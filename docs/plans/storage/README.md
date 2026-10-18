@@ -863,11 +863,9 @@ changes a file that holds memory.
   them. Deviations:
   - Read-only attachments have no writer and so no probe. Their file stays open
     until the store closes.
-  - A lost attachment drops its reader pool at once, and the registry drops the
-    runtime without waiting for the reader workers to exit. The pool's pinned
-    file descriptor lives in its shared state, so it also stays open until the
-    last reader lease drops. Retaining the pool until it quiesces needs that
-    descriptor released on loss; it is a follow-up.
+  - A lost attachment dropped its reader pool at once and the registry dropped
+    the runtime without waiting for the reader workers to exit. The next entry
+    closes this (#4258).
   - Owners that hold a lease on the lost runtime (mounted project and profile
     owners) keep it, so they answer `FileLost` until a restart remounts them.
     #4130's reset-required record therefore stays, with its reason updated:
@@ -877,6 +875,25 @@ changes a file that holds memory.
   files within one probe interval, and the next open serves a fresh store;
   deleting the profile under a running daemon logs `profile_lost` within one
   tick and the daemon exits with every store closed.
+- Step 7b follow-ups, lost-file readers (2026-10-18, branch
+  `fix/4258-lost-file-readers`, #4258). Closing a lost file now finishes its
+  work. The reader pool's pinned descriptor is closed on loss for every holder of
+  it, so a reader lease or retained snapshot that keeps the pool object alive no
+  longer keeps the unlinked inode open. A reader worker that a growing acquire
+  spawned while the pool was closing is shut down as it registers instead of
+  idling until the pool drops. The attachment keeps the lost pool only until its
+  workers have exited. The registry keeps a lost runtime mapped until then:
+  its lookup answers `Evicting` and an open is refused with
+  `RuntimeEvictionInProgress`, so no successor publishes beside connections still
+  open on the old file. The next lookup or open after the last worker exits
+  unmaps it as before. This is a short window, in practice a few milliseconds,
+  and a worker stuck in native work holds it open, as a stuck close does for
+  capacity eviction. The lost writer's own connection closes when its task
+  returns right after the notice and is not part of the check. Proof: with the
+  reader pool held across the loss, the unlinked file's descriptors are gone and
+  `lost_file_closed` turns true; removing `close_for_lost_file`, the descriptor
+  release, the late-registration shutdown or the registry hold each fails its
+  own test.
 - Step 8a, repository identity (2026-10-17, branch `feat/storage-repository-identity`).
   A second full clone, a shallow clone, and a checkout after a merge of unrelated
   histories open the project that first enrolled the repository, with no `init`.
