@@ -10,7 +10,7 @@ use std::time::Duration;
 use reqwest::blocking::Client as HttpClient;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::{Serialize, de::DeserializeOwned};
-use tracedecay_api::remote::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
+use tracedecay_contracts::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
 use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_contracts::remote::discovery::{
@@ -649,7 +649,7 @@ fn take_response_field<T: DeserializeOwned>(
 }
 
 fn status_matches_problem(status: reqwest::StatusCode, kind: ApplicationProblemKind) -> bool {
-    status.as_u16() == tracedecay_api::application_problem_status(kind).as_u16()
+    status.as_u16() == kind.http_status()
 }
 
 #[cfg(test)]

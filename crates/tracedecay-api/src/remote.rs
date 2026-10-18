@@ -38,7 +38,8 @@ use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::remote::replay::{RemoteReplayPendingRequestV1, RemoteReplayRequestV1};
 use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
-    ApplicationContractError, CancellationSignal, RequestId, ResultContractRef,
+    ApplicationContractError, CancellationSignal, REMOTE_ENROLLMENT_CREDENTIAL_HEADER, RequestId,
+    ResultContractRef,
 };
 use tracedecay_domain::{
     CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1, UtcMicros,
@@ -50,7 +51,6 @@ const BEARER_PREFIX: &[u8] = b"Bearer ";
 // versioned wire and can occupy nearly four times their binary size. The
 // application contract still enforces the exact one-mebibyte binary bound.
 const MAX_REMOTE_HTTP_BODY_BYTES: usize = 5 * 1024 * 1024;
-pub const REMOTE_ENROLLMENT_CREDENTIAL_HEADER: &str = "x-tracedecay-enrollment-credential";
 
 /// Parsed HTTP credential header. It cannot be cloned, serialized, or logged.
 pub struct RemoteAuthorizationHeader {
