@@ -478,9 +478,15 @@ const fn intent_gated_lifecycle(producer: tracedecay_domain::NativeHostIdentityV
     )
 }
 
-/// Mirrors the intent pass's own disabled check, so a project the pass would
-/// skip pays no lifecycle write inside the hook's synchronous budget.
-async fn context_scout_intent_enabled(cg: &TraceDecay) -> bool {
+/// Whether this host's lifecycle is enabled under the same policy used by
+/// admission and ledger replay. Claude omits lifecycle writes without intent.
+pub async fn hook_v2_native_lifecycle_enabled(
+    cg: &TraceDecay,
+    producer: tracedecay_domain::NativeHostIdentityV1,
+) -> bool {
+    if !intent_gated_lifecycle(producer) {
+        return true;
+    }
     let Ok(pinned) = cg.configuration_runtime().client().current().await else {
         return false;
     };
@@ -702,8 +708,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
     if let Some(mount) = mount.as_ref()
         && let Some(native_lifecycle) = mount.lifecycle.as_ref()
     {
-        let intent_enabled =
-            intent_gated_lifecycle(envelope.producer) && context_scout_intent_enabled(cg).await;
+        let lifecycle_enabled = hook_v2_native_lifecycle_enabled(cg, envelope.producer).await;
         let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
             return HookV2AdmissionOutcomeV1::Backpressured;
         };
@@ -716,7 +721,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
             native_lifecycle,
             range,
             envelope.producer,
-            intent_enabled,
+            lifecycle_enabled,
         )
         .await
         {

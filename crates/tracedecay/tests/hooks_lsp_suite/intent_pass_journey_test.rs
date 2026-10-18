@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use tracedecay_contracts::retrieval::StatusHookReplayV1;
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ContextScoutConfigurationStateV1, ContextScoutIntentKindV1,
     ContextScoutIntentSettingsV1, ContextScoutSettingsV1, DecisionEngineSettingsV1,
@@ -501,8 +502,19 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
 
     let stop_event = stop(&project, ENABLED_SESSION, &enabled_transcript);
     let delivers = |context: &String| context.contains(&suggestion_text(YES_INTENT));
-    let mut stop_contexts = Vec::new();
-    while stop_contexts.len() < 5 && !stop_contexts.last().is_some_and(delivers) {
+    let mut stop_contexts = vec![hook_context(&run_hook(
+        home,
+        &project,
+        "hook-stop",
+        &stop_event,
+    ))];
+    if !stop_contexts.last().is_some_and(delivers) {
+        wait_for("the timed-out stop callback's replay to drain", || {
+            let status = run_tool(home, &project, "tracedecay_status", &json!({}));
+            let replay: StatusHookReplayV1 = serde_json::from_value(status["hook_replay"].clone())
+                .unwrap_or_else(|error| panic!("hook replay status ({error}): {status}"));
+            replay == StatusHookReplayV1::Drained && intent_outcomes(&log).len() > before + 1
+        });
         stop_contexts.push(hook_context(&run_hook(
             home,
             &project,

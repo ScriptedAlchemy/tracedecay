@@ -26,7 +26,8 @@ use tracedecay_hooks::{
 
 use tracedecay_mcp::handlers::hook_runtime::{
     HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
-    admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_pending_work_envelopes,
+    admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_native_lifecycle_enabled,
+    hook_v2_pending_work_envelopes,
 };
 
 mod spool_opener;
@@ -209,10 +210,6 @@ async fn drain_all_hosts(
             Ok(more) => sweep.more_pending |= more,
             Err(cause) => sweep.fail(*host, StatusHookReplaySpoolV1::DeliveryReceipts, cause),
         }
-        Box::pin(redrive_pending_work(
-            graph, data_root, *host, project_id, now, &mut sweep,
-        ))
-        .await;
         let report = match Box::pin(drain_admitted_host_spool(
             *host,
             project_id,
@@ -229,6 +226,11 @@ async fn drain_all_hosts(
                 None
             }
         };
+        // The host spool retains native lifecycle evidence the ledger cannot carry.
+        Box::pin(redrive_pending_work(
+            graph, data_root, *host, project_id, now, &mut sweep,
+        ))
+        .await;
         if let Some(report) = report
             && (report.committed > 0 || report.duplicates > 0 || report.tombstoned > 0)
         {
@@ -295,6 +297,19 @@ async fn redrive_pending_work(
                 .await
             },
             |envelope, native_session_id| async move {
+                // A timed-out admission may have committed its ledger before its
+                // lifecycle. Only the richer host spool can finish that mount.
+                if native_session_id.is_none()
+                    && tracedecay_hooks::NativeContextScoutLifecycleV1::host_mounts_lifecycle(host)
+                    && matches!(
+                        envelope.event,
+                        tracedecay_hooks::HookEventV2::ToolLifecycle { .. }
+                            | tracedecay_hooks::HookEventV2::SavedEdit { .. }
+                    )
+                    && hook_v2_native_lifecycle_enabled(graph, host).await
+                {
+                    return HookV2AdmissionOutcomeV1::Backpressured;
+                }
                 admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now())
                     .await
             },
@@ -653,6 +668,226 @@ mod tests {
         ] {
             assert_eq!(unresolved_pending_work(&outcome), Some(cause));
         }
+    }
+
+    #[tokio::test]
+    async fn pending_edit_waits_for_the_lifecycle_spool_before_settling() {
+        let (fixture, graph, _newer) = replay_owner_fixture().await;
+        let data_root = &graph.hook_store_layout().data_root;
+        let host = NativeHostIdentityV1::KimiCode;
+        let project_id =
+            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout())
+                .unwrap();
+        let now = hook_replay_now();
+        let hook_runtime = crate::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::new(
+            fixture._temp.path().join("profile"),
+        ));
+        let project = tracedecay_domain::ProjectId::new(
+            graph
+                .hook_store_layout()
+                .identity
+                .project_id
+                .clone()
+                .unwrap(),
+        )
+        .unwrap();
+        let scope = (hook_runtime.scope_resolver)(graph.project_root(), &project).unwrap();
+        let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
+            &hook_runtime,
+            graph.hook_store_layout(),
+        )
+        .unwrap();
+        let binding = published_hook_scope_binding(data_root, worktree_id, host, now).unwrap();
+        let admission_runtime = graph.test_runtime_for_test().unwrap();
+        let project_sessions = admission_runtime
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+            .unwrap();
+        let background_cpu = admission_runtime.background_cpu();
+        let lifecycle = tracedecay_hooks::NativeContextScoutLifecycleV1::new(
+            "session.replay.edit",
+            "call.replay.edit",
+            [8; 16],
+        )
+        .unwrap();
+        let envelope = tracedecay_hooks::HookEventEnvelopeV2 {
+            schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+            event_id: lifecycle.event_id,
+            producer: host,
+            protected_session_id: tracedecay_agent_hosts::hooks::protected_native_session_id(
+                lifecycle.session_id.as_str(),
+            ),
+            project_id,
+            repository_id: binding.repository_id,
+            worktree_id: binding.worktree_id,
+            worktree_epoch: binding.worktree_epoch,
+            binding_token: binding.binding_token,
+            ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+            observed_at: now,
+            event: tracedecay_hooks::HookEventV2::SavedEdit {
+                file_id: [9; 16],
+                changed_range_count: 1,
+            },
+        };
+        // Commit admission while no orchestrator is mounted, reproducing the
+        // durable state left by a caller cancelled before lifecycle persistence.
+        assert!(matches!(
+            admit_hook_v2_envelope(&graph, &envelope, None, now).await,
+            HookV2AdmissionOutcomeV1::Admitted { .. }
+        ));
+        let pending =
+            || hook_v2_pending_work_envelopes(data_root, host, hook_replay_now()).unwrap();
+        assert_eq!(pending(), vec![envelope.clone()]);
+        assert_eq!(
+            tracedecay_daemon_service::context_scout_lifecycle::register_context_scout_lifecycle_authority(
+                project_id,
+                binding.worktree_id,
+                scope.project_id.clone(),
+                scope.worktree_id.clone(),
+                &project_sessions,
+            ),
+            tracedecay_daemon_service::context_scout_lifecycle::AuthorityRegistrationV1::Registered
+        );
+        let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tracedecay_daemon_service::BoundedHookOrchestratorV1::new(
+            1,
+            move |request: tracedecay_daemon_service::HookOrchestrationRequestV1, _| {
+                let ran = ran.clone();
+                async move { ran.send(request.lifecycle).unwrap() }
+            },
+        )
+        .unwrap();
+        assert!(
+            tracedecay_daemon_service::register_hook_orchestration_runtime(
+                project_id,
+                binding.worktree_id,
+                &runtime,
+            )
+        );
+        let sweep = drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        assert!(
+            sweep.failures.iter().any(|failure| failure.host == host
+                && failure.spool == StatusHookReplaySpoolV1::PendingWork)
+        );
+        assert_eq!(pending(), vec![envelope.clone()]);
+        assert!(
+            runs.try_recv().is_err(),
+            "ledger replay must not execute without lifecycle"
+        );
+
+        let root = hook_v2_spool_root(data_root, host);
+        let (mut spool, _) = HookSpoolV1::open(&root, HookSpoolConfigV1::stock(host), now).unwrap();
+        spool
+            .append_with_native_lifecycle(envelope.clone(), Some(lifecycle.clone()), &binding, now)
+            .unwrap();
+        drop(spool);
+        drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        let mounted = tokio::time::timeout(Duration::from_secs(10), runs.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("spool replay must mount lifecycle");
+        assert_eq!(mounted.session_id, lifecycle.session_id);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !pending().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("mounted work must settle its ledger obligation");
+        assert!(
+            runs.try_recv().is_err(),
+            "the mounted edit executes exactly once"
+        );
+        // Claude deliberately omits lifecycle writes while intent is disabled;
+        // an acknowledged edit can therefore need ledger-only recovery.
+        tracedecay_daemon_service::unregister_hook_orchestration_runtime(
+            project_id,
+            binding.worktree_id,
+            &runtime,
+        );
+        let claude = NativeHostIdentityV1::ClaudeCode;
+        let claude_binding =
+            published_hook_scope_binding(data_root, binding.worktree_id, claude, hook_replay_now())
+                .unwrap();
+        let disabled_edit = tracedecay_hooks::HookEventEnvelopeV2 {
+            event_id: [10; 16],
+            producer: claude,
+            protected_session_id: tracedecay_agent_hosts::hooks::protected_native_session_id(
+                "session.replay.disabled-edit",
+            ),
+            project_id: claude_binding.project_id,
+            repository_id: claude_binding.repository_id,
+            worktree_id: claude_binding.worktree_id,
+            worktree_epoch: claude_binding.worktree_epoch,
+            binding_token: claude_binding.binding_token,
+            ..envelope
+        };
+        assert!(matches!(
+            admit_hook_v2_envelope(&graph, &disabled_edit, None, hook_replay_now()).await,
+            HookV2AdmissionOutcomeV1::Admitted { .. }
+        ));
+        let disabled_pending =
+            || hook_v2_pending_work_envelopes(data_root, claude, hook_replay_now()).unwrap();
+        assert_eq!(disabled_pending(), vec![disabled_edit]);
+        assert!(
+            tracedecay_daemon_service::register_hook_orchestration_runtime(
+                project_id,
+                binding.worktree_id,
+                &runtime,
+            )
+        );
+        drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), runs.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none(),
+            "disabled Claude edits settle without mounting a lifecycle"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !disabled_pending().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disabled Claude work must settle without a spool");
+        assert!(runtime.shutdown().await);
+        assert!(
+            pending().is_empty(),
+            "completed lifecycle work settles its durable obligation"
+        );
+        assert!(!HookSpoolV1::has_records(&root).unwrap());
+        assert!(runs.try_recv().is_err(), "each edit executes exactly once");
+        tracedecay_daemon_service::unregister_hook_orchestration_runtime(
+            project_id,
+            binding.worktree_id,
+            &runtime,
+        );
+        assert!(tracedecay_daemon_service::context_scout_lifecycle::unregister_context_scout_lifecycle_authority(
+            project_id, binding.worktree_id, &project_sessions,
+        ));
     }
 
     #[test]
