@@ -698,7 +698,8 @@ fn post_update_full_reinstall_advances_both_version_markers() {
 fn retired_worldwide_counter_commands_are_refused_by_the_parser() {
     for retired in ["enable-upload-counter", "disable-upload-counter"] {
         let error = Cli::try_parse_from(["tracedecay", retired])
-            .expect_err("a retired subcommand must not parse");
+            .err()
+            .expect("a retired subcommand must not parse");
         assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 }

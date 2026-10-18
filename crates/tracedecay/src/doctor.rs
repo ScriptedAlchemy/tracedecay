@@ -136,7 +136,7 @@ pub async fn run_doctor(
 
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let daemon_listening = tracedecay_daemon_control::daemon_socket_connectable(profile);
-    let mut independent = launch_independent_doctor_checks(
+    let independent = launch_independent_doctor_checks(
         profile,
         build_version,
         &project_path,
