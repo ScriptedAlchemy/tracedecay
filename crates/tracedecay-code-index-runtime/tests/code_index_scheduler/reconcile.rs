@@ -11026,6 +11026,46 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     );
 }
 
+/// A hint that lands while a retained reconcile verifies the sealed bytes is
+/// not covered by that verification. The proof it records is stamped with the
+/// epoch the verification began under, so the seat keeps reporting the source
+/// as moved until the follow-up pass instead of absorbing the hint (#4238).
+#[test]
+fn a_hint_landing_during_retained_verification_keeps_the_source_pending() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed retained generation"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let epoch = Arc::clone(&scheduler.epoch);
+    scheduler.install_after_retained_source_check_for_test(Arc::new(move || {
+        tracedecay_application::code_index::DaemonCodeIndexControlV1::advance(&epoch);
+    }));
+
+    let outcome = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("retained reconcile")
+        .expect("unchanged sealed bytes are accepted");
+
+    assert!(
+        matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_)),
+        "the sealed bytes still match: {outcome:?}"
+    );
+    assert!(
+        scheduler.source_change_pending_for_test(),
+        "a hint that landed during the verification must stay pending"
+    );
+}
+
 /// The disk freshness witness names whichever generation last persisted it.
 /// A later seal of the same bytes used to return `None` the moment that id
 /// disagreed, and the graph-on caller then decoded and resealed. Under load
