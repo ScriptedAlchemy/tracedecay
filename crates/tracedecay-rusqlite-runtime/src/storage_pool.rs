@@ -214,21 +214,22 @@ pub(crate) fn wait_until<F: Future>(future: F, deadline: Option<Instant>) -> Opt
 }
 
 /// A `rusqlite::Transaction` is `!Send` only because it holds a
-/// `&Connection`, and `Connection` is `!Sync`. A task is polled by one thread
-/// at a time, so a transaction on a connection only that task can reach is
-/// never used from two threads at once wherever the task moves.
+/// `&Connection`, and `Connection` is `!Sync`. A transaction begun through a
+/// `&mut Connection` is the only path to that connection while it lives, so
+/// whichever thread holds it uses the connection alone. A write job shares
+/// one behind a `Mutex`, which keeps that true across threads.
 pub(crate) struct TaskTransaction<'connection>(rusqlite::Transaction<'connection>);
 
-// SAFETY: [`TaskTransaction::new`]'s contract keeps every other path to the
-// borrowed connection inside the task that holds the transaction.
+// SAFETY: [`TaskTransaction::new`]'s contract makes the transaction the only
+// path to its connection, and `Connection` is `Send`.
 unsafe impl Send for TaskTransaction<'_> {}
 
 impl<'connection> TaskTransaction<'connection> {
     /// # Safety
     ///
-    /// `transaction` must borrow a connection that the calling task owns or
-    /// holds by `&mut`, and no other `&Connection` to it may outlive this
-    /// value outside that task.
+    /// `transaction` must borrow a connection that the caller owns or holds
+    /// by `&mut`, and nothing else may reach that connection while this value
+    /// lives.
     pub(crate) unsafe fn new(transaction: rusqlite::Transaction<'connection>) -> Self {
         Self(transaction)
     }

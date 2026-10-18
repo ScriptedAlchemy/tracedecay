@@ -55,7 +55,7 @@ pub(crate) use column::{
 pub(crate) use json::{decode as decode_json, encode as encode_json};
 pub use types::*;
 
-pub use command::ExactSqlJobTransaction;
+pub use command::{ExactSqlJobTransaction, JobPolicy};
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
@@ -535,19 +535,73 @@ impl ExactSqlHandle {
         R: Send + 'static,
         E: Send + 'static,
     {
+        self.transact_with_policy(JobPolicy::Bounded, job).await
+    }
+
+    /// [`Self::transact`] under `policy`.
+    pub async fn transact_with_policy<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(policy, move |transaction| Ok(job(transaction)))
+            .await
+    }
+
+    /// [`Self::transact_with_policy`] for an async body, so an async helper
+    /// over the job's statements runs unchanged. The body is polled once
+    /// inside the job: its statements are synchronous, so it completes on that
+    /// poll unless it awaited something else, which would hold the writer
+    /// across the wait. Such a job rolls back with
+    /// [`ExactSqlError::JobAwaitedForeignFuture`].
+    pub async fn transact_async<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        body: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: AsyncFn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(policy, move |transaction| {
+            complete_now(body(transaction)).ok_or(ExactSqlError::JobAwaitedForeignFuture)
+        })
+        .await
+    }
+
+    async fn run_job<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<Result<R, E>, ExactSqlError>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
         let (outcome, verdict) = async_channel::bounded(1);
         let (reply, response) = async_channel::bounded(1);
         let job: command::WriterJob = Box::new(move |transaction| {
-            let result = job(transaction);
+            let result = job(transaction)?;
             let commit = result.is_ok();
             let _ = outcome.try_send(result);
-            commit
+            Ok(commit)
         });
         self.writer
             .as_ref()
             .ok_or(ExactSqlError::WriterUnavailable)?
             .try_send(WriterCommand::Job {
                 job,
+                policy,
                 reply,
                 authority: self.write_authority.clone(),
             })
@@ -1276,6 +1330,15 @@ fn verify_write_authority(
     match authority {
         Some(authority) => authority.verify(intent),
         None => Ok(()),
+    }
+}
+
+/// One poll; `None` means the future is pending.
+fn complete_now<F: Future>(future: F) -> Option<F::Output> {
+    match std::pin::pin!(future).poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    {
+        std::task::Poll::Ready(output) => Some(output),
+        std::task::Poll::Pending => None,
     }
 }
 
