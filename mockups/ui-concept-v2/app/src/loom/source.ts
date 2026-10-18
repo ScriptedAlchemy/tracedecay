@@ -1,8 +1,14 @@
 import { DESIGN_SCENARIO } from "./designScenario";
 import { PACK, type PackLoomEvent } from "../data/pack";
-import ubuntuSessions from "../../profile-pack/ubuntu-main/proj_a5b3d7e3ebe14ca7/sessions.json";
-import ubuntuAgents from "../../profile-pack/ubuntu-main/proj_a5b3d7e3ebe14ca7/session_agents.json";
-import ubuntuThreads from "../../profile-pack/ubuntu-main/proj_a5b3d7e3ebe14ca7/session_threads.json";
+import { profileRows } from "../profilePack";
+type UbuntuSession = { session_id: string; provider: string; project_key: string; project_path: string | null; started_at: number | null; ended_at: number | null; parent_session_id: string | null; is_subagent: number; agent_id: string | null; title: string | null };
+const sessionsExport = profileRows<UbuntuSession>("ubuntu-main/proj_a5b3d7e3ebe14ca7/sessions.json");
+const agentsExport = profileRows<{session_id: string; agent_id: string}>("ubuntu-main/proj_a5b3d7e3ebe14ca7/session_agents.json");
+const threadsExport = profileRows<{grouping_provenance: string; session_id: string; thread_id: string}>("ubuntu-main/proj_a5b3d7e3ebe14ca7/session_threads.json");
+const ubuntuAvailable = sessionsExport !== null && agentsExport !== null && threadsExport !== null;
+const ubuntuSessions = sessionsExport ?? [];
+const ubuntuAgents = agentsExport ?? [];
+const ubuntuThreads = threadsExport ?? [];
 
 export type JourneySession = {
   id: string;
@@ -25,7 +31,7 @@ export type JourneySession = {
 
 export const SOURCE_OPTIONS = [
   { id: "mac", label: "Mac profile · event spine" },
-  { id: "ubuntu", label: "Ubuntu profile · session identities" },
+  { id: "ubuntu", label: ubuntuAvailable ? "Ubuntu profile · session identities" : "Ubuntu profile · unavailable" },
   { id: "design", label: "Design example · synthetic" },
 ] as const;
 
@@ -109,6 +115,7 @@ export const SOURCE: {
   events: [],
   agents: ubuntuAgents.map((row) => ({ sessionId: row.session_id, agentId: row.agent_id })),
   notes: [
+    ...(ubuntuAvailable ? [] : ["PROFILE UNAVAILABLE: optional operator exports were not supplied. Empty panels are unavailable data, not an observed empty profile."]),
     "Ubuntu-main is a separate profile; its identities are not joined to Mac events.",
     "The source README reports capture at 2026-08-30 ~1:16 AM PT; an exact capture timestamp is unavailable.",
     "Identity-only export: message counts, event spines, transcript bodies, observations and outcomes are unavailable.",

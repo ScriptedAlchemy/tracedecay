@@ -53,6 +53,27 @@ fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain:
     )
 }
 
+/// The `tools/call` params a one-shot `tracedecay` client (CLI command, host
+/// hook, truncation recovery) sends on its own daemon connection.
+pub(crate) fn one_shot_tool_call_params(
+    tool_name: &str,
+    arguments: serde_json::Value,
+    request_deadline: Option<Instant>,
+) -> serde_json::Value {
+    let mut meta = request_deadline.map_or_else(
+        || json!({}),
+        |deadline| tracedecay_mcp::tool_call_deadline_meta(wire_request_deadline_micros(deadline)),
+    );
+    if let Some(meta) = meta.as_object_mut() {
+        tracedecay_mcp::ToolCallInvoker::mark_one_shot_client(meta);
+    }
+    json!({
+        "name": tool_name,
+        "arguments": arguments,
+        "_meta": meta,
+    })
+}
+
 /// How long a liveness probe waits for the daemon endpoint to accept a
 /// connection before the in-flight request is declared unreachable.
 const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -318,23 +339,15 @@ pub(crate) async fn call_tool_with_liveness_poll(
     .await?;
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
-    let mut params = json!({
-        "name": tool_name,
-        "arguments": arguments,
-    });
-    if let Some(deadline) = request_deadline
-        && let Some(params) = params.as_object_mut()
-    {
-        params.insert(
-            "_meta".to_owned(),
-            tracedecay_mcp::tool_call_deadline_meta(wire_request_deadline_micros(deadline)),
-        );
-    }
     let mut request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(id.clone()),
         method: "tools/call".to_string(),
-        params: Some(params),
+        params: Some(one_shot_tool_call_params(
+            tool_name,
+            arguments,
+            request_deadline,
+        )),
     };
     attach_stateless_request_context(&mut request);
 

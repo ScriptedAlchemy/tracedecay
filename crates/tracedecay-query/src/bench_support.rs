@@ -22,14 +22,7 @@ use tracedecay_code_index::production::{
     VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
     VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-};
-use tracedecay_domain::{
-    LanguageId, ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1,
-    ProjectionOutcomeV1,
-};
+use tracedecay_domain::{LanguageId, ManifestDigest};
 
 const DEFAULT_CORPUS_RELATIVE: &str = "benchmark_data/index-bench/corpus";
 
@@ -52,11 +45,17 @@ pub(crate) struct SealedDrainBounds {
     pub(crate) page_bytes: usize,
 }
 
-/// Working directory of the profiling job is not the crate root.
-pub(crate) fn default_corpus_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(DEFAULT_CORPUS_RELATIVE)
+/// Resolve at launch time so cached binaries do not retain a compiler's sandbox.
+pub(crate) fn default_corpus_root() -> Result<PathBuf, String> {
+    let workspace = match std::env::var_os("BUILD_WORKSPACE_DIRECTORY") {
+        Some(workspace) => PathBuf::from(workspace),
+        None => PathBuf::from(
+            std::env::var_os("CARGO_MANIFEST_DIR")
+                .ok_or_else(|| "pass --corpus outside a Bazel launch".to_owned())?,
+        )
+        .join("../.."),
+    };
+    Ok(workspace.join(DEFAULT_CORPUS_RELATIVE))
 }
 
 /// Ordered, `.gitignore`-blind directory walk. An ignore-crate walk would
@@ -172,52 +171,6 @@ pub(crate) fn decoded_generation(
         .decode(published.manifest_bytes())
         .map(Arc::new)
         .map_err(|error| format!("decode published generation: {error}"))
-}
-
-/// Applies every decision without a downstream model or store.
-pub(crate) struct ApplyingProjectionSink;
-
-impl CodeChunkProjectionSink for ApplyingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions = Vec::with_capacity(
-            request.changes.added_or_changed.len() + request.changes.deleted.len(),
-        );
-        decisions.extend(request.changes.added_or_changed.iter().map(|change| {
-            ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            }
-        }));
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
 }
 
 /// A partitioned sealed generation held in memory: the manifest, its content

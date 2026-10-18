@@ -55,14 +55,15 @@ fn a_command_past_its_timeout_is_killed_and_reported_timed_out() {
 }
 
 #[test]
-fn a_command_flooding_both_pipes_completes() {
+fn a_command_flooding_both_pipes_is_bounded() {
     let flood = "head -c 1048576 /dev/zero | tr '\\0' e >&2; \
                  head -c 1048576 /dev/zero | tr '\\0' o";
 
-    let output = run(flood, Duration::from_secs(60)).expect("flooding command completes");
-
-    assert_eq!(output.len(), JOB_COMMAND_OUTPUT_CAP_CHARS);
-    assert!(output.chars().all(|character| character == 'o'));
+    let result = run(flood, Duration::from_secs(60));
+    assert!(
+        matches!(result, Err(PreRunCommandError::OutputTooLarge)),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -113,4 +114,14 @@ fn dropping_a_running_command_kills_it() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn bounded_capture_still_truncates_prompt_characters() {
+    let output = run(
+        "head -c 32768 /dev/zero | tr '\\0' x",
+        Duration::from_secs(10),
+    )
+    .expect("bounded command");
+    assert_eq!(output.len(), JOB_COMMAND_OUTPUT_CAP_CHARS);
 }

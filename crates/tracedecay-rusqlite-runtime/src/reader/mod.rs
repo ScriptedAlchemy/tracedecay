@@ -1,7 +1,7 @@
 //! Bounded, snapshot-coherent readers for one already-authorized SQLite shard.
 //!
 //! The pool accepts only an explicit verified locator. Every SQLite open occurs
-//! on a dedicated worker thread, and every query is selected by the closed
+//! in a worker task on the storage pool, and every query is selected by the closed
 //! [`RuntimeReadRequestV1`] contract rather than caller-provided SQL.
 
 mod locator;
@@ -21,6 +21,17 @@ pub use worker::{
 
 #[cfg(test)]
 mod tests;
+
+/// How long a read snapshot may sit with no statement running. Past it the
+/// worker rolls the read back and the snapshot's later reads fail as expired,
+/// so a snapshot its owner forgot, or holds across unrelated work, does not
+/// pin the WAL. A long read that keeps issuing statements is not idle.
+pub const READ_SNAPSHOT_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The longest any read snapshot stays open, busy or not. It covers a
+/// multi-statement read of a whole multi-gigabyte store, such as a
+/// schema-convergence audit; every statement also stops at it.
+pub const READ_SNAPSHOT_LIFETIME: std::time::Duration = std::time::Duration::from_hours(1);
 
 use tracedecay_store::{
     RuntimeReadOutcomeV1, RuntimeReadRequestV1, StorageRuntimeErrorV1, UnavailableReasonV1,

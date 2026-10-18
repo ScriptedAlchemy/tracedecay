@@ -60,9 +60,6 @@ pub struct RegisteredWorkApplicationServicesV1 {
     attempts: tracedecay_contracts::WorkAttemptService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
-    attempt_effects: tracedecay_contracts::WorkAttemptEffectServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
     run_control: tracedecay_contracts::WorkRunControlService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
@@ -95,16 +92,7 @@ pub struct RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
-    attempts: tracedecay_contracts::WorkProductAttemptServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
-    synthesis: tracedecay_contracts::WorkProductSynthesisAttemptServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
-    retry: tracedecay_contracts::WorkProductRetryServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_contracts::RuntimeWorkRetryEvidenceV1,
-    >,
+    storage: tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
 }
 
 impl RegisteredWorkProductServicesV1 {
@@ -136,14 +124,7 @@ impl RegisteredWorkProductServicesV1 {
                 storage.clone(),
                 storage.clone(),
             ),
-            attempts: tracedecay_contracts::WorkProductAttemptServiceV1::new(storage.clone()),
-            synthesis: tracedecay_contracts::WorkProductSynthesisAttemptServiceV1::new(
-                storage.clone(),
-            ),
-            retry: tracedecay_contracts::WorkProductRetryServiceV1::new(
-                storage,
-                tracedecay_contracts::RuntimeWorkRetryEvidenceV1,
-            ),
+            storage,
         })
     }
 
@@ -165,6 +146,198 @@ impl RegisteredWorkProductServicesV1 {
         })
     }
 
+    /// Starts one attempt as a single writer transaction: the run's pause
+    /// fence, the replay check, the lease epoch, the product link and the
+    /// attempt row commit together, so a pause cannot land between the fence
+    /// and the reservation. The current product graph is read before the job,
+    /// on a reader; the link's graph-version compare-and-swap fences it.
+    pub async fn start_attempt(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        binding: tracedecay_contracts::WorkProductBindingV1,
+        revisions: tracedecay_contracts::WorkProductRevisionPinsV1,
+        topology: tracedecay_domain::WorkTopologyPolicyV1,
+        command: tracedecay_contracts::StartWorkAttemptCommand,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        let prefetch_context = context.clone();
+        let observed_at = command.occurred_at;
+        let graph = self
+            .storage
+            .prefetch_graph(move |storage| {
+                tracedecay_contracts::PrefetchedWorkGraphReadV1::for_attempt_admission(
+                    storage,
+                    &prefetch_context,
+                    observed_at,
+                )
+            })
+            .await;
+        self.storage
+            .transact_with_graph(graph, move |storage| {
+                tracedecay_contracts::WorkRunControlService::new(storage).admit_reservation(
+                    &context,
+                    &command.task_id,
+                    &command.run_id,
+                )?;
+                tracedecay_contracts::WorkProductAttemptServiceV1::new(storage)
+                    .start_against_registered_topology(
+                        &context,
+                        &binding,
+                        &revisions,
+                        &topology,
+                        command.clone(),
+                    )
+            })
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Commits one product graph mutation as a single writer transaction: the
+    /// revision check, the command replay check and the event append with its
+    /// verified version commit together. The current graph the mutation
+    /// checks its expected version against is read before the job, on a
+    /// reader; the append's graph-version compare-and-swap fences it.
+    pub async fn mutate(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        binding: tracedecay_contracts::WorkProductBindingV1,
+        request: tracedecay_contracts::WorkProductMutationRequestV1,
+        revisions: tracedecay_contracts::WorkProductRevisionPinsV1,
+    ) -> Result<
+        tracedecay_contracts::WorkProductMutationReceiptV1,
+        tracedecay_contracts::WorkProductApplicationErrorV1,
+    > {
+        let (prefetch_context, prefetch_request) = (context.clone(), request.clone());
+        let graph = self
+            .storage
+            .prefetch_graph(move |storage| {
+                tracedecay_contracts::PrefetchedWorkGraphReadV1::for_mutation(
+                    storage,
+                    &prefetch_context,
+                    &prefetch_request,
+                )
+            })
+            .await;
+        self.storage
+            .transact_with_graph(graph, move |storage| {
+                tracedecay_contracts::WorkProductMutationServiceV1::new(storage, storage, storage)
+                    .mutate(&context, &binding, request.clone(), &revisions)
+            })
+            .await
+            .unwrap_or(Err(
+                tracedecay_contracts::WorkProductApplicationErrorV1::EventAuthorityUnavailable,
+            ))
+    }
+
+    /// Admits one synthesis attempt as a single writer transaction: the
+    /// replay check, the source reads, the run's pause fence, the source
+    /// payload hydration `prepare_instructions` does through the job storage
+    /// and the admission commit together.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn synthesize<F>(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        binding: tracedecay_contracts::WorkProductBindingV1,
+        revisions: tracedecay_contracts::WorkProductRevisionPinsV1,
+        topology: tracedecay_domain::WorkTopologyPolicyV1,
+        command: tracedecay_contracts::AdmitWorkSynthesisCommand,
+        prepare_instructions: F,
+    ) -> Result<
+        tracedecay_contracts::WorkSynthesisAttemptV1,
+        tracedecay_contracts::ApplicationProblem,
+    >
+    where
+        F: Fn(
+                &tracedecay_rusqlite_runtime::work_run_control::WorkSqliteJobStorage<'_>,
+                &tracedecay_contracts::StartWorkAttemptCommand,
+                &[tracedecay_domain::WorkAttemptV1],
+            ) -> Result<String, tracedecay_contracts::ApplicationProblem>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let prefetch_context = context.clone();
+        let observed_at = command.start.occurred_at;
+        let graph = self
+            .storage
+            .prefetch_graph(move |storage| {
+                tracedecay_contracts::PrefetchedWorkGraphReadV1::for_attempt_admission(
+                    storage,
+                    &prefetch_context,
+                    observed_at,
+                )
+            })
+            .await;
+        self.storage
+            .transact_with_graph(graph, move |storage| {
+                tracedecay_contracts::admit_work_synthesis_against_registered_topology(
+                    &tracedecay_contracts::WorkProductSynthesisAttemptServiceV1::new(storage),
+                    &context,
+                    &binding,
+                    &revisions,
+                    &topology,
+                    command.clone(),
+                    |start, sources| {
+                        tracedecay_contracts::WorkRunControlService::new(storage)
+                            .admit_reservation(&context, &start.task_id, &start.run_id)?;
+                        prepare_instructions(&storage, start, sources)
+                    },
+                )
+            })
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Admits one retry as a single writer transaction: the replay check, the
+    /// effect-safety read, the lease epoch, the product link, the retry
+    /// receipt, the attempt row and the workflow child rebind commit together.
+    /// `workflow_rebind` is read before the job; its journal append is
+    /// sequence-checked inside it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn retry_attempt(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        binding: tracedecay_contracts::WorkProductBindingV1,
+        revisions: tracedecay_contracts::WorkProductRevisionPinsV1,
+        topology: tracedecay_domain::WorkTopologyPolicyV1,
+        command: tracedecay_contracts::RetryWorkAttemptCommandV1,
+        restarted_at: tracedecay_domain::UtcMicros,
+        workflow_rebind: Option<tracedecay_contracts::WorkflowFanOutRetryRebindV1>,
+    ) -> Result<
+        tracedecay_contracts::WorkRetryAttemptOutcomeV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        let prefetch_context = context.clone();
+        let observed_at = restarted_at;
+        let graph = self
+            .storage
+            .prefetch_graph(move |storage| {
+                tracedecay_contracts::PrefetchedWorkGraphReadV1::for_attempt_admission(
+                    storage,
+                    &prefetch_context,
+                    observed_at,
+                )
+            })
+            .await;
+        self.storage
+            .transact_with_graph(graph, move |storage| {
+                tracedecay_contracts::WorkProductRetryServiceV1::new(
+                    storage,
+                    tracedecay_contracts::RuntimeWorkRetryEvidenceV1,
+                )
+                .retry(
+                    &context,
+                    &binding,
+                    &revisions,
+                    &topology,
+                    command.clone(),
+                    restarted_at,
+                    workflow_rebind.clone(),
+                )
+            })
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
     pub const fn reads(
         &self,
     ) -> &tracedecay_contracts::WorkProductReadServiceV1<
@@ -182,31 +355,6 @@ impl RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.mutations
-    }
-
-    pub const fn attempts(
-        &self,
-    ) -> &tracedecay_contracts::WorkProductAttemptServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.attempts
-    }
-
-    pub const fn synthesis(
-        &self,
-    ) -> &tracedecay_contracts::WorkProductSynthesisAttemptServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.synthesis
-    }
-
-    pub const fn retry(
-        &self,
-    ) -> &tracedecay_contracts::WorkProductRetryServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_contracts::RuntimeWorkRetryEvidenceV1,
-    > {
-        &self.retry
     }
 }
 
@@ -230,10 +378,12 @@ impl RegisteredAuthorizedWorkProductServicesV1 {
 
 impl RegisteredWorkApplicationServicesV1 {
     pub fn attach(db: &RegisteredGlobalDb) -> tracedecay_domain::errors::Result<Self> {
-        let storage = db.work_storage()?;
-        Ok(Self {
+        Ok(Self::over(db.work_storage()?))
+    }
+
+    fn over(storage: tracedecay_rusqlite_runtime::work::WorkSqliteStorage) -> Self {
+        Self {
             attempts: tracedecay_contracts::WorkAttemptService::new(storage.clone()),
-            attempt_effects: tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage.clone()),
             run_control: tracedecay_contracts::WorkRunControlService::new(storage.clone()),
             placement: tracedecay_contracts::WorkPlacementService::new(storage.clone()),
             artifact_hydration: tracedecay_contracts::WorkArtifactHydrationService::new(
@@ -243,7 +393,23 @@ impl RegisteredWorkApplicationServicesV1 {
                 storage.clone(),
             ),
             storage,
-        })
+        }
+    }
+
+    /// Runs the synchronous Work reads in `read` on the blocking pool, so the
+    /// awaiting task parks no runtime thread. A read that cannot run is the
+    /// attempt authority's unavailable problem.
+    pub async fn read<R>(
+        &self,
+        read: impl FnOnce(&Self) -> Result<R, tracedecay_contracts::ApplicationProblem> + Send + 'static,
+    ) -> Result<R, tracedecay_contracts::ApplicationProblem>
+    where
+        R: Send + 'static,
+    {
+        self.storage
+            .read(move |storage| read(&Self::over(storage.clone())))
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
     }
 
     /// Pauses one run as a single writer transaction: the frontier read, the
@@ -281,6 +447,188 @@ impl RegisteredWorkApplicationServicesV1 {
             })
             .await
             .unwrap_or_else(|_| Err(run_control_unavailable()))
+    }
+
+    /// Fences every open attempt after a restart as a single writer
+    /// transaction: the census and every fence commit together or not at all.
+    pub async fn resume_attempts(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_contracts::ResumeWorkAttemptsCommand,
+    ) -> Result<
+        tracedecay_contracts::WorkAttemptRecoveryReportV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkAttemptService::new(storage).resume(&context, &command)
+            })
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Runs one provider-driver step of the attempt authority as a single
+    /// writer transaction: its load, its decision and its fenced update
+    /// commit together.
+    async fn attempt_step<R>(
+        &self,
+        step: impl Fn(
+            &tracedecay_contracts::WorkAttemptService<
+                tracedecay_rusqlite_runtime::work_run_control::WorkSqliteJobStorage<'_>,
+            >,
+        ) -> Result<R, tracedecay_contracts::ApplicationProblem>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<R, tracedecay_contracts::ApplicationProblem>
+    where
+        R: Send + 'static,
+    {
+        self.storage
+            .transact(move |storage| step(&tracedecay_contracts::WorkAttemptService::new(storage)))
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Records a cancellation request against an open attempt as a single
+    /// writer transaction: the load, the conflict check and the fenced update
+    /// commit together.
+    pub async fn cancel_attempt(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_contracts::CancelWorkAttemptCommand,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| attempts.request_cancellation(&context, command.clone()))
+            .await
+    }
+
+    /// Marks the provider running under `actual_route`.
+    pub async fn mark_running(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        actual_route: tracedecay_domain::WorkProviderRouteV1,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.mark_running(&context, &identity, actual_route.clone())
+        })
+        .await
+    }
+
+    /// Fences an attempt whose provider could not start for recovery.
+    pub async fn mark_provider_unavailable(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.mark_provider_unavailable(&context, &identity, observed_at)
+        })
+        .await
+    }
+
+    /// Fails a recovery-required attempt with sealed denial evidence.
+    pub async fn fail_recovery(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        evidence: tracedecay_contracts::WorkAttemptEvidenceRecordV1,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| attempts.fail_recovery(&context, &identity, &evidence))
+            .await
+    }
+
+    /// Acknowledges a durable cancellation request.
+    pub async fn acknowledge_cancellation(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        acknowledged_at: tracedecay_domain::UtcMicros,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.acknowledge_cancellation(&context, &identity, acknowledged_at)
+        })
+        .await
+    }
+
+    /// Escalates an acknowledged cancellation to forced termination.
+    pub async fn escalate_cancellation(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        escalated_at: tracedecay_domain::UtcMicros,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.escalate_cancellation(&context, &identity, escalated_at)
+        })
+        .await
+    }
+
+    /// Seals an attempt with terminal evidence and its artifacts.
+    pub async fn settle_with_artifacts(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        evidence: tracedecay_contracts::WorkAttemptEvidenceRecordV1,
+        artifacts: Vec<tracedecay_domain::WorkArtifactRefV1>,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.settle_with_artifacts(&context, &identity, &evidence, artifacts.clone())
+        })
+        .await
+    }
+
+    /// Records the immutable dispatch receipt before a provider launch, as a
+    /// single writer transaction.
+    pub async fn record_effect_dispatch(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        attempt: tracedecay_domain::WorkAttemptIdentityV1,
+        effect_state: tracedecay_domain::WorkEffectStateV1,
+        dispatched_at: tracedecay_domain::UtcMicros,
+        deadline: tracedecay_domain::UtcMicros,
+    ) -> Result<
+        tracedecay_contracts::WorkAttemptEffectDispatchOutcomeV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage).record_dispatch(
+                    &context,
+                    attempt.clone(),
+                    effect_state,
+                    dispatched_at,
+                    deadline,
+                )
+            })
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Settles the dispatch receipt's effect resolution, as a single writer
+    /// transaction.
+    pub async fn settle_effect_dispatch(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        attempt: tracedecay_domain::WorkAttemptIdentityV1,
+        resolution: tracedecay_contracts::WorkAttemptEffectResolutionV1,
+        resolved_at: tracedecay_domain::UtcMicros,
+    ) -> Result<
+        tracedecay_contracts::WorkAttemptEffectHolderV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage).settle(
+                    &context,
+                    &attempt,
+                    resolution,
+                    resolved_at,
+                )
+            })
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
     }
 
     /// Records one duplicate adjudication as a single writer transaction: the
@@ -343,7 +691,8 @@ impl RegisteredWorkApplicationServicesV1 {
 
     /// Admits one placement as a single writer transaction: the replay check,
     /// the exclusivity read and the publication commit together. `observe`
-    /// reads the target (Git) before the job, never on the writer.
+    /// reads the target (Git) on the blocking pool before the job, never on
+    /// the writer or the caller's worker.
     pub async fn admit_placement(
         &self,
         context: tracedecay_contracts::RequestContext,
@@ -353,9 +702,10 @@ impl RegisteredWorkApplicationServicesV1 {
         ) -> Result<
             tracedecay_domain::WorkPlacementObservationV1,
             tracedecay_contracts::ApplicationProblem,
-        >,
+        > + Send
+        + 'static,
     ) -> Result<tracedecay_domain::WorkPlacementV1, tracedecay_contracts::ApplicationProblem> {
-        let observation = observe(&command.target)?;
+        let observation = observe_placement(observe, command.target.clone()).await?;
         self.storage
             .transact(move |storage| {
                 tracedecay_contracts::WorkPlacementService::new(storage).admit_placement(
@@ -371,7 +721,8 @@ impl RegisteredWorkApplicationServicesV1 {
     /// Releases one placement. The placement is read on a reader and its
     /// target observed before the job; the job then publishes only while the
     /// placement still has the observed target and the expected authority
-    /// version, so the Git observation never runs on the writer.
+    /// version, so the Git observation never runs on the writer. It runs on
+    /// the blocking pool, never on the caller's worker.
     pub async fn release_placement(
         &self,
         context: tracedecay_contracts::RequestContext,
@@ -381,7 +732,8 @@ impl RegisteredWorkApplicationServicesV1 {
         ) -> Result<
             tracedecay_domain::WorkPlacementObservationV1,
             tracedecay_contracts::ApplicationProblem,
-        >,
+        > + Send
+        + 'static,
     ) -> Result<tracedecay_domain::WorkPlacementV1, tracedecay_contracts::ApplicationProblem> {
         let authority = tracedecay_contracts::work_authority(&context)?;
         let identity = tracedecay_domain::WorkPlacementIdentityV1::new(
@@ -396,8 +748,8 @@ impl RegisteredWorkApplicationServicesV1 {
         if current.authority_version() != command.expected_authority_version {
             return Err(tracedecay_contracts::WorkPlacementStorageError::AuthorityConflict.into());
         }
-        let observation = observe(current.target())?;
         let observed_target = current.target().clone();
+        let observation = observe_placement(observe, observed_target.clone()).await?;
         self.storage
             .transact(move |storage| {
                 tracedecay_contracts::WorkPlacementService::new(storage).release(
@@ -425,14 +777,6 @@ impl RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.attempts
-    }
-
-    pub const fn attempt_effects(
-        &self,
-    ) -> &tracedecay_contracts::WorkAttemptEffectServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.attempt_effects
     }
 
     /// The run-level pause/resume authority.
@@ -489,22 +833,168 @@ pub struct RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredWorkflowApplicationServicesV1 {
-    pub fn attach(db: &RegisteredGlobalDb) -> tracedecay_domain::errors::Result<Self> {
-        let authority = db.workflow_storage()?;
+    pub async fn attach(db: &RegisteredGlobalDb) -> tracedecay_domain::errors::Result<Self> {
+        let authority = db.workflow_storage().await?;
         let runtime = db.project_graph_runtime().cloned().ok_or_else(|| {
             attach_error(
                 "attach registered workflow topology",
                 "project graph runtime is not bound",
             )
         })?;
-        Ok(Self {
-            definitions: tracedecay_contracts::WorkflowDefinitionService::new(authority.clone()),
-            effects: authority.clone(),
-            topology: RegisteredWorkflowTopologyV1 {
-                source: authority,
-                runtime,
-            },
-        })
+        Ok(Self::over(RegisteredWorkflowTopologyV1 {
+            source: authority,
+            runtime,
+        }))
+    }
+
+    fn over(topology: RegisteredWorkflowTopologyV1) -> Self {
+        Self {
+            definitions: tracedecay_contracts::WorkflowDefinitionService::new(
+                topology.source.clone(),
+            ),
+            effects: topology.source.clone(),
+            topology,
+        }
+    }
+
+    /// Runs the synchronous Workflow reads in `read` on the blocking pool, so
+    /// the awaiting task parks no runtime thread. A read that cannot run is
+    /// the Workflow runtime's unavailable problem.
+    pub async fn read<R>(
+        &self,
+        read: impl FnOnce(&Self) -> Result<R, tracedecay_contracts::ApplicationProblem> + Send + 'static,
+    ) -> Result<R, tracedecay_contracts::ApplicationProblem>
+    where
+        R: Send + 'static,
+    {
+        let topology = self.topology.clone();
+        self.effects
+            .read(move |_| read(&Self::over(topology)))
+            .await
+            .unwrap_or_else(|_| Err(workflow_unavailable()))
+    }
+
+    /// Journals one Workflow effect as a single writer transaction: the
+    /// reservation, the claim, the mutation, the terminal and its
+    /// reconciliation commit together or not at all.
+    pub async fn execute_effect(
+        &self,
+        identity: tracedecay_contracts::WorkflowEffectIdentityV1,
+        prepared: tracedecay_contracts::WorkflowEffectPreparedV1,
+        ended_at: tracedecay_domain::UtcMicros,
+    ) -> Result<
+        tracedecay_contracts::WorkflowEffectJournalRecordV1,
+        tracedecay_contracts::WorkflowEffectAuthorityErrorV1,
+    > {
+        self.effects
+            .transact(move |storage| {
+                tracedecay_contracts::WorkflowEffectAuthorityPortV1::execute_effect(
+                    &storage, &identity, &prepared, ended_at,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Err(
+                    tracedecay_contracts::WorkflowEffectAuthorityErrorV1::Unavailable(
+                        error.to_string(),
+                    ),
+                )
+            })
+    }
+
+    /// Admits one run, with its fan-out plans, as a single writer
+    /// transaction.
+    pub async fn admit_run(
+        &self,
+        run_id: tracedecay_domain::RunId,
+        definition: tracedecay_domain::WorkflowDefinition,
+        admission: tracedecay_contracts::WorkflowAdmissionSnapshot,
+        fan_out_plans: Vec<tracedecay_domain::WorkflowFanOutPlanV1>,
+        context: tracedecay_domain::WorkflowRunEventContext,
+    ) -> Result<
+        tracedecay_domain::WorkflowRunProjection,
+        tracedecay_contracts::WorkflowRunServiceError,
+    > {
+        self.effects
+            .transact(move |storage| {
+                tracedecay_contracts::WorkflowRunService::new(storage).admit_with_fan_out(
+                    run_id.clone(),
+                    definition.clone(),
+                    admission.clone(),
+                    fan_out_plans.clone(),
+                    context.clone(),
+                )
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(tracedecay_contracts::WorkflowRunStorageError::Unavailable.into())
+            })
+    }
+
+    /// Applies one run command as a single writer transaction: the
+    /// projection read, the sequence check and the append commit together.
+    pub async fn apply_run(
+        &self,
+        run_id: tracedecay_domain::RunId,
+        expected_sequence: u64,
+        command: tracedecay_domain::WorkflowRunCommand,
+        context: tracedecay_domain::WorkflowRunEventContext,
+    ) -> Result<
+        tracedecay_domain::WorkflowRunProjection,
+        tracedecay_contracts::WorkflowRunServiceError,
+    > {
+        self.effects
+            .transact(move |storage| {
+                tracedecay_contracts::WorkflowRunService::new(storage).apply(
+                    &run_id,
+                    expected_sequence,
+                    command.clone(),
+                    context.clone(),
+                )
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(tracedecay_contracts::WorkflowRunStorageError::Unavailable.into())
+            })
+    }
+
+    /// Persists one fan-out census as a single writer transaction, checked
+    /// against the run journal it names.
+    pub async fn persist_census(
+        &self,
+        census: tracedecay_domain::WorkflowFanOutCensusV1,
+    ) -> Result<
+        tracedecay_contracts::WorkflowFanOutCensusPersistOutcomeV1,
+        tracedecay_contracts::WorkflowFanOutCensusError,
+    > {
+        self.effects
+            .transact(move |storage| {
+                tracedecay_contracts::WorkflowFanOutCensusStoragePort::persist_census(
+                    &storage, &census,
+                )
+            })
+            .await
+            .unwrap_or(Err(
+                tracedecay_contracts::WorkflowFanOutCensusError::Unavailable,
+            ))
+    }
+
+    /// Marks every census in `censuses` observability-durable as one writer
+    /// transaction.
+    pub async fn mark_censuses_observability_durable(
+        &self,
+        censuses: Vec<tracedecay_domain::WorkflowFanOutCensusV1>,
+    ) -> Result<(), tracedecay_contracts::WorkflowFanOutCensusError> {
+        self.effects
+            .transact(move |storage| {
+                censuses.iter().try_for_each(|census| {
+                    tracedecay_contracts::WorkflowFanOutCensusStoragePort::mark_census_observability_durable(
+                        &storage, census,
+                    )
+                })
+            })
+            .await
+            .unwrap_or(Err(tracedecay_contracts::WorkflowFanOutCensusError::Unavailable))
     }
 
     pub fn definitions(
@@ -523,10 +1013,7 @@ impl RegisteredWorkflowApplicationServicesV1 {
         &self,
         worktree_id: &tracedecay_domain::WorktreeId,
     ) -> Result<bool, tracedecay_contracts::WorkflowEffectAuthorityErrorV1> {
-        tracedecay_contracts::WorkflowEffectAuthorityPortV1::has_pending_effects(
-            &self.effects,
-            worktree_id,
-        )
+        self.effects.has_pending_effects(worktree_id)
     }
 
     pub fn topology(&self) -> &RegisteredWorkflowTopologyV1 {
@@ -562,8 +1049,35 @@ fn placement_unavailable() -> tracedecay_contracts::ApplicationProblem {
     tracedecay_contracts::WorkPlacementStorageError::Unavailable.into()
 }
 
+async fn observe_placement(
+    observe: impl FnOnce(
+        &tracedecay_domain::WorkPlacementTargetV1,
+    ) -> Result<
+        tracedecay_domain::WorkPlacementObservationV1,
+        tracedecay_contracts::ApplicationProblem,
+    > + Send
+    + 'static,
+    target: tracedecay_domain::WorkPlacementTargetV1,
+) -> Result<tracedecay_domain::WorkPlacementObservationV1, tracedecay_contracts::ApplicationProblem>
+{
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || observe(&target))
+        .await
+        .unwrap_or_else(|_| Err(placement_unavailable()))
+}
+
 fn run_control_unavailable() -> tracedecay_contracts::ApplicationProblem {
     tracedecay_contracts::WorkRunControlStorageError::Unavailable.into()
+}
+
+fn attempt_unavailable() -> tracedecay_contracts::ApplicationProblem {
+    tracedecay_contracts::WorkAttemptStorageError::Unavailable.into()
+}
+
+fn workflow_unavailable() -> tracedecay_contracts::ApplicationProblem {
+    tracedecay_contracts::ApplicationProblem::unavailable(tracedecay_contracts::SafeDiagnostic {
+        code: "workflow.unavailable".to_owned(),
+        message: "The Workflow application runtime is unavailable".to_owned(),
+    })
 }
 
 fn attach_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {

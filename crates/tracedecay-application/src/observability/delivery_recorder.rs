@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracedecay_contracts::ApplicationContractError;
 use tracedecay_domain::DeliverySettlementV1;
 use tracedecay_runtime_core::native_runtime::{
-    NativeTask, NativeTaskOutcome, sleep_until, timeout,
+    NativeTask, NativeTaskOutcome, sleep_until, timeout_at,
 };
 
 use super::delivery_spool::{
@@ -165,7 +165,19 @@ impl BoundedDeliverySettlementRecorderV1 {
     pub async fn shutdown(
         &self,
     ) -> Result<DeliverySettlementRecorderSummaryV1, ApplicationContractError> {
-        self.core.shutdown().await
+        self.core
+            .shutdown(Instant::now() + RECORDER_SHUTDOWN_DEADLINE)
+            .await
+    }
+
+    /// Shutdown bounded by the caller's deadline instead of the recorder's
+    /// own budget. The final drain waits for the store writer, which a
+    /// daemon shutdown phase can hold past that budget.
+    pub async fn shutdown_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<DeliverySettlementRecorderSummaryV1, ApplicationContractError> {
+        self.core.shutdown(deadline).await
     }
 }
 
@@ -174,6 +186,7 @@ impl DeliverySettlementRecorderCoreV1 {
     /// lifecycle compare-and-swap admits exactly one drain.
     async fn shutdown(
         &self,
+        deadline: Instant,
     ) -> Result<DeliverySettlementRecorderSummaryV1, ApplicationContractError> {
         {
             let _admission = self.admission.lock().map_err(|_| {
@@ -211,7 +224,7 @@ impl DeliverySettlementRecorderCoreV1 {
                 )
             })?
             .take();
-        let summary = match timeout(RECORDER_SHUTDOWN_DEADLINE, result).await {
+        let summary = match timeout_at(deadline, result).await {
             Ok(Ok(summary)) => summary,
             Ok(Err(_)) => {
                 return Err(ApplicationContractError::Domain(

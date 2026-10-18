@@ -12,8 +12,9 @@ use tracedecay_contracts::remote::credential_admission::{
     RemoteSessionBoundProtocolBodyV1,
 };
 use tracedecay_contracts::remote::protocol::{
-    RemoteProtocolExecutionControlV1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
-    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_protocol_problem,
+    RemoteProtocolExecutionControlV1, RemoteProtocolFailureV1, RemoteProtocolFutureV1,
+    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    remote_protocol_problem,
 };
 use tracedecay_contracts::remote::transfer::{
     REMOTE_FRAME_TRANSFER_USE_CASE_ID_V1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
@@ -53,30 +54,33 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         &self,
         request: RemoteProtocolRequestV1<RemoteFrameTransferRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let contract = remote_frame_transfer_result_contract_v1()?;
-        let cancellation = match CancellationSignal::active(format!(
-            "cancel.remote.frame-transfer.{}",
-            request.request_id.as_str()
-        )) {
-            Ok(cancellation) => cancellation,
-            Err(_) => {
-                return remote_authority_unavailable_response(
-                    request.request_id,
-                    request.sent_at,
-                    contract,
-                );
-            }
-        };
-        let deadline = UtcMicros(request.body.expires_at_micros);
-        self.execute_controlled(
-            request,
-            credential,
-            RemoteProtocolExecutionControlV1 {
-                deadline,
-                cancellation,
-            },
-        )
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let contract = remote_frame_transfer_result_contract_v1()?;
+            let cancellation = match CancellationSignal::active(format!(
+                "cancel.remote.frame-transfer.{}",
+                request.request_id.as_str()
+            )) {
+                Ok(cancellation) => cancellation,
+                Err(_) => {
+                    return remote_authority_unavailable_response(
+                        request.request_id,
+                        request.sent_at,
+                        contract,
+                    );
+                }
+            };
+            let deadline = UtcMicros(request.body.expires_at_micros);
+            self.execute_controlled(
+                request,
+                credential,
+                RemoteProtocolExecutionControlV1 {
+                    deadline,
+                    cancellation,
+                },
+            )
+            .await
+        })
     }
 
     #[tracing::instrument(name = "daemon.remote.frame_transfer", level = "trace", skip_all)]
@@ -85,161 +89,182 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         request: RemoteProtocolRequestV1<RemoteFrameTransferRequestV1>,
         credential: OpaqueRemoteCredential,
         control: RemoteProtocolExecutionControlV1,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        let contract = remote_frame_transfer_result_contract_v1()?;
-        let now = tracedecay_contracts::clock::now_micros();
-        if control.cancellation.is_cancelled() {
-            return frame_transfer_interrupted_response(
-                request_id,
-                observed_at,
-                contract,
-                ApplicationProblem::cancelled_before_admission(),
-            );
-        }
-        if now >= control.deadline || now.0 >= request.body.expires_at_micros {
-            return frame_transfer_interrupted_response(
-                request_id,
-                observed_at,
-                contract,
-                ApplicationProblem::timed_out_before_admission(),
-            );
-        }
-        let admission = RemoteCredentialAdmissionServiceV1::new(
-            DaemonRemoteCredentialLookupV1::new(Arc::clone(&self.credentials)),
-        );
-        let session = match admission.admit_before_body(
-            &credential,
-            RemoteCredentialUseV1::TransferFrame,
-            tracedecay_contracts::clock::now_micros(),
-        ) {
-            Ok(session) => session,
-            Err(_) => {
-                return remote_authority_unavailable_response(request_id, observed_at, contract);
-            }
-        };
-        if <RemoteFrameTransferRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
-            &session, &request,
-        )
-        .is_err()
-        {
-            return remote_authority_unavailable_response(request_id, observed_at, contract);
-        }
-        let session = match admission
-            .reauthorize_publication(&session, tracedecay_contracts::clock::now_micros())
-        {
-            Ok(session) => session,
-            Err(_) => {
-                return remote_authority_unavailable_response(request_id, observed_at, contract);
-            }
-        };
-        if <RemoteFrameTransferRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
-            &session, &request,
-        )
-        .is_err()
-        {
-            return remote_authority_unavailable_response(request_id, observed_at, contract);
-        }
-        let registered = match self
-            .credentials
-            .storage_for_presented(RemoteCredentialUseV1::TransferFrame, &credential)
-        {
-            Ok(registered) => registered,
-            Err(_) => {
-                return remote_authority_unavailable_response(request_id, observed_at, contract);
-            }
-        };
-        let Some(keyring) = presented_spool_keyring(&credential, request.enrollment_revision)
-        else {
-            return remote_authority_unavailable_response(request_id, observed_at, contract);
-        };
-        let storage = registered.storage.with_keyring(keyring);
-        let authority = match storage.current_writer_authority(&request.body.writer) {
-            Ok(authority) => authority,
-            Err(RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished) => {
-                let failure = RemoteProtocolFailureV1::WriterAuthorityUnpublished;
-                let authority = CurrentRemoteAuthorityStateV1::Unavailable {
-                    reason: failure.unavailable_reason(),
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let request_id = request.request_id.clone();
+            let observed_at = request.sent_at;
+            let contract = remote_frame_transfer_result_contract_v1()?;
+            let now = tracedecay_contracts::clock::now_micros();
+            if control.cancellation.is_cancelled() {
+                return frame_transfer_interrupted_response(
+                    request_id,
                     observed_at,
-                };
-                let problem = remote_protocol_problem(contract, request_id.clone(), failure)?;
-                return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
+                    contract,
+                    ApplicationProblem::cancelled_before_admission(),
+                );
             }
-            Err(_) => {
-                return remote_authority_unavailable_response(request_id, observed_at, contract);
+            if now >= control.deadline || now.0 >= request.body.expires_at_micros {
+                return frame_transfer_interrupted_response(
+                    request_id,
+                    observed_at,
+                    contract,
+                    ApplicationProblem::timed_out_before_admission(),
+                );
             }
-        };
-        let CurrentRemoteAuthorityStateV1::Available(current) = &authority else {
-            let problem = remote_protocol_problem(
-                contract,
-                request_id.clone(),
-                RemoteProtocolFailureV1::AuthorityUnavailable,
-            )?;
-            return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
-        };
-        if current.fence != request.body.writer.authority.fence
-            || current.fence.authority_epoch.0 != request.body.observed_authority_epoch
+            let admission = RemoteCredentialAdmissionServiceV1::new(
+                DaemonRemoteCredentialLookupV1::new(Arc::clone(&self.credentials)),
+            );
+            let session = match admission.admit_before_body(
+                &credential,
+                RemoteCredentialUseV1::TransferFrame,
+                tracedecay_contracts::clock::now_micros(),
+            ) {
+                Ok(session) => session,
+                Err(_) => {
+                    return remote_authority_unavailable_response(
+                        request_id,
+                        observed_at,
+                        contract,
+                    );
+                }
+            };
+            if <RemoteFrameTransferRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+            &session, &request,
+        )
+        .is_err()
         {
-            let problem = remote_protocol_problem(
-                contract,
-                request_id.clone(),
-                RemoteProtocolFailureV1::StaleAuthorityFence,
-            )?;
-            return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
-        }
-        let now = tracedecay_contracts::clock::now_micros();
-        if now >= control.deadline || now.0 >= request.body.expires_at_micros {
-            return frame_transfer_interrupted_response(
-                request_id,
-                observed_at,
-                contract,
-                ApplicationProblem::timed_out_before_admission(),
-            );
-        }
-        if !control.cancellation.try_begin_commit() {
-            return frame_transfer_interrupted_response(
-                request_id,
-                observed_at,
-                contract,
-                ApplicationProblem::cancelled_before_admission(),
-            );
-        }
-        let receipt = match storage.transfer_pending(&request.body) {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                let failure = match error {
-                    RemoteFrameTransferErrorV1::StaleAuthority => {
-                        RemoteProtocolFailureV1::StaleAuthorityFence
-                    }
-                    RemoteFrameTransferErrorV1::SequenceGap
-                    | RemoteFrameTransferErrorV1::InvalidFrame
-                    | RemoteFrameTransferErrorV1::InvalidReceipt
-                    | RemoteFrameTransferErrorV1::Corruption => {
-                        RemoteProtocolFailureV1::ScopeMismatch
-                    }
-                    RemoteFrameTransferErrorV1::Overflow => RemoteProtocolFailureV1::SpoolSaturated,
-                    RemoteFrameTransferErrorV1::Unavailable => {
-                        RemoteProtocolFailureV1::AuthorityUnavailable
-                    }
-                };
-                let problem = remote_protocol_problem(contract, request_id.clone(), failure)?;
-                return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
-            }
-        };
-        if receipt.validate_for(&request.body).is_err() {
             return remote_authority_unavailable_response(request_id, observed_at, contract);
         }
-        let result =
-            match frame_transfer_effect_envelope(&request, &session, receipt, contract.clone()) {
-                Ok(envelope) => Ok(envelope),
-                Err(failure) => Err(remote_protocol_problem(
-                    contract.clone(),
-                    request_id.clone(),
-                    failure,
-                )?),
+            let session = match admission
+                .reauthorize_publication(&session, tracedecay_contracts::clock::now_micros())
+            {
+                Ok(session) => session,
+                Err(_) => {
+                    return remote_authority_unavailable_response(
+                        request_id,
+                        observed_at,
+                        contract,
+                    );
+                }
             };
-        RemoteProtocolResponseV1::new(request_id, authority, result)
+            if <RemoteFrameTransferRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+            &session, &request,
+        )
+        .is_err()
+        {
+            return remote_authority_unavailable_response(request_id, observed_at, contract);
+        }
+            let registered = match self
+                .credentials
+                .storage_for_presented(RemoteCredentialUseV1::TransferFrame, &credential)
+            {
+                Ok(registered) => registered,
+                Err(_) => {
+                    return remote_authority_unavailable_response(
+                        request_id,
+                        observed_at,
+                        contract,
+                    );
+                }
+            };
+            let Some(keyring) = presented_spool_keyring(&credential, request.enrollment_revision)
+            else {
+                return remote_authority_unavailable_response(request_id, observed_at, contract);
+            };
+            let storage = registered.storage.with_keyring(keyring);
+            let authority = match storage.current_writer_authority(&request.body.writer) {
+                Ok(authority) => authority,
+                Err(RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished) => {
+                    let failure = RemoteProtocolFailureV1::WriterAuthorityUnpublished;
+                    let authority = CurrentRemoteAuthorityStateV1::Unavailable {
+                        reason: failure.unavailable_reason(),
+                        observed_at,
+                    };
+                    let problem = remote_protocol_problem(contract, request_id.clone(), failure)?;
+                    return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
+                }
+                Err(_) => {
+                    return remote_authority_unavailable_response(
+                        request_id,
+                        observed_at,
+                        contract,
+                    );
+                }
+            };
+            let CurrentRemoteAuthorityStateV1::Available(current) = &authority else {
+                let problem = remote_protocol_problem(
+                    contract,
+                    request_id.clone(),
+                    RemoteProtocolFailureV1::AuthorityUnavailable,
+                )?;
+                return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
+            };
+            if current.fence != request.body.writer.authority.fence
+                || current.fence.authority_epoch.0 != request.body.observed_authority_epoch
+            {
+                let problem = remote_protocol_problem(
+                    contract,
+                    request_id.clone(),
+                    RemoteProtocolFailureV1::StaleAuthorityFence,
+                )?;
+                return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
+            }
+            let now = tracedecay_contracts::clock::now_micros();
+            if now >= control.deadline || now.0 >= request.body.expires_at_micros {
+                return frame_transfer_interrupted_response(
+                    request_id,
+                    observed_at,
+                    contract,
+                    ApplicationProblem::timed_out_before_admission(),
+                );
+            }
+            if !control.cancellation.try_begin_commit() {
+                return frame_transfer_interrupted_response(
+                    request_id,
+                    observed_at,
+                    contract,
+                    ApplicationProblem::cancelled_before_admission(),
+                );
+            }
+            let receipt = match storage.transfer_pending(&request.body) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let failure = match error {
+                        RemoteFrameTransferErrorV1::StaleAuthority => {
+                            RemoteProtocolFailureV1::StaleAuthorityFence
+                        }
+                        RemoteFrameTransferErrorV1::SequenceGap
+                        | RemoteFrameTransferErrorV1::InvalidFrame
+                        | RemoteFrameTransferErrorV1::InvalidReceipt
+                        | RemoteFrameTransferErrorV1::Corruption => {
+                            RemoteProtocolFailureV1::ScopeMismatch
+                        }
+                        RemoteFrameTransferErrorV1::Overflow => {
+                            RemoteProtocolFailureV1::SpoolSaturated
+                        }
+                        RemoteFrameTransferErrorV1::Unavailable => {
+                            RemoteProtocolFailureV1::AuthorityUnavailable
+                        }
+                    };
+                    let problem = remote_protocol_problem(contract, request_id.clone(), failure)?;
+                    return RemoteProtocolResponseV1::new(request_id, authority, Err(problem));
+                }
+            };
+            if receipt.validate_for(&request.body).is_err() {
+                return remote_authority_unavailable_response(request_id, observed_at, contract);
+            }
+            let result =
+                match frame_transfer_effect_envelope(&request, &session, receipt, contract.clone())
+                {
+                    Ok(envelope) => Ok(envelope),
+                    Err(failure) => Err(remote_protocol_problem(
+                        contract.clone(),
+                        request_id.clone(),
+                        failure,
+                    )?),
+                };
+            RemoteProtocolResponseV1::new(request_id, authority, result)
+        })
     }
 }
 
@@ -347,8 +372,8 @@ mod tests {
     use serde_json::json;
     use tracedecay_domain::{BrainId, BrainNodeId, UserProfileId};
 
-    #[test]
-    fn receiving_owner_denies_interruption_and_unknown_credentials_before_commit() {
+    #[tokio::test]
+    async fn receiving_owner_denies_interruption_and_unknown_credentials_before_commit() {
         let brain_id = BrainId::new("brain.remote").unwrap();
         let node_id = BrainNodeId::new("node.remote").unwrap();
         let credentials = Arc::new(DaemonRemoteCredentialAuthorityV1::new(
@@ -442,6 +467,7 @@ mod tests {
                         cancellation: cancellation.clone(),
                     },
                 )
+                .await
                 .unwrap();
             assert_eq!(response.result.unwrap_err(), expected);
             assert!(!cancellation.commit_started());

@@ -119,10 +119,10 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Bind the registered workflow/handoff authority for the mounted project.
     #[doc(hidden)]
-    pub fn project_workflow_storage_for_test(
+    pub async fn project_workflow_storage_for_test(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
-        self.project_database_for_test()?.workflow_storage()
+        self.project_database_for_test()?.workflow_storage().await
     }
 
     #[doc(hidden)]
@@ -148,7 +148,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn converge_git_evidence_for_test(
         &self,
-        git: &dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource,
+        git: std::sync::Arc<dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource>,
         project_root: Option<&Path>,
     ) -> std::result::Result<
         tracedecay_sessions::runtime::git_correlation::GitEvidencePassOutcome,

@@ -1,5 +1,6 @@
 //! Project-open composition for the canonical feedback and advisory owners.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -86,6 +87,10 @@ use crate::mcp::McpServer;
 use tracedecay_agent_hosts::agents::context_scout::address_registry::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
+};
+use tracedecay_agent_hosts::agents::context_scout::intent_pass::{
+    ContextScoutIntentAnalyticsV1, ContextScoutIntentPassOutcomeV1, ContextScoutIntentPassV1,
+    run_context_scout_intent_pass,
 };
 use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
 use tracedecay_agent_hosts::agents::context_scout::{
@@ -595,6 +600,52 @@ fn proximity_authorization_context(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> Option<RequestContext> {
+    project_open_authorization_context(
+        access,
+        feedback_scope,
+        observed_at,
+        ProjectOpenGrantV1 {
+            domain: "tracedecay.project-open.feedback-proximity-grant.v1",
+            grant_prefix: "grant.tracedecay-daemon.feedback-proximity",
+            capability: tracedecay_tool_catalog::CapabilityId::new(
+                PROXIMITY_CAPABILITY_ID_V1.to_owned(),
+            )
+            .ok()?,
+            use_case: tracedecay_tool_catalog::UseCaseId::new(PROXIMITY_USE_CASE_ID_V1.to_owned())
+                .ok()?,
+            request_id,
+            deadline,
+            cancellation,
+        },
+    )
+}
+
+/// One single-capability grant the daemon mints over project-open access.
+struct ProjectOpenGrantV1 {
+    domain: &'static str,
+    grant_prefix: &'static str,
+    capability: tracedecay_tool_catalog::CapabilityId,
+    use_case: tracedecay_tool_catalog::UseCaseId,
+    request_id: tracedecay_contracts::RequestId,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+}
+
+fn project_open_authorization_context(
+    access: &tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
+    feedback_scope: &FeedbackScopeV1,
+    observed_at: UtcMicros,
+    grant: ProjectOpenGrantV1,
+) -> Option<RequestContext> {
+    let ProjectOpenGrantV1 {
+        domain,
+        grant_prefix,
+        capability,
+        use_case,
+        request_id,
+        deadline,
+        cancellation,
+    } = grant;
     if feedback_scope.validate().is_err()
         || access.scope.project_id != feedback_scope.project_id
         || access.scope.repository_id != feedback_scope.repository_id
@@ -606,19 +657,13 @@ fn proximity_authorization_context(
             .map(tracedecay_domain::RefId::as_str)
             != Some(feedback_scope.branch_ref.as_str())
         || observed_at >= access.grant_expires_at
+        || !access.effective_capabilities.contains(&capability)
     {
-        return None;
-    }
-    let capability =
-        tracedecay_tool_catalog::CapabilityId::new(PROXIMITY_CAPABILITY_ID_V1.to_owned()).ok()?;
-    let use_case =
-        tracedecay_tool_catalog::UseCaseId::new(PROXIMITY_USE_CASE_ID_V1.to_owned()).ok()?;
-    if !access.effective_capabilities.contains(&capability) {
         return None;
     }
     let expires_at = std::cmp::min(deadline.expires_at, access.grant_expires_at);
     let grant_digest = canonical_sha256(&(
-        "tracedecay.project-open.feedback-proximity-grant.v1",
+        domain,
         &access.scope,
         &access.requester,
         &access.configuration_digest,
@@ -629,7 +674,7 @@ fn proximity_authorization_context(
     .ok()?;
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new(format!(
-            "grant.tracedecay-daemon.feedback-proximity.{}",
+            "{grant_prefix}.{}",
             grant_digest.as_str().trim_start_matches("sha256:")
         ))
         .ok()?,
@@ -958,6 +1003,14 @@ async fn run_production_hook_cycle(
     request: HookOrchestrationRequestV1,
     work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> HookOrchestrationWorkOutcomeV1 {
+    let Some(diagnostic_trigger) = feedback_diagnostic_trigger(request.trigger) else {
+        return Box::pin(run_production_intent_cycle(
+            cycle,
+            request,
+            work_cancellation,
+        ))
+        .await;
+    };
     if work_cancellation.is_cancelled() {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
@@ -1007,12 +1060,6 @@ async fn run_production_hook_cycle(
     ) {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
-    let diagnostic_trigger = match request.trigger {
-        HookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
-        HookOrchestrationTriggerV1::Stop | HookOrchestrationTriggerV1::Explicit => {
-            DiagnosticTrigger::ExplicitDocumentDiagnostics
-        }
-    };
     let execution = match cycle
         .run_cycle(
             FeedbackCycleRequest {
@@ -1160,6 +1207,7 @@ async fn run_production_hook_cycle(
         HookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
         HookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
         HookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
+        HookOrchestrationTriggerV1::IntentBoundary => ContextScoutTriggerV1::IntentBoundary,
     };
     let recent = producer
         .scout_owner
@@ -1264,6 +1312,275 @@ async fn run_production_hook_cycle(
     }
 }
 
+/// The feedback cycle a boundary runs, `None` for the intent pass, which runs
+/// no feedback cycle.
+const fn feedback_diagnostic_trigger(
+    trigger: HookOrchestrationTriggerV1,
+) -> Option<DiagnosticTrigger> {
+    match trigger {
+        HookOrchestrationTriggerV1::SavedEdit => Some(DiagnosticTrigger::DocumentSave),
+        HookOrchestrationTriggerV1::Stop | HookOrchestrationTriggerV1::Explicit => {
+            Some(DiagnosticTrigger::ExplicitDocumentDiagnostics)
+        }
+        HookOrchestrationTriggerV1::IntentBoundary => None,
+    }
+}
+
+fn log_scout_intent_outcome(project_root: &Path, outcome: &str) {
+    tracedecay_runtime_core::logging::log_daemon_event(
+        "context_scout_intent_work",
+        &[
+            ("project", project_root.display().to_string()),
+            ("outcome", outcome.to_owned()),
+        ],
+    );
+}
+
+/// One admitted boundary's session intent pass. Intent work is best-effort:
+/// it owes no durable producer work, so every end settles the boundary, and
+/// a newer boundary of the session supersedes it at its own work address.
+/// The pass pins the current configuration, mints the project's hook-runtime
+/// authority, reads the session window, asks the installed decision engine,
+/// and mounts the claim authority of the suggestion it enqueued.
+#[expect(
+    clippy::too_many_lines,
+    reason = "The intent cycle is one pinned, authorized pass over the opened project."
+)]
+async fn run_production_intent_cycle(
+    cycle: Arc<ProjectOpenAdvisoryFeedbackCycleV1>,
+    request: HookOrchestrationRequestV1,
+    work_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+) -> HookOrchestrationWorkOutcomeV1 {
+    let producer = Arc::clone(&cycle.producer);
+    let project_root = producer.project_root.as_path();
+    if work_cancellation.is_cancelled() {
+        log_scout_intent_outcome(project_root, "cancelled");
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    }
+    let Ok(pinned_configuration) = producer
+        .graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+    else {
+        log_scout_intent_outcome(project_root, "configuration_unavailable");
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    };
+    let current_configuration = ConfigurationCurrentStateV1 {
+        revision_id: pinned_configuration.revision_id().clone(),
+        snapshot: pinned_configuration.snapshot().clone(),
+    };
+    let Some(scout_configuration) =
+        ContextScoutConfigurationPinV1::from_current(&current_configuration)
+    else {
+        log_scout_intent_outcome(project_root, "configuration_pin_unavailable");
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    };
+    // Disabled or absent: no window read, no engine request, no authority.
+    if !scout_configuration
+        .intent_settings()
+        .is_some_and(|settings| settings.enabled)
+        || scout_configuration.control().state == ContextScoutServiceStateV1::Disabled
+    {
+        log_scout_intent_outcome(
+            project_root,
+            ContextScoutIntentPassOutcomeV1::Disabled.as_str(),
+        );
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    }
+    let Ok(model_config) =
+        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
+            pinned_configuration.snapshot(),
+        )
+    else {
+        log_scout_intent_outcome(project_root, "model_configuration_unavailable");
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    };
+    // Installing the pinned configuration also builds the decision engine
+    // when its settings digest changed since the last install.
+    if install_project_open_context_scout_configuration(
+        producer.scout_owner.as_ref(),
+        scout_configuration.clone(),
+        tracedecay_agent_hosts::agents::context_scout::model::ContextScoutModelConfig {
+            automation: &model_config,
+            codex: &pinned_configuration.config().lcm_summarizers.codex,
+        },
+    )
+    .await
+    .is_err()
+    {
+        log_scout_intent_outcome(project_root, "configuration_install_failed");
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    }
+    let envelope = request.hook.envelope();
+    let lifecycle = match request.lifecycle.clone() {
+        Some(lifecycle) => Some(lifecycle),
+        None => match tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_native_session(
+            envelope.project_id,
+            envelope.worktree_id,
+            envelope.protected_session_id,
+        )
+        .await
+        {
+            Some(session_id) => {
+                tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
+                    envelope.project_id,
+                    envelope.worktree_id,
+                    &session_id,
+                )
+                .await
+            }
+            None => None,
+        },
+    };
+    let Some(lifecycle) = lifecycle else {
+        log_scout_intent_outcome(project_root, "lifecycle_absent");
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    };
+    let observed_at = now_micros();
+    let Some(context) = daemon_owned_project_source_access_at(
+        &producer.scope,
+        project_root,
+        &pinned_configuration,
+        observed_at,
+    )
+    .ok()
+    .and_then(|access| {
+        intent_authorization_context(&access, &cycle.feedback_scope, envelope, observed_at)
+    }) else {
+        log_scout_intent_outcome(project_root, "authority_unavailable");
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    };
+    let Some(pin) = ContextScoutAuthorityPinV1::new(
+        &context,
+        cycle.feedback_scope.clone(),
+        scout_configuration,
+        observed_at,
+    ) else {
+        log_scout_intent_outcome(project_root, "authority_pin_unavailable");
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    };
+    let code_generation_id = producer
+        .code_index_schedulers
+        .latest_feedback_generation_for_scope(project_root, &producer.scope)
+        .await
+        .map(|generation| generation.metadata().manifest().generation_id.clone());
+    let deadline = pin
+        .configuration()
+        .intent_settings()
+        .map_or(Duration::ZERO, |settings| {
+            Duration::from_millis(
+                u64::from(settings.window.freshen_budget_ms)
+                    .saturating_add(u64::from(settings.engine.timeout_ms)),
+            )
+        })
+        .saturating_add(INTENT_PASS_STORE_BUDGET);
+    let project_key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(project_root);
+    let outcome = run_context_scout_intent_pass(ContextScoutIntentPassV1 {
+        owner: producer.scout_owner.as_ref(),
+        registry: producer.scout_registry.as_ref(),
+        sessions: producer.session_db.as_ref(),
+        analytics: Some(ContextScoutIntentAnalyticsV1 {
+            analytics: producer.graph.profile_database().as_ref(),
+            project_key: &project_key,
+        }),
+        hook: &request.hook,
+        pin: &pin,
+        context: &context,
+        lifecycle: &lifecycle,
+        code_generation_id,
+        engine: producer.scout_owner.intent_engine().await,
+        observed_at,
+        deadline: MonotonicDeadline::at(Instant::now() + deadline),
+        cancellation: work_cancellation,
+    })
+    .await;
+    let ContextScoutIntentPassOutcomeV1::Enqueued {
+        entry,
+        lifecycle: intent_lifecycle,
+    } = outcome
+    else {
+        log_scout_intent_outcome(project_root, outcome.as_str());
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    };
+    let mounted = producer
+        .graph
+        .mount_current_context_scout_claim_authority(
+            Arc::clone(&producer.scout_registry),
+            &request.hook,
+            request.hook_configuration_revision,
+            pin,
+            context,
+            *intent_lifecycle,
+            entry.work.address,
+            entry.work.input_watermark,
+            observed_at,
+        )
+        .await;
+    log_scout_intent_outcome(
+        project_root,
+        if mounted {
+            "mounted"
+        } else {
+            "claim_mount_refused"
+        },
+    );
+    HookOrchestrationWorkOutcomeV1::Completed
+}
+
+/// Store reads and writes the intent pass performs around its freshen wait
+/// and engine exchange.
+const INTENT_PASS_STORE_BUDGET: Duration = Duration::from_secs(1);
+
+/// The request context one intent pass acts under: the daemon-owned project
+/// source access, granted only the hook-runtime operation the suggestion is
+/// produced for, and valid for the access grant's horizon so the mounted
+/// claim authority resolves at the session's later boundaries.
+fn intent_authorization_context(
+    access: &tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
+    feedback_scope: &FeedbackScopeV1,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    observed_at: UtcMicros,
+) -> Option<RequestContext> {
+    let operation = tracedecay_contracts::retrieval::catalog::primitive_read_handler_descriptors()
+        .ok()?
+        .into_iter()
+        .find(|descriptor| {
+            descriptor.surface_operation()
+                == Some(tracedecay_tool_catalog::ApplicationSurfaceOperation::HookRuntime)
+        })?
+        .operation()
+        .clone();
+    let event = envelope
+        .event_id
+        .iter()
+        .fold(String::with_capacity(32), |mut event, byte| {
+            let _ = write!(event, "{byte:02x}");
+            event
+        });
+    project_open_authorization_context(
+        access,
+        feedback_scope,
+        observed_at,
+        ProjectOpenGrantV1 {
+            domain: "tracedecay.project-open.context-scout-intent-grant.v1",
+            grant_prefix: "grant.tracedecay-daemon.context-scout-intent",
+            capability: operation.capability_id().clone(),
+            use_case: operation.use_case_id().clone(),
+            request_id: tracedecay_contracts::RequestId::new(format!(
+                "request.context-scout.intent.{event}"
+            ))
+            .ok()?,
+            deadline: Deadline::new(access.grant_expires_at).ok()?,
+            cancellation: CancellationContext::active(format!(
+                "cancel.context-scout.intent.{event}"
+            ))
+            .ok()?,
+        },
+    )
+}
+
 fn admit_context_scout_observed_at(
     observed_at: UtcMicros,
     publication_revalidated_at: Option<UtcMicros>,
@@ -1283,6 +1600,7 @@ fn observe_hook_feedback_cycle_terminal(
         HookOrchestrationTriggerV1::SavedEdit => "saved_edit",
         HookOrchestrationTriggerV1::Stop => "stop",
         HookOrchestrationTriggerV1::Explicit => "explicit",
+        HookOrchestrationTriggerV1::IntentBoundary => "intent",
     };
     let Ok(subject) = canonical_sha256(&(
         "tracedecay.feedback.accepted-hook-cycle.v1",
@@ -2015,7 +2333,9 @@ async fn register_project_delivery_read_authority(
             return Ok(());
         }
     };
-    let handle = match resolve_production_github_provider_access(invocation, project_root, state) {
+    let handle = match resolve_production_github_provider_access(invocation, project_root, state)
+        .await
+    {
         Ok(access) => {
             let review_bodies = github_anchor_authorities_arc_v1(
                 state.database.clone(),
@@ -2274,43 +2594,33 @@ struct ProductionGitHubProviderAccessV1 {
     http: GitHubHttpReadConfigV1,
 }
 
-fn resolve_production_github_provider_access(
+async fn resolve_production_github_provider_access(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
 ) -> std::result::Result<ProductionGitHubProviderAccessV1, ProjectDeliveryProviderMountGateV1> {
-    let Some(remote_url) = tracedecay_runtime_core::git::git_remote_url(project_root) else {
-        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
-    };
-    let Some((owner, repository)) = github_repository_from_remote_v1(&remote_url) else {
-        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
-    };
-    let profile_id = &state.session_db.binding().shard_id.profile_id;
-    let credential = match invocation.mount_github_read_only_credential_authority_for_project(
-        profile_id,
-        &owner,
-        &repository,
-    ) {
-        // A repository the profile does not name is read as the `origin`
-        // project-open bound: with the local GitHub login when there is one,
-        // anonymously otherwise.
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public
-        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
-            public_repository_read_credential_v1(&owner, &repository)
-        }
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => {
-            return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
-        }
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {
-            match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
-                RegisteredGitHubReadOnlyCredentialV1::Verified(credential) => credential,
-                RegisteredGitHubReadOnlyCredentialV1::Missing
-                | RegisteredGitHubReadOnlyCredentialV1::Rejected => {
-                    return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
-                }
-            }
-        }
-    };
+    let blocking_invocation = invocation.clone();
+    let blocking_root = project_root.to_path_buf();
+    let profile_id = state.session_db.binding().shard_id.profile_id.clone();
+    let (owner, repository, credential) =
+        tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
+            resolve_github_repository_read_credential(
+                &blocking_invocation,
+                &blocking_root,
+                &profile_id,
+            )
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                event = "github_provider_access",
+                outcome = "unavailable",
+                project = %project_root.display(),
+                reason = %error,
+                "GitHub read credential resolution did not finish"
+            );
+            Err(ProjectDeliveryProviderMountGateV1::GitHubSourceAccessUnavailable)
+        })?;
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         state.session_db.clone(),
     );
@@ -2340,6 +2650,54 @@ fn resolve_production_github_provider_access(
     })
 }
 
+/// Resolves `origin`'s GitHub repository and the credential that reads it.
+///
+/// Blocking: the remote lookup may spawn `git`, and the public-repository
+/// fallback probes `gh` and the git credential helper, each for seconds.
+/// It also mounts the credential authority process-wide, so the open owns it
+/// and is not drained until it returns.
+fn resolve_github_repository_read_credential(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    profile_id: &tracedecay_domain::UserProfileId,
+) -> std::result::Result<
+    (String, String, GitHubReadOnlyCredentialV1),
+    ProjectDeliveryProviderMountGateV1,
+> {
+    let Some(remote_url) = tracedecay_runtime_core::git::git_remote_url(project_root) else {
+        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
+    };
+    let Some((owner, repository)) = github_repository_from_remote_v1(&remote_url) else {
+        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
+    };
+    let credential = match invocation.mount_github_read_only_credential_authority_for_project(
+        profile_id,
+        &owner,
+        &repository,
+    ) {
+        // A repository the profile does not name is read as the `origin`
+        // project-open bound: with the local GitHub login when there is one,
+        // anonymously otherwise.
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public
+        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
+            public_repository_read_credential_v1(&owner, &repository)
+        }
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => {
+            return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
+        }
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {
+            match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
+                RegisteredGitHubReadOnlyCredentialV1::Verified(credential) => credential,
+                RegisteredGitHubReadOnlyCredentialV1::Missing
+                | RegisteredGitHubReadOnlyCredentialV1::Rejected => {
+                    return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
+                }
+            }
+        }
+    };
+    Ok((owner, repository, credential))
+}
+
 async fn resolve_production_github_provider_config(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -2354,7 +2712,7 @@ async fn resolve_production_github_provider_config(
         ci_source_access,
         target,
         http,
-    } = resolve_production_github_provider_access(invocation, project_root, state)?;
+    } = resolve_production_github_provider_access(invocation, project_root, state).await?;
     let ci = if credential.permits(GitHubReadPermissionV1::Actions)
         && credential.permits(GitHubReadPermissionV1::Checks)
     {

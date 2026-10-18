@@ -13,7 +13,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{UtcMicros, WorkflowDefinitionId};
 
-use crate::exact_sql::{ExactSqlError, ExactSqlRow, ExactSqlTransaction, ExactSqlValue};
+use crate::exact_sql::{ExactSqlError, ExactSqlRow, ExactSqlValue};
 
 use super::{execute_tx, execute_tx_changed, query_tx, sql_integer, sql_text, version_i64};
 
@@ -40,7 +40,7 @@ const DISPOSITION_SELECT: &str = "SELECT state, revision, transitioned_at
 /// a byte-identical definition must not disturb an already advanced
 /// disposition, so the insert is unconditionally ignored when a row exists.
 pub(super) fn seed_candidate_disposition(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     definition_id: &WorkflowDefinitionId,
     definition_version: u64,
     registered_at: UtcMicros,
@@ -61,7 +61,7 @@ pub(super) fn seed_candidate_disposition(
 }
 
 pub(super) fn load_disposition_tx(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkQuery,
     definition_id: &WorkflowDefinitionId,
     definition_version: u64,
 ) -> Result<Option<WorkflowDefinitionDisposition>, DispositionError> {
@@ -88,7 +88,7 @@ pub(super) fn load_disposition_tx(
 /// typed revision conflict. Every state on the operation's path gets its own
 /// journal entry before the disposition is swapped.
 pub(super) fn apply_lifecycle_transition(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     command: &WorkflowDefinitionLifecycleCommand,
 ) -> Result<WorkflowDefinitionTransitionOutcome, DispositionError> {
     let version =

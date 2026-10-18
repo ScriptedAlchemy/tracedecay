@@ -4,14 +4,15 @@ use std::{sync::Arc, time::Duration};
 use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlHandle, ExactSqlStatement, MemoryReleaseOutcome,
+    ExactSqlHandle, ExactSqlStatement, JobPolicy, MemoryReleaseOutcome,
 };
 pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolState};
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Statement;
 use super::{
-    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, WriteStatement,
+    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior,
+    WriteStatement, WriteTx,
 };
 
 const READER_WAIT: Duration = Duration::from_secs(5);
@@ -285,6 +286,25 @@ impl Connection {
                     .map(Transaction::from_runtime)
             }
         }
+    }
+
+    /// Runs `body` as one write job on the writer: commit when it returns
+    /// `Ok`, rollback when it returns `Err` or awaits anything but its own
+    /// statements ([`Error::JobAwaitedForeignFuture`]).
+    pub(crate) async fn transact<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        body: F,
+    ) -> Result<std::result::Result<R, E>>
+    where
+        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.runtime
+            .transact_async(policy, async move |job| body(&WriteTx::new(job)).await)
+            .await
+            .map_err(Into::into)
     }
 
     /// Begins the authority-bound transaction whose lease renews on progress.

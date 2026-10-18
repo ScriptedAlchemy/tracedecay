@@ -1,4 +1,4 @@
-//! The writer's single worker thread.
+//! The writer's single worker task on the storage pool.
 //!
 //! [`Worker::run`] owns the connection and the loop; the siblings own the two
 //! halves the loop leans on, [`ingress`] for how work arrives and where it is
@@ -6,7 +6,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    panic::{AssertUnwindSafe, catch_unwind},
+    panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{
         Arc,
@@ -20,11 +20,13 @@ use asupersync::{
     Cx,
     channel::{mpsc, watch},
 };
+use futures_util::FutureExt;
 use rusqlite::TransactionBehavior;
 use tracedecay_store::{
     AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
-    RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1,
+    RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1, UnavailableReasonV1,
 };
+use tracing::Instrument;
 
 #[cfg(not(any(unix, windows)))]
 use crate::connection::ConnectionMode;
@@ -34,7 +36,8 @@ use crate::{
     checkpoint::{
         CheckpointBlockerSource, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
         CheckpointOutcome, CheckpointPressure, CheckpointResult, CheckpointStatus, CheckpointWal,
-        RusqliteCheckpointDriver, WriterCheckpointController,
+        FENCE_READ_DEADLINE, RusqliteCheckpointDriver, WriterCheckpointController,
+        foreign_wal_holders,
     },
     connection::{self, OpenedDatabaseFile},
     exact_sql::{
@@ -66,7 +69,15 @@ use rejection::{
     reject_incremental_vacuum, reject_unauthorized,
 };
 
-const HARD_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// When the blocked writer retries its drain: the fence's short interval, or
+/// the backoff once the fence expired and the WAL passed its write ceiling.
+fn drain_retry_due(checkpoint: &WriterCheckpointController) -> Option<Instant> {
+    if checkpoint.hard_drain_required() {
+        checkpoint.retry_due(Instant::now())
+    } else {
+        None
+    }
+}
 
 /// Admission-anchored window for waiting on additional ingress. Once the
 /// worker dispatches, every compatible request already queued may share the
@@ -213,7 +224,7 @@ impl PendingBatchDwell {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn dwell_for_batch(
+async fn dwell_for_batch(
     cx: &Cx,
     mut pending: PendingBatchDwell,
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
@@ -252,7 +263,8 @@ fn dwell_for_batch(
             *incremental_vacuum_closed,
             *checkpoint_closed,
             Some(pending.window.deadline),
-        );
+        )
+        .await;
         if matches!(wake, WorkerWake::CheckpointRetry) {
             return;
         }
@@ -321,11 +333,39 @@ pub(super) struct Worker {
     pub(super) checkpoint_status: watch::Sender<CheckpointStatus>,
     pub(super) checkpoint_pressure: watch::Sender<CheckpointPressure>,
     pub(super) checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
+    pub(super) on_file_lost: Option<super::FileLossNotice>,
     pub(super) started: SyncSender<Result<Option<u64>, WriterStartError>>,
 }
 
+/// How often the writer checks that its pinned file is still the store's
+/// file, between batches and while idle.
+pub const FILE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
+struct FileProbe {
+    file: Arc<OpenedDatabaseFile>,
+    path: PathBuf,
+    due: Instant,
+}
+
+impl FileProbe {
+    fn lost(&mut self, now: Instant) -> bool {
+        if now < self.due {
+            return false;
+        }
+        self.due = now + FILE_PROBE_INTERVAL;
+        self.file.is_lost(&self.path)
+    }
+}
+
+fn earliest(deadline: Option<Instant>, probe: Option<&FileProbe>) -> Option<Instant> {
+    match (deadline, probe.map(|probe| probe.due)) {
+        (Some(deadline), Some(due)) => Some(deadline.min(due)),
+        (deadline, due) => deadline.or(due),
+    }
+}
+
 impl Worker {
-    pub(super) fn run(self) {
+    pub(super) async fn run(self) {
         #[cfg(any(unix, windows))]
         if let Some(opened_database) = self._opened_database.as_deref() {
             #[cfg(unix)]
@@ -440,8 +480,9 @@ impl Worker {
         }
         let state = Arc::clone(&self.state);
         let telemetry = self.telemetry.clone();
-        if let Err(payload) =
-            catch_unwind(AssertUnwindSafe(|| self.run_loop(checkpoint, page_cache)))
+        if let Err(payload) = AssertUnwindSafe(self.run_loop(checkpoint, page_cache))
+            .catch_unwind()
+            .await
         {
             // The fault is otherwise invisible: every later request only sees
             // "writer unavailable". Name the panic so a faulted writer can be
@@ -465,7 +506,7 @@ impl Worker {
         let _ = self.started.send(Err(error));
     }
 
-    fn run_loop(
+    async fn run_loop(
         mut self,
         mut checkpoint: WriterCheckpointController,
         mut page_cache: connection::WriterPageCache,
@@ -482,7 +523,24 @@ impl Worker {
         let mut prefer_auxiliary = true;
         let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
         let mut hard_checkpoint_retry_due = None;
+        #[cfg(unix)]
+        let probe_path = self.canonical_path.clone();
+        #[cfg(not(unix))]
+        let probe_path = self.path.clone();
+        let mut probe = self._opened_database.clone().map(|file| FileProbe {
+            file,
+            path: probe_path,
+            due: Instant::now() + FILE_PROBE_INTERVAL,
+        });
         loop {
+            // The state flips before ingress drains, so work sent before
+            // admission saw the flip is still collected and failed below.
+            let lost = probe
+                .as_mut()
+                .is_some_and(|probe| probe.lost(Instant::now()));
+            if lost {
+                self.state.store(WriterState::Lost as u8, Ordering::Release);
+            }
             {
                 let _span = tracing::trace_span!("rusqlite.writer.drain_ingress").entered();
                 {
@@ -510,6 +568,22 @@ impl Worker {
                     );
                 }
             };
+            if lost {
+                reject_all(&mut queue, &self.telemetry, UnavailableReasonV1::FileLost);
+                reject_all_exact_sql(&mut exact_sql_queue);
+                reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
+                checkpoint_queue.clear();
+                if let Some(probe) = &probe {
+                    tracing::warn!(
+                        path = %probe.path.display(),
+                        "store file was unlinked or replaced; its writer stopped"
+                    );
+                }
+                if let Some(notice) = self.on_file_lost.take() {
+                    notice();
+                }
+                return;
+            }
             if self.shutdown_requested.load(Ordering::Acquire)
                 && queue.is_empty()
                 && exact_sql_queue.is_empty()
@@ -519,7 +593,7 @@ impl Worker {
                 break;
             }
             if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
-                reject_all(&mut queue, &self.telemetry);
+                reject_all(&mut queue, &self.telemetry, UnavailableReasonV1::Faulted);
                 reject_all_exact_sql(&mut exact_sql_queue);
                 reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
                 checkpoint_queue.clear();
@@ -541,8 +615,9 @@ impl Worker {
                     exact_sql_closed,
                     incremental_vacuum_closed,
                     checkpoint_closed,
-                    None,
-                );
+                    earliest(None, probe.as_ref()),
+                )
+                .await;
                 apply_wake(
                     wake,
                     &mut queue,
@@ -559,10 +634,9 @@ impl Worker {
                 continue;
             }
             if let Some(command) = checkpoint_queue.pop_front() {
-                self.run_requested_checkpoint(&mut checkpoint, command);
-                hard_checkpoint_retry_due = checkpoint
-                    .hard_drain_required()
-                    .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                self.run_requested_checkpoint(&mut checkpoint, command)
+                    .await;
+                hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                 continue;
             }
             if checkpoint.hard_drain_required() {
@@ -573,9 +647,7 @@ impl Worker {
                 if now >= *retry_due {
                     self.telemetry.checkpoint_hard_retry();
                     self.run_scheduled_checkpoint(&mut checkpoint);
-                    hard_checkpoint_retry_due = checkpoint
-                        .hard_drain_required()
-                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                     continue;
                 }
                 let wake = wait_for_work(
@@ -589,15 +661,10 @@ impl Worker {
                     exact_sql_closed,
                     incremental_vacuum_closed,
                     checkpoint_closed,
-                    Some(*retry_due),
-                );
-                if matches!(wake, WorkerWake::CheckpointRetry) {
-                    self.telemetry.checkpoint_hard_retry();
-                    self.run_scheduled_checkpoint(&mut checkpoint);
-                    hard_checkpoint_retry_due = checkpoint
-                        .hard_drain_required()
-                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
-                } else {
+                    earliest(Some(*retry_due), probe.as_ref()),
+                )
+                .await;
+                if !matches!(wake, WorkerWake::CheckpointRetry) {
                     apply_wake(
                         wake,
                         &mut queue,
@@ -632,17 +699,10 @@ impl Worker {
                             let connection = checkpoint.connection_mut();
                             let rows_before = connection.total_changes();
                             let lock_work = LockWorkScope::enter();
-                            let reply = {
-                                let _span =
-                                    tracing::trace_span!("rusqlite.writer.exact_sql").entered();
-                                {
-                                    run_writer_command(
-                                        connection,
-                                        command,
-                                        &self.shutdown_requested,
-                                    )
-                                }
-                            };
+                            let reply =
+                                run_writer_command(connection, command, &self.shutdown_requested)
+                                    .instrument(tracing::trace_span!("rusqlite.writer.exact_sql"))
+                                    .await;
                             self.telemetry.exact_sql_command(
                                 1,
                                 connection.total_changes().saturating_sub(rows_before),
@@ -655,9 +715,7 @@ impl Worker {
                             reply.send();
                             self.fit_page_cache(&mut page_cache, &mut checkpoint);
                             self.run_scheduled_checkpoint(&mut checkpoint);
-                            hard_checkpoint_retry_due = checkpoint
-                                .hard_drain_required()
-                                .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                            hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                         } else {
                             reject_writer_command(command);
                         }
@@ -685,6 +743,7 @@ impl Worker {
                 if !queue.is_empty() {
                     prefer_auxiliary = false;
                 }
+                crate::storage_pool::yield_now().await;
                 continue;
             }
             if queue.is_empty() {
@@ -695,6 +754,9 @@ impl Worker {
                 {
                     break;
                 }
+                // An expired fence keeps retrying with backoff even while no
+                // write arrives to run the checkpoint after its batch.
+                let checkpoint_retry = checkpoint.retry_due(Instant::now());
                 let wake = wait_for_work(
                     &self.cx,
                     &mut self.receiver,
@@ -706,8 +768,15 @@ impl Worker {
                     exact_sql_closed,
                     incremental_vacuum_closed,
                     checkpoint_closed,
-                    None,
-                );
+                    earliest(checkpoint_retry, probe.as_ref()),
+                )
+                .await;
+                if matches!(wake, WorkerWake::CheckpointRetry) {
+                    if checkpoint_retry.is_some_and(|due| Instant::now() >= due) {
+                        self.run_scheduled_checkpoint(&mut checkpoint);
+                    }
+                    continue;
+                }
                 apply_wake(
                     wake,
                     &mut queue,
@@ -738,30 +807,27 @@ impl Worker {
                 for item in selected {
                     let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
                 }
-                {
-                    let _span = tracing::trace_span!("rusqlite.writer.batch_dwell").entered();
-                    {
-                        dwell_for_batch(
-                            &self.cx,
-                            pending,
-                            &mut self.receiver,
-                            &mut self.exact_sql_receiver,
-                            &mut self.incremental_vacuum_receiver,
-                            &mut self.checkpoint_receiver,
-                            &mut self.shutdown_receiver,
-                            &mut queue,
-                            &mut inflight,
-                            &mut exact_sql_queue,
-                            &mut incremental_vacuum_queue,
-                            &mut checkpoint_queue,
-                            &self.telemetry,
-                            &mut input_closed,
-                            &mut exact_sql_closed,
-                            &mut incremental_vacuum_closed,
-                            &mut checkpoint_closed,
-                        );
-                    }
-                };
+                dwell_for_batch(
+                    &self.cx,
+                    pending,
+                    &mut self.receiver,
+                    &mut self.exact_sql_receiver,
+                    &mut self.incremental_vacuum_receiver,
+                    &mut self.checkpoint_receiver,
+                    &mut self.shutdown_receiver,
+                    &mut queue,
+                    &mut inflight,
+                    &mut exact_sql_queue,
+                    &mut incremental_vacuum_queue,
+                    &mut checkpoint_queue,
+                    &self.telemetry,
+                    &mut input_closed,
+                    &mut exact_sql_closed,
+                    &mut incremental_vacuum_closed,
+                    &mut checkpoint_closed,
+                )
+                .instrument(tracing::trace_span!("rusqlite.writer.batch_dwell"))
+                .await;
                 // A probe cannot notify this actor directly, so every dwell
                 // wake and the hard deadline re-poll interruption and
                 // authority before auxiliary scheduling can add more delay.
@@ -809,8 +875,7 @@ impl Worker {
                             let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
                         }
                     }
-                    hard_checkpoint_retry_due =
-                        Some(Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                     break;
                 }
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
@@ -830,6 +895,7 @@ impl Worker {
                 inflight.remove(&operation_id);
             }
             prefer_auxiliary = true;
+            crate::storage_pool::yield_now().await;
         }
         if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
             return;
@@ -858,7 +924,22 @@ impl Worker {
     }
 
     fn run_scheduled_checkpoint(&self, checkpoint: &mut WriterCheckpointController) {
-        let snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
+        let now = Instant::now();
+        if checkpoint.defers_scheduled(now) {
+            return;
+        }
+        if checkpoint.revocation_due(now) {
+            self.checkpoint_blockers
+                .revoke_snapshots_older_than(FENCE_READ_DEADLINE);
+        }
+        let mut snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
+        if checkpoint.names_holders(now) && snapshot_blockers.is_clear() {
+            #[cfg(unix)]
+            let database = &self.canonical_path;
+            #[cfg(not(unix))]
+            let database = &self.path;
+            snapshot_blockers = foreign_wal_holders(database);
+        }
         let match_result = {
             let _span = tracing::trace_span!("rusqlite.writer.checkpoint").entered();
             checkpoint.evaluate_scheduled(snapshot_blockers)
@@ -878,8 +959,8 @@ impl Worker {
         }
     }
 
-    fn run_requested_checkpoint(
-        &self,
+    async fn run_requested_checkpoint(
+        &mut self,
         checkpoint: &mut WriterCheckpointController,
         command: CheckpointCommand,
     ) {
@@ -887,7 +968,7 @@ impl Worker {
             command.settle(Err(error));
             return;
         }
-        self.checkpoint_blockers.await_released_snapshots();
+        self.checkpoint_blockers.await_released_snapshots().await;
         let (snapshot_blockers, probe, authority, reply) = command.into_parts();
         let result = checkpoint.evaluate_interruptible(snapshot_blockers, move || {
             match probe.interruption() {
@@ -959,6 +1040,18 @@ pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<Ch
         } => Some(CheckpointPressure::BlockGeneral {
             wal: CheckpointWal::from_sample(*sample),
             blockers: snapshot_blockers.clone(),
+        }),
+        CheckpointResult::Decision {
+            sample,
+            decision:
+                CheckpointDecision::Pending {
+                    snapshot_blockers,
+                    fence_expired: true,
+                    ..
+                },
+        } => Some(CheckpointPressure::FenceExpired {
+            wal: CheckpointWal::from_sample(*sample),
+            holders: snapshot_blockers.clone(),
         }),
         CheckpointResult::Decision { .. } => Some(CheckpointPressure::Open),
         CheckpointResult::Interrupted { .. } => None,
@@ -1516,7 +1609,7 @@ mod auxiliary_scheduling_tests {
         let mut exact_sql_closed = false;
         let mut vacuum_closed = false;
         let mut checkpoint_closed = false;
-        dwell_for_batch(
+        runtime.block_on(dwell_for_batch(
             &cx,
             pending,
             &mut write_rx,
@@ -1534,7 +1627,7 @@ mod auxiliary_scheduling_tests {
             &mut exact_sql_closed,
             &mut vacuum_closed,
             &mut checkpoint_closed,
-        );
+        ));
 
         let batches = build_batches(queue.drain_fair(), &config);
         assert_eq!(batches.len(), 1);

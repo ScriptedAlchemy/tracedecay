@@ -15,9 +15,9 @@ use tracedecay_contracts::{
     WorkflowArtifactPersistOutcome, WorkflowArtifactStoreError, WorkflowArtifactStorePort,
     WorkflowExecutionFence, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutRequest,
     WorkflowProviderAdmission, WorkflowRunAppendOutcome, WorkflowRunAppendRequest,
-    WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
-    durable_workflow_fan_out_plan, prepare_workflow_fan_out, work_executable_catalog_digest,
-    workflow_artifact_payload_digest,
+    WorkflowRunReadPort, WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError,
+    WorkflowRunStoragePort, durable_workflow_fan_out_plan, prepare_workflow_fan_out,
+    work_executable_catalog_digest, workflow_artifact_payload_digest,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, InitiativeId,
@@ -33,11 +33,10 @@ use tracedecay_domain::{
     WorkflowOperationRef, WorkflowOutputName, WorkflowRunCommand, WorkflowRunEvent,
     WorkflowRunEventContext, WorkflowRunStatus, WorkflowStep, WorkflowStepId, WorktreeId,
 };
-use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
 
 use crate::registered_workflow_store;
 
-use registered_workflow_store::RegisteredWorkflowStore;
+use registered_workflow_store::{RegisteredWorkflowStore, WorkflowJobStorage};
 
 use tracedecay_domain::test_fixtures::id;
 
@@ -209,7 +208,7 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
 }
 
 fn admit_fan_out_run(
-    service: &WorkflowRunService<WorkflowSqliteAuthority>,
+    service: &WorkflowRunService<WorkflowJobStorage>,
     run_id: RunId,
     authority: WorkAuthority,
     command: &str,
@@ -268,9 +267,8 @@ fn admission() -> WorkflowAdmissionSnapshot {
     }
 }
 
-fn attach(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
-    WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql())
-        .expect("attach workflow authority")
+fn attach(store: &RegisteredWorkflowStore) -> WorkflowJobStorage {
+    WorkflowJobStorage::attach(store)
 }
 
 fn content_artifact(name: &str, content: &[u8]) -> WorkflowArtifactPayload {
@@ -312,7 +310,7 @@ fn paused_run_survives_restart_and_resumes_from_durable_state() {
     // store restart rebinds the channel and the run is still exactly paused.
     let store = store.restart("run-journal-pause-crash-resume-restarted");
     let reopened = attach(&store);
-    let recovered = WorkflowRunStoragePort::projection(&reopened, &run_id).unwrap();
+    let recovered = WorkflowRunReadPort::projection(&reopened, &run_id).unwrap();
     assert_eq!(recovered.status(), WorkflowRunStatus::Paused);
     assert_eq!(recovered.sequence(), paused.sequence());
 
@@ -378,7 +376,7 @@ fn cancellation_settles_terminal_and_premature_reconcile_is_refused() {
     // The terminal state is durable across a full restart and refuses resume.
     let store = store.restart("run-journal-cancellation-restarted");
     let reopened = attach(&store);
-    let recovered = WorkflowRunStoragePort::projection(&reopened, &run_id).unwrap();
+    let recovered = WorkflowRunReadPort::projection(&reopened, &run_id).unwrap();
     assert_eq!(recovered.status(), WorkflowRunStatus::Cancelled);
     assert!(matches!(
         WorkflowRunService::new(reopened)
@@ -445,7 +443,7 @@ fn command_replay_is_idempotent_and_divergent_reuse_is_a_typed_conflict() {
     );
 
     // A stale expected sequence is a version conflict before any write.
-    let projection = WorkflowRunStoragePort::projection(&authority, &run_id).unwrap();
+    let projection = WorkflowRunReadPort::projection(&authority, &run_id).unwrap();
     let stale = projection.next_event(
         WorkflowRunCommand::Pause,
         context("command.journal.pause", '2', 2),
@@ -463,7 +461,7 @@ fn command_replay_is_idempotent_and_divergent_reuse_is_a_typed_conflict() {
     assert_eq!(store.count("workflow_run_journal"), 1);
 
     assert_eq!(
-        WorkflowRunStoragePort::projection(&authority, &id::<RunId>("run.workflow.journal.absent"))
+        WorkflowRunReadPort::projection(&authority, &id::<RunId>("run.workflow.journal.absent"))
             .unwrap_err(),
         WorkflowRunStorageError::NotFound
     );

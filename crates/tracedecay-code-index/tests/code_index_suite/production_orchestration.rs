@@ -30,22 +30,17 @@ use tracedecay_code_index::{
         VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
         advance_import_dictionary_digest, initial_import_dictionary_digest,
     },
-    projection::{
-        ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-        ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-    },
     provider::GenerationTestAttributionJoinReadPort,
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeSearchChunkGrainV1, CommitId,
     EdgeAuthorityV1, ExtractorRevision, FileOccurrenceId, LanguageId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId,
-    RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1,
-    SnapshotFileDispositionV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId,
-    UtcMicros, WorktreeId, sha256_hex_suffix,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
+    ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId, sha256_hex_suffix,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -143,71 +138,6 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
     }
 }
 
-#[derive(Default)]
-pub(super) struct ApplyingProjectionSink;
-
-impl CodeChunkProjectionSink for ApplyingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions: Vec<ChunkProjectionDecisionV1> = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: Some(
-                    change
-                        .current_digest
-                        .clone()
-                        .expect("added or changed chunks have a current digest"),
-                ),
-            })
-            .collect();
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
-}
-
-struct RejectingProjectionSink;
-
-impl CodeChunkProjectionSink for RejectingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        _request: &ProjectionBatchRequestV1,
-        _receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        Err(ProjectionSinkErrorV1::Rejected(
-            "projection is intentionally unavailable".to_owned(),
-        ))
-    }
-}
-
 pub(super) struct ActiveControl;
 
 impl CodeIndexExecutionControlV1 for ActiveControl {
@@ -284,14 +214,9 @@ pub(super) fn config() -> CodeIndexProductionConfigV1 {
 
 /// A production owner over a fresh in-memory publication store that applies
 /// every projection batch.
-pub(super) fn applying_owner()
--> CodeIndexProductionOwnerV1<SharedPublicationStore, ApplyingProjectionSink> {
-    CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner")
+pub(super) fn applying_owner() -> CodeIndexProductionOwnerV1<SharedPublicationStore> {
+    CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+        .expect("production owner")
 }
 
 fn projection_key() -> ProjectionKeyV1 {
@@ -610,29 +535,26 @@ fn cross_file_edges_require_path_binding_evidence() {
 fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
-    let build =
-        |owner: &mut CodeIndexProductionOwnerV1<SharedPublicationStore, ApplyingProjectionSink>,
-         ordinal: i64,
-         edited: u32| {
-            let occurrence = format!("file.retained.{ordinal}");
-            let source =
-                format!("fn unchanged() -> u32 {{ 1 }}\nfn edited() -> u32 {{ {edited} }}\n");
-            let mut sources = SPARSE_FILLERS.to_vec();
-            sources.push((&occurrence, "src/lib.rs", &source));
-            sources.sort_by_key(|&(_, path, _)| path);
-            owner
-                .build_and_publish(
-                    partitioned_request(
-                        &sources,
-                        BTreeSet::from(["src/lib.rs".to_owned()]),
-                        1_000_000 + ordinal * 100_000,
-                    ),
-                    &ActiveControl,
-                )
-                .expect("generation");
-        };
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let build = |owner: &mut CodeIndexProductionOwnerV1<SharedPublicationStore>,
+                 ordinal: i64,
+                 edited: u32| {
+        let occurrence = format!("file.retained.{ordinal}");
+        let source = format!("fn unchanged() -> u32 {{ 1 }}\nfn edited() -> u32 {{ {edited} }}\n");
+        let mut sources = SPARSE_FILLERS.to_vec();
+        sources.push((&occurrence, "src/lib.rs", &source));
+        sources.sort_by_key(|&(_, path, _)| path);
+        owner
+            .build_and_publish(
+                partitioned_request(
+                    &sources,
+                    BTreeSet::from(["src/lib.rs".to_owned()]),
+                    1_000_000 + ordinal * 100_000,
+                ),
+                &ActiveControl,
+            )
+            .expect("generation");
+    };
     let fillers = SPARSE_FILLERS.len() as u64;
     build(&mut owner, 1, 2);
     let cold = owner.retained_parse_stats();
@@ -673,8 +595,7 @@ fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
 fn unchanged_increment_does_not_reextract_carried_files() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
 
     owner
         .build_and_publish(request("file.carry.1", 1_100_000), &ActiveControl)
@@ -717,8 +638,7 @@ fn unchanged_increment_does_not_reextract_carried_files() {
     );
 
     let mut restarted =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("restart owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("restart owner");
     let after_restart = restarted.retained_parse_stats();
     assert_eq!(after_restart.full_extractions, 0);
     assert_eq!(after_restart.initial_parses, 0);
@@ -749,10 +669,9 @@ fn physical_artifact_pool_does_not_retain_a_dropped_generation() {
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
     {
         let store = SharedPublicationStore::default();
-        let mut owner =
-            CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-                .expect("production owner")
-                .with_physical_artifact_pool(pool.clone());
+        let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+            .expect("production owner")
+            .with_physical_artifact_pool(pool.clone());
         let generation = owner
             .build_and_publish(request("file.physical.1", 1_100_000), &ActiveControl)
             .expect("generation publishes");
@@ -777,13 +696,10 @@ fn physical_artifact_pool_does_not_retain_a_dropped_generation() {
 #[test]
 fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
-    let mut source_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("source owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut source_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("source owner")
+            .with_physical_artifact_pool(pool.clone());
     let source = source_owner
         .build_and_publish(request("file.physical.target", 1_100_000), &ActiveControl)
         .expect("source generation publishes");
@@ -791,13 +707,10 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     assert_eq!(pool.stats().reused, 0);
     assert_eq!(pool.stats().inserted, 1);
 
-    let mut reused_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("reuse owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut reused_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("reuse owner")
+            .with_physical_artifact_pool(pool.clone());
     let reused = reused_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
         .expect("physically reused generation publishes");
@@ -808,25 +721,19 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
         "identical path and content must reuse the source physical artifact"
     );
 
-    let mut cold_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("cold owner");
+    let mut cold_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("cold owner");
     let cold = cold_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
         .expect("cold comparison generation publishes");
     let cold = cold_generation(&cold);
 
     let foreign_occurrence = id::<FileOccurrenceId>("file.physical.foreign");
-    let mut foreign_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("foreign occurrence owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut foreign_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("foreign occurrence owner")
+            .with_physical_artifact_pool(pool.clone());
     let foreign = foreign_owner
         .build_and_publish(request("file.physical.foreign", 1_200_000), &ActiveControl)
         .expect("foreign occurrence rematerializes from the shared artifact");
@@ -864,13 +771,10 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     changed.snapshot.files[0].content_digest = content_digest(changed_source);
     changed.snapshot.content_identity = content_digest(changed_source);
     changed.captured_files[0].sanitized_bytes = Arc::from(changed_source.as_slice());
-    let mut changed_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("changed-content owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut changed_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("changed-content owner")
+            .with_physical_artifact_pool(pool.clone());
     changed_owner
         .build_and_publish(changed, &ActiveControl)
         .expect("different content publishes without borrowing the prior artifact");
@@ -930,10 +834,9 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
     })
     .expect("retained parse pool");
     let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner")
-            .with_retained_parse_pool(pool);
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+        .expect("production owner")
+        .with_retained_parse_pool(pool);
 
     let fast_source = "fn fast() -> u32 { 1 }\n";
     let slow_source = (0..2_000)
@@ -1002,12 +905,9 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
             .iter()
             .any(|chunk| chunk.chunk().anchor.file_occurrence_id.as_str() == "file.slow")
     );
-    let mut cold_owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("cold production owner");
+    let mut cold_owner =
+        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
+            .expect("cold production owner");
     let cold = cold_owner
         .build_and_publish(cold_request, &ActiveControl)
         .expect("cold generation");
@@ -1045,10 +945,9 @@ fn resumed_parse_aborts_without_publication_when_operation_control_expires() {
         })
         .expect("parse pool");
         let store = SharedPublicationStore::default();
-        let mut owner =
-            CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-                .expect("owner")
-                .with_retained_parse_pool(pool.clone());
+        let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+            .expect("owner")
+            .with_retained_parse_pool(pool.clone());
         let request = request_with_source(
             "file.interrupted-parse",
             1_100_000,
@@ -1103,8 +1002,7 @@ fn resumed_parse_aborts_without_publication_when_operation_control_expires() {
 fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1126,8 +1024,7 @@ fn retained_parse_syntax_errors_publish_partial_generation_coverage() {
 fn published_generation_serves_current_conservative_test_attribution() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_at_path("file.production.test", "tests/production.rs", 1_100_000),
@@ -1191,8 +1088,7 @@ fn published_generation_serves_current_conservative_test_attribution() {
 fn published_generation_attributes_inline_rust_tests_to_called_symbols() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1293,8 +1189,7 @@ fn root_feedback_entry_test() {
 fn production_owner_publishes_complete_generation_and_restores_it_after_restart() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
 
     let first = owner
         .build_and_publish(request("file.production.1", 1_100_000), &ActiveControl)
@@ -1328,8 +1223,7 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
     );
 
     let mut restarted =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("restart owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("restart owner");
     let restored = restarted
         .active_generation(&CodeIndexGenerationScopeV1::for_snapshot(
             &request("file.production.scope", 1_100_000).snapshot,
@@ -1440,8 +1334,7 @@ fn sealed_store_drops_whitespace_only_window_chunks() {
 fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_identically() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.graph-projection", 1_250_000), &ActiveControl)
         .expect("generation publishes");
@@ -1514,8 +1407,7 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
 fn an_interrupted_graph_build_fails_typed_and_the_next_build_completes() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.graph-interrupt", 1_260_000), &ActiveControl)
         .expect("generation publishes");
@@ -1578,8 +1470,7 @@ fn an_interrupted_graph_build_fails_typed_and_the_next_build_completes() {
 fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.project-binding", 1_200_000), &ActiveControl)
         .expect("valid generation publishes");
@@ -1609,8 +1500,7 @@ fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
 fn verified_sealed_lexical_pages_are_bounded_exact_and_resumable_after_cancellation() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1741,8 +1631,7 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
 
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
@@ -1852,8 +1741,7 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
     }
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -1958,8 +1846,7 @@ fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
 fn verified_sealed_lexical_imports_are_exact_once_and_fold_their_pages() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let mut request = request_with_source(
         "file.lexical-imports",
         1_265_000,
@@ -2073,8 +1960,7 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
 
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("generation publishes");
@@ -2140,8 +2026,7 @@ fn verified_sealed_lexical_page_transition_is_canonical_across_importing_files()
 fn rejected_sealed_lexical_page_admission_does_not_advance_the_source() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.lexical-admission", 1_266_500), &ActiveControl)
         .expect("generation publishes");
@@ -2226,8 +2111,7 @@ fn sealed_lexical_page_bytes(page: &VerifiedSealedLexicalPageV1) -> Vec<u8> {
 fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let mut request = request_with_source(
         "file.lexical-import-capacity",
         1_267_000,
@@ -2295,8 +2179,7 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
 fn published_generation_validation_is_amortized_per_loaded_generation() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(request("file.validation.memo", 1_300_000), &ActiveControl)
         .expect("valid generation publishes");
@@ -2351,8 +2234,7 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
 fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request("file.source-commitments", 1_350_000),
@@ -2393,8 +2275,7 @@ fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history(
 fn corrupted_chunk_evidence_fails_the_first_validation_of_a_restored_generation() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(
             request("file.validation.corrupt", 1_400_000),
@@ -2432,8 +2313,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
     assert!(primary_store.shares_repository_store(&linked_store));
 
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let primary_request = request_in_scope(
         "file.primary.1",
         1_100_000,
@@ -2493,8 +2373,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
 fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let first = owner
         .build_and_publish(
             request_in_scope(
@@ -2549,8 +2428,7 @@ fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
 fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retrying() {
     let store = PartialKeyPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let hawk_request = request_in_scope(
         "file.identity.hawk",
         1_100_000,
@@ -2612,8 +2490,7 @@ fn misclassified_non_git_scope_reaches_a_terminal_reset_state_instead_of_retryin
 fn non_git_scope_stays_independently_active_beside_git_identified_generations() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let hawk_request = request_in_scope(
         "file.terminal.hawk",
         1_100_000,
@@ -2668,8 +2545,7 @@ fn non_git_scope_stays_independently_active_beside_git_identified_generations() 
 fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
     let store = PartialKeyPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let hawk_request = request_in_scope(
         "file.dispatch.hawk",
         1_100_000,
@@ -2755,8 +2631,7 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
 fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let first = owner
         .build_and_publish(
             request_in_scope(
@@ -2835,8 +2710,7 @@ fn code_shard_slot_key_is_the_sealed_branch_label_not_a_generation_id() {
 fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
 
     let cancelled = owner
         .build_and_publish(
@@ -2871,30 +2745,6 @@ fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
         store
             .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
                 &request("file.production.expired.scope", 1_100_000).snapshot,
-            ))
-            .expect("read publication state")
-            .is_none()
-    );
-}
-
-#[test]
-fn production_owner_never_activates_a_generation_after_projection_failure() {
-    let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), RejectingProjectionSink)
-            .expect("production owner");
-
-    let error = owner
-        .build_and_publish(
-            request("file.production.rejected", 1_100_000),
-            &ActiveControl,
-        )
-        .expect_err("rejected projection must not publish");
-    assert!(matches!(error, CodeIndexProductionErrorV1::Projection(_)));
-    assert!(
-        store
-            .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
-                &request("file.production.rejected.scope", 1_100_000).snapshot,
             ))
             .expect("read publication state")
             .is_none()
@@ -3104,9 +2954,8 @@ fn partitioned_codec_fixture() -> (
     BTreeMap<String, Vec<u8>>,
 ) {
     let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("partitioned fixture owner");
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+        .expect("partitioned fixture owner");
     let first = owner
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("partitioned parent generation");
@@ -3836,9 +3685,8 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
 #[test]
 fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
     let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("retired-parent fixture owner");
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+        .expect("retired-parent fixture owner");
     let parent = owner
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("parent generation");
@@ -4168,8 +4016,7 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
 fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("revision fixture owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("revision fixture owner");
     let parent = owner
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("revision parent generation");
@@ -4272,8 +4119,7 @@ fn file_segment_digests_by_path(manifest: &[u8]) -> BTreeMap<String, String> {
 fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("delta fixture owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("delta fixture owner");
     let parent = owner
         .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
         .expect("delta parent generation");
@@ -4445,8 +4291,7 @@ fn sealed_clone_bindings(
 fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("increment owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("increment owner");
     let parent = owner
         .build_and_publish(increment_wedge_request(1, 1_100_000), &ActiveControl)
         .expect("parent generation");

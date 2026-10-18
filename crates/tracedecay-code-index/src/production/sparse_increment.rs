@@ -290,9 +290,8 @@ pub(super) fn count(value: usize) -> Result<u64, CodeIndexProductionErrorV1> {
 impl SparseBuildV1<'_> {
     /// The successor of `parent` for `snapshot`, or why it must build cold.
     #[tracing::instrument(name = "code_index.build.sparse", level = "trace", skip_all)]
-    pub(super) fn build<S: CodeChunkProjectionSink>(
+    pub(super) fn build(
         &self,
-        projection_sink: &mut S,
         parent: &SealedParentGenerationV1,
         plan: &GenerationIncrementPlanV1,
         mut manifest: CodeGenerationManifestV1,
@@ -389,14 +388,11 @@ impl SparseBuildV1<'_> {
         )
         .emit(&manifest)
         .map_err(CodeIndexProductionErrorV1::Capability)?;
-        let projection = project_for_publication(
-            projection_sink,
-            projection_request(
-                Some(self.target_projection_key.clone()),
-                self.target_projection_key.clone(),
-                changes.set,
-            )?,
-        )
+        let projection = project_for_publication(projection_request(
+            Some(self.target_projection_key.clone()),
+            self.target_projection_key.clone(),
+            changes.set,
+        )?)
         .map_err(CodeIndexProductionErrorV1::Projection)?;
         lexical_page_source::checkpoint(control)?;
 

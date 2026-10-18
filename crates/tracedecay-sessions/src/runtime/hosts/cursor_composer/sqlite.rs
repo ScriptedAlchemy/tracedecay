@@ -90,9 +90,9 @@ const COMPOSER_KEY_SCAN_FROM_START_SQL: &str = "SELECT key, octet_length(value) 
      ORDER BY key
      LIMIT ?3";
 
-/// Shared foreign-store read handle (see [`crate::runtime::shared`]),
+/// Shared foreign-store read handle,
 /// aliased locally for the Cursor composer reader signatures.
-pub(super) use crate::runtime::shared::SqliteReadConn as CursorConn;
+pub(super) use crate::runtime::host_sqlite::SqliteReadConn as CursorConn;
 
 /// A read-only connection bound to the path and physical identity verified
 /// across its immutable open.

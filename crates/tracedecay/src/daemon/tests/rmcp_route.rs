@@ -1171,7 +1171,7 @@ fn production_rmcp_cancels_concurrent_requests_before_or_after_registration() {
 #[cfg(unix)]
 async fn production_rmcp_cancels_concurrent_requests_before_or_after_registration_inner() {
     let fixture = rmcp_route_fixture("rmcp-live-cancellation").await;
-    let (executor, key, controlled_server) = mount_cancellation_executor(&fixture).await;
+    let (executor, controlled_server) = mount_cancellation_executor(&fixture).await;
 
     let (reader, mut writer, server_task) =
         super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
@@ -1239,21 +1239,12 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     assert_eq!(cancellation_observed, started);
     assert_eq!(completed, started);
 
-    // The replacement route leaves the original fixture server and the
-    // controlled replacement both live. Shut those two servers down
-    // first so ownership is explicit, then drain the remaining engine
-    // owners (`shutdown_all` is the production-bounded canceller).
-    {
-        let mut owners = fixture
-            .engine
-            .store_administration
-            .project_servers()
-            .lock()
-            .await;
-        owners.remove(&key);
-    }
-    controlled_server.shutdown().await;
+    // The controlled replacement stays in the engine's owner map so
+    // `shutdown_all` (the production-bounded canceller) tears it down
+    // with its project. Only the displaced fixture server needs an
+    // explicit shutdown, and both test handles drop before the drain.
     fixture.server.shutdown().await;
+    drop((controlled_server, fixture.server));
     let shutdown = fixture.engine.shutdown_all().await;
     assert!(
         shutdown.project_servers.is_clean(),
@@ -1266,7 +1257,6 @@ async fn mount_cancellation_executor(
     fixture: &RmcpRouteFixture,
 ) -> (
     Arc<ControlledCancellationExecutor>,
-    ProjectServerKey,
     Arc<crate::mcp::McpServer>,
 ) {
     let executor = Arc::new(ControlledCancellationExecutor::new());
@@ -1301,14 +1291,14 @@ async fn mount_cancellation_executor(
         assert!(owners.mark_ready(&key));
     }
 
-    (executor, key, controlled_server)
+    (executor, controlled_server)
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect() {
     let fixture = rmcp_route_fixture("serve-proxy-cancellation").await;
-    let (executor, key, controlled_server) = mount_cancellation_executor(&fixture).await;
+    let (executor, controlled_server) = mount_cancellation_executor(&fixture).await;
     let socket = fixture._temp.path().join("daemon.sock");
     let authority = super::seed_socket_authority(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind proxy socket");
@@ -1397,15 +1387,8 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
         .expect("join proxy")
         .expect("proxy session");
     accepting.abort();
-    fixture
-        .engine
-        .store_administration
-        .project_servers()
-        .lock()
-        .await
-        .remove(&key);
-    controlled_server.shutdown().await;
     fixture.server.shutdown().await;
+    drop((controlled_server, fixture.server));
     let shutdown = fixture.engine.shutdown_all().await;
     assert!(
         shutdown.project_servers.is_clean(),
@@ -1417,7 +1400,7 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deadline_reply_does_not_wait_for_a_worker_that_ignores_cancellation() {
     let fixture = rmcp_route_fixture("rmcp-deadline-uncooperative").await;
-    let (executor, key, controlled_server) = mount_cancellation_executor(&fixture).await;
+    let (executor, controlled_server) = mount_cancellation_executor(&fixture).await;
     let (reader, mut writer, server_task) =
         super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
             .await;
@@ -1482,15 +1465,8 @@ async fn deadline_reply_does_not_wait_for_a_worker_that_ignores_cancellation() {
         .expect("deadline RMCP connection did not close")
         .expect("join deadline RMCP task")
         .expect("serve deadline RMCP task");
-    fixture
-        .engine
-        .store_administration
-        .project_servers()
-        .lock()
-        .await
-        .remove(&key);
-    controlled_server.shutdown().await;
     fixture.server.shutdown().await;
+    drop((controlled_server, fixture.server));
     let shutdown = fixture.engine.shutdown_all().await;
     assert!(
         shutdown.project_servers.is_clean(),

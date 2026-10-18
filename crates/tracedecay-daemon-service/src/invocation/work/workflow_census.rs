@@ -13,7 +13,7 @@ use super::workflow_run_control::workflow_runtime_unavailable;
 /// writes from previous processes and notification loss after restarts.
 const SAFETY_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
-pub(super) fn persist_workflow_fan_out_census(
+pub(super) async fn persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
     workflow: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
@@ -28,7 +28,9 @@ pub(super) fn persist_workflow_fan_out_census(
         projection,
         observed_at,
         producer,
-    ) {
+    )
+    .await
+    {
         tracing::warn!(
             ?error,
             run_id = %projection.run_id(),
@@ -38,7 +40,15 @@ pub(super) fn persist_workflow_fan_out_census(
     }
 }
 
-fn try_persist_workflow_fan_out_census(
+struct ObservedCensusV1 {
+    census: tracedecay_domain::WorkflowFanOutCensusV1,
+    unpersisted: bool,
+    attempts: Vec<tracedecay_domain::WorkAttemptV1>,
+    attempt_reads_complete: bool,
+    previous: Option<tracedecay_domain::WorkflowFanOutCensusV1>,
+}
+
+async fn try_persist_workflow_fan_out_census(
     registered: &RegisteredWorkRuntime,
     workflow: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
@@ -49,168 +59,29 @@ fn try_persist_workflow_fan_out_census(
     if projection.fan_out_plans().is_empty() {
         return Ok(());
     }
-    let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
-        &registered.database,
-    )
-    .map_err(|_| workflow_runtime_unavailable())?;
-    let workflow_use_case = tracedecay_tool_catalog::UseCaseId::new("use-case.work.mutate_graph")
-        .map_err(|_| workflow_runtime_unavailable())?;
-    // An unavailable projection is reported below as the typed
-    // `WorkProjectionUnavailable` census evidence, not swallowed.
-    let snapshot = super::preparation::current_work_product_snapshot(
-        registered,
-        context,
-        "capability.work.mutate_graph",
-        &workflow_use_case,
-        observed_at,
-    )
-    .ok();
-    let topology_generation = match super::preparation::current_work_product_attempt_topology(
-        registered,
-        context,
-        "capability.work.mutate_graph",
-        &workflow_use_case,
-        observed_at,
-    ) {
-        Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(binding)) => Some(
-            tracedecay_domain::WorkTopologyGenerationRefV1::new(binding.generation)
-                .map_err(|_| workflow_runtime_unavailable())?,
-        ),
-        Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Absent) | Err(_) => None,
+    let observed = {
+        let (registered, context, projection) =
+            (registered.clone(), context.clone(), projection.clone());
+        workflow
+            .read(move |workflow| {
+                observe_census(&registered, workflow, &context, &projection, observed_at)
+            })
+            .await?
     };
-    let mut attempts = Vec::new();
-    let mut attempt_reads_complete = true;
-    for child in projection
-        .fan_out_plans()
-        .values()
-        .flat_map(|plan| &plan.children)
-    {
-        let identity = projection.active_fan_out_attempt(&child.attempt_identity);
-        match work.attempts().status(
-            context,
-            &tracedecay_contracts::WorkAttemptStatusRequestV1 {
-                task_id: identity.task_id().clone(),
-                run_id: identity.run_id().clone(),
-                attempt_id: identity.attempt_id().clone(),
-            },
-        ) {
-            Ok(attempt) => attempts.push(attempt),
-            Err(ApplicationProblem::NotFoundOrNotAuthorized { .. }) => {}
-            Err(_) => attempt_reads_complete = false,
-        }
-    }
-    let readiness = census_readiness(
-        registered,
-        &work,
-        context,
-        projection,
-        snapshot.as_ref(),
-        &attempts,
+    let ObservedCensusV1 {
+        census,
+        unpersisted,
+        attempts,
         attempt_reads_complete,
-    );
-    let (runnable, blocked) = readiness
-        .as_ref()
-        .map_or((None, None), |(runnable, blocked)| {
-            (Some(runnable), Some(blocked))
-        });
-    let shared_authority_waits = projection
-        .fan_out_plans()
-        .values()
-        .all(|plan| plan.effect_state == tracedecay_domain::WorkEffectStateV1::Observational)
-        .then(std::collections::BTreeSet::new);
-    let latest = tracedecay_contracts::WorkflowFanOutCensusStoragePort::latest_census(
-        workflow.effects(),
-        projection.run_id(),
-    )
-    .map_err(|_| workflow_runtime_unavailable())?;
-    if latest
-        .as_ref()
-        .is_some_and(|census| census.workflow_sequence > projection.sequence())
-    {
-        return Err(workflow_runtime_unavailable());
+        previous,
+    } = observed;
+    if unpersisted {
+        workflow
+            .persist_census(census.clone())
+            .await
+            .map_err(|_| workflow_runtime_unavailable())?;
+        registered.durable_write_signal.bump();
     }
-    let previous = tracedecay_contracts::WorkflowFanOutCensusStoragePort::census_before(
-        workflow.effects(),
-        projection.run_id(),
-        projection.sequence(),
-    )
-    .map_err(|_| workflow_runtime_unavailable())?;
-    let non_duplicate_attempts = match (snapshot.as_ref(), topology_generation.as_ref()) {
-        (_, None) => tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
-            tracedecay_domain::WorkflowCensusEvidenceReasonV1::WorkTopologyUnavailable,
-        ),
-        (None, Some(_)) => {
-            tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
-                tracedecay_domain::WorkflowCensusEvidenceReasonV1::WorkProjectionUnavailable,
-            )
-        }
-        (Some(snapshot), Some(topology_generation)) => {
-            let work_generation =
-                tracedecay_contracts::work_product_projection_generation(snapshot)
-                    .map_err(|_| workflow_runtime_unavailable())?;
-            match work
-                .duplicate_adjudications()
-                .classify_attempts(
-                    context,
-                    tracedecay_contracts::WorkDuplicateAttemptClassificationRequestV1 {
-                        work_generation,
-                        topology_generation: topology_generation.clone(),
-                        attempts: attempts
-                            .iter()
-                            .map(|attempt| attempt.identity().clone())
-                            .collect(),
-                        observed_at,
-                    },
-                ) {
-                Ok(tracedecay_contracts::WorkDuplicateAttemptClassificationReadV1::Complete {
-                    classification,
-                }) => tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Complete(
-                    classification
-                        .non_duplicate_attempts
-                        .into_iter()
-                        .collect::<std::collections::BTreeSet<_>>(),
-                ),
-                Ok(tracedecay_contracts::WorkDuplicateAttemptClassificationReadV1::Unavailable {
-                    ..
-                })
-                | Err(_) => {
-                    tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
-                        tracedecay_domain::WorkflowCensusEvidenceReasonV1::DuplicateAdjudicationUnavailable,
-                    )
-                }
-            }
-        }
-    };
-    let census = match latest {
-        Some(census) if census.workflow_sequence == projection.sequence() => census,
-        Some(_) | None => {
-            let census = tracedecay_contracts::derive_workflow_fan_out_census(
-                projection,
-                &tracedecay_contracts::WorkflowFanOutCensusEvidenceV1 {
-                    work_snapshot: snapshot.as_ref(),
-                    attempts: &attempts,
-                    attempt_reads_complete,
-                    shared_authority_waits: shared_authority_waits.as_ref(),
-                    non_duplicate_attempts,
-                    runnable_children: runnable,
-                    blocked_children: blocked,
-                    previous: previous.as_ref(),
-                    observed_at,
-                },
-            )
-            .map_err(|_| workflow_runtime_unavailable())?;
-            tracedecay_contracts::WorkflowFanOutCensusStoragePort::persist_census(
-                workflow.effects(),
-                &census,
-            )
-            .map_err(|_| workflow_runtime_unavailable())?;
-            // `persist_census` is the canonical durable write; wake recovery
-            // before optional observability enqueue so a later enqueue error
-            // cannot hide the pending record.
-            registered.durable_write_signal.bump();
-            census
-        }
-    };
 
     if let Some(producer) = producer.as_deref() {
         match tracedecay_application::observability::record_workflow_settlement(
@@ -281,6 +152,175 @@ fn try_persist_workflow_fan_out_census(
             Err(workflow_runtime_unavailable())
         }
     }
+}
+
+fn observe_census(
+    registered: &RegisteredWorkRuntime,
+    workflow: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
+    context: &RequestContext,
+    projection: &tracedecay_domain::WorkflowRunProjection,
+    observed_at: UtcMicros,
+) -> Result<ObservedCensusV1, ApplicationProblem> {
+    let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
+        &registered.database,
+    )
+    .map_err(|_| workflow_runtime_unavailable())?;
+    let workflow_use_case = tracedecay_tool_catalog::UseCaseId::new("use-case.work.mutate_graph")
+        .map_err(|_| workflow_runtime_unavailable())?;
+    // An unavailable projection is reported below as the typed
+    // `WorkProjectionUnavailable` census evidence, not swallowed.
+    let snapshot = super::preparation::current_work_product_snapshot(
+        registered,
+        context,
+        "capability.work.mutate_graph",
+        &workflow_use_case,
+        observed_at,
+    )
+    .ok();
+    let topology_generation = match super::preparation::current_work_product_attempt_topology(
+        registered,
+        context,
+        "capability.work.mutate_graph",
+        &workflow_use_case,
+        observed_at,
+    ) {
+        Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(binding)) => Some(
+            tracedecay_domain::WorkTopologyGenerationRefV1::new(binding.generation)
+                .map_err(|_| workflow_runtime_unavailable())?,
+        ),
+        Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Absent) | Err(_) => None,
+    };
+    let mut attempts = Vec::new();
+    let mut attempt_reads_complete = true;
+    for child in projection
+        .fan_out_plans()
+        .values()
+        .flat_map(|plan| &plan.children)
+    {
+        let identity = projection.active_fan_out_attempt(&child.attempt_identity);
+        match work.attempts().status(
+            context,
+            &tracedecay_contracts::WorkAttemptStatusRequestV1 {
+                task_id: identity.task_id().clone(),
+                run_id: identity.run_id().clone(),
+                attempt_id: identity.attempt_id().clone(),
+            },
+        ) {
+            Ok(attempt) => attempts.push(attempt),
+            Err(ApplicationProblem::NotFoundOrNotAuthorized { .. }) => {}
+            Err(_) => attempt_reads_complete = false,
+        }
+    }
+    let readiness = census_readiness(
+        registered,
+        &work,
+        context,
+        projection,
+        snapshot.as_ref(),
+        &attempts,
+        attempt_reads_complete,
+    );
+    let (runnable, blocked) = readiness
+        .as_ref()
+        .map_or((None, None), |(runnable, blocked)| {
+            (Some(runnable), Some(blocked))
+        });
+    let shared_authority_waits = projection
+        .fan_out_plans()
+        .values()
+        .all(|plan| plan.effect_state == tracedecay_domain::WorkEffectStateV1::Observational)
+        .then(std::collections::BTreeSet::new);
+    let latest = tracedecay_contracts::WorkflowFanOutCensusReadPort::latest_census(
+        workflow.effects(),
+        projection.run_id(),
+    )
+    .map_err(|_| workflow_runtime_unavailable())?;
+    if latest
+        .as_ref()
+        .is_some_and(|census| census.workflow_sequence > projection.sequence())
+    {
+        return Err(workflow_runtime_unavailable());
+    }
+    let previous = tracedecay_contracts::WorkflowFanOutCensusReadPort::census_before(
+        workflow.effects(),
+        projection.run_id(),
+        projection.sequence(),
+    )
+    .map_err(|_| workflow_runtime_unavailable())?;
+    let non_duplicate_attempts = match (snapshot.as_ref(), topology_generation.as_ref()) {
+        (_, None) => tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
+            tracedecay_domain::WorkflowCensusEvidenceReasonV1::WorkTopologyUnavailable,
+        ),
+        (None, Some(_)) => {
+            tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
+                tracedecay_domain::WorkflowCensusEvidenceReasonV1::WorkProjectionUnavailable,
+            )
+        }
+        (Some(snapshot), Some(topology_generation)) => {
+            let work_generation =
+                tracedecay_contracts::work_product_projection_generation(snapshot)
+                    .map_err(|_| workflow_runtime_unavailable())?;
+            match work
+                .duplicate_adjudications()
+                .classify_attempts(
+                    context,
+                    tracedecay_contracts::WorkDuplicateAttemptClassificationRequestV1 {
+                        work_generation,
+                        topology_generation: topology_generation.clone(),
+                        attempts: attempts
+                            .iter()
+                            .map(|attempt| attempt.identity().clone())
+                            .collect(),
+                        observed_at,
+                    },
+                ) {
+                Ok(tracedecay_contracts::WorkDuplicateAttemptClassificationReadV1::Complete {
+                    classification,
+                }) => tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Complete(
+                    classification
+                        .non_duplicate_attempts
+                        .into_iter()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                ),
+                Ok(tracedecay_contracts::WorkDuplicateAttemptClassificationReadV1::Unavailable {
+                    ..
+                })
+                | Err(_) => {
+                    tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
+                        tracedecay_domain::WorkflowCensusEvidenceReasonV1::DuplicateAdjudicationUnavailable,
+                    )
+                }
+            }
+        }
+    };
+    let (census, unpersisted) = match latest {
+        Some(census) if census.workflow_sequence == projection.sequence() => (census, false),
+        Some(_) | None => (
+            tracedecay_contracts::derive_workflow_fan_out_census(
+                projection,
+                &tracedecay_contracts::WorkflowFanOutCensusEvidenceV1 {
+                    work_snapshot: snapshot.as_ref(),
+                    attempts: &attempts,
+                    attempt_reads_complete,
+                    shared_authority_waits: shared_authority_waits.as_ref(),
+                    non_duplicate_attempts,
+                    runnable_children: runnable,
+                    blocked_children: blocked,
+                    previous: previous.as_ref(),
+                    observed_at,
+                },
+            )
+            .map_err(|_| workflow_runtime_unavailable())?,
+            true,
+        ),
+    };
+    Ok(ObservedCensusV1 {
+        census,
+        unpersisted,
+        attempts,
+        attempt_reads_complete,
+        previous,
+    })
 }
 
 fn census_readiness(
@@ -528,24 +568,16 @@ async fn recover_pending_census_once(
     producer: Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> Result<(), String> {
-    let read_database = database.clone();
-    let read = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        read_pending_census_observations(&read_database)
-    });
+    let read = read_pending_census_observations(&database);
     tokio::pin!(read);
     let observations = tokio::select! {
         biased;
         () = cancellation.cancelled() => {
             read.await
-                .map_err(|error| format!("cancelled pending read worker did not join: {error}"))?
-                .map_err(|error| {
-                    format!("cancelled pending read completed with failure: {error:?}")
-                })?;
+                .map_err(|error| format!("cancelled pending read completed with failure: {error}"))?;
             return Ok(());
         }
-        result = &mut read => result
-            .map_err(|error| format!("pending read worker failed: {error}"))?
-            .map_err(|error| format!("pending read failed: {error:?}"))?,
+        result = &mut read => result?,
     };
     if observations.is_empty() {
         return Ok(());
@@ -560,26 +592,17 @@ async fn recover_pending_census_once(
         outcome = &mut emission => outcome
             .map_err(|error| format!("durable claim failed: {error:?}"))?,
     };
-    let mark_database = database.clone();
-    let mark = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        mark_durable_census_observations(&mark_database, &observations)
-    });
+    let mark = mark_durable_census_observations(&database, &observations);
     tokio::pin!(mark);
     tokio::select! {
         biased;
         () = cancellation.cancelled() => {
-            mark.await
-                .map_err(|error| {
-                    format!("cancelled durable marker worker did not join: {error}")
-                })?
-                .map_err(|error| {
-                    format!("cancelled durable marker completed with failure: {error:?}")
-                })?;
+            mark.await.map_err(|error| {
+                format!("cancelled durable marker completed with failure: {error}")
+            })?;
             Ok(())
         }
-        result = &mut mark => result
-            .map_err(|error| format!("durable marker worker failed: {error}"))?
-            .map_err(|error| format!("durable marker remains pending: {error:?}")),
+        result = &mut mark => result,
     }
 }
 
@@ -596,19 +619,25 @@ impl Drop for WorkflowFanOutCensusObservationRecoveryInnerV1 {
     }
 }
 
-fn read_pending_census_observations(
+async fn read_pending_census_observations(
     database: &tracedecay_global_db::RegisteredGlobalDb,
-) -> Result<
-    Vec<tracedecay_contracts::WorkflowFanOutCensusObservationV1>,
-    tracedecay_contracts::WorkflowFanOutCensusError,
-> {
+) -> Result<Vec<tracedecay_contracts::WorkflowFanOutCensusObservationV1>, String> {
     let workflow =
         tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(database)
-            .map_err(|_| tracedecay_contracts::WorkflowFanOutCensusError::Unavailable)?;
-    tracedecay_contracts::WorkflowFanOutCensusStoragePort::pending_census_observations(
-        workflow.effects(),
-        32,
-    )
+            .await
+            .map_err(|error| format!("pending read authority unavailable: {error}"))?;
+    workflow
+        .read(|workflow| {
+            Ok(
+                tracedecay_contracts::WorkflowFanOutCensusReadPort::pending_census_observations(
+                    workflow.effects(),
+                    32,
+                ),
+            )
+        })
+        .await
+        .map_err(|problem| format!("pending read worker failed: {problem:?}"))?
+        .map_err(|error| format!("pending read failed: {error:?}"))
 }
 
 fn pending_census_envelopes(
@@ -646,18 +675,21 @@ fn pending_census_envelopes(
         .collect()
 }
 
-fn mark_durable_census_observations(
+async fn mark_durable_census_observations(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     observations: &[tracedecay_contracts::WorkflowFanOutCensusObservationV1],
-) -> Result<(), tracedecay_contracts::WorkflowFanOutCensusError> {
+) -> Result<(), String> {
     let workflow =
         tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(database)
-            .map_err(|_| tracedecay_contracts::WorkflowFanOutCensusError::Unavailable)?;
-    for observation in observations {
-        tracedecay_contracts::WorkflowFanOutCensusStoragePort::mark_census_observability_durable(
-            workflow.effects(),
-            &observation.census,
-        )?;
-    }
-    Ok(())
+            .await
+            .map_err(|error| format!("durable marker authority unavailable: {error}"))?;
+    workflow
+        .mark_censuses_observability_durable(
+            observations
+                .iter()
+                .map(|observation| observation.census.clone())
+                .collect(),
+        )
+        .await
+        .map_err(|error| format!("durable marker remains pending: {error:?}"))
 }

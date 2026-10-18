@@ -465,6 +465,10 @@ pub(super) struct StoreAdministration {
     profile_session_refresh_services: ProfileSessionRefreshServices,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
+    /// Held by a maintenance tick while its telemetry pass or a store unit
+    /// leases stores, and by a capacity retirement's store release, which
+    /// refuses a leased store.
+    maintenance_store_clients: Arc<tokio::sync::Mutex<()>>,
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
@@ -610,6 +614,7 @@ impl Default for StoreAdministration {
             ),
             store_telemetry_sampling:
                 tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::default(),
+            maintenance_store_clients: Arc::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(unix)]
@@ -801,6 +806,10 @@ impl StoreAdministration {
         &self,
     ) -> tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry {
         self.store_telemetry_sampling.clone()
+    }
+
+    pub(super) fn maintenance_store_clients(&self) -> &tokio::sync::Mutex<()> {
+        &self.maintenance_store_clients
     }
 
     pub(super) fn project_routes(&self) -> crate::mcp::project_route::SharedHookProjectRouteCache {
@@ -1034,30 +1043,6 @@ impl StoreAdministration {
     }
 
     #[tracing::instrument(
-        name = "daemon.branch_admin.mounted_project_servers",
-        level = "trace",
-        skip_all
-    )]
-    pub(super) async fn mounted_project_servers(&self) -> Vec<Arc<crate::mcp::McpServer>> {
-        let Ok(profile_root) = self
-            .profile_identity()
-            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
-        else {
-            return Vec::new();
-        };
-
-        {
-            let servers = self.project_servers.lock().await;
-            servers
-                .servers
-                .iter()
-                .filter(|(key, _)| key.owner.profile_root == profile_root)
-                .map(|(_, entry)| Arc::clone(&entry.server))
-                .collect::<Vec<_>>()
-        }
-    }
-
-    #[tracing::instrument(
         name = "daemon.branch_admin.mounted_project_graphs",
         level = "trace",
         skip_all
@@ -1065,10 +1050,29 @@ impl StoreAdministration {
     pub(super) async fn mounted_project_graphs(
         &self,
     ) -> Vec<Arc<tracedecay_project::project::TraceDecay>> {
-        let servers = self.mounted_project_servers().await;
-        let mut graphs = Vec::with_capacity(servers.len());
-        for server in &servers {
-            graphs.push(server.cg().await);
+        let Ok(profile_root) = self
+            .profile_identity()
+            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
+        else {
+            return Vec::new();
+        };
+
+        // A cloned server handle counts as a client lease, and a bounded route
+        // bind never evicts a leased server. Take the graph slots under the
+        // registry lock and read them after it drops, so a held graph swap
+        // parks neither a route bind nor an eviction.
+        let slots = {
+            let servers = self.project_servers.lock().await;
+            servers
+                .servers
+                .iter()
+                .filter(|(key, _)| key.owner.profile_root == profile_root)
+                .map(|(_, entry)| entry.server.graph_slot())
+                .collect::<Vec<_>>()
+        };
+        let mut graphs = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            graphs.push(slot.read().await.clone());
         }
         graphs
     }
@@ -2324,14 +2328,10 @@ mod tests {
             .ensure_profile_host_admission_bootstrap(&profile_root)
             .await
             .unwrap();
-        // The worker performs a real session-runtime-registry open before it
-        // can surface the spool error, so give it a generous (still bounded)
-        // wait; completion notifies immediately, so a healthy run never
-        // sleeps this long.
         assert_eq!(
             administration
                 .profile_host_admission_replay
-                .wait_bootstrap_completed(&profile_root, Duration::from_mins(1))
+                .wait_bootstrap_completed(&profile_root, None)
                 .await,
             BootstrapCompletion::Completed,
             "production bootstrap worker must publish its terminal state"

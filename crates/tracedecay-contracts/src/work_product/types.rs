@@ -7,10 +7,74 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::{CancellationContext, Deadline, RequestContext, RequestId};
+use crate::{
+    ApplicationExecutionFailureClassV1, ApplicationProblem, CancellationContext, Deadline,
+    LegalAction, RequestContext, RequestId, RetryDirective, SafeDiagnostic,
+};
+
+/// Why Work storage failed, for the failures a caller must answer differently
+/// from "the authority is unavailable".
+///
+/// Every other storage fault (I/O, writer loss, an unclassified SQLite error)
+/// stays the layer's own `Unavailable`; the cause is retained in tracing, never
+/// in a public response, so SQL parameters and paths cannot leak.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum WorkStorageFailureV1 {
+    /// The storage channel was saturated. Retry after a delay.
+    #[error("Work storage is busy")]
+    Busy,
+    /// A bounded read exceeded its materialization limit. Retrying the same
+    /// read cannot succeed.
+    #[error("Work storage read exceeded its result limit")]
+    ResultLimitExceeded,
+    /// Persisted rows did not decode. This is stored-data corruption, not a
+    /// stale request.
+    #[error("Stored Work data is invalid")]
+    StoredDataInvalid,
+}
+
+impl WorkStorageFailureV1 {
+    /// The one public answer for this failure, shared by every Work operation
+    /// so the same cause carries the same code, retry directive, and remedy.
+    ///
+    /// Busy is capacity, so it retries after a delay. The other two cannot be
+    /// resolved by retrying, so they name an administrator, and neither is a
+    /// stale-input answer that would send the caller to refresh.
+    pub fn application_problem(self) -> ApplicationProblem {
+        let (code, message) = match self {
+            Self::Busy => {
+                return ApplicationProblem::saturated(
+                    "work.storage_busy",
+                    "The Work storage is busy; retry after a delay",
+                );
+            }
+            Self::ResultLimitExceeded => (
+                "work.storage_result_limit_exceeded",
+                "The Work storage read exceeded its result limit; narrow the selection or \
+                 contact an administrator",
+            ),
+            Self::StoredDataInvalid => (
+                "work.storage_data_invalid",
+                "Stored Work data failed validation; contact an administrator to repair \
+                 storage",
+            ),
+        };
+        ApplicationProblem::ExecutionFailed {
+            classification: ApplicationExecutionFailureClassV1::Permanent,
+            diagnostic: SafeDiagnostic {
+                code: code.to_owned(),
+                message: message.to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+        }
+    }
+}
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkProductApplicationErrorV1 {
+    #[error("Work storage failed: {0}")]
+    Storage(WorkStorageFailureV1),
     #[error("Work operation is not authorized")]
     NotAuthorized,
     #[error("Work operation was cancelled")]
@@ -118,7 +182,7 @@ pub enum WorkProductOwnerAuthorizationErrorV1 {
 
 /// Resolves the registered profile owner and authorizes every selected
 /// project/repository relation against the request context.
-pub trait WorkProductOwnerAuthorizationPortV1: Send + Sync {
+pub trait WorkProductOwnerAuthorizationPortV1 {
     fn authorize_scope(
         &self,
         context: &RequestContext,

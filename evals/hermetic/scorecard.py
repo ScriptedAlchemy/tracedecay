@@ -84,6 +84,8 @@ def row_triggered(row: dict) -> bool:
     """
     if not isinstance(row, dict):
         return False
+    if row.get("agent_completed") is False or row.get("anti_tools_used"):
+        return False
     verify = row.get("verify_pass")
     if verify is not None:
         return bool(verify)
@@ -102,8 +104,39 @@ def row_triggered(row: dict) -> bool:
 row_passed = row_triggered
 
 
-def aggregate(results: list[dict], corpus: list[dict] | None = None) -> dict:
-    """Aggregate scored rows (and optionally a corpus) into adoption buckets."""
+def aggregate(results: list[dict], corpus: list[dict] | None = None, reps: int | None = None) -> dict:
+    """Count each expected scenario/repetition once, including missing runs."""
+    if reps is not None and (type(reps) is not int or reps < 1):
+        raise ValueError("reps must be a positive integer")
+    if any(type(row.get("rep", 1)) is not int or row.get("rep", 1) < 1 for row in results):
+        raise ValueError("repetition must be a positive integer")
+    indexed = any(row.get("scenario_index") is not None for row in results)
+    if indexed and any(type(row.get("scenario_index")) is not int or row["scenario_index"] < 1 for row in results):
+        raise ValueError("indexed results require a positive scenario_index on every row")
+    identities = set()
+    for row in results:
+        identity = (row["scenario_index"] if indexed else row.get("id"), row.get("rep", 1))
+        if identity in identities:
+            raise ValueError(f"duplicate scenario/repetition: {identity}")
+        identities.add(identity)
+    observed_reps = max((row.get("rep", 1) for row in results), default=1)
+    reps = observed_reps if reps is None else reps
+    if reps < 1 or observed_reps > reps:
+        raise ValueError("reps must cover every observed positive repetition")
+    if corpus is not None and indexed:
+        for row in results:
+            index = row["scenario_index"]
+            if index > len(corpus):
+                raise ValueError("result scenario_index is outside the corpus")
+            scenario = corpus[index - 1]
+            if row.get("id") != scenario.get("id") or row.get("category", "") != scenario.get("category", ""):
+                raise ValueError("result scenario/category does not match its corpus index")
+    elif corpus is not None:
+        categories = {scenario["id"]: scenario.get("category", "") for scenario in corpus}
+        if len(categories) != len(corpus):
+            raise ValueError("duplicate corpus scenario")
+        if any(row.get("id") not in categories or row.get("category", "") != categories[row["id"]] for row in results):
+            raise ValueError("result scenario/category does not match the corpus")
     order = list(BUCKETS)
 
     def blank() -> dict:
@@ -119,7 +152,7 @@ def aggregate(results: list[dict], corpus: list[dict] | None = None) -> dict:
             if b not in buckets:
                 buckets[b] = blank()
                 order.append(b)
-            buckets[b]["opportunities"] += 1
+            buckets[b]["opportunities"] += reps
     else:
         for row in results:
             b = bucket_of(row.get("category", "") if isinstance(row, dict) else "")
@@ -242,12 +275,13 @@ def main(argv: list[str] | None = None) -> int:
         help="optional corpus.jsonl; used as the opportunity denominator so "
         "errored/skipped scenarios still count as missed opportunities",
     )
+    ap.add_argument("--reps", type=int, help="expected repetitions, including runs with no result rows")
     args = ap.parse_args(argv)
 
     results = read_jsonl(Path(args.results))
     corpus = read_jsonl(Path(args.corpus)) if args.corpus else None
 
-    summary = aggregate(results, corpus)
+    summary = aggregate(results, corpus, args.reps)
 
     print(render_table(summary))
     print()

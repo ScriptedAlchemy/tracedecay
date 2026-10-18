@@ -13,7 +13,7 @@ use tracedecay_runtime_core::{
         DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1,
         DatabaseOwnerWeakLeaseIssuerErrorV1, DatabaseOwnerWeakLeaseIssuerV1,
         DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle, DatabaseWriteTransaction,
-        engine::{Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows},
+        engine::{Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, WriteTx},
     },
     shard_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
 };
@@ -599,6 +599,41 @@ impl RegisteredGlobalDb {
         })
     }
 
+    pub(crate) fn require_active_write_scope(
+        &self,
+        operation: &str,
+    ) -> tracedecay_domain::errors::Result<()> {
+        self.database
+            .write_authority()?
+            .require_active_write_scope(operation)
+    }
+
+    /// Runs `body` as one write job: commit when it returns `Ok`, rollback
+    /// when it returns `Err`. The daemon write scope is checked before the job
+    /// is queued. The runtime verifies the same authority again at COMMIT, so a
+    /// scope that ends while the body runs rolls the job back and surfaces as
+    /// the outer error.
+    #[tracing::instrument(name = "global_db.registered.txn.job", level = "trace", skip_all)]
+    pub async fn transact<R, E, F>(
+        &self,
+        body: F,
+    ) -> tracedecay_domain::errors::Result<Result<R, E>>
+    where
+        F: AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.require_active_write_scope("begin registered global database transaction")?;
+        self.database
+            .transact(
+                "begin registered global database transaction",
+                async move |transaction: &WriteTx<'_, '_>| {
+                    body(RegisteredGlobalDbWriteTx { transaction }).await
+                },
+            )
+            .await
+    }
+
     pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
         self.database.registered_binding()
     }
@@ -625,12 +660,12 @@ impl RegisteredGlobalDb {
 
     /// Attaches the workflow source and journal authority over the registered
     /// exact-SQL handle.
-    pub fn workflow_storage(
+    pub async fn workflow_storage(
         &self,
     ) -> tracedecay_domain::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
-        self.database.workflow_storage()
+        self.database.workflow_storage().await
     }
 
     pub async fn handoff_open_storage(
@@ -884,6 +919,16 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
 
     #[tracing::instrument(name = "global_db.registered.txn.commit", level = "trace", skip_all)]
     pub async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
+        self.commit_with_on_commit(|| {}).await
+    }
+
+    pub async fn commit_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> tracedecay_runtime_core::db::engine::Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
         if let Err(error) = self
             .authority
             .require_active_write_scope("commit registered global database transaction")
@@ -898,12 +943,45 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
                 ),
             };
         }
-        self.transaction.commit().await.map_err(engine_error)
+        self.transaction
+            .commit_with_on_commit(on_commit)
+            .await
+            .map_err(engine_error)
     }
 
     #[tracing::instrument(name = "global_db.registered.txn.rollback", level = "trace", skip_all)]
     pub async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.transaction.rollback().await.map_err(engine_error)
+    }
+}
+
+/// The transaction a [`RegisteredGlobalDb::transact`] body runs in. It is a
+/// borrowed handle, so the body takes it by value and lends `&transaction` to
+/// helpers written against the executor traits.
+#[derive(Clone, Copy)]
+pub struct RegisteredGlobalDbWriteTx<'a, 'b> {
+    transaction: &'a WriteTx<'a, 'b>,
+}
+
+impl QueryExecutor for RegisteredGlobalDbWriteTx<'_, '_> {
+    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
+    where
+        P: IntoParams,
+    {
+        self.transaction.query(sql, params).await
+    }
+}
+
+impl Executor for RegisteredGlobalDbWriteTx<'_, '_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> EngineResult<u64>
+    where
+        P: IntoParams,
+    {
+        self.transaction.execute(sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
+        self.transaction.execute_batch(sql).await
     }
 }
 

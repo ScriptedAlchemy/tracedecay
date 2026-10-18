@@ -6,6 +6,10 @@
   "fixture": "main",
   "status": "active",
   "prompt": "Measure whether remembered facts, hints, and specialist assistants are actually being used effectively.",
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "routing-only specialist scenario: measures whether the expected specialist was invoked; answer quality is not verified"
+  },
   "expected_agent": "usage-intelligence-analyst",
   "max_tool_calls": 10,
   "notes": "Neutral routing eval for adoption metrics validated against transcript evidence."

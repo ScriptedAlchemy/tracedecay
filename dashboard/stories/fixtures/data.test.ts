@@ -66,8 +66,8 @@ import {
 import { HANDOFF_LIST_TASK_ROUTE } from '../../src/workspaces/agents/handoffTokens.ts';
 import { FEEDBACK_PROXIMITY_ROUTE } from '../../src/viz/proximity/proximityApi.ts';
 import {
-  AutomaticCuratorResponseSchema,
   AutomationOutcomesPayloadSchema,
+  runAutomaticCurator,
 } from '../../src/data/query/automation.ts';
 import {
   ProjectionPayloadSchema,
@@ -132,7 +132,6 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/automation/automatic-fact-receipts': AutomaticFactReceiptsPayloadV1Schema,
   '/api/automation/runs': AutomationRunsPayloadV1Schema,
   '/api/automation/outcomes': AutomationOutcomesPayloadSchema,
-  '/api/application/retained/fact_store_curate': AutomaticCuratorResponseSchema,
   '/api/observatory': DashboardEnvelopeV1Schema(ObservatoryReadModelV1Schema),
   '/api/costs': DashboardEnvelopeV1Schema(CostsReadModelV1Schema),
   '/api/code-index/freshness': DashboardEnvelopeV1Schema(CodeIndexFreshnessPayloadV1Schema),
@@ -286,6 +285,15 @@ describe('fixtures parse against the generated contract for their route', () => 
       expect(await callWork(route, {}, pathname)).toMatchObject({ outcome: 'value' });
     },
   );
+
+  it('POST fact_store_curate: the browser accepts the admitted run receipt', async () => {
+    const pathname = '/api/application/retained/fact_store_curate';
+    vi.stubGlobal('fetch', async () => Response.json(resolveFixture(pathname)));
+    expect(await runAutomaticCurator(pathname)).toMatchObject({
+      outcome: 'started',
+      receipt: { run_id: 'request.story.fact-store-curate', state: 'started' },
+    });
+  });
 
 });
 

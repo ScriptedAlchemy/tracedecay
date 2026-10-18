@@ -78,6 +78,37 @@ pub(crate) fn replayed_attempt_matches_command(
     Ok(attempt.identity() == identity && attempt.execution() == &expected)
 }
 
+fn attempt_admission_selection(
+    context: &RequestContext,
+) -> Result<WorkProductSelectionScopeV1, ApplicationProblem> {
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([
+        WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: context.scope().project_id.clone(),
+            repository_id: context.scope().repository_id.clone(),
+        },
+    ]))
+    .map_err(|_| invalid_start_problem())
+}
+
+impl crate::PrefetchedWorkGraphReadV1 {
+    /// The graph read an attempt admission (start, synthesis or retry)
+    /// observed at `observed_at` makes, read before its writer job. A context
+    /// with no valid selection prefetches nothing; the service refuses it.
+    pub fn for_attempt_admission<S>(
+        storage: &S,
+        context: &RequestContext,
+        observed_at: UtcMicros,
+    ) -> Self
+    where
+        S: WorkGraphReadPortV1 + WorkProductOwnerAuthorizationPortV1,
+    {
+        attempt_admission_selection(context).map_or_else(
+            |_| Self::default(),
+            |selection| Self::current(storage, context, &selection, observed_at),
+        )
+    }
+}
+
 /// Reads the current verified product graph under the exact relation scope
 /// resolved for this request. The caller cannot select a different profile or
 /// repository relation for attempt admission.
@@ -91,13 +122,7 @@ where
     S: WorkGraphReadPortV1 + WorkProductOwnerAuthorizationPortV1,
 {
     admit_product_attempt_request(context, binding, observed_at)?;
-    let selection = WorkProductSelectionScopeV1::relations(BTreeSet::from([
-        WorkProductAuthorizedRelationScopeV1::Repository {
-            project_id: context.scope().project_id.clone(),
-            repository_id: context.scope().repository_id.clone(),
-        },
-    ]))
-    .map_err(|_| invalid_start_problem())?;
+    let selection = attempt_admission_selection(context)?;
     let authorized_scope = storage
         .authorize_scope(context, &selection, observed_at)
         .map_err(owner_problem)?;
@@ -231,6 +256,7 @@ pub(crate) fn product_admission_problem(
         WorkProductAttemptAdmissionErrorV1::PlacementRootConflict => {
             placement_root_conflict_problem()
         }
+        WorkProductAttemptAdmissionErrorV1::Storage(failure) => failure.application_problem(),
         WorkProductAttemptAdmissionErrorV1::Unavailable => {
             ApplicationProblem::unavailable(crate::SafeDiagnostic {
                 code: "application.work-attempt.product-admission-unavailable".to_owned(),
@@ -491,6 +517,7 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
                               the relation scopes the excluded events were admitted under.",
             )
         }
+        WorkProductApplicationErrorV1::Storage(failure) => failure.application_problem(),
         WorkProductApplicationErrorV1::EventAuthorityUnavailable
         | WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable

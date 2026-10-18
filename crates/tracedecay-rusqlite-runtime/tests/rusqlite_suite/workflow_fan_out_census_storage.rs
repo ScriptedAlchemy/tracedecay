@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 
 use tracedecay_contracts::{
     CancellationContext, WorkflowFailurePolicy, WorkflowFanOutCensusPersistOutcomeV1,
-    WorkflowFanOutCensusStoragePort, WorkflowFanOutInput, WorkflowFanOutRequest,
-    WorkflowProviderAdmission, WorkflowRunAppendRequest, WorkflowRunStoragePort,
-    durable_workflow_fan_out_plan, prepare_workflow_fan_out,
+    WorkflowFanOutCensusReadPort, WorkflowFanOutCensusStoragePort, WorkflowFanOutInput,
+    WorkflowFanOutRequest, WorkflowProviderAdmission, WorkflowRunAppendRequest,
+    WorkflowRunReadPort, WorkflowRunStoragePort, durable_workflow_fan_out_plan,
+    prepare_workflow_fan_out,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
@@ -25,11 +26,10 @@ use tracedecay_domain::{
     WorkflowProviderCapacityEvidenceV1, WorkflowRunCommand, WorkflowRunEvent,
     WorkflowRunEventContext, WorkflowStep, WorkflowStepId, WorktreeId,
 };
-use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
 
 use crate::registered_workflow_store;
 
-use registered_workflow_store::RegisteredWorkflowStore;
+use registered_workflow_store::{RegisteredWorkflowStore, WorkflowJobStorage};
 
 use tracedecay_domain::test_fixtures::id;
 
@@ -298,8 +298,8 @@ fn durable_plan(
     durable_workflow_fan_out_plan(&planned, &provider, fan_out_authority()).unwrap()
 }
 
-fn open_authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
-    WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap()
+fn open_authority(store: &RegisteredWorkflowStore) -> WorkflowJobStorage {
+    WorkflowJobStorage::attach(store)
 }
 
 #[test]
@@ -327,7 +327,7 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
     )
     .unwrap();
     let binding =
-        WorkflowRunStoragePort::fan_out_binding(&authority, &plan.children[0].attempt_identity)
+        WorkflowRunReadPort::fan_out_binding(&authority, &plan.children[0].attempt_identity)
             .unwrap()
             .unwrap();
     assert_eq!(binding.run_id, run_id);
@@ -340,7 +340,7 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
     )
     .unwrap();
     assert!(
-        WorkflowRunStoragePort::fan_out_binding(&authority, &unrelated)
+        WorkflowRunReadPort::fan_out_binding(&authority, &unrelated)
             .unwrap()
             .is_none()
     );
@@ -362,7 +362,7 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
         tracedecay_contracts::WorkflowFanOutCensusError::Conflict
     );
 
-    let projection = WorkflowRunStoragePort::projection(&authority, &run_id).unwrap();
+    let projection = WorkflowRunReadPort::projection(&authority, &run_id).unwrap();
     let pause = projection
         .next_event(
             WorkflowRunCommand::Pause,
@@ -383,13 +383,13 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
         WorkflowFanOutCensusPersistOutcomeV1::Persisted
     );
     assert_eq!(
-        WorkflowFanOutCensusStoragePort::census_before(&authority, &run_id, 2)
+        WorkflowFanOutCensusReadPort::census_before(&authority, &run_id, 2)
             .unwrap()
             .unwrap(),
         first
     );
     let pending =
-        WorkflowFanOutCensusStoragePort::pending_census_observations(&authority, 16).unwrap();
+        WorkflowFanOutCensusReadPort::pending_census_observations(&authority, 16).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].census, second);
     assert_eq!(pending[0].previous_observed_at, UtcMicros(200));
@@ -398,13 +398,13 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
     let store = store.restart("workflow-fan-out-census-storage-restarted");
     let reopened = open_authority(&store);
     assert_eq!(
-        WorkflowFanOutCensusStoragePort::latest_census(&reopened, &run_id)
+        WorkflowFanOutCensusReadPort::latest_census(&reopened, &run_id)
             .unwrap()
             .unwrap(),
         second
     );
     let pending_after_restart =
-        WorkflowFanOutCensusStoragePort::pending_census_observations(&reopened, 16).unwrap();
+        WorkflowFanOutCensusReadPort::pending_census_observations(&reopened, 16).unwrap();
     assert_eq!(pending_after_restart.len(), 1);
     assert_eq!(pending_after_restart[0].census, second);
     assert_eq!(
@@ -415,7 +415,7 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
     WorkflowFanOutCensusStoragePort::mark_census_observability_durable(&reopened, &second).unwrap();
     WorkflowFanOutCensusStoragePort::mark_census_observability_durable(&reopened, &second).unwrap();
     assert!(
-        WorkflowFanOutCensusStoragePort::pending_census_observations(&reopened, 16)
+        WorkflowFanOutCensusReadPort::pending_census_observations(&reopened, 16)
             .unwrap()
             .is_empty()
     );
@@ -427,7 +427,7 @@ fn census_replay_conflict_and_restart_recover_the_durable_transition() {
         tracedecay_contracts::WorkflowFanOutCensusError::Conflict
     );
     assert_eq!(
-        WorkflowFanOutCensusStoragePort::census_before(&reopened, &run_id, 3)
+        WorkflowFanOutCensusReadPort::census_before(&reopened, &run_id, 3)
             .unwrap()
             .unwrap(),
         second
@@ -465,7 +465,7 @@ fn census_persist_failure_restarts_and_backfills_the_current_projection() {
         WorkflowFanOutCensusPersistOutcomeV1::Persisted
     );
 
-    let projection = WorkflowRunStoragePort::projection(&authority, &run_id).unwrap();
+    let projection = WorkflowRunReadPort::projection(&authority, &run_id).unwrap();
     let cancellation = projection
         .next_event(
             WorkflowRunCommand::RequestCancellation,
@@ -480,7 +480,7 @@ fn census_persist_failure_restarts_and_backfills_the_current_projection() {
         },
     )
     .unwrap();
-    let cancelling = WorkflowRunStoragePort::projection(&authority, &run_id).unwrap();
+    let cancelling = WorkflowRunReadPort::projection(&authority, &run_id).unwrap();
     let cancelled = cancelling
         .next_event(
             WorkflowRunCommand::ReconcileCancelled,
@@ -495,7 +495,7 @@ fn census_persist_failure_restarts_and_backfills_the_current_projection() {
         },
     )
     .unwrap();
-    let expected_projection = WorkflowRunStoragePort::projection(&authority, &run_id).unwrap();
+    let expected_projection = WorkflowRunReadPort::projection(&authority, &run_id).unwrap();
     assert!(expected_projection.status().is_terminal());
 
     store.inspect(|connection| {
@@ -519,7 +519,7 @@ fn census_persist_failure_restarts_and_backfills_the_current_projection() {
 
     let store = store.restart("workflow-fan-out-census-backfill-restarted");
     let reopened = open_authority(&store);
-    let page = WorkflowFanOutCensusStoragePort::census_backfill_projection_page(
+    let page = WorkflowFanOutCensusReadPort::census_backfill_projection_page(
         &reopened,
         &fan_out_authority(),
         None,
@@ -545,7 +545,7 @@ fn census_persist_failure_restarts_and_backfills_the_current_projection() {
         WorkflowFanOutCensusPersistOutcomeV1::Persisted
     );
     assert_eq!(store.count("workflow_fan_out_census_journal"), 2);
-    let empty = WorkflowFanOutCensusStoragePort::census_backfill_projection_page(
+    let empty = WorkflowFanOutCensusReadPort::census_backfill_projection_page(
         &reopened,
         &fan_out_authority(),
         page.continuation.as_ref(),

@@ -24,11 +24,9 @@ use super::apply::{
 };
 use super::state::{
     canonicalize_session_project_paths, consume_projection_queue_item, decode_observation_row,
-    decode_sequence, discard_projection_output_state_cache, ensure_projection_output_state_cache,
-    projected_stored_message, projection_retry_state, queued_sequence, read_checkpoint,
-    read_message, read_observation, read_session, reaggregate_output_state_for_output,
-    reconcile_session_rows_detailed, schedule_projection_retry, storage, storage_message,
-    stored_output_digest, write_checkpoint,
+    decode_sequence, projected_stored_message, projection_retry_state, queued_sequence,
+    read_checkpoint, read_message, read_observation, read_session, reconcile_session_rows_detailed,
+    schedule_projection_retry, storage, storage_message, stored_output_digest, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -114,29 +112,6 @@ fn records_transient_projection_retry(error: &ProjectionStoreError) -> bool {
     skip_all
 )]
 pub async fn project_observation(
-    database: &Database,
-    observation_id: &CanonicalObservationIdV1,
-) -> ProjectionStoreResult<ProjectionPersistOutcome> {
-    match project_observation_once(database, observation_id).await {
-        Err(error) if error.is_sqlite_disk_image_corrupt() => {
-            // The per-writer TEMP output-state cache can go corrupt while the
-            // file stays sound; that fault lives until the process restarts.
-            // Rebuild the cache and retry once. Corruption that survives is
-            // the real store and surfaces unchanged.
-            tracing::warn!(
-                error = %error.durable_detail(),
-                observation = observation_id.as_str(),
-                database = %database.database_path().display(),
-                "projection hit SQLite corruption; discarding the output state cache and retrying"
-            );
-            discard_projection_output_state_cache(database).await?;
-            project_observation_once(database, observation_id).await
-        }
-        result => result,
-    }
-}
-
-async fn project_observation_once(
     database: &Database,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
@@ -613,7 +588,6 @@ async fn project_observation_in_transaction_with_session(
     transaction: &DatabaseWriteTransaction<'_>,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<(ProjectionPersistOutcome, String)> {
-    ensure_projection_output_state_cache(transaction).await?;
     let checkpoint = read_checkpoint(transaction).await?;
     let Some((sequence, observation)) = read_observation(transaction, observation_id).await? else {
         return Err(ProjectionStoreError::ObservationNotFound);
@@ -1170,8 +1144,6 @@ async fn write_effect_converging_collisions(
 /// (`schema_contract::invariants`) defines a valid skip as zero provenance
 /// rows plus exactly one disposition, so a stale row left behind by an
 /// earlier projection era must not survive next to the skip it contradicts.
-/// The projected-output ownership cache is re-aggregated for every output the
-/// removed rows touched.
 async fn converge_collided_effect(
     conn: &DatabaseWriteTransaction<'_>,
     write: &CollisionGuardedWrite<'_>,
@@ -1241,50 +1213,22 @@ async fn queue_row_is_terminal_collision(
         .is_some_and(|state| state.next_retry_at_micros == PROJECTION_TERMINAL_RETRY_MICROS))
 }
 
-/// Removes provenance rows durable under the collided observation's key and
-/// re-aggregates the temp ownership cache for the outputs they bound.
+/// Removes provenance rows durable under the collided observation's key.
 async fn reconcile_collided_observation_provenance(
     conn: &impl Executor,
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<()> {
-    let observation_id = observation.observation_id().as_str();
-    let mut affected = Vec::new();
-    let mut rows = conn
-        .query(
-            "SELECT DISTINCT output_provider, output_message_id
-             FROM observation_projection_provenance
-             WHERE projector_version = ?1 AND observation_id = ?2",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
-        )
-        .await
-        .map_err(|error| storage("read collided projection provenance", error))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage("read collided projection provenance", error))?
-    {
-        affected.push((
-            row.get::<String>(0)
-                .map_err(|error| storage("read collided projection provenance", error))?,
-            row.get::<String>(1)
-                .map_err(|error| storage("read collided projection provenance", error))?,
-        ));
-    }
-    drop(rows);
-    if affected.is_empty() {
-        return Ok(());
-    }
     conn.execute(
         "DELETE FROM observation_projection_provenance
          WHERE projector_version = ?1 AND observation_id = ?2",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            observation.observation_id().as_str()
+        ],
     )
     .await
-    .map_err(|error| storage("remove collided projection provenance", error))?;
-    for (output_provider, output_message_id) in affected {
-        reaggregate_output_state_for_output(conn, &output_provider, &output_message_id).await?;
-    }
-    Ok(())
+    .map(|_| ())
+    .map_err(|error| storage("remove collided projection provenance", error))
 }
 
 enum RebuildAdvance {
@@ -2007,7 +1951,6 @@ async fn clear_active_projection(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    ensure_projection_output_state_cache(conn).await?;
     retire_projection_predecessor_state(conn, generation).await?;
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_retained_outputs (
@@ -2103,14 +2046,8 @@ async fn clear_active_projection(
         params![SESSION_MESSAGE_PROJECTOR_VERSION],
     )
     .await
-    .map_err(|error| storage("clear projection checkpoint for rebuild", error))?;
-    conn.execute(
-        "DELETE FROM temp.observation_projection_output_state_meta",
-        (),
-    )
-    .await
-    .map_err(|error| storage("invalidate projection output state for rebuild", error))?;
-    Ok(())
+    .map(|_| ())
+    .map_err(|error| storage("clear projection checkpoint for rebuild", error))
 }
 
 async fn retire_projection_predecessor_state(
@@ -2656,14 +2593,8 @@ async fn activate_rebuild_provenance(
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
     .await
-    .map_err(|error| storage("activate rebuilt projection provenance", error))?;
-    conn.execute(
-        "DELETE FROM temp.observation_projection_output_state_meta",
-        (),
-    )
-    .await
-    .map_err(|error| storage("invalidate activated projection output state", error))?;
-    ensure_projection_output_state_cache(conn).await
+    .map(|_| ())
+    .map_err(|error| storage("activate rebuilt projection provenance", error))
 }
 
 async fn activate_rebuild_workflow_facts(

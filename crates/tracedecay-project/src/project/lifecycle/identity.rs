@@ -88,7 +88,14 @@ impl TraceDecay {
     ) -> Result<StoreLayout> {
         let profile_root = open_options.resolved_profile_root()?;
         storage::refuse_retired_checkout_layout(&profile_root, project_root)?;
-        let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
+        // Every profile reads the same `.git/` marker. One naming a shard this
+        // profile does not hold yields to the registry, and only names the
+        // project when nothing else does.
+        let (mut selected, unheld_marker_layout) =
+            match storage::resolve_persisted_layout(project_root, &profile_root)? {
+                Some(layout) if layout.data_root.is_dir() => (Some(layout), None),
+                unheld => (None, unheld),
+            };
         // Every linked worktree resolves through its repository, attached or
         // not; suppressing this for detached worktrees dropped them onto the
         // path-hashed identity fallback and minted a duplicate store.
@@ -162,7 +169,10 @@ impl TraceDecay {
                         return Ok(layout);
                     }
                 }
-                storage::default_profile_sharded_layout(project_root, &profile_root)
+                match unheld_marker_layout {
+                    Some(layout) => Ok(layout),
+                    None => storage::default_profile_sharded_layout(project_root, &profile_root),
+                }
             }
             None => Err(TraceDecayError::project_open(
                 ProjectOpenFailureKind::IdentityUnregistered,

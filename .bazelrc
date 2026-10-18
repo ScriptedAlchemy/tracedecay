@@ -15,9 +15,11 @@ common --repo_env=CARGO_NET_GIT_FETCH_WITH_CLI=true
 # host cargo would download another 418 MB toolchain on every CI job.
 common --repo_env=CARGO_UNSTABLE_GIT=shallow-deps
 common --repo_env=RUSTC_BOOTSTRAP=1
-# MODULE.bazel registers only nightly/2026-10-16. Without this, rules_rust
+# MODULE.bazel registers only nightly/2026-10-18. Without this, rules_rust
 # resolves the stable channel and the build fails closed.
-build --@rules_rust//rust/toolchain/channel=nightly
+# Hosts can extend this repository profile with their private fleet settings.
+build --config=tracedecay
+build:tracedecay --@rules_rust//rust/toolchain/channel=nightly
 build --incompatible_enable_cc_toolchain_resolution
 build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 build --workspace_status_command=scripts/bazel/workspace_status.sh
@@ -33,20 +35,6 @@ build --action_env=HOST_CFLAGS=-DNDEBUG
 build --action_env=TARGET_CFLAGS=-DNDEBUG
 build --action_env=HOST_CXXFLAGS=-DNDEBUG
 build --action_env=TARGET_CXXFLAGS=-DNDEBUG
-# rules_rust compiles env!("CARGO_MANIFEST_DIR") to "${pwd}/<pkg>", which is the
-# sandbox execroot. Crates that read CARGO_MANIFEST_DIR with env! instead of
-# env::var (arborium grammars) then use a dead sandbox path when the build
-# script runs. Compiling build-script binaries locally bakes the stable real
-# execroot. Only the *_ / _bs_ script binaries match. Lib and bin compiles
-# stay sandboxed.
-build "--strategy_regexp=Compiling Rust bin _bs_.*=local"
-build "--strategy_regexp=Compiling Rust bin build_script_build_.*=local"
-# Tests read fixtures through env!("CARGO_MANIFEST_DIR") the same way, and a
-# sandboxed rustc bakes a sandbox path that is gone by the time the test
-# runs. Compile Rust in the real execroot so that path stays readable.
-build --strategy=Rustc=local
-build --strategy=RustcMetadata=local
-build --jobs=4
 build:linux "--@rules_rust//rust/settings:extra_rustc_flag=-Csplit-debuginfo=unpacked"
 # Skip LLVM bitcode in rlibs. Thin LTO (dist) re-enables it below; other
 # configs never ran LTO, so the bitcode was paid compile cost with no
@@ -67,8 +55,8 @@ build:windows --action_env=PATH
 build:windows --enable_runfiles
 
 test --test_output=errors
-# Rust's test harness starts a worker per available CPU. Account for that
-# pool so Bazel does not schedule several full-host suites at once.
+# Suites spawn child services as well as the bounded Rust test harness.
+# Reserve the local host budget so independent suites do not oversubscribe it.
 test --default_test_resources=cpu=HOST_CPUS
 
 # Blocking Clippy policy over every Rust target, matching
@@ -116,3 +104,14 @@ build "--@rules_rust//rust/settings:per_crate_rustc_flag=external/rules_rust++cr
 # Platform configs expand here, after generic build defaults, so their
 # workspace-status command and compiler environment take precedence.
 build --enable_platform_specific_config
+
+# Host profiles select compatible execution pools; .bazelrc.local can override
+# individual checkouts. Private endpoints and capacity stay outside the repo.
+build:rbe-linux --host_platform=//scripts/bazel/platforms:linux_x86_64
+build:rbe-linux --platforms=//scripts/bazel/platforms:linux_x86_64
+build:rbe-linux --extra_toolchains=@zig_sdk//toolchain:linux_amd64_gnu.2.31
+build:rbe-linux --sandbox_writable_path=/tmp/zig-cache
+build:rbe-macos --host_platform=//scripts/bazel/platforms:macos_aarch64
+build:rbe-macos --platforms=//scripts/bazel/platforms:macos_aarch64
+
+try-import %workspace%/.bazelrc.local

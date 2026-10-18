@@ -6361,6 +6361,7 @@ dependencies = [
  "tracedecay-private-fs",
  "tracedecay-project",
  "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
  "tracedecay-sdk",
  "tracedecay-session-memory",
  "tracedecay-session-temporal-store",
@@ -6372,7 +6373,6 @@ dependencies = [
  "tree-sitter-rust",
  "ureq",
  "url",
- "windows-sys 0.61.2",
  "xattr",
  "zip",
 ]
@@ -6411,7 +6411,6 @@ dependencies = [
  "ignore",
  "rayon",
  "regex",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -6761,7 +6760,6 @@ dependencies = [
  "hex",
  "parking_lot",
  "rayon",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -6860,6 +6858,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-store",
  "tracedecay-temporal-query",
+ "tracedecay-tokenizer",
  "tracing",
 ]
 
@@ -7003,6 +7002,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "shell-words",
  "tracedecay-domain",
  "tracing",
 ]
@@ -7186,7 +7186,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tracedecay-api",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-tool-catalog",

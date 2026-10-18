@@ -393,6 +393,37 @@ mod tests {
         assert!(a.authorizes_reuse_of(&a), "self reuse is authorized");
     }
 
+    #[test]
+    fn two_clones_of_one_project_on_one_branch_get_distinct_code_scopes() {
+        let first = init_repo(&[("src/lib.rs", "pub fn first_tree() {}\n")]);
+        let parent = TempDir::new().expect("clone parent");
+        let second = parent.path().join("second");
+        git(
+            parent.path(),
+            &[
+                "clone",
+                "-q",
+                first.path().to_str().unwrap(),
+                second.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(second.join("src/lib.rs"), "pub fn second_tree() {}\n").unwrap();
+        let project_id = ProjectId::new("project.shared-by-two-clones").expect("project id");
+
+        let a = resolved_scope_for_project(first.path(), &project_id).expect("first scope");
+        let b = resolved_scope_for_project(&second, &project_id).expect("second scope");
+
+        assert_eq!(a.project_id, b.project_id);
+        assert_eq!(a.reference, b.reference, "both clones sit on one branch");
+        assert!(a.reference.is_some(), "the branch resolves");
+        assert_ne!(a.worktree_id, b.worktree_id);
+        assert_ne!(a.repository_id, b.repository_id);
+        assert_ne!(
+            a.scope_digest, b.scope_digest,
+            "distinct checkouts must not write one code graph scope"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn worktree_identity_is_invariant_under_a_symlink_alias() {

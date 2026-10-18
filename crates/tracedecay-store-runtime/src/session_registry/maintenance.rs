@@ -634,9 +634,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    /// Hold a store file this daemon still has open, but which was deleted or
-    /// replaced on disk, in the reset-required state until the daemon
-    /// restarts. Returns whether the loss is new.
+    /// Hold a store file that was deleted or replaced on disk while mounted in
+    /// the reset-required state until the daemon restarts and remounts its
+    /// owners. Returns whether the loss is new.
     pub fn record_store_identity_lost(&self, path: &Path) -> bool {
         let mut lost = self
             .lost_store_files
@@ -653,7 +653,8 @@ impl DaemonSessionRuntimeRegistryV1 {
                 found_version: None,
                 required_version: None,
                 reason: "the store file was deleted or replaced while the daemon held it open; \
-                         writes go to an unlinked inode and its space is not freed"
+                         its runtime closed the file, and its owners serve it again after a \
+                         restart"
                     .to_owned(),
                 remedy: DAEMON_RESTART_COMMAND.to_owned(),
             },

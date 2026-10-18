@@ -14,7 +14,7 @@ use tracedecay_contracts::RequestId;
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, dispatch_json_operation,
-    invalid_request_response,
+    invalid_request_problem,
 };
 
 mounted_operations! {
@@ -129,12 +129,16 @@ where
     .await
 }
 
-pub fn workflow_invalid_request_response(request_id: RequestId) -> Response {
-    invalid_request_response(
+pub fn workflow_invalid_request(
+    request_id: RequestId,
+) -> Result<crate::HttpJsonEnvelope<Value>, crate::HttpAdapterError> {
+    invalid_request_problem(
         request_id,
         "workflow.invalid_request",
         "The Workflow application request is invalid",
     )
+    .map(Into::into)
+    .map_err(Into::into)
 }
 
 #[cfg(test)]

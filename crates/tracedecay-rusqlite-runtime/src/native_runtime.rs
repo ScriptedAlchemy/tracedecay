@@ -40,19 +40,32 @@ pub const NOT_INSTALLED: &str = "native execution runtime not installed";
 /// `None` when no runtime was installed or the installed one failed to start.
 #[must_use]
 pub fn handle() -> Option<RuntimeHandle> {
-    Runtime::current_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
+    native_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
+}
+
+fn native_handle() -> Option<RuntimeHandle> {
+    if crate::storage_pool::on_pool() {
+        return None;
+    }
+    Runtime::current_handle()
+}
+
+pub(crate) fn on_native_thread() -> bool {
+    native_handle().is_some()
 }
 
 /// The caller's task context, or a request context on the process runtime.
 #[must_use]
 pub fn cx() -> Option<Cx> {
-    Cx::current().or_else(|| {
-        process_runtime()
-            .ok()?
-            .handle()
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .ok()
-    })
+    Cx::current()
+        .filter(|_| !crate::storage_pool::on_pool())
+        .or_else(|| {
+            process_runtime()
+                .ok()?
+                .handle()
+                .try_request_cx_with_budget(Budget::INFINITE)
+                .ok()
+        })
 }
 
 /// Runs `future` to completion on the calling thread, with the tasks it
@@ -100,6 +113,29 @@ where
             .recv(&cx)
             .await
             .map_err(|error| format!("native blocking work ended without a result: {error}"))
+    })
+}
+
+tokio::task_local! {
+    /// Answers for the effects of blocking work its scope queues through
+    /// [`spawn_owned_blocking`]. Each such work holds a clone until it
+    /// returns, so an owner that signals on its last drop (a project open's
+    /// completion) settles after that work, not when its wait is abandoned.
+    pub static BLOCKING_WORK_OWNER: std::sync::Arc<dyn Send + Sync>;
+}
+
+/// [`spawn_blocking`] for work whose effects belong to the enclosing
+/// [`BLOCKING_WORK_OWNER`]: dropping the returned future still abandons only
+/// the wait, but the owner stays held until the work returns.
+pub fn spawn_owned_blocking<T, F>(work: F) -> BoxFuture<'static, Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let owner = BLOCKING_WORK_OWNER.try_with(std::sync::Arc::clone).ok();
+    spawn_blocking(move || {
+        let _owner = owner;
+        work()
     })
 }
 

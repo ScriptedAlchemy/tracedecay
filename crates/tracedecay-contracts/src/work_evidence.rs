@@ -104,6 +104,8 @@ pub enum WorkEvidenceRootReadErrorV1 {
     Stale,
     #[error("Work evidence root authority is unavailable")]
     Unavailable,
+    #[error("Work evidence root storage failed: {0}")]
+    Storage(crate::WorkStorageFailureV1),
     #[error("Work evidence root read was cancelled")]
     Cancelled,
     #[error("Work evidence root read timed out")]
@@ -519,7 +521,7 @@ pub struct WorkEvidenceRetrievalServiceV1<R, A, T, S, H> {
 impl<R, A, T, S, H> WorkEvidenceRetrievalServiceV1<R, A, T, S, H>
 where
     R: WorkEvidenceRootReadPortV1,
-    A: WorkProductOwnerAuthorizationPortV1,
+    A: WorkProductOwnerAuthorizationPortV1 + Send + Sync,
     T: WorkAttemptReceiptReadPortV1,
     S: WorkTaskSessionPortV1,
     H: WorkAnchorHydrationPortV1,
@@ -801,7 +803,7 @@ impl<R, A, T, S, H> WorkTaskSessionReauthorizationPortV1
     for WorkEvidenceRetrievalServiceV1<R, A, T, S, H>
 where
     R: WorkEvidenceRootReadPortV1,
-    A: WorkProductOwnerAuthorizationPortV1,
+    A: WorkProductOwnerAuthorizationPortV1 + Send + Sync,
     T: WorkAttemptReceiptReadPortV1,
     S: WorkTaskSessionPortV1,
     H: WorkAnchorHydrationPortV1,
@@ -1063,6 +1065,7 @@ fn task_session_reauthorization_error(
         | WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
         | WorkProductApplicationErrorV1::ProposalAuthorityUnavailable
+        | WorkProductApplicationErrorV1::Storage(_)
         | WorkProductApplicationErrorV1::CursorRefused(_)
         | WorkProductApplicationErrorV1::Cancelled
         | WorkProductApplicationErrorV1::TimedOut => {
@@ -1164,6 +1167,9 @@ pub(crate) fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductAppli
         WorkEvidenceRootReadErrorV1::Stale => WorkProductApplicationErrorV1::VersionConflict,
         WorkEvidenceRootReadErrorV1::Unavailable => {
             WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
+        }
+        WorkEvidenceRootReadErrorV1::Storage(failure) => {
+            WorkProductApplicationErrorV1::Storage(failure)
         }
         WorkEvidenceRootReadErrorV1::Cancelled => WorkProductApplicationErrorV1::Cancelled,
         WorkEvidenceRootReadErrorV1::TimedOut => WorkProductApplicationErrorV1::TimedOut,

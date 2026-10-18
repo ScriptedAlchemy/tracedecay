@@ -38,10 +38,21 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "apply_discount",
-    "25"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states apply_discount",
+          "pattern": "\\bapply_discount\\b"
+        },
+        {
+          "id": "states 25",
+          "pattern": "\\b25\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
   "notes": "how-does-X-work opener; distinct topic (discount) from the existing stock-reservation/order-flow scenarios."
 }

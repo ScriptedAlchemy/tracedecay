@@ -291,9 +291,10 @@ impl TraceDecay {
         // nothing here, its identity is deterministic from the canonical
         // path and durably owned by the profile registry. TraceDecay never
         // creates files inside a project's working tree.
-        tracedecay_runtime_core::storage::write_repository_identity_marker(
+        tracedecay_runtime_core::storage::claim_repository_identity_marker(
             project_root,
             project_id.as_str(),
+            &profile_root,
         )?;
         let configuration_database = runtime_registry
             .project_session_store(project_id, vec![project_root.to_path_buf()])
@@ -408,14 +409,7 @@ impl TraceDecay {
         // First-touch parity with the registered open path: daemon warm-up
         // refuses to advertise an identity-bearing project whose Context
         // Scout owner is absent, so init must start it too.
-        tracedecay_agent_hosts::hooks::publish_hook_bindings(
-            &crate::runtime_ports::hook_runtime(
-                tracedecay_runtime_core::config::ProfileRoot::new(
-                    ts.open_options.resolved_profile_root()?,
-                ),
-            )?,
-            &ts.store_layout,
-        )?;
+        ts.publish_hook_bindings().await?;
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
@@ -614,14 +608,7 @@ impl TraceDecay {
             _context_scout_owner: None,
         };
 
-        tracedecay_agent_hosts::hooks::publish_hook_bindings(
-            &crate::runtime_ports::hook_runtime(
-                tracedecay_runtime_core::config::ProfileRoot::new(
-                    ts.open_options.resolved_profile_root()?,
-                ),
-            )?,
-            &ts.store_layout,
-        )?;
+        ts.publish_hook_bindings().await?;
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
@@ -636,6 +623,25 @@ impl TraceDecay {
 
         ts.register_project_store_in_global_registry().await?;
         Ok(ts)
+    }
+
+    /// Publishes this project's Hook bindings on the blocking pool: under
+    /// contention the binding lock waits out the writer lease, which must not
+    /// park a native worker. The open owns the writes, so an aborted open is
+    /// not drained until they return.
+    async fn publish_hook_bindings(&self) -> Result<()> {
+        let runtime =
+            crate::runtime_ports::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::new(
+                self.open_options.resolved_profile_root()?,
+            ))?;
+        let layout = self.store_layout.clone();
+        tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
+            tracedecay_agent_hosts::hooks::publish_hook_bindings(&runtime, &layout)
+        })
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("hook binding publication task failed: {error}"),
+        })?
     }
 
     /// Branch provenance for an ordinary open of the single project store.

@@ -1,0 +1,44 @@
+name: Hermetic evaluation tests
+
+on:
+  pull_request:
+    paths:
+      - "evals/hermetic/**"
+      - "evals/agent_adoption/**"
+      - ".github/workflows/hermetic-evals.yml"
+  push:
+    branches: [master]
+    paths:
+      - "evals/hermetic/**"
+      - "evals/agent_adoption/**"
+      - ".github/workflows/hermetic-evals.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermetic-evals-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Hermetic evaluation regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: hermetic-eval-tests
+      - name: Check runner syntax
+        run: |
+          bash -n evals/hermetic/run.sh
+          bash -n evals/agent_adoption/run.sh
+      - name: Run scorer and shell-runner regressions
+        run: >-
+          bazel test
+          //evals/hermetic:score_test
+          //evals/hermetic:run_test
+          //evals/hermetic:scorecard_test
+          //evals/agent_adoption:selftest
+          --test_output=errors

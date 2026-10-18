@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::routing::get;
 use rustls::pki_types::pem::PemObject;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracedecay_api::remote::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
+use tracedecay_contracts::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef,
@@ -83,10 +83,8 @@ fn unprovisioned_remote_registry(identity: &str) -> DaemonHttpApplicationRegistr
             UserProfileId::new(format!("profile.{identity}")).expect("profile identity"),
         ),
     );
-    let transaction = Arc::new(
-        tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new()
-            .expect("remote replay transaction authority"),
-    );
+    let transaction =
+        Arc::new(tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new());
     let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         transaction,

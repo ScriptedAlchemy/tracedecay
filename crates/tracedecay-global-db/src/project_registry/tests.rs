@@ -3,6 +3,10 @@
 
 use std::cell::Cell;
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 
 use tracedecay_runtime_core::db::engine::{
@@ -648,5 +652,568 @@ async fn dashboard_membership_returns_only_requested_registered_projects() {
             .await
             .expect("read project registration membership"),
         HashSet::from(["project-a".to_owned(), "project-c".to_owned()])
+    );
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// One commit with fixed content and dates, so every repository made here
+/// has the same root commit.
+fn committed_repository(root: &Path) {
+    std::fs::create_dir_all(root).expect("create repository");
+    git(root, &["init", "-q"]);
+    std::fs::write(root.join("lib.rs"), "pub fn a() {}\n").expect("write fixture file");
+    git(root, &["add", "lib.rs"]);
+    git(root, &["commit", "-q", "-m", "initial"]);
+}
+
+/// A committed repository and a full clone of it, as `(original, clone)`.
+fn cloned_repository(harness: &RegisteredGlobalDbHarness, label: &str) -> (PathBuf, PathBuf) {
+    let storage_root = harness
+        .registered
+        .db_path()
+        .parent()
+        .expect("registered database storage root");
+    let original = storage_root.join(format!("{label}-original"));
+    let clone = storage_root.join(format!("{label}-clone"));
+    committed_repository(&original);
+    git(
+        storage_root,
+        &[
+            "clone",
+            "-q",
+            original.to_str().expect("utf-8 fixture path"),
+            clone.to_str().expect("utf-8 fixture path"),
+        ],
+    );
+    (original, clone)
+}
+
+async fn upsert_checkout(db: &RegisteredGlobalDb, project_id: &str, root: &Path) -> String {
+    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(root);
+    let remote = tracedecay_runtime_core::git::git_remote_url(root);
+    db.upsert_code_project(
+        project_id,
+        root,
+        common_dir.as_deref(),
+        remote.as_deref(),
+        Some("main"),
+    )
+    .await
+    .expect("register checkout")
+    .project_id
+}
+
+fn root_commit_alias(root: &Path) -> String {
+    let anchors = tracedecay_runtime_core::storage::repository_identity_anchors(root, None);
+    assert_eq!(anchors.len(), 1, "fixture repository has one root commit");
+    anchors[0].alias_key()
+}
+
+#[asupersync::test]
+async fn upsert_adopts_the_project_a_root_commit_anchor_names() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-adoption").await;
+    let (original, clone) = cloned_repository(&harness, "anchor-adoption");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-clone", &clone).await,
+        "project-original",
+        "a clone no path names adopts the project its root commit names"
+    );
+    let record = harness
+        .registered
+        .get_code_project("project-original")
+        .await
+        .expect("read adopted project")
+        .expect("adopted project stays registered");
+    assert_eq!(
+        record.canonical_root,
+        super::canonical_project_path(&original)
+            .to_string_lossy()
+            .into_owned(),
+        "the first enrolled checkout stays the registered root"
+    );
+    assert!(
+        harness
+            .registered
+            .get_code_project("project-clone")
+            .await
+            .expect("read clone id")
+            .is_none(),
+        "adoption mints no second project"
+    );
+}
+
+#[asupersync::test]
+async fn full_clone_adopts_a_shallow_first_project_and_enriches_its_history() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-shallow-first").await;
+    let (original, full) = cloned_repository(&harness, "shallow-first");
+    std::fs::write(original.join("lib.rs"), "pub fn next() {}\n").unwrap();
+    git(&original, &["commit", "-q", "-am", "advance history"]);
+    let url = format!("file://{}/", original.display());
+    git(&full, &["remote", "set-url", "origin", &url]);
+    let shallow = original.with_file_name("shallow-first-shallow");
+    git(
+        original.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &url,
+            shallow.to_str().unwrap(),
+        ],
+    );
+    upsert_checkout(&harness.registered, "project-shallow", &shallow).await;
+    assert!(
+        !harness
+            .registered
+            .has_history_anchor("project-shallow")
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        harness
+            .registered
+            .project_ids_by_identity(&full, None)
+            .await
+            .unwrap(),
+        vec!["project-shallow"],
+        "admission lookup resolves a full clone against the shallow-first remote"
+    );
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-full", &full).await,
+        "project-shallow"
+    );
+    assert!(
+        harness
+            .registered
+            .has_history_anchor("project-shallow")
+            .await
+            .unwrap()
+    );
+
+    let unrelated = original.with_file_name("shallow-first-unrelated");
+    committed_repository(&unrelated);
+    std::fs::write(unrelated.join("lib.rs"), "pub fn unrelated() {}\n").unwrap();
+    git(
+        &unrelated,
+        &["commit", "-q", "--amend", "-am", "unrelated root"],
+    );
+    git(&unrelated, &["remote", "add", "origin", &url]);
+    assert!(
+        harness
+            .registered
+            .project_ids_by_identity(&unrelated, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-unrelated", &unrelated).await,
+        "project-unrelated",
+        "once history is known a repointed template cannot adopt by remote alone"
+    );
+}
+
+#[asupersync::test]
+async fn clone_activity_keeps_the_verified_primary_root_listable() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-clone-recency").await;
+    let (original, clone) = cloned_repository(&harness, "clone-recency");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    let writer = harness.registered.writer_connection().unwrap();
+    writer
+        .execute_batch(
+            "UPDATE code_projects SET last_seen_at = 100, primary_root_last_seen_at = 100;
+         UPDATE project_aliases SET last_seen_at = 100;",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-clone", &clone).await,
+        "project-original"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .try_list_code_project_paths(10)
+            .await
+            .unwrap(),
+        vec![super::canonical_project_path(&original)],
+        "new clone activity does not invalidate the primary root's own evidence"
+    );
+    upsert_checkout(&harness.registered, "project-original", &clone).await;
+    assert_eq!(
+        harness
+            .registered
+            .try_list_code_project_paths(10)
+            .await
+            .unwrap(),
+        vec![super::canonical_project_path(&original)],
+        "reopening an adopted clone preserves primary-root discovery"
+    );
+}
+
+#[asupersync::test]
+async fn anchors_do_not_keep_a_missing_project_alive_but_its_store_does() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-reap").await;
+    let root = harness
+        .registered
+        .db_path()
+        .parent()
+        .unwrap()
+        .join("reap-checkout");
+    committed_repository(&root);
+    git(
+        &root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/reap.git",
+        ],
+    );
+    upsert_checkout(&harness.registered, "project-reap", &root).await;
+    let anchor = root_commit_alias(&root);
+    assert!(
+        harness
+            .registered
+            .plan_registry_reap()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let store_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
+        harness.registered.db_path().parent().unwrap(),
+        "project-reap",
+    );
+    std::fs::create_dir_all(&store_root).unwrap();
+    let payload = store_root.join("fixture-data");
+    std::fs::write(&payload, "durable fixture data").unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+    let retained = harness.registered.plan_registry_reap().await.unwrap();
+    assert!(
+        retained
+            .retained
+            .iter()
+            .any(|entry| entry.entry.key == "project-reap")
+    );
+    harness
+        .registered
+        .apply_registry_reap(&retained)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&payload).unwrap(),
+        "durable fixture data"
+    );
+    assert!(
+        harness
+            .registered
+            .get_code_project("project-reap")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&anchor)
+            .await
+            .unwrap(),
+        Some("project-reap".to_owned())
+    );
+
+    std::fs::remove_dir_all(&store_root).unwrap();
+    let plan = harness.registered.plan_registry_reap().await.unwrap();
+    assert!(plan.reapable.iter().any(
+        |entry| entry.kind == super::ReapEntryKind::CodeProject && entry.key == "project-reap"
+    ));
+    harness.registered.apply_registry_reap(&plan).await.unwrap();
+    assert!(
+        harness
+            .registered
+            .get_code_project("project-reap")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        harness
+            .registered
+            .project_id_by_alias_key(&anchor)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[asupersync::test]
+async fn native_path_aliases_protect_roots_from_lossy_registry_reaping() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-native-reap").await;
+    let root = harness
+        .registered
+        .db_path()
+        .parent()
+        .unwrap()
+        .join(OsString::from_vec(b"native-root-\xff".to_vec()));
+    std::fs::create_dir_all(&root).unwrap();
+    register(&harness.registered, "project-native", &root).await;
+
+    let plan = harness.registered.plan_registry_reap().await.unwrap();
+    assert!(plan.reapable.is_empty());
+    assert!(
+        plan.retained
+            .iter()
+            .any(|entry| entry.entry.key == "project-native")
+    );
+    harness.registered.apply_registry_reap(&plan).await.unwrap();
+    assert!(root.exists());
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&super::project_path_alias_key(&root))
+            .await
+            .unwrap(),
+        Some("project-native".to_owned()),
+        "lossy display paths must not allow a live native root to be unregistered"
+    );
+}
+
+#[asupersync::test]
+async fn an_anchor_keeps_the_project_that_first_recorded_it() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-stays").await;
+    let (original, clone) = cloned_repository(&harness, "anchor-stays");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    let anchor = root_commit_alias(&original);
+    // A clone enrolled under its own id before anchors existed.
+    let unrelated = original.with_file_name("anchor-stays-unrelated");
+    std::fs::create_dir_all(&unrelated).expect("create unrelated root");
+    register(&harness.registered, "project-clone", &unrelated).await;
+    harness
+        .registered
+        .upsert_project_alias(&clone, "project-clone")
+        .await
+        .expect("alias the clone to its own project");
+
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-clone", &clone).await,
+        "project-clone",
+        "a clone a path already names keeps its own project"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&anchor)
+            .await
+            .expect("read anchor alias"),
+        Some("project-original".to_owned()),
+        "a later registration never re-points an anchor"
+    );
+}
+
+#[asupersync::test]
+async fn an_identical_history_without_a_remote_stays_its_own_project() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-no-remote").await;
+    let storage_root = harness
+        .registered
+        .db_path()
+        .parent()
+        .expect("registered database storage root")
+        .to_path_buf();
+    let original = storage_root.join("no-remote-original");
+    let lookalike = storage_root.join("no-remote-lookalike");
+    committed_repository(&original);
+    committed_repository(&lookalike);
+    assert_eq!(root_commit_alias(&original), root_commit_alias(&lookalike));
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-lookalike", &lookalike).await,
+        "project-lookalike",
+        "a repository that was not cloned does not adopt through its history"
+    );
+}
+
+#[asupersync::test]
+async fn a_clone_tracking_another_remote_does_not_adopt_through_history() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-fork").await;
+    let (original, fork) = cloned_repository(&harness, "anchor-fork");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    git(
+        &fork,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.invalid/fork.git",
+        ],
+    );
+
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-fork", &fork).await,
+        "project-fork",
+        "a shared root commit without remote agreement adopts nothing"
+    );
+}
+
+#[asupersync::test]
+async fn registering_a_named_checkout_again_does_not_walk_its_history() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-walks").await;
+    let (original, _clone) = cloned_repository(&harness, "anchor-walks");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    let walks = tracedecay_runtime_core::storage::root_commit_walk_count_for_test(&original);
+    assert_eq!(walks, 1, "first registration walks the checkout once");
+
+    std::fs::write(original.join("lib.rs"), "pub fn b() {}\n").expect("edit fixture file");
+    git(&original, &["commit", "-q", "-am", "move HEAD"]);
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    assert_eq!(
+        tracedecay_runtime_core::storage::root_commit_walk_count_for_test(&original),
+        walks,
+        "a checkout whose project records its roots is not walked again"
+    );
+}
+
+#[asupersync::test]
+async fn stale_reap_plan_preserves_an_adopted_clone() {
+    let harness = RegisteredGlobalDbHarness::open("registry-reap-adopted-clone").await;
+    let (original, clone) = cloned_repository(&harness, "reap-adoption");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    let anchor = root_commit_alias(&original);
+    std::fs::remove_dir_all(&original).unwrap();
+    let plan = harness.registered.plan_registry_reap().await.unwrap();
+    assert!(plan.reapable.iter().any(|entry| {
+        entry.kind == super::ReapEntryKind::CodeProject && entry.key == "project-original"
+    }));
+
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-new", &clone).await,
+        "project-original"
+    );
+    harness.registered.apply_registry_reap(&plan).await.unwrap();
+
+    assert!(
+        harness
+            .registered
+            .get_code_project("project-original")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&anchor)
+            .await
+            .unwrap(),
+        Some("project-original".to_owned())
+    );
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&super::project_path_alias_key(&clone))
+            .await
+            .unwrap(),
+        Some("project-original".to_owned())
+    );
+}
+
+#[asupersync::test]
+async fn stale_reap_plan_preserves_a_new_store() {
+    let harness = RegisteredGlobalDbHarness::open("registry-reap-new-store").await;
+    let (root, _) = project_roots(&harness, "reap-store");
+    register(&harness.registered, "project-store", &root).await;
+    std::fs::remove_dir_all(&root).unwrap();
+    let plan = harness.registered.plan_registry_reap().await.unwrap();
+    assert!(plan.reapable.iter().any(|entry| {
+        entry.kind == super::ReapEntryKind::CodeProject && entry.key == "project-store"
+    }));
+
+    let store = tracedecay_runtime_core::storage::profile_sharded_data_root(
+        harness.registered.db_path().parent().unwrap(),
+        "project-store",
+    );
+    std::fs::create_dir_all(&store).unwrap();
+    let payload = store.join("fixture-data");
+    std::fs::write(&payload, "durable fixture data").unwrap();
+    harness.registered.apply_registry_reap(&plan).await.unwrap();
+
+    assert!(
+        harness
+            .registered
+            .get_code_project("project-store")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&payload).unwrap(),
+        "durable fixture data"
+    );
+}
+
+#[asupersync::test]
+async fn stale_reap_plan_preserves_rebound_aliases_and_counts_deletions() {
+    let harness = RegisteredGlobalDbHarness::open("registry-reap-rebound-alias").await;
+    let (root, live) = project_roots(&harness, "reap-rebound");
+    register(&harness.registered, "project-original", &root).await;
+    std::fs::remove_dir_all(&root).unwrap();
+    let mut plan = harness.registered.plan_registry_reap().await.unwrap();
+    let authority = plan
+        .reapable
+        .iter()
+        .find(|entry| {
+            entry.kind == super::ReapEntryKind::CodeProject && entry.key == "project-original"
+        })
+        .unwrap()
+        .clone();
+    plan.reapable.push(authority);
+
+    std::fs::create_dir_all(&live).unwrap();
+    register(&harness.registered, "project-live", &live).await;
+    harness
+        .registered
+        .upsert_project_alias(&root, "project-live")
+        .await
+        .unwrap();
+    let removed = harness.registered.apply_registry_reap(&plan).await.unwrap();
+
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&super::project_path_alias_key(&root))
+            .await
+            .unwrap(),
+        Some("project-live".to_owned())
+    );
+    assert_eq!(removed, 1, "only the original authority was deleted");
+    assert_eq!(
+        harness.registered.apply_registry_reap(&plan).await.unwrap(),
+        0
     );
 }

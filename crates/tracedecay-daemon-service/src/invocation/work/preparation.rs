@@ -318,13 +318,78 @@ pub(super) fn repository_selection(
     .map_err(|_| work_product_authority_unavailable())
 }
 
-pub(super) fn decide_product_proposal(
+/// Commits one product graph mutation as a writer job.
+pub(super) async fn mutate_product(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
     capability: &str,
     use_case: &UseCaseId,
-    request: tracedecay_contracts::DecideWorkProposalRequestV1,
+    request: tracedecay_contracts::WorkProductMutationRequestV1,
 ) -> Result<tracedecay_contracts::WorkProductMutationReceiptV1, ApplicationProblem> {
+    let (services, binding) = product_services(registered, capability, use_case)?;
+    let revisions = current_work_product_revision_pins(registered)?;
+    services
+        .mutate(context.clone(), binding, request, revisions)
+        .await
+        .map_err(work_product_problem)
+}
+
+/// Admits execution of one task: the execution snapshot is prepared from a
+/// reader before the admission event commits as a writer job.
+pub(super) async fn admit_execution(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    capability: &str,
+    use_case: &UseCaseId,
+    command: tracedecay_contracts::AdmitWorkExecutionRequestV1,
+) -> Result<tracedecay_contracts::AdmittedWorkExecutionV1, ApplicationProblem> {
+    let (services, binding) = product_services(registered, capability, use_case)?;
+    let revisions = current_work_product_revision_pins(registered)?;
+    if command.mutation.revisions != revisions {
+        return Err(work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
+        ));
+    }
+    let execution_snapshot = {
+        let (registered, context, binding, command) = (
+            registered.clone(),
+            context.clone(),
+            binding.clone(),
+            command.clone(),
+        );
+        tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
+            &registered.database,
+        )
+        .map_err(|_| work_product_authority_unavailable())?
+        .read(move |_| prepare_execution_snapshot(&registered, &context, &binding, &command))
+        .await?
+    };
+    let mutation = services
+        .mutate(
+            context.clone(),
+            binding,
+            tracedecay_contracts::WorkProductMutationRequestV1::AdmitExecution(command),
+            revisions,
+        )
+        .await
+        .map_err(work_product_problem)?;
+    Ok(tracedecay_contracts::AdmittedWorkExecutionV1 {
+        mutation,
+        execution_snapshot,
+    })
+}
+
+fn product_services(
+    registered: &RegisteredWorkRuntime,
+    capability: &str,
+    use_case: &UseCaseId,
+) -> Result<
+    (
+        tracedecay_application::work::RegisteredWorkProductServicesV1,
+        tracedecay_contracts::WorkProductBindingV1,
+    ),
+    ApplicationProblem,
+> {
     let capability =
         CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
     let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
@@ -333,15 +398,7 @@ pub(super) fn decide_product_proposal(
         binding.clone(),
     )
     .map_err(|_| work_product_authority_unavailable())?;
-    if request.mutation.revisions != current_work_product_revision_pins(registered)? {
-        return Err(work_product_problem(
-            tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
-        ));
-    }
-    services
-        .mutations()
-        .decide_proposal(context, &binding, request)
-        .map_err(work_product_problem)
+    Ok((services, binding))
 }
 
 fn work_product_authority_unavailable() -> ApplicationProblem {

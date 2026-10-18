@@ -1,18 +1,17 @@
 //! Exact-root pending workflow-effect holder read.
 
-use std::time::Duration;
-
 use tracedecay_contracts::{WorkflowEffectAuthorityErrorV1, WorkflowEffectIdentityV1};
 use tracedecay_domain::WorktreeId;
 
-use crate::exact_sql::{ExactSqlHandle, ExactSqlStatement};
+use crate::exact_sql::ExactSqlStatement;
+use crate::work::RegisteredWorkQuery;
 
 use super::{
     decode_json, sql_text, workflow_effect_codec_unavailable, workflow_effect_unavailable,
 };
 
 pub(super) fn has_pending_effects(
-    storage: &ExactSqlHandle,
+    source: &impl RegisteredWorkQuery,
     worktree_id: &WorktreeId,
 ) -> Result<bool, WorkflowEffectAuthorityErrorV1> {
     let statement = ExactSqlStatement::new(
@@ -23,8 +22,8 @@ pub(super) fn has_pending_effects(
         Vec::new(),
     )
     .map_err(|_| workflow_effect_codec_unavailable())?;
-    let rows = storage
-        .query(statement, Duration::from_secs(5))
+    let rows = source
+        .work_query(statement)
         .map_err(workflow_effect_unavailable)?;
     if rows.rows.len() > 1024 {
         return Err(workflow_effect_codec_unavailable());

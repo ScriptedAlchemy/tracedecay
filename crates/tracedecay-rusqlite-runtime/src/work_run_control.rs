@@ -20,7 +20,7 @@ use tracedecay_domain::{
     WorkRunControlV1,
 };
 
-use crate::exact_sql::{ExactSqlError, ExactSqlJobTransaction, ExactSqlTransaction, ExactSqlValue};
+use crate::exact_sql::{ExactSqlError, ExactSqlJobTransaction, ExactSqlValue};
 use crate::work::{
     ACTIVE_ATTEMPT_PREDICATE, RegisteredWorkQuery, RegisteredWorkWrite, WorkSqliteStorage,
     authority_params_owned, exact_sql_integer, exact_sql_statement, exact_sql_text,
@@ -33,6 +33,11 @@ use crate::work::{
 #[derive(Clone, Copy)]
 pub struct WorkSqliteJobStorage<'job> {
     pub(crate) transaction: &'job ExactSqlJobTransaction<'job>,
+    pub(crate) owner: &'job tracedecay_store::StoreShardIdV1,
+    /// The graph read made before the job. A job never replays the product
+    /// journal through the read port, so without one every graph read is
+    /// refused as unavailable.
+    pub(crate) graph: Option<&'job tracedecay_contracts::PrefetchedWorkGraphReadV1>,
 }
 
 impl WorkSqliteStorage {
@@ -45,9 +50,107 @@ impl WorkSqliteStorage {
         R: Send + 'static,
         E: Send + 'static,
     {
+        self.run_job(None, job).await
+    }
+
+    /// [`Self::transact`] for a job whose service reads the current product
+    /// graph: the job's storage answers that read from `graph`, read before
+    /// the job on a reader.
+    pub async fn transact_with_graph<R, E, F>(
+        &self,
+        graph: tracedecay_contracts::PrefetchedWorkGraphReadV1,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(WorkSqliteJobStorage<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(Some(graph), job).await
+    }
+
+    async fn run_job<R, E, F>(
+        &self,
+        graph: Option<tracedecay_contracts::PrefetchedWorkGraphReadV1>,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(WorkSqliteJobStorage<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let owner = self.handle().binding().shard_id.clone();
         self.handle()
-            .transact(move |transaction| job(WorkSqliteJobStorage { transaction }))
+            .transact(move |transaction| {
+                job(WorkSqliteJobStorage {
+                    transaction,
+                    owner: &owner,
+                    graph: graph.as_ref(),
+                })
+            })
             .await
+    }
+
+    /// Makes the current product graph read a writer job's service will ask
+    /// for, on the blocking pool, so the awaiting task parks no runtime thread
+    /// and the journal replay never holds the writer. A read that cannot run
+    /// prefetches nothing, and the job's service refuses its read.
+    pub async fn prefetch_graph(
+        &self,
+        read: impl FnOnce(&Self) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 + Send + 'static,
+    ) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 {
+        self.read(read).await.unwrap_or_default()
+    }
+
+    /// Runs the synchronous Work read `read` on the blocking pool, so the
+    /// awaiting task parks no runtime thread.
+    pub async fn read<R>(
+        &self,
+        read: impl FnOnce(&Self) -> R + Send + 'static,
+    ) -> Result<R, ExactSqlError>
+    where
+        R: Send + 'static,
+    {
+        let storage = self.clone();
+        crate::native_runtime::spawn_blocking(move || read(&storage))
+            .await
+            .map_err(ExactSqlError::ReaderUnavailable)
+    }
+}
+
+impl tracedecay_contracts::WorkRunReservationPort for WorkSqliteJobStorage<'_> {
+    fn load_run_control(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
+        load_run_control_from(self.transaction, authority, task_id, run_id)
+    }
+}
+
+impl tracedecay_contracts::WorkRunReservationPort for WorkSqliteStorage {
+    fn load_run_control(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
+        load_run_control_from(self.handle(), authority, task_id, run_id)
+    }
+}
+
+impl tracedecay_contracts::WorkGraphReadPortV1 for WorkSqliteJobStorage<'_> {
+    fn read_graph(
+        &self,
+        context: &tracedecay_contracts::WorkProductPortContextV1,
+        request: &tracedecay_contracts::WorkGraphReadRequestV1,
+    ) -> Result<tracedecay_contracts::WorkGraphReadV1, tracedecay_contracts::WorkGraphReadPortErrorV1>
+    {
+        self.graph.map_or(
+            Err(tracedecay_contracts::WorkGraphReadPortErrorV1::Unavailable),
+            |graph| graph.read_graph(context, request),
+        )
     }
 }
 
@@ -87,70 +190,6 @@ impl WorkRunControlTransitionPort for WorkSqliteJobStorage<'_> {
     }
 }
 
-impl WorkRunControlTransitionPort for WorkSqliteStorage {
-    fn run_control_frontier(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunControlFrontierV1>, WorkRunControlStorageError> {
-        {
-            let _span = tracing::trace_span!("rusqlite.work_run_control.txn.frontier").entered();
-            {
-                let transaction = self
-                    .handle()
-                    .begin_immediate()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                let frontier = run_control_frontier_from(&transaction, authority, task_id, run_id);
-                let _ = transaction.rollback();
-                frontier
-            }
-        }
-    }
-
-    fn workflow_bound_live_attempts(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Vec<WorkRunLiveAttemptV1>, WorkRunControlStorageError> {
-        workflow_bound_live_attempts_from(self.handle(), authority, task_id, run_id)
-    }
-
-    fn publish_run_control_at_frontier(
-        &self,
-        authority: &WorkAuthority,
-        expected: &WorkRunControlFrontierV1,
-        next: &WorkRunControlV1,
-        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
-    ) -> Result<(), WorkRunControlStorageError> {
-        {
-            let _span =
-                tracing::trace_span!("rusqlite.work_run_control.txn.publish_at_frontier").entered();
-            {
-                let transaction = self
-                    .handle()
-                    .begin_immediate()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                if let Err(error) = publish_run_control_at_frontier_tx(
-                    &transaction,
-                    authority,
-                    expected,
-                    next,
-                    blocked_intervals,
-                ) {
-                    let _ = transaction.rollback();
-                    return Err(error);
-                }
-                transaction
-                    .commit()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                Ok(())
-            }
-        }
-    }
-}
-
 impl WorkRunControlStoragePort for WorkSqliteStorage {
     fn run_admission(
         &self,
@@ -159,15 +198,6 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         run_id: &RunId,
     ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError> {
         run_admission_from(self.handle(), authority, task_id, run_id)
-    }
-
-    fn load_run_control(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
-        load_run_control_from(self.handle(), authority, task_id, run_id)
     }
 
     fn publish_run_control(
@@ -273,7 +303,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
                             .entered();
                     {
                         transaction
-                            .execute(
+                            .work_execute(
                                 exact_sql_statement(
                                     "UPDATE work_blocked_intervals_v1
                      SET observability_durable = 1
@@ -640,7 +670,7 @@ fn publish_run_control_tx(
 }
 
 fn load_blocked_interval_observation_cursor(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
 ) -> Result<Option<BlockedIntervalObservationCursor>, WorkRunControlStorageError> {
     let rows = registered_work_query(
@@ -661,7 +691,7 @@ fn load_blocked_interval_observation_cursor(
 }
 
 fn settled_blocked_interval_observation_page(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     after: Option<&BlockedIntervalObservationCursor>,
     limit: u32,
@@ -706,13 +736,13 @@ fn settled_blocked_interval_observation_page(
 }
 
 fn persist_blocked_interval_observation_cursor(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     receipt: &WorkBlockedIntervalReceiptV1,
 ) -> Result<(), WorkRunControlStorageError> {
     let cursor = BlockedIntervalObservationCursor::from_receipt(receipt)?;
     transaction
-        .execute(
+        .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_blocked_interval_observation_cursors_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
@@ -901,7 +931,7 @@ fn blocked_identity_params(receipt: &WorkBlockedIntervalReceiptV1) -> [ExactSqlV
 /// terminal CAS. The interval receipt cannot survive a terminal attempt with
 /// no end instant, and a crash can commit neither half independently.
 pub(crate) fn close_blocked_intervals_on_terminal_attempt(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     next: &WorkAttemptV1,
 ) -> Result<(), WorkAttemptStorageError> {

@@ -34,6 +34,7 @@ import {
   type CodeIndexWorkerSelectionV1,
   type CodeIndexWorkerStatusV1,
   type CodeIndexWorkerSettingsPatch,
+  type ContextScoutIntentSettingsV1,
   type ProjectSettingsPatch,
   type SettingsPayloadV1,
   type UserSettingsPatch,
@@ -194,6 +195,7 @@ export interface ProjectSettingsChangeSet {
   extract_docstrings?: boolean;
   track_call_sites?: boolean;
   context_scout?: boolean;
+  context_scout_intent?: ContextScoutIntentSettingsV1;
   telemetry?: { timings?: boolean };
   sync?: {
     auto_track_pr_branches?: boolean;

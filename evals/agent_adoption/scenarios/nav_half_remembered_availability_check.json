@@ -36,9 +36,17 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "check_availability"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states check_availability",
+          "pattern": "\\bcheck_availability\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
   "notes": "half-remembered name; tracedecay_similar is built for fuzzy/partial recall like this."
 }

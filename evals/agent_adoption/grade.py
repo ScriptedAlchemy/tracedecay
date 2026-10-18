@@ -5,6 +5,14 @@ Reads a run directory produced by run.sh (one transcript per scenario x host)
 and scores each transcript against the labeled scenario. Emits scoreboard.json
 and report.md into the run directory.
 
+Each result reports four measures that are never blended into one number:
+  * correctness: did the run reach the scenario's required, verifiable
+    conclusion or effect (scenario `outcome` block);
+  * routing/adoption: did the agent choose the intended tool, agent, or skill
+    (`adoption_composite`, a routing-only composite);
+  * tool success: which attempted tool calls actually executed;
+  * efficiency: tool-call budget, plus cost and latency from the host.
+
 The grader normalizes BOTH host transcript formats behind a single event model:
   * Claude Code `--output-format stream-json` (JSONL of assistant/user/result events)
   * Codex `codex exec --json` (JSONL of {"msg": {...}} events)
@@ -18,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -29,13 +38,13 @@ from typing import Any, Optional
 # Loading a skill is routing, which is scored separately.
 IGNORED_TOOLS = {"TodoWrite", "Skill"}
 
-# Per-subscore weights. Applicable subscores are selected per scenario, then the
-# weights are renormalized so each scenario score is 0..1.
-WEIGHTS = {
+# Routing subscore weights for the adoption composite. Applicable subscores are
+# selected per scenario, then the weights are renormalized to 0..1. Correctness,
+# tool success, and efficiency are deliberately absent: a routing bonus must not
+# compensate for a wrong answer or a failed call.
+ADOPTION_WEIGHTS = {
     "first_tool_choice": 0.30,
     "not_forbidden_first": 0.25,
-    "outcome": 0.25,
-    "efficiency": 0.10,
     "feedback": 0.30,  # only for scenarios with grade_feedback=true
     "agent_selected": 0.30,  # only for scenarios with expected_agent
 }
@@ -48,7 +57,7 @@ CONDITIONS = ("full", "no-hints", "no-skills", "bare", "cli-only")
 KNOWN_HOSTS = ("claude", "codex")
 
 # Distinctive fragments of the hook-injected tool hints. These MIRROR the
-# `message`/`context` strings in crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs CATEGORY_SPECS: if that
+# `message`/`context` strings in crates/tracedecay-policy/src/intent_catalog.rs INTENT_CATALOG: if that
 # table's wording changes, refresh these. They are chosen to be specific enough
 # that they only appear in an injected hint, never in a raw MCP tool
 # *description* or the CLAUDE.md steering block, so matching one in the
@@ -88,7 +97,7 @@ CH_CLI = "cli-only"                     # plugin guidance drove supported CLI fa
 CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_CLI, CH_NONE)
 
 # The HINT_SIGNATURES above are hand-mirrored fragments of the hook messages in
-# crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. That mirror is load-bearing: if the source wording
+# crates/tracedecay-policy/src/intent_catalog.rs. That mirror is load-bearing: if the source wording
 # drifts and a signature stops matching, the hint text still fires in live
 # transcripts but grade.py no longer recognizes it, so genuinely hint-driven
 # adoptions get silently misfiled as `steering-or-description` and the whole
@@ -96,7 +105,7 @@ CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_CLI, CH_NONE)
 # turn the README's "refresh these if the table changes" footnote into an
 # enforced check; run.sh runs it before spending a single live token.
 HINT_SOURCE_REL = os.path.join(
-    "crates", "tracedecay-agent-hosts", "src", "hooks", "tool_hints.rs"
+    "crates", "tracedecay-policy", "src", "intent_catalog.rs"
 )
 
 # The optional repeated-query hint is its own MCP result text block, starting
@@ -239,6 +248,10 @@ class ToolCall:
     raw_name: str
     canon: str
     input: dict = field(default_factory=dict)
+    call_id: str = ""
+    # True/False once the host reported the call's result; None when no result
+    # was seen (killed run, or a host event shape this parser does not read).
+    ok: Optional[bool] = None
 
     @property
     def is_tracedecay(self) -> bool:
@@ -263,9 +276,9 @@ _TRACEDECAY_CLI = re.compile(
 _SKILL_FILE_READ = re.compile(r"tracedecay[^\s'\"]*/skills/([a-z][a-z0-9-]*)/SKILL\.md")
 
 
-def tool_call(seq: int, raw_name: str, inp: dict) -> ToolCall:
+def tool_call(seq: int, raw_name: str, inp: dict, call_id: str = "") -> ToolCall:
     """Build one normalized call, preserving TraceDecay CLI and skill identity."""
-    call = ToolCall(seq, raw_name, canon_name(raw_name), inp)
+    call = ToolCall(seq, raw_name, canon_name(raw_name), inp, call_id)
     if call.canon == "Bash":
         match = _TRACEDECAY_CLI.search(call.command)
         skills = _SKILL_FILE_READ.findall(call.command)
@@ -386,7 +399,7 @@ def parse_claude(lines: list[str], host: str) -> Transcript:
                     continue
                 if item.get("type") == "tool_use":
                     raw = item.get("name") or ""
-                    tc = tool_call(seq, raw, item.get("input") or {})
+                    tc = tool_call(seq, raw, item.get("input") or {}, str(item.get("id") or ""))
                     tools.append(tc)
                     timeline.append({"kind": "tool", "call": tc})
                     seq += 1
@@ -408,11 +421,13 @@ def parse_claude(lines: list[str], host: str) -> Transcript:
             message = obj.get("message")
             content = message.get("content") if isinstance(message, dict) else None
             if isinstance(content, list):
-                tool_errors += sum(
-                    1 for item in content
-                    if isinstance(item, dict) and item.get("type") == "tool_result"
-                    and item.get("is_error") is True
-                )
+                results = [item for item in content
+                           if isinstance(item, dict) and item.get("type") == "tool_result"]
+                tool_errors += sum(1 for item in results if item.get("is_error") is True)
+                for item in results:
+                    done = next((t for t in tools if t.call_id and t.call_id == item.get("tool_use_id")), None)
+                    if done is not None:
+                        done.ok = item.get("is_error") is not True
         elif typ == "result":
             r = obj.get("result")
             if isinstance(r, str) and r.strip():
@@ -459,12 +474,13 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
             msg = obj.get("msg") if isinstance(obj.get("msg"), dict) else obj
         t = msg.get("type") or outer_type
         item_id = str(msg.get("id") or "") if item_envelope else ""
-        if outer_type == "item.completed" and item_envelope and (
+        completed_item = outer_type == "item.completed" and item_envelope
+        failed_item = completed_item and (
             msg.get("status") == "failed"
             or (t == "command_execution" and msg.get("exit_code") not in (0, None))
             or (t == "mcp_tool_call" and msg.get("error"))
-        ):
-            tool_errors += 1
+        )
+        tool_errors += bool(failed_item)
 
         def _add_tool(tc: ToolCall):
             nonlocal seq
@@ -472,6 +488,7 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                 if item_id in seen_item_ids:
                     return
                 seen_item_ids.add(item_id)
+                tc.call_id = item_id
             tools.append(tc)
             timeline.append({"kind": "tool", "call": tc})
             seq += 1
@@ -542,6 +559,10 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                 blob = "\n".join(_string_leaves(msg))
                 if blob.strip():
                     timeline.append({"kind": "ctx", "text": blob})
+        if completed_item and item_id:
+            done = next((c for c in tools if c.call_id == item_id), None)
+            if done is not None:
+                done.ok = not failed_item
     cost = cost_record()
     if turn_usages:
         def summed(key):
@@ -743,12 +764,169 @@ def repeated_query_hint_next_steps(tr: Transcript) -> list[str]:
     return steps
 
 
-def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict) -> dict:
+# --------------------------------------------------------------------------- #
+# Correctness: scenario-declared structured checks
+# --------------------------------------------------------------------------- #
+# A scenario's `outcome` block declares what a correct run must establish.
+#   {"kind": "answer",  "answer": CHECKS}                  final answer states conclusions
+#   {"kind": "effect",  "files": {glob: CHECKS}, "tool_effects": [...]}
+#                                                          resulting state / successful call
+#   {"kind": "ungraded", "reason": "..."}                  no verifiable ground truth
+# CHECKS = {"required": [CHECK...], "forbidden": [CHECK...]} with
+# CHECK = {"id": "<conclusion>", "pattern": "<regex, case-insensitive>"}.
+# A run is correct only when every required check matches and no forbidden check
+# does. Patterns are inspectable evidence, not semantic judgment: a regex can
+# still be satisfied by a wrong answer phrased unexpectedly, so write forbidden
+# checks for the plausible opposite conclusion.
+OUTCOME_KINDS = ("answer", "effect", "ungraded")
+
+
+def _check_hits(text: str, checks: list[dict]) -> list[str]:
+    return [c["id"] for c in checks if re.search(c["pattern"], text, re.I | re.M)]
+
+
+def _evaluate_checks(text: str, checks: dict) -> dict:
+    required = checks.get("required", [])
+    forbidden = checks.get("forbidden", [])
+    met = _check_hits(text, required)
+    return {
+        "required_met": met,
+        "required_missing": [c["id"] for c in required if c["id"] not in met],
+        "forbidden_hit": _check_hits(text, forbidden),
+    }
+
+
+def _glob_files(effects: dict, pattern: str) -> str:
+    """Concatenate the snapshotted files a glob selects (`*` crosses `/`)."""
+    return "\n".join(
+        body for path, body in sorted(effects.items()) if fnmatch.fnmatchcase(path, pattern)
+    )
+
+
+def tool_effect_met(tr: Transcript, effect: dict) -> bool:
+    """A named tool executed successfully with matching input."""
+    return any(
+        call.canon in effect["tools"] and call.ok is True
+        and re.search(effect.get("input_pattern", ""), json.dumps(call.input, default=str), re.I)
+        for call in tr.tools
+    )
+
+
+def grade_outcome(scn: dict, tr: Transcript, effects: Optional[dict] = None) -> dict:
+    """Task correctness, independent of which tools the agent chose.
+
+    status: pass | fail | ungraded (no ground truth declared) | unverified
+    (an effect scenario whose post-run snapshot was not captured).
+    """
+    outcome = scn.get("outcome") or {"kind": "ungraded", "reason": "scenario declares no outcome"}
+    kind = outcome["kind"]
+    if kind == "ungraded":
+        return {"kind": kind, "status": "ungraded", "score": None, "reason": outcome.get("reason")}
+
+    missing: list[str] = []
+    forbidden: list[str] = []
+    total = met = 0
+    evidence: dict[str, Any] = {}
+    if kind == "answer":
+        got = _evaluate_checks(tr.final_text, outcome["answer"])
+        evidence["answer"] = got
+        total += len(outcome["answer"].get("required", []))
+        met += len(got["required_met"])
+        missing += got["required_missing"]
+        forbidden += got["forbidden_hit"]
+    else:
+        for effect in outcome.get("tool_effects", []):
+            total += 1
+            if tool_effect_met(tr, effect):
+                met += 1
+            else:
+                missing.append(effect["id"])
+        files = outcome.get("files", {})
+        if files and effects is None:
+            return {"kind": kind, "status": "unverified", "score": None,
+                    "reason": "no post-run file snapshot (run.sh captures one for effect scenarios)"}
+        for pattern, checks in files.items():
+            got = _evaluate_checks(_glob_files(effects or {}, pattern), checks)
+            evidence[pattern] = got
+            total += len(checks.get("required", []))
+            met += len(got["required_met"])
+            missing += got["required_missing"]
+            forbidden += got["forbidden_hit"]
+    score = 0.0 if forbidden else (met / total if total else 1.0)
+    return {
+        "kind": kind, "status": "pass" if score == 1.0 else "fail", "score": round(score, 4),
+        "required_missing": missing, "forbidden_hit": forbidden, "evidence": evidence,
+    }
+
+
+def lint_outcomes(scenarios: dict) -> list[str]:
+    """Every scenario declares a well-formed `outcome`; patterns compile."""
+    problems = []
+
+    def check_list(sid, where, checks):
+        for c in checks:
+            if not (isinstance(c, dict) and isinstance(c.get("id"), str) and isinstance(c.get("pattern"), str)):
+                problems.append(f"{sid}: {where} entry needs string id and pattern")
+                continue
+            try:
+                re.compile(c["pattern"])
+            except re.error as err:
+                problems.append(f"{sid}: {where} {c['id']!r} bad regex: {err}")
+
+    def check_checks(sid, where, checks, need_required=True):
+        if not isinstance(checks, dict) or set(checks) - {"required", "forbidden"}:
+            problems.append(f"{sid}: {where} must be an object with required/forbidden only")
+            return
+        if need_required and not checks.get("required"):
+            problems.append(f"{sid}: {where} needs at least one required conclusion")
+        for key in ("required", "forbidden"):
+            check_list(sid, f"{where}.{key}", checks.get(key, []))
+
+    for sid in sorted(scenarios):
+        scn = scenarios[sid]
+        outcome = scn.get("outcome")
+        if "ground_truth" in scn:
+            problems.append(f"{sid}: bare ground_truth substrings are retired; declare `outcome`")
+        if not isinstance(outcome, dict) or outcome.get("kind") not in OUTCOME_KINDS:
+            problems.append(f"{sid}: outcome.kind must be one of {OUTCOME_KINDS}")
+            continue
+        kind = outcome["kind"]
+        if kind == "ungraded":
+            if not outcome.get("reason"):
+                problems.append(f"{sid}: ungraded outcome needs a reason")
+        elif kind == "answer":
+            check_checks(sid, "outcome.answer", outcome.get("answer"))
+        else:
+            files, tool_effects = outcome.get("files", {}), outcome.get("tool_effects", [])
+            if not files and not tool_effects:
+                problems.append(f"{sid}: effect outcome needs files or tool_effects")
+            for glob_, checks in files.items():
+                check_checks(sid, f"outcome.files[{glob_}]", checks, need_required=False)
+            for effect in tool_effects:
+                if not (isinstance(effect.get("id"), str) and effect.get("tools")):
+                    problems.append(f"{sid}: tool_effects entry needs id and tools")
+                check_list(sid, "tool_effects", [{"id": effect.get("id", "?"), "pattern": effect.get("input_pattern", "")}])
+    return problems
+
+
+def tool_success(tr: Transcript) -> dict:
+    """Attempt vs executed counts. A failed call is an attempt, never a success."""
+    def count(calls):
+        ok = sum(c.ok is True for c in calls)
+        bad = sum(c.ok is False for c in calls)
+        return {"attempted": len(calls), "succeeded": ok, "failed": bad,
+                "unconfirmed": len(calls) - ok - bad,
+                "success_rate": round(ok / (ok + bad), 4) if ok + bad else None}
+    meaningful = tr.meaningful
+    return {**count(meaningful), "tracedecay": count([c for c in meaningful if c.is_tracedecay])}
+
+
+def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict,
+                   effects: Optional[dict] = None) -> dict:
     et = scn.get("expected_tools", {})
     required_first = set(et.get("required_first", []))
     forbidden_first = et.get("forbidden_first", [])
     forbidden_bash = et.get("forbidden_bash", [])
-    ground_truth = scn.get("ground_truth", [])
     budget = scn.get("max_tool_calls", 8)
 
     meaningful = tr.meaningful
@@ -777,9 +955,9 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     if forb_idx is not None:
         details["first_forbidden_tool"] = meaningful[forb_idx].canon or meaningful[forb_idx].command[:60]
 
-    # 3. efficiency
+    # 3. efficiency (reported on its own; never part of the adoption composite)
     count = len(meaningful)
-    subs["efficiency"] = 1.0 if count <= budget else 0.0
+    efficiency = {"within_tool_budget": count <= budget, "tool_calls": count, "budget": budget}
     details["tool_call_count"] = count
     details["budget"] = budget
     # Claude Code defers most MCP schemas behind ToolSearch; count those loads
@@ -795,14 +973,8 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     details["corrections"] = details["tool_errors"] + details["repeated_calls"]
     details["review_words"] = len(tr.final_text.split())
 
-    # 4. outcome (fraction of ground-truth fragments present in final answer)
-    if ground_truth:
-        low = tr.final_text.lower()
-        hits = [g for g in ground_truth if g.lower() in low]
-        subs["outcome"] = len(hits) / len(ground_truth)
-        details["ground_truth_hits"] = hits
-        details["ground_truth_missing"] = [g for g in ground_truth if g not in hits]
-    # (no ground_truth -> outcome subscore omitted)
+    # 4. correctness: scenario-declared structured checks, tool choice ignored
+    correctness = grade_outcome(scn, tr, effects)
 
     # 5. feedback behavior
     if scn.get("grade_feedback"):
@@ -810,7 +982,8 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         want_id = str(seeded_facts.get(fact_key, "")) if fact_key else ""
         fb_ok = False
         for t in tr.tools:
-            if t.canon != "tracedecay_fact_feedback":
+            # A failed feedback call is an attempt, not recorded feedback.
+            if t.canon != "tracedecay_fact_feedback" or t.ok is not True:
                 continue
             fid = str(
                 t.input.get("fact_id")
@@ -862,15 +1035,16 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     if "max_tracedecay_calls" in scn:
         details["tracedecay_call_budget"] = scn["max_tracedecay_calls"]
         details["excess_tracedecay_calls"] = max(0, td_calls - scn["max_tracedecay_calls"])
-        subs["efficiency"] *= float(td_calls <= scn["max_tracedecay_calls"])
+        efficiency["within_tool_budget"] &= td_calls <= scn["max_tracedecay_calls"]
+        efficiency["excess_tracedecay_calls"] = details["excess_tracedecay_calls"]
 
-    # weighted score
-    total_w = sum(WEIGHTS[k] for k in subs)
-    score = sum(subs[k] * WEIGHTS[k] for k in subs) / total_w if total_w else 0.0
-    # Specialist packs measure routing. Generic efficiency or a plausible final
-    # answer cannot compensate for failing to invoke the expected specialist.
+    # Routing/adoption composite: tool, agent, and skill-routing choices only.
+    # It says nothing about whether the task was done; see `correctness`.
+    total_w = sum(ADOPTION_WEIGHTS[k] for k in subs)
+    composite = sum(subs[k] * ADOPTION_WEIGHTS[k] for k in subs) / total_w if total_w else 0.0
+    # Specialist packs measure routing of the expected specialist alone.
     if expected_agent:
-        score = subs["agent_selected"]
+        composite = subs["agent_selected"]
 
     # discovery-channel attribution (condition from per-scenario meta)
     condition = run_meta.get("channel_condition", "full")
@@ -888,8 +1062,11 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         "repeated_query_hints": run_meta.get("repeated_query_hints", "off"),
         "repeated_query_class": scn.get("repeated_query_class"),
         "channel": channel,
-        "score": round(score, 4),
+        "correctness": correctness,
+        "adoption_composite": round(composite, 4),
         "subscores": {k: round(v, 4) for k, v in subs.items()},
+        "tool_success": tool_success(tr),
+        "efficiency": efficiency,
         "details": details,
         "repeated_query_hint_next_steps": repeated_query_hint_next_steps(tr),
         "final_answer_chars": len(tr.final_text),
@@ -902,6 +1079,22 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
 # --------------------------------------------------------------------------- #
 # Aggregation + reporting
 # --------------------------------------------------------------------------- #
+def pass_rate(rs: list[dict]) -> Optional[float]:
+    """Share of verifiably graded runs that passed; ungraded/unverified excluded."""
+    graded = [r["correctness"]["status"] for r in rs if r["correctness"]["status"] in ("pass", "fail")]
+    return round(graded.count("pass") / len(graded), 4) if graded else None
+
+
+def correctness_summary(rs: list[dict]) -> dict:
+    status = [r["correctness"]["status"] for r in rs]
+    return {
+        "passed": status.count("pass"), "failed": status.count("fail"),
+        "unverified": status.count("unverified"), "ungraded": status.count("ungraded"),
+        "pass_rate": pass_rate(rs),
+        "score_mean": _mean([r["correctness"]["score"] for r in rs]),
+    }
+
+
 def aggregate(results: list[dict]) -> dict:
     by_host: dict[str, list[dict]] = {}
     for r in results:
@@ -916,14 +1109,15 @@ def aggregate(results: list[dict]) -> dict:
             return round(sum(vals) / len(vals), 4) if vals else None
 
         # Channel-efficacy: how many scenarios each discovery channel drove, and
-        # the mean score of the scenarios it drove.
+        # the routing composite plus verified pass rate of the scenarios it drove.
         channels: dict[str, dict] = {}
         for ch in CHANNELS:
             crs = [r for r in rs if r.get("channel") == ch]
             if crs:
                 channels[ch] = {
                     "n": len(crs),
-                    "mean_score": round(sum(r["score"] for r in crs) / len(crs), 4),
+                    "adoption_composite_mean": _mean([r["adoption_composite"] for r in crs]),
+                    "correctness_pass_rate": pass_rate(crs),
                 }
         # Per-condition adoption: fraction of scenarios where any tracedecay tool
         # fired (channel != none), plus mean score.
@@ -936,7 +1130,8 @@ def aggregate(results: list[dict]) -> dict:
             conditions[cond] = {
                 "n": len(crs),
                 "adoption_rate": round(adopted / len(crs), 4) if crs else 0.0,
-                "mean_score": round(sum(r["score"] for r in crs) / len(crs), 4) if crs else 0.0,
+                "adoption_composite_mean": _mean([r["adoption_composite"] for r in crs]),
+                "correctness_pass_rate": pass_rate(crs),
             }
 
         skill_counts: dict[str, dict[str, int]] = {}
@@ -959,26 +1154,43 @@ def aggregate(results: list[dict]) -> dict:
                 elif skill in routing["unexpected"]:
                     counts["fp"] += 1
 
+        calls = [r["tool_success"] for r in rs]
+        td_calls = [c["tracedecay"] for c in calls]
         agg[host] = {
-            "skill_routing": skill_counts,
-            "unmeasured_skill_cases": unmeasured_skill_cases,
-            "no_skill_cases": no_skill_cases,
-            "no_skill_overtrigger": no_skill_overtrigger,
-            "excess_tracedecay_calls": sum(r["details"].get("excess_tracedecay_calls", 0) for r in rs),
             "n": n,
-            "mean_score": round(sum(r["score"] for r in rs) / n, 4) if n else 0.0,
+            # Task correctness: only scenarios with a verifiable outcome count.
+            "correctness": correctness_summary(rs),
+            # Routing/adoption: which tool, agent, or skill the agent chose.
+            "adoption_composite_mean": _mean([r["adoption_composite"] for r in rs]),
             "first_tool_choice_rate": rate("first_tool_choice"),
             "not_forbidden_first_rate": rate("not_forbidden_first"),
-            "outcome_mean": rate("outcome"),
-            "efficiency_rate": rate("efficiency"),
             "feedback_rate": rate("feedback"),
             "agent_selected_rate": rate("agent_selected"),
             "forbidden_first_count": sum(
                 1 for r in rs if r["details"].get("forbidden_first_flag")
             ),
+            # Attempt-based: a failed TraceDecay call still counts as adoption.
             "adoption_rate": round(
                 sum(1 for r in rs if r.get("channel") != CH_NONE) / n, 4
             ) if n else 0.0,
+            # Tool success: which attempted calls actually executed.
+            "tool_success": {
+                "attempted": sum(c["attempted"] for c in calls),
+                "succeeded": sum(c["succeeded"] for c in calls),
+                "failed": sum(c["failed"] for c in calls),
+                "unconfirmed": sum(c["unconfirmed"] for c in calls),
+                "tracedecay_attempted": sum(c["attempted"] for c in td_calls),
+                "tracedecay_succeeded": sum(c["succeeded"] for c in td_calls),
+                "tracedecay_failed": sum(c["failed"] for c in td_calls),
+                "runs_with_failed_tracedecay_call": sum(1 for c in td_calls if c["failed"]),
+            },
+            # Efficiency: tool budget here; spend and latency in cost_and_hints.
+            "efficiency_rate": _mean([float(r["efficiency"]["within_tool_budget"]) for r in rs]),
+            "skill_routing": skill_counts,
+            "unmeasured_skill_cases": unmeasured_skill_cases,
+            "no_skill_cases": no_skill_cases,
+            "no_skill_overtrigger": no_skill_overtrigger,
+            "excess_tracedecay_calls": sum(r["details"].get("excess_tracedecay_calls", 0) for r in rs),
             "channels": channels,
             "conditions": conditions,
         }
@@ -1010,12 +1222,15 @@ def aggregate_cost_and_hints(results: list[dict], by_scenario: bool = False) -> 
         costs = [r["cost"] for r in rs]
         out[key] = {
             "n": len(rs),
-            "mean_score": _mean([r["score"] for r in rs]),
-            "outcome_mean": _mean([r["subscores"].get("outcome") for r in rs]),
+            "correctness_pass_rate": pass_rate(rs),
+            "adoption_composite_mean": _mean([r["adoption_composite"] for r in rs]),
             "completion_rate": _mean([float(r.get("final_answer_chars", 0) > 0) for r in rs]),
             "mean_tool_calls": _mean([r["details"].get("tool_call_count") for r in rs]),
             "mean_cost_usd": _mean([u.get("total_cost_usd") for u in costs]),
             "mean_num_turns": _mean([u.get("num_turns") for u in costs]),
+            "mean_duration_s": _mean([None if u.get("duration_ms") is None else u["duration_ms"] / 1000
+                                      for u in costs]),
+            "usd_per_pass": usd_per_pass(rs),
             "mean_prompt_tokens": _mean([_prompt_tokens(u) for u in costs]),
             "mean_output_tokens": _mean([u.get("output_tokens") for u in costs]),
             "hints_total": sum(next_steps.values()),
@@ -1023,6 +1238,15 @@ def aggregate_cost_and_hints(results: list[dict], by_scenario: bool = False) -> 
             "hint_next_steps": next_steps,
         }
     return out
+
+
+def usd_per_pass(rs: list[dict]) -> Optional[float]:
+    """Total spend divided by verified passes; None when spend is unknown or nothing passed."""
+    spend = [r["cost"].get("total_cost_usd") for r in rs]
+    passes = sum(r["correctness"]["status"] == "pass" for r in rs)
+    if not passes or any(s is None for s in spend):
+        return None
+    return round(sum(spend) / passes, 4)
 
 
 def _mean(vals: list) -> Optional[float]:
@@ -1061,7 +1285,7 @@ def learned_skill_aggregate(results: list[dict], invalid_runs: list[dict]) -> li
         out.append({
             **rows[key],
             "n": len(rs),
-            "outcome_mean": _mean([r["subscores"].get("outcome") for r in rs]),
+            "correctness_mean": _mean([r["correctness"]["score"] for r in rs]),
             "routing": routing,
             "tokens_mean": _mean(tokens),
             "tokens_total": sum(t for t in tokens if t is not None),
@@ -1087,7 +1311,7 @@ def render_learned_skill(rows: list[dict]) -> list[str]:
         "Corrections are tool errors plus repeated identical calls within one headless turn. "
         "Token and cost means exclude runs whose host reported no usage (`unknown` columns).",
         "",
-        "| workflow | variant | host/model | n | invalid | outcome | tp | fn | fp | tn | unknown "
+        "| workflow | variant | host/model | n | invalid | correctness | tp | fn | fp | tn | unknown "
         "| tokens mean | tokens total | tokens unknown | usd mean | usd total | tool calls "
         "| corrections | review words | duration ms |",
         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -1096,7 +1320,7 @@ def render_learned_skill(rows: list[dict]) -> list[str]:
         ro = r["routing"]
         lines.append(
             f"| {r['workflow']} | {r['variant']} | {r['host_model']} | {r['n']} | {r['invalid']} | "
-            f"{fmt(r['outcome_mean'])} | {ro['tp']} | {ro['fn']} | {ro['fp']} | {ro['tn']} | "
+            f"{fmt(r['correctness_mean'])} | {ro['tp']} | {ro['fn']} | {ro['fp']} | {ro['tn']} | "
             f"{ro['unknown']} | {fmt(r['tokens_mean'])} | {r['tokens_total']} | {r['tokens_unknown']} | "
             f"{fmt(r['cost_usd_mean'])} | {fmt(r['cost_usd_total'])} | {fmt(r['tool_calls_mean'])} | "
             f"{fmt(r['corrections_mean'])} | {fmt(r['review_words_mean'])} | {fmt(r['duration_ms_mean'])} |"
@@ -1124,17 +1348,53 @@ def render_report(scoreboard: dict) -> str:
                      f"{values.get('excess_tracedecay_calls', 0)} excess TraceDecay calls; "
                      f"{values.get('unmeasured_skill_cases', 0)} skill-routing cases unmeasured.")
     lines.append("")
-    lines.append("## Per-host aggregate")
+    def fmt(x):
+        return "-" if x is None else f"{x:.2f}"
+
+    lines.append("## Task correctness (verified outcomes)")
     lines.append("")
-    lines.append("| host/model | n | mean | first-choice | not-forbidden | outcome | efficiency | feedback | agent | forbidden-first # |")
-    lines.append("|------------|---|------|--------------|---------------|---------|------------|----------|-------|-------------------|")
+    lines.append("Pass means every required conclusion or effect was established and no forbidden "
+                 "one appeared, whichever tools were used. `ungraded` scenarios declare no "
+                 "verifiable ground truth; `unverified` effect scenarios lack a post-run snapshot. "
+                 "Both are excluded from the pass rate.")
+    lines.append("")
+    lines.append("| host/model | n | pass | fail | unverified | ungraded | pass rate |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|")
     for host, a in scoreboard["aggregate"].items():
-        def fmt(x):
-            return "-" if x is None else f"{x:.2f}"
+        c = a["correctness"]
+        lines.append(f"| {host} | {a['n']} | {c['passed']} | {c['failed']} | {c['unverified']} | "
+                     f"{c['ungraded']} | {fmt(c['pass_rate'])} |")
+    lines.append("")
+    lines.append("## Routing and adoption (not effectiveness)")
+    lines.append("")
+    lines.append("Whether the agent chose the intended tool, agent, or skill. The adoption composite "
+                 "weighs routing subscores only; a failed TraceDecay call still counts as adopted "
+                 "(an attempt), and a high composite says nothing about whether the task was done.")
+    lines.append("")
+    lines.append("| host/model | n | adoption composite | adoption rate | first-choice | not-forbidden | feedback | agent | forbidden-first # |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for host, a in scoreboard["aggregate"].items():
         lines.append(
-            f"| {host} | {a['n']} | {a['mean_score']:.2f} | {fmt(a['first_tool_choice_rate'])} | "
-            f"{fmt(a['not_forbidden_first_rate'])} | {fmt(a['outcome_mean'])} | {fmt(a['efficiency_rate'])} | "
+            f"| {host} | {a['n']} | {fmt(a['adoption_composite_mean'])} | {fmt(a['adoption_rate'])} | "
+            f"{fmt(a['first_tool_choice_rate'])} | {fmt(a['not_forbidden_first_rate'])} | "
             f"{fmt(a['feedback_rate'])} | {fmt(a['agent_selected_rate'])} | {a['forbidden_first_count']} |"
+        )
+    lines.append("")
+    lines.append("## Tool success and efficiency")
+    lines.append("")
+    lines.append("Calls are attempts; only calls whose result the host reported without an error "
+                 "count as succeeded. `unconfirmed` calls had no reported result. Efficiency is the "
+                 "share of runs within the scenario's tool-call budget; spend and latency are in the "
+                 "cost table below.")
+    lines.append("")
+    lines.append("| host/model | calls | succeeded | failed | unconfirmed | TraceDecay attempted | TraceDecay succeeded | TraceDecay failed | within budget |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for host, a in scoreboard["aggregate"].items():
+        t = a["tool_success"]
+        lines.append(
+            f"| {host} | {t['attempted']} | {t['succeeded']} | {t['failed']} | {t['unconfirmed']} | "
+            f"{t['tracedecay_attempted']} | {t['tracedecay_succeeded']} | {t['tracedecay_failed']} | "
+            f"{fmt(a['efficiency_rate'])} |"
         )
     lines.append("")
 
@@ -1150,7 +1410,7 @@ def render_report(scoreboard: dict) -> str:
         ch = a.get("channels", {})
         def cell(name):
             c = ch.get(name)
-            return "-" if not c else f"{c['n']} ({c['mean_score']:.2f})"
+            return "-" if not c else f"{c['n']} ({fmt(c['adoption_composite_mean'])} / {fmt(c['correctness_pass_rate'])})"
         lines.append(
             f"| {host} | {a.get('adoption_rate', 0.0):.2f} | "
             f"{cell('hint-driven')} | {cell('skill-driven')} | "
@@ -1158,8 +1418,8 @@ def render_report(scoreboard: dict) -> str:
             f"{cell('cli-only')} | {cell('none')} |"
         )
     lines.append("")
-    lines.append("Cells show `count (mean score)`. `adoption` is the fraction of "
-                 "transcripts where any tracedecay tool fired.")
+    lines.append("Cells show `count (adoption composite / correctness pass rate)`. `adoption` is the "
+                 "fraction of transcripts where any tracedecay tool was attempted.")
     lines.append("")
 
     # Per-condition adoption (only interesting when ablations were run).
@@ -1169,8 +1429,8 @@ def render_report(scoreboard: dict) -> str:
     if len(conds) > 1:
         lines.append("## Ablation: adoption by condition")
         lines.append("")
-        lines.append("| host | condition | n | adoption | mean score |")
-        lines.append("|------|-----------|---|----------|------------|")
+        lines.append("| host | condition | n | adoption | adoption composite | correctness pass rate |")
+        lines.append("|------|-----------|---|----------|--------------------|-----------------------|")
         for host, a in scoreboard["aggregate"].items():
             for cond in conds:
                 c = a.get("conditions", {}).get(cond)
@@ -1178,11 +1438,12 @@ def render_report(scoreboard: dict) -> str:
                     continue
                 lines.append(
                     f"| {host} | {cond} | {c['n']} | "
-                    f"{c['adoption_rate']:.2f} | {c['mean_score']:.2f} |"
+                    f"{c['adoption_rate']:.2f} | {fmt(c['adoption_composite_mean'])} | "
+                    f"{fmt(c['correctness_pass_rate'])} |"
                 )
         lines.append("")
 
-    lines.append("## Outcome, cost, and repeated-query hints")
+    lines.append("## Correctness, cost, latency, and repeated-query hints")
     lines.append("")
     lines.append("Prompt tokens include cache reads and writes. `-` means the host did not report it.")
     lines.append("")
@@ -1197,17 +1458,18 @@ def render_report(scoreboard: dict) -> str:
 
     lines.append("## Per-scenario")
     lines.append("")
-    lines.append("| scenario | host | model | cond | score | first tool | agent | channel | forbidden-first | tools/budget | outcome |")
-    lines.append("|----------|------|-------|------|-------|------------|-------|---------|-----------------|--------------|---------|")
+    lines.append("| scenario | host | model | cond | correctness | adoption composite | first tool | agent | channel | forbidden-first | tools ok/failed | tools/budget |")
+    lines.append("|----------|------|-------|------|-------------|--------------------|------------|-------|---------|-----------------|-----------------|--------------|")
     for r in sorted(scoreboard["results"], key=lambda x: (x["host"], x.get("condition", "full"), x["id"])):
         d = r["details"]
-        oc = r["subscores"].get("outcome")
+        ts = r["tool_success"]
         lines.append(
-            f"| {r['id']} | {r['host']} | {r.get('model') or '-'} | {r.get('condition','full')} | {r['score']:.2f} | "
+            f"| {r['id']} | {r['host']} | {r.get('model') or '-'} | {r.get('condition','full')} | "
+            f"{r['correctness']['status']} | {r['adoption_composite']:.2f} | "
             f"`{d.get('first_tool')}` | {d.get('invoked_agent') or '-'} | {r.get('channel','-')} | "
             f"{'YES' if d.get('forbidden_first_flag') else 'no'} | "
-            f"{d.get('tool_call_count')}/{d.get('budget')} | "
-            f"{'-' if oc is None else f'{oc:.2f}'} |"
+            f"{ts['succeeded']}/{ts['failed']} | "
+            f"{d.get('tool_call_count')}/{d.get('budget')} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -1216,15 +1478,16 @@ def render_cost_and_hints(cells: dict) -> list[str]:
     def num(x, digits=2):
         return "-" if x is None else f"{x:.{digits}f}"
     lines = [
-        "| cell | n | score | outcome | completed | tools | cost $ | turns | prompt tok | output tok | hints | runs w/ hint | after hint |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| cell | n | pass rate | composite | completed | tools | cost $ | $/pass | latency s | turns | prompt tok | output tok | hints | runs w/ hint | after hint |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for cell, c in cells.items():
         after = ", ".join(f"{k} {v}" for k, v in sorted(c["hint_next_steps"].items())) or "-"
         lines.append(
-            f"| {cell} | {c['n']} | {num(c['mean_score'])} | {num(c['outcome_mean'])} | "
+            f"| {cell} | {c['n']} | {num(c['correctness_pass_rate'])} | {num(c['adoption_composite_mean'])} | "
             f"{num(c['completion_rate'])} | "
-            f"{num(c['mean_tool_calls'], 1)} | {num(c['mean_cost_usd'], 4)} | {num(c['mean_num_turns'], 1)} | "
+            f"{num(c['mean_tool_calls'], 1)} | {num(c['mean_cost_usd'], 4)} | {num(c['usd_per_pass'], 4)} | "
+            f"{num(c['mean_duration_s'], 1)} | {num(c['mean_num_turns'], 1)} | "
             f"{num(c['mean_prompt_tokens'], 0)} | {num(c['mean_output_tokens'], 0)} | "
             f"{c['hints_total']} | {c['runs_with_hint']} | {after} |"
         )
@@ -1291,7 +1554,7 @@ def main() -> int:
     ap.add_argument(
         "--check-hints",
         action="store_true",
-        help="Only verify HINT_SIGNATURES still match crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs; "
+        help="Only verify HINT_SIGNATURES still match crates/tracedecay-policy/src/intent_catalog.rs; "
         "exit non-zero on drift. Skips (exit 0) if the source tree is absent.",
     )
     args = ap.parse_args()
@@ -1311,7 +1574,7 @@ def main() -> int:
         if drift:
             print("HINT-SIGNATURE DRIFT DETECTED:", file=sys.stderr)
             for sig in drift:
-                print(f"  - no longer in tool_hints.rs: {sig!r}", file=sys.stderr)
+                print(f"  - no longer in intent_catalog.rs: {sig!r}", file=sys.stderr)
             print(
                 "Channel attribution would misclassify hint-driven adoptions. "
                 f"Refresh HINT_SIGNATURES in grade.py against {src}.",
@@ -1329,15 +1592,16 @@ def main() -> int:
     # Neutrality lint (USER DOCTRINE): prompts must never name tracedecay/MCP/a
     # tool/a skill. Enforced at grade time and available standalone via
     # --lint-only so run.sh can fail fast before spending tokens.
-    violations = lint_scenarios(scenarios) + lint_learned_skills(scenarios)
+    violations = lint_scenarios(scenarios) + lint_learned_skills(scenarios) + lint_outcomes(scenarios)
     if violations:
-        print("SCENARIO NEUTRALITY LINT FAILED:", file=sys.stderr)
+        print("SCENARIO LINT FAILED:", file=sys.stderr)
         for v in violations:
             print(f"  - {v}", file=sys.stderr)
         print(
             "Rewrite the prompt(s) to neutral, natural phrasing that does not name "
             "any tracedecay tool, MCP, or skill, and that does not reuse a "
-            "learned-skill generation session.",
+            "learned-skill generation session; every scenario must also declare a "
+            "well-formed `outcome`.",
             file=sys.stderr,
         )
         if args.lint_only:
@@ -1428,7 +1692,12 @@ def main() -> int:
                 }
             )
             continue
-        results.append(score_scenario(scn, tr, seeded_facts, per_meta))
+        effects = None
+        effects_path = os.path.join(run_dir, base + ".effects.json")
+        if os.path.exists(effects_path):
+            with open(effects_path) as f:
+                effects = json.load(f)
+        results.append(score_scenario(scn, tr, seeded_facts, per_meta, effects))
 
     scoreboard = {
         "meta": {
