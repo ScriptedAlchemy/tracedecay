@@ -332,7 +332,8 @@ src/b.ts(2,2): warning TS6133: Second.
 
     #[test]
     fn an_unparsed_second_diagnostic_is_not_a_continuation() {
-        let stdout = "src/a.ts(1,1): error TS2322: First.\nsrc/b.ts(2,nope): error TS1005: Second.\n";
+        let stdout =
+            "src/a.ts(1,1): error TS2322: First.\nsrc/b.ts(2,nope): error TS1005: Second.\n";
         let error = parse_tsc_output(stdout).expect_err("incomplete report");
         assert!(error.to_string().contains("src/b.ts"));
     }
