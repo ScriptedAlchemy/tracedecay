@@ -53,6 +53,17 @@ describe('dashboard credential', () => {
     expect(sentHeaders(fetchMock).get('authorization')).toBe('Bearer other');
   });
 
+  it('authenticates requests through the shared JSON transport', async () => {
+    window.history.replaceState(null, '', `/#token=${TOKEN}`);
+    const { adoptLaunchCredential } = await freshCredential();
+    const { fetchJsonResponse } = await import('../query/responseBody.ts');
+    adoptLaunchCredential();
+
+    expect((await fetchJsonResponse('/api/settings')).outcome).toBe('response');
+    expect(sentHeaders(fetchMock).get('authorization')).toBe(BASIC);
+    expect(sentHeaders(fetchMock).get('accept')).toBe('application/json');
+  });
+
   it('survives a reload through sessionStorage', async () => {
     sessionStorage.setItem('tracedecay.dashboard.access', TOKEN);
     const { dashboardFetch } = await freshCredential();
