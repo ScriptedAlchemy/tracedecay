@@ -1052,9 +1052,13 @@ async fn dashboard_freshness_does_not_join_a_text_projection_slice() {
     // source, so start from the settled owner this test is about.
     wait_for_settled_owner(&registry, fixture.path()).await;
 
+    // The slot stays held for the whole read, so a read that joined the slice
+    // would never complete. The ceiling is a failure bound for that hang, not
+    // a latency bound: a loaded host takes more than 100 ms to schedule a read
+    // that completes in 2 ms (#4238).
     let held_slot = latest.text_projection_build.lock_slot();
     let freshness = tokio::time::timeout(
-        Duration::from_millis(100),
+        SERVING_SEAT_FAILURE_CEILING,
         registry.dashboard_freshness(fixture.path()),
     )
     .await
