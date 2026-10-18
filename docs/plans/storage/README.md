@@ -760,6 +760,37 @@ changes a file that holds memory.
   `global.db` rows) or a store the daemon does not mount (orphan collection's
   memory check), and neither holds a read slot on a live file. It goes with step
   8, where a project directory describes itself and memory has its own file.
+- Step 8, repository identity (2026-10-17, branch `feat/storage-repository-identity`).
+  A second full clone, a shallow clone, and a checkout after a merge of unrelated
+  histories open the project that first enrolled the repository, with no `init`.
+  Anchors are rows in the existing `global.db` `project_aliases` table under the
+  prefixes `git-root-commit:`, `git-subproject:` and `git-remote-url:`, beside the
+  path and `git-common-dir:` rows. There is no `catalog.db`, no schema change, and
+  no `tracedecay project link` or `project split`. Registration keeps the first
+  enrolled checkout as `canonical_root`, never re-points an anchor, and caches
+  each checkout's registration on its own. MCP scope admits a checkout outside the
+  registered root when its own marker names the project. The daemon source binding
+  digest names the project, so every checkout verifies one binding, and a binding
+  under the old root-derived digest rebinds once. Deviations from section 2:
+  - Anchor lookup requires an `origin` remote. Unrelated repositories whose first
+    commit is byte-identical (most test fixtures) would otherwise merge. A clone
+    whose origin was removed mints its own project, as before.
+  - A full clone records its normalized origin beside its root commits, so a later
+    shallow clone, which can name only its remote, finds the project. A
+    subproject records no remote anchor, because one remote cannot tell two
+    subprojects of a repository apart.
+  - Anchors adopt only a checkout that no path or `git-common-dir:` alias names.
+    Two clones enrolled under separate ids before this step keep both ids instead
+    of tripping `reset_required`.
+  - A marker naming a store this profile does not hold yields to the registry. At
+    first touch, when nothing else names the checkout, the profile still enrolls
+    under the marker's id, because the store locator refuses an enrollment root
+    whose marker names another project.
+  - The daemon's enrollment authority for a project admits another root when that
+    root's own marker names the project. Any other second authority is still
+    `DuplicateProjectAuthority`.
+  - A new root commit is recorded at the next registration of a checkout; a
+    process that already registered that checkout does not walk again.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose
