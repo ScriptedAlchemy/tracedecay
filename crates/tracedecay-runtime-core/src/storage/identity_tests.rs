@@ -238,6 +238,17 @@ mod identity_anchor_tests {
         roots
     }
 
+    fn anchors(root: &Path) -> Vec<IdentityAnchor> {
+        repository_identity_anchors(root, crate::git::git_remote_url(root).as_deref())
+    }
+
+    fn remote(url: &str, relative: &str) -> IdentityAnchor {
+        IdentityAnchor::Remote {
+            url: crate::git::normalize_git_remote_url(url).expect("normalized remote"),
+            relative: PathBuf::from(relative),
+        }
+    }
+
     #[test]
     fn every_root_commit_of_a_merged_history_is_an_anchor() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -246,7 +257,7 @@ mod identity_anchor_tests {
         assert_eq!(roots.len(), 2, "fixture must carry two unrelated roots");
 
         assert_eq!(
-            repository_identity_anchors(&root),
+            anchors(&root),
             roots
                 .iter()
                 .cloned()
@@ -263,17 +274,19 @@ mod identity_anchor_tests {
     fn a_subdirectory_project_is_anchored_by_root_and_relative_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = two_root_repository(temp.path());
-        let anchors = repository_identity_anchors(&root.join("nested"));
+        let anchors = repository_identity_anchors(&root.join("nested"), Some("git@h:o/r.git"));
 
+        let mut expected = root_commits(&root)
+            .iter()
+            .map(|root| format!("git-subproject:{}:nested", root.as_str()))
+            .collect::<Vec<_>>();
+        expected.push("git-remote-url:https://h/o/r#nested".to_owned());
         assert_eq!(
             anchors
                 .iter()
                 .map(IdentityAnchor::alias_key)
                 .collect::<Vec<_>>(),
-            root_commits(&root)
-                .iter()
-                .map(|root| format!("git-subproject:{}:nested", root.as_str()))
-                .collect::<Vec<_>>()
+            expected
         );
     }
 
@@ -289,16 +302,11 @@ mod identity_anchor_tests {
         let shallow = temp.path().join("shallow");
         fs::create_dir(shallow.join("nested")).expect("create subproject");
 
+        assert_eq!(anchors(&shallow), vec![remote(&url, "")]);
         assert_eq!(
-            repository_identity_anchors(&shallow),
-            vec![IdentityAnchor::Remote(
-                crate::git::normalize_git_remote_url(&url).expect("normalized remote")
-            )]
-        );
-        assert_eq!(
-            repository_identity_anchors(&shallow.join("nested")),
-            Vec::new(),
-            "one remote cannot tell subprojects of a repository apart"
+            anchors(&shallow.join("nested")),
+            vec![remote(&url, "nested")],
+            "a subproject's remote anchor names its path in the checkout"
         );
 
         git(temp.path(), &["clone", "-q", &url, "full"]);
@@ -307,13 +315,64 @@ mod identity_anchor_tests {
             .into_iter()
             .map(IdentityAnchor::RootCommit)
             .collect::<Vec<_>>();
-        expected.push(IdentityAnchor::Remote(
-            crate::git::normalize_git_remote_url(&url).expect("normalized remote"),
-        ));
+        expected.push(remote(&url, ""));
         assert_eq!(
-            repository_identity_anchors(&full),
+            anchors(&full),
             expected,
             "a full clone records its remote for later shallow clones"
+        );
+    }
+
+    #[test]
+    fn one_remote_normalizes_the_same_however_it_was_cloned() {
+        let expected = Some("https://github.com/owner/repo".to_owned());
+        for spelling in [
+            "https://github.com/Owner/Repo.git",
+            "https://github.com/owner/repo/",
+            "ssh://git@github.com/owner/repo.git",
+            "ssh://git@github.com/owner/repo",
+            "git@github.com:owner/repo.git",
+            "git@github.com:/owner/repo",
+        ] {
+            assert_eq!(
+                crate::git::normalize_git_remote_url(spelling),
+                expected,
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            crate::git::normalize_git_remote_url("file:///srv/repos/remote.git/"),
+            crate::git::normalize_git_remote_url("/srv/repos/remote.git"),
+        );
+        assert_eq!(
+            crate::git::local_remote_path("file:///srv/repos/checkout"),
+            Some(PathBuf::from("/srv/repos/checkout"))
+        );
+        assert_eq!(
+            crate::git::local_remote_path("git@github.com:owner/repo.git"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_checkout_walks_its_history_once_per_head() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = two_root_repository(temp.path());
+        let walks = root_commit_walk_count_for_test(&root);
+
+        let first = anchors(&root);
+        assert_eq!(anchors(&root), first);
+        assert_eq!(
+            root_commit_walk_count_for_test(&root),
+            walks + 1,
+            "a second lookup at the same HEAD reuses the walk"
+        );
+        commit(&root, "third.txt");
+        assert_eq!(anchors(&root), first);
+        assert_eq!(
+            root_commit_walk_count_for_test(&root),
+            walks + 2,
+            "a new HEAD is walked again"
         );
     }
 
@@ -321,23 +380,32 @@ mod identity_anchor_tests {
     fn an_unborn_repository_has_no_anchors() {
         let temp = tempfile::tempdir().expect("tempdir");
         git(temp.path(), &["init", "-q"]);
-        assert_eq!(repository_identity_anchors(temp.path()), Vec::new());
+        assert_eq!(
+            repository_identity_anchors(temp.path(), Some("git@h:o/r")),
+            Vec::new()
+        );
     }
 
     #[test]
-    fn claiming_a_marker_never_overwrites_another_project() {
+    fn a_marker_naming_a_held_store_survives_a_claim_and_an_unheld_one_is_replaced() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = two_root_repository(temp.path());
-        assert!(write_repository_identity_marker(&root, "proj_foreign").unwrap());
-
-        assert!(!claim_repository_identity_marker(&root, "proj_local").unwrap());
-        assert_eq!(
+        let profile = temp.path().join("profile");
+        let marked = |project_id| {
             read_repository_identity_marker(&root)
                 .unwrap()
                 .expect("marker")
-                .project_id,
-            "proj_foreign"
-        );
-        assert!(claim_repository_identity_marker(&root, "proj_foreign").unwrap());
+                .project_id
+                == project_id
+        };
+        assert!(write_repository_identity_marker(&root, "proj_held").unwrap());
+        fs::create_dir_all(profile_sharded_data_root(&profile, "proj_held")).unwrap();
+
+        assert!(!claim_repository_identity_marker(&root, "proj_local", &profile).unwrap());
+        assert!(marked("proj_held"), "a held project's marker is kept");
+
+        assert!(write_repository_identity_marker(&root, "proj_stale").unwrap());
+        assert!(claim_repository_identity_marker(&root, "proj_local", &profile).unwrap());
+        assert!(marked("proj_local"), "a marker naming no held store yields");
     }
 }

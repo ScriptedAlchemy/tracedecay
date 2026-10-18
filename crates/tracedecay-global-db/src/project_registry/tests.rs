@@ -720,7 +720,7 @@ async fn upsert_checkout(db: &RegisteredGlobalDb, project_id: &str, root: &Path)
 }
 
 fn root_commit_alias(root: &Path) -> String {
-    let anchors = tracedecay_runtime_core::storage::repository_identity_anchors(root);
+    let anchors = tracedecay_runtime_core::storage::repository_identity_anchors(root, None);
     assert_eq!(anchors.len(), 1, "fixture repository has one root commit");
     anchors[0].alias_key()
 }
@@ -812,5 +812,45 @@ async fn an_identical_history_without_a_remote_stays_its_own_project() {
         upsert_checkout(&harness.registered, "project-lookalike", &lookalike).await,
         "project-lookalike",
         "a repository that was not cloned does not adopt through its history"
+    );
+}
+
+#[asupersync::test]
+async fn a_clone_tracking_another_remote_does_not_adopt_through_history() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-fork").await;
+    let (original, fork) = cloned_repository(&harness, "anchor-fork");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    git(
+        &fork,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.invalid/fork.git",
+        ],
+    );
+
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-fork", &fork).await,
+        "project-fork",
+        "a shared root commit without remote agreement adopts nothing"
+    );
+}
+
+#[asupersync::test]
+async fn registering_a_named_checkout_again_does_not_walk_its_history() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-anchor-walks").await;
+    let (original, _clone) = cloned_repository(&harness, "anchor-walks");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    let walks = tracedecay_runtime_core::storage::root_commit_walk_count_for_test(&original);
+    assert_eq!(walks, 1, "first registration walks the checkout once");
+
+    std::fs::write(original.join("lib.rs"), "pub fn b() {}\n").expect("edit fixture file");
+    git(&original, &["commit", "-q", "-am", "move HEAD"]);
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    assert_eq!(
+        tracedecay_runtime_core::storage::root_commit_walk_count_for_test(&original),
+        walks,
+        "a checkout whose project records its roots is not walked again"
     );
 }

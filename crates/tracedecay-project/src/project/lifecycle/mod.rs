@@ -294,6 +294,7 @@ impl TraceDecay {
         tracedecay_runtime_core::storage::claim_repository_identity_marker(
             project_root,
             project_id.as_str(),
+            &profile_root,
         )?;
         let configuration_database = runtime_registry
             .project_session_store(project_id, vec![project_root.to_path_buf()])

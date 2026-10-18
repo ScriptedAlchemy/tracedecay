@@ -1,6 +1,7 @@
 //! Linked-worktree and same-remote clone identity tests.
 
 use super::*;
+use tracedecay_domain::errors::ProjectOpenFailureKind;
 
 #[tokio::test]
 async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
@@ -480,11 +481,8 @@ async fn unrelated_histories_merge_adds_an_alias_and_keeps_the_id() {
         ],
     );
 
-    let reopened = open_with_maintenance(&profile, &project).await.unwrap();
-    assert_eq!(open_project_id(&reopened), project_id);
-    reopened.close();
-    // The registration cache of this process already holds `project`, so the
-    // new root is recorded by the next checkout that registers.
+    // `project` already records a root anchor, so its own registrations no
+    // longer walk; the next checkout no path names records the new root.
     let merged_clone = root.join("repo-merged-clone");
     git(
         &root,
@@ -499,12 +497,278 @@ async fn unrelated_histories_merge_adds_an_alias_and_keeps_the_id() {
         .unwrap();
     assert_eq!(open_project_id(&cloned), project_id);
     cloned.close();
-
     let (_, aliases) = registry_rows(&profile, &project_id).await;
     assert_eq!(
         count_prefixed(&aliases, "git-root-commit:"),
         2,
         "{aliases:?}"
+    );
+
+    // A clone holding only the merged-in history reaches the project through
+    // the new root alone.
+    let vendored_clone = root.join("repo-vendored-clone");
+    git(
+        &root,
+        &[
+            "clone",
+            "--single-branch",
+            "--branch",
+            "vendored",
+            project.to_str().unwrap(),
+            vendored_clone.to_str().unwrap(),
+        ],
+    );
+    let vendored = open_with_maintenance(&profile, &vendored_clone)
+        .await
+        .expect("the merged-in root names the project");
+    assert_eq!(open_project_id(&vendored), project_id);
+    vendored.close();
+}
+
+/// A bare remote and a committed clone of it, as `(remote, clone)`, whose
+/// root commit is `file`'s.
+fn pushed_repository(dir: &Path, name: &str, file: &str) -> (PathBuf, PathBuf) {
+    let remote = dir.join(format!("{name}.git"));
+    let checkout = dir.join(name);
+    git(dir, &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir,
+        &[
+            "clone",
+            remote.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    git(&checkout, &["config", "user.email", "test@example.com"]);
+    git(&checkout, &["config", "user.name", "TraceDecay Test"]);
+    fs::write(checkout.join(file), format!("{file}\n")).unwrap();
+    git(&checkout, &["add", "."]);
+    git(&checkout, &["commit", "-m", file]);
+    git(&checkout, &["push", "origin", "HEAD:master"]);
+    (remote, checkout)
+}
+
+#[tokio::test]
+async fn anchors_naming_two_projects_adopt_neither_and_the_checkout_mints() {
+    let dir = TempDir::new().unwrap();
+    let profile = test_profile(&test_home(&dir));
+    let root = canonical_temp_path(dir.path());
+    let (one_remote, one) = pushed_repository(&root, "one", "one.txt");
+    let (two_remote, two) = pushed_repository(&root, "two", "two.txt");
+    let mut enrolled = Vec::new();
+    for checkout in [&one, &two] {
+        let cg = init_with_maintenance(&profile, checkout).await.unwrap();
+        enrolled.push(open_project_id(&cg));
+        cg.close();
+    }
+    git(
+        &one,
+        &[
+            "pull",
+            "--no-rebase",
+            "--no-edit",
+            "--allow-unrelated-histories",
+            two_remote.to_str().unwrap(),
+            "master",
+        ],
+    );
+    git(&one, &["push", "origin", "HEAD:master"]);
+    let third = root.join("third");
+    git(
+        &root,
+        &[
+            "clone",
+            one_remote.to_str().unwrap(),
+            third.to_str().unwrap(),
+        ],
+    );
+
+    let unregistered = match open_with_maintenance(&profile, &third).await {
+        Ok(_) => panic!("ambiguous anchors must not adopt a project"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        unregistered.project_open_failure_kind(),
+        Some(ProjectOpenFailureKind::IdentityUnregistered),
+        "ambiguous anchors fall through instead of conflicting: {unregistered}"
+    );
+    let minted = init_with_maintenance(&profile, &third)
+        .await
+        .expect("ambiguous anchors fall through to a fresh project");
+    assert!(
+        !enrolled.contains(&open_project_id(&minted)),
+        "{} adopted one of {enrolled:?}",
+        open_project_id(&minted)
+    );
+    minted.close();
+}
+
+#[tokio::test]
+async fn a_fork_with_its_own_origin_is_its_own_project() {
+    let dir = TempDir::new().unwrap();
+    let profile = test_profile(&test_home(&dir));
+    let (_remote, project, fork) = same_remote_clones(&canonical_temp_path(dir.path()));
+    let first = init_with_maintenance(&profile, &project).await.unwrap();
+    let project_id = open_project_id(&first);
+    first.close();
+    git(
+        &fork,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@example.invalid:someone/fork.git",
+        ],
+    );
+
+    let unregistered = match open_with_maintenance(&profile, &fork).await {
+        Ok(_) => panic!("a shared root commit alone must not adopt a fork"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        unregistered.project_open_failure_kind(),
+        Some(ProjectOpenFailureKind::IdentityUnregistered),
+        "{unregistered}"
+    );
+    let forked = init_with_maintenance(&profile, &fork).await.unwrap();
+    assert_ne!(open_project_id(&forked), project_id);
+    forked.close();
+}
+
+#[tokio::test]
+async fn a_held_marker_outranks_anchors_when_a_moved_clone_registers() {
+    let dir = TempDir::new().unwrap();
+    let profile = test_profile(&test_home(&dir));
+    let root = canonical_temp_path(dir.path());
+    let (remote, project, clone) = same_remote_clones(&root);
+    let first = init_with_maintenance(&profile, &project).await.unwrap();
+    let project_id = open_project_id(&first);
+    first.close();
+    let store_relpaths = async |project_id: &str| {
+        HostAdmissionTestRuntimeV1::profile(profile.data_dir())
+            .await
+            .unwrap()
+            .project_registry_context_by_id(project_id)
+            .await
+            .expect("project stays registered")
+            .stores
+            .into_iter()
+            .map(|store| store.store.store_relpath)
+            .collect::<Vec<_>>()
+    };
+    let project_stores = store_relpaths(&project_id).await;
+
+    // Enrolled as its own project while it tracked a fork, then pointed at
+    // the shared remote and moved, so only its marker still names it.
+    git(
+        &clone,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@example.invalid:someone/fork.git",
+        ],
+    );
+    let own = init_with_maintenance(&profile, &clone).await.unwrap();
+    let own_id = open_project_id(&own);
+    own.close();
+    assert_ne!(own_id, project_id);
+    git(
+        &clone,
+        &["remote", "set-url", "origin", remote.to_str().unwrap()],
+    );
+    let moved = root.join("repo-clone-moved");
+    fs::rename(&clone, &moved).unwrap();
+
+    let reopened = open_with_maintenance(&profile, &moved).await.unwrap();
+    assert_eq!(open_project_id(&reopened), own_id);
+    reopened.close();
+    assert_eq!(
+        store_relpaths(&project_id).await,
+        project_stores,
+        "the adopted project's store still points at its own shard"
+    );
+    let (canonical_root, _) = registry_rows(&profile, &own_id).await;
+    assert_eq!(
+        canonical_root,
+        RegisteredGlobalDb::canonical_project_key(&moved),
+        "the moved clone stays its own project"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_marker_yields_to_the_project_anchors_adopt() {
+    let dir = TempDir::new().unwrap();
+    let profile = test_profile(&test_home(&dir));
+    let (_remote, project, clone) = same_remote_clones(&canonical_temp_path(dir.path()));
+    let first = init_with_maintenance(&profile, &project).await.unwrap();
+    let project_id = open_project_id(&first);
+    first.close();
+    write_repository_identity_marker(&clone, "proj_stale").unwrap();
+
+    let adopted = open_with_maintenance(&profile, &clone)
+        .await
+        .expect("a marker naming no store this profile holds does not refuse the clone");
+    assert_eq!(open_project_id(&adopted), project_id);
+    adopted.close();
+    assert_eq!(
+        read_repository_identity_marker(&clone)
+            .unwrap()
+            .expect("marker")
+            .project_id,
+        project_id
+    );
+}
+
+#[tokio::test]
+async fn reopening_an_enrolled_checkout_does_not_walk_its_history() {
+    let dir = TempDir::new().unwrap();
+    let profile = test_profile(&test_home(&dir));
+    let (_remote, project, _clone) = same_remote_clones(&canonical_temp_path(dir.path()));
+    let first = init_with_maintenance(&profile, &project).await.unwrap();
+    let project_id = open_project_id(&first);
+    first.close();
+    let walks = tracedecay_runtime_core::storage::root_commit_walk_count_for_test(&project);
+    assert!(
+        walks > 0,
+        "first touch walks the unknown checkout's history"
+    );
+
+    // A new HEAD defeats the per-HEAD memo, so only the alias gates keep the
+    // reopen, its identity lookup and its registration from walking.
+    fs::write(project.join("src/lib.rs"), "pub fn moved_head() {}\n").unwrap();
+    git(&project, &["commit", "-am", "move HEAD"]);
+    open_with_maintenance(&profile, &project)
+        .await
+        .unwrap()
+        .close();
+    let db = HostAdmissionTestRuntimeV1::profile(profile.data_dir())
+        .await
+        .unwrap();
+    let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&project);
+    let remote = tracedecay_runtime_core::git::git_remote_url(&project);
+    assert_eq!(
+        db.project_registry_context_by_identity(&project, common_dir.as_deref())
+            .await
+            .unwrap()
+            .expect("enrolled checkout")
+            .project
+            .project_id,
+        project_id
+    );
+    db.upsert_code_project(
+        &project_id,
+        &project,
+        common_dir.as_deref(),
+        remote.as_deref(),
+        Some("master"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tracedecay_runtime_core::storage::root_commit_walk_count_for_test(&project),
+        walks,
+        "an enrolled checkout resolves by path and records no new walk"
     );
 }
 
@@ -530,14 +794,10 @@ async fn shallow_clone_adopts_through_remote_url() {
             shallow.to_str().unwrap(),
         ],
     );
-    git(
-        &shallow,
-        &["remote", "set-url", "origin", remote.to_str().unwrap()],
-    );
 
     let cg = open_with_maintenance(&profile, &shallow)
         .await
-        .expect("a shallow clone of the same remote opens the initialized repository");
+        .expect("a shallow file:// clone of the project's remote path opens the project");
     assert_eq!(open_project_id(&cg), project_id);
     cg.close();
 }
@@ -560,9 +820,14 @@ async fn second_profile_enrolls_under_the_existing_marker_without_rewriting_it()
     let marker_id = open_project_id(&foreign);
     foreign.close();
 
-    assert!(
-        open_with_maintenance(&profile, &project).await.is_err(),
-        "a marker naming a shard this profile lacks does not open a store"
+    let unheld = match open_with_maintenance(&profile, &project).await {
+        Ok(_) => panic!("a marker naming a shard this profile lacks does not open a store"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        unheld.project_open_failure_kind(),
+        Some(ProjectOpenFailureKind::IdentityUnregistered),
+        "the unheld marker yields to a registry that names nothing: {unheld}"
     );
     let first = init_with_maintenance(&profile, &project)
         .await

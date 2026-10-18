@@ -81,6 +81,7 @@ pub(super) async fn open_project_for_handshake(
         tracedecay_runtime_core::storage::claim_repository_identity_marker(
             project_path,
             project_id,
+            &handshake.client_identity.profile_root,
         )?;
     }
     let configuration_database = Box::pin(

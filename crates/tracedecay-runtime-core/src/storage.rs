@@ -485,10 +485,13 @@ mod profile_identity;
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use identity::pin_fixture_repository_identity;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use identity::root_commit_walk_count_for_test;
 pub use identity::{
     IdentityAnchor, claim_repository_identity_marker, has_repository_identity_marker,
-    read_repository_identity_marker, repository_identity_anchors, repository_identity_path,
-    write_repository_identity_marker,
+    read_repository_identity_marker, repository_identity_anchors,
+    repository_identity_anchors_off_executor, repository_identity_path,
+    walked_repository_identity_anchors, write_repository_identity_marker,
 };
 pub use layout::{
     default_profile_project_id, default_profile_sharded_layout, enrolled_project_roots,

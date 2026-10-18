@@ -200,7 +200,7 @@ pub async fn register_project_store(
         // removed.
         .await?;
 
-    storage::claim_repository_identity_marker(project_root, &project.project_id)?;
+    storage::claim_repository_identity_marker(project_root, &project.project_id, &profile_root)?;
 
     if let Some(primary_root) = primary_root.as_deref() {
         // The registry now points canonical_root/display_root at the

@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -19,8 +21,9 @@ pub enum IdentityAnchor {
     /// A project rooted below its repository's worktree root: one of the
     /// repository's root commits plus the project's path inside the checkout.
     Subproject { root: GitOidV1, relative: PathBuf },
-    /// The normalized `origin` URL, used when the roots cannot be walked.
-    Remote(String),
+    /// The normalized `origin` URL, plus the project's path inside the
+    /// checkout for a subproject.
+    Remote { url: String, relative: PathBuf },
 }
 
 impl IdentityAnchor {
@@ -28,22 +31,117 @@ impl IdentityAnchor {
     pub fn alias_key(&self) -> String {
         match self {
             Self::RootCommit(root) => format!("git-root-commit:{}", root.as_str()),
-            Self::Subproject { root, relative } => format!(
-                "git-subproject:{}:{}",
-                root.as_str(),
-                relative.to_string_lossy().replace('\\', "/")
-            ),
-            Self::Remote(url) => format!("git-remote-url:{url}"),
+            Self::Subproject { root, relative } => {
+                format!("git-subproject:{}:{}", root.as_str(), slash_path(relative))
+            }
+            Self::Remote { url, relative } if relative.as_os_str().is_empty() => {
+                format!("git-remote-url:{url}")
+            }
+            Self::Remote { url, relative } => {
+                format!("git-remote-url:{url}#{}", slash_path(relative))
+            }
         }
     }
+
+    /// Whether this anchor names a commit of the history rather than a remote.
+    #[must_use]
+    pub fn is_history(&self) -> bool {
+        !matches!(self, Self::Remote { .. })
+    }
+}
+
+fn slash_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 const ROOT_COMMIT_WALK_LIMIT: usize = 1_000_000;
 const ROOT_COMMIT_WALK_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The anchors naming the repository `project_root` belongs to; empty outside
-/// a repository, in a bare repository, or before the first commit.
-pub fn repository_identity_anchors(project_root: &Path) -> Vec<IdentityAnchor> {
+type RootCommitWalk = (GitOidV1, Option<Vec<GitOidV1>>);
+
+/// The last root-commit walk of each checkout, keyed by its canonical root and
+/// valid while HEAD stays the commit it walked from.
+static ROOT_COMMIT_WALKS: LazyLock<Mutex<HashMap<PathBuf, RootCommitWalk>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(any(test, feature = "test-helpers"))]
+static ROOT_COMMIT_WALK_COUNTS: LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Root-commit walks this process ran for the checkout at `project_root`.
+#[cfg(any(test, feature = "test-helpers"))]
+#[must_use]
+pub fn root_commit_walk_count_for_test(project_root: &Path) -> u64 {
+    let root = fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    ROOT_COMMIT_WALK_COUNTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&root)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn memoized_root_commits(
+    authority: &crate::git_repository::GitRepositoryAuthority,
+    checkout: &Path,
+    head: &GitOidV1,
+    may_walk: bool,
+) -> Option<Vec<GitOidV1>> {
+    if let Some((walked_head, roots)) = ROOT_COMMIT_WALKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(checkout)
+        && walked_head == head
+    {
+        return roots.clone();
+    }
+    if !may_walk {
+        return None;
+    }
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        *ROOT_COMMIT_WALK_COUNTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(checkout.to_path_buf())
+            .or_default() += 1;
+    }
+    let roots = authority.root_commits(ROOT_COMMIT_WALK_LIMIT, ROOT_COMMIT_WALK_DEADLINE);
+    ROOT_COMMIT_WALKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(checkout.to_path_buf(), (head.clone(), roots.clone()));
+    roots
+}
+
+/// The anchors naming the repository `project_root` belongs to, given its raw
+/// `origin` URL; empty outside a repository, in a bare repository, or before
+/// the first commit.
+///
+/// The history is walked at most once per checkout and HEAD in a process. A
+/// shallow history, or one the walk budget cannot finish, yields only the
+/// remote anchor.
+pub fn repository_identity_anchors(
+    project_root: &Path,
+    origin: Option<&str>,
+) -> Vec<IdentityAnchor> {
+    identity_anchors(project_root, origin, true)
+}
+
+/// [`repository_identity_anchors`] without walking: the history anchors come
+/// only from a walk this process already ran at the current HEAD.
+pub fn walked_repository_identity_anchors(
+    project_root: &Path,
+    origin: Option<&str>,
+) -> Vec<IdentityAnchor> {
+    identity_anchors(project_root, origin, false)
+}
+
+fn identity_anchors(
+    project_root: &Path,
+    origin: Option<&str>,
+    may_walk: bool,
+) -> Vec<IdentityAnchor> {
     let Ok(authority) = crate::git_repository::GitRepositoryAuthority::discover(project_root)
     else {
         return Vec::new();
@@ -51,38 +149,62 @@ pub fn repository_identity_anchors(project_root: &Path) -> Vec<IdentityAnchor> {
     let Some(worktree_root) = authority.worktree_root() else {
         return Vec::new();
     };
-    let relative = fs::canonicalize(project_root)
+    let Some(head) = authority
+        .head()
         .ok()
-        .and_then(|root| root.strip_prefix(worktree_root).ok().map(Path::to_path_buf))
-        .unwrap_or_default();
-    let remote = || {
-        crate::git::git_remote_url(project_root)
-            .as_deref()
-            .and_then(crate::git::normalize_git_remote_url)
-            .map(IdentityAnchor::Remote)
+        .and_then(|head| head.commit().cloned())
+    else {
+        return Vec::new();
     };
-    // ponytail: walks on every registry miss; memoize per (git dir, HEAD) if a
-    // history without a commit-graph makes unenrolled lookups slow.
-    match authority.root_commits(ROOT_COMMIT_WALK_LIMIT, ROOT_COMMIT_WALK_DEADLINE) {
-        Some(roots) if roots.is_empty() => Vec::new(),
-        // The remote is recorded beside the roots so a later shallow clone,
-        // which can only name its remote, finds this project.
-        Some(roots) if relative.as_os_str().is_empty() => roots
-            .into_iter()
-            .map(IdentityAnchor::RootCommit)
-            .chain(remote())
-            .collect(),
-        Some(roots) => roots
-            .into_iter()
-            .map(|root| IdentityAnchor::Subproject {
-                root,
-                relative: relative.clone(),
-            })
-            .collect(),
-        // A remote names the whole repository, so it cannot tell two
-        // subprojects of one repository apart.
-        None if !relative.as_os_str().is_empty() => Vec::new(),
-        None => remote().into_iter().collect(),
+    let checkout = fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let relative = checkout
+        .strip_prefix(worktree_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let shallow = authority.git_dir().join("shallow").is_file()
+        || authority.common_dir().join("shallow").is_file();
+    let roots = if shallow {
+        None
+    } else {
+        memoized_root_commits(&authority, &checkout, &head, may_walk)
+    };
+    let remote = origin
+        .and_then(crate::git::normalize_git_remote_url)
+        .map(|url| IdentityAnchor::Remote {
+            url,
+            relative: relative.clone(),
+        });
+    roots
+        .unwrap_or_default()
+        .into_iter()
+        .map(|root| {
+            if relative.as_os_str().is_empty() {
+                IdentityAnchor::RootCommit(root)
+            } else {
+                IdentityAnchor::Subproject {
+                    root,
+                    relative: relative.clone(),
+                }
+            }
+        })
+        .chain(remote)
+        .collect()
+}
+
+/// [`repository_identity_anchors`] on the native blocking pool, so a history
+/// walk never holds an async executor thread.
+pub async fn repository_identity_anchors_off_executor(
+    project_root: &Path,
+    origin: Option<&str>,
+) -> Vec<IdentityAnchor> {
+    let Some(cx) = crate::native_runtime::cx() else {
+        return repository_identity_anchors(project_root, origin);
+    };
+    let root = project_root.to_path_buf();
+    let owned_origin = origin.map(str::to_owned);
+    match cx.spawn_blocking(move |_| repository_identity_anchors(&root, owned_origin.as_deref())) {
+        Ok(mut task) => task.join(&cx).await.unwrap_or_default(),
+        Err(_) => repository_identity_anchors(project_root, origin),
     }
 }
 
@@ -270,14 +392,28 @@ pub fn pin_fixture_repository_identity(project_root: &Path, project_id: &str) ->
     Ok(())
 }
 
-/// [`write_repository_identity_marker`] unless a readable marker already names
-/// another project. Every profile reads the same `.git/` marker, so one naming
-/// another id is another profile's enrollment and is left as it is.
-pub fn claim_repository_identity_marker(project_root: &Path, project_id: &str) -> Result<bool> {
-    if let Ok(Some(marker)) = read_repository_identity_marker(project_root)
-        && marker.project_id != project_id
-    {
-        return Ok(false);
+/// Makes the marker name `project_id` unless it names another project whose
+/// store `profile_root` holds. A marker naming a store this profile lacks is
+/// stale or another profile's, and the project this profile resolved replaces
+/// it; one already naming `project_id` for this checkout is left unwritten.
+pub fn claim_repository_identity_marker(
+    project_root: &Path,
+    project_id: &str,
+    profile_root: &Path,
+) -> Result<bool> {
+    if let Ok(Some(marker)) = read_repository_identity_marker(project_root) {
+        if marker.project_id != project_id
+            && super::profile_sharded_data_root(profile_root, &marker.project_id).is_dir()
+        {
+            return Ok(false);
+        }
+        let current_common_dir = repository_identity_path(project_root)
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        if marker.project_id == project_id
+            && current_common_dir.as_deref() == Some(Path::new(&marker.git_common_dir))
+        {
+            return Ok(true);
+        }
     }
     write_repository_identity_marker(project_root, project_id)
 }
