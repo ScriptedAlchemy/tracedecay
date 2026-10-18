@@ -110,7 +110,7 @@ pub fn cx() -> Option<Cx> {
 /// for a bare thread on an installed runtime.
 fn admitted_runtime(entry: &'static str) -> Option<&'static Runtime> {
     let runtime = installed_runtime().ok()?;
-    let admitted = if ON_BLOCKING_POOL.get() {
+    let admitted = if ON_RUNTIME_BLOCKING_THREAD.get() {
         // The runtime's own blocking thread.
         true
     } else if crate::storage_pool::on_pool() {
@@ -154,7 +154,7 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
 /// be cancelled with that region before it starts, which would strand anything
 /// the caller had already queued for it.
 ///
-/// Called on a thread of the runtime's blocking pool (inside an
+/// Called on a blocking-pool thread that already runs work queued here (an
 /// [`off_native_thread`] handler, say), it runs `work` inline at the call:
 /// queuing would hold this pool thread while waiting for another, and a full
 /// pool would deadlock on that wait.
@@ -267,6 +267,7 @@ where
     let (sender, receiver) = asupersync::channel::oneshot::channel();
     runtime
         .spawn_blocking(move || {
+            ON_BLOCKING_POOL.set(true);
             let _ = sender.send_blocking(work());
         })
         .ok_or("native blocking pool unavailable")?;
@@ -274,9 +275,14 @@ where
 }
 
 thread_local! {
+    /// Set for good once a blocking-pool thread runs work [`queue_blocking`]
+    /// or [`NativeTask::spawn_off_native_thread`] queued; such a thread serves
+    /// the pool for its whole life.
+    static ON_BLOCKING_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// Set at start on every thread of the native runtime's blocking pool,
     /// whoever queued the work it runs.
-    static ON_BLOCKING_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ON_RUNTIME_BLOCKING_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Drives `settlement` on the caller's executor. A caller that stops waiting
@@ -639,6 +645,7 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         handle()
             .ok_or("native execution runtime unavailable")?
             .spawn_blocking(move || {
+                ON_BLOCKING_POOL.set(true);
                 let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     poll_on_current_thread(work)
                 }));
@@ -924,7 +931,7 @@ fn start(builder: RuntimeBuilder) -> Result<Runtime, String> {
         .on_thread_start(|| {
             // Workers have their runtime entered before this hook runs.
             if Runtime::current_handle().is_none() {
-                ON_BLOCKING_POOL.set(true);
+                ON_RUNTIME_BLOCKING_THREAD.set(true);
             }
         })
         .build()
