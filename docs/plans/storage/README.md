@@ -813,25 +813,50 @@ changes a file that holds memory.
   registered root when its own marker names the project. The daemon source binding
   digest names the project, so every checkout verifies one binding, and a binding
   under the old root-derived digest rebinds once. Deviations from section 2:
-  - Anchor lookup requires an `origin` remote. Unrelated repositories whose first
-    commit is byte-identical (most test fixtures) would otherwise merge. A clone
-    whose origin was removed mints its own project, as before.
-  - A full clone records its normalized origin beside its root commits, so a later
-    shallow clone, which can name only its remote, finds the project. A
-    subproject records no remote anchor, because one remote cannot tell two
-    subprojects of a repository apart.
-  - Anchors adopt only a checkout that no path or `git-common-dir:` alias names.
-    Two clones enrolled under separate ids before this step keep both ids instead
-    of tripping `reset_required`.
-  - A marker naming a store this profile does not hold yields to the registry. At
-    first touch, when nothing else names the checkout, the profile still enrolls
-    under the marker's id, because the store locator refuses an enrollment root
-    whose marker names another project.
+  - A shared root commit adopts only beside agreement on the remote: the
+    checkout's normalized `origin` equals the `git-remote-url:` anchor an
+    enrolled checkout of the project recorded, or its `origin` is a local path or
+    `file://` URL that is itself an enrolled checkout. A shallow clone adopts on
+    its remote alone. Forks, re-pointed templates and subtree-merged libraries
+    therefore no longer share a project, so they need no `project split`.
+    `ssh://`, scp-style and `https://` spellings of one host path normalize
+    equal, and a `file://` URL equals its plain path.
+  - A subproject's remote anchor carries its path in the checkout
+    (`git-remote-url:<url>#<path>`), so two subprojects of one repository stay
+    apart.
+  - Anchors that name two projects adopt neither, and the checkout mints its own
+    project instead of reporting a conflict.
+  - Registration and lookup resolve in one order: a marker naming a store this
+    profile holds, then path and `git-common-dir:` aliases, then anchors. Two
+    clones enrolled under separate ids before this step keep both ids.
+  - A marker naming a store this profile does not hold yields to the registry and
+    is replaced by the id the profile resolves; one naming a held store is never
+    rewritten. At first touch, when nothing else names the checkout, the profile
+    enrolls under the marker's id.
   - The daemon's enrollment authority for a project admits another root when that
-    root's own marker names the project. Any other second authority is still
-    `DuplicateProjectAuthority`.
-  - A new root commit is recorded at the next registration of a checkout; a
-    process that already registered that checkout does not walk again.
+    root's own marker names the project, and withdrawing a registration removes
+    only the roots it added.
+  - The history walk runs at most once per checkout and HEAD in a process, on the
+    blocking pool. Lookup walks only a checkout that no held marker, path or
+    common-dir alias names; registration walks a named checkout only until its
+    project records a history anchor. A root that a fetch or merge adds to an
+    enrolled checkout is therefore recorded when a checkout no alias names (a
+    fresh clone) registers.
+  - Only the registered root writes `code_projects.git_remote_url` and
+    `default_branch`. The GitHub source binding follows each checkout's own
+    `origin`, which adopted clones share or which is a local path that binds
+    nothing, so it does not flip between clones.
+  - Two clones on one branch share the `profile_graph_scope_id(store, branch)`
+    row but not graph data: the code shard id carries each checkout's worktree id
+    and repository id, so the scope id is unchanged.
+  Open: the lifecycle and the claim count a marker as held when its shard
+  directory exists, the registry when a `store_instances` row names it. After an
+  upgrade, a repository's anchors belong to whichever enrolled clone registers
+  first. `branch add` of one branch from two clones overwrites that branch's
+  `branch_meta.json` provenance. Code-index scope reconciliation counts as live
+  only the lease repository's worktrees and mounted roots, so it collects a second
+  clone's code-index scope once that clone has been unmounted for 7 days, and the
+  clone re-indexes on its next open.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose
