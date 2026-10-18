@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fmt,
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     thread,
     time::{Duration, Instant},
 };
@@ -81,7 +81,7 @@ impl RepositoryPhysicalAttachmentFactory {
             .verify_current_path(&path)
             .map_err(RepositoryAttachmentStartError::Identity)?;
         Ok(RepositoryRuntimePhysicalAttachment {
-            state: Mutex::new(RepositoryRuntimePhysicalState {
+            state: Arc::new(Mutex::new(RepositoryRuntimePhysicalState {
                 binding,
                 database_path: path,
                 opened_file_identity: expected_identity,
@@ -91,8 +91,10 @@ impl RepositoryPhysicalAttachmentFactory {
                 admission_open: true,
                 drained: false,
                 closed: false,
+                file_lost: false,
                 close_failure: None,
-            }),
+            })),
+            drain_serial: Mutex::new(()),
         })
     }
 
@@ -217,6 +219,8 @@ impl RepositoryPhysicalAttachmentFactory {
                 }
             };
         let checkpoint_blockers = ReaderCheckpointBlockers::default();
+        let lost_state = Arc::new(OnceLock::<Weak<Mutex<RepositoryRuntimePhysicalState>>>::new());
+        let notice_state = Arc::clone(&lost_state);
         start_hook(AttachmentWorkerStartStage::BeforeWriter);
         let writer_result = PersistentWriter::start_with_checkpoint_blockers(
             runtime,
@@ -224,6 +228,11 @@ impl RepositoryPhysicalAttachmentFactory {
             admission.clone(),
             ConcreteRepositoryWriteExecutor::default(),
             Arc::new(checkpoint_blockers.clone()),
+            Some(Box::new(move || {
+                if let Some(state) = notice_state.get().and_then(Weak::upgrade) {
+                    close_lost_file(&state);
+                }
+            })),
         );
         start_hook(AttachmentWorkerStartStage::AfterWriter);
         let writer = match writer_result {
@@ -283,19 +292,23 @@ impl RepositoryPhysicalAttachmentFactory {
         }
         let opened_file_identity = opened_database.identity();
         let initialization_file = created.then_some(opened_database);
+        let state = Arc::new(Mutex::new(RepositoryRuntimePhysicalState {
+            binding,
+            database_path: path,
+            opened_file_identity,
+            initialization_file,
+            writer: Some(Arc::new(writer)),
+            readers: Some(readers),
+            admission_open: true,
+            drained: false,
+            closed: false,
+            file_lost: false,
+            close_failure: None,
+        }));
+        let _ = lost_state.set(Arc::downgrade(&state));
         Ok(RepositoryRuntimePhysicalAttachment {
-            state: Mutex::new(RepositoryRuntimePhysicalState {
-                binding,
-                database_path: path,
-                opened_file_identity,
-                initialization_file,
-                writer: Some(Arc::new(writer)),
-                readers: Some(readers),
-                admission_open: true,
-                drained: false,
-                closed: false,
-                close_failure: None,
-            }),
+            state,
+            drain_serial: Mutex::new(()),
         })
     }
 }
@@ -348,7 +361,10 @@ impl Error for RepositoryAttachmentStartError {
 }
 
 pub struct RepositoryRuntimePhysicalAttachment {
-    state: Mutex<RepositoryRuntimePhysicalState>,
+    state: Arc<Mutex<RepositoryRuntimePhysicalState>>,
+    /// Serializes `drain` so the state lock can be released across the writer
+    /// join: the writer's lost-file notice takes that lock.
+    drain_serial: Mutex<()>,
 }
 
 struct RepositoryRuntimePhysicalState {
@@ -361,10 +377,35 @@ struct RepositoryRuntimePhysicalState {
     admission_open: bool,
     drained: bool,
     closed: bool,
+    file_lost: bool,
     close_failure: Option<String>,
 }
 
+/// Runs on the writer's pool task once its probe finds the file unlinked or
+/// replaced: the writer already stopped, so this releases the readers and the
+/// attachment's handles without waiting on any of them.
+fn close_lost_file(state: &Mutex<RepositoryRuntimePhysicalState>) {
+    let (writer, readers) = {
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.file_lost = true;
+        state.admission_open = false;
+        (state.writer.take(), state.readers.take())
+    };
+    if let Some(readers) = &readers {
+        readers.close_for_lost_file();
+    }
+    drop((writer, readers));
+}
+
 impl RepositoryRuntimePhysicalAttachment {
+    /// Whether the store's file was unlinked or replaced under this
+    /// attachment, which then closed every connection to it.
+    pub fn file_lost(&self) -> bool {
+        self.lock_state().file_lost
+    }
+
     pub fn binding(&self) -> StoreRuntimeBindingV1 {
         self.lock_state().binding.clone()
     }
@@ -423,7 +464,8 @@ impl RepositoryRuntimePhysicalAttachment {
             u32::from(snapshot.general_workers) + u32::from(snapshot.health_workers)
         });
         RepositoryRuntimePhysicalSnapshot {
-            healthy: writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
+            healthy: !state.file_lost
+                && writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
             writer_present: writer.is_some(),
             reader_handles,
             general_reader_waiters: occupancy.map_or(0, |snapshot| snapshot.waiting_general),
@@ -473,6 +515,11 @@ impl RepositoryRuntimePhysicalAttachment {
     ) -> Result<RuntimeSubmitOutcomeV1, RepositoryDispatchError> {
         let writer = {
             let state = self.lock_state();
+            if state.file_lost {
+                return Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                    reason: UnavailableReasonV1::FileLost,
+                });
+            }
             if !state.admission_open || state.closed {
                 return Err(RepositoryDispatchError::Closed);
             }
@@ -551,6 +598,16 @@ impl RepositoryRuntimePhysicalAttachment {
     ) -> Result<RuntimeReadOutcomeV1, RepositoryDispatchError> {
         let readers = {
             let state = self.lock_state();
+            if state.file_lost {
+                return RuntimeReadOutcomeV1::new(
+                    None,
+                    RuntimeReadCoverageV1::Unavailable {
+                        coverage: None,
+                        reason: UnavailableReasonV1::FileLost,
+                    },
+                )
+                .map_err(|error| RepositoryDispatchError::ReaderWorker(error.to_string()));
+            }
             if !state.admission_open || state.closed {
                 return Err(RepositoryDispatchError::Closed);
             }
@@ -581,6 +638,10 @@ impl RepositoryRuntimePhysicalAttachment {
                 "repository physical attachment cannot drain on a storage pool thread".to_owned(),
             );
         }
+        let _serial = self
+            .drain_serial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self.lock_state();
         if state.closed {
             return Ok(());
@@ -633,15 +694,16 @@ impl RepositoryRuntimePhysicalAttachment {
             }
         };
         let readers = state.readers.take();
+        drop(state);
         drop(readers);
         if let Some(writer) = writer
             && let Err(error) = writer.shutdown_and_join()
         {
             let message = format!("join repository writer: {error}");
-            state.close_failure = Some(message.clone());
+            self.lock_state().close_failure = Some(message.clone());
             return Err(message);
         }
-        state.drained = true;
+        self.lock_state().drained = true;
         Ok(())
     }
 
@@ -676,12 +738,7 @@ impl RepositoryRuntimePhysicalAttachment {
 
 impl Drop for RepositoryRuntimePhysicalAttachment {
     fn drop(&mut self) {
-        let pending = self
-            .state
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .initialization_file
-            .is_some();
+        let pending = self.lock_state().initialization_file.is_some();
         if pending {
             let _ = self.abort_initialization();
         }
@@ -1136,6 +1193,35 @@ mod tests {
         attachment.close_and_join().unwrap();
         donor.drain().unwrap();
         donor.close_and_join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drain_completes_when_the_probe_finds_the_file_gone_while_the_writer_is_busy() {
+        let directory = TempDir::new().unwrap();
+        let attachment = Arc::new(attach_seeded_store(directory.path(), &binding(), 0));
+        let handle = attachment.exact_sql_handle().unwrap();
+        let busy = thread::spawn(move || {
+            handle.execute(statement(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000000) \
+                 SELECT count(*) FROM c",
+                vec![],
+            ))
+        });
+        thread::sleep(Duration::from_millis(200));
+        fs::remove_file(directory.path().join("store-0.sqlite3")).unwrap();
+        thread::sleep(crate::FILE_PROBE_INTERVAL);
+
+        let (done, drained) = mpsc::channel();
+        let draining = Arc::clone(&attachment);
+        thread::spawn(move || {
+            let _ = done.send(draining.drain());
+        });
+        let drain = drained.recv_timeout(Duration::from_secs(30)).expect(
+            "a drain that joins the writer must not wait on the lost-file notice's state lock",
+        );
+        assert_eq!(drain, Ok(()));
+        let _ = busy.join();
     }
 
     #[test]

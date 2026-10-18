@@ -186,6 +186,30 @@ impl OpenedDatabaseFile {
         Ok(())
     }
 
+    /// Whether this file was unlinked, or `path` now names another file.
+    /// A path that cannot be inspected for another reason is not lost.
+    #[cfg(unix)]
+    pub(crate) fn is_lost(&self, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        if self.file.metadata().is_ok_and(|pinned| pinned.nlink() == 0) {
+            return true;
+        }
+        match std::fs::metadata(path) {
+            Ok(current) => metadata_identity(&current) != self.identity,
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn is_lost(&self, path: &Path) -> bool {
+        !path.exists()
+            || matches!(
+                self.verify_current_path(path),
+                Err(OpenedDatabaseFileError::Replaced)
+            )
+    }
+
     pub(crate) fn verify_connection(
         &self,
         _connection: &Connection,
@@ -310,18 +334,23 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 
 #[cfg(unix)]
 fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
-    use std::os::unix::fs::MetadataExt;
-
     let metadata = file
         .metadata()
         .map_err(|_| OpenedDatabaseFileError::Inspect)?;
+    Ok(metadata_identity(&metadata))
+}
+
+#[cfg(unix)]
+fn metadata_identity(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+
     let mut hasher = Sha256::new();
     hasher.update(metadata.dev().to_le_bytes());
     hasher.update(metadata.ino().to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_le_bytes(bytes).max(1))
+    u64::from_le_bytes(bytes).max(1)
 }
 
 #[cfg(unix)]

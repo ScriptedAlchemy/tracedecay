@@ -2705,8 +2705,9 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     /// a reset store serves on its next open without a daemon restart.
     reset_required_stores: StdMutex<BTreeMap<StoreShardIdV1, StoreResetRequiredV1>>,
     /// Store files deleted or replaced while this daemon held them open,
-    /// keyed by path. Only a restart releases the unlinked inode, so an entry
-    /// lives as long as the registry.
+    /// keyed by path. The writer's file probe closes the store's connections,
+    /// but the mounted owners keep their lease on the closed runtime until a
+    /// restart remounts them, so an entry lives as long as the registry.
     lost_store_files: StdMutex<BTreeMap<std::path::PathBuf, StoreResetRequiredV1>>,
     retained_hook_tasks: RetainedHookTasks,
     session_sync_service:

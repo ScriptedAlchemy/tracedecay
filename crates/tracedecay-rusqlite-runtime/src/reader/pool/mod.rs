@@ -793,6 +793,24 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.inner.capacity_changed.notify_all();
     }
 
+    /// Fences admission and tells every worker to interrupt its statement and
+    /// exit, which closes its connection. Never waits, so a pool task may call it.
+    pub(crate) fn close_for_lost_file(&self) {
+        self.begin_shutdown_drain();
+        let clients: Vec<_> = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .records
+            .values()
+            .map(|record| record.client.clone())
+            .collect();
+        for client in clients {
+            client.shutdown();
+        }
+    }
+
     pub(crate) fn is_quiescent(&self) -> bool {
         let state = self
             .inner
