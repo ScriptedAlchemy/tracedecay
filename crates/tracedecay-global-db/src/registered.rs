@@ -610,8 +610,9 @@ impl RegisteredGlobalDb {
 
     /// Runs `body` as one write job: commit when it returns `Ok`, rollback
     /// when it returns `Err`. The daemon write scope is checked before the job
-    /// is queued and again inside the job after the body, so a scope that ends
-    /// while the body runs rolls the job back and surfaces as the outer error.
+    /// is queued. The runtime verifies the same authority again at COMMIT, so a
+    /// scope that ends while the body runs rolls the job back and surfaces as
+    /// the outer error.
     #[tracing::instrument(name = "global_db.registered.txn.job", level = "trace", skip_all)]
     pub async fn transact<R, E, F>(
         &self,
@@ -622,28 +623,15 @@ impl RegisteredGlobalDb {
         R: Send + 'static,
         E: Send + 'static,
     {
-        let authority = self.database.write_authority()?;
-        authority.require_active_write_scope("begin registered global database transaction")?;
-        let verdict = self
-            .database
+        self.require_active_write_scope("begin registered global database transaction")?;
+        self.database
             .transact(
                 "begin registered global database transaction",
                 async move |transaction: &WriteTx<'_, '_>| {
-                    let value = body(RegisteredGlobalDbWriteTx { transaction })
-                        .await
-                        .map_err(ScopedJobAbort::Body)?;
-                    authority
-                        .require_active_write_scope("commit registered global database transaction")
-                        .map_err(ScopedJobAbort::ScopeEnded)?;
-                    Ok(value)
+                    body(RegisteredGlobalDbWriteTx { transaction }).await
                 },
             )
-            .await?;
-        match verdict {
-            Ok(value) => Ok(Ok(value)),
-            Err(ScopedJobAbort::Body(error)) => Ok(Err(error)),
-            Err(ScopedJobAbort::ScopeEnded(error)) => Err(error),
-        }
+            .await
     }
 
     pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
@@ -965,11 +953,6 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
     pub async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.transaction.rollback().await.map_err(engine_error)
     }
-}
-
-enum ScopedJobAbort<E> {
-    Body(E),
-    ScopeEnded(TraceDecayError),
 }
 
 /// The transaction a [`RegisteredGlobalDb::transact`] body runs in. It is a
