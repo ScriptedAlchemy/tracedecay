@@ -12,7 +12,7 @@
 //!    records the relation scopes it was admitted under, and an event outside
 //!    the selection falls outside the slice the read was authorized over, it
 //!    does not poison the events inside it. So the page is served over the
-//!    covered prefix (see [`covered_prefix`](super::covered_prefix) for why the
+//!    covered prefix (see [`Coverage`](super::journal::Coverage) for why the
 //!    covered slice is always a prefix) and carries a
 //!    [`WorkGraphSelectionCoverageV1`](tracedecay_contracts::WorkGraphSelectionCoverageV1)
 //!    naming what lies beyond it. Filtering silently would falsify the
@@ -27,7 +27,8 @@
 //!    point-in-time read can claim.
 //! 3. **Pages resume by sequence, not by offset.** The continuation names the
 //!    durable sequence the previous page ended on, so an event appended between
-//!    two pages cannot shift a caller past an event it never saw.
+//!    two pages cannot shift a caller past an event it never saw. A page reads
+//!    one row more than its limit and no more.
 
 use tracedecay_contracts::{
     OpaqueCursor, WorkHistoryCoverageV1, WorkHistoryReadPortV1, WorkHistoryRequestV1,
@@ -35,8 +36,12 @@ use tracedecay_contracts::{
     WorkProductPortContextV1, WorkProductSelectionScopeV1,
 };
 
-use super::{FromStoreFault, covered_prefix, load_journal};
-use crate::work::WorkSqliteStorage;
+use super::journal::{
+    integer, journal_entry, load_coverage, load_head_version, require_current_journal,
+};
+use super::{FromStoreFault, owner_params};
+use crate::exact_sql::ExactSqlValue;
+use crate::work::{WorkSqliteStorage, registered_work_query};
 
 type HistoryError = WorkProductApplicationErrorV1;
 
@@ -49,34 +54,56 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
         request: &WorkHistoryRequestV1,
     ) -> Result<WorkHistoryV1, HistoryError> {
         let scope = context.authorized_scope();
-        let journal = load_journal(self.handle(), scope).map_err(HistoryError::from_fault)?;
+        let source = self.handle();
+        require_current_journal(source).map_err(HistoryError::from_fault)?;
+        let total = load_head_version(source, scope)
+            .map_err(HistoryError::from_fault)?
+            .map_or(0, tracedecay_domain::WorkGraphVersionV1::get);
         // Events outside the selection fall outside it; they do not poison the
         // ones inside. The page is served over the covered prefix and carries
         // the disclosure that says what was left out, so a caller can never
         // mistake a slice of the journal for the whole of it.
-        let (journal, selection_coverage) = covered_prefix(scope.selection(), journal)
-            .ok_or(HistoryError::EventAuthorityUnavailable)?;
-        // Inside the prefix the admitted scopes must still be exactly this
-        // selection's. `covered_prefix` admits an event whose scopes the
-        // selection merely contains, but history returns the stored event
-        // unchanged, and an event admitted under fewer scopes than the read
-        // claims is not one this authority may re-present under them.
-        let authorized = selected_relation_scopes(scope.selection());
-        if journal
+        let coverage = load_coverage(source, scope, total).map_err(HistoryError::from_fault)?;
+        let selection_coverage = coverage.disclosure().map_err(HistoryError::from_fault)?;
+        let after = resume_from(request.continuation.as_ref())?;
+        let limit = usize::try_from(request.limit).map_err(|_| HistoryError::InvalidRequest)?;
+        let mut params = owner_params(scope);
+        params.extend([
+            integer(after).map_err(HistoryError::from_fault)?,
+            integer(coverage.covered).map_err(HistoryError::from_fault)?,
+            ExactSqlValue::Integer(request.observed_at.0),
+        ]);
+        let rows = registered_work_query(
+            source,
+            &format!(
+                "SELECT sequence, event_payload FROM work_product_journal_events_v1
+                 WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
+                   AND sequence > ?3 AND sequence <= ?4 AND occurred_at <= ?5
+                 ORDER BY sequence
+                 LIMIT {}",
+                limit + 1
+            ),
+            params,
+        )
+        .map_err(HistoryError::from_fault)?;
+        let mut events = rows
+            .rows
             .iter()
-            .any(|entry| entry.event.authorized_relation_scopes() != authorized.as_slice())
+            .map(|row| journal_entry(&row.values).map(|entry| entry.event))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(HistoryError::from_fault)?;
+        // Inside the prefix the admitted scopes must still be exactly this
+        // selection's. A covering selection admits an event whose scopes it
+        // merely contains, but history returns the stored event unchanged, and
+        // an event admitted under fewer scopes than the read claims is not one
+        // this authority may re-present under them.
+        let authorized = selected_relation_scopes(scope.selection());
+        if events
+            .iter()
+            .any(|event| event.authorized_relation_scopes() != authorized.as_slice())
         {
             return Err(HistoryError::NotFoundOrNotAuthorized);
         }
-        let after = resume_from(request.continuation.as_ref())?;
-        let mut events = journal
-            .into_iter()
-            .filter(|entry| {
-                entry.sequence.get() > after && entry.event.occurred_at() <= request.observed_at
-            })
-            .map(|entry| entry.event)
-            .collect::<Vec<_>>();
-        let limit = usize::try_from(request.limit).map_err(|_| HistoryError::InvalidRequest)?;
         let coverage = if events.len() <= limit {
             WorkHistoryCoverageV1::Complete {
                 returned: u32::try_from(events.len())

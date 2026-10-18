@@ -9,11 +9,11 @@
 //! timeline, causal, workload, and critical-path projections the Work views
 //! draw.
 //!
-//! Three rules hold this adapter to what it can actually prove.
+//! Four rules hold this adapter to what it can actually prove.
 //!
 //! 1. **Declared, never derived.** Item effort, causal candidates,
 //!    `scheduled_at`, and `deadline` reach a projection only by having been
-//!    written into a `WorkProductEventV1` payload by the caller that declared
+//!    written into a `WorkProductEventPayloadV1` by the caller that declared
 //!    them. This module reads them back out of the journal and folds them; it
 //!    never estimates one, never backfills one, and never reads one off an
 //!    attempt row.
@@ -23,31 +23,38 @@
 //!    correlate them and reports unavailable coverage. A daemon route may bind
 //!    its registered Work authority explicitly and then hydrates only attempts
 //!    the product graph already accepted.
-//! 3. **Only verified versions are readable.** The event and its recovered
-//!    graph version commit in one transaction, so a caller can never observe an
-//!    event without the graph authority that verified and digested it.
+//! 3. **Only verified versions are readable.** The event, its verified version
+//!    and the new current state commit in one transaction, so a caller can never
+//!    observe an event without the graph authority that verified and digested
+//!    it.
+//! 4. **Nothing replays the journal.** Every query is keyed by the owner and
+//!    bounded by a page size or by the checkpoint interval (see [`journal`]).
+//!    The current graph is a projection the append maintains in its own
+//!    transaction, older versions are rebuilt from the nearest checkpoint, and
+//!    where a selection's covered prefix ends is read from a registry of scope
+//!    sets. `docs/plans/work-current-state.md` has the design.
 
 use tracedecay_contracts::{
     AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkEvidenceReadPortErrorV1,
-    WorkEvidenceRootReadErrorV1, WorkGraphReadPortErrorV1, WorkGraphSelectionCoverageV1,
-    WorkProductApplicationErrorV1, WorkProductAttemptAdmissionErrorV1, WorkProductEventPortErrorV1,
-    WorkProductSelectionScopeV1, WorkStorageFailureV1,
+    WorkEvidenceRootReadErrorV1, WorkGraphReadPortErrorV1, WorkProductApplicationErrorV1,
+    WorkProductAttemptAdmissionErrorV1, WorkProductEventPortErrorV1, WorkStorageFailureV1,
 };
 use tracedecay_domain::{
-    ManifestDigest, UtcMicros, WorkGraphVersionV1, WorkProductEventPayloadV1,
-    WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1, canonical_sha256,
+    ManifestDigest, UtcMicros, WorkGraphVersionV1, WorkProductEventSequenceV1, WorkProductEventV1,
+    WorkProductGraphV1, WorkProductSourceWatermarkV1, canonical_sha256,
 };
 
 use crate::exact_sql::{ExactSqlError, ExactSqlReaderRefusalV1, ExactSqlValue};
-use crate::work::{RegisteredWorkQuery, exact_sql_integer, exact_sql_text, registered_work_query};
 
 mod attempt_admission;
+pub(crate) mod journal;
 pub(crate) use attempt_admission::{admit_retry, admit_synthesis};
 mod authorization;
 mod events;
 mod evidence;
 mod history;
-mod publication;
+pub mod instrument;
+mod migration;
 mod read;
 mod rooted_evidence;
 
@@ -80,6 +87,7 @@ pub(crate) struct WorkProductPublishedVersionV1 {
     pub(crate) event_sequence: WorkProductEventSequenceV1,
     pub(crate) valid_at: UtcMicros,
     pub(crate) observed_at: UtcMicros,
+    pub(crate) source_watermark: WorkProductSourceWatermarkV1,
     pub(crate) recovered_graph_digest: String,
 }
 
@@ -152,24 +160,6 @@ pub(crate) trait FromStoreFault: Sized {
     }
 }
 
-/// Classifies a failed insert into the journal or the published versions.
-///
-/// Only a primary-key or uniqueness violation is the expected-revision
-/// conflict: another writer already holds the sequence, version, or command
-/// this insert claimed. Every other failure, busy storage, a lost writer, an
-/// I/O error, is the storage fault it is and never reads as stale input.
-pub(crate) fn insert_fault<E: FromStoreFault>(error: ExactSqlError, conflict: E) -> E {
-    const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
-    const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
-    match error {
-        ExactSqlError::Sqlite {
-            extended_code: Some(SQLITE_CONSTRAINT_PRIMARYKEY | SQLITE_CONSTRAINT_UNIQUE),
-            ..
-        } => conflict,
-        error => E::from_fault(error),
-    }
-}
-
 /// The ports that share the `Storage` / `NotFoundOrNotAuthorized` / `TimedOut`
 /// / `Unavailable` vocabulary.
 macro_rules! store_fault_port {
@@ -221,270 +211,6 @@ pub(crate) fn owner_params(scope: &AuthorizedWorkProductScopeV1) -> Vec<ExactSql
     ]
 }
 
-/// Whether this selection authorizes every relation scope the event was
-/// admitted under, that is, whether this one event is inside the slice of work
-/// the selection names.
-///
-/// `ProfileOwnedNoGit` is an explicit no-Git selection, so it covers exactly
-/// the events that named no relation scope. A `Relations` selection covers any
-/// event whose scopes it names, which includes the scope-free ones.
-///
-/// An event this returns `false` for is *outside* the selection. It is not a
-/// defect in the journal and it does not invalidate the events that are inside:
-/// see [`covered_prefix`] for what a reader does with it.
-pub(crate) fn selection_covers(
-    selection: &WorkProductSelectionScopeV1,
-    event: &WorkProductEventV1,
-) -> bool {
-    match selection {
-        WorkProductSelectionScopeV1::ProfileOwnedNoGit => {
-            event.authorized_relation_scopes().is_empty()
-        }
-        WorkProductSelectionScopeV1::Relations { relation_scopes } => event
-            .authorized_relation_scopes()
-            .iter()
-            .all(|scope| relation_scopes.contains(scope)),
-    }
-}
-
-/// The readable slice of an owner's journal under one selection, and the
-/// disclosure that says how much was left out.
-///
-/// A selection names a slice of the owner's work. Events outside it fall
-/// outside the slice; they do not poison it. So the read is answered over the
-/// covered slice rather than refused outright, with the caveat that a silent
-/// covered slice would be worse than a refusal, which is why the coverage comes
-/// back with it and every mounted read carries it through.
-///
-/// The slice is the journal's covered *prefix*, and that follows from folding
-/// rather than from convenience. A graph version is folded from every event up
-/// to its own sequence, so the first uncovered event ends the readable slice:
-/// any later version would have to be folded across an event outside the
-/// selection to exist at all, and that graph never existed under this
-/// selection. Every event from the first uncovered one onward is therefore
-/// counted as excluded, whatever scopes it named itself.
-pub(crate) fn covered_prefix(
-    selection: &WorkProductSelectionScopeV1,
-    mut journal: Vec<WorkProductJournalEntryV1>,
-) -> Option<(Vec<WorkProductJournalEntryV1>, WorkGraphSelectionCoverageV1)> {
-    let total = journal.len();
-    let covered = journal
-        .iter()
-        .position(|entry| !selection_covers(selection, &entry.event))
-        .unwrap_or(total);
-    let covered_events = u32::try_from(covered).ok()?;
-    let Some(first_excluded_sequence) = journal.get(covered).map(|entry| entry.sequence) else {
-        return Some((
-            journal,
-            WorkGraphSelectionCoverageV1::Complete { covered_events },
-        ));
-    };
-    journal.truncate(covered);
-    Some((
-        journal,
-        WorkGraphSelectionCoverageV1::Partial {
-            covered_events,
-            excluded_events: u32::try_from(total - covered).ok()?,
-            first_excluded_sequence,
-        },
-    ))
-}
-
-/// One owner's journal and published versions, both bounded to the slice the
-/// selection covers.
-///
-/// Every read that folds a graph needs the same three things, the covered
-/// events, the versions folded from them alone, and the coverage disclosure,
-/// so they are resolved once here rather than re-derived at each reader.
-pub(crate) struct CoveredJournalV1 {
-    pub(crate) journal: Vec<WorkProductJournalEntryV1>,
-    pub(crate) published: Vec<WorkProductPublishedVersionV1>,
-    pub(crate) coverage: WorkGraphSelectionCoverageV1,
-}
-
-/// Load the covered slice of the owner's journal and the versions readable from
-/// it. A [`StoreFault`] is a store that could not be read or decoded, which
-/// every caller turns into its typed failure rather than into an empty graph.
-pub(crate) fn load_covered_journal(
-    source: &impl RegisteredWorkQuery,
-    scope: &AuthorizedWorkProductScopeV1,
-) -> Result<CoveredJournalV1, StoreFault> {
-    let (journal, coverage) = covered_prefix(scope.selection(), load_journal(source, scope)?)
-        .ok_or(StoreFault::Corrupt("journal coverage"))?;
-    let published = load_published_versions(source, scope)?
-        .into_iter()
-        // A version folded from an event outside the selection is not readable
-        // under it: that graph never existed under this selection.
-        .filter(|version| {
-            coverage
-                .first_excluded_sequence()
-                .is_none_or(|excluded| version.event_sequence < excluded)
-        })
-        .collect();
-    Ok(CoveredJournalV1 {
-        journal,
-        published,
-        coverage,
-    })
-}
-
-/// Load the owner's whole journal in canonical sequence order.
-///
-/// A [`StoreFault`] means the rows could not be read or decoded, which every
-/// caller turns into a typed failure rather than into an empty journal.
-pub(crate) fn load_journal(
-    source: &impl RegisteredWorkQuery,
-    scope: &AuthorizedWorkProductScopeV1,
-) -> Result<Vec<WorkProductJournalEntryV1>, StoreFault> {
-    let rows = registered_work_query(
-        source,
-        "SELECT sequence, event_payload FROM work_product_events_v1
-         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-         ORDER BY sequence",
-        owner_params(scope),
-    )?;
-    rows.rows
-        .into_iter()
-        .map(|row| {
-            let corrupt = || StoreFault::Corrupt("journal row");
-            let sequence = exact_sql_integer(&row.values, 0)
-                .and_then(|value| u64::try_from(value).ok())
-                .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
-                .ok_or_else(corrupt)?;
-            let event: WorkProductEventV1 =
-                serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
-                    .map_err(|_| corrupt())?;
-            Ok(WorkProductJournalEntryV1 { sequence, event })
-        })
-        .collect()
-}
-
-/// The owner's journal tail: the sequence and result version a new append must
-/// follow. `Ok(None)` is an owner with no journal at all.
-#[allow(clippy::type_complexity)]
-pub(crate) fn load_journal_tail(
-    source: &impl RegisteredWorkQuery,
-    scope: &AuthorizedWorkProductScopeV1,
-) -> Result<Option<(WorkProductEventSequenceV1, WorkGraphVersionV1)>, StoreFault> {
-    let rows = registered_work_query(
-        source,
-        "SELECT sequence, result_graph_version FROM work_product_events_v1
-         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-         ORDER BY sequence DESC LIMIT 1",
-        owner_params(scope),
-    )?;
-    let Some(row) = rows.rows.first() else {
-        return Ok(None);
-    };
-    let corrupt = || StoreFault::Corrupt("journal tail");
-    let sequence = exact_sql_integer(&row.values, 0)
-        .and_then(|value| u64::try_from(value).ok())
-        .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
-        .ok_or_else(corrupt)?;
-    let version = exact_sql_integer(&row.values, 1)
-        .and_then(|value| u64::try_from(value).ok())
-        .and_then(|value| WorkGraphVersionV1::new(value).ok())
-        .ok_or_else(corrupt)?;
-    Ok(Some((sequence, version)))
-}
-
-/// Load every verified graph version this owner has published, oldest first.
-pub(crate) fn load_published_versions(
-    source: &impl RegisteredWorkQuery,
-    scope: &AuthorizedWorkProductScopeV1,
-) -> Result<Vec<WorkProductPublishedVersionV1>, StoreFault> {
-    let rows = registered_work_query(
-        source,
-        "SELECT graph_version, event_sequence, valid_at, observed_at, recovered_graph_digest
-         FROM work_product_graph_versions_v1
-         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-         ORDER BY graph_version",
-        owner_params(scope),
-    )?;
-    rows.rows
-        .into_iter()
-        .map(|row| {
-            let corrupt = || StoreFault::Corrupt("published version row");
-            Ok(WorkProductPublishedVersionV1 {
-                graph_version: exact_sql_integer(&row.values, 0)
-                    .and_then(|value| u64::try_from(value).ok())
-                    .and_then(|value| WorkGraphVersionV1::new(value).ok())
-                    .ok_or_else(corrupt)?,
-                event_sequence: exact_sql_integer(&row.values, 1)
-                    .and_then(|value| u64::try_from(value).ok())
-                    .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
-                    .ok_or_else(corrupt)?,
-                valid_at: UtcMicros(exact_sql_integer(&row.values, 2).ok_or_else(corrupt)?),
-                observed_at: UtcMicros(exact_sql_integer(&row.values, 3).ok_or_else(corrupt)?),
-                recovered_graph_digest: exact_sql_text(&row.values, 4)
-                    .ok_or_else(corrupt)?
-                    .to_owned(),
-            })
-        })
-        .collect()
-}
-
-/// Fold the journal into the graph at `through_sequence`.
-///
-/// Returns `None` when the stored chain is not one canonical progression, a
-/// missing `Created` head, a gap, or a change whose folded result version does
-/// not match the version the event recorded. A broken chain is never repaired
-/// here and never partially folded: the caller turns it into a typed
-/// unavailability, because a graph folded from part of its history is a
-/// falsified graph, not a degraded one.
-pub(crate) fn fold_graph(
-    journal: &[WorkProductJournalEntryV1],
-    through_sequence: WorkProductEventSequenceV1,
-) -> Option<WorkProductGraphV1> {
-    let mut fold = JournalFoldV1::new(journal);
-    fold.advance_to(through_sequence)?;
-    fold.graph
-}
-
-/// One forward pass over a journal that yields the graph at each requested
-/// sequence, so reading several versions folds every event once instead of
-/// refolding the whole prefix per version.
-pub(crate) struct JournalFoldV1<'a> {
-    remaining: &'a [WorkProductJournalEntryV1],
-    graph: Option<WorkProductGraphV1>,
-}
-
-impl<'a> JournalFoldV1<'a> {
-    pub(crate) const fn new(journal: &'a [WorkProductJournalEntryV1]) -> Self {
-        Self {
-            remaining: journal,
-            graph: None,
-        }
-    }
-
-    /// Folds forward through `through_sequence` with the same chain rules as
-    /// [`fold_graph`]. Requests must ascend: an earlier sequence answers the
-    /// graph already folded past it, which the caller's version check refuses.
-    pub(crate) fn advance_to(
-        &mut self,
-        through_sequence: WorkProductEventSequenceV1,
-    ) -> Option<&WorkProductGraphV1> {
-        while let Some((entry, rest)) = self.remaining.split_first() {
-            if entry.sequence.get() > through_sequence.get() {
-                break;
-            }
-            self.remaining = rest;
-            let folded = match (self.graph.take(), entry.event.payload()) {
-                (None, WorkProductEventPayloadV1::Created { graph }) => graph.clone(),
-                (Some(current), WorkProductEventPayloadV1::Changed { change }) => {
-                    current.apply(change.as_ref().clone()).ok()?
-                }
-                _ => return None,
-            };
-            if folded.version() != entry.event.result_graph_version() {
-                return None;
-            }
-            self.graph = Some(folded);
-        }
-        self.graph.as_ref()
-    }
-}
-
 /// The exact digest a verified version records for a folded graph.
 pub(crate) fn recovered_graph_digest(graph: &WorkProductGraphV1) -> Option<ManifestDigest> {
     canonical_sha256(&(WORK_PRODUCT_GRAPH_DIGEST_DOMAIN, graph)).ok()
@@ -493,18 +219,14 @@ pub(crate) fn recovered_graph_digest(graph: &WorkProductGraphV1) -> Option<Manif
 /// Rebuild the verified version identity for one published row.
 pub(crate) fn verified_version(
     published: &WorkProductPublishedVersionV1,
-    event: &WorkProductEventV1,
 ) -> Option<VerifiedWorkGraphVersionV1> {
-    if published.event_sequence != event.sequence()
-        || published.graph_version != event.result_graph_version()
-        || published.observed_at < published.valid_at
-    {
+    if published.observed_at < published.valid_at {
         return None;
     }
     VerifiedWorkGraphVersionV1::new(
         published.graph_version,
         published.event_sequence,
-        event.source_watermark().clone(),
+        published.source_watermark.clone(),
         ManifestDigest::new(published.recovered_graph_digest.clone()).ok()?,
     )
     .ok()
@@ -512,6 +234,7 @@ pub(crate) fn verified_version(
 
 #[cfg(test)]
 mod store_fault_tests {
+    use super::journal::WriteFault;
     use super::*;
 
     type Port = WorkProductEventPortErrorV1;
@@ -525,29 +248,34 @@ mod store_fault_tests {
         }
     }
 
+    /// What a port answers for a failed row write.
+    fn write_answer(error: ExactSqlError) -> Port {
+        match WriteFault::from(error) {
+            WriteFault::Conflict => Port::VersionConflict,
+            WriteFault::Store(fault) => Port::from_fault(fault),
+        }
+    }
+
     #[test]
     fn only_a_primary_key_or_unique_violation_is_a_version_conflict() {
         for conflict in [1555, 2067] {
-            assert_eq!(
-                insert_fault(sqlite(conflict), Port::VersionConflict),
-                Port::VersionConflict
-            );
+            assert_eq!(write_answer(sqlite(conflict)), Port::VersionConflict);
         }
         // CHECK, trigger abort, I/O error, busy, and a lost writer all fail
         // the insert without the revision having moved.
         for other in [275, 1811, 778, 5] {
             assert_eq!(
-                insert_fault(sqlite(other), Port::VersionConflict),
+                write_answer(sqlite(other)),
                 Port::Unavailable,
                 "SQLite code {other} must not read as a stale revision"
             );
         }
         assert_eq!(
-            insert_fault(ExactSqlError::Busy, Port::VersionConflict),
+            write_answer(ExactSqlError::Busy),
             Port::Storage(WorkStorageFailureV1::Busy)
         );
         assert_eq!(
-            insert_fault(ExactSqlError::WriterUnavailable, Port::VersionConflict),
+            write_answer(ExactSqlError::WriterUnavailable),
             Port::Unavailable
         );
     }

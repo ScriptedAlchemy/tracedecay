@@ -389,6 +389,21 @@ impl WorkGraphTimelineV1 {
         Ok(timeline)
     }
 
+    /// The timeline key a request's continuation resumes after, so a storage
+    /// adapter can select only the window past it. A continuation minted for
+    /// another request is refused here, exactly as [`Self::page`] refuses it.
+    pub fn resume_key(
+        request: &WorkGraphReadRequestV1,
+    ) -> Result<Option<(UtcMicros, UtcMicros, u64)>, WorkGraphReadPortErrorV1> {
+        let Some(continuation) = &request.continuation else {
+            return Ok(None);
+        };
+        let binding = timeline_binding(request)?;
+        decode_bound_cursor::<WorkGraphTimelinePositionV1>(&binding, continuation.as_str())
+            .map(|position| Some(position.key()))
+            .map_err(WorkGraphReadPortErrorV1::CursorRefused)
+    }
+
     /// One bounded page of a timeline read, in timeline order.
     ///
     /// `window` is every entry the request's mode and window select. The

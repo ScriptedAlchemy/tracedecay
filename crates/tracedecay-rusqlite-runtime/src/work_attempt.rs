@@ -50,6 +50,56 @@ fn load_stored(
     decode_stored(&payload)
 }
 
+/// Identities loaded per query. Three parameters each, plus the authority's
+/// five, stay far below SQLite's parameter limit.
+const ATTEMPT_HYDRATION_BATCH: usize = 64;
+
+/// The stored attempts for `identities` under `authority`, in bounded batches.
+///
+/// An identity that has no row, that another authority owns, or whose batch
+/// could not be read is simply absent from the answer, which is how a caller
+/// tells hydrated attempts from unavailable ones. The authority is part of
+/// every query, so a row it does not own can never be returned.
+pub(crate) fn load_attempts(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+    identities: &std::collections::BTreeSet<WorkAttemptIdentityV1>,
+) -> std::collections::BTreeMap<WorkAttemptIdentityV1, WorkAttemptV1> {
+    let identities = identities.iter().collect::<Vec<_>>();
+    let mut loaded = std::collections::BTreeMap::new();
+    for batch in identities.chunks(ATTEMPT_HYDRATION_BATCH) {
+        let tuples = (0..batch.len())
+            .map(|index| {
+                let base = 6 + index * 3;
+                format!("(?{}, ?{}, ?{})", base, base + 1, base + 2)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params = authority_params_owned(authority)
+            .into_iter()
+            .chain(batch.iter().flat_map(|identity| identity_params(identity)))
+            .collect();
+        let Ok(rows) = registered_work_query(
+            source,
+            &format!(
+                "SELECT attempt_payload FROM work_attempts_v1
+                 WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+                   AND actor_id = ?4 AND policy_digest = ?5
+                   AND (task_id, run_id, attempt_id) IN (VALUES {tuples})"
+            ),
+            params,
+        ) else {
+            continue;
+        };
+        for row in rows.rows {
+            if let Ok(attempt) = attempt_from_row(row) {
+                loaded.insert(attempt.identity().clone(), attempt);
+            }
+        }
+    }
+    loaded
+}
+
 fn insert_attempt(
     storage: &WorkSqliteStorage,
     authority: &WorkAuthority,

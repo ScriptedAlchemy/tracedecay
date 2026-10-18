@@ -6,7 +6,10 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{TaskId, WorkProductGraphV1};
 
-use super::{FromStoreFault, fold_graph, load_covered_journal, verified_version};
+use super::FromStoreFault;
+use super::journal::{
+    NamedVersionV1, covered_prefix_len, require_current_journal, resolve_named_version,
+};
 use crate::work::WorkSqliteStorage;
 
 impl WorkEvidenceRootReadPortV1 for WorkSqliteStorage {
@@ -65,40 +68,17 @@ fn verified_graph(
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), WorkEvidenceRootReadErrorV1> {
     let scope = context.authorized_scope();
-    // Bounded to the slice the selection covers, exactly as the graph read is:
-    // a version folded across an event outside the selection never existed
-    // under it, while a version inside the covered prefix stays readable.
-    let covered = load_covered_journal(storage.handle(), scope)
-        .map_err(WorkEvidenceRootReadErrorV1::from_fault)?;
-    let (journal, published) = (covered.journal, covered.published);
-    let Some(version) = published
-        .iter()
-        .find(|version| version.graph_version == requested.graph_version())
-    else {
-        return Err(
-            if published
-                .iter()
-                .any(|version| version.graph_version.get() > requested.graph_version().get())
-            {
-                WorkEvidenceRootReadErrorV1::Stale
-            } else {
-                WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized
-            },
-        );
-    };
-    let entry = journal
-        .iter()
-        .find(|entry| entry.sequence == version.event_sequence)
-        .ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
-    let graph = fold_graph(&journal, version.event_sequence)
-        .ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
-    if graph.version() != version.graph_version {
-        return Err(WorkEvidenceRootReadErrorV1::Unavailable);
+    let source = storage.handle();
+    // Resolved inside the selection's own aggregate, exactly as the graph read
+    // is.
+    require_current_journal(source).map_err(WorkEvidenceRootReadErrorV1::from_fault)?;
+    let covered =
+        covered_prefix_len(source, scope).map_err(WorkEvidenceRootReadErrorV1::from_fault)?;
+    match resolve_named_version(source, scope, covered, requested)
+        .map_err(WorkEvidenceRootReadErrorV1::from_fault)?
+    {
+        NamedVersionV1::Found(found) => Ok(*found),
+        NamedVersionV1::Stale => Err(WorkEvidenceRootReadErrorV1::Stale),
+        NamedVersionV1::Absent => Err(WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized),
     }
-    let verified =
-        verified_version(version, &entry.event).ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
-    if verified != *requested {
-        return Err(WorkEvidenceRootReadErrorV1::Stale);
-    }
-    Ok((verified, graph))
 }

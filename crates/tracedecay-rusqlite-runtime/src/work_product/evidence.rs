@@ -3,9 +3,9 @@
 //!
 //! Evidence is not a second store. `WorkGraphChangeV1::EvidenceLinked` and
 //! `WorkGraphChangeV1::AcceptedAttemptLinked` write a `TaskEvidenceLinkV1` into
-//! the journal, and folding the journal to a published version reproduces
+//! the journal, and reconstructing the graph at a published version reproduces
 //! exactly the links that version declared. So this authority reads evidence
-//! the same way it reads a graph: fold, verify, answer. It never joins an
+//! the same way it reads a graph: reconstruct, verify, answer. It never joins an
 //! attempt row, a retrieval anchor row, or any other authority's table to
 //! enrich a link.
 //!
@@ -19,8 +19,8 @@
 //! caller's question. An older published version is therefore answered as
 //! itself: verified versions are retained, and reading one is a temporal read,
 //! not a stale one. What is refused is an identity this authority did not
-//! verify. The identity is rebuilt from the published row and the journaled
-//! event, and a byte-for-byte disagreement at a version this authority does
+//! verify. The identity is rebuilt from the published row, and a
+//! byte-for-byte disagreement at a version this authority does
 //! know is reported as staleness; a version it never published is an absence,
 //! unless a higher version exists, in which case the caller is behind and is
 //! told that instead.
@@ -50,7 +50,10 @@ use tracedecay_domain::{
     TaskEvidenceLinkV1, TaskId, WorkProductGraphV1, WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1,
 };
 
-use super::{FromStoreFault, fold_graph, load_covered_journal, verified_version};
+use super::FromStoreFault;
+use super::journal::{
+    NamedVersionV1, covered_prefix_len, require_current_journal, resolve_named_version,
+};
 use crate::work::WorkSqliteStorage;
 
 type PortError = WorkEvidenceReadPortErrorV1;
@@ -141,55 +144,26 @@ fn task_links(graph: &WorkProductGraphV1, task_id: &TaskId) -> Vec<TaskEvidenceL
     links
 }
 
-/// Resolve the exact verified version the caller named, and the graph folded to
-/// it.
+/// Resolve the exact verified version the caller named, and the graph
+/// reconstructed at it.
 ///
-/// The selection bounds which versions are readable, exactly as it does for a
-/// graph read: the journal's covered prefix is answered, and a version folded
-/// across an event outside the selection is not readable under it, because that
-/// graph never existed under this selection. A version *inside* the covered
-/// prefix is served normally, an event admitted under some other scope later
-/// in the journal does not retract evidence the caller is plainly authorized
-/// for.
+/// The selection resolves to one aggregate, and only that aggregate's versions
+/// are readable. An older version of it is answered as itself: verified
+/// versions are retained, and reading one is a temporal read, not a stale one.
 fn verified_graph(
     storage: &WorkSqliteStorage,
     context: &WorkProductPortContextV1,
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), PortError> {
     let scope = context.authorized_scope();
-    let covered = load_covered_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
-    let (journal, published) = (covered.journal, covered.published);
-    let Some(version) = published
-        .iter()
-        .find(|version| version.graph_version == requested.graph_version())
-    else {
+    let source = storage.handle();
+    require_current_journal(source).map_err(PortError::from_fault)?;
+    let covered = covered_prefix_len(source, scope).map_err(PortError::from_fault)?;
+    match resolve_named_version(source, scope, covered, requested).map_err(PortError::from_fault)? {
+        NamedVersionV1::Found(found) => Ok(*found),
         // A version this authority never published is an absence. A version
         // the caller is behind is staleness. They are not the same answer.
-        return Err(
-            if published
-                .iter()
-                .any(|version| version.graph_version.get() > requested.graph_version().get())
-            {
-                PortError::Stale
-            } else {
-                PortError::NotFoundOrNotAuthorized
-            },
-        );
-    };
-    let entry = journal
-        .iter()
-        .find(|entry| entry.sequence == version.event_sequence)
-        .ok_or(PortError::Unavailable)?;
-    let graph = fold_graph(&journal, version.event_sequence).ok_or(PortError::Unavailable)?;
-    if graph.version() != version.graph_version {
-        return Err(PortError::Unavailable);
+        NamedVersionV1::Stale => Err(PortError::Stale),
+        NamedVersionV1::Absent => Err(PortError::NotFoundOrNotAuthorized),
     }
-    let verified = verified_version(version, &entry.event).ok_or(PortError::Unavailable)?;
-    // The same version number under a different verified identity is a
-    // different reading of history, so the caller's identity is honoured
-    // exactly rather than reconciled to this one.
-    if verified != *requested {
-        return Err(PortError::Stale);
-    }
-    Ok((verified, graph))
 }

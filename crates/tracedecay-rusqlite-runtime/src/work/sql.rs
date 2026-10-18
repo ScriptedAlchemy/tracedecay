@@ -113,5 +113,7 @@ pub(crate) fn registered_work_query(
     sql: &str,
     params: Vec<ExactSqlValue>,
 ) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError> {
-    source.work_query(exact_sql_statement(sql, params)?)
+    let rows = source.work_query(exact_sql_statement(sql, params)?)?;
+    crate::work_product::instrument::record(&rows);
+    Ok(rows)
 }

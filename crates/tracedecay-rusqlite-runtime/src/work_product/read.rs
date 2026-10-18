@@ -10,7 +10,8 @@
 //! product journal is keyed by the registered profile owner. Plain storage has
 //! no correspondence between them. Daemon routes bind their registered
 //! authority through [`AuthorizedWorkProductReadStorageV1`], which can hydrate
-//! exactly the accepted attempt identities declared by each graph version.
+//! exactly the accepted attempt identities declared by each graph version, in
+//! bounded batches.
 //!
 //! So the coverage is reported, not guessed:
 //!
@@ -26,16 +27,26 @@
 //! A selection names a slice of the owner's work, not the whole journal. An
 //! event outside the selection falls outside the slice; it does not invalidate
 //! the events inside it. So a read is answered over the journal's covered
-//! prefix, see [`covered_prefix`](super::covered_prefix) for why the covered
-//! slice is always a prefix, and carries a
+//! prefix, see [`Coverage`](super::journal::Coverage) for why the covered slice
+//! is always a prefix, and carries a
 //! [`WorkGraphSelectionCoverageV1`](tracedecay_contracts::WorkGraphSelectionCoverageV1)
 //! that says how much lies outside it. Answering the slice silently would be
 //! the real falsification; refusing the whole read because a later event was
 //! admitted under a scope this selection does not name would discard work the
 //! caller is plainly authorized for.
 //!
-//! Published versions are filtered by the same boundary: a version folded from
-//! an event outside the selection is not readable under it at all.
+//! The prefix's end comes from the scope registry, one row per distinct scope
+//! set, so no read scans events to find it. Published versions are bounded by
+//! the same prefix: a version folded from an event outside the selection is not
+//! readable under it at all.
+//!
+//! * `Current` is the newest version of the prefix observed by the caller's
+//!   instant. It is served from the journal's head when that is the newest, so a
+//!   current read over a fully covered journal touches no event.
+//! * `AsOf`, `Evolution` and `Forensic` are historical. They select version
+//!   rows by their own instants and reconstruct each graph from the nearest
+//!   checkpoint, and every reconstructed graph must reproduce its recorded
+//!   digest.
 //!
 //! ## The empty-journal rule
 //!
@@ -46,27 +57,28 @@
 //! never as a denial. `Evolution` and `Forensic` are range reads, and their
 //! explicit zero state *is* representable, an empty timeline with
 //! `Complete { returned: 0 }` coverage, so that is what they answer. A covered
-//! journal holding events but no published version cannot be committed by the
+//! prefix holding events but no published version cannot be committed by the
 //! atomic writer, so it is reported unavailable rather than absent.
 
 use tracedecay_contracts::{
     VerifiedWorkEvidenceRootV1, VerifiedWorkGraphVersionV1, WorkAttemptReceiptReadErrorV1,
-    WorkAttemptReceiptReadPortV1, WorkAttemptReceiptV1, WorkAttemptStoragePort,
-    WorkEvidenceRootReadErrorV1, WorkEvidenceRootReadPortV1, WorkGraphReadModeV1,
-    WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkProductPortContextV1,
+    WorkAttemptReceiptReadPortV1, WorkAttemptReceiptV1, WorkEvidenceRootReadErrorV1,
+    WorkEvidenceRootReadPortV1, WorkGraphReadModeV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1,
+    WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphTimelineV1, WorkGraphVersionEntryV1,
+    WorkProductPortContextV1,
 };
 use tracedecay_domain::{
     ProjectionGenerationId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAuthority,
-    WorkProductGraphV1, WorkProductProjectionBundleV1, WorkProjectionSequenceV1,
-    WorkRuntimeAttemptProjectionV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1,
-    canonical_sha256,
+    WorkGraphVersionV1, WorkProductGraphV1, WorkProductProjectionBundleV1,
+    WorkProjectionSequenceV1, WorkRuntimeAttemptProjectionV1, WorkRuntimeProjectionCoverageV1,
+    WorkRuntimeProjectionV1, canonical_sha256,
 };
 
-use super::{
-    FromStoreFault, JournalFoldV1, WorkProductJournalEntryV1, WorkProductPublishedVersionV1,
-    load_covered_journal, verified_version,
+use super::journal::{
+    GraphReplay, TimelineAxis, load_coverage, load_head, load_head_version, load_latest_published,
+    load_published, load_timeline_window, require_current_journal, verified_graph,
 };
+use super::{FromStoreFault, WorkProductPublishedVersionV1, verified_version};
 use crate::work::WorkSqliteStorage;
 
 type PortError = WorkGraphReadPortErrorV1;
@@ -140,129 +152,135 @@ fn read_graph(
     request: &WorkGraphReadRequestV1,
 ) -> Result<WorkGraphReadV1, PortError> {
     let scope = context.authorized_scope();
+    let source = storage.handle();
+    require_current_journal(source).map_err(PortError::from_fault)?;
     // Events outside the selection fall outside it; they do not poison the
     // ones inside. The read is answered over the covered prefix and carries
     // the coverage that says what was left out, so a caller can never
     // mistake a slice for the whole.
-    let covered = load_covered_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
-    let selection_coverage = covered.coverage;
-    if covered.published.is_empty() && !covered.journal.is_empty() {
-        return Err(PortError::Unavailable);
+    let total = load_head_version(source, scope)
+        .map_err(PortError::from_fault)?
+        .map_or(0, WorkGraphVersionV1::get);
+    let coverage = load_coverage(source, scope, total).map_err(PortError::from_fault)?;
+    let selection_coverage = coverage.disclosure().map_err(PortError::from_fault)?;
+    if let Ok(covered_head) = WorkGraphVersionV1::new(coverage.covered) {
+        // A covered prefix with no verified head version is a state the atomic
+        // writer cannot produce, so it is damage and not an empty journal.
+        load_published(source, scope, coverage.covered, covered_head)
+            .map_err(PortError::from_fault)?
+            .ok_or(PortError::Unavailable)?;
     }
-
+    // The journal's head is the covered prefix's head only when nothing is
+    // excluded; a narrower prefix reconstructs its own head from a checkpoint.
+    let head = if coverage.first_excluded.is_none() {
+        load_head(source, scope).map_err(PortError::from_fault)?
+    } else {
+        None
+    };
+    let covered = coverage.covered;
+    let mut replay = GraphReplay::new(source, scope, head.as_ref());
+    let mut entries = |published: Vec<WorkProductPublishedVersionV1>| {
+        build_entries(
+            storage,
+            authority,
+            &mut replay,
+            published,
+            request.observed_at,
+        )
+    };
+    let absent = || WorkGraphReadV1::Absent {
+        authorized_scope: scope.clone(),
+        selection_coverage: selection_coverage.clone(),
+    };
     // A read cannot include a version this authority had not observed at the
     // caller's observation instant. Besides preserving forensic truth, this
     // lets a prepared mutation read its former head and reach the event
     // journal's authoritative compare-and-swap conflict when a later version
     // has already committed.
-    let visible = covered
-        .published
-        .iter()
-        .filter(|version| version.observed_at <= request.observed_at)
-        .collect::<Vec<_>>();
-    let entries = |selected: &dyn Fn(usize, &WorkProductPublishedVersionV1) -> bool| {
-        build_entries(
-            storage,
-            authority,
-            &covered.journal,
-            &visible,
-            selected,
-            request.observed_at,
-        )
-    };
-    let absent = |selection_coverage| WorkGraphReadV1::Absent {
-        authorized_scope: scope.clone(),
-        selection_coverage,
-    };
     match &request.mode {
         WorkGraphReadModeV1::Current => {
-            let head = visible.len().checked_sub(1);
-            Ok(match entries(&|index, _| Some(index) == head)?.pop() {
+            let latest = load_latest_published(source, scope, covered, request.observed_at, None)
+                .map_err(PortError::from_fault)?;
+            Ok(match entries(latest.into_iter().collect())?.pop() {
                 Some(snapshot) => WorkGraphReadV1::Current {
                     authorized_scope: scope.clone(),
                     selection_coverage,
                     snapshot,
                 },
-                None => absent(selection_coverage),
+                None => absent(),
             })
         }
         WorkGraphReadModeV1::AsOf { valid_at } => {
-            let as_of = visible
-                .iter()
-                .rposition(|version| version.valid_at <= *valid_at);
-            Ok(match entries(&|index, _| Some(index) == as_of)?.pop() {
+            let latest =
+                load_latest_published(source, scope, covered, request.observed_at, Some(*valid_at))
+                    .map_err(PortError::from_fault)?;
+            Ok(match entries(latest.into_iter().collect())?.pop() {
                 Some(snapshot) => WorkGraphReadV1::AsOf {
                     authorized_scope: scope.clone(),
                     selection_coverage,
                     snapshot,
                 },
-                None => absent(selection_coverage),
+                None => absent(),
             })
         }
         WorkGraphReadModeV1::Evolution {
             from_valid_at,
             through_valid_at,
         } => {
-            let selected = entries(&|_, version| {
-                version.valid_at >= *from_valid_at && version.valid_at <= *through_valid_at
-            })?;
+            let window = load_timeline_window(
+                source,
+                scope,
+                covered,
+                TimelineAxis::Valid,
+                (*from_valid_at, *through_valid_at),
+                request.observed_at,
+                WorkGraphTimelineV1::resume_key(request)?,
+            )
+            .map_err(PortError::from_fault)?;
             Ok(WorkGraphReadV1::Evolution {
                 authorized_scope: scope.clone(),
                 selection_coverage,
-                timeline: WorkGraphTimelineV1::page(request, selected)?,
+                timeline: WorkGraphTimelineV1::page(request, entries(window)?)?,
             })
         }
         WorkGraphReadModeV1::Forensic {
             from_observed_at,
             through_observed_at,
         } => {
-            let selected = entries(&|_, version| {
-                version.observed_at >= *from_observed_at
-                    && version.observed_at <= *through_observed_at
-            })?;
+            let window = load_timeline_window(
+                source,
+                scope,
+                covered,
+                TimelineAxis::Observed,
+                (*from_observed_at, *through_observed_at),
+                request.observed_at,
+                WorkGraphTimelineV1::resume_key(request)?,
+            )
+            .map_err(PortError::from_fault)?;
             Ok(WorkGraphReadV1::Forensic {
                 authorized_scope: scope.clone(),
                 selection_coverage,
-                timeline: WorkGraphTimelineV1::page(request, selected)?,
+                timeline: WorkGraphTimelineV1::page(request, entries(window)?)?,
             })
         }
     }
 }
 
-/// Verify every visible version and build an entry for each selected one,
-/// carrying the graph folded to that version and every projection derived
-/// from that same graph.
-///
-/// The journal is folded once, forward. Every visible verified row is checked
-/// against its event and folded graph version, so a damaged history fails the
-/// read closed, but only selected versions are cloned, hydrated, and
-/// projected: a point read costs one fold however long the history is.
+/// Reconstruct and verify each selected version, ascending so neighbouring
+/// versions share a fold, and build the entry carrying the graph and every
+/// projection derived from that same graph.
 fn build_entries(
     storage: &WorkSqliteStorage,
     authority: Option<&WorkAuthority>,
-    journal: &[WorkProductJournalEntryV1],
-    visible: &[&WorkProductPublishedVersionV1],
-    selected: &dyn Fn(usize, &WorkProductPublishedVersionV1) -> bool,
+    replay: &mut GraphReplay<'_, crate::exact_sql::ExactSqlHandle>,
+    mut selected: Vec<WorkProductPublishedVersionV1>,
     projected_at: UtcMicros,
 ) -> Result<Vec<WorkGraphVersionEntryV1>, PortError> {
-    let mut fold = JournalFoldV1::new(journal);
-    let mut entries = Vec::new();
-    for (index, version) in visible.iter().copied().enumerate() {
-        let journal_index = journal
-            .binary_search_by_key(&version.event_sequence, |entry| entry.sequence)
-            .map_err(|_| PortError::Unavailable)?;
-        let entry = &journal[journal_index];
-        let graph = fold
-            .advance_to(version.event_sequence)
-            .ok_or(PortError::Unavailable)?;
-        if graph.version() != version.graph_version {
-            return Err(PortError::Unavailable);
-        }
-        let verified = verified_version(version, &entry.event).ok_or(PortError::Unavailable)?;
-        if !selected(index, version) {
-            continue;
-        }
-        let graph = graph.clone();
+    selected.sort_by_key(|version| version.graph_version);
+    let mut entries = Vec::with_capacity(selected.len());
+    for version in &selected {
+        let graph = verified_graph(replay, version).map_err(PortError::from_fault)?;
+        let verified = verified_version(version).ok_or(PortError::Unavailable)?;
         let runtime = runtime_projection(storage, authority, &graph, version, projected_at)?;
         let projections = WorkProductProjectionBundleV1::from_graph(&graph, &runtime, projected_at)
             .map_err(|_| PortError::Unavailable)?;
@@ -302,13 +320,14 @@ fn runtime_projection(
     let mut attempts = Vec::new();
     let mut unavailable = std::collections::BTreeSet::new();
     if let Some(authority) = authority {
+        let mut loaded = crate::work_attempt::load_attempts(storage.handle(), authority, &accepted);
         for identity in &accepted {
-            match storage.load(authority, identity) {
-                Ok(attempt) => attempts.push(WorkRuntimeAttemptProjectionV1 {
+            match loaded.remove(identity) {
+                Some(attempt) => attempts.push(WorkRuntimeAttemptProjectionV1 {
                     identity: attempt.identity().clone(),
                     state: attempt.state(),
                 }),
-                Err(_) => {
+                None => {
                     unavailable.insert(identity.clone());
                 }
             }

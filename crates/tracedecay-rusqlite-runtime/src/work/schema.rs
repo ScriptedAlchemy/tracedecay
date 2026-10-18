@@ -316,50 +316,90 @@ ON work_duplicate_adjudications_v1 (
 );
 ";
 
-/// The canonical Work product graph authority: its immutable event journal,
-/// and the verified graph versions committed atomically with it.
+/// The canonical Work product graph authority: the owner's immutable event
+/// journal, the verified graph versions committed atomically with it, the
+/// current-state projection, and the bounded checkpoints historical reads fold
+/// from.
 ///
 /// The product journal is scoped by the registered profile OWNER (brain +
-/// profile), because that is the scope
-/// `WorkProductEventV1::owner_scope` declares and the only scope its
-/// authorization port resolves. The two are never joined: correlating a task
-/// row with a product item would invent a correspondence neither authority
-/// records.
+/// profile), because that is the scope `WorkProductEventV1::owner_scope`
+/// declares and the only scope its authorization port resolves. The two are
+/// never joined: correlating a task row with a product item would invent a
+/// correspondence neither authority records.
+///
+/// Within the owner the event sequence equals the graph version it produces
+/// (`Created` is 1 and every change adds 1), so a position in the chain is a
+/// version. `work_product_journal_head_v1` is the current graph, rewritten by
+/// every append in its transaction, so no current read or append replays the
+/// chain. `work_product_journal_checkpoints_v1` holds the graph at every
+/// 128th version, which bounds reconstructing any older version to a short
+/// fold. `work_product_journal_scopes_v1` records each distinct relation-scope
+/// set the journal has seen and the sequence it first appeared at, which is all
+/// a selection needs to find where its covered prefix ends.
 ///
 /// Every measurement the product projections expose, item effort, declared
 /// causal candidates, scheduled_at, deadline, lives inside `event_payload`
 /// exactly as the caller declared it in the event. Nothing in this schema
-/// derives, estimates, or backfills one.
+/// derives, estimates, or backfills one. See `docs/plans/work-current-state.md`.
 pub const WORK_PRODUCT_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS work_product_events_v1 (
+CREATE TABLE IF NOT EXISTS work_product_journal_events_v1 (
     owner_brain_id TEXT NOT NULL,
     owner_profile_id TEXT NOT NULL,
     sequence INTEGER NOT NULL CHECK (sequence > 0),
+    scope_key TEXT NOT NULL,
     event_id TEXT NOT NULL,
     command_id TEXT NOT NULL,
     canonical_input_digest TEXT NOT NULL,
     expected_graph_version INTEGER
         CHECK (expected_graph_version IS NULL OR expected_graph_version > 0),
-    result_graph_version INTEGER NOT NULL CHECK (result_graph_version > 0),
+    result_graph_version INTEGER NOT NULL CHECK (result_graph_version = sequence),
     occurred_at INTEGER NOT NULL,
     event_payload TEXT NOT NULL,
     PRIMARY KEY (owner_brain_id, owner_profile_id, sequence),
     UNIQUE (owner_brain_id, owner_profile_id, event_id),
-    UNIQUE (owner_brain_id, owner_profile_id, command_id),
-    UNIQUE (owner_brain_id, owner_profile_id, result_graph_version)
+    UNIQUE (owner_brain_id, owner_profile_id, command_id)
 ) STRICT;
 
-CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
+CREATE TABLE IF NOT EXISTS work_product_journal_scopes_v1 (
+    owner_brain_id TEXT NOT NULL,
+    owner_profile_id TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    relation_scopes TEXT NOT NULL,
+    first_sequence INTEGER NOT NULL CHECK (first_sequence > 0),
+    PRIMARY KEY (owner_brain_id, owner_profile_id, scope_key)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS work_product_journal_versions_v1 (
     owner_brain_id TEXT NOT NULL,
     owner_profile_id TEXT NOT NULL,
     graph_version INTEGER NOT NULL CHECK (graph_version > 0),
-    event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+    event_sequence INTEGER NOT NULL CHECK (event_sequence = graph_version),
     valid_at INTEGER NOT NULL,
     observed_at INTEGER NOT NULL CHECK (observed_at >= valid_at),
     source_watermark TEXT NOT NULL,
     recovered_graph_digest TEXT NOT NULL,
-    PRIMARY KEY (owner_brain_id, owner_profile_id, graph_version),
-    UNIQUE (owner_brain_id, owner_profile_id, event_sequence)
+    PRIMARY KEY (owner_brain_id, owner_profile_id, graph_version)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS work_product_journal_versions_timeline_v1
+ON work_product_journal_versions_v1 (
+    owner_brain_id, owner_profile_id, valid_at, observed_at, graph_version
+);
+
+CREATE TABLE IF NOT EXISTS work_product_journal_checkpoints_v1 (
+    owner_brain_id TEXT NOT NULL,
+    owner_profile_id TEXT NOT NULL,
+    graph_version INTEGER NOT NULL CHECK (graph_version > 0),
+    graph_payload TEXT NOT NULL,
+    PRIMARY KEY (owner_brain_id, owner_profile_id, graph_version)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS work_product_journal_head_v1 (
+    owner_brain_id TEXT NOT NULL,
+    owner_profile_id TEXT NOT NULL,
+    head_version INTEGER NOT NULL CHECK (head_version > 0),
+    head_graph TEXT NOT NULL,
+    PRIMARY KEY (owner_brain_id, owner_profile_id)
 ) STRICT;
 ";
 

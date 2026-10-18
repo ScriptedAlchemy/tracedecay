@@ -15,7 +15,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{WorkProductAuthorizedRelationScopeV1, WorkProductGraphV1};
 
-use super::{FromStoreFault, fold_graph, load_journal};
+use super::FromStoreFault;
+use super::journal::load_verified_graph;
 
 use crate::work::RegisteredWorkWrite;
 use crate::work_run_control::WorkSqliteJobStorage;
@@ -218,14 +219,18 @@ fn graph_for_product(
     context: &tracedecay_contracts::WorkProductPortContextV1,
     product: &WorkProductEventCommitV1,
 ) -> Result<WorkProductGraphV1, AdmissionError> {
-    let journal = load_journal(transaction, context.authorized_scope())
-        .map_err(AdmissionError::from_fault)?;
-    let graph =
-        fold_graph(&journal, product.event().sequence()).ok_or(AdmissionError::Unavailable)?;
-    if graph.version() != product.verified_graph_version().graph_version() {
-        return Err(AdmissionError::VersionConflict);
-    }
-    Ok(graph)
+    let scope = context.authorized_scope();
+    // The version was just appended or replayed under this selection, so it is
+    // inside whatever prefix the selection covers.
+    load_verified_graph(
+        transaction,
+        scope,
+        u64::MAX,
+        product.verified_graph_version().graph_version(),
+    )
+    .map_err(AdmissionError::from_fault)?
+    .map(|(_, graph)| graph)
+    .ok_or(AdmissionError::Unavailable)
 }
 
 fn require_declared_authority(
