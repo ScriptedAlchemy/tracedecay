@@ -57,22 +57,21 @@ use tracedecay_domain::{
 use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneEvidence,
-    ExactLaneRequest, ExactLaneRetriever,
+    ExactLaneRequest,
 };
 use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageError,
     FusionStageInput,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    production_code_index_freshness,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, production_code_index_freshness,
 };
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
     CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
-    lexical_query_parts, merge_lexical_routes,
+    LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1, lexical_query_parts,
+    merge_lexical_routes,
 };
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
