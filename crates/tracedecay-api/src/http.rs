@@ -250,22 +250,9 @@ where
     }
 }
 
+/// Axum view of the canonical [`ApplicationProblemKind::http_status`] mapping.
 pub fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
-    match kind {
-        ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-        ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-        ApplicationProblemKind::Conflict
-        | ApplicationProblemKind::PartialEffect
-        | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-        ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
-        ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-        ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
-        ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-    }
+    StatusCode::from_u16(kind.http_status()).expect("canonical problem status is a valid code")
 }
 
 impl<T> CanonicalInvocationResult<T> {
