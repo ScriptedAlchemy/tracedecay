@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use super::registered_http::invoke_registered_http;
+use super::registered_http::invoke_registered;
 use super::require_public_catalog_route;
-use axum::response::Response;
+use axum::response::IntoResponse;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
 use tracedecay_contracts::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
@@ -76,7 +76,11 @@ struct WorkExecutorOwner {
 impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
     fn invoke_work(&self, request: WorkHttpRequest) -> tracedecay_api::WorkInvocationFuture {
         let executor = Arc::clone(&self.executor);
-        Box::pin(async move { invoke_work_operation(Some(executor.as_ref()), request).await })
+        Box::pin(async move {
+            invoke_work_operation(Some(executor.as_ref()), request)
+                .await
+                .into_response()
+        })
     }
 }
 
@@ -88,7 +92,7 @@ impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
 pub(crate) async fn invoke_work_operation(
     executor: Option<&dyn DaemonInvocationExecutor>,
     request: WorkHttpRequest,
-) -> Response {
+) -> Result<tracedecay_api::HttpJsonEnvelope<serde_json::Value>, tracedecay_api::HttpAdapterError> {
     let WorkHttpRequest {
         operation,
         request_id,
@@ -101,7 +105,7 @@ pub(crate) async fn invoke_work_operation(
         // to keep the wire outcome enum compact.
         (boxed $request_ty:ty, $variant:ident, $output:ty) => {{
             let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
+                return tracedecay_api::work_invalid_request(request_id);
             };
             let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::work_application(
                 request_id.as_str(),
@@ -111,9 +115,9 @@ pub(crate) async fn invoke_work_operation(
                 controls.cancellation.context(),
             );
             let Some(executor) = executor else {
-                return super::registered_executor_unavailable::<$output, _>(operation, request_id);
+                return super::registered_executor_unavailable(operation, request_id);
             };
-            invoke_registered_http::<$output, _>(
+            invoke_registered::<$output, _>(
                 executor,
                 operation,
                 request_id,
@@ -131,7 +135,7 @@ pub(crate) async fn invoke_work_operation(
         }};
         ($request_ty:ty, $variant:ident, $output:ty) => {{
             let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
+                return tracedecay_api::work_invalid_request(request_id);
             };
             let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::work_application(
                 request_id.as_str(),
@@ -141,9 +145,9 @@ pub(crate) async fn invoke_work_operation(
                 controls.cancellation.context(),
             );
             let Some(executor) = executor else {
-                return super::registered_executor_unavailable::<$output, _>(operation, request_id);
+                return super::registered_executor_unavailable(operation, request_id);
             };
-            invoke_registered_http::<$output, _>(
+            invoke_registered::<$output, _>(
                 executor,
                 operation,
                 request_id,

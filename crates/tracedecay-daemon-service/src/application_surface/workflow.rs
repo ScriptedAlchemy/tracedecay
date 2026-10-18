@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use super::registered_http::invoke_registered_http;
+use super::registered_http::invoke_registered;
 use super::require_public_catalog_route;
-use axum::response::Response;
+use axum::response::IntoResponse;
 use tracedecay_api::WorkflowOperation;
 use tracedecay_contracts::{
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
@@ -50,7 +50,11 @@ impl tracedecay_api::WorkflowApplicationOwner for WorkflowExecutorOwner {
         request: tracedecay_api::WorkflowHttpRequest,
     ) -> tracedecay_api::WorkflowInvocationFuture {
         let executor = Arc::clone(&self.executor);
-        Box::pin(async move { invoke_workflow_operation(Some(executor.as_ref()), request).await })
+        Box::pin(async move {
+            invoke_workflow_operation(Some(executor.as_ref()), request)
+                .await
+                .into_response()
+        })
     }
 }
 
@@ -68,7 +72,7 @@ impl tracedecay_api::WorkflowApplicationOwner for WorkflowExecutorOwner {
 pub async fn invoke_workflow_operation(
     executor: Option<&dyn DaemonInvocationExecutor>,
     request: tracedecay_api::WorkflowHttpRequest,
-) -> Response {
+) -> Result<tracedecay_api::HttpJsonEnvelope<serde_json::Value>, tracedecay_api::HttpAdapterError> {
     let tracedecay_api::WorkflowHttpRequest {
         operation,
         request_id,
@@ -79,7 +83,7 @@ pub async fn invoke_workflow_operation(
         WorkflowOperation::RegisterDefinition => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionRegisterRequest>(body)
             else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_domain::WorkflowDefinition>(
                 executor,
@@ -94,7 +98,7 @@ pub async fn invoke_workflow_operation(
         WorkflowOperation::ActivateDefinition => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionActivateRequest>(body)
             else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
                 executor,
@@ -109,7 +113,7 @@ pub async fn invoke_workflow_operation(
         WorkflowOperation::RetireDefinition => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionRetireRequest>(body)
             else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
                 executor,
@@ -124,7 +128,7 @@ pub async fn invoke_workflow_operation(
         WorkflowOperation::RejectDefinition => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionRejectRequest>(body)
             else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
                 executor,
@@ -139,7 +143,7 @@ pub async fn invoke_workflow_operation(
         WorkflowOperation::ValidateDefinition => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionValidateRequest>(body)
             else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_contracts::WorkflowDefinitionValidation>(
                 executor,
@@ -153,7 +157,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::GetDefinition => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionGetRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_domain::WorkflowDefinition>(
                 executor,
@@ -167,7 +171,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::ListDefinitions => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionListRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<Vec<tracedecay_domain::WorkflowDefinition>>(
                 executor,
@@ -182,7 +186,7 @@ pub async fn invoke_workflow_operation(
         WorkflowOperation::DefinitionHistory => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionHistoryRequest>(body)
             else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<Vec<tracedecay_domain::WorkflowDefinition>>(
                 executor,
@@ -196,7 +200,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::DiffDefinition => {
             let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionDiffRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_contracts::WorkflowDefinitionDiff>(
                 executor,
@@ -210,7 +214,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::HandoffIssue => {
             let Ok(decoded) = serde_json::from_value::<TaskHandoffIssueRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_contracts::TaskHandoffGrant>(
                 executor,
@@ -224,7 +228,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::HandoffRedeem => {
             let Ok(decoded) = serde_json::from_value::<TaskHandoffRedeemRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_contracts::TaskHandoffRedeemed>(
                 executor,
@@ -238,7 +242,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::StartRun => {
             let Ok(decoded) = serde_json::from_value::<WorkflowRunStartRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_domain::WorkflowRunProjection>(
                 executor,
@@ -252,7 +256,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::PauseRun => {
             let Ok(decoded) = serde_json::from_value::<WorkflowRunPauseRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_domain::WorkflowRunProjection>(
                 executor,
@@ -266,7 +270,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::ResumeRun => {
             let Ok(decoded) = serde_json::from_value::<WorkflowRunResumeRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_domain::WorkflowRunProjection>(
                 executor,
@@ -280,7 +284,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::CancelRun => {
             let Ok(decoded) = serde_json::from_value::<WorkflowRunCancelRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_domain::WorkflowRunProjection>(
                 executor,
@@ -294,7 +298,7 @@ pub async fn invoke_workflow_operation(
         }
         WorkflowOperation::GetRun => {
             let Ok(decoded) = serde_json::from_value::<WorkflowRunGetRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
+                return tracedecay_api::workflow_invalid_request(request_id);
             };
             invoke::<tracedecay_domain::WorkflowRunProjection>(
                 executor,
@@ -321,7 +325,7 @@ async fn invoke<T>(
         tracedecay_contracts::ResolvedScope,
         tracedecay_contracts::ApplicationOutcome<T>,
     )>,
-) -> Response
+) -> Result<tracedecay_api::HttpJsonEnvelope<serde_json::Value>, tracedecay_api::HttpAdapterError>
 where
     T: serde::Serialize,
 {
@@ -333,9 +337,9 @@ where
         controls.cancellation.context(),
     );
     let Some(executor) = executor else {
-        return super::registered_executor_unavailable::<T, _>(operation, request_id);
+        return super::registered_executor_unavailable(operation, request_id);
     };
-    invoke_registered_http::<T, _>(
+    invoke_registered::<T, _>(
         executor, operation, request_id, controls, invocation, select,
     )
     .await

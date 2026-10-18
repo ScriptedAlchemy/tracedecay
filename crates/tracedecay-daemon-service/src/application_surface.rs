@@ -254,7 +254,7 @@ fn work_application_router_with_executor(
 pub async fn invoke_work_operation(
     executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     request: tracedecay_api::WorkHttpRequest,
-) -> Response {
+) -> Result<tracedecay_api::HttpJsonEnvelope<Value>, tracedecay_api::HttpAdapterError> {
     work::invoke_work_operation(Some(executor), request).await
 }
 

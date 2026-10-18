@@ -51,7 +51,7 @@ use tracedecay_domain::{
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
-    dispatch_json_operation, invalid_request_response,
+    dispatch_json_operation, invalid_request_problem,
 };
 
 fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
@@ -414,10 +414,14 @@ where
 /// The owner decodes against the typed contract, so this is the refusal it
 /// returns when that decode fails: the same canonical problem envelope every
 /// other malformed application request produces.
-pub fn work_invalid_request_response(request_id: RequestId) -> Response {
-    invalid_request_response(
+pub fn work_invalid_request(
+    request_id: RequestId,
+) -> Result<crate::HttpJsonEnvelope<Value>, crate::HttpAdapterError> {
+    invalid_request_problem(
         request_id,
         "work.invalid_request",
         "The Work application request is invalid",
     )
+    .map(Into::into)
+    .map_err(Into::into)
 }
