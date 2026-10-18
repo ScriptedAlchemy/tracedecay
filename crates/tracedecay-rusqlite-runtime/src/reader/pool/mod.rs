@@ -317,6 +317,15 @@ pub(super) struct PoolState {
 }
 
 impl PoolState {
+    /// Why an acquisition refused by a draining pool is turned away.
+    const fn draining_reason(&self) -> UnavailableReasonV1 {
+        if self.lost {
+            UnavailableReasonV1::FileLost
+        } else {
+            UnavailableReasonV1::Draining
+        }
+    }
+
     fn workers(&self, lane: ReaderLane) -> u16 {
         self.records
             .values()
@@ -808,13 +817,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     /// pool object may outlive this call inside a lease, but no longer holds
     /// the unlinked file open. Never waits, so a pool task may call it.
     pub(crate) fn close_for_lost_file(&self) {
-        self.begin_shutdown_drain();
+        // Draining and `lost` flip under one lock, so a waiter the wake below
+        // releases never sees the pool draining without the file being lost.
         let clients: Vec<_> = {
             let mut state = self
                 .inner
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.lifecycle = ReaderPoolState::Draining;
+            state.health_admission_open = false;
             state.lost = true;
             state
                 .records
@@ -822,6 +834,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 .map(|record| record.client.clone())
                 .collect()
         };
+        self.inner.capacity_changed.notify_all();
         self.inner.locator.release_opened_database();
         for client in clients {
             client.shutdown();
@@ -1036,10 +1049,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             if state.lifecycle == ReaderPoolState::Draining
                 && (lane == ReaderLane::General || !state.health_admission_open)
             {
+                let reason = state.draining_reason();
+                drop(state);
                 self.inner.admission.interrupted();
-                return Err(ReaderAcquireError::Interrupted {
-                    reason: UnavailableReasonV1::Draining,
-                });
+                return Err(ReaderAcquireError::Interrupted { reason });
             }
             if lane == ReaderLane::General
                 && self
@@ -1149,6 +1162,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         if state.lost {
                             client.shutdown();
                         }
+                        let reason = state.draining_reason();
                         state.available(lane).push_back(AvailableWorker {
                             id,
                             client,
@@ -1157,9 +1171,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         drop(state);
                         self.inner.capacity_changed.notify_all();
                         self.inner.admission.interrupted();
-                        return Err(ReaderAcquireError::Interrupted {
-                            reason: UnavailableReasonV1::Draining,
-                        });
+                        return Err(ReaderAcquireError::Interrupted { reason });
                     }
                     *state.leased_mut(lane) += 1;
                     drop(state);

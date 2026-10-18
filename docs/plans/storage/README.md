@@ -889,11 +889,24 @@ changes a file that holds memory.
   unmaps it as before. This is a short window, in practice a few milliseconds,
   and a worker stuck in native work holds it open, as a stuck close does for
   capacity eviction. The lost writer's own connection closes when its task
-  returns right after the notice and is not part of the check. Proof: with the
+  returns right after the notice, which the next entry adds to the check
+  (#4280). Proof: with the
   reader pool held across the loss, the unlinked file's descriptors are gone and
   `lost_file_closed` turns true; removing `close_for_lost_file`, the descriptor
   release, the late-registration shutdown or the registry hold each fails its
   own test.
+- Step 7b follow-ups, lost writer and blocked acquires (2026-10-18, branch
+  `fix/4280-lost-writer`, #4280). `lost_file_closed` now also waits for the lost
+  writer's task to finish, because the writer's SQLite connection closes only when
+  that task returns, after the loss notice has run. The attachment keeps the lost
+  writer beside the lost reader pool and marks the file lost, moves both handles
+  and closes the pool in one lock hold, so no check sees a lost file with nothing
+  left to wait on. A caller blocked in the reader pool's acquire when the file is
+  lost, or acquiring afterwards, now gets `FileLost` instead of `Draining`; the
+  pool flips to draining and records the loss in one lock hold. Proof: with the
+  writer task held after the notice and the readers already exited,
+  `lost_file_closed` stays false and turns true once the task returns; removing
+  the writer check or the `FileLost` reason each fails its own test.
 - Step 8a, repository identity (2026-10-17, branch `feat/storage-repository-identity`).
   A second full clone, a shallow clone, and a checkout after a merge of unrelated
   histories open the project that first enrolled the repository, with no `init`.
