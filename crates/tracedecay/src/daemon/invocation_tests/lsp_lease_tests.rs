@@ -617,7 +617,7 @@ async fn state_shutdown_fences_a_queued_open_before_the_endpoint_expiry_sweep() 
     let endpoint_guard = state.lsp_session_registry.lock().await;
     let shutdown_state = Arc::clone(&state);
     let shutdown = tokio::spawn(async move {
-        shutdown_state.shutdown().await;
+        shutdown_state.shutdown(None).await;
     });
     // The fence the open below must be queued behind is the closed admission
     // gate, so observe it directly: `begin_shutdown` closes the gate and then
@@ -728,7 +728,7 @@ async fn shutdown_fences_reconnect_before_lease_and_endpoint_expiry() {
     assert_eq!(service.active_lsp_runtime_count().await, 1);
     assert_eq!(service.lsp_lease_tasks.active_tasks(), 1);
 
-    service.expire_all().await;
+    service.expire_all(None).await;
     registry.lock().await.expire_at(u64::MAX);
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert_eq!(service.active_lsp_runtime_count().await, 0);
@@ -743,7 +743,7 @@ async fn shutdown_joins_pending_lease_reclamation() {
     let retained_runtime_state = Arc::downgrade(&service.lsp_sessions);
 
     service.disconnect_lsp_session(&registry, session).await;
-    service.expire_all().await;
+    service.expire_all(None).await;
     assert_eq!(
         service
             .lsp_lease_tasks

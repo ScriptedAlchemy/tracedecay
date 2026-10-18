@@ -1372,7 +1372,7 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
     )
     .await;
     tracing::Instrument::instrument(
-        resources.invocation.shutdown(),
+        resources.invocation.shutdown(None),
         tracing::trace_span!("daemon.harness.shutdown_invocation"),
     )
     .await;

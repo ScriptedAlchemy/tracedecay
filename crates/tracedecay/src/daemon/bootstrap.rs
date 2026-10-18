@@ -357,7 +357,7 @@ async fn run_foreground_loopback(
                     let invocation_cancel = invocation.clone();
                     move || invocation_cancel.cancel_admissions()
                 },
-                move |_| async move { invocation_join.shutdown().await },
+                move |deadline| async move { invocation_join.shutdown(Some(deadline)).await },
             ),
         ],
         vec![tracedecay_daemon_service::shutdown::ShutdownOwner::new(
