@@ -6,9 +6,10 @@ use serde_json::{Value, json};
 use super::read_modes::{
     LineRange, ReadMode, render_lines, render_map, render_signatures, render_symbol_context,
 };
+use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_domain::canonical_text::sha256_hex;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::storage::ProjectPath;
@@ -193,7 +194,8 @@ pub fn resolve_indexed_source_file(
     if file.contains('\0') {
         return Err(TraceDecayError::Config {
             message: "path contains NUL byte".to_owned(),
-        });
+        }
+        .into());
     }
 
     let input = Path::new(file);
@@ -216,13 +218,12 @@ pub fn resolve_indexed_source_file(
                 input.display(),
                 project_root.display()
             ),
-        });
+        }
+        .into());
     };
     if reader
         .symbols_in_logical_file(&display_file, 1, cancellation)
-        .map_err(|error| {
-            crate::map_code_graph_read_runtime_error(crate::map_projection_error(error))
-        })?
+        .map_err(GraphQueryError::from)?
         .is_empty()
     {
         return Err(TraceDecayError::Config {
@@ -231,7 +232,8 @@ pub fn resolve_indexed_source_file(
                 input.display(),
                 project_root.display()
             ),
-        });
+        }
+        .into());
     }
     let absolute_path = if input.is_absolute() {
         input.to_path_buf()
@@ -269,14 +271,16 @@ fn relative_source_key(path: &Path) -> Result<Option<String>> {
             _ => {
                 return Err(TraceDecayError::Config {
                     message: format!("path '{}' contains unsafe components", path.display()),
-                });
+                }
+                .into());
             }
         }
     }
     if parts.is_empty() {
         return Err(TraceDecayError::Config {
             message: "path must name a project file".to_owned(),
-        });
+        }
+        .into());
     }
     Ok(Some(parts.join("/")))
 }
