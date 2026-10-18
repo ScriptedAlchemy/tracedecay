@@ -173,12 +173,17 @@ describe('the Work inspector', () => {
     expect(within(definition).queryByText('owners', { selector: 'dt' })).toBeNull();
   });
 
-  it('keeps placement, attempts, and topology metrics as separate typed readings', async () => {
+  it('keeps placement and attempts as separate typed readings', async () => {
     const aside = await inspector('/work?view=dag&task=leaf');
     const placement = aside.querySelector<HTMLElement>('[data-work-inspector-placement]');
     if (placement === null) throw new Error('no placement');
-    expect(row(placement, 'placement').textContent).toContain('not read under this projection');
+    // The inspector issues the placement read itself once a task is selected;
+    // this server refuses it, and the row reports the refusal, not an empty lane set.
+    await waitFor(() =>
+      expect(row(placement, 'placement').textContent).not.toContain('not read yet'),
+    );
     expect(row(placement, 'placement').querySelector('[data-evidence-grade="unavailable"]')).not.toBeNull();
+    expect(row(placement, 'placement').textContent).not.toContain('no placement lane');
 
     const attempts = row(placement, 'attempts');
     expect(attempts.textContent).toContain('run-1 / attempt-1 · recovery_required');
@@ -187,7 +192,7 @@ describe('the Work inspector', () => {
 
     const evidence = aside.querySelector<HTMLElement>('[data-work-inspector-evidence]');
     if (evidence === null) throw new Error('no evidence');
-    expect(row(evidence, 'topology metrics').textContent).toContain('not read under this projection');
+    expect(within(evidence).queryByText('topology metrics', { selector: 'dt' })).toBeNull();
     expect(row(evidence, 'graph version').textContent).toContain('v9 / seq 12');
     expect(row(evidence, 'selection scope').textContent).toContain('profile-owned');
     expect(row(evidence, 'attempts').textContent).toContain('1 unavailable, so a floor');

@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react';
 import type {
-  ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   WorkGraphReadV1,
 } from '../../contracts/generated.ts';
@@ -42,7 +41,6 @@ export function WorkInspector({
   graphReading,
   dag,
   topology,
-  topologyMetrics,
   onSelect,
 }: {
   task: WorkTaskView | null;
@@ -51,7 +49,6 @@ export function WorkInspector({
   graphReading: WorkGraphReading;
   dag: WorkDagReading;
   topology: WorkResult<ExecutionTopologyViewV1> | undefined;
-  topologyMetrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
   onSelect: (taskId: string) => void;
 }) {
   if (task === null) {
@@ -79,7 +76,6 @@ export function WorkInspector({
           snapshot={snapshot}
           graph={graph}
           graphReading={graphReading}
-          topologyMetrics={topologyMetrics}
         />
       </aside>
     );
@@ -98,7 +94,6 @@ export function WorkInspector({
         snapshot={snapshot}
         graph={graph}
         graphReading={graphReading}
-        topologyMetrics={topologyMetrics}
       />
       <WorkEvidencePanel taskId={task.task_id} graph={graph} />
     </aside>
@@ -353,7 +348,7 @@ function PlacementRow({
   if (topology === undefined) {
     return (
       <Row term="placement" grade="unavailable" source="TOPOLOGY" muted>
-        not read under this projection · the Topology camera issues the placement read
+        not read yet · the placement read is issued once a task is selected
       </Row>
     );
   }
@@ -423,13 +418,11 @@ function WorkEvidenceSummary({
   snapshot,
   graph,
   graphReading,
-  topologyMetrics,
 }: {
   task: WorkTaskView | null;
   snapshot: WorkProductView;
   graph: WorkResult<WorkGraphReadV1> | undefined;
   graphReading: WorkGraphReading;
-  topologyMetrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
 }) {
   const scope = selectionScope(graph);
   const entry = graphEntryOf(graphReading);
@@ -494,42 +487,10 @@ function WorkEvidenceSummary({
           </span>{' '}
           <span className="text-text-muted">immutable · observed {formatMicrosUtc(snapshot.observed_at)}</span>
         </Row>
-        <TopologyMetricsRow metrics={topologyMetrics} />
         <Row term="selection scope" grade={scope.grade} source="GRAPH" muted={scope.grade === 'unavailable'}>
           {scope.text}
         </Row>
       </dl>
     </Panel>
-  );
-}
-
-function TopologyMetricsRow({
-  metrics,
-}: {
-  metrics: WorkResult<ExecutionTopologyMetricsV1> | undefined;
-}) {
-  if (metrics === undefined) {
-    return (
-      <Row term="topology metrics" grade="unavailable" source="TOPOLOGY" muted>
-        not read under this projection · the Topology camera issues the accounting read
-      </Row>
-    );
-  }
-  if (metrics.outcome === 'refused') {
-    return (
-      <Row term="topology metrics" grade="unavailable" source="TOPOLOGY" muted>
-        <StateChip kind={metrics.state} detail={metrics.detail} />
-      </Row>
-    );
-  }
-  return (
-    <Row term="topology metrics" grade={metrics.value.current ? 'exact' : 'stale'} source="TOPOLOGY">
-      <span className="td-value" data-cell="numeric">
-        {metrics.value.measurements.length}
-      </span>{' '}
-      <span className="text-text-muted">
-        measurements · {metrics.value.current ? 'current' : 'not current'} · watermark {metrics.value.watermark}
-      </span>
-    </Row>
   );
 }

@@ -3,12 +3,6 @@ import type { WorkDagLayout } from '../workDagLayout.ts';
 import type { WorkTaskView } from '../workProductView.ts';
 import type { WorkDagReading } from '../workViewsModel.ts';
 
-/**
- * What the dependency board hands each of its fields: the fitted graph and
- * the matrix read one layout and share the board's inspect/select grammar.
- */
-export type WorkDagFieldView = 'graph' | 'matrix';
-
 export interface Emphasis {
   readonly tasks: ReadonlySet<string>;
   readonly edges: ReadonlySet<string>;

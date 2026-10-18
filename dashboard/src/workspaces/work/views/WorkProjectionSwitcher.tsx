@@ -21,26 +21,9 @@ import { cn } from '../../../ui/cn.ts';
  * so there is no fetch to make an arrow key expensive.
  */
 
-export type WorkProjectionKind =
-  | 'board'
-  | 'dag'
-  | 'matrix'
-  | 'timeline'
-  | 'causal'
-  | 'workload'
-  | 'topology'
-  | 'concurrent-attempts';
+export type WorkProjectionKind = 'board' | 'dag';
 
-export const WORK_PROJECTIONS: readonly WorkProjectionKind[] = [
-  'board',
-  'dag',
-  'matrix',
-  'timeline',
-  'causal',
-  'workload',
-  'topology',
-  'concurrent-attempts',
-];
+export const WORK_PROJECTIONS: readonly WorkProjectionKind[] = ['board', 'dag'];
 
 /** The query parameter that positions the camera, so a projection survives a
  * reload and can be linked to. */
@@ -52,18 +35,6 @@ export function projectionLabel(kind: WorkProjectionKind): string {
       return 'Board';
     case 'dag':
       return 'DAG';
-    case 'matrix':
-      return 'Matrix';
-    case 'timeline':
-      return 'Timeline';
-    case 'causal':
-      return 'Causal';
-    case 'workload':
-      return 'Workload';
-    case 'topology':
-      return 'Topology';
-    case 'concurrent-attempts':
-      return 'Concurrent Attempts';
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -79,18 +50,6 @@ export function projectionNote(kind: WorkProjectionKind): string {
       return 'tasks grouped by the furthest gate each has passed';
     case 'dag':
       return 'declared dependencies, layered by longest path';
-    case 'matrix':
-      return 'every declared relation as a cell, task order on both axes, for dense graphs';
-    case 'timeline':
-      return 'runs woven across the tasks they attached evidence to';
-    case 'causal':
-      return 'declared dependencies read against the evidence at both ends';
-    case 'workload':
-      return 'runs as regions, sized by the tasks they touched';
-    case 'topology':
-      return 'attempts placed onto executors and worktrees, under one verified topology generation';
-    case 'concurrent-attempts':
-      return 'observed attempt spans joined to exact provider and session proximity evidence';
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -98,16 +57,18 @@ export function projectionNote(kind: WorkProjectionKind): string {
   }
 }
 
-function asProjection(value: string | null): WorkProjectionKind {
+/**
+ * `?view=` values. Positions retired by issue #4220 still arrive in saved
+ * links: the matrix was the same declared relations as the DAG, so it opens
+ * the DAG, and every other retired position opens the board, where the
+ * selected task (`?task`) keeps its place and its attempts, evidence and
+ * placement stay in the inspector.
+ */
+export function asProjection(value: string | null): WorkProjectionKind {
   switch (value) {
     case 'dag':
     case 'matrix':
-    case 'timeline':
-    case 'causal':
-    case 'workload':
-    case 'topology':
-    case 'concurrent-attempts':
-      return value;
+      return 'dag';
     // An unreadable or absent parameter opens the board. The board is the
     // projection whose every channel this build can measure, so it is the one
     // position that cannot mislead a reader who did not choose it.

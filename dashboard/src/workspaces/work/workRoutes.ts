@@ -2,13 +2,10 @@ import {
   ExecutionTopologyMetricsRequestV1Schema,
   ExecutionTopologyMetricsV1Schema,
   ExecutionTopologyViewV1Schema,
-  WorkAttemptListRequestV1Schema,
-  WorkAttemptListV1Schema,
   WorkGraphReadRequestV1Schema,
   WorkGraphReadV1Schema,
   WorkEvidenceRetrieveRequestV1Schema,
   WorkEvidenceRetrievalV1Schema,
-  WorkExecutionHistoryV1Schema,
   PrepareWorkProductMutationRequestV1Schema,
   WorkProductMutationReceiptV1Schema,
   WorkProductMutationRequestV1Schema,
@@ -30,29 +27,6 @@ import type { WorkRoute } from "./workApi.ts";
  * Creation and admission use the backend-owned prepare/mutate handoff so the
  * browser never mints authority identities, clocks, or revision pins.
  */
-
-/**
- * The execution record behind the projections.
- *
- * Paged like the snapshot, but cursored on the verified topology generation the
- * page was read under rather than on a sequence: a cursor minted against a
- * superseded generation is refused (`work.topology_generation_superseded`)
- * instead of being continued across a topology that moved. Ordering is stable
- * on (task_id, run_id, attempt_id), which is what makes the resume point exact.
- */
-export const WORK_LIST_ATTEMPTS_ROUTE = {
-  operation: "operation.work.list_attempts",
-  path: "/api/work/list-attempts",
-  request: WorkAttemptListRequestV1Schema,
-  response: WorkAttemptListV1Schema,
-} as const satisfies WorkRoute<unknown, unknown>;
-
-export const WORK_EXECUTION_HISTORY_ROUTE = {
-  operation: "operation.work.execution_history",
-  path: "/api/work/execution-history",
-  request: WorkAttemptListRequestV1Schema,
-  response: WorkExecutionHistoryV1Schema,
-} as const satisfies WorkRoute<unknown, unknown>;
 
 /**
  * The canonical structural execution-topology view. Unlike the attempt page,

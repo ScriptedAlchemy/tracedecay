@@ -24,9 +24,8 @@ import { laneReading } from '../workLaneModel.ts';
 import type { WorkProductView, WorkTaskView } from '../workProductView.ts';
 import type { WorkDagReading } from '../workViewsModel.ts';
 import { DagFittedField } from './DagFittedField.tsx';
-import { DagMatrixField } from './DagMatrixField.tsx';
 import { RelationSample, relationGrade, relationLabel, relationMarker } from './DagRelationLayer.tsx';
-import type { CardWiring, DagFieldProps, Emphasis, WorkDagFieldView } from './dagField.ts';
+import type { CardWiring, Emphasis } from './dagField.ts';
 import { EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
@@ -87,14 +86,11 @@ export function WorkDagBoard({
   reading,
   selected,
   onSelect,
-  view = 'graph',
 }: {
   snapshot: WorkProductView;
   reading: WorkDagReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
-  /** The fitted graph (the DAG camera) or the matrix (the Matrix camera). */
-  view?: WorkDagFieldView;
 }) {
   const layout = useMemo(
     () => workDagLayout(reading, snapshot.projections),
@@ -144,19 +140,8 @@ export function WorkDagBoard({
     // The fitted renderer frames the graph with its own 24px margin and
     // stops at a readable floor; wider graphs scroll rather than shrink the
     // 11px identities below legibility.
-    switch (view) {
-      case 'graph':
-        setZoom(Math.max(FITTED_FLOOR, Math.min(1, (width - 48) / layout.width)));
-        return;
-      case 'matrix':
-        setZoom(1);
-        return;
-      default: {
-        const unhandled: never = view;
-        return unhandled;
-      }
-    }
-  }, [layout, view]);
+    setZoom(Math.max(FITTED_FLOOR, Math.min(1, (width - 48) / layout.width)));
+  }, [layout]);
 
   // A graph wider than its field opens fitted, the 200%-zoom and narrow-
   // viewport focus mode, and re-fits when the graph version changes shape.
@@ -261,7 +246,6 @@ export function WorkDagBoard({
         zoom={zoom}
         onZoom={setZoom}
         onFit={fit}
-        view={view}
       />
 
       <div
@@ -271,30 +255,27 @@ export function WorkDagBoard({
         aria-describedby={`${controlsId}-legend`}
         className={cn(
           'td-optic td-grain td-scanlines relative max-h-[62vh] min-h-48 overflow-auto',
-          view === 'graph' && 'flex min-h-[22rem]',
+          'flex min-h-[22rem]',
         )}
         data-work-dag-field
-        data-work-dag-view={view}
+        data-work-dag-view="graph"
         data-work-dag-zoom={zoom.toFixed(2)}
         data-work-dag-inspected={inspected ?? undefined}
         onPointerLeave={() => setInspected(null)}
       >
-        <DagField
-          view={view}
-          props={{
-            layout,
-            reading,
-            tasks,
-            selected,
-            inspected,
-            isolation,
-            critical,
-            showLabels,
-            zoom,
-            onSelect,
-            onInspect: setInspected,
-            card,
-          }}
+        <DagFittedField
+          layout={layout}
+          reading={reading}
+          tasks={tasks}
+          selected={selected}
+          inspected={inspected}
+          isolation={isolation}
+          critical={critical}
+          showLabels={showLabels}
+          zoom={zoom}
+          onSelect={onSelect}
+          onInspect={setInspected}
+          card={card}
         />
       </div>
 
@@ -310,19 +291,6 @@ export function WorkDagBoard({
       />
     </div>
   );
-}
-
-function DagField({ view, props }: { view: WorkDagFieldView; props: DagFieldProps }) {
-  switch (view) {
-    case 'graph':
-      return <DagFittedField {...props} />;
-    case 'matrix':
-      return <DagMatrixField {...props} />;
-    default: {
-      const unhandled: never = view;
-      return unhandled;
-    }
-  }
 }
 
 function nearestInRow(
@@ -360,7 +328,6 @@ function GraphControls({
   zoom,
   onZoom,
   onFit,
-  view,
 }: {
   id: string;
   showLabels: boolean;
@@ -374,9 +341,7 @@ function GraphControls({
   zoom: number;
   onZoom: (value: number) => void;
   onFit: () => void;
-  view: WorkDagFieldView;
 }) {
-  const zoomable = view === 'graph';
   const effort = criticalReading.effort;
   const criticalDisabled = !effort.available || effort.value.taskIds.length === 0;
   const criticalNote = !effort.available
@@ -400,7 +365,7 @@ function GraphControls({
       <span className="flex items-center gap-1.5 text-3xs text-text-muted">
         <span className="td-legend">layout</span>
         <span className="td-value text-3xs text-text-secondary">
-          {view === 'graph' ? 'hierarchical · longest-path strata · fitted' : 'dependency matrix · strata order on both axes'}
+          hierarchical · longest-path strata · fitted
         </span>
       </span>
 
@@ -450,18 +415,18 @@ function GraphControls({
       </label>
 
       <span className="ml-auto flex items-center gap-0.5" role="group" aria-label="Zoom">
-        <ZoomButton label="Zoom out" onClick={() => onZoom(Math.max(ZOOM_MIN, zoom / ZOOM_STEP))} disabled={!zoomable || zoom <= ZOOM_MIN}>
+        <ZoomButton label="Zoom out" onClick={() => onZoom(Math.max(ZOOM_MIN, zoom / ZOOM_STEP))} disabled={zoom <= ZOOM_MIN}>
           −
         </ZoomButton>
-        <ZoomButton label="Reset zoom to 100%" onClick={() => onZoom(1)} disabled={!zoomable || zoom === 1}>
+        <ZoomButton label="Reset zoom to 100%" onClick={() => onZoom(1)} disabled={zoom === 1}>
           <span className="td-value text-3xs" data-cell="numeric">
             {Math.round(zoom * 100)}%
           </span>
         </ZoomButton>
-        <ZoomButton label="Zoom in" onClick={() => onZoom(Math.min(ZOOM_MAX, zoom * ZOOM_STEP))} disabled={!zoomable || zoom >= ZOOM_MAX}>
+        <ZoomButton label="Zoom in" onClick={() => onZoom(Math.min(ZOOM_MAX, zoom * ZOOM_STEP))} disabled={zoom >= ZOOM_MAX}>
           +
         </ZoomButton>
-        <ZoomButton label="Fit the graph to the field" onClick={onFit} disabled={!zoomable}>
+        <ZoomButton label="Fit the graph to the field" onClick={onFit}>
           fit
         </ZoomButton>
       </span>

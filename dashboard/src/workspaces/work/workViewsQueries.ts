@@ -4,47 +4,27 @@ import type {
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   ResolvedScope,
-  WorkAttemptListV1,
-  WorkExecutionHistoryV1,
   WorkGraphReadV1,
 } from '../../contracts/generated.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';
 import {
-  WORK_LIST_ATTEMPTS_ROUTE,
-  WORK_EXECUTION_HISTORY_ROUTE,
   WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
   WORK_TOPOLOGY_ROUTE,
   WORK_VIEWS_ROUTE,
 } from './workRoutes.ts';
 
 /**
- * The two reads behind the four Work projections.
- *
- * `useWorkAttempts` is the execution record, one page of `WorkAttemptV1`.
- * `useWorkGraphViews` is the work-product graph and the projection bundle
- * derived from one version of it. Both are scoped through `scopedUrl`, both ask
- * once and state their coverage, and both are enabled per-projection so a
- * camera position that does not draw a read does not issue it.
+ * The reads behind the Work page. `useWorkGraphViews` is the work-product graph
+ * and the projection bundle derived from one version of it; `useWorkTopology`
+ * is the placement page the inspector reads for the selected task. Both are
+ * scoped through `scopedUrl`, both ask once and state their coverage, and
+ * both are enabled only when something draws them so a page that does not
+ * need a read does not issue it.
  */
 
-/**
- * The execution read behind the four Work projections.
- *
- * Scoped exactly like every other Work read, `scopedUrl` rewrites to the
- * project gateway when the scope bar names a project, so the attempts on the
- * page belong to the same project as the snapshot drawn beside them.
- *
- * One page, deliberately. The projections state their coverage rather than
- * chasing it: an auto-paging loop would spend an unbounded number of round
- * trips to turn a `capped` reading into a `complete` one, and would have to
- * abandon the walk anyway the moment the topology generation moved underneath
- * it. Asking once and drawing what came back, with the cap said out loud,
- * is the reading this build can defend.
- */
-
-/** How many attempts a page asks for. The contract admits 1..=1000; the daemon
+/** How many rows a topology page asks for. The contract admits 1..=1000; the daemon
  * decides what it can actually return and says so in `coverage`. */
 const WORK_ATTEMPT_PAGE_SIZE = 250;
 
@@ -68,49 +48,6 @@ function workTopologyMetricsRequest(
     },
     max_events: WORK_TOPOLOGY_METRICS_MAX_EVENTS,
   };
-}
-
-/**
- * @param enabled the execution record is drawn by one projection, so the read
- * is issued when that projection is on screen rather than on every visit to the
- * Work page. A disabled query has no data, which the reading reports as pending
- *, correct, because nothing has been asked.
- */
-export function useWorkAttempts(enabled: boolean, pageSize: number = WORK_ATTEMPT_PAGE_SIZE) {
-  const scope = useScope((state) => state.scope);
-  const key = scopeKey(scope);
-  return useQuery<WorkResult<WorkAttemptListV1>>({
-    queryKey: workQueryKey(key, 'list-attempts', pageSize),
-    enabled,
-    queryFn: ({ signal }) =>
-      callWork(
-        WORK_LIST_ATTEMPTS_ROUTE,
-        // No cursor: the first page is the only page this read asks for, and a
-        // cursor invented here would name a generation the daemon never minted.
-        { cursor: null, page_size: pageSize },
-        scopedUrl(scope, WORK_LIST_ATTEMPTS_ROUTE.path),
-        signal,
-      ),
-  });
-}
-
-export function useWorkExecutionHistory(
-  enabled: boolean,
-  pageSize: number = WORK_ATTEMPT_PAGE_SIZE,
-) {
-  const scope = useScope((state) => state.scope);
-  const key = scopeKey(scope);
-  return useQuery<WorkResult<WorkExecutionHistoryV1>>({
-    queryKey: workQueryKey(key, 'list-attempts', 'execution-history', pageSize),
-    enabled,
-    queryFn: ({ signal }) =>
-      callWork(
-        WORK_EXECUTION_HISTORY_ROUTE,
-        { cursor: null, page_size: pageSize },
-        scopedUrl(scope, WORK_EXECUTION_HISTORY_ROUTE.path),
-        signal,
-      ),
-  });
 }
 
 /** The canonical structural topology page. It shares the attempt cursor
@@ -155,7 +92,7 @@ export function useWorkTopologyMetrics(enabled: boolean) {
 }
 
 /**
- * The work-product graph read behind the four Work projections.
+ * The work-product graph read behind the Work board and DAG.
  *
  * The bootstrap read uses the profile-owned no-Git selection. Once any Work
  * response supplies its canonical `ResolvedScope`, subsequent reads use the

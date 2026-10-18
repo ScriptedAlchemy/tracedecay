@@ -1,8 +1,8 @@
 /**
- * The DAG camera draws the fitted dependency board; the Matrix camera draws
- * the dependency structure matrix over the same layout. Both are projections
- * in `?view`, and both keep the board's grammar: hover inspects without moving
- * the address, click or Enter selects into it.
+ * The DAG camera draws the fitted dependency board and keeps the board's
+ * grammar: hover inspects without moving the address, click or Enter selects
+ * into it. Projections retired by issue #4220 still arrive in saved links and
+ * open the nearest surviving camera without losing the selected task.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, waitFor } from '@testing-library/react';
@@ -67,7 +67,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('DAG and Matrix cameras', () => {
+describe('the DAG camera', () => {
   it('DAG draws the fitted board; cards wear the typed-state family of their lane', async () => {
     const container = await renderBoard('/work?view=dag');
     expect(container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-view')).toBe('graph');
@@ -83,57 +83,26 @@ describe('DAG and Matrix cameras', () => {
     await waitFor(() => expect(address.search).toContain('task=side'));
   });
 
-  it('Matrix is its own projection tab, kept in the address', async () => {
-    const container = await renderBoard('/work?view=dag');
-    const tab = [...container.querySelectorAll('[role="tab"]')].find((node) => node.textContent === 'Matrix')!;
-    fireEvent.click(tab);
-    await waitFor(() => expect(address.search).toBe('?view=matrix'));
-    expect(container.querySelector('[data-work-dag-matrix]')!.getAttribute('data-work-dag-matrix')).toBe('4');
-  });
-
-  it('Matrix: one listbox tab stop, cells lit by fan-in, arrows inspect, Enter selects', async () => {
-    const container = await renderBoard('/work?view=matrix');
-    const matrix = container.querySelector<HTMLElement>('[data-work-dag-matrix]')!;
-    expect(matrix.getAttribute('role')).toBe('listbox');
-    expect(matrix.getAttribute('data-work-dag-matrix-back')).toBe('0');
-    expect(
-      [...container.querySelectorAll('[data-work-dsm-cell]')].map((node) => [
-        node.getAttribute('data-work-dsm-cell'),
-        node.getAttribute('data-work-dsm-intensity'),
-      ]),
-    ).toEqual([
-      ['gating:root->middle', '0.95'],
-      ['gating:root->side', '0.95'],
-      ['gating:middle->leaf', '0.65'],
-      ['gating:side->leaf', '0.65'],
-    ]);
-    expect(
-      [...container.querySelectorAll('[data-work-dag-matrix] [role="option"]')].map((node) => node.getAttribute('tabindex')),
-    ).toEqual(['-1', '-1', '-1', '-1']);
-    fireEvent.focus(matrix);
-    expect(container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-inspected')).toBe('root');
-    fireEvent.keyDown(matrix, { key: 'ArrowDown' });
-    expect(container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-inspected')).toBe('middle');
-    fireEvent.keyDown(matrix, { key: 'Enter' });
-    await waitFor(() => expect(address.search).toContain('task=middle'));
-  });
-
-  it('Matrix ends inspection when the pointer moves off a row or the grid inside the field', async () => {
-    const container = await renderBoard('/work?view=matrix');
-    const field = container.querySelector('[data-work-dag-field]')!;
-    // The pointer stays inside the matrix, on its axis and margin.
-    const matrix = container.querySelector<HTMLElement>('[data-work-dag-matrix]')!;
-    const row = matrix.querySelector<HTMLElement>('[data-work-task="side"]')!;
-    fireEvent.pointerEnter(row);
-    expect(field.getAttribute('data-work-dag-inspected')).toBe('side');
-    fireEvent.pointerLeave(row, { relatedTarget: matrix });
-    expect(field.getAttribute('data-work-dag-inspected')).toBeNull();
-
-    const grid = container.querySelector<SVGSVGElement>('[data-work-dag-matrix-grid]')!;
-    vi.spyOn(grid, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 400, 400));
-    fireEvent.pointerMove(grid, { clientX: 1, clientY: 1 });
-    expect(field.getAttribute('data-work-dag-inspected')).toBe('root');
-    fireEvent.pointerLeave(grid, { relatedTarget: matrix });
-    expect(field.getAttribute('data-work-dag-inspected')).toBeNull();
+  it.each([
+    ['matrix', 'dag'],
+    ['timeline', 'board'],
+    ['causal', 'board'],
+    ['workload', 'board'],
+    ['topology', 'board'],
+    ['concurrent-attempts', 'board'],
+  ])('a saved ?view=%s link opens the %s and keeps the selected task', async (retired, opens) => {
+    const page = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={[`/work?view=${retired}&task=middle`]}>
+          <AddressProbe />
+          <WorkPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await waitFor(() =>
+      expect(page.container.querySelector('[data-work-header-camera]')?.getAttribute('data-work-header-camera')).toBe(opens),
+    );
+    expect(address.search).toContain('task=middle');
+    expect([...page.container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual(['Board', 'DAG']);
   });
 });

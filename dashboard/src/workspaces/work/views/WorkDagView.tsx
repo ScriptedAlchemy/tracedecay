@@ -6,7 +6,6 @@ import type { WorkGraphReading } from '../workGraphModel.ts';
 import type { WorkProductView } from '../workProductView.ts';
 import { type WorkDagReading, workDagReading } from '../workViewsModel.ts';
 import { WorkDagBoard } from './WorkDagBoard.tsx';
-import type { WorkDagFieldView } from './dagField.ts';
 import { ChannelLedger, EmptyReading } from './WorkViewChannel.tsx';
 
 /**
@@ -32,13 +31,11 @@ export function WorkDagView({
   graph,
   selected,
   onSelect,
-  view = 'graph',
 }: {
   snapshot: WorkProductView;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
-  view?: WorkDagFieldView;
 }) {
   const reading = useMemo(
     () => workDagReading(snapshot.projections, graph),
@@ -47,9 +44,9 @@ export function WorkDagView({
   const coverage = coverageReading(snapshot.coverage);
 
   return (
-    <div className="flex min-w-0 flex-col gap-3" data-work-view={view === 'graph' ? 'dag' : 'matrix'}>
+    <div className="flex min-w-0 flex-col gap-3" data-work-view="dag">
       <Panel
-        legend={view === 'graph' ? 'Task dependency graph' : 'Dependency structure matrix'}
+        legend="Task dependency graph"
         actions={
           <>
             <StateChip kind={coverage.state} detail={coverage.detail} />
@@ -65,7 +62,6 @@ export function WorkDagView({
           reading={reading}
           selected={selected}
           onSelect={onSelect}
-          view={view}
         />
       </Panel>
 

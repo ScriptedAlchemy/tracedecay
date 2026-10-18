@@ -1,19 +1,12 @@
 /**
- * The Work cameras over one exact product graph and its execution projections.
+ * The Work cameras over one exact product graph: the board and the DAG.
  *
- * Two invariants carry this file.
- *
- * The first is the product mandate: one canonical selection, many synchronized
- * projections. The switcher moves the camera and must never move the
- * selection, so a task selected on the board is still selected after three
- * projection changes and a reload of the same address.
- *
- * The second is the honesty rule. Each of these projections is asked to
- * encode a measurement this build cannot take, and the failure mode is not a
- * broken drawing, it is a gap that quietly acquires a value. Every projection
- * is therefore asserted to render its absent channels as stated absences, and
- * a refusal from the daemon is asserted never to render as a projection of
- * nothing.
+ * The invariant that carries this file is the product mandate: one canonical
+ * selection, many synchronized projections. The switcher moves the camera and
+ * must never move the selection, so a task selected on the board is still
+ * selected after a projection change and a reload of the same address. A
+ * refusal from the daemon is asserted never to render as a projection of
+ * nothing, and the tabs never point at a region the page did not draw.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -22,194 +15,29 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useScope } from '../../../data/scope/store.ts';
-import {
-  workAttempt,
-  workAttemptList,
-  workRoute,
-  workTerminal,
-} from '../../../test/workAttemptFixture.ts';
 import { applicationProblem, applicationSuccess } from '../../../test/applicationEnvelope.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../../test/workGraphFixture.ts';
-import { topologyMetricsModel } from '../../../test/workTopologyMetricsFixture.ts';
 import { WorkPage } from '../WorkPage.tsx';
 
-/**
- * The execution record behind the graph above: one task that took two attempts
- * and only succeeded after the fallback route took over, and one attempt part
- * way up the cancellation ladder that has not terminated.
- */
-const ATTEMPTS = [
-  workAttempt({
-    taskId: 'middle',
-    runId: 'run-1',
-    attemptId: 'attempt-1',
-    state: 'failed',
-    terminal: workTerminal('failed', 100),
-  }),
-  workAttempt({
-    taskId: 'middle',
-    runId: 'run-1',
-    attemptId: 'attempt-2',
-    actual: workRoute('claude', 'route-fallback'),
-    recovery: { reason: 'lease_lost', source_attempt_id: 'attempt-1', state: 'restarted' },
-    terminal: workTerminal('succeeded', 200),
-  }),
-  workAttempt({
-    taskId: 'leaf',
-    runId: 'run-1',
-    attemptId: 'attempt-3',
-    state: 'cancellation_escalated',
-    cancellation: {
-      state: 'escalated',
-      value: {
-        acknowledgement: { acknowledged_at: 12, request: { request_id: 'c-1', requested_at: 8 } },
-        escalated_at: 20,
-      },
-    },
-    terminal: null,
-  }),
-];
-
-/**
- * The work-product graph behind every camera: the same chain carries declared
- * effort, its dependencies are the gating edges,
- * one causal candidate is nominated, and one attempt is live under complete
- * runtime coverage.
- */
 const VIEWS_GRAPH: WorkGraphVersionSpec = {
   tasks: [
     { taskId: 'root', title: 'Root task', effort: 2 },
     { taskId: 'middle', title: 'Middle task', effort: 3, dependencies: ['root'] },
-    { taskId: 'leaf', title: 'Leaf task', effort: 5, dependencies: ['middle'], causalCandidates: ['middle'] },
+    { taskId: 'leaf', title: 'Leaf task', effort: 5, dependencies: ['middle'] },
     { taskId: 'loop-a', title: 'Loop A' },
     { taskId: 'loop-b', title: 'Loop B', dependencies: ['loop-a'] },
     { taskId: 'lonely', title: 'Lonely task' },
   ],
   criticalPath: ['root', 'middle', 'leaf'],
-  runtimeAttempts: [{ attemptId: 'attempt-2', taskId: 'middle', runId: 'run-1' }],
 };
 
-function viewsBody(spec: WorkGraphVersionSpec = VIEWS_GRAPH) {
-  return {
-    status: 200,
-    body: applicationSuccess('operation.work.views', workGraphRead(spec)),
-  };
-}
-
-/** The generated `ExecutionTopologyViewV1` payload behind the topology lens.
- * Its policy dimensions are deliberately unlike anything the attempt envelope
- * could reconstruct, which makes the DOM test prove the mounted canonical
- * route is the one the view consumed. */
-function topologyBody(
-  generation = 'generation-7',
-  lanes: readonly unknown[] = [
-    {
-      task_id: 'middle',
-      run_id: 'run-1',
-      attempt_count: 2,
-      placement: {
-        state: 'placed',
-        placement: {
-          authority_version: 4,
-          blockers: [],
-          identity: { task_id: 'middle', run_id: 'run-1' },
-          retention_eligible_at: null,
-          state: 'admitted',
-          target: {
-            kind: 'linked_worktree',
-            in_place_acknowledged: false,
-            network_free: true,
-            root: '/w/main',
-          },
-          transitioned_at: 10,
-        },
-      },
-    },
-    {
-      task_id: 'leaf',
-      run_id: 'run-1',
-      attempt_count: 1,
-      placement: { state: 'absent' },
-    },
-  ],
-) {
-  return {
-    status: 200,
-    body: applicationSuccess(
-      'operation.work.topology',
-      {
-        state: 'view',
-        topology: { generation, task_count: 6 },
-        coverage: { coverage: 'complete', returned: 3 },
-        execution_placement: { mode: { kind: 'existing_worktree_only' }, lanes },
-        branch_topology: { allowed: ['unbranched', 'independent_branches'] },
-        review_topology: {
-          allowed: ['no_review', 'standard_pull_requests'],
-          github_stacked_prs: 'disabled',
-        },
-        integration_strategy: {
-          cross_merge: {
-            allow_cross_repository: false,
-            allowed_modes: ['disabled', 'fast_forward_only'],
-            default_mode: 'fast_forward_only',
-          },
-          gates: {
-            cleanliness: 'require_clean',
-            maximum_preflight_age_seconds: 300,
-            require_fresh_preflight: true,
-            review: { kind: 'independent_review_count', count: 1 },
-            tests: [],
-          },
-          protected_refs: [],
-        },
-      },
-    ),
-  };
-}
-
-/** Serve every Work read the page issues. Routed by path rather than
- * answered with one body, so a projection cannot pass by reading the wrong
- * contract. */
-function serveWork(
-  attempts: { status: number; body: unknown } = {
-    status: 200,
-    body: applicationSuccess('operation.work.list_attempts', workAttemptList(ATTEMPTS)),
-  },
-  views: { status: number; body: unknown } = viewsBody(),
-  topology: { status: number; body: unknown } = topologyBody(),
-  executionHistory: { status: number; body: unknown } = {
-    status: 503,
-    body: applicationProblem('unavailable'),
-  },
-  proximity: { status: number; body: unknown } = {
-    status: 503,
-    body: applicationProblem('unavailable'),
-  },
-  evidence: { status: number; body: unknown } = {
-    status: 503,
-    body: applicationProblem('unavailable'),
-  },
-  metrics: { status: number; body: unknown } = {
-    status: 200,
-    body: applicationSuccess('operation.work.topology_metrics', topologyMetricsModel()),
-  },
-) {
+/** Serve every Work read the page issues. Routed by path rather than answered
+ * with one body, so a projection cannot pass by reading the wrong contract. */
+function serveWork() {
   serve((url) =>
-    url.includes('/work/list-attempts')
-      ? attempts
-      : url.includes('/work/execution-history')
-        ? executionHistory
-        : url.includes('/work/retrieve-evidence')
-          ? evidence
-          : url.includes('/feedback/proximity')
-            ? proximity
-      : url.includes('/work/views')
-        ? views
-        : url.includes('/work/topology-metrics')
-          ? metrics
-          : url.includes('/work/topology')
-            ? topology
-            : { status: 503, body: applicationProblem('unavailable') },
+    url.includes('/work/views')
+      ? { status: 200, body: applicationSuccess('operation.work.views', workGraphRead(VIEWS_GRAPH)) }
+      : { status: 503, body: applicationProblem('unavailable') },
   );
 }
 
@@ -284,46 +112,13 @@ afterEach(() => {
 });
 
 describe('the projection switcher', () => {
-  it('offers every projection as a tab and opens on the board', async () => {
+  it('offers the board and the DAG as tabs and opens on the board', async () => {
     renderPage();
     const tablist = await screen.findByRole('tablist', { name: 'Work projection' });
     const tabs = within(tablist).getAllByRole('tab');
 
-    expect(tabs.map((tab) => tab.textContent)).toEqual([
-      'Board',
-      'DAG',
-      'Matrix',
-      'Timeline',
-      'Causal',
-      'Workload',
-      'Topology',
-    ]);
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['Board', 'DAG']);
     expect(within(tablist).getByRole('tab', { selected: true }).textContent).toBe('Board');
-  });
-
-  it('hides concurrent attempts when the selected task has one observed attempt', async () => {
-    renderPage('/work?task=middle');
-
-    await screen.findByRole('tablist', { name: 'Work projection' });
-    expect(screen.queryByRole('tab', { name: 'Concurrent Attempts' })).toBeNull();
-  });
-
-  it('shows and restores concurrent attempts for two observed attempts', async () => {
-    serveWork(
-      undefined,
-      viewsBody({
-        ...VIEWS_GRAPH,
-        runtimeAttempts: [
-          { attemptId: 'attempt-1', taskId: 'middle', runId: 'run-1' },
-          { attemptId: 'attempt-2', taskId: 'middle', runId: 'run-1' },
-        ],
-      }),
-    );
-    renderPage('/work?task=middle&view=concurrent-attempts');
-
-    const tab = await screen.findByRole('tab', { name: 'Concurrent Attempts' });
-    await waitFor(() => expect(tab.getAttribute('aria-selected')).toBe('true'));
-    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(tab.id);
   });
 
   it('moves the camera between projections with the arrow keys', async () => {
@@ -336,11 +131,9 @@ describe('the projection switcher', () => {
     await waitFor(() =>
       expect(screen.getByRole('tab', { name: 'DAG' }).getAttribute('aria-selected')).toBe('true'),
     );
-    await user.keyboard('{End}');
+    await user.keyboard('{Home}');
     await waitFor(() =>
-      expect(
-        screen.getByRole('tab', { name: 'Topology' }).getAttribute('aria-selected'),
-      ).toBe('true'),
+      expect(screen.getByRole('tab', { name: 'Board' }).getAttribute('aria-selected')).toBe('true'),
     );
   });
 
@@ -354,7 +147,7 @@ describe('the projection switcher', () => {
       expect(container.querySelector('[data-work-task="root"][data-selected]')).not.toBeNull(),
     );
 
-    for (const name of ['DAG', 'Timeline', 'Causal', 'Workload', 'Board']) {
+    for (const name of ['DAG', 'Board']) {
       await open(name);
       await waitFor(() =>
         expect(
@@ -365,15 +158,14 @@ describe('the projection switcher', () => {
   });
 
   it('reopens the projection its address names', async () => {
-    const { container } = renderPage('/work?view=causal');
-    await waitFor(() =>
-      expect(container.querySelector('[data-work-view="causal"]')).not.toBeNull(),
-    );
-    expect(screen.getByRole('tab', { selected: true }).textContent).toBe('Causal');
+    const { container } = renderPage('/work?view=dag');
+    await waitFor(() => expect(container.querySelector('[data-work-view="dag"]')).not.toBeNull());
+    expect(screen.getByRole('tab', { selected: true }).textContent).toBe('DAG');
   });
 
   /** An unreadable camera position opens the board rather than an empty frame:
-   * the board is the one projection whose every channel this build measures. */
+   * the board is the one projection whose every channel this build measures.
+   * The retired positions of issue #4220 take this path too. */
   it('opens the board when the address names a projection this build has not got', async () => {
     const { container } = renderPage('/work?view=cortex-9');
     await waitFor(() => expect(container.querySelector('[data-work-board]')).not.toBeNull());
@@ -408,463 +200,5 @@ describe('the projection switcher', () => {
     const panel = screen.getByRole('tabpanel');
     expect(within(panel).getByText(/fixture unavailable problem/)).toBeTruthy();
     expect(danglingReferences(container)).toEqual([]);
-  });
-});
-
-describe('every attempt-shaped projection', () => {
-  /**
-   * The assertion this file exists for. Wall clock and observed execution
-   * order survived the graph-read mount as the two measurements no contract
-   * carries, an attempt still records an end and no start, and nothing binds
-   * a task's completion to the instant another task finished, and a
-   * projection that drew either would be drawing a number nobody could check.
-   */
-  it.each([
-    [
-      'timeline',
-      'no span can be drawn: an attempt records the instant it was observed to finish, and nothing anywhere records when it started, WorkLeaseFenceV1 is {epoch, lease_id} and WorkAttemptProgressV1 is {completed, total}, and the work-product graph read does not add one, because its runtime projection carries an attempt identity and a state and no instant at all, so every mark has an end and never a width',
-      2,
-    ],
-    [
-      'causal',
-      "no order of execution is readable here: the snapshot carries no timestamp, and the work-product graph read answers declared causal candidates rather than an observed sequence, so nothing binds a task's completion to the instant another task finished, the weave's terminal order, read from the attempt list, is the nearest measurement this build has and it ranks attempts rather than tasks",
-      2,
-    ],
-    [
-      'topology',
-      'no span can be drawn: an attempt records the instant it was observed to finish, and nothing anywhere records when it started, WorkLeaseFenceV1 is {epoch, lease_id} and WorkAttemptProgressV1 is {completed, total}, and the work-product graph read does not add one, because its runtime projection carries an attempt identity and a state and no instant at all, so every mark has an end and never a width',
-      1,
-    ],
-  ] as const)('%s states the measurements it could not take', async (view, sentence, count) => {
-    const { container } = renderPage(`/work?view=${view}`);
-    await waitFor(() =>
-      expect(container.querySelector(`[data-work-view="${view}"]`)).not.toBeNull(),
-    );
-    expect(screen.getAllByText(sentence)).toHaveLength(count);
-  });
-
-  it.each([
-    [
-      'timeline',
-      'The work-product graph version this read returned holds no task at all, so there is no instant to record. This is the authority reporting an empty graph, not a read that failed.',
-    ],
-    [
-      'causal',
-      'The snapshot returned no tasks, so there is no declared order to overlay. This is the daemon reporting an empty board, not a projection that failed to draw.',
-    ],
-    [
-      'workload',
-      'The snapshot returned no tasks, so there is nothing to aggregate. This is the daemon reporting an empty board, not an aggregation that failed to draw.',
-    ],
-  ] as const)('%s draws an empty board as an empty board, not as a failure', async (view, sentence) => {
-    serveWork(undefined, viewsBody({ ...VIEWS_GRAPH, tasks: [] }));
-    const { container } = renderPage(`/work?view=${view}`);
-
-    await waitFor(() =>
-      expect(container.querySelector(`[data-work-view="${view}"]`)).not.toBeNull(),
-    );
-    expect(screen.getByText(sentence)).toBeTruthy();
-    expect(container.querySelector('[data-work-reading="refused"]')).toBeNull();
-  });
-
-  /** Any table these projections draw is read by a screen reader, so it needs
-   * a caption and column headers like every other table in the workspace. */
-  const activityCaption =
-    'Admitted task-activity frames still held by the live connection, newest first, with the observation instant, project, and detail word each frame carried. The stream coalesces task mutations per project and carries no task identity or title, so neither is a column; canonical Work reads refetch on every frame.';
-  const activityHeaders = ['Observed (UTC)', 'Project', 'Event', 'Frame'] as const;
-
-  it.each([
-    [
-      'dag',
-      [
-        "Every task on the dependency graph with its identity, the authority's projected lane, its stratum depth, its gating and soft relation counts, declared effort, and the milestone it belongs to. Selecting a row selects the same task the graph card selects.",
-        'Every relation drawn on the graph: its kind, the task it leaves, the task it reaches, and whether it runs against the strata inside a declared cycle.',
-        activityCaption,
-      ],
-      [
-        ['Task', 'Identity', 'Lane', 'Depth', 'Gating in', 'Gating out', 'Soft', 'Effort', 'Milestone', 'Grade'],
-        ['Relation', 'From', 'To', 'Direction'],
-        activityHeaders,
-      ],
-    ],
-    [
-      'timeline',
-      [
-        'Every task the work-product graph returned, with the instant it was created, the instant it last changed, the instant it is scheduled for and the instant it is due by. None of these is the start of an attempt, so no duration is derivable from them.',
-        activityCaption,
-      ],
-      [['Task', 'Created', 'Last changed', 'Scheduled', 'Due'], activityHeaders],
-    ],
-    [
-      'causal',
-      [
-        'Every dependency the returned tasks declare, with the task it names, the task that declares it, and what the terminal attempt state at the two ends reads as.',
-        activityCaption,
-      ],
-      [['Dependency', 'Dependent', 'Reading'], activityHeaders],
-    ],
-    ['workload', [activityCaption], [activityHeaders]],
-  ] as const)('%s captions every table it draws', async (view, captions, headers) => {
-    const { container } = renderPage(`/work?view=${view}`);
-    await waitFor(() =>
-      expect(container.querySelector(`[data-work-view="${view}"]`)).not.toBeNull(),
-    );
-
-    const tables = [...container.querySelectorAll('table')];
-    expect(
-      tables.map((table) =>
-        (table.querySelector('caption')?.textContent ?? '').replace(/\s+/g, ' ').trim(),
-      ),
-    ).toEqual(captions);
-    expect(
-      tables.map((table) =>
-        [...table.querySelectorAll('th[scope="col"]')].map((header) =>
-          (header.textContent ?? '').replace(/\s+/g, ' ').trim(),
-        ),
-      ),
-    ).toEqual(headers);
-  });
-
-  /** 44px explicitly: the app's root font size is 14px, so a spacing-11
-   * minimum computes to 38.5px and lands under the target size the
-   * accessibility gate measures. */
-  it.each([
-    ['dag', 12],
-    ['timeline', 8],
-    ['causal', 6],
-    ['workload', 6],
-    ['topology', 2],
-  ] as const)('%s gives every task control a reachable target', async (view, count) => {
-    const { container } = renderPage(`/work?view=${view}`);
-    await waitFor(() =>
-      expect(container.querySelector(`[data-work-view="${view}"]`)).not.toBeNull(),
-    );
-
-    const controls = [
-      ...container.querySelectorAll(`[data-work-view="${view}"] [data-work-task]`),
-    ];
-    expect(controls).toHaveLength(count);
-    expect(controls.map((control) => control.className.includes('min-h-[44px]'))).toEqual(
-      Array.from({ length: count }, () => true),
-    );
-  });
-});
-
-/**
- * The execution record, over the mounted attempt-list route.
- *
- * These four readings were the timeline's absences until the route landed, so
- * the tests here are the mirror image of the ones above: each asserts that a
- * measurement is now drawn from `WorkAttemptV1` rather than inferred, and that
- * the page's own limits, a cap, a refusal, a typed absence, are still said
- * out loud instead of collapsing into an empty record.
- */
-describe('the execution record', () => {
-  async function openTimeline() {
-    const page = renderPage('/work?view=timeline');
-    await waitFor(() =>
-      expect(page.container.querySelector('[data-work-execution-record]')).not.toBeNull(),
-    );
-    return page.container;
-  }
-
-  it('states a capped page as a floor rather than totalling what it did not read', async () => {
-    serveWork({
-      status: 200,
-      body: applicationSuccess(
-        'operation.work.list_attempts',
-        workAttemptList(ATTEMPTS, {
-          coverage: 'capped',
-          remaining: 41,
-          resume: 'bc1.resume',
-          returned: 3,
-        }),
-      ),
-    });
-    const container = await openTimeline();
-
-    expect(container.querySelector('[data-work-attempt-coverage="capped"]')).not.toBeNull();
-    expect(screen.getByText(/3 of 44 attempts/)).toBeTruthy();
-    expect(screen.getByText(/every count below is a floor/)).toBeTruthy();
-  });
-
-  /**
-   * A cursor minted under a superseded topology generation is refused, and the
-   * refusal has to reach the page as a refusal. An execution record that fell
-   * back to an empty page would report "nothing ran", which is the opposite of
-   * what happened.
-   */
-  it('draws a refused attempt read as a refusal, never as an empty record', async () => {
-    serveWork({ status: 409, body: applicationProblem('conflict') });
-    const container = await openTimeline();
-
-    const record = container.querySelector<HTMLElement>('[data-work-execution-record]');
-    expect(record?.getAttribute('data-work-execution-record')).toBe('refused');
-    // The daemon's sentence, inside the record rather than only on its chip.
-    expect(within(record as HTMLElement).getByText(/fixture conflict problem/)).toBeTruthy();
-    // Nothing measured is drawn: no executor row, no chain, no ladder.
-    expect(container.querySelector('[data-work-executor]')).toBeNull();
-    expect(container.querySelector('[data-work-lineage]')).toBeNull();
-    expect(container.querySelector('[data-work-ladder-rung]')).toBeNull();
-  });
-
-  /** The daemon's typed `absent`, which its policy makes indistinguishable
-   * from a denial. Reported as the one state it arrived as. */
-  it('reports a typed absence as an absence its policy will not disambiguate', async () => {
-    serveWork({
-      status: 200,
-      body: applicationSuccess('operation.work.list_attempts', { state: 'absent' }),
-    });
-    const container = await openTimeline();
-
-    expect(
-      container.querySelector('[data-work-execution-record]')?.getAttribute(
-        'data-work-execution-record',
-      ),
-    ).toBe('absent');
-    expect(screen.getByText(/indistinguishable from a denial/)).toBeTruthy();
-  });
-
-  it('resolves every ARIA reference it makes while the record is drawn', async () => {
-    const container = await openTimeline();
-    expect(danglingReferences(container)).toEqual([]);
-  });
-});
-
-/** The canonical `operation.work.topology` route publishes every structural
- * dimension under one generation. The DOM assertions below prove the mounted
- * route is consumed, rather than a browser reconstruction from attempt data. */
-describe('the execution-topology lens', () => {
-  async function openTopology() {
-    const page = renderPage('/work?view=topology');
-    await waitFor(() =>
-      expect(page.container.querySelector('[data-work-view="topology"]')).not.toBeNull(),
-    );
-    return page.container;
-  }
-
-  it('draws a refused canonical topology read as a refusal, never as an empty lane set', async () => {
-    serveWork(undefined, viewsBody(), { status: 503, body: applicationProblem('unavailable') });
-    const container = await openTopology();
-
-    expect(container.querySelector('[data-work-topology-lane]')).toBeNull();
-    const absences = container.querySelectorAll('[data-work-channel="absent"]');
-    expect(absences.length).toBeGreaterThan(0);
-    expect(
-      Array.from(absences).some((absence) =>
-        (absence.textContent ?? '').includes('fixture unavailable problem'),
-      ),
-    ).toBe(true);
-  });
-
-  it('draws an authorized empty canonical page as a statement, not a failed render', async () => {
-    serveWork(undefined, viewsBody(), topologyBody('generation-7', []));
-    const container = await openTopology();
-
-    await waitFor(() =>
-      expect(container.querySelector('[data-work-reading="empty"]')).not.toBeNull(),
-    );
-    // Empty is still pinned: the generation identity arrived with the page.
-    expect(
-      container.querySelector('[data-work-topology-generation="generation-7"]'),
-    ).not.toBeNull();
-  });
-
-  it('selects a canonical placement lane and keeps that selection when the camera moves', async () => {
-    const container = await openTopology();
-    const user = userEvent.setup();
-    await waitFor(() => expect(container.querySelector('[data-work-topology-lane]')).not.toBeNull());
-
-    const landing = container.querySelector<HTMLElement>(
-      '[data-work-topology-lane="middle:run-1"] [data-work-task="middle"]',
-    );
-    expect(landing).not.toBeNull();
-    await user.click(landing as HTMLElement);
-    await waitFor(() =>
-      expect(landing?.getAttribute('aria-pressed')).toBe('true'),
-    );
-
-    // The canonical selection survives the camera move to the board.
-    await user.click(screen.getByRole('tab', { name: 'Board' }));
-    await waitFor(() =>
-      expect(
-        container.querySelector(
-          '[data-work-task="middle"][aria-pressed="true"], [data-work-task="middle"][data-selected]',
-        ),
-      ).not.toBeNull(),
-    );
-  });
-
-  it('resolves every ARIA reference it makes while the lens is drawn', async () => {
-    const container = await openTopology();
-    await waitFor(() => expect(container.querySelector('[data-work-topology-lane]')).not.toBeNull());
-    expect(danglingReferences(container)).toEqual([]);
-  });
-
-  it('refuses graph runtime figures when the mounted canonical topology generation differs', async () => {
-    serveWork(undefined, viewsBody(), topologyBody('generation-other'));
-    const container = await openTopology();
-    await waitFor(() =>
-      expect(container.querySelector('[data-work-accounting="concurrency_and_fanout"]')).not.toBeNull(),
-    );
-    const concurrency = container.querySelector<HTMLElement>(
-      '[data-work-accounting="concurrency_and_fanout"]',
-    );
-    expect(concurrency).not.toBeNull();
-    expect(concurrency?.getAttribute('data-work-accounting-reading')).toBe('absent');
-    expect(concurrency?.textContent).toContain('generation-7');
-    expect(concurrency?.textContent).toContain('generation-other');
-    expect(concurrency?.textContent).toContain('unbound');
-  });
-
-  it('refuses snapshot titles and attempt accounting across independently refreshed generations', async () => {
-    const mismatchedAttempts = workAttemptList(ATTEMPTS);
-    serveWork(
-      {
-        status: 200,
-        body: applicationSuccess(
-          'operation.work.list_attempts',
-          {
-            ...mismatchedAttempts,
-            topology: { ...mismatchedAttempts.topology, generation: 'generation-attempt' },
-          },
-        ),
-      },
-      viewsBody({ ...VIEWS_GRAPH, generationId: 'generation-graph' }),
-      topologyBody('generation-topology'),
-    );
-    const container = await openTopology();
-
-    await waitFor(() =>
-      expect(container.querySelector('[data-work-snapshot-title-join="conflicting"]')).not.toBeNull(),
-    );
-    const titleJoin = container.querySelector<HTMLElement>(
-      '[data-work-snapshot-title-join="conflicting"]',
-    );
-    expect(titleJoin?.textContent).toContain('generation-graph');
-    expect(titleJoin?.textContent).toContain('generation-topology');
-    expect(titleJoin?.textContent).toContain('unbound');
-
-    const lane = container.querySelector<HTMLElement>('[data-work-topology-lane="middle:run-1"]');
-    expect(lane?.textContent).toContain('middle');
-    expect(lane?.textContent).not.toContain('Middle task');
-
-    await waitFor(() =>
-      expect(container.querySelector('[data-work-accounting="reruns"]')).not.toBeNull(),
-    );
-    const reruns = container.querySelector<HTMLElement>('[data-work-accounting="reruns"]');
-    expect(reruns?.getAttribute('data-work-accounting-reading')).toBe('absent');
-    expect(reruns?.textContent).toContain('generation-attempt');
-    expect(reruns?.textContent).toContain('generation-topology');
-    expect(reruns?.textContent).toContain('unbound');
-    expect(reruns?.querySelector('[data-work-accounting-value]')).toBeNull();
-  });
-
-  const UNDECODED_DIMENSIONS = [
-    'duplicate_work',
-    'conflict_confusion',
-    'ready_to_integrated_latency',
-    'stale_stack_age',
-    'operational_leaks',
-    'delivery_fanout',
-  ];
-  const SOURCED_DIMENSIONS = [
-    'concurrency_and_fanout',
-    'integration_outcomes',
-    'github_stack_capability',
-    'blocked_time',
-    'reruns',
-    'duplicate_effects',
-  ];
-  const NOT_TAKEN_HERE = 'rather than one measured as zero';
-
-  async function openCoverage() {
-    const container = await openTopology();
-    await waitFor(() =>
-      expect(container.querySelector('[data-work-accounting-coverage]')).not.toBeNull(),
-    );
-    return {
-      container,
-      coverage: container.querySelector<HTMLDetailsElement>('[data-work-accounting-coverage]')!,
-    };
-  }
-
-  it('reads sourced dimensions first and sets the undecoded ones behind one closed coverage disclosure', async () => {
-    const { container, coverage } = await openCoverage();
-
-    expect(coverage.tagName).toBe('DETAILS');
-    expect(coverage.open).toBe(false);
-    expect(coverage.querySelector('summary')?.textContent).toContain('6 dimensions');
-
-    for (const dimension of UNDECODED_DIMENSIONS) {
-      const entries = container.querySelectorAll(`[data-work-accounting="${dimension}"]`);
-      expect(entries.length, dimension).toBe(1);
-      expect(coverage.contains(entries[0]!), dimension).toBe(true);
-    }
-    for (const dimension of SOURCED_DIMENSIONS) {
-      const card = container.querySelector(`[data-work-accounting="${dimension}"]`)!;
-      expect(card.closest('details'), dimension).toBeNull();
-      expect(
-        card.compareDocumentPosition(coverage) & Node.DOCUMENT_POSITION_FOLLOWING,
-        dimension,
-      ).toBeTruthy();
-    }
-
-    expect(
-      container.querySelector('[data-work-accounting="github_stack_capability"]')?.textContent,
-    ).toContain('no trustworthy capability observation');
-  });
-
-  it('explains the undecoded dimensions once instead of once per measure', async () => {
-    const { container, coverage } = await openCoverage();
-    const coverageText = coverage.textContent ?? '';
-
-    expect(coverageText.split(NOT_TAKEN_HERE).length - 1).toBe(1);
-    expect(coverageText).toContain('work.stack_drift.observed.v1');
-    expect(container.textContent).not.toContain('belongs to the work.stack_drift.observed.v1 event family');
-    expect(coverage.querySelector('[data-work-accounting="duplicate_work"]')?.textContent).toContain(
-      'retry chain and not duplicate work',
-    );
-  });
-
-  it('collapses a sourced card\'s undecoded rungs into its own disclosure', async () => {
-    const { container } = await openCoverage();
-    const concurrency = container.querySelector<HTMLElement>(
-      '[data-work-accounting="concurrency_and_fanout"]',
-    )!;
-    const undecoded = concurrency.querySelector<HTMLDetailsElement>(
-      '[data-work-accounting-undecoded="concurrency_and_fanout"]',
-    );
-
-    expect(undecoded?.tagName).toBe('DETAILS');
-    expect(undecoded?.open).toBe(false);
-    for (const rung of ['accepted', 'admitted', 'useful', 'fanout']) {
-      const row = concurrency.querySelector(`[data-work-accounting-row="${rung}"]`);
-      expect(row?.getAttribute('data-work-accounting-absent'), rung).toBe('unsupported');
-      expect(undecoded?.contains(row), rung).toBe(true);
-    }
-    expect(undecoded?.textContent).toContain('a count and not a width');
-    for (const rung of ['requested', 'active']) {
-      const row = concurrency.querySelector(`[data-work-accounting-row="${rung}"]`);
-      expect(row?.closest('details'), rung).toBeNull();
-    }
-  });
-
-  it('keeps a conflicting reading inline rather than inside any disclosure', async () => {
-    serveWork(undefined, viewsBody(), topologyBody('generation-other'));
-    const { container } = await openCoverage();
-    const concurrency = container.querySelector<HTMLElement>(
-      '[data-work-accounting="concurrency_and_fanout"]',
-    )!;
-
-    for (const rung of ['requested', 'active']) {
-      const row = concurrency.querySelector(`[data-work-accounting-row="${rung}"]`);
-      expect(row?.getAttribute('data-work-accounting-absent'), rung).toBe('conflicting');
-      expect(row?.closest('details'), rung).toBeNull();
-    }
-    const support = concurrency.querySelector('[data-work-accounting-facet="support"]');
-    expect(support?.textContent).toContain('Conflicting');
-    expect(support?.textContent).toContain('unbound');
-    expect(support?.closest('details')).toBeNull();
   });
 });

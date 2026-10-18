@@ -7,11 +7,8 @@ import {
 } from '../../test/workGraphFixture.ts';
 import type { WorkResult } from './workApi.ts';
 import {
-  WORK_CHURN_WINDOW_MICROS,
-  churnReading,
   graphChannelGap,
   graphEntryOf,
-  runtimeReading,
   workGraphReading,
 } from './workGraphModel.ts';
 
@@ -22,7 +19,7 @@ import {
  * `callWork` parses the wire with, so the object these derivations are proved
  * against is the contract and not a hand-shaped approximation of it. The
  * assertions that matter most are the separations: an empty window from a
- * refusal, a withheld figure from a zero, unmeasured attempts from no attempts,
+ * refusal, a withheld figure from a zero,
  * and a timeline's own order from the authority's.
  */
 
@@ -119,99 +116,5 @@ describe('the empty window', () => {
     if (refused.available) return;
     expect(refused.state).toBe('unavailable');
     expect(refused.detail).toContain('the authority could not be read');
-  });
-});
-
-describe('the churn measurement', () => {
-  const OBSERVED = 1_800_000_000_000_000;
-
-  it('measures each age against the instant the version was observed at', () => {
-    const reading = workGraphReading(
-      read({
-        tasks: [
-          { taskId: 'fresh', updatedAt: OBSERVED - 1_000 },
-          { taskId: 'stale', updatedAt: OBSERVED - WORK_CHURN_WINDOW_MICROS - 1 },
-          { taskId: 'ahead', updatedAt: OBSERVED + 5_000 },
-        ],
-        observedAt: OBSERVED,
-      }),
-    );
-    const entry = graphEntryOf(reading);
-    expect(entry).not.toBeNull();
-    if (entry === null) return;
-
-    const churn = churnReading(entry, WORK_CHURN_WINDOW_MICROS);
-    expect(churn.observedAt).toBe(OBSERVED);
-    expect(churn.recent).toEqual([{ taskId: 'fresh', updatedAt: OBSERVED - 1_000, age: 1_000 }]);
-    // The stale entry is counted, not lost: a small `recent` must be tellable
-    // from a small graph.
-    expect(churn.counted).toBe(3);
-    // An update recorded later than the read instant is a disagreement between
-    // two clocks, reported as such rather than rounded into the window.
-    expect(churn.ahead).toBe(1);
-  });
-});
-
-describe('the runtime projection', () => {
-  it('reports unavailable coverage as unmeasured attempts, never as zero attempts', () => {
-    const reading = workGraphReading(
-      read({
-        tasks: [{ taskId: 'a' }],
-        runtimeCoverage: { coverage: 'unavailable' },
-      }),
-    );
-    const entry = graphEntryOf(reading);
-    if (entry === null) throw new Error('fixture answered no version');
-
-    const runtime = runtimeReading(entry.runtime);
-    expect(runtime.available).toBe(false);
-    if (runtime.available) return;
-    expect(runtime.state).toBe('unavailable');
-    expect(runtime.detail).toContain('not a reading of zero attempts');
-  });
-
-  it('reports partial coverage as a floor with the unread attempts counted', () => {
-    const reading = workGraphReading(
-      read({
-        tasks: [{ taskId: 'a' }],
-        runtimeAttempts: [
-          { attemptId: 'attempt-2', taskId: 'b', runId: 'run-1' },
-          { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', state: 'succeeded' },
-        ],
-        runtimeCoverage: {
-          coverage: 'partial',
-          unavailable_attempts: [
-            { attempt_id: 'attempt-3', run_id: 'run-1', task_id: 'c' },
-          ],
-        },
-      }),
-    );
-    const entry = graphEntryOf(reading);
-    if (entry === null) throw new Error('fixture answered no version');
-
-    const runtime = runtimeReading(entry.runtime);
-    expect(runtime.available).toBe(true);
-    if (!runtime.available) return;
-    expect(runtime.value.complete).toBe(false);
-    expect(runtime.value.unavailable).toBe(1);
-    // Deterministic order: by task then attempt, not arrival order.
-    expect(runtime.value.attempts.map((attempt) => attempt.attemptId)).toEqual([
-      'attempt-1',
-      'attempt-2',
-    ]);
-    expect(runtime.value.attempts[0]?.state).toBe('succeeded');
-  });
-
-  it('answers an empty attempt list under complete coverage as a real zero', () => {
-    const reading = workGraphReading(read({ tasks: [{ taskId: 'a' }] }));
-    const entry = graphEntryOf(reading);
-    if (entry === null) throw new Error('fixture answered no version');
-
-    const runtime = runtimeReading(entry.runtime);
-    expect(runtime.available).toBe(true);
-    if (!runtime.available) return;
-    expect(runtime.value.attempts).toEqual([]);
-    expect(runtime.value.complete).toBe(true);
-    expect(runtime.value.unavailable).toBe(0);
   });
 });

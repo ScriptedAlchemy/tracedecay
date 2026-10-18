@@ -16,8 +16,6 @@ import {
 } from '../workflows/workflowQueries.ts';
 import { useWorkEvidence } from './workEvidenceQueries.ts';
 import {
-  useWorkAttempts,
-  useWorkExecutionHistory,
   useWorkGraphViews,
   useWorkTopology,
   useWorkTopologyMetrics,
@@ -32,8 +30,6 @@ const GRAPH = {
 
 const QUERIES: ReadonlyArray<readonly [string, () => { data: unknown }]> = [
   ['work views', () => useWorkGraphViews(true)],
-  ['work attempts', () => useWorkAttempts(true)],
-  ['work execution history', () => useWorkExecutionHistory(true)],
   ['work topology', () => useWorkTopology(true)],
   ['work topology metrics', () => useWorkTopologyMetrics(true)],
   ['work evidence', () => useWorkEvidence(GRAPH, 'task-alpha', { kind: 'current' }, null)],

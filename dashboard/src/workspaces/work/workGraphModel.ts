@@ -5,7 +5,6 @@ import type {
   WorkGraphTimelineCoverageV1,
   WorkGraphVersionEntryV1,
   WorkRuntimeAttemptProjectionV1,
-  WorkRuntimeProjectionV1,
 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import type { WorkResult } from './workApi.ts';
@@ -15,20 +14,17 @@ import type { WorkChannel } from './workChannel.ts';
  * The work-product graph read: what `operation.work.views` said, reduced to the
  * one graph version the projections' channels are taken from.
  *
- * `WorkGraphReadV1` is the third read behind the four Work
- * projections. One immutable graph version and the whole
+ * `WorkGraphReadV1` is one immutable graph version and the whole
  * `WorkProductProjectionBundleV1` derived from that same version: declared
- * effort and the effort-weighted critical path, the gating edge set, the
- * declared causal candidates, the per-task timeline instants, the workload
- * figures, and the live runtime attempt projection with its own coverage.
- * `workViewsModel.ts` explains how each projection binds these channels beside
- * the snapshot- and attempt-fed ones.
+ * effort and the effort-weighted critical path, the gating edge set, and the
+ * live runtime attempt projection with its own coverage. `workViewsModel.ts`
+ * binds the DAG's channels to it.
  */
 
 /**
  * What `operation.work.views` said, or the reason it said nothing.
  *
- * Shaped like `WorkAttemptReading` on purpose: a read is pending, refused, or
+ * A read is pending, refused, or
  * answered, and there is no fourth case and no empty default. An authorized
  * selection with no graph yet is an answer, the daemon's `absent` mode, and
  * arrives as a read whose page carries no entry; only a real denial arrives as
@@ -139,11 +135,6 @@ export function workGraphReading(
   }
 }
 
-/** The page a reading carries, or `null` for the two states that carry none. */
-export function graphPageOf(reading: WorkGraphReading): WorkGraphPage | null {
-  return reading.state === 'read' ? reading.page : null;
-}
-
 /** The graph version every channel below is derived from, or `null` when this
  * read has not produced one. */
 export function graphEntryOf(reading: WorkGraphReading): WorkGraphVersionEntryV1 | null {
@@ -186,7 +177,7 @@ export function terminalWorkAttempt(state: WorkAttemptStateV1): boolean {
 /**
  * Why a channel the graph read would have supplied has no value.
  *
- * Distinct from `channelGap` for the same reason `attemptChannelGap` is: the
+ * Distinct from a schema absence: the
  * contract carries these measurements, so reporting them as
  * `unsupported_schema` would tell a reader the build cannot do something it
  * can. Each case is the state the read actually returned, in that state's own
@@ -255,196 +246,7 @@ export interface WorkCriticalPathReading {
   readonly totalEffort: number;
 }
 
-/** Declared effort mass, and the runtime split of it when one could be taken. */
-export interface WorkEffortMassReading {
-  readonly total: number;
-  /**
-   * Ready, running and blocked effort are measured against live attempt state,
-   * so the authority returns them only under COMPLETE runtime coverage and
-   * returns nothing at all otherwise (`work_product_projection.rs` gates all
-   * three on `runtime_complete`). Absent here therefore means the split could
-   * not be taken, never that nothing is ready.
-   */
-  readonly split: WorkChannel<WorkEffortSplitReading>;
-}
-
-interface WorkEffortSplitReading {
-  readonly ready: number;
-  readonly running: number;
-  readonly blocked: number;
-}
-
-/** What was asked for against what is actually running. Gated on complete
- * runtime coverage by the same authority rule as the effort split. */
-export interface WorkConcurrencyReading {
-  readonly requested: number;
-  readonly actual: number;
-}
-
-export interface WorkTimelineInstantReading {
-  readonly taskId: string;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-  readonly scheduledAt: number | null;
-  readonly deadline: number | null;
-}
-
-interface WorkChurnEntry {
-  readonly taskId: string;
-  readonly updatedAt: number;
-  /** Microseconds between the recorded update and the instant this read was
-   * taken at. A measurement, not a bucket. */
-  readonly age: number;
-}
-
-export interface WorkChurnReading {
-  /** The instant the graph version was observed at, which is the only clock
-   * "recent" can be recent against. */
-  readonly observedAt: number;
-  readonly window: number;
-  /** Entries updated within `window` before `observedAt`, freshest first. */
-  readonly recent: readonly WorkChurnEntry[];
-  /** Timeline entries the window was measured over, so a small `recent` can be
-   * told from a small graph. */
-  readonly counted: number;
-  /**
-   * Entries whose recorded update is LATER than the instant this read was taken
-   * at. Neither recent nor stale: the two instants disagree, which is a reading
-   * about the read and not something to round away into the window.
-   */
-  readonly ahead: number;
-}
-
-interface WorkRuntimeAttemptReading {
-  readonly attemptId: string;
-  readonly taskId: string;
-  readonly runId: string;
-  readonly state: WorkAttemptStateV1;
-}
-
-export interface WorkRuntimeReading {
-  readonly attempts: readonly WorkRuntimeAttemptReading[];
-  /** False when the projection could read only some of the attempts. Every
-   * count taken off `attempts` is then a floor. */
-  readonly complete: boolean;
-  /** How many attempts the projection knows of and could not read. */
-  readonly unavailable: number;
-  readonly observedAt: number;
-}
-
-/** How far back "recent" reaches, in microseconds: one day.
- *
- * A rendering parameter rather than a measurement, and printed as one. The
- * measurement is `WorkChurnEntry.age`, which is the real distance between an
- * update and the instant the graph was read at; the window only decides which
- * of those distances the view lists. */
-export const WORK_CHURN_WINDOW_MICROS = 24 * 60 * 60 * 1_000_000;
-
 export function criticalPathReading(entry: WorkGraphVersionEntryV1): WorkCriticalPathReading {
   const path = entry.projections.critical_path;
   return { taskIds: path.task_ids, totalEffort: path.total_effort };
-}
-
-export function effortSplit(entry: WorkGraphVersionEntryV1): WorkChannel<WorkEffortSplitReading> {
-  const { ready_effort: ready, running_effort: running, blocked_effort: blocked } =
-    entry.projections.workload;
-  if (ready === null || running === null || blocked === null) {
-    return {
-      available: false,
-      state: 'partial',
-      detail:
-        'the graph version answered its total declared effort but no ready/running/blocked split: the authority takes that split against live attempt state and withholds it unless the runtime projection covered every attempt, so this is effort that could not be apportioned rather than effort that is all idle',
-    };
-  }
-  return { available: true, value: { ready, running, blocked } };
-}
-
-export function concurrencyReading(
-  entry: WorkGraphVersionEntryV1,
-): WorkChannel<WorkConcurrencyReading> {
-  const { requested_concurrency: requested, actual_concurrency: actual } =
-    entry.projections.workload;
-  if (requested === null || actual === null) {
-    return {
-      available: false,
-      state: 'partial',
-      detail:
-        'neither concurrency figure was answered: both are counted against live attempt state and the authority withholds them unless the runtime projection covered every attempt, so this is concurrency that could not be counted rather than a graph running nothing',
-    };
-  }
-  return { available: true, value: { requested, actual } };
-}
-
-export function timelineInstants(
-  entry: WorkGraphVersionEntryV1,
-): readonly WorkTimelineInstantReading[] {
-  return entry.projections.timeline.entries
-    .map((row) => ({
-      taskId: row.task_id,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      scheduledAt: row.scheduled_at,
-      deadline: row.deadline,
-    }))
-    .sort((a, b) => b.updatedAt - a.updatedAt || a.taskId.localeCompare(b.taskId));
-}
-
-export function churnReading(entry: WorkGraphVersionEntryV1, window: number): WorkChurnReading {
-  const observedAt = entry.observed_at;
-  const recent: WorkChurnEntry[] = [];
-  let ahead = 0;
-  for (const row of entry.projections.timeline.entries) {
-    const age = observedAt - row.updated_at;
-    if (age < 0) {
-      ahead += 1;
-      continue;
-    }
-    if (age > window) continue;
-    recent.push({ taskId: row.task_id, updatedAt: row.updated_at, age });
-  }
-  return {
-    observedAt,
-    window,
-    recent: recent.sort((a, b) => a.age - b.age || a.taskId.localeCompare(b.taskId)),
-    counted: entry.projections.timeline.entries.length,
-    ahead,
-  };
-}
-
-/**
- * The live runtime projection, and the one coverage state that is not a value.
- *
- * `unavailable` coverage means the attempts could not be measured at all. It is
- * NOT zero attempts, and the two must never render alike: an empty attempt list
- * under `complete` coverage is the authority stating that nothing is running,
- * which is a reading a reader can act on.
- */
-export function runtimeReading(runtime: WorkRuntimeProjectionV1): WorkChannel<WorkRuntimeReading> {
-  const coverage = runtime.coverage;
-  if (coverage.coverage === 'unavailable') {
-    return {
-      available: false,
-      state: 'unavailable',
-      detail:
-        'the runtime projection could not be read at all, so the attempts under this graph version are unmeasured, this is not a reading of zero attempts, and nothing about what is running follows from it',
-    };
-  }
-  return {
-    available: true,
-    value: {
-      attempts: runtime.attempts
-        .map((attempt) => ({
-          attemptId: attempt.identity.attempt_id,
-          taskId: attempt.identity.task_id,
-          runId: attempt.identity.run_id,
-          state: attempt.state,
-        }))
-        .sort(
-          (a, b) => a.taskId.localeCompare(b.taskId) || a.attemptId.localeCompare(b.attemptId),
-        ),
-      complete: coverage.coverage === 'complete',
-      unavailable: coverage.coverage === 'partial' ? coverage.unavailable_attempts.length : 0,
-      observedAt: runtime.observed_at,
-    },
-  };
 }
