@@ -1494,7 +1494,7 @@ fn concurrent_artifact_reads_are_bounded_and_keep_the_verified_file() {
                 resident_bytes: bytes,
                 unreclaimable_bytes: bytes,
                 swapped_bytes: 0,
-                cgroup_committed_bytes: None,
+                cgroup_headroom_bytes: None,
             })
         }),
     );

@@ -1492,7 +1492,7 @@ fn fixed_reading_authority() -> Arc<ProcessResidentMemoryV1> {
         resident_bytes: 256 * 1024 * 1024,
         unreclaimable_bytes: 256 * 1024 * 1024,
         swapped_bytes: 0,
-        cgroup_committed_bytes: None,
+        cgroup_headroom_bytes: None,
     };
     Arc::new(ProcessResidentMemoryV1::with_pressure(
         limit,
