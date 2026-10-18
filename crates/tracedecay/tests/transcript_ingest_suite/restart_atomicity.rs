@@ -241,7 +241,7 @@ pub(super) async fn run_user_provider_pass(
     let authority =
         GlobalDbSessionIngestAuthority::new(database).with_background_cpu(runtime.background_cpu());
     let shard = &database.binding().shard_id;
-    let outcome = with_transcript_source_profile(
+    with_transcript_source_profile(
         ProfileRoot::new(runtime.profile_root_for_test()).with_home(home),
         ingest_user_global_sources_for_provider_with_roots_bounded(
             (&shard.brain_id, &shard.profile_id, &authority),
@@ -252,8 +252,7 @@ pub(super) async fn run_user_provider_pass(
             &ObservationCancellation::default(),
         ),
     )
-    .await;
-    outcome
+    .await
 }
 
 /// Runs one Claude source through the production observation pipeline against
