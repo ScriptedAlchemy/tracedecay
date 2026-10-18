@@ -219,7 +219,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
                 category: ContextScoutCategoryV1::Coordination,
                 relevance_score: 10_000,
                 suggestion_text: "Another active agent edited this file.".to_owned(),
-                evidence: scout_evidence(now),
+                evidence: scout_evidence(now).into(),
                 expires_at: UtcMicros(now.0 + 1_000_000),
             }],
         },

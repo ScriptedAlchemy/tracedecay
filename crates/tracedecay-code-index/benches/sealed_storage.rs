@@ -140,10 +140,10 @@ struct LinkedWorktreeReport {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let repository = std::env::var_os(REPO_ENV).map_or_else(
-        || PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
-        PathBuf::from,
-    );
+    let repository = std::env::var_os(REPO_ENV)
+        .or_else(|| std::env::var_os("BUILD_WORKSPACE_DIRECTORY"))
+        .map(PathBuf::from)
+        .ok_or("set SEALED_STORAGE_REPO to the Git checkout to measure")?;
     let revision = std::env::var(REV_ENV).unwrap_or_else(|_| "HEAD".to_owned());
     let revision = git_output(&repository, &["rev-parse", "--verify", &revision])?;
     let sources = git_sources(&repository, &revision)?;

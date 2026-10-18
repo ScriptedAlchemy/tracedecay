@@ -150,7 +150,7 @@ export function CodePage() {
    * cache for the same id, and the lens stays where it is unless it needs a
    * different symbol than the one it was reading. */
   const pin = useCallback(
-    (node: GraphNodeV1, view: CodeView = location.view === 'atlas' ? 'cortex' : location.view) => {
+    (node: GraphNodeV1, view: CodeView = location.view) => {
       setSelected(node);
       setInspection(null);
       setSearchParams(writeCodeLocation(searchParams, { view, focusId: node.id }), {

@@ -273,14 +273,7 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     )
     .await;
 
-    assert_eq!(
-        crate::support::tool_refusal(&response),
-        json!({
-            "kind": "execution_failed",
-            "code": "graph_tool.failed",
-            "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
-        })
-    );
+    crate::support::assert_missing_alias_table_refusal(&response);
 }
 
 #[cfg(feature = "test-transport")]

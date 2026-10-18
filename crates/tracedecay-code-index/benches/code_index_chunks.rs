@@ -24,18 +24,9 @@ use tracedecay_domain::{
     ValidatedCodeFileV1,
 };
 
-const WORKLOAD_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/workload-v1.json"
-);
-const EXPECTED_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/expected-v1.json"
-);
-const DEFAULT_RESULT_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/result-provisional.json"
-);
+const WORKLOAD_PATH: &str = "benchmark_data/query-code-index/workload-v1.json";
+const EXPECTED_PATH: &str = "benchmark_data/query-code-index/expected-v1.json";
+const RESULT_FILE: &str = "result-provisional.json";
 const CHUNKER_V1: &str = "chunker.query-benchmark.v1";
 const CHUNKER_REPLAY: &str = "chunker.query-benchmark.replay";
 const CHUNKER_INCOMPATIBLE: &str = "chunker.query-benchmark.incompatible";
@@ -394,7 +385,7 @@ fn run_cli() -> Result<(), String> {
         [] => validate_only(),
         [argument] if argument == "--validate-only" => validate_only(),
         [argument] if argument == "--describe" => describe(),
-        [argument] if argument == "--run" => run_measurement(Path::new(DEFAULT_RESULT_PATH)),
+        [argument] if argument == "--run" => run_measurement(&default_result_path()?),
         [run, output, path] if run == "--run" && output == "--output" => {
             run_measurement(Path::new(path))
         }
@@ -452,6 +443,17 @@ fn run_sample_cli(scale_name: &str, case_name: &str) -> Result<(), String> {
         serde_json::to_string(&sample).map_err(|error| format!("serialize sample: {error}"))?
     );
     Ok(())
+}
+
+fn default_result_path() -> Result<PathBuf, String> {
+    if let Some(workspace) = env::var_os("BUILD_WORKSPACE_DIRECTORY") {
+        return Ok(PathBuf::from(workspace)
+            .join("benchmark_data/query-code-index")
+            .join(RESULT_FILE));
+    }
+    let outputs = env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
+        .ok_or_else(|| "pass --output PATH when running outside Bazel".to_owned())?;
+    Ok(PathBuf::from(outputs).join(RESULT_FILE))
 }
 
 fn run_measurement(output_path: &Path) -> Result<(), String> {
@@ -938,7 +940,7 @@ fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], path: &str) -> Result<
 }
 
 fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from("../..")
 }
 
 fn load_base_sources(paths: &[String]) -> Result<Vec<WorkloadFile>, String> {

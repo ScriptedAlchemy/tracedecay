@@ -59,13 +59,21 @@ impl NativeContextScoutLifecycleV1 {
         })
     }
 
-    pub fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+    /// Hosts whose tool callbacks name the session and call the Context Scout
+    /// lifecycle is bound to: their transcripts carry no turn tuple of their own.
+    pub const fn host_mounts_lifecycle(host: NativeHostIdentityV1) -> bool {
         matches!(
-            envelope.producer,
-            tracedecay_domain::NativeHostIdentityV1::KimiCode
-                | tracedecay_domain::NativeHostIdentityV1::OpenCode
-        ) && <[u8; 32]>::from(Sha256::digest(self.session_id.as_str().as_bytes()))
-            == envelope.protected_session_id
+            host,
+            NativeHostIdentityV1::ClaudeCode
+                | NativeHostIdentityV1::KimiCode
+                | NativeHostIdentityV1::OpenCode
+        )
+    }
+
+    pub fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        Self::host_mounts_lifecycle(envelope.producer)
+            && <[u8; 32]>::from(Sha256::digest(self.session_id.as_str().as_bytes()))
+                == envelope.protected_session_id
             && self.event_id == envelope.event_id
             && matches!(
                 envelope.event,

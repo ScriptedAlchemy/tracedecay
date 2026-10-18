@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
 use tracedecay_agent_hosts::agents::context_scout::ContextScoutDurableStoreOutcomeV1;
 use tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1;
+use tracedecay_agent_hosts::agents::context_scout::intent_pass::intent_hint_emitted_event;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1,
@@ -277,6 +278,7 @@ fn release_hook_v2_delivery_claim(
 pub(super) async fn hook_v2_delivery_receipt(
     cg: &TraceDecay,
     receipt: Value,
+    analytics: Option<&RegisteredGlobalDb>,
 ) -> Result<ContextScoutStoreStatusV1> {
     let receipt = serde_json::from_value::<ContextScoutDeliveryReceiptV1>(receipt)
         .map_err(|error| config_error(format!("invalid Context Scout receipt: {error}")))?;
@@ -292,6 +294,17 @@ pub(super) async fn hook_v2_delivery_receipt(
         return Ok(ContextScoutStoreStatusV1::Unavailable);
     };
     let outcome = owner.record_delivery(&claim, &receipt).await;
+    if outcome == ContextScoutDurableStoreOutcomeV1::Stored
+        && let Some(analytics) = analytics
+        && let Some(event) = intent_hint_emitted_event(
+            &RegisteredGlobalDb::canonical_project_key(cg.project_root()),
+            &claim.entry,
+            &receipt,
+        )
+        && let Err(error) = analytics.append_analytics_events(&[event]).await
+    {
+        tracing::warn!(%error, "Context Scout intent hint_emitted analytics not recorded");
+    }
     if release_hook_v2_delivery_claim(project_id, receipt.envelope_id, outcome) {
         let _ = owner.requeue(claim).await;
     }

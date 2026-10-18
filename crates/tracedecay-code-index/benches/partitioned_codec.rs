@@ -29,10 +29,7 @@ use tracedecay_domain::{
     SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
 };
 
-const CORPUS_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/index-bench/corpus"
-);
+const CORPUS_ROOT: &str = "../../benchmark_data/index-bench/corpus";
 const REPLICAS: usize = 10;
 const WARMUPS: usize = 2;
 const MEASURED: usize = 5;
@@ -182,7 +179,7 @@ fn replicated_sources(replicas: usize) -> Result<Vec<SourceFile>, Box<dyn Error>
         .hidden(false)
         .build()
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .filter(|entry| entry.path().is_file())
         .map(|entry| {
             let path = entry.path();
             let relative = path

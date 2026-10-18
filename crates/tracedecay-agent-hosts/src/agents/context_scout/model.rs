@@ -183,7 +183,8 @@ impl ContextScoutModelAssistantV1 for UnavailableContextScoutModelAssistantV1 {
         let error = match self.route {
             ContextScoutModelBackendV1::Disabled => ContextScoutModelErrorV1::Disabled,
             ContextScoutModelBackendV1::CodexAppServer
-            | ContextScoutModelBackendV1::Unsupported => ContextScoutModelErrorV1::Unavailable,
+            | ContextScoutModelBackendV1::Unsupported
+            | ContextScoutModelBackendV1::DecisionEngine => ContextScoutModelErrorV1::Unavailable,
         };
         Box::pin(async move { Err(error) })
     }

@@ -79,3 +79,39 @@ fn registered_scope_route_rejects_foreign_repository() {
         RegisteredScopeResolver::resolve(registered.path(), foreign.path(), &project_id).is_err()
     );
 }
+
+#[test]
+fn registered_scope_route_admits_a_clone_whose_marker_names_the_project() {
+    let repository = repository();
+    let registered_root = repository.path().canonicalize().expect("registered root");
+    let project_id = ProjectId::new("project.registered-route").expect("project id");
+    let clone_parent = tempfile::TempDir::new().expect("clone parent");
+    let clone = clone_parent.path().join("clone");
+    git(
+        clone_parent.path(),
+        &[
+            "clone",
+            "--quiet",
+            registered_root.to_str().expect("registered path"),
+            clone.to_str().expect("clone path"),
+        ],
+    );
+    for root in [registered_root.as_path(), clone.as_path()] {
+        assert!(
+            tracedecay_runtime_core::storage::write_repository_identity_marker(
+                root,
+                project_id.as_str(),
+            )
+            .expect("identity marker")
+        );
+    }
+
+    let registered_scope =
+        RegisteredScopeResolver::resolve(&registered_root, &registered_root, &project_id)
+            .expect("registered scope");
+    let clone_scope = RegisteredScopeResolver::resolve(&registered_root, &clone, &project_id)
+        .expect("a clone whose own marker names the project resolves");
+
+    assert_eq!(clone_scope.project_id, project_id);
+    assert_ne!(clone_scope.worktree_id, registered_scope.worktree_id);
+}

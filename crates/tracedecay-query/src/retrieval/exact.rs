@@ -185,17 +185,6 @@ impl ExactLaneEvidence {
     }
 }
 
-/// The exact-lane retriever contract. Implementations adapt the store-side
-/// `ExactTermPostingReadPort` into `CompactCandidate` values for one frozen
-/// generation.
-pub trait ExactLaneRetriever {
-    /// Retrieve the committed exact-tier candidate prefix for `request`.
-    fn retrieve_exact(
-        &self,
-        request: &ExactLaneRequest<'_>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError>;
-}
-
 /// The sole exact-admission authority surface.
 ///
 /// Only the central exact-admission validator can mint
@@ -836,15 +825,10 @@ where
         rebuilt.validate().map_err(contract_error)?;
         Ok(rebuilt)
     }
-}
 
-impl<A, P> ExactLaneRetriever for ExactLane<A, P>
-where
-    A: ExactAdmissionAuthority,
-    P: ExactTermPostingReadPort,
-{
+    /// Retrieve the committed exact candidate prefix for `request`.
     #[tracing::instrument(name = "query.lane.exact", level = "trace", skip_all)]
-    fn retrieve_exact(
+    pub fn retrieve_exact(
         &self,
         request: &ExactLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError> {
