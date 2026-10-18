@@ -77,10 +77,9 @@ Observations that shaped the decisions:
   commits, edited files and branch spans. Loom's lanes and Agents'
   `DelegationTimeline` draw the same tree, time across and delegation down,
   from the same `subagent-tree` read.
-- Knowledge's `RunHistory` (and `automations/ledger.ts`, 725 lines that
-  Automations does not use) is a compact copy of Automations' `RunLedger` and
-  `RunInspector` over the same `/api/automation/runs` routes. Its own comment
-  says so.
+- Knowledge's curation camera mounted `automations/RunHistory.tsx` (233 lines),
+  a compact copy of Automations' `RunLedger` and `RunInspector` over the same
+  `/api/automation/runs` and artifact routes. Its own comment says so.
 - Costs' `TopologyMetricsCosts` and Observatory's `ExecutionTopologyMetrics`
   render the same `useWorkTopologyMetrics` read.
 - Explorer, Knowledge, Costs, Automations, Observatory and Workflows have no
@@ -121,7 +120,7 @@ tab strip of its views; each view keeps its own page.
 | **Code** `/code` | Look up and compare code, and see what is shipping. | Code, Delivery | Code: keep (daemon emits its hrefs). Delivery: merge in as `/code/delivery`; its only outbound data link is Compare in Code, and it shares no read with any other workspace. |
 | **Memory** `/memory` | Retrieve what TraceDecay remembers: projects, facts, sessions, agent runs. | Brain, Explorer, Knowledge, Sessions, Loom, Agents | All merge in. Brain is the family landing (`/` opens it). Explorer is kept: its run API and cancel control and per-lane typed absence have no other home. Sessions is kept: only it finds by text, volume and page. Loom is kept: only it plots many sessions on one axis and replays one. Agents is kept for handoffs, failures and usage, which nothing else shows. Remove Agents' timeline view (Loom draws it) and Knowledge's duplicate run history (Automations owns the ledger). |
 | **Work** `/work` | Track tasks and the workflows that execute them. | Work, Workflows | Work: keep with board and DAG only. Workflows: merge in as `/work/workflows`; it already runs on Work's `callWork` plumbing, and the Work page itself says execution belongs to it. |
-| **Operations** `/operations` | Debug the running system: health, scheduled automation, spend. | Observatory, Automations, Costs | Observatory is the family landing and keeps the Doctor dot. Automations and Costs merge in. Remove Costs' copy of the topology metrics card (Observatory renders the same read). |
+| **Operations** `/operations` | Debug the running system: health, scheduled automation, spend. | Observatory, Automations, Costs | Observatory is the family landing and keeps the Doctor dot. Automations and Costs merge in. Costs' topology accounting card stays: Plan 26 places accounting facts beside spend, and it is a different presentation of a read Observatory also draws (recorded below as a follow-up, not removed). |
 | **Settings** `/settings` | Review and change configuration. | Settings | Keep top-level. Delivery and Observatory link here, and it is the only write surface for configuration. |
 
 Redirects (query string and hash kept, including `scope`):
@@ -146,5 +145,49 @@ Redirects (query string and hash kept, including `scope`):
 
 ## After
 
-Filled in when the change lands; see the pull request description for the
-measured before and after counts.
+Measured against master `334a226d60`.
+
+| Measure | Before | After |
+|---|---|---|
+| Top-level rail entries | 14 | 5 (Code, Memory, Work, Operations, Settings) |
+| Views reachable | 14 workspaces | the same 14, each one click from its family's visible tab strip and one keystroke from the command palette |
+| Work projections | 8 | 2 (board, DAG) |
+| Work production source (non-test TS/TSX) | 13,528 lines | 6,196 lines |
+| Work test source | 5,539 lines | 2,990 lines |
+| Dashboard production source | 117,597 lines | 109,280 lines (-8,317) |
+| Dashboard test source | 219 files, 2,125 tests | 215 files, 2,037 tests |
+| Retired paths with a redirect | none | 11 paths, plus `/`, the Agents timeline link, and every removed `/work?view=` value |
+
+What was removed, and why (evidence is in the tables above):
+
+- **Work: matrix, timeline, causal, workload, topology and concurrent-attempts
+  projections**, with their view components, the attempt-record model, the
+  topology accounting cards and models, the causal, workload and weave readings
+  in `workViewsModel`, the attempt and execution-history query hooks and their
+  routes, and their tests. A task's attempts, evidence and placement are read
+  in the inspector; the placement read is now issued when a task is selected
+  rather than when a camera is chosen. The Work server routes, MCP and CLI
+  tools are untouched, and Observatory and Costs keep `useWorkTopologyMetrics`.
+- **Agents: the timeline view.** Loom draws the same tree against time from the
+  same read. `/agents?view=timeline` opens Loom on the linked session.
+- **Knowledge: the embedded run history.** The curation camera keeps the
+  curator control and the outcomes, and links to the one run ledger in
+  Automations.
+
+Kept on purpose, with the overlap recorded for a later change that has a
+replacement to point at:
+
+- Scoped Brain draws the same graph slice as Code.
+- Explorer's lanes repeat the search each of Code, Sessions and Knowledge has.
+  It stays because its run API, cancel control and typed absences have no
+  other home.
+- Loom and Sessions both render a session's commits, files and branch spans.
+- Costs' topology accounting card and Observatory's render one read.
+- Agents and Observatory fetch `/api/plugins/analytics/diagnostics` under two
+  cache keys.
+
+Operations and callability preserved: every write control (scheduler pause and
+resume, curator run, settings PATCH routes, workflow activate, retire and
+reject, explorer run and cancel, work prepare and admit, code-diagnostics
+refresh and toggles) is still on a view, and no daemon route, MCP tool or CLI
+command was touched.
