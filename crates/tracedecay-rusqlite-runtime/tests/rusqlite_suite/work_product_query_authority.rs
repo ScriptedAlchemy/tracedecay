@@ -803,7 +803,7 @@ fn evidence_is_not_served_from_a_version_that_was_never_published() {
 
     store.inspect(|connection| {
         connection
-            .execute("DELETE FROM work_product_graph_versions_v1", [])
+            .execute("DELETE FROM work_product_journal_versions_v1", [])
             .expect("drop the published versions");
     });
 
@@ -812,7 +812,7 @@ fn evidence_is_not_served_from_a_version_that_was_never_published() {
             .expect_err("an unpublished version has no readable evidence"),
         WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
     );
-    assert_eq!(store.count("work_product_events_v1"), 1);
+    assert_eq!(store.count("work_product_journal_events_v1"), 1);
     let history = read_history(&store, 16, None).expect("read history");
     assert_eq!(history.events.len(), 1);
 }

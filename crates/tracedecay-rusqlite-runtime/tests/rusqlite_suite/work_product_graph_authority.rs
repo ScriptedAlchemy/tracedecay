@@ -63,16 +63,16 @@ fn a_created_work_product_commits_one_verified_journal_version_with_declared_eff
     // The event and verified version are the two rows of one atomic commit.
     // Their exact sequence/version identity must agree with the returned
     // receipt; separate row counts alone would not prove that relationship.
-    assert_eq!(store.count("work_product_events_v1"), 1);
-    assert_eq!(store.count("work_product_graph_versions_v1"), 1);
+    assert_eq!(store.count("work_product_journal_events_v1"), 1);
+    assert_eq!(store.count("work_product_journal_versions_v1"), 1);
     let (event_id, event_sequence, verified_sequence, verified_version): (String, i64, i64, i64) =
         store.inspect(|connection| {
             connection
                 .query_row(
                     "SELECT event.event_id, event.sequence,
                             verified.event_sequence, verified.graph_version
-                     FROM work_product_events_v1 AS event
-                     JOIN work_product_graph_versions_v1 AS verified
+                     FROM work_product_journal_events_v1 AS event
+                     JOIN work_product_journal_versions_v1 AS verified
                        ON verified.owner_brain_id = event.owner_brain_id
                       AND verified.owner_profile_id = event.owner_profile_id
                       AND verified.event_sequence = event.sequence
@@ -173,8 +173,8 @@ fn replaying_one_command_returns_the_same_event_without_a_second_journal_row() {
         first.verified_graph_version(),
         second.verified_graph_version()
     );
-    assert_eq!(store.count("work_product_events_v1"), 1);
-    assert_eq!(store.count("work_product_graph_versions_v1"), 1);
+    assert_eq!(store.count("work_product_journal_events_v1"), 1);
+    assert_eq!(store.count("work_product_journal_versions_v1"), 1);
 }
 
 #[test]
@@ -184,7 +184,7 @@ fn a_verified_graph_insert_failure_rolls_back_the_journal_event() {
             connection
                 .execute_batch(
                     "CREATE TRIGGER reject_work_product_verified_graph
-                     BEFORE INSERT ON work_product_graph_versions_v1
+                     BEFORE INSERT ON work_product_journal_versions_v1
                      BEGIN
                        SELECT RAISE(ABORT, 'injected verified graph failure');
                      END;",
@@ -206,8 +206,8 @@ fn a_verified_graph_insert_failure_rolls_back_the_journal_event() {
         failure,
         WorkProductApplicationErrorV1::EventAuthorityUnavailable
     );
-    assert_eq!(store.count("work_product_events_v1"), 0);
-    assert_eq!(store.count("work_product_graph_versions_v1"), 0);
+    assert_eq!(store.count("work_product_journal_events_v1"), 0);
+    assert_eq!(store.count("work_product_journal_versions_v1"), 0);
 }
 
 #[test]
@@ -219,15 +219,16 @@ fn a_uniqueness_violation_on_the_journal_insert_is_a_version_conflict() {
             connection
                 .execute_batch(
                     "CREATE TRIGGER rival_claims_sequence
-                     BEFORE INSERT ON work_product_events_v1
+                     BEFORE INSERT ON work_product_journal_events_v1
                      BEGIN
-                       INSERT INTO work_product_events_v1 (
-                         owner_brain_id, owner_profile_id, sequence, event_id, command_id,
-                         canonical_input_digest, expected_graph_version, result_graph_version,
-                         occurred_at, event_payload
+                       INSERT INTO work_product_journal_events_v1 (
+                         owner_brain_id, owner_profile_id, sequence, scope_key, event_id,
+                         command_id, canonical_input_digest, expected_graph_version,
+                         result_graph_version, occurred_at, event_payload
                        ) VALUES (
-                         NEW.owner_brain_id, NEW.owner_profile_id, NEW.sequence, 'event.rival',
-                         'command.rival', 'digest.rival', NULL, 9999, 0, '{}'
+                         NEW.owner_brain_id, NEW.owner_profile_id, NEW.sequence, 'scope.rival',
+                         'event.rival', 'command.rival', 'digest.rival', NULL, NEW.sequence, 0,
+                         '{}'
                        );
                      END;",
                 )
@@ -243,12 +244,12 @@ fn a_uniqueness_violation_on_the_journal_insert_is_a_version_conflict() {
     .expect_err("a lost race for the sequence must reject the append");
 
     assert_eq!(conflict, WorkProductApplicationErrorV1::VersionConflict);
-    assert_eq!(store.count("work_product_events_v1"), 0);
-    assert_eq!(store.count("work_product_graph_versions_v1"), 0);
+    assert_eq!(store.count("work_product_journal_events_v1"), 0);
+    assert_eq!(store.count("work_product_journal_versions_v1"), 0);
 }
 
 #[test]
-fn a_journal_row_that_does_not_decode_is_invalid_stored_data_not_an_absent_graph() {
+fn a_head_that_does_not_decode_is_invalid_stored_data_not_an_absent_graph() {
     let store = RegisteredWorkStore::start("work-product-undecodable-journal");
     let first = create(
         &store,
@@ -262,14 +263,14 @@ fn a_journal_row_that_does_not_decode_is_invalid_stored_data_not_an_absent_graph
     store.inspect(|connection| {
         connection
             .execute(
-                "UPDATE work_product_events_v1 SET event_payload = 'not json'",
+                "UPDATE work_product_journal_head_v1 SET head_graph = 'not json'",
                 [],
             )
-            .expect("corrupt the stored event payload");
+            .expect("corrupt the stored head");
     });
 
     assert_eq!(
-        read_current(&store).expect_err("an undecodable journal is not a readable graph"),
+        read_current(&store).expect_err("an undecodable head is not a readable graph"),
         WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid)
     );
     // The mutation path reads the same journal and must say the same thing,
@@ -291,12 +292,73 @@ fn a_journal_row_that_does_not_decode_is_invalid_stored_data_not_an_absent_graph
                 mutation: next,
             },
         )
-        .expect_err("an undecodable journal cannot be appended to");
+        .expect_err("an undecodable head cannot be appended to");
     assert_eq!(
         append,
         WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid)
     );
-    assert_eq!(store.count("work_product_events_v1"), 1);
+    assert_eq!(store.count("work_product_journal_events_v1"), 1);
+}
+
+/// Current reads and appends run from the head and never read an event, so an
+/// event row that does not decode is found by the reads that do read events,
+/// such as a historical version rebuilt from the journal. It is invalid stored
+/// data there, never an absent graph and never a silent skip.
+#[test]
+fn an_event_row_that_does_not_decode_fails_history_and_historical_reads_only() {
+    let store = RegisteredWorkStore::start("work-product-undecodable-event");
+    let mut latest = create(
+        &store,
+        "command.work-product.undecodable-event.create",
+        UtcMicros(100),
+        vec![item("task.history.0", &[], 1)],
+    )
+    .expect("create the work product");
+    for index in 1..3 {
+        let mut change = mutation(
+            &format!("command.work-product.undecodable-event.add.{index}"),
+            UtcMicros(100 + index),
+        );
+        change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+            verified_version: latest.verified_graph_version().clone(),
+        };
+        latest = mutations(&store)
+            .add_task(
+                &context(),
+                &binding(),
+                AddWorkTaskRequestV1 {
+                    selection: repository_selection(),
+                    item: item(&format!("task.history.{index}"), &[], 1),
+                    mutation: change,
+                },
+            )
+            .expect("publish the next version");
+    }
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_journal_events_v1 SET event_payload = 'not json'
+                 WHERE sequence = 1",
+                [],
+            )
+            .expect("corrupt the first event's payload");
+    });
+
+    let current = read_current(&store).expect("the head does not depend on any event row");
+    assert_eq!(
+        current.entries()[0].verified_version(),
+        latest.verified_graph_version()
+    );
+    let invalid = WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid);
+    let first_version = reads(&store).read_graph(
+        &context(),
+        WorkGraphReadRequestV1::as_of(repository_selection(), UtcMicros(100), PROJECTED_AT)
+            .expect("an as-of request"),
+    );
+    assert_eq!(
+        first_version.expect_err("a version rebuilt from an undecodable event is not served"),
+        invalid
+    );
 }
 
 #[test]
@@ -320,8 +382,8 @@ fn the_same_command_with_different_input_is_an_idempotency_conflict() {
     )
     .expect_err("a reused command id with different input must not be accepted");
     assert_eq!(conflict, WorkProductApplicationErrorV1::IdempotencyConflict);
-    assert_eq!(store.count("work_product_events_v1"), 1);
-    assert_eq!(store.count("work_product_graph_versions_v1"), 1);
+    assert_eq!(store.count("work_product_journal_events_v1"), 1);
+    assert_eq!(store.count("work_product_journal_versions_v1"), 1);
 }
 
 #[test]
@@ -343,8 +405,8 @@ fn a_second_creation_cannot_claim_there_is_no_prior_graph() {
     )
     .expect_err("a second create must lose the compare-and-swap");
     assert_eq!(conflict, WorkProductApplicationErrorV1::VersionConflict);
-    assert_eq!(store.count("work_product_events_v1"), 1);
-    assert_eq!(store.count("work_product_graph_versions_v1"), 1);
+    assert_eq!(store.count("work_product_journal_events_v1"), 1);
+    assert_eq!(store.count("work_product_journal_versions_v1"), 1);
 }
 
 #[test]
@@ -450,29 +512,38 @@ fn current_reads_retain_exact_contents_across_published_history() {
             .item(&id("task.history.16"))
             .is_none()
     );
+    // The first version, rebuilt from the journal. Damage to its history is
+    // found by the read that rebuilds it and by no other.
+    let first_version = || {
+        reads(&store).read_graph(
+            &context(),
+            WorkGraphReadRequestV1::as_of(repository_selection(), UtcMicros(100), PROJECTED_AT)
+                .expect("an as-of request"),
+        )
+    };
+    let invalid = WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid);
+    assert_eq!(
+        first_version().expect("the first version").entries()[0]
+            .graph()
+            .items()
+            .len(),
+        1
+    );
     store.inspect(|connection| {
         connection
             .execute(
-                "UPDATE work_product_events_v1 SET event_payload = json_set(event_payload, '$.sequence', 99) WHERE sequence = 1",
+                "UPDATE work_product_journal_events_v1 SET event_payload = json_set(event_payload, '$.sequence', 99) WHERE sequence = 1",
                 [],
             )
             .expect("change an earlier event's embedded sequence");
     });
     assert_eq!(
-        read_current(&store).expect_err("a mismatched historical event sequence is unavailable"),
-        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+        first_version().expect_err("a mismatched historical event sequence is not served"),
+        invalid
     );
-    store.inspect(|connection| {
-        connection
-            .execute(
-                "UPDATE work_product_events_v1 SET event_payload = json_set(event_payload, '$.sequence', 1) WHERE sequence = 1",
-                [],
-            )
-            .expect("restore the historical event's sequence");
-    });
     assert_eq!(
         read_current(&store)
-            .expect("the canonical sequence restores graph availability")
+            .expect("the head does not depend on the damaged event")
             .entries()[0]
             .verified_version(),
         latest.verified_graph_version()
@@ -480,15 +551,25 @@ fn current_reads_retain_exact_contents_across_published_history() {
     store.inspect(|connection| {
         connection
             .execute(
-                "UPDATE work_product_graph_versions_v1 SET recovered_graph_digest = 'invalid' WHERE graph_version = 1",
+                "UPDATE work_product_journal_events_v1 SET event_payload = json_set(event_payload, '$.sequence', 1) WHERE sequence = 1",
+                [],
+            )
+            .expect("restore the historical event's sequence");
+    });
+    assert!(first_version().is_ok());
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_journal_versions_v1 SET recovered_graph_digest = 'invalid' WHERE graph_version = 1",
                 [],
             )
             .expect("corrupt an earlier published identity");
     });
     assert_eq!(
-        read_current(&store).expect_err("invalid historical publication remains unavailable"),
-        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+        first_version().expect_err("an invalid historical publication is not served"),
+        invalid
     );
+    assert!(read_current(&store).is_ok());
 }
 
 #[test]
@@ -904,7 +985,7 @@ fn a_tampered_journal_without_its_verified_version_is_not_readable() {
     // connection. No production writer exposes this partial mutation.
     store.inspect(|connection| {
         connection
-            .execute("DELETE FROM work_product_graph_versions_v1", [])
+            .execute("DELETE FROM work_product_journal_versions_v1", [])
             .expect("drop the published version");
     });
 
@@ -913,14 +994,15 @@ fn a_tampered_journal_without_its_verified_version_is_not_readable() {
         read_current(&store).expect_err("an unverified event is not a readable graph"),
         WorkProductApplicationErrorV1::GraphAuthorityUnavailable
     );
-    assert_eq!(store.count("work_product_events_v1"), 1);
+    assert_eq!(store.count("work_product_journal_events_v1"), 1);
 }
 
-/// A current read answers from the head, but the head is only as trustworthy
-/// as the verified history beneath it, so a corrupted earlier verified row
-/// fails the read closed rather than being skipped as history nobody asked for.
+/// A current read answers from the head and proves it against the head
+/// version's own digest, so a head that no longer matches what was verified
+/// fails the read closed. A corrupted earlier row is history nobody asked for,
+/// and is found only by the read that rebuilds that version.
 #[test]
-fn a_corrupted_historical_verified_version_makes_the_current_read_unavailable() {
+fn a_head_that_disagrees_with_its_verified_version_is_not_served() {
     let store = RegisteredWorkStore::start("work-product-tampered-history");
     let first = create(
         &store,
@@ -946,20 +1028,31 @@ fn a_corrupted_historical_verified_version_makes_the_current_read_unavailable() 
         .expect("publish the head version");
     assert!(read_current(&store).is_ok());
 
-    // Point the first verified row at an event that does not exist, through
-    // the out-of-band inspection connection. No production writer can.
+    // Damage the first version's digest: history nobody asked for.
     store.inspect(|connection| {
         connection
             .execute(
-                "UPDATE work_product_graph_versions_v1 SET event_sequence = 99
+                "UPDATE work_product_journal_versions_v1 SET recovered_graph_digest = 'invalid'
                  WHERE graph_version = 1",
                 [],
             )
             .expect("corrupt the historical verified version");
     });
+    assert!(read_current(&store).is_ok());
 
+    // Damage the head version's digest, through the out-of-band inspection
+    // connection. No production writer can.
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_journal_versions_v1 SET recovered_graph_digest = 'invalid'
+                 WHERE graph_version = 2",
+                [],
+            )
+            .expect("corrupt the head verified version");
+    });
     assert_eq!(
-        read_current(&store).expect_err("a broken verified history is not a readable head"),
-        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+        read_current(&store).expect_err("a head its verified version disowns is not served"),
+        WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid)
     );
 }
