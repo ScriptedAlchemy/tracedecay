@@ -77,11 +77,9 @@ fn graph_admission_failures_refuse_with_the_typed_graph_state() {
 #[test]
 fn graph_query_failures_after_open_refuse_like_a_failed_open() {
     let unavailable: RetrievalPortOutcome<QualifiedNamePrimitiveResult> = graph_query_outcome(
-        &tracedecay_graph_query::map_code_graph_read_runtime_error(
-            CodeGraphReadError::Unavailable {
-                detail: "the projection closed".to_owned(),
-            },
-        ),
+        &GraphQueryError::Read(CodeGraphReadError::Unavailable {
+            detail: "the projection closed".to_owned(),
+        }),
         EvidenceDomain::Graph,
         UtcMicros(1),
     );
@@ -96,19 +94,116 @@ fn graph_query_failures_after_open_refuse_like_a_failed_open() {
         )
     );
 
-    let unrelated: RetrievalPortOutcome<QualifiedNamePrimitiveResult> = graph_query_outcome(
-        &tracedecay_domain::errors::TraceDecayError::Config {
+    for error in [
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: "not a graph read".to_owned(),
         },
-        EvidenceDomain::Graph,
-        UtcMicros(1),
-    );
-    assert_eq!(
-        unrelated
-            .into_termination()
-            .map(|(termination, _)| termination),
-        Ok(tracedecay_contracts::OperationTermination::Failed)
-    );
+        tracedecay_domain::errors::TraceDecayError::project_route(
+            "unrelated-query-failure",
+            false,
+            "not a graph read",
+        ),
+    ] {
+        let unrelated: RetrievalPortOutcome<QualifiedNamePrimitiveResult> = graph_query_outcome(
+            &GraphQueryError::Runtime(error),
+            EvidenceDomain::Graph,
+            UtcMicros(1),
+        );
+        assert_eq!(
+            unrelated
+                .into_termination()
+                .map(|(termination, _)| termination),
+            Ok(tracedecay_contracts::OperationTermination::Failed)
+        );
+    }
+}
+
+#[test]
+fn incomplete_graph_evidence_remains_unavailable_after_open() {
+    let symbol = CodeGraphSymbolSummaryV1 {
+        occurrence: tracedecay_domain::SymbolOccurrenceId::new("symbol.incomplete")
+            .expect("symbol occurrence"),
+        binding: None,
+        metadata: None,
+    };
+    let test_error = tracedecay_graph_query::test_risk::verified_test_symbol_parts(&symbol)
+        .expect_err("test evidence requires extraction metadata");
+    let health_error =
+        crate::graph_health_delta::HealthDeltaError::Graph(GraphQueryError::EvidenceUnavailable {
+            reason_code: "verified-code-graph-evidence-unavailable",
+            detail: "verified health evidence is incomplete for one or more symbols".to_owned(),
+        });
+    for (outcome, domain) in [
+        (
+            graph_query_outcome::<QualifiedNamePrimitiveResult>(
+                &test_error,
+                EvidenceDomain::Graph,
+                UtcMicros(1),
+            ),
+            EvidenceDomain::Graph,
+        ),
+        (
+            health_delta_outcome::<QualifiedNamePrimitiveResult>(&health_error, UtcMicros(1)),
+            EvidenceDomain::Operational,
+        ),
+    ] {
+        let RetrievalPortOutcome::Refused(evidence, problem) = outcome else {
+            panic!("incomplete evidence must refuse as unavailable: {outcome:?}");
+        };
+        assert_eq!(
+            (problem.kind(), problem.reason_code()),
+            (
+                ApplicationProblemKind::Unavailable,
+                "application.code-graph.unavailable"
+            )
+        );
+        assert!(evidence.payload.is_none());
+        assert_eq!(
+            evidence.omissions,
+            vec![Omission {
+                domain,
+                count: 0,
+                reason: OmissionReason::Unavailable,
+            }]
+        );
+        assert_eq!(evidence.temporal.freshness, FreshnessState::Unknown);
+    }
+}
+
+#[test]
+fn graph_query_refusals_keep_operator_and_retry_details() {
+    for (error, expected) in [
+        (
+            CodeGraphReadError::Parked {
+                cause: "projection store cannot be opened".to_owned(),
+                remedy: "repair the configured store path".to_owned(),
+                retries_on_wake: false,
+            },
+            ApplicationProblemDetailV1::Parked {
+                cause: "projection store cannot be opened".to_owned(),
+                remedy: "repair the configured store path".to_owned(),
+                retries_on_wake: false,
+            },
+        ),
+        (
+            CodeGraphReadError::Rewarming {
+                retry_after_millis: 47,
+            },
+            ApplicationProblemDetailV1::CodeGraphRewarming {
+                retry_after_millis: 47,
+            },
+        ),
+    ] {
+        let outcome: RetrievalPortOutcome<QualifiedNamePrimitiveResult> = graph_query_outcome(
+            &GraphQueryError::Read(error),
+            EvidenceDomain::Graph,
+            UtcMicros(1),
+        );
+        let RetrievalPortOutcome::Refused(_, problem) = outcome else {
+            panic!("operator and retry details require a refusal: {outcome:?}");
+        };
+        assert_eq!(problem.detail(), Some(&expected));
+    }
 }
 
 #[test]
