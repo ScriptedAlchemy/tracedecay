@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import settingsWire from '../../test/fixtures/settings-patch.json';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
 import { useScope, type ScopeWritability } from '../../data/scope/store.ts';
 import { SettingsPage, findConfigSection } from './SettingsPage.tsx';
@@ -97,15 +98,7 @@ const FIXTURE_SETTINGS: ReadonlyArray<readonly [string, readonly string[]]> = [
 
 function projectPatchResponse(current: unknown) {
   return {
-    application_outcome: {
-      Effect: {
-        receipt: {
-          request_id: 'request.configuration.settings-fixture',
-          idempotency_key: 'settings-fixture',
-          outcome: 'completed',
-        },
-      },
-    },
+    application_outcome: structuredClone(settingsWire.changed.body.application_outcome),
     current,
   };
 }
@@ -400,6 +393,35 @@ describe('SettingsPage effective configuration review', () => {
         'Current CPU and memory admission limits are unavailable; an exact count is judged when the daemon restarts.',
       ),
     ).toBeTruthy();
+  });
+
+  it('requires a refresh after an uncertain effect without offering to repeat the write', async () => {
+    const response = structuredClone(settingsWire.changed.body);
+    response.application_outcome.value.reconciliation = 'pending';
+    let dispatched = false;
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') {
+        dispatched = true;
+        return jsonResponse(response);
+      }
+      return jsonResponse(dispatched ? updatedSettings('rev-43') : settings());
+    });
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    renderSettings();
+    await openReview(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Review project change' }));
+    await user.click(screen.getByRole('checkbox', { name: /I confirm this change against configuration revision rev-42/ }));
+    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+    expect(await screen.findByText(/Refresh current values before retrying/)).toBeTruthy();
+    expect(screen.queryByText('Project settings saved')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry project settings' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Load current values' }));
+    await waitFor(() => expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy());
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === 'PATCH')).toHaveLength(1);
+    expect(screen.queryByText('Project settings saved')).toBeNull();
   });
 
   it('blocks a stale project change before sending the patch', async () => {

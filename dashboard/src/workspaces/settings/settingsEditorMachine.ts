@@ -108,7 +108,7 @@ type SettingsResting =
 /** A write that did not reach a verdict. Distinct from a refusal, which did. */
 type SettingsSubmitFailure =
   | { readonly kind: 'offline'; readonly detail: string }
-  | { readonly kind: 'error'; readonly detail: string }
+  | { readonly kind: 'error' | 'unsettled'; readonly detail: string }
   | { readonly kind: 'protocol_error'; readonly authority: string; readonly detail: string };
 
 interface SettingsEditable {
@@ -453,6 +453,8 @@ function settleSubmit(
       return failed(state, { kind: 'offline', detail: result.detail });
     case 'error':
       return failed(state, { kind: 'error', detail: result.detail });
+    case 'unsettled':
+      return failed(state, { kind: 'unsettled', detail: result.detail });
     case 'protocol_error':
       return failed(state, {
         kind: 'protocol_error',

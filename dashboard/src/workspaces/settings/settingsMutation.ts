@@ -1,6 +1,11 @@
 import { dashboardFetch } from '../../data/auth/credential.ts';
-import { z } from 'zod';
-import type { SettingsPayloadV1 } from '../../contracts/generated.ts';
+import {
+  DashboardConfigurationRefusalV1Schema,
+  ProjectSettingsPatchResponseV1Schema,
+  type EffectReceipt,
+  type SettingsPayloadV1,
+} from '../../contracts/generated.ts';
+import { applicationProblemStatusMatches } from '../../contracts/application.ts';
 import { readOnlyScopeRefusal, type ScopeWritability } from '../../data/scope/store.ts';
 import {
   buildSettingsEditor,
@@ -25,7 +30,7 @@ export type SettingsMutationResult =
       readonly resyncRecommended: boolean;
       readonly restartRecommended: boolean;
       /** Canonical durable application receipt for project writes. */
-      readonly effectReceipt: Readonly<Record<string, unknown>> | null;
+      readonly effectReceipt: EffectReceipt | null;
     }
   | {
       readonly outcome: 'conflict';
@@ -39,6 +44,10 @@ export type SettingsMutationResult =
     }
   | {
       readonly outcome: 'offline' | 'error';
+      readonly detail: string;
+    }
+  | {
+      readonly outcome: 'unsettled';
       readonly detail: string;
     }
   /** The authority that performs this write is not currently mounted. Kept
@@ -127,12 +136,6 @@ export async function applySettingsMutation(
     }),
   });
   if (patched.outcome !== 'response') return patched;
-  if (patched.response.status === 409) {
-    return readConflict(patched.body, request.expectedRevisionId);
-  }
-  if (patched.response.status === 503) {
-    return { outcome: 'unavailable', detail: unavailableDetail(patched.body) };
-  }
   // The gateway's read-only refusal, recognized by its own body rather than by
   // the status alone: a 405 this dashboard cannot account for stays a plain
   // error below rather than borrowing the scope explanation.
@@ -144,13 +147,10 @@ export async function applySettingsMutation(
         detail: `Nothing was applied: ${scopeRefused.detail.replace(/\.$/, '')}.`,
       };
     }
+    return { outcome: 'error', detail: 'Settings update failed (HTTP 405).' };
   }
   if (!patched.response.ok) {
-    const validation = readValidation(patched.body);
-    return validation ?? {
-      outcome: 'error',
-      detail: `Settings update failed (HTTP ${patched.response.status}).`,
-    };
+    return settingsRefusal(patched.body, patched.response.status, patchAuthority);
   }
   const projectPatch = request.scope === 'project'
     ? projectSettingsPatchResponse(patched.body, patchAuthority)
@@ -186,23 +186,10 @@ function projectSettingsPatchResponse(
   | {
       readonly parsed: true;
       readonly current: unknown;
-      readonly effectReceipt: Readonly<Record<string, unknown>> | null;
+      readonly effectReceipt: EffectReceipt | null;
     }
-  | { readonly parsed: false; readonly violation: Extract<SettingsMutationResult, { outcome: 'protocol_error' }> } {
-  const response = z
-    .object({
-      application_outcome: z.union([
-        z.null(),
-        z.object({
-          Effect: z.object({
-            receipt: z.record(z.string(), z.unknown()),
-          }).passthrough(),
-        }).strict(),
-      ]),
-      current: z.unknown(),
-    })
-    .strict()
-    .safeParse(body);
+  | { readonly parsed: false; readonly violation: Extract<SettingsMutationResult, { outcome: 'protocol_error' | 'unsettled' }> } {
+  const response = ProjectSettingsPatchResponseV1Schema.safeParse(body);
   if (!response.success) {
     return {
       parsed: false,
@@ -212,10 +199,23 @@ function projectSettingsPatchResponse(
       ),
     };
   }
+  const outcome = response.data.application_outcome;
+  if (outcome !== null && (
+    outcome.outcome !== 'effect'
+    || outcome.value.execution.termination !== 'completed'
+    || outcome.value.reconciliation !== 'reconciled'
+    || outcome.value.receipt.outcome !== 'completed'
+    || outcome.value.receipt.committed_state === null
+  )) {
+    return {
+      parsed: false,
+      violation: { outcome: 'unsettled', detail: 'The settings effect is not confirmed. Refresh current values before retrying.' },
+    };
+  }
   return {
     parsed: true,
     current: response.data.current,
-    effectReceipt: response.data.application_outcome?.Effect.receipt ?? null,
+    effectReceipt: outcome?.outcome === 'effect' ? outcome.value.receipt : null,
   };
 }
 
@@ -282,42 +282,38 @@ function contractedPayload(body: unknown, authority: string): ContractedPayload 
   }
 }
 
-/**
- * CONTRACT GAP, the settings refusal bodies are not generated.
- *
- * `/api/settings/{project,user}` build their 400/409/503 bodies with
- * `serde_json::json!` in `crates/tracedecay-api/src/configuration.rs`
- * (`settings_validation_error`, `configuration_revision_conflict_error`,
- * `configuration_authority_unavailable_error`), so schemars never sees them
- * and `contracts/generated.ts` carries no type for them. The success payload
- * is contracted and is parsed as such above; only the refusals are read here.
- *
- * Every member below is therefore optional and every absence resolves to a
- * stated unavailable value, a missing `actual_revision_id` reads as unknown,
- * a missing `detail` says the authority is unavailable without naming which.
- * None of it is inferred, and none of it turns a refusal into a success.
- */
-const RefusalBodySchema = z
-  .object({
-    detail: z.string().optional(),
-    expected_revision_id: z.string().optional(),
-    actual_revision_id: z.string().optional(),
-    validation_errors: z
-      .array(z.object({ field: z.string(), message: z.string() }).passthrough())
-      .optional(),
-  })
-  .passthrough();
-
-function readRefusal(body: unknown): z.infer<typeof RefusalBodySchema> {
-  const parsed = RefusalBodySchema.safeParse(body);
-  return parsed.success ? parsed.data : {};
-}
-
-function unavailableDetail(body: unknown): string {
-  const detail = readRefusal(body).detail;
-  return detail != null && detail.length > 0
-    ? `Nothing was applied: ${detail.replace(/\.$/, '')}.`
-    : 'Nothing was applied: the authority for this write is unavailable.';
+function settingsRefusal(body: unknown, status: number, authority: string): SettingsMutationResult {
+  const parsed = DashboardConfigurationRefusalV1Schema.safeParse(body);
+  if (!parsed.success) return protocolError(authority, 'expected a configuration refusal.');
+  const refusal = parsed.data;
+  if ('problem' in refusal) {
+    // The existing settings adapter preserves HTTP 409 for cancellation.
+    const matches = refusal.problem.kind === 'cancelled'
+      ? status === 409
+      : applicationProblemStatusMatches(status, refusal.problem.kind);
+    if (!matches) return protocolError(authority, 'the application problem disagrees with its HTTP status.');
+    if (refusal.problem.committed_receipt !== null) {
+      return { outcome: 'unsettled', detail: `${refusal.problem.message} Refresh current values before retrying.` };
+    }
+    return { outcome: 'error', detail: refusal.problem.message };
+  }
+  if ('validation_errors' in refusal) {
+    return status === 400
+      ? { outcome: 'validation', detail: refusal.detail, errors: refusal.validation_errors }
+      : protocolError(authority, 'the validation refusal disagrees with its HTTP status.');
+  }
+  switch (refusal.code) {
+    case 'configuration_revision_conflict':
+      return status === 409
+        ? { outcome: 'conflict', expectedRevisionId: refusal.expected_revision_id, actualRevisionId: refusal.actual_revision_id }
+        : protocolError(authority, 'the revision conflict disagrees with its HTTP status.');
+    case 'configuration_authority_unavailable':
+      return status === 503
+        ? { outcome: 'unavailable', detail: `Nothing was applied: ${refusal.detail.replace(/\.$/, '')}.` }
+        : protocolError(authority, 'the authority refusal disagrees with its HTTP status.');
+    case 'application_contract_violation':
+      return protocolError(authority, refusal.detail);
+  }
 }
 
 type JsonFetchResult =
@@ -354,31 +350,6 @@ function protocolError(
     outcome: 'protocol_error',
     authority,
     detail: `${authority} violated the settings contract: ${reason}`,
-  };
-}
-
-function readValidation(body: unknown): SettingsMutationResult | null {
-  const refusal = readRefusal(body);
-  const errors: readonly SettingsValidationError[] = (refusal.validation_errors ?? []).map(
-    ({ field, message }) => ({ field, message }),
-  );
-  if (errors.length === 0) return null;
-  return {
-    outcome: 'validation',
-    detail: refusal.detail ?? 'Settings validation failed.',
-    errors,
-  };
-}
-
-function readConflict(
-  body: unknown,
-  fallbackExpectedRevisionId: string,
-): SettingsMutationResult {
-  const refusal = readRefusal(body);
-  return {
-    outcome: 'conflict',
-    expectedRevisionId: refusal.expected_revision_id ?? fallbackExpectedRevisionId,
-    actualRevisionId: refusal.actual_revision_id ?? null,
   };
 }
 

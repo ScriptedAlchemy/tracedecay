@@ -449,7 +449,7 @@ function emitNamedDef(
 function emitAlias(desc: string, name: string, ann: string, zod: string, ts: string): EmittedDef {
   return {
     typeName: name,
-    types: `export type ${name} = ${ts};`,
+    types: `export type ${name} =${ts.startsWith("\n") ? "" : " "}${ts};`,
     decoders: `${desc}export const ${name}Schema: ${ann} = ${zod};`,
   };
 }

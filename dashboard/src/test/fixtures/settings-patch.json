@@ -1,0 +1,639 @@
+{
+  "cancelled": {
+    "body": {
+      "contract": {
+        "schema_id": "schema.configuration.batch.result",
+        "schema_revision": 1
+      },
+      "problem": {
+        "cancellation_stage": "before_admission",
+        "code": "cancelled",
+        "committed_receipt": null,
+        "coverage": null,
+        "detail": null,
+        "details": [],
+        "diagnostic": null,
+        "execution_failure_classification": null,
+        "kind": "cancelled",
+        "legal_actions": [],
+        "message": "The request was cancelled before admission",
+        "owning_layer": "application",
+        "request_id": "request.configuration.settings-fixture",
+        "retry": "never",
+        "retry_after_millis": null,
+        "retry_scope": null,
+        "retryable": false,
+        "revision": 1,
+        "terminality": "pre_admission",
+        "trace_id": "request.configuration.settings-fixture",
+        "unavailable_classification": null
+      },
+      "request_id": "request.configuration.settings-fixture"
+    },
+    "status": 409
+  },
+  "changed": {
+    "body": {
+      "application_outcome": {
+        "outcome": "effect",
+        "value": {
+          "authority": {
+            "authorized_scope_digest": "sha256:cb520e3731e8dbab143f4fc32b885fc977d467f4648a6429bf0ed9bf0294873e",
+            "disclosure": "metadata",
+            "grant_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "grant_id": "grant.settings",
+            "grant_revision": 1,
+            "policy": {
+              "decision_id": "policy.settings",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "evaluator_revision": "policy.settings.v1",
+              "revision": 1
+            },
+            "revalidated_at": 10
+          },
+          "effect_class": "administrative",
+          "effect_id": "effect.configuration.settings",
+          "execution": {
+            "budget": {
+              "bytes_consumed": 0,
+              "elapsed_micros": 0,
+              "units_consumed": 0
+            },
+            "cancellation": null,
+            "effective_deadline": {
+              "expires_at": 1000
+            },
+            "ended_at": 20,
+            "started_at": 10,
+            "termination": "completed"
+          },
+          "expected_state": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "idempotency_key": "settings-idempotency-fixture",
+          "payload": null,
+          "receipt": {
+            "actor": "actor.settings",
+            "catalog_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "committed_state": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "configuration_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "effect_class": "administrative",
+            "expected_state": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "external_proof": null,
+            "idempotency_key": "settings-idempotency-fixture",
+            "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation": "use-case.configuration.batch",
+            "outcome": "completed",
+            "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "privacy_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "request_id": "request.configuration.settings-fixture",
+            "scope": {
+              "project_id": "project.settings.scout",
+              "reference": null,
+              "repository_id": "repository.settings",
+              "scope_digest": "sha256:cb520e3731e8dbab143f4fc32b885fc977d467f4648a6429bf0ed9bf0294873e",
+              "worktree_id": "worktree.settings"
+            }
+          },
+          "reconciliation": "reconciled"
+        }
+      },
+      "current": {
+        "authorization": {
+          "outcome": "authorized"
+        },
+        "coverage": {
+          "completeness": "complete",
+          "denominator": 1,
+          "eligible": 1,
+          "examined": 1,
+          "excluded": 0,
+          "matched": 1,
+          "omission_reasons": [],
+          "omitted": 0,
+          "unit": "configuration_control_plane",
+          "unknown": 0
+        },
+        "domain_state": "ready",
+        "freshness": {
+          "observed_at_micros": 100,
+          "state": "fresh",
+          "watermark": null
+        },
+        "legal_actions": [
+          {
+            "kind": "request_apply",
+            "operation": "configuration_batch"
+          },
+          {
+            "kind": "refresh",
+            "operation": "configuration_list"
+          }
+        ],
+        "payload": {
+          "automation": {
+            "availability": {
+              "available": true
+            },
+            "backend": "codex_app_server",
+            "config_endpoint": "/api/plugins/holographic/curation/config",
+            "configuration_revision_id": "rev-43",
+            "enabled": true,
+            "host_mode": "standalone"
+          },
+          "environment": {
+            "global_accounting_enabled": false,
+            "global_accounting_mode": "disabled",
+            "pricing_offline": true,
+            "variables": []
+          },
+          "project": {
+            "config": {
+              "context_scout": false,
+              "exclude": [
+                ".git/**",
+                ".tracedecay/**",
+                "**/*.min.*",
+                ".cache/**",
+                "**/.cache/**",
+                ".gradle/**",
+                "**/.gradle/**",
+                ".next/**",
+                "**/.next/**",
+                ".turbo/**",
+                "**/.turbo/**",
+                ".venv/**",
+                "**/.venv/**",
+                ".worktrees/**",
+                "**/.worktrees/**",
+                "__pycache__/**",
+                "**/__pycache__/**",
+                "build/**",
+                "**/build/**",
+                "coverage/**",
+                "**/coverage/**",
+                "dist/**",
+                "**/dist/**",
+                "node_modules/**",
+                "**/node_modules/**",
+                "out/**",
+                "**/out/**",
+                "target/**",
+                "**/target/**",
+                "vendor/**",
+                "**/vendor/**",
+                "venv/**",
+                "**/venv/**"
+              ],
+              "extract_docstrings": true,
+              "include": [],
+              "max_file_size": 2097152,
+              "sync": {
+                "auto_track_pr_branches": false,
+                "auto_track_pr_poll_secs": 300
+              },
+              "telemetry": {
+                "timings": true
+              },
+              "track_call_sites": true
+            },
+            "configuration_revision_id": "rev-43",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.fd56d9635ef3558e8743096f4bcc8dc5f6e38a457b3b225086af5bf4b01b75ab",
+            "pr_autotrack": {
+              "tracked": []
+            }
+          },
+          "resync_recommended": true,
+          "storage": {
+            "dashboard_root": "/project",
+            "graph_db": "/project/.tracedecay/graph.db",
+            "lcm_db": "/project/.tracedecay/lcm.db",
+            "lcm_scope": "project",
+            "memory_db": "/project/.tracedecay/memory.db",
+            "project_id": "project.settings.scout",
+            "project_root": "/project",
+            "savings_db": "/project/.tracedecay/savings.db",
+            "storage_mode": "project_local",
+            "store_root": "/project/.tracedecay"
+          },
+          "user": {
+            "code_index_worker_configuration_revision_id": "workers-rev-3",
+            "code_index_worker_configuration_snapshot_id": "workers-snapshot-3",
+            "code_index_worker_status": null,
+            "code_index_workers": {
+              "mode": "automatic"
+            },
+            "configuration_revision_id": "user-rev-7",
+            "configuration_snapshot_id": "user-snapshot-7",
+            "extraction_timeout_secs": 30,
+            "installed_agents": [],
+            "upload_enabled": false,
+            "watcher_debounce": "15s"
+          },
+          "version": {
+            "cached_latest_version": null,
+            "channel": "stable",
+            "version": "0.1.0"
+          }
+        },
+        "schema_revision": 1,
+        "scope": {
+          "project_id": "project.settings.scout",
+          "storage_mode": "project_local",
+          "store_root": "/project/.tracedecay"
+        },
+        "source_watermark": null,
+        "time": {
+          "observation_time_micros": 100,
+          "valid_time_micros": null
+        },
+        "version": {
+          "entity_version": null,
+          "graph_version": null
+        }
+      }
+    },
+    "status": 200
+  },
+  "idempotency_conflict": {
+    "body": {
+      "contract": {
+        "schema_id": "schema.configuration.batch.result",
+        "schema_revision": 1
+      },
+      "problem": {
+        "cancellation_stage": null,
+        "code": "configuration.conflict",
+        "committed_receipt": null,
+        "coverage": null,
+        "detail": null,
+        "details": [],
+        "diagnostic": {
+          "code": "configuration.conflict",
+          "message": "The idempotency key was already used for a different settings change."
+        },
+        "execution_failure_classification": null,
+        "kind": "conflict",
+        "legal_actions": [
+          "refresh"
+        ],
+        "message": "The idempotency key was already used for a different settings change.",
+        "owning_layer": "application",
+        "request_id": "request.configuration.settings-fixture",
+        "retry": "after_revalidate",
+        "retry_after_millis": null,
+        "retry_scope": "fresh_request",
+        "retryable": true,
+        "revision": 1,
+        "terminality": "pre_admission",
+        "trace_id": "request.configuration.settings-fixture",
+        "unavailable_classification": null
+      },
+      "request_id": "request.configuration.settings-fixture"
+    },
+    "status": 409
+  },
+  "read": {
+    "body": {
+      "authorization": {
+        "outcome": "authorized"
+      },
+      "coverage": {
+        "completeness": "complete",
+        "denominator": 1,
+        "eligible": 1,
+        "examined": 1,
+        "excluded": 0,
+        "matched": 1,
+        "omission_reasons": [],
+        "omitted": 0,
+        "unit": "configuration_control_plane",
+        "unknown": 0
+      },
+      "domain_state": "ready",
+      "freshness": {
+        "observed_at_micros": 100,
+        "state": "fresh",
+        "watermark": null
+      },
+      "legal_actions": [
+        {
+          "kind": "request_apply",
+          "operation": "configuration_batch"
+        },
+        {
+          "kind": "refresh",
+          "operation": "configuration_list"
+        }
+      ],
+      "payload": {
+        "automation": {
+          "availability": {
+            "available": true
+          },
+          "backend": "codex_app_server",
+          "config_endpoint": "/api/plugins/holographic/curation/config",
+          "configuration_revision_id": "rev-42",
+          "enabled": true,
+          "host_mode": "standalone"
+        },
+        "environment": {
+          "global_accounting_enabled": false,
+          "global_accounting_mode": "disabled",
+          "pricing_offline": true,
+          "variables": []
+        },
+        "project": {
+          "config": {
+            "context_scout": false,
+            "exclude": [
+              ".git/**",
+              ".tracedecay/**",
+              "**/*.min.*",
+              ".cache/**",
+              "**/.cache/**",
+              ".gradle/**",
+              "**/.gradle/**",
+              ".next/**",
+              "**/.next/**",
+              ".turbo/**",
+              "**/.turbo/**",
+              ".venv/**",
+              "**/.venv/**",
+              ".worktrees/**",
+              "**/.worktrees/**",
+              "__pycache__/**",
+              "**/__pycache__/**",
+              "build/**",
+              "**/build/**",
+              "coverage/**",
+              "**/coverage/**",
+              "dist/**",
+              "**/dist/**",
+              "node_modules/**",
+              "**/node_modules/**",
+              "out/**",
+              "**/out/**",
+              "target/**",
+              "**/target/**",
+              "vendor/**",
+              "**/vendor/**",
+              "venv/**",
+              "**/venv/**"
+            ],
+            "extract_docstrings": true,
+            "include": [],
+            "max_file_size": 1048576,
+            "sync": {
+              "auto_track_pr_branches": false,
+              "auto_track_pr_poll_secs": 300
+            },
+            "telemetry": {
+              "timings": true
+            },
+            "track_call_sites": true
+          },
+          "configuration_revision_id": "rev-42",
+          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.fd56d9635ef3558e8743096f4bcc8dc5f6e38a457b3b225086af5bf4b01b75ab",
+          "pr_autotrack": {
+            "tracked": []
+          }
+        },
+        "resync_recommended": false,
+        "storage": {
+          "dashboard_root": "/project",
+          "graph_db": "/project/.tracedecay/graph.db",
+          "lcm_db": "/project/.tracedecay/lcm.db",
+          "lcm_scope": "project",
+          "memory_db": "/project/.tracedecay/memory.db",
+          "project_id": "project.settings.scout",
+          "project_root": "/project",
+          "savings_db": "/project/.tracedecay/savings.db",
+          "storage_mode": "project_local",
+          "store_root": "/project/.tracedecay"
+        },
+        "user": {
+          "code_index_worker_configuration_revision_id": "workers-rev-3",
+          "code_index_worker_configuration_snapshot_id": "workers-snapshot-3",
+          "code_index_worker_status": null,
+          "code_index_workers": {
+            "mode": "automatic"
+          },
+          "configuration_revision_id": "user-rev-7",
+          "configuration_snapshot_id": "user-snapshot-7",
+          "extraction_timeout_secs": 30,
+          "installed_agents": [],
+          "upload_enabled": false,
+          "watcher_debounce": "15s"
+        },
+        "version": {
+          "cached_latest_version": null,
+          "channel": "stable",
+          "version": "0.1.0"
+        }
+      },
+      "schema_revision": 1,
+      "scope": {
+        "project_id": "project.settings.scout",
+        "storage_mode": "project_local",
+        "store_root": "/project/.tracedecay"
+      },
+      "source_watermark": null,
+      "time": {
+        "observation_time_micros": 100,
+        "valid_time_micros": null
+      },
+      "version": {
+        "entity_version": null,
+        "graph_version": null
+      }
+    },
+    "status": 200
+  },
+  "revision_conflict": {
+    "body": {
+      "actual_revision_id": "rev-43",
+      "code": "configuration_revision_conflict",
+      "detail": "settings changed after this edit began; refresh and retry",
+      "expected_revision_id": "rev-42"
+    },
+    "status": 409
+  },
+  "unavailable": {
+    "body": {
+      "code": "configuration_authority_unavailable",
+      "detail": "configuration authority is unavailable"
+    },
+    "status": 503
+  },
+  "unchanged": {
+    "body": {
+      "application_outcome": null,
+      "current": {
+        "authorization": {
+          "outcome": "authorized"
+        },
+        "coverage": {
+          "completeness": "complete",
+          "denominator": 1,
+          "eligible": 1,
+          "examined": 1,
+          "excluded": 0,
+          "matched": 1,
+          "omission_reasons": [],
+          "omitted": 0,
+          "unit": "configuration_control_plane",
+          "unknown": 0
+        },
+        "domain_state": "ready",
+        "freshness": {
+          "observed_at_micros": 100,
+          "state": "fresh",
+          "watermark": null
+        },
+        "legal_actions": [
+          {
+            "kind": "request_apply",
+            "operation": "configuration_batch"
+          },
+          {
+            "kind": "refresh",
+            "operation": "configuration_list"
+          }
+        ],
+        "payload": {
+          "automation": {
+            "availability": {
+              "available": true
+            },
+            "backend": "codex_app_server",
+            "config_endpoint": "/api/plugins/holographic/curation/config",
+            "configuration_revision_id": "rev-42",
+            "enabled": true,
+            "host_mode": "standalone"
+          },
+          "environment": {
+            "global_accounting_enabled": false,
+            "global_accounting_mode": "disabled",
+            "pricing_offline": true,
+            "variables": []
+          },
+          "project": {
+            "config": {
+              "context_scout": false,
+              "exclude": [
+                ".git/**",
+                ".tracedecay/**",
+                "**/*.min.*",
+                ".cache/**",
+                "**/.cache/**",
+                ".gradle/**",
+                "**/.gradle/**",
+                ".next/**",
+                "**/.next/**",
+                ".turbo/**",
+                "**/.turbo/**",
+                ".venv/**",
+                "**/.venv/**",
+                ".worktrees/**",
+                "**/.worktrees/**",
+                "__pycache__/**",
+                "**/__pycache__/**",
+                "build/**",
+                "**/build/**",
+                "coverage/**",
+                "**/coverage/**",
+                "dist/**",
+                "**/dist/**",
+                "node_modules/**",
+                "**/node_modules/**",
+                "out/**",
+                "**/out/**",
+                "target/**",
+                "**/target/**",
+                "vendor/**",
+                "**/vendor/**",
+                "venv/**",
+                "**/venv/**"
+              ],
+              "extract_docstrings": true,
+              "include": [],
+              "max_file_size": 1048576,
+              "sync": {
+                "auto_track_pr_branches": false,
+                "auto_track_pr_poll_secs": 300
+              },
+              "telemetry": {
+                "timings": true
+              },
+              "track_call_sites": true
+            },
+            "configuration_revision_id": "rev-42",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.fd56d9635ef3558e8743096f4bcc8dc5f6e38a457b3b225086af5bf4b01b75ab",
+            "pr_autotrack": {
+              "tracked": []
+            }
+          },
+          "resync_recommended": false,
+          "storage": {
+            "dashboard_root": "/project",
+            "graph_db": "/project/.tracedecay/graph.db",
+            "lcm_db": "/project/.tracedecay/lcm.db",
+            "lcm_scope": "project",
+            "memory_db": "/project/.tracedecay/memory.db",
+            "project_id": "project.settings.scout",
+            "project_root": "/project",
+            "savings_db": "/project/.tracedecay/savings.db",
+            "storage_mode": "project_local",
+            "store_root": "/project/.tracedecay"
+          },
+          "user": {
+            "code_index_worker_configuration_revision_id": "workers-rev-3",
+            "code_index_worker_configuration_snapshot_id": "workers-snapshot-3",
+            "code_index_worker_status": null,
+            "code_index_workers": {
+              "mode": "automatic"
+            },
+            "configuration_revision_id": "user-rev-7",
+            "configuration_snapshot_id": "user-snapshot-7",
+            "extraction_timeout_secs": 30,
+            "installed_agents": [],
+            "upload_enabled": false,
+            "watcher_debounce": "15s"
+          },
+          "version": {
+            "cached_latest_version": null,
+            "channel": "stable",
+            "version": "0.1.0"
+          }
+        },
+        "schema_revision": 1,
+        "scope": {
+          "project_id": "project.settings.scout",
+          "storage_mode": "project_local",
+          "store_root": "/project/.tracedecay"
+        },
+        "source_watermark": null,
+        "time": {
+          "observation_time_micros": 100,
+          "valid_time_micros": null
+        },
+        "version": {
+          "entity_version": null,
+          "graph_version": null
+        }
+      }
+    },
+    "status": 200
+  },
+  "validation": {
+    "body": {
+      "detail": "invalid project settings patch: unknown field `unknown_setting`, expected one of `expected_revision_id`, `idempotency_key`, `include`, `exclude`, `max_file_size`, `extract_docstrings`, `track_call_sites`, `telemetry`, `sync`, `context_scout`, `context_scout_intent`",
+      "validation_errors": [
+        {
+          "field": "unknown_setting",
+          "message": "invalid project settings patch: unknown field `unknown_setting`, expected one of `expected_revision_id`, `idempotency_key`, `include`, `exclude`, `max_file_size`, `extract_docstrings`, `track_call_sites`, `telemetry`, `sync`, `context_scout`, `context_scout_intent`"
+        }
+      ]
+    },
+    "status": 400
+  }
+}
