@@ -1399,13 +1399,9 @@ mod cheaper_frontier_tests {
 
 #[cfg(test)]
 mod shutdown_settlement_tests {
-    use super::{
-        BoundedObservabilityProducerV1, ObservabilityProducerDeadlinesV1,
-        ObservabilityProducerIdentityV1, ProducerControl,
-    };
+    use super::{BoundedObservabilityProducerV1, ObservabilityProducerIdentityV1, ProducerControl};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
     use tokio::sync::{mpsc, oneshot};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
@@ -1427,7 +1423,10 @@ mod shutdown_settlement_tests {
         .await
         .unwrap();
         let db = runtime.project_database_arc().unwrap();
-        let producer = BoundedObservabilityProducerV1::start_with_deadlines(
+        // Production deadlines: the worker's terminal write and its reply must
+        // fit the budget on a starved runner. A short budget fails these tests
+        // on scheduling delay while the producer settles correctly.
+        let producer = BoundedObservabilityProducerV1::start(
             db.clone(),
             ObservabilityProducerIdentityV1 {
                 authorized_scope_ref: project_id.as_str().to_owned(),
@@ -1437,10 +1436,6 @@ mod shutdown_settlement_tests {
                 policy_revision: "policy.v1".to_owned(),
             },
             1,
-            ObservabilityProducerDeadlinesV1 {
-                persistence: Duration::from_millis(50),
-                shutdown: Duration::from_millis(250),
-            },
         )
         .unwrap();
         (directory, runtime, producer)
