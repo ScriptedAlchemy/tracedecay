@@ -1,5 +1,5 @@
 //! The daemon-owned Context Scout intent pass through a spawned daemon, real
-//! Claude hook commands, and a loopback decision engine.
+//! Claude Code hook commands, and a loopback decision engine.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
@@ -19,82 +19,89 @@ use tracedecay_policy::intent_catalog::suggestion_text;
 
 use super::common::{
     apply_tracedecay_home_env, git_program, spawn_tracedecay_daemon_logged,
-    tracedecay_command_with_home,
+    tool_json_structured_content, tracedecay_bin, tracedecay_command_with_home,
 };
 
 const YES_INTENT: ContextScoutIntentKindV1 = ContextScoutIntentKindV1::SessionRecall;
-const DEBUG_LOG: &str = "warn,tracedecay::context_scout_lifecycle=debug,tracedecay_mcp=debug,tracedecay_daemon_service=debug,tracedecay_agent_hosts=debug,tracedecay=debug";
 const PROJECT_ID: &str = "project.intent-pass-journey";
 const ABSENT_SESSION: &str = "00000000-0000-4000-8000-00000000a001";
 const ENABLED_SESSION: &str = "00000000-0000-4000-8000-00000000b001";
+const WAIT: Duration = Duration::from_secs(60);
 
+/// A loopback `/v1/systemone` server answering yes for [`YES_INTENT`] and no
+/// for every other question, counting the requests it answered.
 struct FakeDecisionEngine {
     url: String,
     requests: Arc<AtomicUsize>,
 }
 
-/// Answers every `noul` question of a `/v1/systemone` request: yes for
-/// [`YES_INTENT`], no for the rest.
-fn fake_decision_engine() -> FakeDecisionEngine {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let requests = Arc::new(AtomicUsize::new(0));
-    let seen = Arc::clone(&requests);
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { return };
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut request_line = String::new();
-            let _ = reader.read_line(&mut request_line);
-            let mut content_length = 0;
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
-                }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    content_length = value.trim().parse().unwrap_or(0);
-                }
+impl FakeDecisionEngine {
+    fn start() -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                answer(stream, &seen);
             }
-            let mut body = vec![0; content_length];
-            let _ = reader.read_exact(&mut body);
-            let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let answers = request["questions"]
-                .as_object()
-                .map(|questions| {
-                    questions
-                        .keys()
-                        .map(|key| {
-                            let probability = if key == YES_INTENT.as_key() {
-                                0.95
-                            } else {
-                                0.02
-                            };
-                            (key.clone(), json!({"type": "noul", "noul": probability}))
-                        })
-                        .collect::<serde_json::Map<_, _>>()
-                })
-                .unwrap_or_default();
-            if request_line.starts_with("POST /v1/systemone ") {
-                seen.fetch_add(1, Ordering::SeqCst);
-            }
-            let response = json!({"model": "intent-journey", "answers": answers}).to_string();
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{response}",
-                response.len()
-            );
-        }
-    });
-    FakeDecisionEngine { url, requests }
+        });
+        Self { url, requests }
+    }
+
+    fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
 }
 
+fn answer(mut stream: std::net::TcpStream, seen: &AtomicUsize) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut request_line = String::new();
+    let _ = reader.read_line(&mut request_line);
+    let mut content_length = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0; content_length];
+    let _ = reader.read_exact(&mut body);
+    let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let answers = request["questions"]
+        .as_object()
+        .into_iter()
+        .flat_map(|questions| questions.keys())
+        .map(|key| {
+            let probability = if key == YES_INTENT.as_key() {
+                0.95
+            } else {
+                0.02
+            };
+            (key.clone(), json!({"type": "noul", "noul": probability}))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    if request_line.starts_with("POST /v1/systemone ") {
+        seen.fetch_add(1, Ordering::SeqCst);
+    }
+    let response = json!({"model": "intent-journey", "answers": answers}).to_string();
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{response}",
+        response.len()
+    );
+}
+
+/// RFC 3339 UTC with millisecond precision, the timestamp Claude Code writes.
 fn rfc3339(at: SystemTime) -> String {
-    let micros = at.duration_since(UNIX_EPOCH).unwrap().as_millis();
-    let (secs, millis) = (micros / 1000, micros % 1000);
-    let days = i64::try_from(secs / 86_400).unwrap();
-    let rem = secs % 86_400;
+    let millis = at.duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let secs = i64::try_from(millis / 1000).unwrap();
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -105,14 +112,15 @@ fn rfc3339(at: SystemTime) -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
     format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
         rem / 3600,
         rem % 3600 / 60,
-        rem % 60
+        rem % 60,
+        millis % 1000
     )
 }
 
-/// A Claude Code transcript whose earlier turns ask for prior-session context.
+/// A Claude Code transcript whose prior turns ask for an earlier session.
 fn write_claude_transcript(home: &Path, project: &Path, session: &str) -> PathBuf {
     let dir = home.join(".claude/projects/-intent-pass-journey");
     std::fs::create_dir_all(&dir).unwrap();
@@ -120,13 +128,11 @@ fn write_claude_transcript(home: &Path, project: &Path, session: &str) -> PathBu
     let turns = [
         (
             "user",
-            json!(
-                "Last week we settled the retry budget in another session. What did we decide back then?"
-            ),
+            json!("We settled the retry budget in another session last week. What did we decide?"),
         ),
         (
             "assistant",
-            json!([{"type": "text", "text": "I do not have that earlier conversation loaded yet."}]),
+            json!([{"type": "text", "text": "That earlier conversation is not loaded here."}]),
         ),
         (
             "user",
@@ -137,14 +143,14 @@ fn write_claude_transcript(home: &Path, project: &Path, session: &str) -> PathBu
         .iter()
         .enumerate()
         .map(|(index, (role, content))| {
-            let offset = Duration::from_secs(30 * (turns.len() - index) as u64);
+            let age = Duration::from_secs(30 * u64::try_from(turns.len() - index).unwrap());
             json!({
                 "type": role,
                 "cwd": project.to_string_lossy(),
                 "sessionId": session,
                 "uuid": format!("{session}-{index}"),
-                "parentUuid": (index > 0).then(|| format!("{session}-{}", index - 1)),
-                "timestamp": rfc3339(now - offset),
+                "parentUuid": index.checked_sub(1).map(|parent| format!("{session}-{parent}")),
+                "timestamp": rfc3339(now - age),
                 "message": {"role": role, "content": content},
             })
             .to_string()
@@ -157,10 +163,9 @@ fn write_claude_transcript(home: &Path, project: &Path, session: &str) -> PathBu
 }
 
 fn run_hook(home: &Path, project: &Path, hook: &str, event: &Value) -> Output {
-    let mut command = Command::new(super::common::tracedecay_bin());
+    let mut command = Command::new(tracedecay_bin());
     apply_tracedecay_home_env(&mut command, home);
     let mut child = command
-        .env("RUST_LOG", DEBUG_LOG)
         .arg(hook)
         .current_dir(project)
         .stdin(Stdio::piped())
@@ -174,7 +179,19 @@ fn run_hook(home: &Path, project: &Path, hook: &str, event: &Value) -> Output {
         .unwrap()
         .write_all(event.to_string().as_bytes())
         .unwrap();
-    child.wait_with_output().unwrap()
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "`tracedecay {hook}`: {output:?}");
+    output
+}
+
+/// The `additionalContext` a Claude Code hook hands its host.
+fn hook_context(output: &Output) -> String {
+    let response: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("hook stdout is JSON ({error}): {output:?}"));
+    response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn run_tool(home: &Path, project: &Path, name: &str, args: &Value) -> Value {
@@ -191,7 +208,7 @@ fn run_tool(home: &Path, project: &Path, name: &str, args: &Value) -> Value {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    super::common::tool_json_structured_content(&output.stdout)
+    tool_json_structured_content(&output.stdout)
 }
 
 fn post_tool_use(project: &Path, session: &str, transcript: &Path) -> Value {
@@ -254,46 +271,67 @@ fn enabled_settings(engine_url: &str) -> ContextScoutSettingsV1 {
     }
 }
 
+/// Every `context_scout_intent_work` outcome the daemon logged, in order.
 fn intent_outcomes(log: &Path) -> Vec<String> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
-        .filter(|line| line.contains("context_scout_intent_work"))
-        .filter_map(|line| line.split("outcome=").nth(1))
+        .filter(|line| line.contains("event=context_scout_intent_work "))
+        .filter_map(|line| line.split(" outcome=").nth(1))
         .map(|outcome| outcome.split_whitespace().next().unwrap_or("").to_owned())
         .collect()
 }
 
-fn wait_for(what: &str, timeout: Duration, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + timeout;
+fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + WAIT;
     while !ready() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-fn hook_context(output: &Output) -> String {
-    assert!(output.status.success(), "{output:?}");
-    let response: Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| panic!("hook stdout is JSON ({error}): {output:?}"));
-    response["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned()
+/// `(emitted, suppressed)` for one hint category, read through the analytics
+/// tool, which reads the profile `analytics_events` hint settlement reads.
+fn hint_counts(home: &Path, project: &Path, intent: ContextScoutIntentKindV1) -> (i64, i64) {
+    let hints = run_tool(
+        home,
+        project,
+        "tracedecay_analytics",
+        &json!({"section": "hints", "format": "json"}),
+    );
+    hints["hints"]["by_category"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["category"] == intent.as_key())
+        .map_or((0, 0), |row| {
+            (
+                row["emitted"].as_i64().unwrap_or(0),
+                row["suppressed"].as_i64().unwrap_or(0),
+            )
+        })
 }
 
-#[test]
-fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boundary() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path();
-    let project = home.join("project");
+fn ingested_messages(home: &Path, project: &Path, session: &str) -> i64 {
+    let status = run_tool(
+        home,
+        project,
+        "tracedecay_lcm_status",
+        &json!({"provider": "claude", "session_id": session, "format": "json"}),
+    );
+    status
+        .pointer("/outcome/value/payload/lcm/raw_message_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+}
+
+fn git_fixture(project: &Path) {
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
         "pub fn retry_budget() -> u32 { 3 }\n",
     )
     .unwrap();
-    let git = git_program();
     for args in [
         &["init", "-q", "-b", "main"][..],
         &["config", "user.email", "test@tracedecay.dev"][..],
@@ -302,97 +340,98 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         &["commit", "-q", "-m", "fixture"][..],
     ] {
         assert!(
-            Command::new(&git)
+            Command::new(git_program())
                 .args(args)
-                .current_dir(&project)
+                .current_dir(project)
                 .status()
                 .unwrap()
                 .success()
         );
     }
     assert!(
-        tracedecay_runtime_core::storage::write_repository_identity_marker(&project, PROJECT_ID)
+        tracedecay_runtime_core::storage::write_repository_identity_marker(project, PROJECT_ID)
             .unwrap()
     );
+}
+
+#[test]
+fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let project = home.join("project");
+    git_fixture(&project);
     let absent_transcript = write_claude_transcript(home, &project, ABSENT_SESSION);
     let enabled_transcript = write_claude_transcript(home, &project, ENABLED_SESSION);
-    let engine = fake_decision_engine();
-    let log = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR").map_or_else(
-        || home.join("daemon.log"),
-        |dir| PathBuf::from(dir).join("daemon.log"),
-    );
-    let _daemon = spawn_tracedecay_daemon_logged(home, &log, |command| {
-        command.env("RUST_LOG", DEBUG_LOG);
-    });
+    let engine = FakeDecisionEngine::start();
+    let log = home.join("daemon.log");
+    let _daemon = spawn_tracedecay_daemon_logged(home, &log, |_| {});
     assert!(
         tracedecay_command_with_home(home)
             .arg("init")
             .current_dir(&project)
             .status()
             .unwrap()
-            .success()
+            .success(),
+        "tracedecay init enrolls the project"
     );
-    let status = run_tool(
+    run_tool(
         home,
         &project,
         "tracedecay_status",
         &json!({"wait_for": {"state": "ready", "timeout_ms": 90_000}}),
     );
-    eprintln!("status: {status}");
-    wait_for("the advisory owner mount", Duration::from_secs(60), || {
+    wait_for("the advisory owner that runs hook work to mount", || {
         std::fs::read_to_string(&log)
             .unwrap_or_default()
-            .contains("event=advisory_deferred_attempt project=")
-            && std::fs::read_to_string(&log)
-                .unwrap_or_default()
-                .contains("phase=mounted attempt=terminal")
+            .lines()
+            .any(|line| {
+                line.contains("event=advisory_deferred_attempt ")
+                    && line.contains(" phase=mounted ")
+            })
+    });
+    wait_for("both Claude transcripts to be ingested", || {
+        ingested_messages(home, &project, ABSENT_SESSION) == 3
+            && ingested_messages(home, &project, ENABLED_SESSION) == 3
     });
 
-    let post = run_hook(
+    run_hook(
         home,
         &project,
         "hook-claude-post-tool-use",
         &post_tool_use(&project, ABSENT_SESSION, &absent_transcript),
     );
-    assert!(post.status.success(), "{post:?}");
-    eprintln!(
-        "post: {} stderr: {}",
-        String::from_utf8_lossy(&post.stdout),
-        String::from_utf8_lossy(&post.stderr)
-    );
-    for entry in walk(&home.join(".tracedecay")) {
-        eprintln!("file: {}", entry.display());
-    }
-    wait_for(
-        "the absent-block intent pass",
-        Duration::from_secs(30),
-        || !intent_outcomes(&log).is_empty(),
-    );
+    wait_for("the absent-block tool boundary's intent pass", || {
+        !intent_outcomes(&log).is_empty()
+    });
     let absent_stop = hook_context(&run_hook(
         home,
         &project,
         "hook-stop",
         &stop(&project, ABSENT_SESSION, &absent_transcript),
     ));
-    wait_for(
-        "the absent-block stop intent pass",
-        Duration::from_secs(30),
-        || intent_outcomes(&log).len() >= 2,
+    wait_for("the absent-block stop boundary's intent pass", || {
+        intent_outcomes(&log).len() >= 2
+    });
+    assert!(
+        intent_outcomes(&log)
+            .iter()
+            .all(|outcome| outcome == "disabled"),
+        "without an intent block every intent pass ends disabled: {:?}",
+        intent_outcomes(&log)
     );
-    eprintln!("absent outcomes: {:?}", intent_outcomes(&log));
     assert_eq!(
-        intent_outcomes(&log),
-        ["disabled", "disabled"],
-        "without an intent block both boundaries end their intent pass disabled"
-    );
-    assert_eq!(
-        engine.requests.load(Ordering::SeqCst),
+        engine.requests(),
         0,
         "without an intent block the decision engine is never asked"
     );
     assert!(
         !absent_stop.contains(&suggestion_text(YES_INTENT)),
         "without an intent block the stop boundary delivers no intent suggestion: {absent_stop}"
+    );
+    assert_eq!(
+        hint_counts(home, &project, YES_INTENT),
+        (0, 0),
+        "without an intent block no intent hint is recorded"
     );
 
     let current = run_tool(
@@ -401,7 +440,6 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         "tracedecay_configuration_get",
         &json!({"key": CONTEXT_SCOUT_SETTINGS_SETTING_KEY}),
     );
-    eprintln!("configuration: {current}");
     let revision = current
         .pointer("/outcome/value/payload/revision_id")
         .and_then(Value::as_str)
@@ -424,29 +462,27 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         "the enabled intent block commits through the configuration surface: {receipt}"
     );
 
-    let post = run_hook(
+    let before = intent_outcomes(&log).len();
+    run_hook(
         home,
         &project,
         "hook-claude-post-tool-use",
         &post_tool_use(&project, ENABLED_SESSION, &enabled_transcript),
     );
-    assert!(post.status.success(), "{post:?}");
-    eprintln!("post: {}", String::from_utf8_lossy(&post.stdout));
-    wait_for("the enabled intent pass", Duration::from_secs(30), || {
-        intent_outcomes(&log).len() >= 3
+    wait_for("the enabled tool boundary's intent pass", || {
+        intent_outcomes(&log).len() > before
     });
-    eprintln!("enabled outcomes: {:?}", intent_outcomes(&log));
-    eprintln!("{}", std::fs::read_to_string(&log).unwrap_or_default());
     assert_eq!(
-        intent_outcomes(&log)[2],
-        "mounted",
-        "the tool boundary's intent pass enqueues and mounts one suggestion"
+        intent_outcomes(&log)[before..],
+        ["mounted"],
+        "the tool boundary's intent pass enqueues one suggestion and mounts its claim"
     );
     assert_eq!(
-        engine.requests.load(Ordering::SeqCst),
+        engine.requests(),
         1,
         "the tool boundary asks the decision engine exactly once"
     );
+
     let delivered = hook_context(&run_hook(
         home,
         &project,
@@ -457,32 +493,22 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         delivered.contains(&suggestion_text(YES_INTENT)),
         "the next boundary delivers the session-recall suggestion: {delivered}"
     );
-
     wait_for(
-        "the delivered hint_emitted row",
-        Duration::from_secs(30),
+        "the delivered hint_emitted row and the stop pass's withheld duplicate",
         || {
-            let hints = run_tool(
-                home,
-                &project,
-                "tracedecay_analytics",
-                &json!({"section": "hints", "format": "json"}),
-            );
-            eprintln!("hints: {hints}");
-            hints.to_string().contains(YES_INTENT.as_key())
+            let (emitted, suppressed) = hint_counts(home, &project, YES_INTENT);
+            emitted == 1 && suppressed >= 1
         },
     );
-}
-
-fn walk(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            out.extend(walk(&path));
-        } else {
-            out.push(path);
-        }
-    }
-    out
+    let after_mount = intent_outcomes(&log)[before + 1..].to_vec();
+    assert!(
+        !after_mount.is_empty() && after_mount.iter().all(|outcome| outcome == "suppressed"),
+        "the stop boundary's own intent pass withholds the suggestion it just delivered: \
+         {after_mount:?}"
+    );
+    assert_eq!(
+        hint_counts(home, &project, YES_INTENT).0,
+        1,
+        "the session receives the suggestion exactly once"
+    );
 }
