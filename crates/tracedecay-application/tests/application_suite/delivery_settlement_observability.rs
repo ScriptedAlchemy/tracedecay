@@ -183,6 +183,71 @@ async fn bounded_recorder_keeps_settlement_io_off_the_delivery_boundary_and_drai
 }
 
 #[tokio::test]
+async fn recorder_shutdown_waits_out_a_held_writer_until_the_callers_deadline() {
+    let profile_dir = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let project_id = ProjectId::new("project.delivery.held-writer").expect("project id");
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        profile_dir.path().to_path_buf(),
+        project.path(),
+        project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let db = runtime.project_database_arc().expect("project database");
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "boot:delivery-held-writer".to_owned(),
+        producer_revision: "delivery-held-writer-producer.v1".to_owned(),
+        configuration_revision: "delivery-held-writer-config.v1".to_owned(),
+        policy_revision: "delivery-held-writer-policy.v1".to_owned(),
+    };
+    let producer = Arc::new(
+        BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 8).expect("producer"),
+    );
+    let authority = Arc::new(
+        DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), identity)
+            .expect("settlement authority"),
+    );
+    let recorder =
+        BoundedDeliverySettlementRecorderV1::start(Arc::clone(&authority), 1).expect("recorder");
+    let blocker = db
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    assert_eq!(
+        recorder
+            .try_record(DeliverySettlementV1 {
+                attempt: attempt(),
+                outcome: DeliverySettlementOutcomeV1::Delivered,
+                settled_at: UtcMicros(120),
+                drop_reason: None,
+            })
+            .expect("durable offer"),
+        DeliverySettlementRecordOutcomeV1::Enqueued
+    );
+
+    let (summary, ()) = tokio::join!(
+        recorder.shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+        async {
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+            blocker.rollback().await.expect("release registered writer");
+        }
+    );
+    let summary = summary.expect("the drain outlasts the recorder's 5 s budget");
+    assert_eq!(summary.settled, 1);
+    assert_eq!(summary.retained, 0);
+
+    drop(recorder);
+    drop(authority);
+    let producer = match Arc::try_unwrap(producer) {
+        Ok(producer) => producer,
+        Err(_) => panic!("recorder must release producer after shutdown"),
+    };
+    producer.shutdown().await.expect("flush producer");
+}
+
+#[tokio::test]
 async fn recorder_queue_saturation_retains_every_durable_receipt() {
     let profile_dir = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");

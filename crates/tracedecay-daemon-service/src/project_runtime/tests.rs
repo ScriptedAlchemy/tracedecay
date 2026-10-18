@@ -1166,7 +1166,7 @@ async fn cancelled_shutdown_caller_does_not_abandon_the_registry_drain() {
 
     let shutdown_registry = Arc::clone(&registry);
     let shutdown = tokio::spawn(async move {
-        shutdown_registry.shut_down_all().await;
+        shutdown_registry.shut_down_all(None).await;
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !registry.closed.load(Ordering::Acquire) {
@@ -1190,9 +1190,12 @@ async fn cancelled_shutdown_caller_does_not_abandon_the_registry_drain() {
         Err(ProjectRuntimeRegistryError::Closed),
         "a publication reserved before shutdown must not commit afterward"
     );
-    tokio::time::timeout(std::time::Duration::from_secs(2), registry.shut_down_all())
-        .await
-        .expect("a replacement shutdown caller must observe the completed background drain");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        registry.shut_down_all(None),
+    )
+    .await
+    .expect("a replacement shutdown caller must observe the completed background drain");
     assert!(registry.is_empty());
 }
 
@@ -1225,7 +1228,7 @@ async fn cancelled_publication_releases_while_shutdown_drain_is_waiting() {
 
     let shutdown_registry = Arc::clone(&registry);
     let shutdown = tokio::spawn(async move {
-        shutdown_registry.shut_down_all().await;
+        shutdown_registry.shut_down_all(None).await;
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), drain_is_waiting)
         .await
@@ -1255,7 +1258,7 @@ fn shutting_down_off_tokio_empties_the_registry() {
     let shut_down = tracedecay_runtime_core::native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_err());
         registry.publish(root("alpha"), component(1)).await.unwrap();
-        registry.shut_down_all().await
+        registry.shut_down_all(None).await
     })
     .expect("native runtime");
 
@@ -1277,7 +1280,7 @@ async fn shutting_down_empties_the_registry() {
     registry.publish(root("alpha"), component(1)).await.unwrap();
     registry.publish(root("beta"), component(2)).await.unwrap();
 
-    registry.shut_down_all().await;
+    registry.shut_down_all(None).await;
 
     assert!(registry.is_empty());
     assert!(!registry.holds::<Component>(&root("alpha")).await);
@@ -1369,9 +1372,12 @@ async fn daemon_shutdown_does_not_wait_for_drained_runtime_deallocation() {
         .await
         .unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), registry.shut_down_all())
-        .await
-        .expect("shutdown must not park behind a drained runtime's deallocation");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        registry.shut_down_all(None),
+    )
+    .await
+    .expect("shutdown must not park behind a drained runtime's deallocation");
     assert!(registry.is_empty());
     assert!(
         dropped.try_recv().is_err(),
