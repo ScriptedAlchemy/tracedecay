@@ -347,28 +347,8 @@ pub async fn patch_project_settings(
             tracedecay_domain::ProjectId::new(project_id)
                 .map_err(|_| configuration_authority_unavailable_error())
         })?;
-    let preview = preview_project_settings(
-        &project_id,
-        &current,
-        ProjectSettingsPatchV1 {
-            expected_revision_id: patch.expected_revision_id,
-            include: patch.include,
-            exclude: patch.exclude,
-            max_file_size: patch.max_file_size,
-            extract_docstrings: patch.extract_docstrings,
-            track_call_sites: patch.track_call_sites,
-            telemetry: patch.telemetry.map(|telemetry| TelemetrySettingsPatchV1 {
-                timings: telemetry.timings,
-            }),
-            sync: patch.sync.map(|sync| SyncSettingsPatchV1 {
-                auto_track_pr_branches: sync.auto_track_pr_branches,
-                auto_track_pr_poll_secs: sync.auto_track_pr_poll_secs,
-            }),
-            context_scout: patch.context_scout,
-            context_scout_intent: None,
-        },
-    )
-    .map_err(project_preview_error)?;
+    let preview = preview_project_settings(&project_id, &current, application_project_patch(patch))
+        .map_err(project_preview_error)?;
     let application_outcome = if preview.changed {
         let runtime = state
             .application_invocation_executor
@@ -810,6 +790,26 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+fn application_project_patch(patch: ProjectSettingsPatch) -> ProjectSettingsPatchV1 {
+    ProjectSettingsPatchV1 {
+        expected_revision_id: patch.expected_revision_id,
+        include: patch.include,
+        exclude: patch.exclude,
+        max_file_size: patch.max_file_size,
+        extract_docstrings: patch.extract_docstrings,
+        track_call_sites: patch.track_call_sites,
+        telemetry: patch.telemetry.map(|telemetry| TelemetrySettingsPatchV1 {
+            timings: telemetry.timings,
+        }),
+        sync: patch.sync.map(|sync| SyncSettingsPatchV1 {
+            auto_track_pr_branches: sync.auto_track_pr_branches,
+            auto_track_pr_poll_secs: sync.auto_track_pr_poll_secs,
+        }),
+        context_scout: patch.context_scout,
+        context_scout_intent: patch.context_scout_intent,
+    }
+}
+
 fn project_preview_error(
     error: ProjectSettingsPreviewErrorV1,
 ) -> DashboardConfigurationRouteErrorV1 {
@@ -867,7 +867,103 @@ fn project_apply_error(
 mod tests {
     use super::*;
     use serde_json::json;
-    use tracedecay_domain::configuration::CodeIndexWorkerLimitingReasonV1;
+    use tracedecay_configuration::config::registry::ConfigurationRegistry;
+    use tracedecay_configuration::config::resolver::resolve_configuration;
+    use tracedecay_domain::ProjectId;
+    use tracedecay_domain::configuration::{
+        CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CodeIndexWorkerLimitingReasonV1, ConfigurationValueV1,
+        ContextScoutConfigurationStateV1, ContextScoutIntentSettingsV1,
+    };
+
+    fn pinned_defaults(
+        revision: &ConfigurationRevisionId,
+    ) -> crate::config::PinnedRuntimeConfiguration {
+        let snapshot = resolve_configuration(&ConfigurationRegistry::core().unwrap(), &[])
+            .unwrap()
+            .snapshot;
+        crate::config::PinnedRuntimeConfiguration::new(
+            tracedecay_configuration::config::RuntimeConfigurationTarget {
+                profile_root: PathBuf::from("/profile"),
+                project_id: ProjectId::new("project.settings.scout").unwrap(),
+                project_root: PathBuf::from("/project"),
+            },
+            revision.clone(),
+            snapshot,
+        )
+        .unwrap()
+    }
+
+    fn intent_patch_body(base_url: &str, revision: &ConfigurationRevisionId) -> Value {
+        json!({
+            "expected_revision_id": revision.as_str(),
+            "idempotency_key": "intent-patch",
+            "context_scout": true,
+            "context_scout_intent": {
+                "enabled": true,
+                "engine": {
+                    "base_url": base_url,
+                    "model": "intent-small",
+                    "timeout_ms": 250,
+                    "max_concurrent": 2,
+                    "max_state_bytes": 65536
+                },
+                "window": {
+                    "max_user_turns": 3,
+                    "max_messages": 12,
+                    "max_bytes": 16384,
+                    "max_age_secs": 1800,
+                    "freshen_budget_ms": 150
+                },
+                "questions": [],
+                "action_fact_score_permille": 700,
+                "ttl_secs": 600,
+                "min_delivery_gap_secs": 30,
+                "prompt_lookup_deadline_ms": 200
+            }
+        })
+    }
+
+    #[test]
+    fn http_patch_carries_the_scout_intent_block_into_the_effective_settings() {
+        let revision = ConfigurationRevisionId::new("configuration.revision.scout").unwrap();
+        let current = pinned_defaults(&revision);
+        let project_id = ProjectId::new("project.settings.scout").unwrap();
+
+        let patch =
+            parse_project_settings_patch(intent_patch_body("http://127.0.0.1:8088", &revision))
+                .expect("intent block parses");
+        let preview =
+            preview_project_settings(&project_id, &current, application_project_patch(patch))
+                .expect("valid intent block previews");
+        assert!(preview.changed);
+        let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
+            panic!("project settings must be atomic")
+        };
+        let [DirectConfigurationMutation::Set { key, value, .. }] = mutations.as_slice() else {
+            panic!("the flag and the intent block must plan exactly one typed Set")
+        };
+        assert_eq!(key.as_str(), CONTEXT_SCOUT_SETTINGS_SETTING_KEY);
+        let ConfigurationValueV1::ContextScoutSettings(settings) = value.as_ref() else {
+            panic!("the patch must write the typed Context Scout value")
+        };
+        assert_eq!(settings.state, ContextScoutConfigurationStateV1::Active);
+        let intent = settings.intent.as_ref().expect("intent block written");
+        assert_eq!(intent.engine.base_url, "http://127.0.0.1:8088");
+        assert_eq!(
+            intent.questions,
+            ContextScoutIntentSettingsV1::reference_questions()
+        );
+
+        let patch = parse_project_settings_patch(intent_patch_body("not-a-url", &revision))
+            .expect("shape is valid; the engine URL is a domain check");
+        let Err(ProjectSettingsPreviewErrorV1::Validation(issues)) =
+            preview_project_settings(&project_id, &current, application_project_patch(patch))
+        else {
+            panic!("an invalid engine URL must be a validation error")
+        };
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].field, "context_scout_intent");
+    }
 
     fn serialization_schema<T: JsonSchema>() -> Value {
         let generator = schemars::generate::SchemaSettings::default()
