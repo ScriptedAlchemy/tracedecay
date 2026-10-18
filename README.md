@@ -269,9 +269,9 @@ bazel build //...
 bazel test //... --test_output=errors
 ```
 
-Use Cargo when you need to validate Cargo packaging, a feature combination that
-has no Bazel target, or a platform-specific workflow. The release workflows
-continue to build the published Cargo artifact.
+Bazel owns workspace builds, tests, checks, and code generation. Release
+workflows package its production CLI as binary archives and MCP bundles;
+Rust workspace crates are private and are not published to crates.io.
 
 On macOS `tracedecay` is ad-hoc signed as `dev.tracedecay.cli` with
 designated requirement `identifier "dev.tracedecay.cli"`. macOS TCC keys
@@ -280,14 +280,9 @@ requirement is the binary's cdhash, so an Allow does not survive the next
 rebuild; the linker default identifier (`tracedecay-<hash>`) changes every
 build as well, and the daemon blocks in `open()` until the prompt is
 answered. A release build strips after linking, which mints that identifier
-again from the deps filename. Export
-`CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="$PWD/scripts/macos-rustc-wrapper.sh"`
-from the checkout root (the macOS CI and release jobs do) and the wrapper
-signs the product once rustc has finished, so `cargo build --release` and
-`cargo install --path crates/tracedecay-cli` keep the stable identity on
-the binary cargo copies into place. The committed Cargo config cannot set
-it, because Cargo has no per-target wrapper and Windows cannot run the
-script. `install.sh` and `tracedecay update`
+again from the deps filename. The shared release build action applies
+`scripts/macos-stable-codesign.sh` to the Bazel-built binary before packaging.
+`install.sh` and `tracedecay update`
 apply the same identity to the installed file after the archive checksum
 check when the binary is unsigned or ad-hoc signed, including an ad-hoc
 signature whose identifier already matches but whose requirement is still

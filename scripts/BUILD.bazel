@@ -53,14 +53,28 @@ py_test(
     main = "test-check-ambient-tokio.py",
 )
 
+py_binary(
+    name = "packaged_lsp_bridge",
+    srcs = [
+        "check-packaged-lsp-bridge.py",
+        "lib/__init__.py",
+        "lib/portable_process.py",
+        "lib/process_control.py",
+    ],
+    main = "check-packaged-lsp-bridge.py",
+)
+
 exports_files(
     [
         "bazel/rust_test.bzl",
+        "test-rust-cache-lineage.py",
+        "test-check-packaged-lsp-bridge.py",
         "bazel/gen_builds.py",
         "bazel/rust_test_environment_probe.txt",
         "check-dashboard-bundle.py",
         "check-github-hosted-runners.py",
         "run-session-temporal-benchmark.sh",
+        "mcp-conformance-smoke.sh",
         "test-check-github-hosted-runners.py",
         "test-gen-builds-default-alias.py",
         "test-measure-ranked-tail-trim.py",
