@@ -11,20 +11,19 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
     RetrievalCursorKeyringV1,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1,
 };
 use tracedecay_query::retrieval::hydrate::{
     CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
     HydrationReadOutcomeV1, HydrationWorkPermitV1, LateHydrationSource,
 };
-use tracedecay_query::retrieval::lexical::{LexicalLane, LexicalLaneRetriever};
+use tracedecay_query::retrieval::lexical::LexicalLane;
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalExecutionControl,
     RetrievalPortError,

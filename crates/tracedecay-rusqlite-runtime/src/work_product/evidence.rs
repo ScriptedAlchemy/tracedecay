@@ -50,7 +50,7 @@ use tracedecay_domain::{
     TaskEvidenceLinkV1, TaskId, WorkProductGraphV1, WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1,
 };
 
-use super::{fold_graph, load_covered_journal, verified_version};
+use super::{FromStoreFault, fold_graph, load_covered_journal, verified_version};
 use crate::work::WorkSqliteStorage;
 
 type PortError = WorkEvidenceReadPortErrorV1;
@@ -157,7 +157,7 @@ fn verified_graph(
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), PortError> {
     let scope = context.authorized_scope();
-    let covered = load_covered_journal(storage.handle(), scope).ok_or(PortError::Unavailable)?;
+    let covered = load_covered_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
     let (journal, published) = (covered.journal, covered.published);
     let Some(version) = published
         .iter()

@@ -737,7 +737,18 @@ fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
     )
     .expect("open scheduler");
     let limit = NonZeroU64::new(16 * GIB).expect("limit");
-    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    // This tests ledger admission independently of unrelated process allocations.
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+                swapped_bytes: 0,
+                cgroup_committed_bytes: None,
+            })
+        }),
+    ));
     let high_watermark = pressure.high_watermark_bytes();
     let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
     scheduler.bind_resident_memory(Arc::clone(&authority));

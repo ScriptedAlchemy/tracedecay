@@ -14,9 +14,7 @@ use tracedecay_domain::{
     SnapshotFileDispositionV1, UtcMicros, canonical_sha256,
 };
 
-use super::{
-    ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, projection_key,
-};
+use super::{ActiveControl, SharedPublicationStore, config, projection_key};
 use crate::support::{PartitionedSealV1, RUST_SOURCE, id};
 
 /// One module's source: a body whose size varies with `index`, so per-file
@@ -107,8 +105,7 @@ fn at_width<R>(
     parallelism::force_indexing_workers_for_test(width);
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
     let generation = owner
         .build_and_publish(multi_file_request(file_count, 1_100_000), &ActiveControl)
         .expect("equivalence generation publishes");

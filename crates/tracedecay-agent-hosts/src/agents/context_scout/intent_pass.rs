@@ -249,10 +249,7 @@ pub async fn run_context_scout_intent_pass(
         ContextScoutServiceStateV1::Disabled => return ContextScoutIntentPassOutcomeV1::Disabled,
         ContextScoutServiceStateV1::Paused => {
             pass.owner
-                .record_intent_outcome(
-                    ContextScoutModelOutcomeV1::NotRequested,
-                    Some(ContextScoutSuppressionV1::Paused),
-                )
+                .record_intent_outcome(ContextScoutSuppressionV1::Paused)
                 .await;
             return ContextScoutIntentPassOutcomeV1::Suppressed {
                 reason: ContextScoutSuppressionV1::Paused,
@@ -340,8 +337,7 @@ pub async fn run_context_scout_intent_pass(
             let suppression = duplicate.map(|_| ContextScoutSuppressionV1::Duplicate);
             pass.owner
                 .record_intent_outcome(
-                    model_outcome,
-                    Some(suppression.unwrap_or(ContextScoutSuppressionV1::NoEligibleCandidate)),
+                    suppression.unwrap_or(ContextScoutSuppressionV1::NoEligibleCandidate),
                 )
                 .await;
             if let Some(intent) = duplicate {
@@ -376,10 +372,7 @@ pub async fn run_context_scout_intent_pass(
         // An entry only an idle-window claim could take would also make the
         // session's hook claim ambiguous; spacing withholds it instead.
         pass.owner
-            .record_intent_outcome(
-                model_outcome,
-                Some(ContextScoutSuppressionV1::QuietOrUnreceptive),
-            )
+            .record_intent_outcome(ContextScoutSuppressionV1::QuietOrUnreceptive)
             .await;
         record_withheld(
             &pass,

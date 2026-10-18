@@ -6,7 +6,7 @@ use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
-use tracedecay_global_db::{ProjectObservationStoreError, StoreInstanceUpsert};
+use tracedecay_global_db::{ProjectObservationStoreError, RegisteredGlobalDb, StoreInstanceUpsert};
 use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };

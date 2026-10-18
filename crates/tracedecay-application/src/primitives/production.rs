@@ -41,8 +41,8 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::SourceReadContext;
 use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
 use tracedecay_graph_query::{
-    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
-    code_graph_read_error_from_runtime,
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest, GraphQueryError,
+    GraphQueryResult,
 };
 use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
 use tracedecay_temporal_query::cursor::SessionCursorAuthenticator;
@@ -396,13 +396,20 @@ fn unpublished_file_outcome<T>(
 /// same typed state an open failure reports when the query surfaced a
 /// code-graph read error, and a failed read otherwise.
 fn graph_query_outcome<T>(
-    error: &tracedecay_domain::errors::TraceDecayError,
+    error: &GraphQueryError,
     domain: EvidenceDomain,
     finished_at: UtcMicros,
 ) -> RetrievalPortOutcome<T> {
-    match code_graph_read_error_from_runtime(error) {
-        Some(read_error) => graph_read_outcome(&read_error, domain, finished_at),
-        None => failed(domain, finished_at),
+    match error {
+        GraphQueryError::Read(read_error) => graph_read_outcome(read_error, domain, finished_at),
+        GraphQueryError::EvidenceUnavailable { detail, .. } => graph_read_outcome(
+            &CodeGraphReadError::Unavailable {
+                detail: detail.clone(),
+            },
+            domain,
+            finished_at,
+        ),
+        GraphQueryError::Runtime(_) => failed(domain, finished_at),
     }
 }
 
@@ -769,7 +776,7 @@ async fn open_code_graph(
 fn all_code_graph_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
-) -> tracedecay_domain::errors::Result<Vec<CodeGraphSymbolSummaryV1>> {
+) -> GraphQueryResult<Vec<CodeGraphSymbolSummaryV1>> {
     const PAGE_SIZE: usize = 4_096;
     GraphQueryManager::new(graph, cancellation).page_all_symbols(
         PAGE_SIZE,
@@ -996,14 +1003,4 @@ pub fn admitted_root_uri_for_project(
             field: "application primitive admitted root URI",
         })?;
     Ok(uri.to_string())
-}
-
-pub fn locator_digest_for_project(
-    project_root: &Path,
-) -> Result<ManifestDigest, ApplicationContractError> {
-    tracedecay_runtime_core::worktree::locator_digest_for_project(project_root).map_err(|_| {
-        ApplicationContractError::Inconsistent {
-            field: "application primitive project locator digest",
-        }
-    })
 }

@@ -469,7 +469,7 @@ pub struct HookV2LifecycleMountV1<'a> {
 }
 
 /// Claude's lifecycle exists only for the Context Scout intent pass, so it is
-/// minted only while that pass is enabled. Kimi and OpenCode bind theirs for
+/// minted only while that pass is enabled. Kimi Code and `OpenCode` bind theirs for
 /// every Scout claim and are not gated.
 const fn intent_gated_lifecycle(producer: tracedecay_domain::NativeHostIdentityV1) -> bool {
     matches!(

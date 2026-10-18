@@ -46,6 +46,11 @@ pub(crate) fn context() -> RequestContext {
 /// A request context granted the `capability.work.{operation}` capability
 /// and use case, under the same authority as [`context`].
 pub(crate) fn context_for(operation: &str) -> RequestContext {
+    context_for_actor(operation, ACTOR)
+}
+
+/// [`context_for`] issued to `actor` instead of the default one.
+pub(crate) fn context_for_actor(operation: &str, actor: &str) -> RequestContext {
     let scope = ResolvedScope::new(
         id::<ProjectId>(PROJECT),
         id::<RepositoryId>(REPOSITORY),
@@ -67,7 +72,7 @@ pub(crate) fn context_for(operation: &str) -> RequestContext {
     )
     .unwrap();
     RequestContext::new(
-        id::<ActorId>(ACTOR),
+        id::<ActorId>(actor),
         scope,
         grant,
         RequestId::new("request.run-control-jobs").unwrap(),

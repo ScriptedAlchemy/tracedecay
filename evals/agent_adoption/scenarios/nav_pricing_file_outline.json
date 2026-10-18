@@ -36,11 +36,25 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "LineItem",
-    "compute_total",
-    "compute_grand_total"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states LineItem",
+          "pattern": "\\bLineItem\\b"
+        },
+        {
+          "id": "states compute_total",
+          "pattern": "\\bcompute_total\\b"
+        },
+        {
+          "id": "states compute_grand_total",
+          "pattern": "\\bcompute_grand_total\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 3,
   "notes": "file structure; tracedecay_source_outline is a table-of-contents call, cheaper than a full read."
 }

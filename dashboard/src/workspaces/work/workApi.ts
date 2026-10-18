@@ -1,3 +1,4 @@
+import { dashboardFetch } from '../../data/auth/credential.ts';
 import type { WireSchema } from '../../data/query/wireSchema.ts';
 import {
   ApplicationProblemEnvelopeSchema,
@@ -162,7 +163,7 @@ export async function callWork<Request, Response>(
 
   let response: Response_;
   try {
-    response = await fetch(url, {
+    response = await dashboardFetch(url, {
       method: 'POST',
       headers: { accept: 'application/json', 'content-type': 'application/json' },
       body: JSON.stringify(encoded.data),

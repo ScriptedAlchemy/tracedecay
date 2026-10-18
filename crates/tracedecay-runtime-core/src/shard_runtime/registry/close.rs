@@ -17,6 +17,12 @@ use crate::shard_runtime::shard::ShardRuntimeEvictionBlocker;
 
 const SHUTDOWN_HOLD_DRAIN_POLL: Duration = Duration::from_millis(10);
 
+/// A pass is the last one when the next poll would land at or past the
+/// deadline, so the drain logs and returns before its caller's deadline.
+fn is_last_drain_pass(now: std::time::Instant, deadline: std::time::Instant) -> bool {
+    now + SHUTDOWN_HOLD_DRAIN_POLL >= deadline
+}
+
 /// What still keeps one mounted runtime from closing at shutdown.
 struct RuntimeHold {
     blockers: Vec<ShardRuntimeEvictionBlocker>,
@@ -183,7 +189,7 @@ impl StoreRuntimeRegistry {
         self.cancel_and_join_opens_for_shutdown(&cx).await?;
         let mut closed = 0;
         loop {
-            let final_pass = std::time::Instant::now() + SHUTDOWN_HOLD_DRAIN_POLL >= deadline;
+            let final_pass = is_last_drain_pass(std::time::Instant::now(), deadline);
             let (batch, held) = self.close_idle_batch(final_pass).await?;
             closed += batch;
             if !held || final_pass {
@@ -967,33 +973,41 @@ mod tests {
         drop(profile);
     }
 
-    /// A lease released after store close begins can still have its WAL
-    /// truncated before the caller's deadline. The pinned profile runtime
-    /// keeps the drain running to its last poll before that deadline, so the
-    /// close still returns before the caller's own deadline cancels it.
+    /// Leases released seconds after store close begins still have their
+    /// runtimes closed, so their WALs are truncated, while the caller's
+    /// deadline is far off.
     #[asupersync::test]
     async fn shutdown_close_waits_for_a_lease_released_while_it_runs() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
         let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
         let binding = code.binding().clone();
+        let profile_binding = profile.binding().clone();
         let release = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(4));
-            drop(code);
+            drop((code, profile));
         });
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        assert_eq!(registry.close_idle_for_shutdown(deadline).await.unwrap(), 1);
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the drain must return before its caller's deadline"
-        );
-        assert!(matches!(
-            registry.lookup(&binding),
-            StoreRuntimeLookup::Missing { .. }
-        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        assert_eq!(registry.close_idle_for_shutdown(deadline).await.unwrap(), 2);
+        for binding in [binding, profile_binding] {
+            assert!(matches!(
+                registry.lookup(&binding),
+                StoreRuntimeLookup::Missing { .. }
+            ));
+        }
         release.join().unwrap();
-        drop(profile);
+    }
+
+    /// The last pass runs while one poll still fits before the deadline, so
+    /// the drain logs its held runtimes and returns before the caller's own
+    /// deadline cancels it.
+    #[test]
+    fn the_last_drain_pass_runs_before_the_deadline() {
+        let now = std::time::Instant::now();
+        assert!(is_last_drain_pass(now, now + SHUTDOWN_HOLD_DRAIN_POLL / 2));
+        assert!(is_last_drain_pass(now, now + SHUTDOWN_HOLD_DRAIN_POLL));
+        assert!(!is_last_drain_pass(now, now + SHUTDOWN_HOLD_DRAIN_POLL * 2));
     }
 
     #[asupersync::test]
@@ -1385,5 +1399,165 @@ mod tests {
         ));
         drop(state);
         drop(profile);
+    }
+
+    /// This process's descriptors on files under `path` that were unlinked.
+    #[cfg(target_os = "linux")]
+    fn deleted_descriptors(path: &std::path::Path) -> Vec<String> {
+        let prefix = path.display().to_string();
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .map(|target| target.display().to_string())
+            .filter(|target| target.starts_with(&prefix) && target.ends_with(" (deleted)"))
+            .collect()
+    }
+
+    /// The first lookup that is not `Evicting`: a lost runtime stays mapped
+    /// until its reader workers have exited.
+    #[cfg(target_os = "linux")]
+    async fn lookup_after_lost_runtime_closes(
+        registry: &StoreRuntimeRegistry,
+        binding: &StoreRuntimeBindingV1,
+    ) -> StoreRuntimeLookup {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let lookup = registry.lookup(binding);
+            if !matches!(lookup, StoreRuntimeLookup::Evicting { .. }) {
+                return lookup;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a lost runtime's reader workers must exit"
+            );
+            let _ = crate::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[asupersync::test]
+    async fn a_store_unlinked_under_its_runtime_closes_its_files_and_reopens_fresh() {
+        use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlStatement, ExactSqlValue};
+
+        let statement = |sql: &str| ExactSqlStatement::new(sql.to_owned(), Vec::new()).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let (registry, profile, code, authority) =
+            mount_code_runtime(temporary.path().join("runtime.db")).await;
+        let path = authority.canonical_database_path().to_path_buf();
+        let handle = code.authorized_exact_sql_handle(authority.clone()).unwrap();
+        handle
+            .execute(statement("CREATE TABLE unlink_probe (value TEXT)"))
+            .unwrap();
+        handle
+            .execute(statement("INSERT INTO unlink_probe VALUES ('before')"))
+            .unwrap();
+        drop(handle);
+
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(file));
+        }
+
+        let deadline = std::time::Instant::now()
+            + tracedecay_rusqlite_runtime::FILE_PROBE_INTERVAL
+            + Duration::from_secs(2);
+        while code.physical_snapshot().healthy || !deleted_descriptors(&path).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "within one probe interval the store must report itself lost and hold no \
+                 descriptor on the unlinked files: {:?}",
+                deleted_descriptors(&path)
+            );
+            let _ = crate::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await;
+        }
+        assert!(!code.physical_snapshot().writer_present);
+        assert!(matches!(
+            lookup_after_lost_runtime_closes(&registry, code.binding()).await,
+            StoreRuntimeLookup::Missing { .. }
+        ));
+
+        let path = seed_final_graph_db(path).await;
+        let authority = DatabaseAuthority::for_runtime(&path, "reopen a lost store").unwrap();
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let fresh = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                StoreIncarnationV1::new(1).unwrap(),
+                Some(pin),
+                authority.clone(),
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("the next open must publish a fresh runtime: {failure:?}")
+            }
+        };
+        let handle = fresh.authorized_exact_sql_handle(authority).unwrap();
+        handle
+            .execute(statement("CREATE TABLE unlink_probe (value TEXT)"))
+            .unwrap();
+        let rows = handle
+            .query(
+                statement("SELECT count(*) FROM unlink_probe"),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
+        drop((handle, fresh, code, profile));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[asupersync::test]
+    async fn an_evicted_lost_runtime_leaves_no_pin_on_its_key() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (registry, profile, code, authority) =
+            mount_code_runtime(temporary.path().join("runtime.db")).await;
+        let key = StoreRuntimeKey::from_binding(code.binding());
+        registry
+            .lock_state()
+            .profile_pin_tokens
+            .entry(key.clone())
+            .or_default()
+            .insert(u64::MAX);
+        let path = authority.canonical_database_path().to_path_buf();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(file));
+        }
+        let deadline = std::time::Instant::now()
+            + tracedecay_rusqlite_runtime::FILE_PROBE_INTERVAL
+            + Duration::from_secs(2);
+        while code.physical_snapshot().healthy {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the store must report itself lost"
+            );
+            let _ = crate::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await;
+        }
+
+        assert!(matches!(
+            lookup_after_lost_runtime_closes(&registry, code.binding()).await,
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        assert!(
+            !registry.lock_state().profile_pin_tokens.contains_key(&key),
+            "pins held on the evicted runtime must not count against a reopened key"
+        );
+        drop((code, profile));
     }
 }

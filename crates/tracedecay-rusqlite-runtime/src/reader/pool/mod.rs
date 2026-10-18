@@ -8,7 +8,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Condvar, Mutex, Weak},
-    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -87,8 +86,9 @@ struct ActiveSnapshot {
 pub(crate) struct ReaderCheckpointBlockers {
     active: Arc<Mutex<BTreeMap<u64, ActiveSnapshot>>>,
     /// Active snapshots whose lease already ended: the worker's rollback
-    /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return thread.
+    /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return task.
     released: Arc<(Mutex<BTreeSet<u64>>, Condvar)>,
+    finished: Arc<asupersync::sync::Notify>,
 }
 
 impl ReaderCheckpointBlockers {
@@ -130,6 +130,7 @@ impl ReaderCheckpointBlockers {
             .remove(&reader_id)
         {
             settled.notify_all();
+            self.finished.notify_waiters();
         }
     }
 
@@ -192,20 +193,27 @@ impl CheckpointBlockerSource for ReaderCheckpointBlockers {
         revoked
     }
 
-    /// A return thread writes off a worker that misses
+    /// A return task writes off a worker that misses
     /// [`DEFERRED_SNAPSHOT_END_LIMIT`], so the wait shares that bound; a
     /// reader still pinned past it is reported by the checkpoint itself.
-    fn await_released_snapshots(&self) {
-        let (released, settled) = &*self.released;
-        let released = released
+    fn await_released_snapshots(&self) -> futures_util::future::BoxFuture<'static, ()> {
+        let released = Arc::clone(&self.released);
+        let finished = Arc::clone(&self.finished);
+        let awaited = released
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let awaited = released.clone();
-        let _ = settled
-            .wait_timeout_while(released, DEFERRED_SNAPSHOT_END_LIMIT, |released| {
-                !released.is_disjoint(&awaited)
-            })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move {
+            let settled = finished.wait_until(|| {
+                released
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_disjoint(&awaited)
+            });
+            let _ = crate::storage_pool::timeout(DEFERRED_SNAPSHOT_END_LIMIT, settled).await;
+        })
     }
 }
 
@@ -251,8 +259,14 @@ impl LaneAdmission {
 
 pub(super) struct WorkerRecord {
     pub(super) client: worker::WorkerClient,
-    pub(super) join: Option<JoinHandle<()>>,
+    pub(super) join: Option<crate::storage_pool::PoolTask>,
     lane: ReaderLane,
+}
+
+pub(super) fn join_worker(record: &mut WorkerRecord) {
+    if let Some(join) = record.join.take() {
+        let _ = join.join();
+    }
 }
 
 #[derive(Clone)]
@@ -297,9 +311,21 @@ pub(super) struct PoolState {
     pub(super) waiting_health: u16,
     /// Successful exact-SQL snapshot admissions across both lanes.
     snapshot_admissions: u64,
+    /// Set by [`ReaderPool::close_for_lost_file`]: every worker, including one
+    /// still being spawned, must exit and none may stay idle.
+    lost: bool,
 }
 
 impl PoolState {
+    /// Why an acquisition refused by a draining pool is turned away.
+    const fn draining_reason(&self) -> UnavailableReasonV1 {
+        if self.lost {
+            UnavailableReasonV1::FileLost
+        } else {
+            UnavailableReasonV1::Draining
+        }
+    }
+
     fn workers(&self, lane: ReaderLane) -> u16 {
         self.records
             .values()
@@ -433,6 +459,10 @@ pub(super) struct PoolInner<E: ReaderQueryExecutor> {
     pub(super) state: Mutex<PoolState>,
     pub(super) capacity_changed: Condvar,
     pub(super) admission: Arc<ReaderAdmissionRecorder>,
+    /// Test-only: runs once between a growing acquire's worker spawn and its
+    /// registration.
+    #[cfg(test)]
+    after_spawn: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<E: ReaderQueryExecutor> Drop for PoolInner<E> {
@@ -448,9 +478,7 @@ impl<E: ReaderQueryExecutor> Drop for PoolInner<E> {
             record.client.shutdown();
         }
         for mut record in records.into_values() {
-            if let Some(join) = record.join.take() {
-                let _ = join.join();
-            }
+            join_worker(&mut record);
         }
     }
 }
@@ -552,9 +580,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 waiting_general: 0,
                 waiting_health: 0,
                 snapshot_admissions: 0,
+                lost: false,
             }),
             capacity_changed: Condvar::new(),
             admission: Arc::new(ReaderAdmissionRecorder::default()),
+            #[cfg(test)]
+            after_spawn: Mutex::new(None),
         });
         let pool = Self { inner };
         for _ in 0..pool.inner.budget.min_per_hot_shard {
@@ -781,6 +812,64 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.inner.capacity_changed.notify_all();
     }
 
+    /// Fences admission, closes the pinned descriptor, and tells every worker
+    /// to interrupt its statement and exit, which closes its connection. The
+    /// pool object may outlive this call inside a lease, but no longer holds
+    /// the unlinked file open. Never waits, so a pool task may call it.
+    pub(crate) fn close_for_lost_file(&self) {
+        // Draining and `lost` flip under one lock, so a waiter the wake below
+        // releases never sees the pool draining without the file being lost.
+        let clients: Vec<_> = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.lifecycle = ReaderPoolState::Draining;
+            state.health_admission_open = false;
+            state.lost = true;
+            state
+                .records
+                .values()
+                .map(|record| record.client.clone())
+                .collect()
+        };
+        self.inner.capacity_changed.notify_all();
+        self.inner.locator.release_opened_database();
+        for client in clients {
+            client.shutdown();
+        }
+    }
+
+    /// Test-only: run `hook` once, between the next growing acquire's worker
+    /// spawn and its registration.
+    #[cfg(test)]
+    pub(crate) fn run_once_after_spawn(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .inner
+            .after_spawn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
+    }
+
+    /// Whether every worker has exited, so no connection to the file is open.
+    /// Meaningful after [`Self::close_for_lost_file`], which stops new workers.
+    pub(crate) fn workers_exited(&self) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.opening_general == 0
+            && state.opening_health == 0
+            && state.records.values().all(|record| {
+                record
+                    .join
+                    .as_ref()
+                    .is_none_or(crate::storage_pool::PoolTask::is_finished)
+            })
+    }
+
     pub(crate) fn is_quiescent(&self) -> bool {
         let state = self
             .inner
@@ -824,12 +913,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     /// Every lane-state transition that feeds quiescence (lease returns,
     /// opens, limbo resolution) notifies `capacity_changed`, so the wait is
     /// event-driven. The one exception is the final strong-count handoff:
-    /// the deferred-return thread drops its pool reference immediately after
+    /// the deferred-return task drops its pool reference immediately after
     /// its notification, and that drop has no event, so the tail of this wait
     /// yields across a window of a few instructions.
     ///
     /// There is no bound: a deferred return always resolves its limbo, and a
-    /// host under load can stall that thread for tens of seconds.
+    /// host under load can stall that task for tens of seconds.
     #[cfg(test)]
     pub(crate) fn wait_until_quiescent(&self) {
         fn lanes_busy(state: &PoolState) -> bool {
@@ -923,6 +1012,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     where
         F: FnMut() -> Option<UnavailableReasonV1>,
     {
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderAcquireError::Worker(
+                worker::ReaderWorkerError::WorkerClosed,
+            ));
+        }
         let lane = admission.lane;
         let lease_ceiling = self.lease_ceiling(admission);
         let mut waiting = WaitingGuard::new(&self.inner, lane);
@@ -955,10 +1049,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             if state.lifecycle == ReaderPoolState::Draining
                 && (lane == ReaderLane::General || !state.health_admission_open)
             {
+                let reason = state.draining_reason();
+                drop(state);
                 self.inner.admission.interrupted();
-                return Err(ReaderAcquireError::Interrupted {
-                    reason: UnavailableReasonV1::Draining,
-                });
+                return Err(ReaderAcquireError::Interrupted { reason });
             }
             if lane == ReaderLane::General
                 && self
@@ -1035,6 +1129,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         Arc::clone(&self.inner.admission),
                     )
                     .and_then(|spawned| self.validate_worker_identity(spawned));
+                    #[cfg(test)]
+                    if let Some(pause) = self
+                        .inner
+                        .after_spawn
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        pause();
+                    }
                     let mut state = self
                         .inner
                         .state
@@ -1054,6 +1158,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         },
                     );
                     if state.lifecycle == ReaderPoolState::Draining {
+                        // The lost-file sweep ran before this worker existed.
+                        if state.lost {
+                            client.shutdown();
+                        }
+                        let reason = state.draining_reason();
                         state.available(lane).push_back(AvailableWorker {
                             id,
                             client,
@@ -1062,9 +1171,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         drop(state);
                         self.inner.capacity_changed.notify_all();
                         self.inner.admission.interrupted();
-                        return Err(ReaderAcquireError::Interrupted {
-                            reason: UnavailableReasonV1::Draining,
-                        });
+                        return Err(ReaderAcquireError::Interrupted { reason });
                     }
                     *state.leased_mut(lane) += 1;
                     drop(state);
@@ -1135,9 +1242,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             record.client.shutdown();
         }
         for record in &mut retired {
-            if let Some(join) = record.join.take() {
-                let _ = join.join();
-            }
+            join_worker(record);
         }
         retired.len()
     }

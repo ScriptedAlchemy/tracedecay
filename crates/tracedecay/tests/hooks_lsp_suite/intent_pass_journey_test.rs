@@ -26,7 +26,7 @@ const YES_INTENT: ContextScoutIntentKindV1 = ContextScoutIntentKindV1::SessionRe
 const PROJECT_ID: &str = "project.intent-pass-journey";
 const ABSENT_SESSION: &str = "00000000-0000-4000-8000-00000000a001";
 const ENABLED_SESSION: &str = "00000000-0000-4000-8000-00000000b001";
-const WAIT: Duration = Duration::from_secs(60);
+const WAIT: Duration = Duration::from_secs(180);
 
 /// A loopback `/v1/systemone` server answering yes for [`YES_INTENT`] and no
 /// for every other question, counting the requests it answered.

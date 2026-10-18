@@ -773,15 +773,6 @@ impl ProjectContextScoutOwnerV1 {
             let mut runtime = self.runtime.lock().await;
             runtime.last_route = Some(ContextScoutRouteV1::DecisionEngine);
             runtime.last_suppression = Some(ContextScoutSuppressionV1::PendingSibling);
-            if let Some(outcome) = input
-                .candidates
-                .first()
-                .and_then(|candidate| candidate.evidence.as_session())
-                .map(|evidence| evidence.decision.outcome)
-            {
-                runtime.last_model_outcome = Some(outcome);
-                runtime.last_model_receipt = None;
-            }
             return Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
                 reason: ContextScoutSuppressionV1::PendingSibling,
             });
@@ -790,20 +781,12 @@ impl ProjectContextScoutOwnerV1 {
     }
 
     /// Records an intent pass that ended before selection (no candidate, or
-    /// an engine failure with no action fact) so status reports the engine
-    /// outcome of the latest pass.
-    pub async fn record_intent_outcome(
-        &self,
-        model_outcome: ContextScoutModelOutcomeV1,
-        suppression: Option<ContextScoutSuppressionV1>,
-    ) {
+    /// an engine failure with no action fact). The model slot describes the
+    /// configured model and is left untouched.
+    pub async fn record_intent_outcome(&self, suppression: ContextScoutSuppressionV1) {
         let mut runtime = self.runtime.lock().await;
         runtime.last_route = Some(ContextScoutRouteV1::DecisionEngine);
-        runtime.last_model_outcome = Some(model_outcome);
-        runtime.last_model_receipt = None;
-        if suppression.is_some() {
-            runtime.last_suppression = suppression;
-        }
+        runtime.last_suppression = Some(suppression);
     }
 
     /// Installs only an admitted active/paused control transition while
@@ -1232,17 +1215,25 @@ fn status_with_recent(
     recent: &ContextScoutRecentStateV1,
 ) -> ContextScoutStatusV1 {
     status.active_suggestions = recent.pending.len();
-    let Some(entry) = recent
-        .pending
-        .iter()
-        .chain(recent.deliveries.iter().map(|delivery| &delivery.entry))
-        .max_by_key(|entry| entry.envelope.candidate.expires_at)
-    else {
+    let entries = || {
+        recent
+            .pending
+            .iter()
+            .chain(recent.deliveries.iter().map(|delivery| &delivery.entry))
+    };
+    let Some(entry) = entries().max_by_key(|entry| entry.envelope.candidate.expires_at) else {
         return status;
     };
     status.last_route = Some(entry.route);
-    status.last_model_outcome = Some(entry.model_outcome);
-    status.last_model_receipt.clone_from(&entry.model_receipt);
+    if let Some(model_entry) = entries()
+        .filter(|entry| entry.route != ContextScoutRouteV1::DecisionEngine)
+        .max_by_key(|entry| entry.envelope.candidate.expires_at)
+    {
+        status.last_model_outcome = Some(model_entry.model_outcome);
+        status
+            .last_model_receipt
+            .clone_from(&model_entry.model_receipt);
+    }
     if let Some(delivered) = recent
         .deliveries
         .iter()
@@ -1314,7 +1305,9 @@ mod tests {
     use super::super::address_registry::ContextScoutAddressBindOutcomeV1;
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
-    use tracedecay_contracts::context_scout::{ContextScoutCandidateV1, ContextScoutCategoryV1};
+    use tracedecay_contracts::context_scout::{
+        ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutModelReceiptV1,
+    };
     use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
@@ -1324,8 +1317,9 @@ mod tests {
     use tracedecay_domain::configuration::{
         CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CandidateDispositionV1, ConfigurationCandidateV1,
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
-        ConfigurationValueV1, ContextScoutConfigurationStateV1, ContextScoutSettingsV1,
-        DecisionEngineSettingsV1, IntentWindowSettingsV1, SettingKey,
+        ConfigurationValueV1, ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
+        ContextScoutConfiguredModelPathV1, ContextScoutSettingsV1, DecisionEngineSettingsV1,
+        IntentWindowSettingsV1, SettingKey,
     };
     use tracedecay_domain::feedback::FeedbackScopeV1;
     use tracedecay_domain::{ActorId, RepositoryId, WorktreeId};
@@ -2166,7 +2160,7 @@ mod tests {
         unregister(address.project_id, &owner);
     }
 
-    fn active_intent_configuration() -> ContextScoutConfigurationPinV1 {
+    fn active_intent_configuration(base: ContextScoutSettingsV1) -> ContextScoutConfigurationPinV1 {
         let setting_key = SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY).expect("setting");
         let revision_id = ConfigurationRevisionId::new("revision.scout.intent").expect("revision");
         let settings = ContextScoutSettingsV1 {
@@ -2193,7 +2187,7 @@ mod tests {
                 min_delivery_gap_secs: 30,
                 prompt_lookup_deadline_ms: 200,
             }),
-            ..ContextScoutSettingsV1::disabled()
+            ..base
         };
         settings.validate().expect("intent settings");
         let snapshot = ConfigurationSnapshotV1::new(
@@ -2252,7 +2246,7 @@ mod tests {
         )
         .await
         .expect("owner");
-        let configuration = active_intent_configuration();
+        let configuration = active_intent_configuration(ContextScoutSettingsV1::disabled());
         owner
             .install_configuration(configuration.clone(), None)
             .await
@@ -2370,8 +2364,8 @@ mod tests {
         let status = owner.configured_status().await.expect("status");
         assert_eq!(status.last_route, Some(ContextScoutRouteV1::DecisionEngine));
         assert_eq!(
-            status.last_model_outcome,
-            Some(ContextScoutModelOutcomeV1::Succeeded)
+            status.last_model_outcome, None,
+            "the model slot describes the configured model, not the intent engine"
         );
 
         let ContextScoutRuntimeOutcomeV1::Enqueued { entry: second, .. } = owner
@@ -2443,6 +2437,108 @@ mod tests {
         );
         assert_eq!(after_gap.delivered_intents, spaced.delivered_intents);
         unregister(sibling_address.project_id, &owner);
+    }
+
+    #[tokio::test]
+    async fn intent_pass_outcomes_leave_the_configured_model_slot_alone() {
+        let (_temporary, database) = test_database().await;
+        let owner = ProjectContextScoutOwnerV1::startup(database, [43; 16], UtcMicros(1), None)
+            .await
+            .expect("owner");
+        let configuration = active_intent_configuration(ContextScoutSettingsV1 {
+            mode: ContextScoutConfigurationModeV1::ConfiguredModel,
+            model_path: Some(ContextScoutConfiguredModelPathV1::CodexAppServer),
+            model_id: Some("configured-test-model".to_owned()),
+            model_timeout_secs: Some(60),
+            ..ContextScoutSettingsV1::disabled()
+        });
+        let revision = configuration.control().configuration_revision;
+        owner
+            .install_configuration(configuration, None)
+            .await
+            .expect("configured model installation");
+
+        owner.runtime.lock().await.last_model_outcome = Some(ContextScoutModelOutcomeV1::Succeeded);
+        owner
+            .record_intent_outcome(ContextScoutSuppressionV1::NoEligibleCandidate)
+            .await;
+        let capability = owner.capability().await.expect("capability");
+        assert!(capability.configured_model_available);
+        assert_eq!(
+            capability.last_model_outcome,
+            Some(ContextScoutModelOutcomeV1::Succeeded)
+        );
+
+        {
+            let mut runtime = owner.runtime.lock().await;
+            runtime.last_model_outcome = Some(ContextScoutModelOutcomeV1::TokenBudgetExceeded);
+            runtime.last_model_receipt = Some(ContextScoutModelReceiptV1 {
+                requested_backend: ContextScoutModelBackendV1::CodexAppServer,
+                actual_provider: Some("codex".to_owned()),
+                actual_model: Some("configured-test-model".to_owned()),
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                estimated_cost_microusd: Some(1),
+            });
+        }
+        let address = ContextScoutAddressV1 {
+            profile_id: [1; 16],
+            provider_id: [2; 16],
+            protected_session_id: [3; 32],
+            thread_id: [4; 16],
+            turn_id: [5; 16],
+            agent_id: [6; 16],
+            logical_message_id: [7; 16],
+            project_id: [43; 16],
+        };
+        let evidence = super::super::evidence::fixture_context_scout_session_evidence();
+        let intent_entry = ContextScoutDurableQueueEntryV1 {
+            work: ContextScoutWorkV1 {
+                address,
+                generation: 1,
+                input_watermark: [8; 32],
+            },
+            route: ContextScoutRouteV1::DecisionEngine,
+            model_outcome: evidence.decision.outcome,
+            model_receipt: None,
+            envelope: tracedecay_contracts::context_scout::ContextScoutSuggestionEnvelopeV1 {
+                envelope_id: [9; 16],
+                address,
+                input_watermark: [8; 32],
+                configuration_revision: revision,
+                delivery_window: ContextScoutDeliveryWindowV1::NextBoundary,
+                candidate: ContextScoutCandidateV1 {
+                    dedupe_key: [10; 32],
+                    category: ContextScoutCategoryV1::Retrieval,
+                    relevance_score: 900,
+                    suggestion_text: "tracedecay hint: recall the earlier session.".to_owned(),
+                    evidence: evidence.into(),
+                    expires_at: UtcMicros(4_000_000_000_000_000),
+                },
+            },
+        };
+        assert_eq!(
+            owner.store().enqueue(intent_entry).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        owner
+            .record_intent_outcome(ContextScoutSuppressionV1::NoEligibleCandidate)
+            .await;
+
+        let budget = owner.budget().await.expect("budget");
+        assert!(budget.exhausted);
+        assert_eq!(
+            budget.last_model_outcome,
+            Some(ContextScoutModelOutcomeV1::TokenBudgetExceeded)
+        );
+        assert_eq!(
+            (budget.last_input_tokens, budget.last_output_tokens),
+            (Some(10), Some(5))
+        );
+        assert_eq!(
+            owner.configured_status().await.expect("status").last_route,
+            Some(ContextScoutRouteV1::DecisionEngine)
+        );
     }
 
     #[tokio::test]

@@ -39,12 +39,13 @@ DAEMON ADMISSION (mcp/handlers/hook_runtime/admission.rs)
 INTENT PASS (async, coalesced per session by BoundedHookOrchestratorV1)
   1. pin configuration; intent disabled => Completed{Disabled}
   2. resolve native session id
-  3. bounded freshen (ingest_project_sources_for_provider_bounded) + read window
+  3. bounded freshen (re-read every 50 ms up to freshen_budget_ms until the
+     boundary's turn is ingested; the pass never drives ingest) + read window
      (agents/context_scout/session_window.rs over lcm_raw_messages)
   4. action facts (deterministic, from tool calls in the window; tracedecay-policy/src/intent_action_facts.rs)
      || decision engine (one batched request, all configured questions; agents/context_scout/decision_engine.rs)
   5. deterministic policy (tracedecay-policy/src/intent_decision.rs) -> <= 1 candidate
-     (evidence = Session, category Retrieval) -> delivery window (IntentBoundary -> NextBoundary)
+     (evidence = Session, category Retrieval) -> delivery window (IntentBoundary -> Immediate)
   6. owner.prepare_configured -> select_deterministic_context_scout -> store.enqueue
   7. mount claim authority on the session-scoped intent address
 NEXT BOUNDARY (or the phase-2 bounded lookup inside the same prompt hook)
@@ -65,7 +66,9 @@ of it. Nothing content-bearing enters `HookEventEnvelopeV2`.
 ### Timing
 
 Classification never runs inside the admission ack budget. Delivery is
-`NextBoundary`, or, for prompt hooks with a configured
+`Immediate`: the pass runs after admission, so the first later boundary of
+any kind claims it (a delivery inside `min_delivery_gap_secs` is withheld
+as `suppressed_budget`). Phase 2 adds, for prompt hooks with a configured
 `prompt_lookup_deadline_ms`, one bounded second round-trip inside the same
 hook (plan 22 "the host performs one bounded lookup"). A fast engine
 delivers in the same prompt; a slow one degrades to the next boundary.

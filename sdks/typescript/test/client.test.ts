@@ -14,16 +14,19 @@ import {
   type OperationApplicationDistributionResult,
   type PrimitiveSearchFreshnessV1,
 } from "../src/operations";
-import { factStoreCurateReceiptMatches } from "../src/automation-receipt";
 import {
+  OPERATION_TERMINATIONS,
   decodeCanonicalSchema,
   decodeHttpSuccessEnvelope,
+  factStoreCurateReceiptMatches,
   type HttpSuccessEnvelope,
   type PageState,
 } from "../src/types";
 
 import {
   TraceDecayAbortError,
+  TraceDecayDisconnectedError,
+  TraceDecayDeniedError,
   TraceDecayMalformedResponseError,
   TraceDecayResetRequiredError,
   TraceDecayStaleError,
@@ -115,27 +118,48 @@ function successEnvelope(payload: unknown, cursor: unknown = null) {
   };
 }
 
+async function curatorScope() {
+  return {
+    project_id: "project.sdk",
+    repository_id: "repository.sdk",
+    worktree_id: "worktree.sdk",
+    reference: null,
+    scope_digest: await canonicalDigest([
+      "tracedecay.application.scope.v1", "project.sdk", "repository.sdk", "worktree.sdk", null,
+    ]),
+  };
+}
+
 /** The `fact_store_curate` answer at admission: a pending effect receipt. */
-function curateSuccessEnvelope(payload: unknown) {
+async function curateSuccessEnvelope(payload: unknown) {
   const envelope = successEnvelope(payload);
-  envelope.value.binding_id = "binding.http.fact_store_curate.v1";
-  envelope.value.contract.schema_id = "schema.application.retained.fact-store-curate.result";
-  envelope.value.request_id = "request.sdk.curate";
-  envelope.value.outcome = {
-    outcome: "effect",
+  return {
+    ...envelope,
     value: {
-      effect_id: "effect.retained.fact_store_curate.request.sdk.curate",
-      effect_class: "administrative",
-      idempotency_key: "idempotency.retained.fact_store_curate.sdk",
-      authority: {},
-      expected_state: "sha256:" + "0".repeat(64),
-      reconciliation: "pending",
-      receipt: { outcome: "effect_unknown", committed_state: null },
-      payload,
-      execution: { ...structuredClone(RECEIPT), termination: "effect_unknown" },
+      ...envelope.value,
+      binding_id: "binding.http.fact_store_curate.v1",
+      contract: {
+        schema_id: "schema.application.retained.fact-store-curate.result",
+        schema_revision: 1,
+      },
+      request_id: "request.sdk.curate",
+      scope: await curatorScope(),
+      outcome: {
+        outcome: "effect",
+        value: {
+          effect_id: "effect.retained.fact_store_curate.request.sdk.curate",
+          effect_class: "administrative",
+          idempotency_key: "idempotency.retained.fact_store_curate.sdk",
+          authority: {},
+          expected_state: "sha256:" + "0".repeat(64),
+          reconciliation: "pending",
+          receipt: { outcome: "effect_unknown", committed_state: null },
+          payload,
+          execution: { ...structuredClone(RECEIPT), termination: "effect_unknown" },
+        },
+      },
     },
-  } as unknown as typeof envelope.value.outcome;
-  return envelope;
+  };
 }
 
 /** A retained fact-store evidence envelope for the named HTTP binding. */
@@ -311,6 +335,29 @@ async function withServer(
     await once(fixture.server, "close");
   }
 }
+
+const OPEN_EVENT = {
+  event: "open",
+  data: {
+    correlation_id: "request.operation",
+    frontier: {
+      next_sequence: 0,
+      retained_from_sequence: 0,
+      resume_token: "resume",
+    },
+  },
+};
+const RESUME_URL =
+  "/projects/project.sdk/application/operations/request.operation/events?next_sequence=0&resume_token=resume";
+
+const openThenEof: RequestHandler = (_request, response) => {
+  response.writeHead(200, { "content-type": "text/event-stream" });
+  response.end(["event: open", `data: ${JSON.stringify(OPEN_EVENT)}`, "", ""].join("\n"));
+};
+
+const refuseConnection: RequestHandler = (request) => {
+  request.socket.destroy();
+};
 
 function json(
   response: ServerResponse,
@@ -1051,8 +1098,10 @@ describe("TraceDecayClient generated operation bindings", () => {
       request_digest: requestDigest,
       state: "started",
     };
+    const scope = await curatorScope();
     const envelope = (payload: unknown) => ({
       request_id: "request.sdk.curate",
+      scope,
       outcome: { outcome: "effect", value: { reconciliation: "pending", payload } },
     });
 
@@ -1080,13 +1129,11 @@ describe("TraceDecayClient generated operation bindings", () => {
     }))).resolves.toBe(false);
   });
 
-  it("returns the started receipt from the curate operation", async () => {
+  it("returns the started receipt bound to the submitted bounds and scope", async () => {
+    const bounds = { fact_review_limit: 37, min_confidence_millionths: 812_345 };
     const requestDigest = await canonicalDigest([
       "tracedecay.automation-run.request-identity.v1",
-      {
-        kind: "memory_curator",
-        options: { fact_review_limit: 24, min_confidence_millionths: 720_000 },
-      },
+      { kind: "memory_curator", options: bounds },
     ]);
     const receipt = {
       run_id: "request.sdk.curate",
@@ -1094,18 +1141,22 @@ describe("TraceDecayClient generated operation bindings", () => {
       request_digest: requestDigest,
       state: "started",
     };
+    const envelope = await curateSuccessEnvelope(receipt);
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
-      fetch: async () => new Response(JSON.stringify(curateSuccessEnvelope(receipt)), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+      fetch: async (_url, init) => {
+        expect(JSON.parse(String(init?.body))).toEqual(bounds);
+        return new Response(JSON.stringify(envelope), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
     });
 
     const response = await client.operations.application_fact_store_curate(
-      {},
+      bounds,
       { requestId: "request.sdk.curate" },
     );
     expect(response.request_id).toBe("request.sdk.curate");
@@ -1113,6 +1164,12 @@ describe("TraceDecayClient generated operation bindings", () => {
     if (response.outcome.outcome !== "effect") throw new Error("expected an effect outcome");
     expect(response.outcome.value.reconciliation).toBe("pending");
     expect(response.outcome.value.payload).toEqual(receipt);
+
+    envelope.value.scope.scope_digest = "sha256:" + "9".repeat(64);
+    await expect(client.operations.application_fact_store_curate(
+      bounds,
+      { requestId: "request.sdk.curate" },
+    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
   });
 
   it("fails closed on malformed typed Workflow requests before transport", async () => {
@@ -1264,6 +1321,41 @@ describe("TraceDecayClient generated operation bindings", () => {
 });
 
 describe("TraceDecayClient transport envelopes", () => {
+  it("requires concealed problems to omit identity and ordinary problems to bind it", async () => {
+    const concealed = problemEnvelope("not_found_or_not_authorized", "concealed");
+    const disclosed = problemEnvelope("not_found_or_not_authorized", "concealed", {
+      bindingId: "binding.http.workflow.list_definitions",
+    });
+    const wrongBinding = problemEnvelope("not_found_or_not_authorized", "concealed", {
+      bindingId: "binding.http.different.v1",
+    });
+    const unbound = problemEnvelope("unavailable", "service_unavailable");
+
+    await withServer(
+      [
+        (_request, response) => json(response, 404, concealed),
+        (_request, response) => json(response, 404, disclosed),
+        (_request, response) => json(response, 404, wrongBinding),
+        (_request, response) => json(response, 503, unbound),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayDeniedError,
+        );
+        for (let response = 0; response < 3; response += 1) {
+          await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+            TraceDecayMalformedResponseError,
+          );
+        }
+      },
+    );
+  });
+
   it("classifies admitted terminal problems and requires committed_receipt", async () => {
     const bindingId = "binding.http.workflow.list_definitions";
     const reset = problemEnvelope("reset_required", "store_reset_required", {
@@ -1798,6 +1890,91 @@ describe("TraceDecayClient transport envelopes", () => {
   });
 });
 
+describe("TraceDecayClient operation stream disposal", () => {
+  const open = [
+    "event: open",
+    'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume"}}}',
+    "",
+    "",
+  ].join("\n");
+
+  it("cancels a live HTTP body and releases its reader on early iterator return", async () => {
+    let cancelled = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(open));
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:4317",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => response,
+    });
+    const iterator = client.streamOperation("request.operation");
+
+    expect((await iterator.next()).value?.event).toBe("open");
+    await iterator.return(undefined);
+
+    expect(cancelled).toBe(1);
+    expect(response.body?.locked).toBe(false);
+    expect(await iterator.next()).toEqual({ done: true, value: undefined });
+  });
+
+  it("closes a rejected non-SSE response without suppressing the protocol error", async () => {
+    let cancelled = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(open));
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    }), { headers: { "content-type": "text/plain" } });
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:4317",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => response,
+    });
+    await expect(client.streamOperation("request.operation").next()).rejects.toThrow(
+      "the daemon opened an operation stream with an invalid media type",
+    );
+    expect(cancelled).toBe(1);
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it("closes a live HTTP watcher without posting an operation cancellation", async () => {
+    let close: Promise<void> | undefined;
+    await withServer(
+      [
+        (_request, response) => {
+          close = new Promise<void>((resolve) => response.once("close", resolve));
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.write(open);
+        },
+      ],
+      async (baseUrl, requests) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        for await (const event of client.streamOperation("request.operation")) {
+          expect(event.event).toBe("open");
+          break;
+        }
+        expect(close).toBeDefined();
+        await Promise.race([
+          close,
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(() => reject(new Error("watcher HTTP connection never closed")), 2000)),
+        ]);
+        expect(requests.map(request => request.method)).toEqual(["GET"]);
+      },
+    );
+  });
+});
+
 describe("TraceDecayClient operation lifecycle", () => {
   it("accepts the server media type, UTF-8 BOM, and inherited SSE event ID", async () => {
     await withServer(
@@ -1910,6 +2087,186 @@ describe("TraceDecayClient operation lifecycle", () => {
         expect(events).toEqual(["open", "open", "completed"]);
       },
     );
+  });
+
+  it.each(OPERATION_TERMINATIONS)(
+    "ends the stream after a %s terminal without reconnecting",
+    async (termination) => {
+      await withServer(
+        [
+          (_request, response) => {
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            response.end(
+              [
+                "event: open",
+                `data: ${JSON.stringify(OPEN_EVENT)}`,
+                "",
+                `event: ${termination}`,
+                "id: 0",
+                `data: ${JSON.stringify({
+                  event: termination,
+                  data: {
+                    sequence: 0,
+                    terminal: {
+                      termination,
+                      receipt: {
+                        ...RECEIPT,
+                        termination,
+                        cancellation: { observed: true },
+                      },
+                    },
+                  },
+                })}`,
+                "",
+                "",
+              ].join("\n"),
+            );
+          },
+        ],
+        async (baseUrl, requests) => {
+          const client = createClient({
+            baseUrl,
+            projectId: "project.sdk",
+            token: "sdk-secret",
+          });
+          const events = [];
+          for await (const event of client.streamOperation("request.operation", {
+            maxReconnects: 3,
+          })) {
+            events.push(event.event);
+          }
+          expect(events).toEqual(["open", termination]);
+          expect(requests).toHaveLength(1);
+        },
+      );
+    },
+  );
+
+  it("rejects an unavailable terminal whose receipt disagrees", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: unavailable",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "unavailable",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "unavailable", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const consume = async () => {
+          for await (const _event of client.streamOperation("request.operation")) {
+            // Drain the stream.
+          }
+        };
+        await expect(consume()).rejects.toThrow(
+          "the SSE terminal event is inconsistent",
+        );
+      },
+    );
+  });
+
+  it("retries refused reconnects within the budget and keeps the frontier", async () => {
+    await withServer(
+      [
+        openThenEof,
+        refuseConnection,
+        refuseConnection,
+        (request, response) => {
+          expect(request.url).toBe(RESUME_URL);
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: completed",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl, requests) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events = [];
+        for await (const event of client.streamOperation("request.operation", {
+          maxReconnects: 3,
+        })) {
+          events.push(event.event);
+        }
+        expect(events).toEqual(["open", "completed"]);
+        expect(requests).toHaveLength(4);
+      },
+    );
+  });
+
+  it("fails with a disconnect once refused reconnects exhaust the budget", async () => {
+    await withServer(
+      [openThenEof, refuseConnection, refuseConnection],
+      async (baseUrl, requests) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events: string[] = [];
+        const consume = async () => {
+          for await (const event of client.streamOperation("request.operation", {
+            maxReconnects: 2,
+          })) {
+            events.push(event.event);
+          }
+        };
+        await expect(consume()).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+        expect(events).toEqual(["open"]);
+        expect(requests).toHaveLength(3);
+      },
+    );
+  });
+
+  it("does not retry a refused first connection", async () => {
+    await withServer([refuseConnection], async (baseUrl, requests) => {
+      const client = createClient({
+        baseUrl,
+        projectId: "project.sdk",
+        token: "sdk-secret",
+      });
+      const consume = async () => {
+        for await (const _event of client.streamOperation("request.operation", {
+          maxReconnects: 3,
+        })) {
+          // Drain the stream.
+        }
+      };
+      await expect(consume()).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+      expect(requests).toHaveLength(1);
+    });
   });
 
   it("rejects an open event for a different operation", async () => {

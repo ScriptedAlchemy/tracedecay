@@ -5,16 +5,13 @@
 //! cannot leak.
 
 use std::{
-    sync::{
-        Arc, Mutex,
-        mpsc::{Receiver, RecvTimeoutError},
-    },
-    thread::{self, JoinHandle},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use tracedecay_store::{RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1};
 
+use super::super::worker::SnapshotEndReply;
 use super::super::{
     READ_SNAPSHOT_LIFETIME, ReaderQueryExecutor, ReaderWorkerError, unavailable_read, worker,
 };
@@ -28,7 +25,7 @@ struct Checkout<E: ReaderQueryExecutor> {
     inner: Arc<PoolInner<E>>,
     lane: ReaderLane,
     worker: AvailableWorker,
-    deferred_end: Option<Receiver<Result<(), ReaderWorkerError>>>,
+    deferred_end: Option<SnapshotEndReply>,
     retire: bool,
 }
 
@@ -55,7 +52,7 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
         }
         // The lease is over but the worker has not confirmed its rollback.
         // Move it from leased to limbo rather than dropping it out of the
-        // accounting: it is still a live thread holding a record, and the pool
+        // accounting: it is still a live task holding a record, and the pool
         // must be able to see it, replace it, and refuse to call itself
         // quiescent while it is outstanding.
         //
@@ -75,26 +72,24 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
                     let checkpoint_blockers = self.inner.checkpoint_blockers.clone();
                     let reader_id = self.worker.id;
                     spawn_or_run_deferred_return(
-                        Box::new(move || {
+                        async move {
                             record.client.shutdown();
-                            let _ = receive.recv_timeout(DEFERRED_SNAPSHOT_END_LIMIT);
+                            let _ = crate::storage_pool::timeout(
+                                DEFERRED_SNAPSHOT_END_LIMIT,
+                                receive.recv(),
+                            )
+                            .await;
                             if let Some(join) = record.join.take() {
-                                let _ = join.join();
+                                let _ = join.finished().await;
                             }
                             checkpoint_blockers.finish(reader_id);
-                        }),
-                        |task| {
-                            thread::Builder::new()
-                                .name("tracedecay-rusqlite-reader-retire".to_owned())
-                                .spawn(task)
                         },
+                        crate::storage_pool::spawn,
                     );
                 }
             } else {
                 record.client.shutdown();
-                if let Some(join) = record.join.take() {
-                    let _ = join.join();
-                }
+                super::join_worker(&mut record);
             }
         }
         if let Some(receive) = deferred_end {
@@ -102,12 +97,8 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
             let lane = self.lane;
             let worker = self.worker.clone();
             spawn_or_run_deferred_return(
-                Box::new(move || finish_deferred_return(inner, lane, worker, receive)),
-                |task| {
-                    thread::Builder::new()
-                        .name("tracedecay-rusqlite-reader-return".to_owned())
-                        .spawn(task)
-                },
+                finish_deferred_return(inner, lane, worker, receive),
+                crate::storage_pool::spawn,
             );
         } else if self.retire && !timed_out_retirement {
             // A failed end retains its blocker until the retired worker has
@@ -312,17 +303,17 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         let Some(receive) = self.checkout.deferred_end.take() else {
             return Ok(());
         };
-        let error = match receive.recv_timeout(DEFERRED_SNAPSHOT_END_LIMIT) {
-            Ok(Ok(())) => {
+        let error = match end_reply_within(&receive, DEFERRED_SNAPSHOT_END_LIMIT) {
+            Some(Ok(Ok(()))) => {
                 self.checkout
                     .inner
                     .checkpoint_blockers
                     .finish(self.checkout.worker.id);
                 return Ok(());
             }
-            Ok(Err(error)) => error,
-            Err(RecvTimeoutError::Disconnected) => ReaderWorkerError::WorkerClosed,
-            Err(RecvTimeoutError::Timeout) => {
+            Some(Ok(Err(error))) => error,
+            Some(Err(_)) => ReaderWorkerError::WorkerClosed,
+            None => {
                 self.checkout.deferred_end = Some(receive);
                 ReaderWorkerError::WorkerClosed
             }
@@ -331,7 +322,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         Err(error)
     }
 
-    fn defer_snapshot_end(&mut self, receive: Receiver<Result<(), ReaderWorkerError>>) {
+    fn defer_snapshot_end(&mut self, receive: SnapshotEndReply) {
         self.checkout
             .inner
             .checkpoint_blockers
@@ -351,16 +342,16 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
                 return;
             }
         };
-        match receive.recv_timeout(SNAPSHOT_END_GRACE) {
-            Ok(Ok(())) => self
+        match end_reply_within(&receive, SNAPSHOT_END_GRACE) {
+            Some(Ok(Ok(()))) => self
                 .checkout
                 .inner
                 .checkpoint_blockers
                 .finish(self.checkout.worker.id),
-            Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => {
+            Some(Ok(Err(_)) | Err(_)) => {
                 self.checkout.retire = true;
             }
-            Err(RecvTimeoutError::Timeout) => self.defer_snapshot_end(receive),
+            None => self.defer_snapshot_end(receive),
         }
     }
 }
@@ -393,21 +384,28 @@ impl<E: ReaderQueryExecutor> Drop for SnapshotLease<'_, E> {
     }
 }
 
-fn finish_deferred_return<E: ReaderQueryExecutor>(
+fn end_reply_within(
+    receive: &SnapshotEndReply,
+    bound: Duration,
+) -> Option<Result<Result<(), ReaderWorkerError>, async_channel::RecvError>> {
+    crate::storage_pool::wait_until(receive.recv(), Some(Instant::now() + bound))
+}
+
+async fn finish_deferred_return<E: ReaderQueryExecutor>(
     inner: Arc<PoolInner<E>>,
     lane: ReaderLane,
     mut worker: AvailableWorker,
-    receive: Receiver<Result<(), ReaderWorkerError>>,
+    receive: SnapshotEndReply,
 ) {
     let checkpoint_blockers = inner.checkpoint_blockers.clone();
     let reader_id = worker.id;
-    // Bounded, not open-ended. An unbounded `recv()` here parks this thread
-    // for the life of the process against a worker that never answers, and the
-    // limbo slot it holds never clears, so the lane runs one worker short and
+    // Bounded, not open-ended. An unbounded wait here holds this task for the
+    // life of the process against a worker that never answers, and the limbo
+    // slot it holds never clears, so the lane runs one worker short and
     // shutdown cannot converge. Past the bound the worker is written off.
     let returned = matches!(
-        receive.recv_timeout(DEFERRED_SNAPSHOT_END_LIMIT),
-        Ok(Ok(()))
+        crate::storage_pool::timeout(DEFERRED_SNAPSHOT_END_LIMIT, receive.recv()).await,
+        Some(Ok(Ok(())))
     );
     if returned {
         // Rollback is acknowledged. Release this snapshot's blocker before
@@ -437,7 +435,7 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
     if let Some(mut record) = discarded {
         record.client.shutdown();
         if let Some(join) = record.join.take() {
-            let _ = join.join();
+            let _ = join.finished().await;
         }
     }
     if !returned {
@@ -445,33 +443,19 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
     }
 }
 
-type DeferredReturnTask = Box<dyn FnOnce() + Send + 'static>;
-
-fn spawn_or_run_deferred_return(
-    task: DeferredReturnTask,
-    spawn: impl FnOnce(DeferredReturnTask) -> std::io::Result<JoinHandle<()>>,
-) {
-    // `Builder::spawn` does not return the closure on failure. Keep the real
-    // return task recoverable so worker capacity cannot disappear silently.
-    let pending = Arc::new(Mutex::new(Some(task)));
-    let threaded = Arc::clone(&pending);
-    let wrapper: DeferredReturnTask = Box::new(move || {
-        if let Some(task) = threaded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            task();
-        }
-    });
-    if spawn(wrapper).is_err() {
-        let task = pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(task) = task {
-            task();
-        }
+fn spawn_or_run_deferred_return<F>(
+    task: F,
+    spawn: impl FnOnce(F) -> Result<crate::storage_pool::PoolTask, F>,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let Err(task) = spawn(task) else {
+        return;
+    };
+    if crate::storage_pool::on_pool() {
+        crate::storage_pool::adopt(task);
+    } else {
+        crate::storage_pool::wait_until(task, None);
     }
 }
 #[cfg(test)]
@@ -485,15 +469,30 @@ mod deferred_return_spawn_tests {
         let ran = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&ran);
 
-        spawn_or_run_deferred_return(
-            Box::new(move || observed.store(true, Ordering::Release)),
-            |task| {
-                drop(task);
-                Err(std::io::Error::other("injected spawn failure"))
-            },
-        );
+        spawn_or_run_deferred_return(async move { observed.store(true, Ordering::Release) }, Err);
 
         assert!(ran.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_refused_deferred_return_on_a_pool_thread_still_runs_to_completion() {
+        let (done, finished) = std::sync::mpsc::channel();
+        crate::storage_pool::spawn(async move {
+            spawn_or_run_deferred_return(
+                async move {
+                    crate::storage_pool::sleep(Duration::from_millis(20)).await;
+                    let _ = done.send(());
+                },
+                Err,
+            );
+        })
+        .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(10)),
+            Ok(()),
+            "a pool thread must finish the return it could not spawn, not drop it"
+        );
     }
 }
 
@@ -514,7 +513,7 @@ mod snapshot_return_tests {
     /// grace.
     fn acknowledge_deferred_end<E: ReaderQueryExecutor>(lease: &mut super::ReaderLease<E>) {
         if let Some(end) = lease.checkout.deferred_end.take() {
-            end.recv().unwrap().unwrap();
+            end.recv_blocking().unwrap().unwrap();
             lease
                 .checkout
                 .inner

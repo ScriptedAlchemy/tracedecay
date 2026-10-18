@@ -235,7 +235,7 @@ pub fn sqlite_database_path(path: &Path) -> std::result::Result<PathBuf, SqliteD
         })?;
     #[cfg(windows)]
     let absolute = extended_length_path(&absolute);
-    let limit = sqlite_default_vfs_max_pathname().ok_or_else(|| {
+    let limit = tracedecay_rusqlite_runtime::default_vfs_max_pathname().ok_or_else(|| {
         SqliteDatabasePathError::VfsUnavailable {
             path: absolute.clone(),
         }
@@ -251,17 +251,6 @@ pub fn sqlite_database_path(path: &Path) -> std::result::Result<PathBuf, SqliteD
         });
     }
     Ok(absolute)
-}
-
-/// `mxPathname` of `SQLite`'s default VFS: the longest full pathname it opens.
-fn sqlite_default_vfs_max_pathname() -> Option<usize> {
-    // SAFETY: `sqlite3_vfs_find` initializes SQLite on first use and returns
-    // either null or a pointer to a registered VFS that lives for the rest of
-    // the process; only its immutable `mxPathname` field is read.
-    let vfs = unsafe { rusqlite::ffi::sqlite3_vfs_find(std::ptr::null()) };
-    // SAFETY: a non-null `vfs` points at a registered, never-freed VFS.
-    let max_pathname = unsafe { vfs.as_ref() }?.mxPathname;
-    usize::try_from(max_pathname).ok()
 }
 
 /// Drops `.` and resolves `..` lexically, without touching the filesystem.

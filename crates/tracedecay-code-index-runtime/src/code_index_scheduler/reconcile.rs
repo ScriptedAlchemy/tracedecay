@@ -16,9 +16,8 @@ use gix::{
     object::tree::diff::{Action as TreeDiffAction, Change as TreeDiffChange},
 };
 use thiserror::Error;
-use tracedecay_application::code_index::{
-    DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
-};
+use tracedecay_application::code_index::DaemonCodeIndexControlV1;
+use tracedecay_code_index::production::CodeIndexProductionOwnerV1;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeIndexScopeStoreResetV1, DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
 };
@@ -69,7 +68,7 @@ use super::{
     CodeGraphActivationStateV1, CodeGraphReplayBindingV1, CodeIndexBuildProgressSlotStateV1,
     CodeIndexBuildProgressSlotV1, CodeIndexBuildProgressStateV1, CodeIndexHintPolicyV1,
     CodeIndexIgnoredDependencyRefusalV1, CodeTextProjectionStateV1,
-    DaemonCodeIndexPublicationStoreV1, DaemonCodeTextArtifactStoreV1, DaemonProjectionSinkV1,
+    DaemonCodeIndexPublicationStoreV1, DaemonCodeTextArtifactStoreV1,
     DurableActiveSealedGenerationBindingV1, GenerationDecodeAdmissionV1, GenerationServingCachesV1,
     GenerationTextControlV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
     SharedCodeIndexBytePoolV1, branch_generations, classification, file_occurrence_id,
@@ -85,8 +84,7 @@ const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
 pub(super) const CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1: &str = "code-index-build-workers-v1";
 
 const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
-type ProductionOwner =
-    ProductionCodeIndexOwnerV1<DaemonCodeIndexPublicationStoreV1, DaemonProjectionSinkV1>;
+type ProductionOwner = CodeIndexProductionOwnerV1<DaemonCodeIndexPublicationStoreV1>;
 
 #[derive(Default)]
 pub(super) struct PendingHintsV1 {
@@ -579,12 +577,16 @@ impl SourceFreshnessFenceV1 {
             .clone()
     }
 
+    /// `source_epoch` is the epoch the verification began under, not the
+    /// epoch now: a hint that lands while the source is being verified is not
+    /// covered by that verification.
     fn mark_reconciled(
         &self,
         git_metadata: identity::GitMetadataFingerprintV1,
         source_witness: Option<ReconciledSourceWitnessV1>,
         source_roster: &[CodeIndexIgnoredSourceAdmissionV1],
         reconciled_without_generation: bool,
+        source_epoch: u64,
     ) {
         let micros = now_micros().0;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -594,7 +596,7 @@ impl SourceFreshnessFenceV1 {
         state.last_reconciled_at = Instant::now();
         state.verified_against_source = true;
         state.reconciled_without_generation = reconciled_without_generation;
-        state.reconciled_source_epoch = self.source_epoch.load(Ordering::Acquire);
+        state.reconciled_source_epoch = source_epoch;
         state.successor_build_in_flight = false;
         self.last_reconciled_at_micros
             .store(micros, Ordering::Release);
@@ -934,6 +936,10 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// tests; production never installs one.
     #[cfg(test)]
     reconcile_fault: Option<Arc<reconcile_panic_guard::ReconcileFaultInjectionV1>>,
+    /// Test-only: runs once a retained reconcile has verified the sealed bytes,
+    /// before it accepts them, so a test can land a hint inside that window.
+    #[cfg(test)]
+    after_retained_source_check: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Process resident-memory authority artifact builds and readers reserve
     /// through. Standalone opens get a private default-limit authority; the
     /// registry rebinds its shared process authority at mount.
@@ -1273,13 +1279,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             privacy_key_epoch: 1,
             max_snapshot_age_micros: None,
         };
-        let owner = open_production_code_index_owner_v1(
-            production_config.clone(),
-            publication.clone(),
-            DaemonProjectionSinkV1,
-        )
-        .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
-        .with_physical_artifact_pool(byte_pool.physical_artifacts.clone());
+        let owner = CodeIndexProductionOwnerV1::new(production_config.clone(), publication.clone())
+            .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
+            .with_physical_artifact_pool(byte_pool.physical_artifacts.clone());
         let latest_content_identity = None;
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
@@ -1302,6 +1304,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             byte_pool,
             #[cfg(test)]
             reconcile_fault: None,
+            #[cfg(test)]
+            after_retained_source_check: None,
             resident_memory: Arc::new(ProcessResidentMemoryV1::new(
                 detected_process_resident_memory_limit_v1(),
             )),
@@ -1812,6 +1816,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
+        let began_under = self.epoch.load(Ordering::Acquire);
         {
             let hints = self
                 .hints
@@ -1901,7 +1906,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         let snapshot_content_identity = generation.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        self.mark_reconciled(source_manifest);
+        self.mark_reconciled(source_manifest, began_under);
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
             CodeIndexNoopEvidenceV1 {
                 snapshot_content_identity,
@@ -2086,6 +2091,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         }
         let scope = CodeIndexGenerationScopeV1::for_snapshot(pending.snapshot());
+        let began_under = control.expected_epoch();
         let mut publication = self
             .publication
             .for_undecoded_active_rebuild(&pointer)
@@ -2100,6 +2106,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             stat_signature
                 .clone()
                 .map(|signature| ReconciledSourceWitnessV1::new(signature, generation.snapshot())),
+            began_under,
         );
         self.persist_published_witness(generation.metadata(), &git_metadata, stat_signature)?;
         let outcome = CodeIndexReconcileOutcomeV1::Published(self.publish_evidence(
@@ -2123,6 +2130,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         stat_signature: String,
         source_manifest: SourceContentManifestV1,
         prior_witness: Option<&RestoreFreshnessWitnessV1>,
+        began_under: u64,
     ) -> CodeIndexReconcileOutcomeV1 {
         let snapshot_content_identity = metadata.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
@@ -2132,6 +2140,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 stat_signature: stat_signature.clone(),
                 content_manifest: source_manifest,
             }),
+            began_under,
         );
         if let Some(prior) = prior_witness {
             RestoreFreshnessWitnessV1 {
@@ -2158,6 +2167,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
+        let began_under = self.epoch.load(Ordering::Acquire);
         if let Some(outcome) = self.republish_unpublished_retained_generation()? {
             return Ok(Some(outcome));
         }
@@ -2207,6 +2217,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         let source_manifest = SourceContentManifestV1::for_snapshot(metadata.snapshot());
         let sealed_bytes_match =
             retained_is_reusable && !has_hints && self.sources_match_manifest(&source_manifest);
+        #[cfg(test)]
+        if let Some(hook) = self.after_retained_source_check.clone() {
+            hook();
+        }
         let quiet_witness = sealed_bytes_match
             && witness.as_ref().is_some_and(|witness| {
                 witness.git_metadata_signature == sampled_metadata.stable_signature()
@@ -2242,6 +2256,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 sampled_sweep.signature,
                 source_manifest,
                 witness.as_ref(),
+                began_under,
             )));
         }
 
@@ -2388,13 +2403,12 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .map_err(CodeIndexProductionErrorV1::Publication)?;
                 CodeIndexPublishedBuildV1::new(pending, manifest_bytes)?
             } else {
-                let mut owner = open_production_code_index_owner_v1(
-                    self.production_config.clone(),
-                    publication,
-                    DaemonProjectionSinkV1,
-                )
-                .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
-                .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
+                let mut owner =
+                    CodeIndexProductionOwnerV1::new(self.production_config.clone(), publication)
+                        .map_err(|error| {
+                            CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string())
+                        })?
+                        .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
                 owner
                     .build_and_publish(
                         CodeIndexBuildRequestV1 {
@@ -2418,6 +2432,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 stat_signature.clone().map(|signature| {
                     ReconciledSourceWitnessV1::new(signature, generation.snapshot())
                 }),
+                control.expected_epoch(),
             );
             self.persist_published_witness(generation.metadata(), &git_metadata, stat_signature)?;
             let outcome = CodeIndexReconcileOutcomeV1::Published(self.publish_evidence(
@@ -2434,7 +2449,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map(|signature| ReconciledSourceWitnessV1::new(signature, &captured.snapshot));
         let snapshot_content_identity = captured.snapshot.content_identity;
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        self.mark_reconciled_retained_generation_state(git_metadata.clone(), source_witness);
+        self.mark_reconciled_retained_generation_state(
+            git_metadata.clone(),
+            source_witness,
+            control.expected_epoch(),
+        );
         if let (Some(witness), Some(stat_signature)) = (witness, stat_signature) {
             RestoreFreshnessWitnessV1 {
                 generation_id: witness.generation_id,
@@ -2732,6 +2751,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map(|pointer| pointer.generation_id)
     }
 
+    #[cfg(test)]
+    pub(super) fn install_after_retained_source_check_for_test(
+        &mut self,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        self.after_retained_source_check = Some(hook);
+    }
+
     /// Install a deterministic reconcile fault for one mounted worktree so a
     /// test can drive the real background worker loop over a pass that panics
     /// or fails, and count the attempts the loop actually makes.
@@ -2864,6 +2891,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
             let control = self.reconcile_control();
+            // Every earlier attempt was cancelled by a newer source epoch. A
+            // source that changes faster than a pass lasts would cancel this
+            // one too, so it seals what it captured; the epoch that
+            // superseded it stays owed to the follow-up pass.
+            let control = if retry == MAX_SUPERSEDED_RECONCILE_RETRIES {
+                control.ignoring_source_epoch()
+            } else {
+                control
+            };
             let mut captured = match capture(self, &control) {
                 Ok(captured) => captured,
                 Err(CodeIndexSchedulerErrorV1::Production(
@@ -2886,7 +2922,15 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .hints
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                (!control.is_cancelled()).then(|| hints.take())
+                (!control.is_cancelled()).then(|| {
+                    if control.source_superseded() {
+                        // The arrival that superseded this capture is not in
+                        // it: leave its marker for the follow-up pass.
+                        PendingHintsV1::default()
+                    } else {
+                        hints.take()
+                    }
+                })
             };
             let Some(hints) = hints else {
                 stop_if_resident_memory(&control)?;
@@ -2940,7 +2984,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 drop(std::mem::take(&mut captured.captured_files));
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
-                self.mark_reconciled(SourceContentManifestV1::for_snapshot(&captured.snapshot));
+                self.mark_reconciled(
+                    SourceContentManifestV1::for_snapshot(&captured.snapshot),
+                    control.expected_epoch(),
+                );
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
                     overflow_reconciled,
@@ -3014,7 +3061,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
-                    self.mark_reconciled(source_manifest);
+                    self.mark_reconciled(source_manifest, control.expected_epoch());
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                         snapshot_content_identity,
                         overflow_reconciled,
@@ -3024,7 +3071,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             };
             self.require_reusable_publication(&generation)?;
             self.latest_content_identity = Some(snapshot_content_identity);
-            self.mark_reconciled(source_manifest);
+            self.mark_reconciled(source_manifest, control.expected_epoch());
             return Ok(CodeIndexReconcileOutcomeV1::Published(
                 self.publish_evidence(&generation, reextracted_files, overflow_reconciled),
             ));
@@ -3034,7 +3081,14 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// Record that the worktree was just reconciled against `source_manifest`,
     /// the per-file digests of the snapshot this pass captured or verified.
-    pub(super) fn mark_reconciled(&mut self, source_manifest: SourceContentManifestV1) {
+    /// `source_epoch` is the epoch that pass began under. A pass that sealed
+    /// or verified past a newer epoch proves only that one, so freshness keeps
+    /// reporting the source as moved until the follow-up pass.
+    pub(super) fn mark_reconciled(
+        &mut self,
+        source_manifest: SourceContentManifestV1,
+        source_epoch: u64,
+    ) {
         let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
         let source_witness =
             self.worktree_stat_signature()
@@ -3043,7 +3097,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     stat_signature,
                     content_manifest: source_manifest,
                 });
-        self.mark_reconciled_state(metadata, source_witness);
+        self.mark_reconciled_state(metadata, source_witness, source_epoch);
         self.persist_freshness_witness();
     }
 
@@ -3051,6 +3105,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         &mut self,
         metadata: identity::GitMetadataFingerprintV1,
         source_witness: Option<ReconciledSourceWitnessV1>,
+        source_epoch: u64,
     ) {
         let reconciled_without_generation = self
             .publication
@@ -3061,6 +3116,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             source_witness,
             &self.ignored_source_admissions,
             reconciled_without_generation,
+            source_epoch,
         );
     }
 
@@ -3068,12 +3124,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         &mut self,
         metadata: identity::GitMetadataFingerprintV1,
         source_witness: Option<ReconciledSourceWitnessV1>,
+        source_epoch: u64,
     ) {
         self.freshness_fence.mark_reconciled(
             metadata,
             source_witness,
             &self.ignored_source_admissions,
             false,
+            source_epoch,
         );
     }
 
@@ -3443,6 +3501,11 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub fn verified_against_source(&self) -> bool {
         self.freshness_fence.verified_against_source()
+    }
+
+    #[cfg(test)]
+    pub(super) fn source_change_pending_for_test(&self) -> bool {
+        self.freshness_fence.source_change_pending()
     }
 
     /// True when reconciliation has verified the live worktree against source
