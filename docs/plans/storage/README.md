@@ -760,6 +760,19 @@ changes a file that holds memory.
     behind interactive writers instead of retrying `Busy`. `set_metadata`, the
     retrieval-anchor disposition and derivative writes, and
     `execute_write_engine` and `execute_write_batch` run as jobs.
+- Step 5i-3, global-db configuration and rollup writes (2026-10-18, branch
+  `refactor/storage-global-db-config-jobs`). `RegisteredGlobalDb::transact` runs a
+  body as one writer job over `Database::transact`, handing it a
+  `RegisteredGlobalDbWriteTx` that implements the executor traits, so the existing
+  `&impl Executor` helpers run in it unchanged. It checks the daemon write scope
+  before queueing; the runtime verifies the same authority again at COMMIT, so a
+  scope that ends mid-body rolls the job back. The configuration store, control and
+  revision writes and the observability rollup rebuild, claim, release, frontier
+  and compaction writes now use it. The interactive transaction stays for the other
+  global-db sites, which move in the next slices. Bodies are `Fn`, so each site
+  clones what it owns into the closure. A rollup rebuild that finds its stored
+  receipt still ends by rolling back, so replay does not advance the transaction
+  generation.
 - #4138 (2026-10-16). Shutdown store close waits up to 3 s for leases to drain
   before deciding a store's WAL cannot be truncated. Under load, owners joined
   before store close could still be unwinding the tasks that held their leases,

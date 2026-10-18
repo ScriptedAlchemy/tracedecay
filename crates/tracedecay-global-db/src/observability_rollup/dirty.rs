@@ -1,8 +1,10 @@
-use tracedecay_runtime_core::db::engine::QueryExecutor;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
 use crate::RegisteredGlobalDb;
 
-use super::{ObservabilityRollupDirtyDayClaimV1, validate_day, validate_identifier};
+use super::{
+    ObservabilityRollupDirtyDayClaimV1, transact_rollup, validate_day, validate_identifier,
+};
 
 impl RegisteredGlobalDb {
     /// Leases the oldest dirty execution-topology day for one exact scope.
@@ -24,13 +26,15 @@ impl RegisteredGlobalDb {
         if lease_seconds == 0 || lease_seconds > 300 {
             return Err("invalid observability rollup dirty-day lease".to_owned());
         }
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin observability dirty-day claim: {error}"))?;
-        let mut rows = transaction
-            .query(
-                "UPDATE observability_rollup_dirty_days
+        let scope = authorized_scope_ref.to_owned();
+        let claimant = claimant_id.to_owned();
+        transact_rollup(
+            self,
+            "claim observability dirty day",
+            async move |transaction| {
+                let mut rows = transaction
+                    .query(
+                        "UPDATE observability_rollup_dirty_days
                  SET claimant_id = ?2, lease_until_seconds = unixepoch() + ?3
                  WHERE rowid = (
                     SELECT rowid FROM observability_rollup_dirty_days
@@ -41,44 +45,41 @@ impl RegisteredGlobalDb {
                  )
                  RETURNING scope_ref, day_start_seconds, source_watermark,
                            claimant_id, lease_until_seconds",
-                tracedecay_runtime_core::db::engine::params![
-                    authorized_scope_ref,
-                    claimant_id,
-                    i64::from(lease_seconds)
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to claim observability dirty day: {error}"))?;
-        let claim = match rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read observability dirty-day claim: {error}"))?
-        {
-            Some(row) => Some(ObservabilityRollupDirtyDayClaimV1 {
-                authorized_scope_ref: row
-                    .get(0)
-                    .map_err(|error| format!("failed to decode dirty-day scope: {error}"))?,
-                day_start_seconds: row
-                    .get(1)
-                    .map_err(|error| format!("failed to decode dirty-day bucket: {error}"))?,
-                source_watermark: row
-                    .get(2)
-                    .map_err(|error| format!("failed to decode dirty-day watermark: {error}"))?,
-                claimant_id: row
-                    .get(3)
-                    .map_err(|error| format!("failed to decode dirty-day claimant: {error}"))?,
-                lease_until_seconds: row
-                    .get(4)
-                    .map_err(|error| format!("failed to decode dirty-day lease: {error}"))?,
-            }),
-            None => None,
-        };
-        drop(rows);
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit observability dirty-day claim: {error}"))?;
-        Ok(claim)
+                        tracedecay_runtime_core::db::engine::params![
+                            scope.as_str(),
+                            claimant.as_str(),
+                            i64::from(lease_seconds)
+                        ],
+                    )
+                    .await
+                    .map_err(|error| format!("failed to claim observability dirty day: {error}"))?;
+                let claim = match rows.next().await.map_err(|error| {
+                    format!("failed to read observability dirty-day claim: {error}")
+                })? {
+                    Some(row) => Some(ObservabilityRollupDirtyDayClaimV1 {
+                        authorized_scope_ref: row.get(0).map_err(|error| {
+                            format!("failed to decode dirty-day scope: {error}")
+                        })?,
+                        day_start_seconds: row.get(1).map_err(|error| {
+                            format!("failed to decode dirty-day bucket: {error}")
+                        })?,
+                        source_watermark: row.get(2).map_err(|error| {
+                            format!("failed to decode dirty-day watermark: {error}")
+                        })?,
+                        claimant_id: row.get(3).map_err(|error| {
+                            format!("failed to decode dirty-day claimant: {error}")
+                        })?,
+                        lease_until_seconds: row.get(4).map_err(|error| {
+                            format!("failed to decode dirty-day lease: {error}")
+                        })?,
+                    }),
+                    None => None,
+                };
+                drop(rows);
+                Ok(claim)
+            },
+        )
+        .await
     }
 
     /// Releases one exact lease after a bounded rebuild attempt could not
@@ -93,31 +94,34 @@ impl RegisteredGlobalDb {
         claim: &ObservabilityRollupDirtyDayClaimV1,
     ) -> Result<bool, String> {
         validate_dirty_claim(claim)?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin observability dirty-day release: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE observability_rollup_dirty_days
+        let claim = claim.clone();
+        transact_rollup(
+            self,
+            "release observability dirty day",
+            async move |transaction| {
+                let changed = transaction
+                    .execute(
+                        "UPDATE observability_rollup_dirty_days
                  SET claimant_id = NULL, lease_until_seconds = NULL
                  WHERE scope_ref = ?1 AND day_start_seconds = ?2
                    AND source_watermark = ?3 AND claimant_id = ?4
                    AND lease_until_seconds = ?5",
-                tracedecay_runtime_core::db::engine::params![
-                    claim.authorized_scope_ref.as_str(),
-                    claim.day_start_seconds,
-                    claim.source_watermark,
-                    claim.claimant_id.as_str(),
-                    claim.lease_until_seconds
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to release observability dirty day: {error}"))?;
-        transaction.commit().await.map_err(|error| {
-            format!("failed to commit observability dirty-day release: {error}")
-        })?;
-        Ok(changed == 1)
+                        tracedecay_runtime_core::db::engine::params![
+                            claim.authorized_scope_ref.as_str(),
+                            claim.day_start_seconds,
+                            claim.source_watermark,
+                            claim.claimant_id.as_str(),
+                            claim.lease_until_seconds
+                        ],
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("failed to release observability dirty day: {error}")
+                    })?;
+                Ok(changed == 1)
+            },
+        )
+        .await
     }
 }
 
