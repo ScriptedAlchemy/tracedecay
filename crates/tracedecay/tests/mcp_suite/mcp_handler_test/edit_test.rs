@@ -874,3 +874,33 @@ async fn test_insert_at_ambiguous_anchor() {
             .contains("matches 2 lines")
     );
 }
+
+#[tokio::test]
+async fn insert_at_requires_the_complete_long_anchor() {
+    let dir = test_temp_dir();
+    let project = dir.path().join("project");
+    fs::create_dir_all(project.join("src")).unwrap();
+    let prefix = format!("// {}", "a".repeat(100));
+    let original = format!("{prefix}old\n{prefix}unique\n");
+    fs::write(project.join("src/main.rs"), &original).unwrap();
+    let cg = init_test_project(&project).await;
+    for (suffix, success) in [("absent", false), ("unique", true)] {
+        let result = handle_tool_call(
+            &cg,
+            "tracedecay_insert_at",
+            json!({
+                "path": "src/main.rs", "anchor": format!("{prefix}{suffix}"),
+                "content": "// insert", "before": true, "dry_run": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        assert_eq!(parsed["success"], success, "{parsed}");
+    }
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.rs")).unwrap(),
+        original
+    );
+}

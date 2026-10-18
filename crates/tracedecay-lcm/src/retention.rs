@@ -473,6 +473,18 @@ async fn commit_authorized(
     authorize: Option<&RetentionAuthorization<'_>>,
     intent: &str,
 ) -> Result<(), LcmError> {
+    commit_authorized_with_on_commit(transaction, authorize, intent, || {}).await
+}
+
+async fn commit_authorized_with_on_commit<F>(
+    transaction: RetentionWriteTransaction<'_>,
+    authorize: Option<&RetentionAuthorization<'_>>,
+    intent: &str,
+    on_commit: F,
+) -> Result<(), LcmError>
+where
+    F: FnOnce() + Send + 'static,
+{
     if let Some(authorize) = authorize
         && let Err(error) = authorize(intent)
     {
@@ -483,7 +495,7 @@ async fn commit_authorized(
             ))),
         };
     }
-    transaction.commit().await
+    transaction.commit_with_on_commit(on_commit).await
 }
 
 #[derive(Clone)]
@@ -517,14 +529,20 @@ enum RetentionWriteTransaction<'a> {
 }
 
 impl RetentionWriteTransaction<'_> {
-    async fn commit(self) -> Result<(), LcmError> {
+    async fn commit_with_on_commit<F>(self, on_commit: F) -> Result<(), LcmError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
         match self {
             Self::Database(transaction) => transaction
-                .commit()
+                .commit_with_on_commit(on_commit)
                 .await
                 .map_err(|error| LcmError::Db(error.to_string())),
             #[cfg(test)]
-            Self::Connection(transaction) => transaction.commit().await.map_err(Into::into),
+            Self::Connection(transaction) => transaction
+                .commit_with_on_commit(on_commit)
+                .await
+                .map_err(Into::into),
         }
     }
 
@@ -1060,8 +1078,13 @@ async fn offload_one(
             target.store_id
         )));
     }
-    commit_authorized(txn, authorize, "commit session retention offload pass").await?;
-    rollback.disarm();
+    commit_authorized_with_on_commit(
+        txn,
+        authorize,
+        "commit session retention offload pass",
+        move || rollback.disarm(),
+    )
+    .await?;
     Ok(byte_len)
 }
 

@@ -48,6 +48,12 @@ pub trait SessionExec: SessionQuery {
 /// Write transaction the session store can query, mutate, and commit.
 pub trait SessionWriteTxn: SessionExec {
     fn commit(self) -> impl Future<Output = Result<(), EngineError>> + Send;
+    fn commit_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send
+    where
+        F: FnOnce() + Send + 'static;
 }
 
 impl SessionQuery for DatabaseEngineReadSnapshot {

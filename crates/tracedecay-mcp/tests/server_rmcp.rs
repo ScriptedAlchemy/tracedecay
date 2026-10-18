@@ -53,6 +53,9 @@ struct TestContext {
     cancellation_registered: tokio::sync::Notify,
     cancellations: std::sync::Mutex<Vec<(Value, String)>>,
     dispatch_started: tokio::sync::Notify,
+    max_concurrent_reads: usize,
+    held: std::sync::atomic::AtomicUsize,
+    release: tokio::sync::Semaphore,
 }
 
 impl McpConnectionContext for TestContext {
@@ -73,7 +76,7 @@ impl McpConnectionContext for TestContext {
     }
 
     fn max_concurrent_reads(&self) -> usize {
-        2
+        self.max_concurrent_reads
     }
 
     fn tool_is_read_only(&self, _tool_name: &str) -> bool {
@@ -111,6 +114,15 @@ impl McpConnectionContext for TestContext {
                         .unwrap_or("outside the connection scope"),
                 ),
                 ("tools/call", Some("panic")) => panic!("tool handler exploded"),
+                ("tools/call", Some("hold")) => {
+                    self.held.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    self.release
+                        .acquire()
+                        .await
+                        .expect("release permit")
+                        .forget();
+                    call_tool_text("released")
+                }
                 ("tools/call", Some("wait_for_cancel")) => {
                     self.dispatch_started.notify_one();
                     cancellation.cancelled().await;
@@ -293,10 +305,17 @@ fn call_tool_text(text: &str) -> Value {
 }
 
 fn new_context() -> Arc<TestContext> {
+    new_context_admitting(2)
+}
+
+fn new_context_admitting(max_concurrent_reads: usize) -> Arc<TestContext> {
     Arc::new(TestContext {
         cancellation_registered: tokio::sync::Notify::new(),
         cancellations: std::sync::Mutex::new(Vec::new()),
         dispatch_started: tokio::sync::Notify::new(),
+        max_concurrent_reads,
+        held: std::sync::atomic::AtomicUsize::new(0),
+        release: tokio::sync::Semaphore::new(0),
     })
 }
 
@@ -753,4 +772,67 @@ async fn a_panicking_request_is_answered_and_its_session_keeps_serving() {
         json!("request_cancelled"),
         "{in_flight}"
     );
+}
+
+async fn wait_until_held(context: &TestContext, expected: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while context.held.load(std::sync::atomic::Ordering::Acquire) < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("requests did not reach dispatch");
+}
+
+#[tokio::test]
+async fn pipelined_requests_past_the_pending_bound_wait_unread_instead_of_failing() {
+    let bound = tracedecay_mcp::server::MAX_PENDING_REQUESTS;
+    // Execution admits everything, so only the session's own bound can hold
+    // a request back from dispatch.
+    let context = new_context_admitting(bound + 1);
+    let mut session = TestSession::initialized(&context, "2025-06-18").await;
+    for id in 1..=bound + 1 {
+        session
+            .send(&request_frame(
+                id as u64,
+                "tools/call",
+                json!({"name": "hold", "arguments": {}}),
+                None,
+            ))
+            .await;
+    }
+
+    wait_until_held(&context, bound).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), session.recv())
+            .await
+            .is_err(),
+        "a request past the bound must wait, not be refused"
+    );
+    assert_eq!(
+        context.held.load(std::sync::atomic::Ordering::Acquire),
+        bound,
+        "the session must not admit a request past its pending bound"
+    );
+
+    context.release.add_permits(1);
+    let first = session.recv().await.expect("a settled request is answered");
+    assert_eq!(
+        first["result"]["content"][0]["text"],
+        json!("released"),
+        "{first}"
+    );
+    wait_until_held(&context, bound + 1).await;
+
+    context.release.add_permits(bound);
+    let mut answered = std::collections::HashSet::from([first["id"].clone()]);
+    while answered.len() < bound + 1 {
+        let response = session.recv().await.expect("every request is answered");
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            json!("released"),
+            "{response}"
+        );
+        answered.insert(response["id"].clone());
+    }
 }
