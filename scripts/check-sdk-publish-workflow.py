@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -60,6 +60,12 @@ def validate(workflow: dict[str, Any]) -> None:
     triggers = workflow.get("on", workflow.get(True, {}))
     if not isinstance(triggers, dict) or set(triggers) != {"workflow_dispatch"}:
         fail("release publication must retain its validated dispatch entry point")
+    dispatch = triggers["workflow_dispatch"]
+    inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
+    release_tag = inputs.get("release_tag") if isinstance(inputs, dict) else None
+    if (not isinstance(release_tag, dict) or release_tag.get("required") is not True
+            or release_tag.get("type") != "string"):
+        fail("release dispatch must require a string release_tag input")
     jobs = workflow.get("jobs", {})
     if not {"validate-release", "verify-release", BUILD_JOB, PUBLISH_JOB} <= jobs.keys():
         fail("source validation, release verification, SDK build and publisher are required")
@@ -80,6 +86,9 @@ def validate(workflow: dict[str, Any]) -> None:
     if (options.get("ref") != SOURCE_SHA_REF or options.get("persist-credentials") is not False
             or "repository" in options or checkout.get("if") or checkout.get("continue-on-error")):
         fail("SDK checkout must use the validated source SHA without persisted credentials")
+    checkout_path = options.get("path", ".")
+    if not isinstance(checkout_path, str) or PurePosixPath(checkout_path) != PurePosixPath("."):
+        fail("SDK checkout must place the validated source at the workspace root")
     if any(secret in str((build, build_steps)) for secret in ("secrets.", "github.token")):
         fail("SDK build must not receive repository credentials")
 

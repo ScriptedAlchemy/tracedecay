@@ -38,6 +38,27 @@ class SdkPublishBoundaryTests(unittest.TestCase):
                 step["run"] = "./scripts/check-and-pack-sdk.sh"
         CHECKER.validate(self.workflow)
 
+    def test_dispatch_requires_an_explicit_string_release_tag(self) -> None:
+        triggers = self.workflow.get("on", self.workflow.get(True))
+        inputs = triggers["workflow_dispatch"]["inputs"]
+        original = inputs.pop("release_tag")
+        self.assert_rejected("require a string release_tag")
+        for field, value in (("required", False), ("type", "boolean")):
+            with self.subTest(field=field):
+                inputs["release_tag"] = {**original, field: value}
+                self.assert_rejected("require a string release_tag")
+        inputs["release_tag"] = original
+        inputs["reason"] = {"description": "Recovery reason", "type": "string", "required": False}
+        CHECKER.validate(self.workflow)
+
+    def test_validated_checkout_must_occupy_the_build_workspace(self) -> None:
+        checkout = self.build["steps"][0]["with"]
+        checkout["path"] = "validated-source"
+        self.assert_rejected("workspace root")
+        checkout["path"] = "./"
+        checkout["fetch-depth"] = 0
+        CHECKER.validate(self.workflow)
+
     def test_build_cannot_substitute_mutable_source_or_repository(self) -> None:
         checkout = self.build["steps"][0]["with"]
         checkout["ref"] = "master"
