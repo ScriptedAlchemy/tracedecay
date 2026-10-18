@@ -64,8 +64,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    JournalFoldV1, WorkProductJournalEntryV1, WorkProductPublishedVersionV1, load_covered_journal,
-    verified_version,
+    FromStoreFault, JournalFoldV1, WorkProductJournalEntryV1, WorkProductPublishedVersionV1,
+    load_covered_journal, verified_version,
 };
 use crate::work::WorkSqliteStorage;
 
@@ -144,7 +144,7 @@ fn read_graph(
     // ones inside. The read is answered over the covered prefix and carries
     // the coverage that says what was left out, so a caller can never
     // mistake a slice for the whole.
-    let covered = load_covered_journal(storage.handle(), scope).ok_or(PortError::Unavailable)?;
+    let covered = load_covered_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
     let selection_coverage = covered.coverage;
     if covered.published.is_empty() && !covered.journal.is_empty() {
         return Err(PortError::Unavailable);

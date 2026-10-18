@@ -6,7 +6,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{TaskId, WorkProductGraphV1};
 
-use super::{fold_graph, load_covered_journal, verified_version};
+use super::{FromStoreFault, fold_graph, load_covered_journal, verified_version};
 use crate::work::WorkSqliteStorage;
 
 impl WorkEvidenceRootReadPortV1 for WorkSqliteStorage {
@@ -69,7 +69,7 @@ fn verified_graph(
     // a version folded across an event outside the selection never existed
     // under it, while a version inside the covered prefix stays readable.
     let covered = load_covered_journal(storage.handle(), scope)
-        .ok_or(WorkEvidenceRootReadErrorV1::Unavailable)?;
+        .map_err(WorkEvidenceRootReadErrorV1::from_fault)?;
     let (journal, published) = (covered.journal, covered.published);
     let Some(version) = published
         .iter()

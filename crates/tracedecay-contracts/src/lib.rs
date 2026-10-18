@@ -556,7 +556,7 @@ pub use work_product::{
     WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
     WorkProductPortContextV1, WorkProductReadServiceV1, WorkProductRetryAdmissionV1,
     WorkProductRevisionPinsV1, WorkProductSelectionScopeV1, WorkProductSynthesisAdmissionV1,
-    work_product_projection_generation,
+    WorkStorageFailureV1, work_product_projection_generation,
 };
 pub use work_retry::{
     RetryWorkAttemptCommandV1, RuntimeWorkRetryEvidenceV1, VerifiedWorkRetryFailureV1,

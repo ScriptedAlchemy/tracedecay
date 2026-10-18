@@ -23,17 +23,13 @@ use tracedecay_code_index::production::{
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
     SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
 };
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-};
 use tracedecay_domain::test_fixtures::id;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, FileOccurrenceId, LanguageId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
+    UtcMicros,
 };
 use tracedecay_graph_db::{GraphGenerationRowSpill, GraphNamespace, GraphProjectorRevision};
 
@@ -100,33 +96,6 @@ impl CodeIndexAtomicPublicationPort for Publication {
 
 fn decoded(built: &CodeIndexPublishedBuildV1) -> &CodeIndexPublishedGenerationV1 {
     built.decoded().expect("a build without a parent runs cold")
-}
-
-struct Projection;
-
-impl CodeChunkProjectionSink for Projection {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let decisions = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: ProjectionOperationV1::Added,
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .collect::<Vec<_>>();
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
 }
 
 struct Active;
@@ -308,7 +277,7 @@ fn decode(manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> CodeIndexPub
 fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     const PEAK_BUDGET_BYTES: usize = 19_000_000;
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
-    let built = CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+    let built = CodeIndexProductionOwnerV1::new(config(), Publication)
         .expect("owner")
         .build_and_publish(request(300), &Active)
         .expect("build");
@@ -368,15 +337,14 @@ fn a_full_build_leaves_live_only_what_its_generation_charges() {
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
     // Grammars and extractor registries initialize once per process.
     drop(
-        CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+        CodeIndexProductionOwnerV1::new(config(), Publication)
             .expect("owner")
             .build_and_publish(request(300), &Active)
             .expect("warm build"),
     );
 
     let before = LIVE.load(Ordering::Relaxed);
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), Publication, Projection).expect("owner");
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), Publication).expect("owner");
     let built = owner
         .build_and_publish(request(300), &Active)
         .expect("build");
@@ -397,13 +365,13 @@ fn a_full_build_leaves_live_only_what_its_generation_charges() {
 fn a_dropped_generation_leaves_nothing_once_the_pool_drops_its_dead_entries() {
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
     drop(
-        CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+        CodeIndexProductionOwnerV1::new(config(), Publication)
             .expect("owner")
             .build_and_publish(request(300), &Active)
             .expect("warm build"),
     );
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), Publication)
         .expect("owner")
         .with_physical_artifact_pool(pool.clone());
 
@@ -431,7 +399,7 @@ fn a_dropped_generation_leaves_nothing_once_the_pool_drops_its_dead_entries() {
 #[test]
 fn retained_bytes_account_for_what_a_decode_leaves_live() {
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
-    let built = CodeIndexProductionOwnerV1::new(config(), Publication, Projection)
+    let built = CodeIndexProductionOwnerV1::new(config(), Publication)
         .expect("owner")
         .build_and_publish(request(300), &Active)
         .expect("build");

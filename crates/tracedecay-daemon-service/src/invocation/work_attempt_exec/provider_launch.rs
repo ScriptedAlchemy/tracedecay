@@ -15,16 +15,25 @@
 //! drained by their own threads. The attempt's async side talks to the
 //! lifeline only through channels, which wake through ordinary `Waker`s on any
 //! executor.
+//!
+//! A descendant can keep the pipes open after the provider exits. The lifeline
+//! therefore keeps the group signalable until the readers finish, and
+//! [`ProviderProcess::abandon_output`] releases readers whose pipe never
+//! closes, so the attempt's deadline and cancellation bound the whole drain.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::process::{Child, ChildStdin, Command, ExitStatus};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    mpsc::{self, RecvTimeoutError},
+};
 use std::time::Duration;
 
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use super::TerminationSignal;
-use super::provider_output::read_capped;
+use super::provider_output::{CapturedPipe, read_capped};
 
 /// How long the lifeline waits for a control message before checking whether
 /// the provider exited.
@@ -38,12 +47,28 @@ enum Control {
     Signal(TerminationSignal),
 }
 
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
 /// A live provider. Dropping it SIGKILLs the provider's process group.
 pub(super) struct ProviderProcess {
     control: mpsc::Sender<Control>,
     exited: oneshot::Receiver<io::Result<ExitStatus>>,
-    stdout: oneshot::Receiver<Captured>,
-    stderr: oneshot::Receiver<Captured>,
+    exit: Option<Result<ExitStatus, io::ErrorKind>>,
+    captures: async_mpsc::UnboundedReceiver<(Stream, Captured)>,
+    undrained: u8,
+    stdout: Captured,
+    stderr: Captured,
+    stop_readers: Arc<AtomicBool>,
+}
+
+impl Drop for ProviderProcess {
+    fn drop(&mut self) {
+        self.abandon_output();
+    }
 }
 
 impl ProviderProcess {
@@ -59,8 +84,10 @@ impl ProviderProcess {
         let (spawned_tx, spawned) = oneshot::channel();
         let (control, control_rx) = mpsc::channel();
         let (exited_tx, exited) = oneshot::channel();
-        let (stdout_tx, stdout) = oneshot::channel();
-        let (stderr_tx, stderr) = oneshot::channel();
+        let (captures_tx, captures) = async_mpsc::unbounded_channel();
+        let stop_readers = Arc::new(AtomicBool::new(false));
+        let live_readers = Arc::new(AtomicUsize::new(2));
+        let stop = Arc::clone(&stop_readers);
         std::thread::Builder::new()
             .name("work-provider-lifeline".to_owned())
             .spawn(move || {
@@ -71,8 +98,20 @@ impl ProviderProcess {
                         return;
                     }
                 };
-                let readers = spawn_reader(child.stdout.take(), stdout_cap, stdout_tx)
-                    .and_then(|()| spawn_reader(child.stderr.take(), stderr_cap, stderr_tx));
+                let handles = ReaderHandles {
+                    captured: captures_tx,
+                    stop,
+                    live: Arc::clone(&live_readers),
+                };
+                let readers = spawn_reader(
+                    Stream::Stdout,
+                    child.stdout.take(),
+                    stdout_cap,
+                    handles.clone(),
+                )
+                .and_then(|()| {
+                    spawn_reader(Stream::Stderr, child.stderr.take(), stderr_cap, handles)
+                });
                 if let Err(error) = readers {
                     terminate(&mut child, TerminationSignal::Kill);
                     let _ = child.wait();
@@ -80,7 +119,9 @@ impl ProviderProcess {
                     return;
                 }
                 let _ = spawned_tx.send(Ok(()));
+                let group = child.id();
                 let _ = exited_tx.send(supervise(&mut child, &control_rx));
+                hold_group(group, &control_rx, &live_readers);
             })?;
         spawned
             .await
@@ -88,8 +129,12 @@ impl ProviderProcess {
         Ok(Self {
             control,
             exited,
-            stdout,
-            stderr,
+            exit: None,
+            captures,
+            undrained: 2,
+            stdout: None,
+            stderr: None,
+            stop_readers,
         })
     }
 
@@ -101,19 +146,54 @@ impl ProviderProcess {
         let _ = self.control.send(Control::Signal(signal));
     }
 
-    /// Waits for the provider to exit. Cancel-safe; never call it again once
-    /// it has returned.
+    /// Waits for the provider to exit. Cancel-safe and repeatable.
     pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
-        (&mut self.exited)
-            .await
-            .map_err(|_| io::Error::other("provider lifeline thread exited before the provider"))?
+        let exit = match self.exit {
+            Some(exit) => exit,
+            None => {
+                let exit = (&mut self.exited).await.map_err(|_| {
+                    io::Error::other("provider lifeline thread exited before the provider")
+                })?;
+                let exit = exit.map_err(|error| error.kind());
+                self.exit = Some(exit);
+                exit
+            }
+        };
+        exit.map_err(io::Error::from)
     }
 
-    /// The captured streams, once the provider and every descendant holding
-    /// its pipes have closed them.
-    pub(super) async fn output(self) -> (Captured, Captured) {
-        let Self { stdout, stderr, .. } = self;
-        (stdout.await.ok().flatten(), stderr.await.ok().flatten())
+    /// Waits until every descendant holding the provider's pipes has closed
+    /// them, or [`Self::abandon_output`] released the readers. Cancel-safe and
+    /// repeatable.
+    pub(super) async fn drain(&mut self) {
+        while self.undrained > 0 {
+            let Some((stream, captured)) = self.captures.recv().await else {
+                break;
+            };
+            self.undrained -= 1;
+            match stream {
+                Stream::Stdout => self.stdout = captured,
+                Stream::Stderr => self.stderr = captured,
+            }
+        }
+    }
+
+    /// Waits for the provider to exit and its pipes to close.
+    pub(super) async fn finish(&mut self) -> io::Result<ExitStatus> {
+        let status = self.wait().await;
+        self.drain().await;
+        status
+    }
+
+    /// Tells readers still parked on an open pipe to stop. [`Self::drain`]
+    /// then completes promptly with whatever each stream held so far.
+    pub(super) fn abandon_output(&self) {
+        self.stop_readers.store(true, Ordering::Release);
+    }
+
+    /// The captured streams; a stream still undrained reads as absent.
+    pub(super) fn output(&mut self) -> (Captured, Captured) {
+        (self.stdout.take(), self.stderr.take())
     }
 }
 
@@ -141,18 +221,53 @@ fn supervise(child: &mut Child, control: &mpsc::Receiver<Control>) -> io::Result
     }
 }
 
+/// What a reader thread shares with the attempt and the lifeline.
+#[derive(Clone)]
+struct ReaderHandles {
+    captured: async_mpsc::UnboundedSender<(Stream, Captured)>,
+    stop: Arc<AtomicBool>,
+    live: Arc<AtomicUsize>,
+}
+
 fn spawn_reader(
-    stream: Option<impl Read + Send + 'static>,
+    which: Stream,
+    pipe: Option<impl CapturedPipe + Send + 'static>,
     cap: u64,
-    captured: oneshot::Sender<Captured>,
+    handles: ReaderHandles,
 ) -> io::Result<()> {
     std::thread::Builder::new()
         .name("work-provider-output".to_owned())
         .spawn(move || {
-            let _ = captured.send(read_capped(stream, cap));
+            let captured = read_capped(pipe, cap, &handles.stop);
+            // The pipe is closed by now; only then may the lifeline give up
+            // the group it kept signalable for this reader.
+            handles.live.fetch_sub(1, Ordering::AcqRel);
+            let _ = handles.captured.send((which, captured));
         })
         .map(drop)
 }
+
+/// Keeps the provider's process group signalable after the leader is reaped,
+/// until every reader has finished. The group id cannot name an unrelated
+/// process while a member survives, because the kernel does not recycle a pid
+/// that is still a process group id. The first `ESRCH` means no member
+/// remains, and the lifeline stops signaling.
+#[cfg(unix)]
+fn hold_group(group: u32, control: &mpsc::Receiver<Control>, live_readers: &AtomicUsize) {
+    while live_readers.load(Ordering::Acquire) > 0 {
+        let (signal, last) = match control.recv_timeout(EXIT_POLL_INTERVAL) {
+            Ok(Control::Signal(signal)) => (signal, false),
+            Ok(Control::Start(_)) | Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => (TerminationSignal::Kill, true),
+        };
+        if !signal_group(group, signal) || last {
+            return;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn hold_group(_group: u32, _control: &mpsc::Receiver<Control>, _live_readers: &AtomicUsize) {}
 
 /// Writes off the lifeline so a provider that never reads stdin cannot stall
 /// the cancellation ladder.
@@ -192,22 +307,28 @@ fn arm_parent_death_signal(command: &mut Command) {
 
 #[cfg(unix)]
 fn terminate(child: &mut Child, signal: TerminationSignal) {
+    // The child leads its own process group; signal the whole group so
+    // provider-spawned descendants observe the ladder too. The child is not
+    // yet reaped, so its group id cannot have been reused.
+    if !signal_group(child.id(), signal) {
+        let _ = child.kill();
+    }
+}
+
+/// Signals a process group this thread still owns. False when the group is
+/// gone or the id is out of range.
+#[cfg(unix)]
+fn signal_group(group: u32, signal: TerminationSignal) -> bool {
     let signal = match signal {
         TerminationSignal::Interrupt => libc::SIGINT,
         TerminationSignal::Kill => libc::SIGKILL,
     };
-    let Ok(pid) = libc::pid_t::try_from(child.id()) else {
-        let _ = child.kill();
-        return;
+    let Ok(group) = libc::pid_t::try_from(group) else {
+        return false;
     };
-    // The child leads its own process group; signal the whole group so
-    // provider-spawned descendants observe the ladder too. The child is not
-    // yet reaped, so its group id cannot have been reused.
-    // SAFETY: killpg with a pid owned by this thread and a constant signal
-    // number has no memory-safety obligations.
-    if unsafe { libc::killpg(pid, signal) } != 0 {
-        let _ = child.kill();
-    }
+    // SAFETY: killpg with a constant signal number has no memory-safety
+    // obligations.
+    unsafe { libc::killpg(group, signal) == 0 }
 }
 
 #[cfg(not(unix))]
