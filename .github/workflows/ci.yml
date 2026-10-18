@@ -208,6 +208,7 @@ jobs:
           python3 scripts/test-package-release-archive.py
           python3 scripts/test-plan-release-recovery.py
           python3 scripts/test-check-release-artifacts.py
+          python3 scripts/test-update-release-checksums.py
           python3 scripts/test-neutralize-release-pr-closing-keywords.py
           bash scripts/test-check-distribution-clean-source.sh
           bash scripts/test-check-distribution-snapshot.sh
@@ -659,20 +660,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build the shipped binary
+        id: cli
         uses: ./.github/actions/build-cli
         with:
           config: release
           dest: target/x86_64-unknown-linux-gnu/release
           cache-key: release-x86_64-unknown-linux-gnu
 
-      - name: Smoke-run the shipped binary
+      - name: Read immutable packaging inputs
+        id: packaging
         shell: bash
         run: |
           set -euo pipefail
-          binary="target/x86_64-unknown-linux-gnu/release/tracedecay"
-          test -x "$binary"
-          "$binary" --version
-          "$binary" --help >/dev/null
+          echo "tag=v$(cat version.txt)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Package and exercise the shipped artifacts
+        uses: ./.github/actions/package-release
+        with:
+          binary: ${{ steps.cli.outputs.path }}
+          tag: ${{ steps.packaging.outputs.tag }}
+          asset-prefix: tracedecay-${{ steps.packaging.outputs.tag }}
+          platform: x86_64-linux
+          archive: tar.gz
+          epoch: ${{ steps.packaging.outputs.epoch }}
 
   # Frontend checks require no Rust compilation and must also validate drafts.
   # Do not serialize them behind repository-wide Rust formatting and gates.
