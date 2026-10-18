@@ -863,13 +863,7 @@ async fn run_foreground_unix(
                     "daemon_shutdown",
                     &[
                         ("outcome", "profile_lost".to_owned()),
-                        (
-                            "identity",
-                            profile_watch
-                                .as_ref()
-                                .map(|watch| watch.path().display().to_string())
-                                .unwrap_or_default(),
-                        ),
+                        ("profile", profile_root.display().to_string()),
                     ],
                 );
                 break;

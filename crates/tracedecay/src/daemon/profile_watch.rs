@@ -33,10 +33,6 @@ impl ProfileIdentityWatch {
         })
     }
 
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// A file that cannot be inspected for another reason is not lost.
     fn lost(&self) -> bool {
         match std::fs::metadata(&self.path) {
