@@ -1628,8 +1628,10 @@ where
             }
         };
         self.last_route = Some(selection.route);
-        self.last_model_outcome = Some(selection.model_outcome);
-        self.last_model_receipt.clone_from(&selection.model_receipt);
+        if selection.route != ContextScoutRouteV1::DecisionEngine {
+            self.last_model_outcome = Some(selection.model_outcome);
+            self.last_model_receipt.clone_from(&selection.model_receipt);
+        }
         if selection.model_outcome == ContextScoutModelOutcomeV1::Cancelled {
             self.last_suppression = Some(ContextScoutSuppressionV1::Cancelled);
             return Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
