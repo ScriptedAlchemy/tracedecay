@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::{GraphQueryError, GraphQueryResult as Result};
 use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
-use tracedecay_domain::errors::Result;
 use tracedecay_graph_db::GraphCancellation;
 
 const MAX_CONTEXT_SYMBOLS: usize = 12;
@@ -261,9 +261,7 @@ fn fetch_nodes(
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
     reader
         .symbols_in_logical_file(file_path, MAX_FILE_SYMBOLS, cancellation)
-        .map_err(|error| {
-            crate::map_code_graph_read_runtime_error(crate::map_projection_error(error))
-        })
+        .map_err(GraphQueryError::from)
 }
 
 /// One symbol row. `line`/`end_line` are 1-based inclusive and null when the

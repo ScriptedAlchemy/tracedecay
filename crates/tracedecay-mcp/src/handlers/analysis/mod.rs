@@ -226,7 +226,9 @@ fn verified_analysis_edges(
         .iter()
         .map(|symbol| symbol.occurrence.clone())
         .collect::<Vec<_>>();
-    graph.edges_among(&occurrences, kinds, ANALYSIS_RELATION_BUDGET)
+    graph
+        .edges_among(&occurrences, kinds, ANALYSIS_RELATION_BUDGET)
+        .map_err(Into::into)
 }
 
 fn verified_analysis_unavailable(capability: &str, detail: &str) -> TraceDecayError {

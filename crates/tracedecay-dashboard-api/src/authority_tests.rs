@@ -388,15 +388,15 @@ impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
     }
 }
 
-struct DashboardStateFixture {
-    state: DashboardState,
+pub(super) struct DashboardStateFixture {
+    pub(super) state: DashboardState,
     layout: StoreLayout,
     _database_authority: tracedecay_runtime_core::db::DatabaseAuthority,
     _temporary: tempfile::TempDir,
 }
 
 impl DashboardStateFixture {
-    async fn open(project_id: &str) -> Self {
+    pub(super) async fn open(project_id: &str) -> Self {
         let temporary = tempfile::tempdir().expect("dashboard fixture");
         let project_root = temporary.path().join("project");
         let profile_root = temporary.path().join("profile");

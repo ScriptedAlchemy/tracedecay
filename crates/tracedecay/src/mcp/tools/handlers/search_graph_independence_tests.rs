@@ -39,11 +39,10 @@ impl tracedecay_graph_query::VerifiedGraphQueryPort for YieldingUnavailableVerif
     ) -> tracedecay_graph_query::VerifiedGraphQueryFuture<'a> {
         Box::pin(async {
             tokio::task::yield_now().await;
-            Err(tracedecay_graph_query::map_code_graph_read_runtime_error(
-                tracedecay_graph_query::CodeGraphReadError::Unavailable {
-                    detail: "ready graph admission result".to_owned(),
-                },
-            ))
+            Err(tracedecay_graph_query::CodeGraphReadError::Unavailable {
+                detail: "ready graph admission result".to_owned(),
+            }
+            .into())
         })
     }
 }
