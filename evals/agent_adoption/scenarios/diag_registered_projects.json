@@ -31,7 +31,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "registry contents are run-environment-dependent; no fixed answer to check"
+  },
   "max_tool_calls": 3,
   "notes": "what-projects-are-registered; registry contents are run-environment-dependent, graded on tool choice."
 }

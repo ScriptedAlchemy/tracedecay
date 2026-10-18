@@ -38,11 +38,25 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "pricing",
-    "inventory",
-    "orders"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states pricing",
+          "pattern": "\\bpricing\\b"
+        },
+        {
+          "id": "states inventory",
+          "pattern": "\\binventory\\b"
+        },
+        {
+          "id": "states orders",
+          "pattern": "\\borders\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 6,
   "notes": "Architecture orientation; modules are pricing, inventory, orders, discount."
 }

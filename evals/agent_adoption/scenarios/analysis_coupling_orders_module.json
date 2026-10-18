@@ -35,11 +35,29 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "orders",
-    "pricing",
-    "inventory"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states orders",
+          "pattern": "\\borders\\b"
+        },
+        {
+          "id": "states pricing",
+          "pattern": "\\bpricing\\b"
+        },
+        {
+          "id": "states inventory",
+          "pattern": "\\binventory\\b"
+        },
+        {
+          "id": "ties orders to pricing/inventory as the most-coupled module",
+          "pattern": "\\borders\\b[^.\\n]{0,160}\\b(?:pricing|inventory)\\b|\\b(?:pricing|inventory)\\b[^.\\n]{0,160}\\borders\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
   "notes": "coupling; orders.rs imports both pricing and inventory, so it has the highest fan-out while pricing/inventory have the fan-in."
 }

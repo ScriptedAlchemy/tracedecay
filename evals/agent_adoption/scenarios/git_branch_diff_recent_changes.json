@@ -40,8 +40,11 @@
       "git status"
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "deferred scenario: no verifiable ground truth until its fixture gap is closed"
+  },
   "max_tool_calls": 6,
   "requires_fixture": "git-history",
-  "notes": "DEFERRED: the fixture is a single `git init && commit -m init`, so there is no real diff to summarize. Needs lane 1's seeded multi-commit history; ground_truth should then name the touched symbols/files."
+  "notes": "DEFERRED: the fixture is a single `git init && commit -m init`, so there is no real diff to summarize. Needs lane 1's seeded multi-commit history; its outcome should then require the touched symbols/files."
 }
