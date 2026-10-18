@@ -43,3 +43,10 @@ toolchain, the second compiles and runs the native grammars, and the third
 reads the committed corpus from test runfiles after changing directories.
 Use Bazel's execution log or the scheduler's worker metrics to confirm which
 machine executed actions; a remote cache hit alone does not prove execution.
+
+The `code_index_chunks --run` benchmark defaults to
+`TEST_UNDECLARED_OUTPUTS_DIR/result-provisional.json` under `bazel test`, so
+Bazel retrieves the result with the test's undeclared outputs. Under
+`bazel run` it writes to
+`benchmark_data/query-code-index/result-provisional.json` in the source
+workspace. An explicit `--output PATH` always selects the destination.
