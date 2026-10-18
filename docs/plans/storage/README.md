@@ -798,9 +798,33 @@ changes a file that holds memory.
     once delay every other store. Measured under host load at N=6, three runs
     each: `mcp_suite` 193 to 242 s on this branch against 224 to 227 s on master,
     `daemon_suite` 92 to 123 s against 97 to 124 s.
-  - Fenced TRUNCATE on lanes, idle close, the unlink probe and `ProfileLost` are the
-    next slices of this step.
+  - Fenced TRUNCATE on lanes and idle close are the next slices of this step.
   Proof: 64 attached stores add exactly N threads, all of them pool threads.
+- Step 7, unlink probe and ProfileLost (2026-10-18, branch
+  `feat/storage-unlink-probe-profile-lost`). Each writer checks its pinned file
+  every 2 s, between batches and from its idle wait: `fstat` link count 0, or a
+  path that is missing or names another inode, means the file is lost. The
+  writer then fails its queued work as `Unavailable { reason: FileLost }`, drops
+  its connection and pinned descriptor, and tells its attachment, which tells
+  every reader to interrupt and exit and drops its own handles; none of this
+  waits on a pool thread. Later submits and reads on that attachment answer
+  `FileLost`. The registry unmaps a lost runtime on the next lookup or open of
+  its key, so that open resolves and publishes a fresh runtime under the
+  existing creation rules. The daemon pins `profile-identity.json` by inode at
+  start and checks it every second from its accept loop; once the file is gone
+  or replaced it logs `daemon_shutdown outcome=profile_lost` and leaves through
+  the ordinary graceful shutdown, which closes every store. Deviations:
+  - Read-only attachments have no writer and so no probe. Their file stays open
+    until the store closes.
+  - Owners that hold a lease on the lost runtime (mounted project and profile
+    owners) keep it, so they answer `FileLost` until a restart remounts them.
+    #4130's reset-required record therefore stays, with its reason updated:
+    the space is now released, and the restart only remounts those owners.
+  - The watch runs on the Unix daemon only; the loopback daemon has no inode.
+  Proof: an unlinked store reports itself lost and holds no descriptor on its
+  files within one probe interval, and the next open serves a fresh store;
+  deleting the profile under a running daemon logs `profile_lost` within one
+  tick and the daemon exits with every store closed.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose
@@ -813,7 +837,8 @@ changes a file that holds memory.
   6. The 512 MiB response-handle cap on top of #4128's TTL sweep: step 10.
   7. Hook events into `telemetry.hook_events`: step 8.
   8. Closing a store's lane when its file is lost, instead of a daemon restart:
-     step 7's unlink probe. #4130 is the interim restart remedy.
+     closed by step 7's unlink probe. Owners that cache the lost runtime's
+     lease still need #4130's restart to serve it again.
   9. A 24-hour acceptance run on a fresh profile showing bounded growth: step 12.
 - Step 4 merged into step 8 (2026-10-16). A dead-letter valve on today's global
   queue was built and then dropped: the projection code deliberately keeps corrupt
