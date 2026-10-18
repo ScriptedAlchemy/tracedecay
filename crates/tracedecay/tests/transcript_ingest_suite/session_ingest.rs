@@ -103,7 +103,9 @@ async fn close_registry(registry: DaemonSessionRuntimeRegistryV1) {
     let cx = tracedecay_runtime_core::native_runtime::cx().unwrap();
     registry.shutdown_terminal_tasks(&cx).await.unwrap();
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .unwrap();
 }

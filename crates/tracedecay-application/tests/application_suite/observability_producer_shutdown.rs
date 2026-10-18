@@ -332,10 +332,12 @@ async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
             .expect("queued observation"),
         ObservabilityEmissionOutcomeV1::Enqueued
     );
-    // The held writer parks the worker on its first write for a whole
-    // persistence deadline, so it holds at most one more observation and the
-    // single slot overflows by the third offer.
-    let dropped = (2..=3).find(|offer| {
+    // The held writer parks the worker on each write for a whole persistence
+    // deadline, so it frees the single slot at most once per deadline. A test
+    // thread descheduled that long between offers sees the slot drained, so
+    // offers continue until one overflows. They stop at that first drop,
+    // which leaves its range pending for the shutdown receipts.
+    let dropped = (2..=64).find(|offer| {
         let mut offered = envelope(scope);
         offered.event_id = format!("event:persistence-failed:{offer}");
         offered.idempotency_key = format!("idempotency:persistence-failed:{offer}");

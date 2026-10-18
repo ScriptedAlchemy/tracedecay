@@ -443,6 +443,59 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
     );
 }
 
+#[test]
+fn a_pool_task_is_refused_snapshot_calls_instead_of_parked() {
+    use crate::exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlStatementBudget};
+
+    let store = TestStore::new();
+    let spawned = super::worker::spawn(
+        store.locator(),
+        CountExecutor,
+        Arc::new(crate::telemetry::ReaderAdmissionRecorder::default()),
+    )
+    .expect("spawn reader worker");
+    spawned
+        .client
+        .begin(super::READ_SNAPSHOT_LIFETIME)
+        .expect("begin read snapshot");
+    let client = spawned.client.clone();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let (report, refused) = std::sync::mpsc::channel();
+    crate::storage_pool::spawn(async move {
+        let probe = Probe::for_request(&read);
+        let query = ExactSqlStatement::new("SELECT 1".to_owned(), Vec::new()).unwrap();
+        let _ = report.send((
+            client.pin_exact_sql(),
+            client.execute(read, &probe).map(|_| ()),
+            client
+                .execute_exact_sql_query(query, ExactSqlStatementBudget::Request)
+                .map(|_| ()),
+        ));
+    })
+    .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+    let (pin, execute, query) = refused
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a pool task's snapshot calls must return, not park");
+    let unavailable = || {
+        Err(ExactSqlError::ReaderUnavailable(
+            ReaderWorkerError::WorkerClosed.to_string(),
+        ))
+    };
+    assert_eq!(pin, unavailable(), "a pool task's pin must refuse");
+    assert!(
+        matches!(execute, Err(ReaderWorkerError::WorkerClosed)),
+        "a pool task's read must refuse, got {execute:?}"
+    );
+    assert_eq!(
+        query,
+        unavailable(),
+        "a pool task's exact query must refuse"
+    );
+    spawned.client.shutdown();
+    spawned.join.join().unwrap();
+}
+
 /// Table-size telemetry walks `dbstat` for the whole store, so on a
 /// multi-gigabyte database the scan runs for minutes. A caller that cannot
 /// get its reply within the bound must receive a typed deadline error and
