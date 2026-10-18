@@ -1098,3 +1098,122 @@ async fn registering_a_named_checkout_again_does_not_walk_its_history() {
         "a checkout whose project records its roots is not walked again"
     );
 }
+
+#[asupersync::test]
+async fn stale_reap_plan_preserves_an_adopted_clone() {
+    let harness = RegisteredGlobalDbHarness::open("registry-reap-adopted-clone").await;
+    let (original, clone) = cloned_repository(&harness, "reap-adoption");
+    upsert_checkout(&harness.registered, "project-original", &original).await;
+    let anchor = root_commit_alias(&original);
+    std::fs::remove_dir_all(&original).unwrap();
+    let plan = harness.registered.plan_registry_reap().await.unwrap();
+    assert!(plan.reapable.iter().any(|entry| {
+        entry.kind == super::ReapEntryKind::CodeProject && entry.key == "project-original"
+    }));
+
+    assert_eq!(
+        upsert_checkout(&harness.registered, "project-new", &clone).await,
+        "project-original"
+    );
+    harness.registered.apply_registry_reap(&plan).await.unwrap();
+
+    assert!(
+        harness
+            .registered
+            .get_code_project("project-original")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&anchor)
+            .await
+            .unwrap(),
+        Some("project-original".to_owned())
+    );
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&super::project_path_alias_key(&clone))
+            .await
+            .unwrap(),
+        Some("project-original".to_owned())
+    );
+}
+
+#[asupersync::test]
+async fn stale_reap_plan_preserves_a_new_store() {
+    let harness = RegisteredGlobalDbHarness::open("registry-reap-new-store").await;
+    let (root, _) = project_roots(&harness, "reap-store");
+    register(&harness.registered, "project-store", &root).await;
+    std::fs::remove_dir_all(&root).unwrap();
+    let plan = harness.registered.plan_registry_reap().await.unwrap();
+    assert!(plan.reapable.iter().any(|entry| {
+        entry.kind == super::ReapEntryKind::CodeProject && entry.key == "project-store"
+    }));
+
+    let store = tracedecay_runtime_core::storage::profile_sharded_data_root(
+        harness.registered.db_path().parent().unwrap(),
+        "project-store",
+    );
+    std::fs::create_dir_all(&store).unwrap();
+    let payload = store.join("fixture-data");
+    std::fs::write(&payload, "durable fixture data").unwrap();
+    harness.registered.apply_registry_reap(&plan).await.unwrap();
+
+    assert!(
+        harness
+            .registered
+            .get_code_project("project-store")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&payload).unwrap(),
+        "durable fixture data"
+    );
+}
+
+#[asupersync::test]
+async fn stale_reap_plan_preserves_rebound_aliases_and_counts_deletions() {
+    let harness = RegisteredGlobalDbHarness::open("registry-reap-rebound-alias").await;
+    let (root, live) = project_roots(&harness, "reap-rebound");
+    register(&harness.registered, "project-original", &root).await;
+    std::fs::remove_dir_all(&root).unwrap();
+    let mut plan = harness.registered.plan_registry_reap().await.unwrap();
+    let authority = plan
+        .reapable
+        .iter()
+        .find(|entry| {
+            entry.kind == super::ReapEntryKind::CodeProject && entry.key == "project-original"
+        })
+        .unwrap()
+        .clone();
+    plan.reapable.push(authority);
+
+    std::fs::create_dir_all(&live).unwrap();
+    register(&harness.registered, "project-live", &live).await;
+    harness
+        .registered
+        .upsert_project_alias(&root, "project-live")
+        .await
+        .unwrap();
+    let removed = harness.registered.apply_registry_reap(&plan).await.unwrap();
+
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&super::project_path_alias_key(&root))
+            .await
+            .unwrap(),
+        Some("project-live".to_owned())
+    );
+    assert_eq!(removed, 1, "only the original authority was deleted");
+    assert_eq!(
+        harness.registered.apply_registry_reap(&plan).await.unwrap(),
+        0
+    );
+}
