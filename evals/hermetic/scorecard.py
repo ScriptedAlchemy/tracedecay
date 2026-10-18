@@ -110,9 +110,12 @@ def aggregate(results: list[dict], corpus: list[dict] | None = None, reps: int |
         raise ValueError("reps must be a positive integer")
     if any(type(row.get("rep", 1)) is not int or row.get("rep", 1) < 1 for row in results):
         raise ValueError("repetition must be a positive integer")
+    indexed = any(row.get("scenario_index") is not None for row in results)
+    if indexed and any(type(row.get("scenario_index")) is not int or row["scenario_index"] < 1 for row in results):
+        raise ValueError("indexed results require a positive scenario_index on every row")
     identities = set()
     for row in results:
-        identity = (row.get("id"), row.get("rep", 1))
+        identity = (row["scenario_index"] if indexed else row.get("id"), row.get("rep", 1))
         if identity in identities:
             raise ValueError(f"duplicate scenario/repetition: {identity}")
         identities.add(identity)
@@ -120,7 +123,15 @@ def aggregate(results: list[dict], corpus: list[dict] | None = None, reps: int |
     reps = observed_reps if reps is None else reps
     if reps < 1 or observed_reps > reps:
         raise ValueError("reps must cover every observed positive repetition")
-    if corpus is not None:
+    if corpus is not None and indexed:
+        for row in results:
+            index = row["scenario_index"]
+            if index > len(corpus):
+                raise ValueError("result scenario_index is outside the corpus")
+            scenario = corpus[index - 1]
+            if row.get("id") != scenario.get("id") or row.get("category", "") != scenario.get("category", ""):
+                raise ValueError("result scenario/category does not match its corpus index")
+    elif corpus is not None:
         categories = {scenario["id"]: scenario.get("category", "") for scenario in corpus}
         if len(categories) != len(corpus):
             raise ValueError("duplicate corpus scenario")
