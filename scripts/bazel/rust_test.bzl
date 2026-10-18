@@ -27,6 +27,7 @@ export PATH="{toolchain_path}:$PATH"
 # Names such as CARGO_BIN_EXE_<bin> may carry `-`, which no shell variable
 # can, so each assignment goes through env as its own argument: a runfiles
 # path with spaces stays one word.
+{test_filter}
 exec env {runfiles_env} "$TEST_SRCDIR/$TEST_WORKSPACE/{binary}" "$@"
 """
 
@@ -58,7 +59,7 @@ if not exist "%TEST_BINARY%" (
   dir /s /b "%TEST_SRCDIR%" 1>&2
   exit /b 1
 )
-"%TEST_BINARY%" %*
+{test_filter}
 exit /b %ERRORLEVEL%
 """
 
@@ -128,6 +129,13 @@ def _isolated_rust_test_impl(ctx):
         runfiles_root + paths[variable].rsplit("/", 1)[0]
         for variable in ["RUSTC", "RUST_ANALYZER", "NODE"]
     ])
+    test_filter = ""
+    if windows:
+        test_filter = '"%TEST_BINARY%" %*'
+        if ctx.attr.use_libtest_harness:
+            test_filter = 'if defined TESTBRIDGE_TEST_ONLY (\n  "%TEST_BINARY%" "%TESTBRIDGE_TEST_ONLY%" %*\n) else (\n  "%TEST_BINARY%" %*\n)'
+    elif ctx.attr.use_libtest_harness:
+        test_filter = 'if [ -n "${TESTBRIDGE_TEST_ONLY:-}" ]; then\n  set -- "$TESTBRIDGE_TEST_ONLY" "$@"\nfi'
     ctx.actions.write(
         output = executable,
         content = template.format(
@@ -135,6 +143,7 @@ def _isolated_rust_test_impl(ctx):
             package = ctx.label.package,
             runfiles_env = runfiles_env,
             toolchain_path = toolchain_path,
+            test_filter = test_filter,
         ),
         is_executable = True,
     )
@@ -184,6 +193,7 @@ _isolated_rust_test = rule(
             cfg = "target",
             mandatory = True,
         ),
+        "use_libtest_harness": attr.bool(default = True),
         "_windows": attr.label(default = "@platforms//os:windows"),
         "_analyzer_runtime": attr.label(
             default = "@rust_analyzer_tools//:rustc_lib",
@@ -250,6 +260,7 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
         "name": name,
         "tags": tags,
         "test_binary": ":" + binary_name,
+        "use_libtest_harness": kwargs.get("use_libtest_harness", True),
         "runfiles_env": {
             variable: str(native.package_relative_label(label))
             for variable, label in runfiles_env.items()
