@@ -1,0 +1,43 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load(":exec_files.bzl", "exec_files")
+
+package(default_visibility = ["//visibility:public"])
+
+# --config=windows-check sets the target platform to Windows while every action
+# still runs on Linux. The dashboard bundle that Rust crates embed is built by
+# rules_js, which resolves npm packages and node for the *target* platform and
+# so fetches Windows rspack bindings and node.exe it cannot run. The aliases
+# below hand those crates the bundle built in the exec configuration instead.
+# Other configurations, including a native Windows build, keep the direct
+# targets.
+bool_flag(
+    name = "enabled",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "active",
+    flag_values = {":enabled": "True"},
+)
+
+[
+    [
+        exec_files(
+            name = name + "_exec",
+            src = label,
+            # Built only through the alias; `//...` must not build it twice.
+            tags = ["manual"],
+        ),
+        alias(
+            name = name,
+            actual = select({
+                ":active": ":" + name + "_exec",
+                "//conditions:default": label,
+            }),
+        ),
+    ]
+    for name, label in {
+        "dashboard_app_dist": "//dashboard:app_dist",
+        "dashboard_bundle_sha256": "//dashboard:bundle_sha256",
+    }.items()
+]
