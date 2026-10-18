@@ -1,5 +1,61 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
 filegroup(
     name = "scenarios",
     srcs = glob(["scenarios/*.json"]),
     visibility = ["//crates/tracedecay:__pkg__"],
+)
+
+py_test(
+    name = "fact_evidence_test",
+    srcs = ["fact_evidence.py", "test_fact_evidence.py"],
+    main = "test_fact_evidence.py",
+)
+
+py_test(
+    name = "isolated_environment_test",
+    srcs = ["isolated_environment.py", "test_isolated_environment.py"],
+    data = ["//scripts:lib/portable_process.py"],
+    main = "test_isolated_environment.py",
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+)
+
+py_test(
+    name = "runner_lifecycle_test",
+    srcs = [
+        "fact_evidence.py",
+        "isolated_environment.py",
+        "run_real_model.py",
+        "test_run_lifecycle.py",
+    ],
+    data = ["//scripts:lib/portable_process.py"],
+    main = "test_run_lifecycle.py",
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+)
+
+py_test(
+    name = "cli_fixture_test",
+    size = "large",
+    srcs = [
+        "fact_evidence.py",
+        "isolated_environment.py",
+        "run_real_model.py",
+        "test_cli_fixture.py",
+    ],
+    args = ["$(rootpath //crates/tracedecay-cli:tracedecay__test)"],
+    data = [
+        "//crates/tracedecay-cli:tracedecay__test",
+        "//scripts:lib/portable_process.py",
+    ],
+    main = "test_cli_fixture.py",
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
 )
