@@ -97,6 +97,68 @@ fn authority_in_scope_with_policy(
     .unwrap()
 }
 
+/// Hydrating the attempts a graph accepted is one query per batch of
+/// identities and not one per attempt, and the three ways an identity can fail
+/// to hydrate (no row, a row another authority owns, a row that does not
+/// decode) all stay absent from the answer, which is how the read reports them
+/// as unavailable instead of inventing an attempt.
+#[test]
+fn accepted_attempts_hydrate_in_bounded_batches() {
+    let store = RegisteredWorkStore::start("attempt-hydration-batches");
+    let owner = authority("actor.attempt.hydration");
+    let foreign = authority_in_worktree("actor.attempt.hydration", "worktree.attempt.foreign");
+    let identity_at = |index: usize| {
+        WorkAttemptIdentityV1::new(
+            id::<TaskId>(&format!("task.hydrate.{index}")),
+            id::<RunId>("run.hydrate"),
+            id::<AttemptId>(&format!("attempt.hydrate.{index}")),
+        )
+        .unwrap()
+    };
+    let stored = |index: usize| {
+        attempt_at(
+            &format!("task.hydrate.{index}"),
+            "run.hydrate",
+            &format!("attempt.hydrate.{index}"),
+        )
+    };
+    for index in 0..70 {
+        store.storage().insert(&owner, &stored(index)).unwrap();
+    }
+    store.storage().insert(&foreign, &stored(70)).unwrap();
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_attempts_v1 SET attempt_payload = 'not json'
+                 WHERE task_id = 'task.hydrate.69'",
+                [],
+            )
+            .expect("corrupt one stored attempt");
+    });
+
+    // 69 hydrate, one row does not decode, one belongs to the other authority,
+    // and 80 never existed.
+    let requested = (0..151).map(identity_at).collect::<BTreeSet<_>>();
+    let (loaded, read) = tracedecay_rusqlite_runtime::work_product::instrument::measure(|| {
+        store.storage().load_attempts(&owner, &requested)
+    });
+
+    assert_eq!(
+        loaded.keys().cloned().collect::<BTreeSet<_>>(),
+        (0..69).map(identity_at).collect::<BTreeSet<_>>()
+    );
+    for (identity, attempt) in &loaded {
+        assert_eq!(attempt.identity(), identity);
+    }
+    assert_eq!(
+        read.queries, 3,
+        "151 identities in batches of 64 are three queries, not one per attempt"
+    );
+    // Sixty-nine good rows and the one that does not decode: the batches return
+    // rows that exist under this authority and nothing for the rest.
+    assert_eq!(read.rows, 70, "{read:?}");
+}
+
 #[test]
 fn exact_scope_holder_census_sees_old_policy_and_other_actor_attempts() {
     let store = RegisteredWorkStore::start("attempt-cleanup-holder-scope");

@@ -24,7 +24,7 @@ use super::journal::{
     insert_checkpoint_row, insert_event_row, insert_version_row, integer, journal_entry,
     published_from_values, register_scope_set, write_head_row,
 };
-use super::{StoreFault, recovered_graph_digest};
+use super::{StoreFault, WorkProductJournalEntryV1, recovered_graph_digest};
 use crate::exact_sql::{ExactSqlError, ExactSqlValue};
 use crate::work::{
     RegisteredWorkWrite, WorkSqliteStorage, exact_sql_integer, exact_sql_statement, exact_sql_text,
@@ -32,6 +32,13 @@ use crate::work::{
 };
 
 const LEGACY_VERSIONS_TABLE: &str = "work_product_graph_versions_v1";
+
+/// Legacy events read per query, few enough that a query of the largest legal
+/// events stays far under the exact-SQL result cap.
+const LEGACY_QUERY_EVENTS: usize = 16;
+
+/// Stored payload bytes a batch reads before it stops and continues.
+const BATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Legacy events folded per writer transaction.
 const BATCH_EVENTS: usize = 256;
@@ -166,23 +173,43 @@ fn migrate_batch(transaction: &impl RegisteredWorkWrite) -> Result<Batch, StoreF
     };
     let mut at = prior_version.map_or(0, WorkGraphVersionV1::get);
 
-    let mut batch_params = owner.clone();
-    batch_params.push(integer(at)?);
-    let events = registered_work_query(
-        transaction,
-        &format!(
-            "SELECT sequence, event_payload FROM {LEGACY_EVENTS_TABLE}
-             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND sequence > ?3
-             ORDER BY sequence
-             LIMIT {BATCH_EVENTS}"
-        ),
-        batch_params.clone(),
-    )?;
-    let Some(last_row) = events.rows.last() else {
+    // The batch is read a few events at a time and stops at a byte budget, so
+    // no legacy history makes a single result too big. A short batch is fine:
+    // the next call continues from the head.
+    let mut entries = Vec::new();
+    let mut payload_bytes = 0;
+    while entries.len() < BATCH_EVENTS && payload_bytes < BATCH_PAYLOAD_BYTES {
+        let mut params = owner.clone();
+        params.push(integer(
+            entries
+                .last()
+                .map_or(at, |entry: &WorkProductJournalEntryV1| entry.sequence.get()),
+        )?);
+        let rows = registered_work_query(
+            transaction,
+            &format!(
+                "SELECT sequence, event_payload FROM {LEGACY_EVENTS_TABLE}
+                 WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND sequence > ?3
+                 ORDER BY sequence
+                 LIMIT {}",
+                LEGACY_QUERY_EVENTS.min(BATCH_EVENTS - entries.len())
+            ),
+            params,
+        )?;
+        if rows.rows.is_empty() {
+            break;
+        }
+        for row in &rows.rows {
+            payload_bytes += exact_sql_text(&row.values, 1).map_or(0, str::len);
+            entries.push(journal_entry(&row.values)?);
+        }
+    }
+    let Some(last) = entries.last() else {
         return Err(StoreFault::Corrupt("legacy rows behind the head"));
     };
-    let mut versions_params = batch_params;
-    versions_params.push(integer(journal_entry(&last_row.values)?.sequence.get())?);
+    let last_sequence = last.sequence.get();
+    let mut versions_params = owner.clone();
+    versions_params.extend([integer(at)?, integer(last_sequence)?]);
     let versions = registered_work_query(
         transaction,
         &format!(
@@ -193,12 +220,11 @@ fn migrate_batch(transaction: &impl RegisteredWorkWrite) -> Result<Batch, StoreF
         ),
         versions_params,
     )?;
-    if versions.rows.len() != events.rows.len() {
+    if versions.rows.len() != entries.len() {
         return Err(StoreFault::Corrupt("published versions"));
     }
 
-    for (event_row, version_row) in events.rows.iter().zip(&versions.rows) {
-        let entry = journal_entry(&event_row.values)?;
+    for (entry, version_row) in entries.iter().zip(&versions.rows) {
         let published = published_from_values(&version_row.values)?;
         if entry.sequence.get() != at + 1
             || published.graph_version.get() != entry.sequence.get()
@@ -208,15 +234,23 @@ fn migrate_batch(transaction: &impl RegisteredWorkWrite) -> Result<Batch, StoreF
         }
         let folded =
             fold_event(graph.take(), &entry.event).ok_or(StoreFault::Corrupt("event chain"))?;
-        let digest =
-            recovered_graph_digest(&folded).ok_or(StoreFault::Corrupt("recovered graph"))?;
-        if digest.as_str() != published.recovered_graph_digest {
-            return Err(StoreFault::Corrupt("recovered graph"));
+        // Re-deriving a digest digests the whole graph, so it is done where a
+        // later read starts from the result: at each checkpoint and at the end
+        // of the batch. Every other version row is copied as recorded, and a
+        // read that rebuilds one proves it against that row, failing closed.
+        let is_checkpoint = entry.sequence.get().is_multiple_of(CHECKPOINT_INTERVAL);
+        let is_batch_end = at + 1 == last_sequence;
+        if is_checkpoint || is_batch_end {
+            let digest =
+                recovered_graph_digest(&folded).ok_or(StoreFault::Corrupt("recovered graph"))?;
+            if digest.as_str() != published.recovered_graph_digest {
+                return Err(StoreFault::Corrupt("recovered graph"));
+            }
         }
         insert_event_row(transaction, &owner, &entry.event).map_err(write_fault)?;
         register_scope_set(transaction, &owner, &entry.event).map_err(write_fault)?;
         insert_version_row(transaction, &owner, &published).map_err(write_fault)?;
-        if entry.sequence.get().is_multiple_of(CHECKPOINT_INTERVAL) {
+        if is_checkpoint {
             let json =
                 serde_json::to_string(&folded).map_err(|_| StoreFault::Corrupt("checkpoint"))?;
             insert_checkpoint_row(transaction, &owner, folded.version(), &json)

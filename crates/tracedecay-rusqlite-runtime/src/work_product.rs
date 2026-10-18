@@ -58,6 +58,7 @@ mod migration;
 mod read;
 mod rooted_evidence;
 
+pub use migration::WorkProductJournalMigrationError;
 pub use read::AuthorizedWorkProductReadStorageV1;
 
 /// The digest domain separator for a recovered Work product graph.

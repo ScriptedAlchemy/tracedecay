@@ -13,7 +13,7 @@
 //! layer ever starts estimating one, these equalities break.
 
 #[path = "../support/work_product_graph.rs"]
-mod work_product_graph;
+pub(crate) mod work_product_graph;
 
 use std::collections::BTreeSet;
 

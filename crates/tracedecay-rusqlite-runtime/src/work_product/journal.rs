@@ -42,8 +42,10 @@ use crate::work::{
 /// A checkpoint is stored at every version divisible by this.
 pub(crate) const CHECKPOINT_INTERVAL: u64 = 128;
 
-/// Events read per query while folding forward from a checkpoint.
-pub(crate) const EVENT_PAGE_ROWS: usize = 64;
+/// Events read per query while folding forward from a checkpoint. A query of
+/// this many of the largest legal events stays far under the exact-SQL result
+/// cap, which is the point of paging.
+pub(crate) const EVENT_PAGE_ROWS: usize = 16;
 
 /// One more than a timeline page, so a page can tell it has a successor.
 pub(crate) const TIMELINE_WINDOW_ROWS: usize = MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1 + 1;

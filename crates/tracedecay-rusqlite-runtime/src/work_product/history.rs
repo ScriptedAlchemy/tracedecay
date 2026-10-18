@@ -28,7 +28,8 @@
 //! 3. **Pages resume by sequence, not by offset.** The continuation names the
 //!    durable sequence the previous page ended on, so an event appended between
 //!    two pages cannot shift a caller past an event it never saw. A page reads
-//!    one row more than its limit and no more.
+//!    at most one row more than its limit, and stops early at a byte budget
+//!    with a continuation, so no stored history makes a single result too big.
 
 use tracedecay_contracts::{
     OpaqueCursor, WorkHistoryCoverageV1, WorkHistoryReadPortV1, WorkHistoryRequestV1,
@@ -41,11 +42,19 @@ use super::journal::{
 };
 use super::{FromStoreFault, owner_params};
 use crate::exact_sql::ExactSqlValue;
-use crate::work::{WorkSqliteStorage, registered_work_query};
+use crate::work::{WorkSqliteStorage, exact_sql_text, registered_work_query};
 
 type HistoryError = WorkProductApplicationErrorV1;
 
 const HISTORY_CURSOR_PREFIX: &str = "work-product-event-sequence:";
+
+/// Events read per query.
+const HISTORY_QUERY_ROWS: usize = 16;
+
+/// Stored payload bytes one page reads before it stops and continues, well under
+/// the exact-SQL result cap, so history of any size pages without an oversized
+/// result.
+const HISTORY_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
 impl WorkHistoryReadPortV1 for WorkSqliteStorage {
     fn read_history(
@@ -65,33 +74,45 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
         // mistake a slice of the journal for the whole of it.
         let coverage = load_coverage(source, scope, total).map_err(HistoryError::from_fault)?;
         let selection_coverage = coverage.disclosure().map_err(HistoryError::from_fault)?;
-        let after = resume_from(request.continuation.as_ref())?;
+        let mut cursor = resume_from(request.continuation.as_ref())?;
         let limit = usize::try_from(request.limit).map_err(|_| HistoryError::InvalidRequest)?;
-        let mut params = owner_params(scope);
-        params.extend([
-            integer(after).map_err(HistoryError::from_fault)?,
-            integer(coverage.covered).map_err(HistoryError::from_fault)?,
-            ExactSqlValue::Integer(request.observed_at.0),
-        ]);
-        let rows = registered_work_query(
-            source,
-            &format!(
-                "SELECT sequence, event_payload FROM work_product_journal_events_v1
-                 WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-                   AND sequence > ?3 AND sequence <= ?4 AND occurred_at <= ?5
-                 ORDER BY sequence
-                 LIMIT {}",
-                limit + 1
-            ),
-            params,
-        )
-        .map_err(HistoryError::from_fault)?;
-        let mut events = rows
-            .rows
-            .iter()
-            .map(|row| journal_entry(&row.values).map(|entry| entry.event))
-            .collect::<Result<Vec<_>, _>>()
+        let mut events = Vec::new();
+        let mut payload_bytes = 0;
+        let mut exhausted = false;
+        // One more event than the limit is read, so the page knows whether a
+        // successor exists, in queries of a few rows and no more bytes than the
+        // page budget, so no stored history can make a single result too big.
+        while events.len() <= limit && payload_bytes < HISTORY_PAGE_BYTES {
+            let mut params = owner_params(scope);
+            params.extend([
+                integer(cursor).map_err(HistoryError::from_fault)?,
+                integer(coverage.covered).map_err(HistoryError::from_fault)?,
+                ExactSqlValue::Integer(request.observed_at.0),
+            ]);
+            let rows = registered_work_query(
+                source,
+                &format!(
+                    "SELECT sequence, event_payload FROM work_product_journal_events_v1
+                     WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
+                       AND sequence > ?3 AND sequence <= ?4 AND occurred_at <= ?5
+                     ORDER BY sequence
+                     LIMIT {}",
+                    HISTORY_QUERY_ROWS.min(limit + 1 - events.len())
+                ),
+                params,
+            )
             .map_err(HistoryError::from_fault)?;
+            if rows.rows.is_empty() {
+                exhausted = true;
+                break;
+            }
+            for row in &rows.rows {
+                let entry = journal_entry(&row.values).map_err(HistoryError::from_fault)?;
+                payload_bytes += exact_sql_text(&row.values, 1).map_or(0, str::len);
+                cursor = entry.sequence.get();
+                events.push(entry.event);
+            }
+        }
         // Inside the prefix the admitted scopes must still be exactly this
         // selection's. A covering selection admits an event whose scopes it
         // merely contains, but history returns the stored event unchanged, and
@@ -104,19 +125,25 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
         {
             return Err(HistoryError::NotFoundOrNotAuthorized);
         }
-        let coverage = if events.len() <= limit {
+        // Complete only when every covered row was consumed and fits the limit.
+        // A page that stopped on its byte budget cannot know that nothing
+        // follows, so it hands back a continuation, and the next page may be
+        // empty.
+        let complete = exhausted && events.len() <= limit;
+        events.truncate(limit);
+        let coverage = if complete {
             WorkHistoryCoverageV1::Complete {
                 returned: u32::try_from(events.len())
                     .map_err(|_| HistoryError::EventAuthorityUnavailable)?,
             }
         } else {
-            events.truncate(limit);
             let last = events
                 .last()
                 .map(|event| event.sequence().get())
                 .ok_or(HistoryError::EventAuthorityUnavailable)?;
             WorkHistoryCoverageV1::Partial {
-                returned: request.limit,
+                returned: u32::try_from(events.len())
+                    .map_err(|_| HistoryError::EventAuthorityUnavailable)?,
                 continuation: OpaqueCursor::new(format!("{HISTORY_CURSOR_PREFIX}{last}"))
                     .map_err(|_| HistoryError::EventAuthorityUnavailable)?,
             }

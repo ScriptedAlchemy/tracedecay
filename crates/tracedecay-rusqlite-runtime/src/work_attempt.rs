@@ -100,6 +100,20 @@ pub(crate) fn load_attempts(
     loaded
 }
 
+impl WorkSqliteStorage {
+    /// The stored attempts for `identities` under `authority`, read in bounded
+    /// batches. An identity with no row, a row another authority owns, or a row
+    /// that does not decode is absent from the answer.
+    #[must_use]
+    pub fn load_attempts(
+        &self,
+        authority: &WorkAuthority,
+        identities: &std::collections::BTreeSet<WorkAttemptIdentityV1>,
+    ) -> std::collections::BTreeMap<WorkAttemptIdentityV1, WorkAttemptV1> {
+        load_attempts(self.handle(), authority, identities)
+    }
+}
+
 fn insert_attempt(
     storage: &WorkSqliteStorage,
     authority: &WorkAuthority,

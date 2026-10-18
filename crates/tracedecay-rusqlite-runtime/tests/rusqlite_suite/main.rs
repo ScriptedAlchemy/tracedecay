@@ -29,6 +29,7 @@ mod work_duplicate_adjudication_storage;
 mod work_leak_adjudication_storage;
 mod work_placement_storage;
 mod work_product_graph_authority;
+mod work_product_journal_state;
 mod work_product_query_authority;
 mod work_run_control_storage;
 mod work_storage;
