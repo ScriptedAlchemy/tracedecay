@@ -42,7 +42,11 @@ else
     fail "eval binary build failed; not reusing any older binary. Reproduce with: $build_cmd"
   bazel_bin="$(cd "$repo_root" && bazel info --config="$config" bazel-bin)" ||
     fail "could not resolve the Bazel output directory (bazel info --config=$config bazel-bin)"
-  bin="$bazel_bin/crates/tracedecay-cli/tracedecay"
+  exe=""
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) exe=".exe" ;;
+  esac
+  bin="$bazel_bin/crates/tracedecay-cli/tracedecay${exe}"
   [[ -f "$bin" && -x "$bin" ]] ||
     fail "expected a binary at $bin after: $build_cmd"
   origin="bazel --config=$config $target"

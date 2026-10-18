@@ -85,6 +85,7 @@ py_binary(
 exports_files(
     [
         "bazel/rust_test.bzl",
+        "build-eval-binary.sh",
         "test-rust-cache-lineage.py",
         "test-check-packaged-lsp-bridge.py",
         "test-check-sdk-publish-workflow.py",

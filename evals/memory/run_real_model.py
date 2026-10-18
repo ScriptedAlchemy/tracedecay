@@ -699,7 +699,6 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
 
 def main(argv):
     args = parse_args(argv)
-    args.tracedecay_bin = resolve_tracedecay_bin(args.tracedecay_bin)
     scenarios = load_scenarios(args.scenario)
     if not scenarios:
         sys.exit("no runnable scenarios selected")
@@ -712,7 +711,7 @@ def main(argv):
         "timestamp": timestamp,
         "driver": args.driver,
         "model": args.model,
-        "tracedecay_bin": str(args.tracedecay_bin),
+        "tracedecay_bin": None,
         "scenarios": [],
     }
 
@@ -728,6 +727,9 @@ def main(argv):
         print(json.dumps(report, indent=2))
         print(f"\nblocked report written to {report_path}", file=sys.stderr)
         return 2
+
+    args.tracedecay_bin = resolve_tracedecay_bin(args.tracedecay_bin)
+    report["tracedecay_bin"] = args.tracedecay_bin
 
     overall_ok = True
     for scenario in scenarios:

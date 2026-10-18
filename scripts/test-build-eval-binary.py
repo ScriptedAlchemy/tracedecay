@@ -37,7 +37,8 @@ class BuildEvalBinaryTest(unittest.TestCase):
         self.built.write_text("#!/bin/sh\necho tracedecay 1.2.3\n")
         self.built.chmod(0o755)
         self.log = root / "bazel.log"
-        fakes = root / "fakes"
+        self.fakes = root / "fakes"
+        fakes = self.fakes
         fakes.mkdir()
         bazel = fakes / "bazel"
         bazel.write_text(FAKE_BAZEL)
@@ -68,6 +69,16 @@ class BuildEvalBinaryTest(unittest.TestCase):
         self.assertIn("tracedecay 1.2.3", result.stderr)
         self.assertIn("sha256 ", result.stderr)
 
+    def test_windows_build_selects_the_executable_suffix(self):
+        windows_binary = self.built.with_suffix(".exe")
+        self.built.rename(windows_binary)
+        uname = self.fakes / "uname"
+        uname.write_text("#!/bin/sh\necho MINGW64_NT-10.0\n")
+        uname.chmod(0o755)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(windows_binary))
+
     def test_config_override_reaches_bazel(self):
         result = self.run_script(TRACEDECAY_EVAL_BAZEL_CONFIG="dist")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -88,6 +99,19 @@ class BuildEvalBinaryTest(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), str(explicit))
         self.assertIn("tracedecay 9.9.9", result.stderr)
         self.assertFalse(self.log.exists())
+
+    def test_isolated_reentry_reuses_the_selected_binary_without_another_build(self):
+        outer = self.run_script()
+        self.assertEqual(outer.returncode, 0, outer.stderr)
+        with tempfile.TemporaryDirectory() as isolated_home:
+            child = self.run_script(
+                TRACEDECAY_BIN=outer.stdout.strip(),
+                HOME=isolated_home,
+                XDG_CACHE_HOME=str(Path(isolated_home) / ".cache"),
+            )
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(child.stdout, outer.stdout)
+        self.assertEqual(sum(line.startswith("build ") for line in self.log.read_text().splitlines()), 1)
 
     def test_missing_explicit_binary_names_the_build_command(self):
         result = self.run_script(TRACEDECAY_BIN=str(self.built.with_name("absent")))
