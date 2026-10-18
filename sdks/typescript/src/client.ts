@@ -962,72 +962,94 @@ export class TraceDecayClient {
         },
         options.signal,
       );
-      if (!response.ok || response.body === null) {
-        await this.readJson(response);
-        throw new TraceDecayMalformedResponseError(
-          "the daemon did not open an SSE stream",
-          { status: response.status },
-        );
-      }
-      if (!hasMediaType(response, "text/event-stream")) {
-        throw new TraceDecayMalformedResponseError(
-          "the daemon opened an operation stream with an invalid media type",
-          { status: response.status },
-        );
-      }
-
+      let streamFailed = false;
       try {
-        for await (const frame of parseSse(response.body)) {
-          if (frame.retryDelayMs !== undefined) {
-            reconnectDelayMs = frame.retryDelayMs;
-          }
-          const decoded = decodeSse(frame, response.status, operationId);
-          if (decoded.frontier !== undefined) {
-            nextSequence = decoded.frontier.nextSequence;
-            resumeToken = decoded.frontier.resumeToken;
-          }
-          if (decoded.sequence !== undefined) {
-            if (
-              lastSequence !== undefined &&
-              BigInt(decoded.sequence) <= BigInt(lastSequence)
-            ) {
-              continue;
+        if (!response.ok || response.body === null) {
+          await this.readJson(response);
+          throw new TraceDecayMalformedResponseError(
+            "the daemon did not open an SSE stream",
+            { status: response.status },
+          );
+        }
+        if (!hasMediaType(response, "text/event-stream")) {
+          throw new TraceDecayMalformedResponseError(
+            "the daemon opened an operation stream with an invalid media type",
+            { status: response.status },
+          );
+        }
+
+        try {
+          for await (const frame of parseSse(response.body)) {
+            if (frame.retryDelayMs !== undefined) {
+              reconnectDelayMs = frame.retryDelayMs;
             }
-            const expected =
-              lastSequence === undefined ? undefined : incrementDecimal(lastSequence);
-            if (expected !== undefined && decoded.sequence !== expected) {
-              throw new TraceDecayMalformedResponseError(
-                "the daemon returned a non-contiguous SSE sequence",
-                { status: response.status, payload: decoded.event },
-              );
+            const decoded = decodeSse(frame, response.status, operationId);
+            if (decoded.frontier !== undefined) {
+              nextSequence = decoded.frontier.nextSequence;
+              resumeToken = decoded.frontier.resumeToken;
             }
-            lastSequence = decoded.lastSequence ?? decoded.sequence;
-            nextSequence = incrementDecimal(lastSequence);
+            if (decoded.sequence !== undefined) {
+              if (
+                lastSequence !== undefined &&
+                BigInt(decoded.sequence) <= BigInt(lastSequence)
+              ) {
+                continue;
+              }
+              const expected =
+                lastSequence === undefined ? undefined : incrementDecimal(lastSequence);
+              if (expected !== undefined && decoded.sequence !== expected) {
+                throw new TraceDecayMalformedResponseError(
+                  "the daemon returned a non-contiguous SSE sequence",
+                  { status: response.status, payload: decoded.event },
+                );
+              }
+              lastSequence = decoded.lastSequence ?? decoded.sequence;
+              nextSequence = incrementDecimal(lastSequence);
+            }
+            yield {
+              event: frame.event,
+              id: decoded.sequence ?? null,
+              data: decoded.event,
+            };
+            if (TERMINAL_EVENTS.has(frame.event)) {
+              return;
+            }
           }
-          yield {
-            event: frame.event,
-            id: decoded.sequence ?? null,
-            data: decoded.event,
-          };
-          if (TERMINAL_EVENTS.has(frame.event)) {
-            return;
+        } catch (cause) {
+          streamFailed = true;
+          if (cause instanceof TraceDecayProtocolError) {
+            throw cause;
+          }
+          if (options.signal?.aborted) {
+            throw new TraceDecayAbortError(options.signal.reason ?? cause);
+          }
+          if (reconnects >= maxReconnects) {
+            if (cause instanceof TraceDecayDisconnectedError) {
+              throw cause;
+            }
+            throw new TraceDecayDisconnectedError(
+              `operation stream disconnected after ${reconnects} reconnects`,
+              cause,
+            );
           }
         }
       } catch (cause) {
-        if (cause instanceof TraceDecayProtocolError) {
-          throw cause;
-        }
-        if (options.signal?.aborted) {
-          throw new TraceDecayAbortError(options.signal.reason ?? cause);
-        }
-        if (reconnects >= maxReconnects) {
-          if (cause instanceof TraceDecayDisconnectedError) {
-            throw cause;
+        streamFailed = true;
+        throw cause;
+      } finally {
+        // Closing a watcher must close its HTTP body without cancelling the operation.
+        // parseSse has already released its reader when this outer cleanup runs.
+        try {
+          await response.body?.cancel();
+        } catch (cause) {
+          // Do not mask a primary failure (including a retryable disconnect).
+          // Otherwise disposal must report that its transport did not close.
+          if (!streamFailed) {
+            throw new TraceDecayDisconnectedError(
+              "failed to close operation stream transport",
+              cause,
+            );
           }
-          throw new TraceDecayDisconnectedError(
-            `operation stream disconnected after ${reconnects} reconnects`,
-            cause,
-          );
         }
       }
 
