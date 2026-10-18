@@ -93,6 +93,7 @@ export function CortexSceneCanvas<L>({
   const fitKRef = useRef(1);
   const paletteRef = useRef<ScenePalette | null>(null);
   const frameRequest = useRef<number | null>(null);
+  const layoutGeneration = useRef(0);
   const state = useRef({ selectedId, inspectedId, hovered, cursor, reduced, layoutState, box });
   state.current = { selectedId, inspectedId, hovered, cursor, reduced, layoutState, box };
 
@@ -204,17 +205,21 @@ export function CortexSceneCanvas<L>({
   const hasBox = box.width > 0 && box.height > 0;
   useEffect(() => {
     if (noContext || !hasBox) return;
-    let cancelled = false;
+    // Only the newest request may write the layout; a cleanup, whether a newer
+    // scene or an unmount, retires its generation and aborts its worker.
+    const generation = (layoutGeneration.current += 1);
+    const controller = new AbortController();
+    const current = () => layoutGeneration.current === generation;
     setLayoutState({ status: 'pending' });
     cameraRef.current = null;
     Promise.resolve()
-      .then(() => painter.layout(scene, state.current.box))
+      .then(() => painter.layout(scene, state.current.box, controller.signal))
       .then(
         (layout) => {
-          if (!cancelled) setLayoutState({ status: 'ready', layout });
+          if (current()) setLayoutState({ status: 'ready', layout });
         },
         (error: unknown) => {
-          if (!cancelled) {
+          if (current()) {
             setLayoutState({
               status: 'failed',
               reason: error instanceof Error ? error.message : 'the layout did not complete',
@@ -223,7 +228,8 @@ export function CortexSceneCanvas<L>({
         },
       );
     return () => {
-      cancelled = true;
+      layoutGeneration.current += 1;
+      controller.abort();
     };
   }, [scene, painter, noContext, hasBox]);
 
