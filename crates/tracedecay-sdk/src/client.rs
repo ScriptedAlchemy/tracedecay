@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -16,24 +16,14 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracedecay_tool_catalog::{
     CancellationPoint, ReceiptContract, ReconciliationContract, SdkTransportBindingV1,
-    TerminalState,
 };
 
 use crate::operations::{OperationTransport, TypedOperation};
 pub use crate::request_control::OperationRequestOptions;
+use crate::stream::{self, Action, ConnectClass, StreamSession};
 
-const MAX_OPAQUE_BYTES: usize = 4_096;
-const MAX_REQUEST_ID_BYTES: usize = 512;
-/// Bound on one raw SSE line and on the event/id/data bytes retained for one
-/// frame before JSON decoding. Every canonical frame is a single JSON object of
-/// bounded metadata, request and operation identifiers (≤ 512 bytes), a
-/// sequence, a frontier with a 32-byte resume key, or a terminal receipt, so
-/// 64 KiB leaves wide headroom while capping what a peer can make the client
-/// retain.
-const MAX_SSE_FRAME_BYTES: usize = 64 * 1024;
-/// One byte of lookahead past the limit tells an over-limit line apart from one
-/// that ends exactly at it.
-const SSE_LINE_LOOKAHEAD_BYTES: u64 = MAX_SSE_FRAME_BYTES as u64 + 1;
+pub(crate) const MAX_OPAQUE_BYTES: usize = 4_096;
+pub(crate) const MAX_REQUEST_ID_BYTES: usize = 512;
 /// Selects loopback or remote HTTP policy without changing operation semantics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionMode {
@@ -137,6 +127,34 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Result<Client, ClientError> {
+        let endpoint = self.endpoint()?;
+        let mut builder = HttpClient::builder().timeout(self.timeout);
+        if matches!(&self.mode, ConnectionMode::Local(_)) {
+            // Ambient proxies must never receive local daemon credentials.
+            builder = builder.no_proxy();
+        }
+        let http = builder.build().map_err(ClientError::transport)?;
+        Ok(Client {
+            http,
+            endpoint,
+            mcp_transport: self.mcp_transport,
+        })
+    }
+
+    /// Build the asynchronous client for the operation-event stream. It has no
+    /// total request timeout, because a healthy stream outlives any fixed
+    /// deadline; `timeout` bounds connection establishment.
+    pub fn build_async_stream(self) -> Result<crate::async_stream::AsyncStreamClient, ClientError> {
+        let endpoint = self.endpoint()?;
+        let mut builder = reqwest::Client::builder().connect_timeout(self.timeout);
+        if matches!(&self.mode, ConnectionMode::Local(_)) {
+            builder = builder.no_proxy();
+        }
+        let http = builder.build().map_err(ClientError::transport)?;
+        Ok(crate::async_stream::AsyncStreamClient::new(http, endpoint))
+    }
+
+    fn endpoint(&self) -> Result<Endpoint, ClientError> {
         let settings = self.mode.settings();
         validate_opaque(&settings.project_id, MAX_REQUEST_ID_BYTES, "project ID")?;
         validate_opaque(&settings.token, MAX_OPAQUE_BYTES, "bearer token")?;
@@ -155,29 +173,67 @@ impl ClientBuilder {
         let normalized_path = base.path().trim_end_matches('/').to_owned();
         base.set_path(&normalized_path);
         let default_origin = base.origin().ascii_serialization();
-        let origin = self.origin.unwrap_or(default_origin);
-        let origin_value = HeaderValue::from_str(&origin)
+        let origin = self.origin.clone().unwrap_or(default_origin);
+        let origin = HeaderValue::from_str(&origin)
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
         let mut authorization = HeaderValue::from_str(&format!("Bearer {}", settings.token))
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
         authorization.set_sensitive(true);
-        let mut builder = HttpClient::builder().timeout(self.timeout);
-        if matches!(&self.mode, ConnectionMode::Local(_)) {
-            // Ambient proxies must never receive local daemon credentials.
-            builder = builder.no_proxy();
-        }
-        let http = builder.build().map_err(ClientError::transport)?;
         let application_root = with_path_segments(
             base,
             ["projects", settings.project_id.as_str(), "application"],
         )?;
-        Ok(Client {
-            http,
+        Ok(Endpoint {
             application_root,
             authorization,
-            origin: origin_value,
-            mcp_transport: self.mcp_transport,
+            origin,
         })
+    }
+}
+
+/// The validated daemon application endpoint and credentials, shared by the
+/// blocking and asynchronous clients.
+#[derive(Clone, Debug)]
+pub(crate) struct Endpoint {
+    application_root: reqwest::Url,
+    authorization: HeaderValue,
+    origin: HeaderValue,
+}
+
+impl Endpoint {
+    pub(crate) fn lifecycle_url(
+        &self,
+        operation_id: &str,
+        suffix: &str,
+    ) -> Result<reqwest::Url, ClientError> {
+        with_path_segments(
+            self.application_root.clone(),
+            ["operations", operation_id, suffix],
+        )
+    }
+
+    /// The events URL carrying the stream's resume frontier.
+    pub(crate) fn events_url(&self, session: &StreamSession) -> Result<reqwest::Url, ClientError> {
+        let mut url = self.lifecycle_url(session.operation_id(), "events")?;
+        let (next_sequence, resume_token) = session.resume_query();
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(next_sequence) = next_sequence {
+                query.append_pair("next_sequence", &next_sequence.to_string());
+            }
+            if let Some(token) = resume_token {
+                query.append_pair("resume_token", token);
+            }
+        }
+        Ok(url)
+    }
+
+    pub(crate) fn headers(&self, accept: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static(accept));
+        headers.insert(AUTHORIZATION, self.authorization.clone());
+        headers.insert(ORIGIN, self.origin.clone());
+        headers
     }
 }
 
@@ -185,9 +241,7 @@ impl ClientBuilder {
 #[derive(Clone, Debug)]
 pub struct Client {
     http: HttpClient,
-    application_root: reqwest::Url,
-    authorization: HeaderValue,
-    origin: HeaderValue,
+    endpoint: Endpoint,
     mcp_transport: Option<Arc<dyn McpToolTransport>>,
 }
 
@@ -490,10 +544,10 @@ impl Client {
         })?;
         crate::observe::finish((|| {
             let url = with_path_segments(
-                self.application_root.clone(),
+                self.endpoint.application_root.clone(),
                 route.split('/').filter(|segment| !segment.is_empty()),
             )?;
-            let mut headers = self.headers("application/json");
+            let mut headers = self.endpoint.headers("application/json");
             crate::request_control::apply_http_headers(&mut headers, options)?;
             let response = crate::observe::headers(|| {
                 self.http
@@ -518,8 +572,8 @@ impl Client {
         crate::observe::finish((|| {
             let response = crate::observe::headers(|| {
                 self.http
-                    .post(self.lifecycle_url(operation_id, "cancel")?)
-                    .headers(self.headers("application/json"))
+                    .post(self.endpoint.lifecycle_url(operation_id, "cancel")?)
+                    .headers(self.endpoint.headers("application/json"))
                     .send()
                     .map_err(ClientError::transport)
             })?;
@@ -571,45 +625,18 @@ impl Client {
         options: StreamOptions,
     ) -> Result<OperationStream, ClientError> {
         crate::observe::finish((|| {
-            validate_opaque(operation_id, MAX_REQUEST_ID_BYTES, "operation ID")?;
-            if let Some(resume) = &options.resume {
-                validate_opaque(&resume.token, MAX_OPAQUE_BYTES, "resume token")?;
-            }
             let mut stream = OperationStream {
                 client: self.clone(),
-                operation_id: operation_id.to_owned(),
-                reader: None,
-                options,
-                reconnects: 0,
-                next_sequence: None,
-                resume_token: None,
-                terminal: false,
-                pending_event: None,
-                pending_id: None,
-                pending_data: None,
+                session: StreamSession::new(operation_id, &options)?,
+                body: None,
             };
-            if let Some(resume) = &stream.options.resume {
-                stream.next_sequence = Some(resume.next_sequence);
-                stream.resume_token = Some(resume.token.clone());
+            // The first connection is not retried: its failure is the call's.
+            match stream.connect() {
+                Ok(()) => stream.session.connected(),
+                Err(error) => return Err(error),
             }
-            stream.connect()?;
             Ok(stream)
         })())
-    }
-
-    fn lifecycle_url(&self, operation_id: &str, suffix: &str) -> Result<reqwest::Url, ClientError> {
-        with_path_segments(
-            self.application_root.clone(),
-            ["operations", operation_id, suffix],
-        )
-    }
-
-    fn headers(&self, accept: &'static str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT, HeaderValue::from_static(accept));
-        headers.insert(AUTHORIZATION, self.authorization.clone());
-        headers.insert(ORIGIN, self.origin.clone());
-        headers
     }
 
     fn decode_application_response(
@@ -767,7 +794,7 @@ impl ApplicationResponse {
 }
 
 /// The response media type, without its parameters.
-fn media_type(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn media_type(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -789,14 +816,7 @@ pub(crate) fn problem_error(body: &Value, status: u16, missing_value: &'static s
     }
 }
 
-/// Whether an event name ends the operation's stream.
-fn is_terminal_event(event: &str) -> bool {
-    TerminalState::ALL
-        .iter()
-        .any(|state| state.as_str() == event)
-}
-
-fn protocol(status: u16, message: impl Into<String>) -> ClientError {
+pub(crate) fn protocol(status: u16, message: impl Into<String>) -> ClientError {
     ClientError::Protocol {
         status: Some(status),
         message: message.into(),
@@ -805,7 +825,7 @@ fn protocol(status: u16, message: impl Into<String>) -> ClientError {
 
 /// A protocol violation detected outside an HTTP status (request encoding,
 /// MCP results, and SSE framing).
-fn statusless_protocol(message: impl Into<String>) -> ClientError {
+pub(crate) fn statusless_protocol(message: impl Into<String>) -> ClientError {
     ClientError::Protocol {
         status: None,
         message: message.into(),
@@ -853,7 +873,7 @@ fn nullable_unsigned(value: Option<&Value>, status: u16, field: &str) -> Result<
     }
 }
 
-fn validate_receipt<'a>(
+pub(crate) fn validate_receipt<'a>(
     value: Option<&'a Value>,
     status: u16,
     field: &str,
@@ -1043,391 +1063,87 @@ pub struct StreamEvent {
 
 impl StreamEvent {
     pub fn terminal(&self) -> bool {
-        is_terminal_event(&self.event)
+        stream::is_terminal_event(&self.event)
     }
 }
 
 /// Blocking SSE iterator with bounded frames and bounded, opt-in resume.
+///
+/// Framing, validation, and the reconnect policy live in
+/// [`crate::stream::StreamSession`]; this type only performs the blocking I/O
+/// it asks for. Each `next` call blocks its thread on the network, so a
+/// Node-style event loop must use [`crate::async_stream`] instead.
 pub struct OperationStream {
     client: Client,
-    operation_id: String,
-    reader: Option<BufReader<Response>>,
-    options: StreamOptions,
-    reconnects: usize,
-    next_sequence: Option<u64>,
-    resume_token: Option<String>,
-    terminal: bool,
-    pending_event: Option<String>,
-    pending_id: Option<String>,
-    /// Data lines of the open frame, already joined with `\n`.
-    pending_data: Option<String>,
+    session: StreamSession,
+    body: Option<Response>,
 }
 
 impl OperationStream {
     fn connect(&mut self) -> Result<(), ClientError> {
-        let mut url = self.client.lifecycle_url(&self.operation_id, "events")?;
-        {
-            let mut query = url.query_pairs_mut();
-            if let Some(next_sequence) = self.next_sequence {
-                query.append_pair("next_sequence", &next_sequence.to_string());
-            }
-            if let Some(token) = &self.resume_token {
-                query.append_pair("resume_token", token);
-            }
-        }
+        let url = self.client.endpoint.events_url(&self.session)?;
         let response = crate::observe::headers(|| {
             self.client
                 .http
                 .get(url)
-                .headers(self.client.headers("text/event-stream"))
+                .headers(self.client.endpoint.headers("text/event-stream"))
                 .send()
                 .map_err(ClientError::transport)
         })?;
-        let status = response.status();
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(ClientError::Authentication(status.as_u16()));
-        }
-        let media_type = media_type(response.headers());
-        if !status.is_success() && media_type == Some("application/json") {
-            let body: Value = crate::observe::body_decode(|| {
-                response.json().map_err(|error| {
-                    protocol(
-                        status.as_u16(),
-                        format!("daemon returned malformed stream problem JSON: {error}"),
-                    )
-                })
-            })?;
-            if body.get("kind").and_then(Value::as_str) == Some("problem") {
-                return Err(problem_error(
-                    &body,
-                    status.as_u16(),
-                    "stream problem envelope has no value",
-                ));
+        let status = response.status().as_u16();
+        match stream::classify_connect(status, media_type(response.headers())) {
+            ConnectClass::Stream => {
+                self.body = Some(response);
+                Ok(())
             }
-            return Err(protocol(
-                status.as_u16(),
-                "daemon returned an unknown stream problem envelope",
-            ));
-        }
-        if !status.is_success() || media_type != Some("text/event-stream") {
-            return Err(protocol(
-                status.as_u16(),
-                "daemon did not open a canonical event stream",
-            ));
-        }
-        self.pending_event = None;
-        self.pending_id = None;
-        self.pending_data = None;
-        self.reader = Some(BufReader::new(response));
-        Ok(())
-    }
-
-    /// Bytes currently retained for the open frame.
-    fn pending_frame_bytes(&self) -> usize {
-        self.pending_event.as_deref().map_or(0, str::len)
-            + self.pending_id.as_deref().map_or(0, str::len)
-            + self.pending_data.as_deref().map_or(0, str::len)
-    }
-
-    /// Closes the stream without delivering the frame or touching the resume
-    /// frontier; the remainder of an oversized frame is never drained.
-    fn refuse_oversized_frame(&mut self) -> ClientError {
-        self.reader = None;
-        self.terminal = true;
-        self.pending_event = None;
-        self.pending_id = None;
-        self.pending_data = None;
-        ClientError::StreamFrameTooLarge {
-            limit_bytes: MAX_SSE_FRAME_BYTES,
-        }
-    }
-
-    fn read_event(&mut self) -> Result<Option<StreamEvent>, ClientError> {
-        loop {
-            let reader = self.reader.as_mut().ok_or_else(|| {
-                ClientError::Transport("event stream reader is not connected".into())
-            })?;
-            let mut line = String::new();
-            let read = reader
-                .by_ref()
-                .take(SSE_LINE_LOOKAHEAD_BYTES)
-                .read_line(&mut line)
-                .map_err(|error| ClientError::Transport(error.to_string()))?;
-            if read == 0 {
-                if self.pending_event.is_some() || self.pending_data.is_some() {
-                    return Err(statusless_protocol(
-                        "event stream ended inside an SSE frame",
-                    ));
-                }
-                return Ok(None);
-            }
-            if read > MAX_SSE_FRAME_BYTES {
-                return Err(self.refuse_oversized_frame());
-            }
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                let Some(data_text) = self.pending_data.take() else {
-                    self.pending_event = None;
-                    continue;
-                };
-                let event_name = self
-                    .pending_event
-                    .take()
-                    .unwrap_or_else(|| "message".into());
-                let data: Value = serde_json::from_str(&data_text).map_err(|error| {
-                    statusless_protocol(format!("SSE data is not JSON: {error}"))
+            ConnectClass::ProblemBody => {
+                let body = crate::observe::body_decode(|| {
+                    response.bytes().map_err(ClientError::transport)
                 })?;
-                if data.get("event").and_then(Value::as_str) != Some(event_name.as_str()) {
-                    return Err(statusless_protocol(
-                        "SSE event name disagrees with its JSON payload",
-                    ));
-                }
-                let id = self.pending_id.take();
-                if event_name == "open" {
-                    if id.is_some() {
-                        return Err(statusless_protocol("SSE open event must not carry an ID"));
-                    }
-                    let open_data = data
-                        .get("data")
-                        .and_then(Value::as_object)
-                        .ok_or_else(|| statusless_protocol("SSE open data is malformed"))?;
-                    if open_data.get("correlation_id").and_then(Value::as_str)
-                        != Some(self.operation_id.as_str())
-                    {
-                        return Err(statusless_protocol(
-                            "SSE open correlation identity does not match operation",
-                        ));
-                    }
-                    let frontier = open_data
-                        .get("frontier")
-                        .and_then(Value::as_object)
-                        .ok_or_else(|| statusless_protocol("SSE open frontier is malformed"))?;
-                    let next_sequence = frontier
-                        .get("next_sequence")
-                        .and_then(Value::as_u64)
-                        .ok_or_else(|| {
-                            statusless_protocol("SSE open frontier has no next sequence")
-                        })?;
-                    let retained = frontier
-                        .get("retained_from_sequence")
-                        .and_then(Value::as_u64)
-                        .ok_or_else(|| {
-                            statusless_protocol("SSE open frontier has no retained sequence")
-                        })?;
-                    if retained > next_sequence {
-                        return Err(statusless_protocol(
-                            "SSE open frontier sequence range is inconsistent",
-                        ));
-                    }
-                    self.next_sequence = Some(next_sequence);
-                    self.resume_token = match frontier.get("resume_token") {
-                        Some(Value::Null) => None,
-                        Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
-                        _ => {
-                            return Err(statusless_protocol(
-                                "SSE open frontier resume token is malformed",
-                            ));
-                        }
-                    };
-                } else {
-                    if !matches!(event_name.as_str(), "item" | "progress" | "resume_gap")
-                        && !is_terminal_event(&event_name)
-                    {
-                        return Err(statusless_protocol("SSE event name is not canonical"));
-                    }
-                    let event_data = data
-                        .get("data")
-                        .and_then(Value::as_object)
-                        .ok_or_else(|| statusless_protocol("SSE event data is malformed"))?;
-                    let sequence = event_data
-                        .get("sequence")
-                        .and_then(Value::as_u64)
-                        .ok_or_else(|| {
-                            statusless_protocol("SSE event has no canonical sequence")
-                        })?;
-                    if id.as_deref() != Some(sequence.to_string().as_str()) {
-                        return Err(statusless_protocol(
-                            "SSE ID disagrees with its canonical sequence",
-                        ));
-                    }
-                    if self
-                        .next_sequence
-                        .is_some_and(|expected| expected != sequence)
-                    {
-                        return Err(statusless_protocol(
-                            "SSE event sequence disagrees with the stream frontier",
-                        ));
-                    }
-                    match event_name.as_str() {
-                        "item" if !event_data.contains_key("item") => {
-                            return Err(statusless_protocol("SSE item payload is missing"));
-                        }
-                        "progress"
-                            if event_data
-                                .get("completed")
-                                .and_then(Value::as_u64)
-                                .is_none()
-                                || !matches!(event_data.get("total"), Some(Value::Null))
-                                    && event_data
-                                        .get("total")
-                                        .and_then(Value::as_u64)
-                                        .is_none() =>
-                        {
-                            return Err(statusless_protocol("SSE progress payload is malformed"));
-                        }
-                        "resume_gap" => validate_resume_gap(event_data)?,
-                        event if is_terminal_event(event) => {
-                            validate_terminal(event_data, event)?;
-                        }
-                        _ => {}
-                    }
-                    self.next_sequence = Some(
-                        sequence
-                            .checked_add(1)
-                            .ok_or_else(|| statusless_protocol("SSE sequence overflowed"))?,
-                    );
-                }
-                let event = StreamEvent {
-                    event: event_name,
-                    id,
-                    data,
-                };
-                self.terminal = event.terminal();
-                return Ok(Some(event));
+                Err(stream::problem_from_body(status, &body))
             }
-            if line.starts_with(':') {
-                continue;
-            }
-            let (field, value) = line.split_once(':').map_or((line, ""), |(field, value)| {
-                (field, value.strip_prefix(' ').unwrap_or(value))
-            });
-            match field {
-                // Account before extending: the joining `\n` counts too.
-                "event" | "id" | "data"
-                    if self.pending_frame_bytes() + value.len() + 1 > MAX_SSE_FRAME_BYTES =>
-                {
-                    return Err(self.refuse_oversized_frame());
-                }
-                "event" => self.pending_event = Some(value.to_owned()),
-                "id" if !value.contains('\0') => self.pending_id = Some(value.to_owned()),
-                "data" => match &mut self.pending_data {
-                    Some(data) => {
-                        data.push('\n');
-                        data.push_str(value);
-                    }
-                    None => self.pending_data = Some(value.to_owned()),
-                },
-                _ => {}
-            }
+            ConnectClass::Refused(error) => Err(error),
         }
     }
-}
-
-fn validate_resume_gap(event_data: &serde_json::Map<String, Value>) -> Result<(), ClientError> {
-    let gap = event_data
-        .get("gap")
-        .and_then(Value::as_object)
-        .ok_or_else(|| statusless_protocol("SSE resume gap is malformed"))?;
-    let first = gap
-        .get("first_missing_sequence")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| statusless_protocol("SSE resume gap has no first sequence"))?;
-    let last = gap
-        .get("last_missing_sequence")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| statusless_protocol("SSE resume gap has no last sequence"))?;
-    let frontier = gap
-        .get("frontier")
-        .and_then(Value::as_object)
-        .ok_or_else(|| statusless_protocol("SSE resume gap frontier is malformed"))?;
-    let next = frontier
-        .get("next_sequence")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| statusless_protocol("SSE resume gap frontier has no next sequence"))?;
-    let retained = frontier
-        .get("retained_from_sequence")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| statusless_protocol("SSE resume gap frontier has no retained sequence"))?;
-    let token_valid = matches!(
-        frontier.get("resume_token"),
-        Some(Value::Null | Value::String(_))
-    );
-    if first > last || retained > next || !token_valid {
-        return Err(statusless_protocol(
-            "SSE resume gap range or frontier is malformed",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_terminal(
-    event_data: &serde_json::Map<String, Value>,
-    event_name: &str,
-) -> Result<(), ClientError> {
-    let terminal = event_data
-        .get("terminal")
-        .and_then(Value::as_object)
-        .ok_or_else(|| statusless_protocol("SSE terminal payload is malformed"))?;
-    if terminal.get("termination").and_then(Value::as_str) != Some(event_name) {
-        return Err(statusless_protocol(
-            "SSE terminal outcome disagrees with its event",
-        ));
-    }
-    let receipt_termination = validate_receipt(terminal.get("receipt"), 200, "terminal.receipt")?;
-    if receipt_termination != event_name {
-        return Err(statusless_protocol(
-            "SSE terminal receipt disagrees with its event",
-        ));
-    }
-    Ok(())
 }
 
 impl Iterator for OperationStream {
     type Item = Result<StreamEvent, ClientError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.terminal {
-            return None;
-        }
+        let mut buffer = [0_u8; 8 * 1024];
         loop {
-            let mut disconnect = match self.read_event() {
-                Ok(Some(event)) => return Some(Ok(event)),
-                Ok(None) => {
-                    ClientError::Transport("event stream ended before a terminal event".into())
+            let action = self.session.next_action();
+            if !self.session.is_open() {
+                self.body = None;
+            }
+            match action {
+                Action::Deliver(item) => return Some(item),
+                Action::Done => return None,
+                Action::Connect { delay } => {
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                    match self.connect() {
+                        Ok(()) => self.session.connected(),
+                        Err(error) => self.session.connect_failed(error),
+                    }
                 }
-                Err(error @ ClientError::Transport(_)) => error,
-                Err(error) => return Some(Err(self.finish(error))),
-            };
-            // Every reconnect attempt, including one that fails to connect,
-            // spends budget. Only transport failures are retried; auth, problem,
-            // and protocol errors surface at once.
-            loop {
-                if self.reconnects >= self.options.max_reconnects {
-                    return Some(Err(self.finish(disconnect)));
-                }
-                if self.next_sequence.is_none() || self.resume_token.is_none() {
-                    return Some(Err(self.finish(statusless_protocol(
-                        "stream ended without a resumable frontier",
-                    ))));
-                }
-                self.reconnects += 1;
-                match self.connect() {
-                    Ok(()) => break,
-                    Err(error @ ClientError::Transport(_)) => disconnect = error,
-                    Err(error) => return Some(Err(self.finish(error))),
+                Action::Read => {
+                    let read = match self.body.as_mut() {
+                        Some(body) => body.read(&mut buffer),
+                        None => Ok(0),
+                    };
+                    match read {
+                        Ok(0) => self.session.end_of_body(),
+                        Ok(read) => self.session.chunk(&buffer[..read]),
+                        Err(error) => self
+                            .session
+                            .read_failed(ClientError::Transport(error.to_string())),
+                    }
                 }
             }
         }
-    }
-}
-
-impl OperationStream {
-    /// Ends iteration after `error`, so a caller that keeps calling `next` sees
-    /// `None` instead of an endless error stream.
-    fn finish(&mut self, error: ClientError) -> ClientError {
-        self.terminal = true;
-        self.reader = None;
-        error
     }
 }
 
@@ -1699,7 +1415,7 @@ pub enum ClientError {
 }
 
 impl ClientError {
-    fn transport(error: reqwest::Error) -> Self {
+    pub(crate) fn transport(error: reqwest::Error) -> Self {
         Self::Transport(error.to_string())
     }
 }
@@ -1754,7 +1470,7 @@ fn with_path_segments<'a>(
 /// `.` and `..` are excluded because they are dot segments, which the URL
 /// path builder drops rather than encodes, so they could never round-trip as
 /// identifiers.
-fn validate_opaque(value: &str, maximum: usize, field: &str) -> Result<(), ClientError> {
+pub(crate) fn validate_opaque(value: &str, maximum: usize, field: &str) -> Result<(), ClientError> {
     let valid = !value.is_empty()
         && value.trim() == value
         && value.len() <= maximum

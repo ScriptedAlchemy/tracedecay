@@ -7276,6 +7276,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-tool-catalog",

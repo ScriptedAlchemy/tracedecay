@@ -2,12 +2,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod async_stream;
 pub mod client;
 mod observe;
 pub mod operations;
 pub mod remote_client;
 mod request_control;
 mod semantic;
+mod stream;
 
 /// Canonical cancellation observations, identity, and process-local signal.
 pub use tracedecay_contracts::{
