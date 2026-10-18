@@ -760,6 +760,27 @@ changes a file that holds memory.
   `global.db` rows) or a store the daemon does not mount (orphan collection's
   memory check), and neither holds a read slot on a live file. It goes with step
   8, where a project directory describes itself and memory has its own file.
+- Step 7, shared pool (2026-10-17, branch `refactor/storage-shared-executor`). Every
+  attached file's writer and readers are tasks on one fixed pool of
+  `tracedecay-store-N` threads (default 6, clamped 2 to 16), so the thread count no
+  longer grows with the file count. A task holds a pool thread only while it runs
+  SQL; idle waits, batch dwell, snapshot polls, busy-begin and WAL-recovery retries
+  are awaits on the pool timer. A synchronous store wait issued from a pool thread
+  (writer start, reply waits, reader acquire and snapshot calls, task join, drain)
+  refuses with the existing unavailable errors in every build profile instead of
+  parking. FairQueue, batching, the ledger, the checkpoint controller and the
+  step 6 fence are unchanged. Deviations, each with the slice that closes it:
+  - N comes from `TRACEDECAY_STORE_THREADS`, not daemon configuration; it moves to
+    `StorageConfig` with the executor's public surface.
+  - No thread is reserved for foreground classes yet. Today's files mix classes
+    (Work shares `sessions.db` with observation ingest), so a reservation by file
+    has nothing to key on until step 8. Until then six statements running long at
+    once delay every other store. Measured under host load, with three runs each:
+    `mcp_suite` 193 to 242 s on this branch against 224 to 227 s on master,
+    `daemon_suite` 92 to 123 s against 97 to 124 s.
+  - Fenced TRUNCATE on lanes, idle close, the unlink probe and `ProfileLost` are the
+    next slices of this step.
+  Proof: 64 attached stores add exactly N threads, all of them pool threads.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose
