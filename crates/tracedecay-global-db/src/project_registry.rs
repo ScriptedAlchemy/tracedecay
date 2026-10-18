@@ -283,7 +283,8 @@ impl ProjectIdentityAliasKind {
 /// libraries into one project, so a shared root commit adopts only beside
 /// agreement on the remote: the same normalized `origin` as an enrolled
 /// checkout, or a local `origin` that is itself an enrolled checkout. A
-/// shallow clone, which cannot walk to its roots, adopts on its remote alone.
+/// shallow clone, which cannot walk to its roots, adopts on its remote alone;
+/// so does a full clone when the enrolled project has no history anchors yet.
 struct AnchorProbe {
     history: Vec<String>,
     remote: Option<String>,
@@ -316,30 +317,68 @@ impl AnchorProbe {
 
     /// The one project the anchors agree on; anchors naming two projects adopt
     /// nothing.
-    fn adopted(&self, named: &std::collections::HashMap<String, String>) -> Option<String> {
+    async fn adopted(
+        &self,
+        named: &std::collections::HashMap<String, String>,
+        read: &impl QueryExecutor,
+    ) -> tracedecay_domain::errors::Result<Option<String>> {
         let remote = self.remote.as_ref().and_then(|key| named.get(key));
         if self.history.is_empty() {
-            return remote.cloned();
+            return Ok(remote.cloned());
         }
         let named_by_history = self
             .history
             .iter()
             .filter_map(|key| named.get(key))
             .collect::<BTreeSet<_>>();
-        let [project_id] = named_by_history.into_iter().collect::<Vec<_>>()[..] else {
-            return None;
+        let projects = named_by_history.into_iter().collect::<Vec<_>>();
+        if projects.is_empty() {
+            if let Some(project_id) = remote
+                && !has_history_anchor_in(read, project_id).await?
+            {
+                return Ok(Some(project_id.clone()));
+            }
+            return Ok(None);
+        }
+        let [project_id] = projects[..] else {
+            return Ok(None);
         };
         let local_origin = self.local_origin.as_ref().and_then(|key| named.get(key));
-        (remote == Some(project_id) || local_origin == Some(project_id)).then(|| project_id.clone())
+        Ok(
+            (remote == Some(project_id) || local_origin == Some(project_id))
+                .then(|| project_id.clone()),
+        )
     }
 }
 
+async fn has_history_anchor_in(
+    read: &impl QueryExecutor,
+    project_id: &str,
+) -> tracedecay_domain::errors::Result<bool> {
+    const OPERATION: &str = "resolve project history anchor";
+    let mut rows = read
+        .query(
+            "SELECT 1 FROM project_aliases
+             WHERE project_id = ?1
+               AND (alias_path LIKE 'git-root-commit:%' OR alias_path LIKE 'git-subproject:%')
+             LIMIT 1",
+            params![project_id],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .is_some())
+}
+
 async fn alias_project_id(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    read: &impl QueryExecutor,
     alias: &str,
 ) -> tracedecay_domain::errors::Result<Option<String>> {
-    const OPERATION: &str = "upsert code project";
-    let mut rows = transaction
+    const OPERATION: &str = "resolve project alias";
+    let mut rows = read
         .query(
             "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
             params![alias],
@@ -638,7 +677,7 @@ async fn list_code_project_paths_from(
              FROM recent_projects
              LEFT JOIN project_aliases
                ON project_aliases.project_id = recent_projects.project_id
-              AND project_aliases.last_seen_at = recent_projects.last_seen_at
+              AND project_aliases.last_seen_at = recent_projects.primary_root_last_seen_at
              ORDER BY recent_projects.last_seen_at DESC,
                       recent_projects.project_id,
                       project_aliases.alias_path",
@@ -732,7 +771,10 @@ async fn list_code_project_paths_from(
                     }
                 };
                 let display_evidence = path.to_string_lossy();
-                if primary_last_seen != last_seen_at
+                // Clone activity advances project recency without verifying
+                // the primary root again. Its own alias must still agree with
+                // the primary-root evidence from the last root verification.
+                if primary_last_seen > last_seen_at
                     || (display_evidence != canonical_root && display_evidence != display_root)
                     || !current_aliases.contains(&project_path_alias_key(&path))
                 {
@@ -997,7 +1039,8 @@ impl RegisteredGlobalDb {
                             named_by_anchor.insert(key.to_owned(), project_id);
                         }
                     }
-                    existing_authorities.extend(probe.adopted(&named_by_anchor));
+                    existing_authorities
+                        .extend(probe.adopted(&named_by_anchor, &transaction).await?);
                 }
                 if existing_authorities.len() > 1 {
                     // Two ids already claim this root or its repository. Picking one
@@ -1964,13 +2007,17 @@ impl RegisteredGlobalDb {
         )
         .await;
         let probe = AnchorProbe::new(&anchors, Some(&origin));
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error("resolve project history anchor", error))?;
         let mut named = std::collections::HashMap::new();
         for key in probe.keys() {
-            if let Some(project_id) = self.project_id_by_alias_key(key).await? {
+            if let Some(project_id) = alias_project_id(&snapshot, key).await? {
                 named.insert(key.to_owned(), project_id);
             }
         }
-        Ok(probe.adopted(&named))
+        probe.adopted(&named, &snapshot).await
     }
 
     async fn has_history_anchor(
@@ -1982,21 +2029,7 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT 1 FROM project_aliases
-                 WHERE project_id = ?1
-                   AND (alias_path LIKE 'git-root-commit:%' OR alias_path LIKE 'git-subproject:%')
-                 LIMIT 1",
-                params![project_id],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        Ok(rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-            .is_some())
+        has_history_anchor_in(&snapshot, project_id).await
     }
 
     async fn has_store_instance(
@@ -2262,16 +2295,15 @@ impl RegisteredGlobalDb {
             let project_id: String = row
                 .get(1)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            // A non-path alias (a remote-name search key) can never be judged
-            // dead by consulting the filesystem, so it is never a candidate.
+            // Anchors remain lookup data while the project exists, but are
+            // not evidence that any checkout still exists.
             let missing_path = match self::alias_key_path(&alias) {
                 Some(path) if !path.exists() => path.to_string_lossy().into_owned(),
-                // Either a non-path alias, which the filesystem can never
-                // judge dead, or a path that is still there.
-                _ => {
+                Some(_) => {
                     *live_roots_by_project.entry(project_id).or_default() += 1;
                     continue;
                 }
+                None => continue,
             };
             dead_aliases.push(RegistryReapEntry {
                 kind: ReapEntryKind::ProjectAlias,
