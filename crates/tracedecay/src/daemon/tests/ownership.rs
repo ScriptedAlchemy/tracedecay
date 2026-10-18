@@ -339,6 +339,61 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
 }
 
+/// A daemon-wide graph listing must not count as a client of the servers it
+/// lists. A bounded route bind treats any extra server handle as a lease, so
+/// a listing that held handles across its graph reads made an idle server
+/// unevictable and refused the open with `project_server_capacity_reached`.
+#[cfg(unix)]
+#[tokio::test]
+async fn mounted_graph_listing_takes_no_server_lease_while_it_reads() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("project dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("project source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "graph-listing-lease");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("mount project server");
+
+    let swap = server.graph_slot().write_owned().await;
+    let listing = engine.store_administration.mounted_project_graphs();
+    let mut listing = std::pin::pin!(listing);
+    let handles = Arc::strong_count(&server);
+    assert!(
+        std::future::Future::poll(
+            listing.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        )
+        .is_pending(),
+        "the listing parks on the held graph read"
+    );
+    assert_eq!(
+        Arc::strong_count(&server),
+        handles,
+        "a parked graph listing must hold no server handle"
+    );
+    assert!(
+        engine
+            .store_administration
+            .project_servers()
+            .try_lock()
+            .is_ok(),
+        "a parked graph listing must not hold the registry lock, or every route bind waits on the swap"
+    );
+    drop(swap);
+    assert_eq!(listing.await.len(), 1);
+}
+
 /// A mounted route alias answers without re-running registry admission: the
 /// retirement/revocation lifecycle owns a mounted server's validity, and only
 /// a (re)mount re-enters `ensure_registered_project_route`. A tombstone

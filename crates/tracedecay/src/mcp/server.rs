@@ -1328,6 +1328,13 @@ impl McpServer {
         self.cg.read().await.clone()
     }
 
+    /// The served-instance slot, for readers that must not keep the server
+    /// itself alive: a server handle counts as a client lease and blocks
+    /// bounded eviction.
+    pub(crate) fn graph_slot(&self) -> Arc<tokio::sync::RwLock<Arc<TraceDecay>>> {
+        Arc::clone(&self.cg)
+    }
+
     #[tracing::instrument(name = "mcp.server.stats_snapshot", level = "trace", skip_all)]
     pub async fn server_stats_json(&self) -> Value {
         let uptime = self.stats.started_at.elapsed();
