@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
+use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::is_test_file;
 use tracedecay_contracts::retrieval::{
@@ -8,7 +9,6 @@ use tracedecay_contracts::retrieval::{
     TestRiskConfidenceV1, TestRiskEntryV1, TestRiskResultV1, TestRiskSummaryV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId,
 };
@@ -520,8 +520,11 @@ pub fn verified_test_symbol_parts(
     Ok((metadata, file))
 }
 
-fn test_risk_graph_problem(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
+fn test_risk_graph_problem(detail: &str) -> GraphQueryError {
+    GraphQueryError::EvidenceUnavailable {
+        reason_code: "verified-test-evidence-unavailable",
+        detail: detail.to_owned(),
+    }
 }
 
 #[tracing::instrument(name = "graph.health.test_risk.attribution", level = "trace", skip_all)]
