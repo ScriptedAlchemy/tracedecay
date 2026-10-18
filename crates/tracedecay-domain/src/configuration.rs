@@ -18,11 +18,13 @@ use crate::research::{
     ProjectId, UtcMicros, canonical_sha256,
 };
 
+mod context_scout_intent;
 mod lcm_summarizer_executables;
 pub mod topology;
 mod work_executable_bindings;
 mod work_expertise_consent;
 
+pub use context_scout_intent::*;
 pub use lcm_summarizer_executables::*;
 pub use topology::*;
 pub use work_executable_bindings::*;
@@ -929,6 +931,11 @@ pub struct ContextScoutSettingsV1 {
     pub model_path: Option<ContextScoutConfiguredModelPathV1>,
     pub model_id: Option<String>,
     pub model_timeout_secs: Option<u64>,
+    /// Session intent pass. Absent means the Scout runs no intent pass; the
+    /// field is omitted from the canonical encoding so settings written before
+    /// it existed keep their behavior digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<ContextScoutIntentSettingsV1>,
 }
 
 impl ContextScoutSettingsV1 {
@@ -943,6 +950,7 @@ impl ContextScoutSettingsV1 {
             model_path: None,
             model_id: None,
             model_timeout_secs: None,
+            intent: None,
         }
     }
 
@@ -971,6 +979,9 @@ impl ContextScoutSettingsV1 {
         }
         if let Some(model_id) = self.model_id.as_deref() {
             validate_canonical_label(model_id, "context scout model id")?;
+        }
+        if let Some(intent) = &self.intent {
+            intent.validate()?;
         }
         self.limits.validate()
     }
