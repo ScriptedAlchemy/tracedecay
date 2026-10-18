@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use axum::body::to_bytes;
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{
     FactCommitOwnerV1, FactPayloadAccessV1, FactProjectionV1, FactStatusV1, FactStoreAddResultV1,
@@ -268,7 +269,8 @@ async fn workflow_dispatch_preserves_read_interruption_and_effect_settlement_pol
                 body,
             },
         )
-        .await;
+        .await
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
