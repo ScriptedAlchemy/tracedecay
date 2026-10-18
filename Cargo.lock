@@ -6858,6 +6858,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-store",
  "tracedecay-temporal-query",
+ "tracedecay-tokenizer",
  "tracing",
 ]
 
