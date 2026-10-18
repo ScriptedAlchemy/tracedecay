@@ -13,7 +13,7 @@ use tracedecay_runtime_core::{
         DatabaseOwnerErrorV1, DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1,
         DatabaseOwnerWeakLeaseIssuerErrorV1, DatabaseOwnerWeakLeaseIssuerV1,
         DatabaseRuntimeClientV1, DatabaseStorageTelemetryHandle, DatabaseWriteTransaction,
-        engine::{Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows},
+        engine::{Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, WriteTx},
     },
     shard_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
 };
@@ -599,6 +599,53 @@ impl RegisteredGlobalDb {
         })
     }
 
+    pub(crate) fn require_active_write_scope(
+        &self,
+        operation: &str,
+    ) -> tracedecay_domain::errors::Result<()> {
+        self.database
+            .write_authority()?
+            .require_active_write_scope(operation)
+    }
+
+    /// Runs `body` as one write job: commit when it returns `Ok`, rollback
+    /// when it returns `Err`. The daemon write scope is checked before the job
+    /// is queued and again inside the job after the body, so a scope that ends
+    /// while the body runs rolls the job back and surfaces as the outer error.
+    #[tracing::instrument(name = "global_db.registered.txn.job", level = "trace", skip_all)]
+    pub async fn transact<R, E, F>(
+        &self,
+        body: F,
+    ) -> tracedecay_domain::errors::Result<Result<R, E>>
+    where
+        F: AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let authority = self.database.write_authority()?;
+        authority.require_active_write_scope("begin registered global database transaction")?;
+        let verdict = self
+            .database
+            .transact(
+                "begin registered global database transaction",
+                async move |transaction: &WriteTx<'_, '_>| {
+                    let value = body(RegisteredGlobalDbWriteTx { transaction })
+                        .await
+                        .map_err(ScopedJobAbort::Body)?;
+                    authority
+                        .require_active_write_scope("commit registered global database transaction")
+                        .map_err(ScopedJobAbort::ScopeEnded)?;
+                    Ok(value)
+                },
+            )
+            .await?;
+        match verdict {
+            Ok(value) => Ok(Ok(value)),
+            Err(ScopedJobAbort::Body(error)) => Ok(Err(error)),
+            Err(ScopedJobAbort::ScopeEnded(error)) => Err(error),
+        }
+    }
+
     pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
         self.database.registered_binding()
     }
@@ -917,6 +964,41 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
     #[tracing::instrument(name = "global_db.registered.txn.rollback", level = "trace", skip_all)]
     pub async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.transaction.rollback().await.map_err(engine_error)
+    }
+}
+
+enum ScopedJobAbort<E> {
+    Body(E),
+    ScopeEnded(TraceDecayError),
+}
+
+/// The transaction a [`RegisteredGlobalDb::transact`] body runs in. It is a
+/// borrowed handle, so the body takes it by value and lends `&transaction` to
+/// helpers written against the executor traits.
+#[derive(Clone, Copy)]
+pub struct RegisteredGlobalDbWriteTx<'a, 'b> {
+    transaction: &'a WriteTx<'a, 'b>,
+}
+
+impl QueryExecutor for RegisteredGlobalDbWriteTx<'_, '_> {
+    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
+    where
+        P: IntoParams,
+    {
+        self.transaction.query(sql, params).await
+    }
+}
+
+impl Executor for RegisteredGlobalDbWriteTx<'_, '_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> EngineResult<u64>
+    where
+        P: IntoParams,
+    {
+        self.transaction.execute(sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
+        self.transaction.execute_batch(sql).await
     }
 }
 
