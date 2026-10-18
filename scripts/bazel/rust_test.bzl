@@ -208,13 +208,12 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
         "TRACEDECAY_DATA_DIR": "/dev/null",
         "TRACEDECAY_DISABLE_GLOBAL_DB": "1",
     }
-    data = list(kwargs.pop("data", []))
-    present = [native.package_relative_label(entry) for entry in data]
-    for label in runfiles_env.values():
-        resolved = native.package_relative_label(label)
-        if resolved not in present:
-            present.append(resolved)
-            data.append(label)
+    # Owned resource globs can overlap a suite's explicit data declarations.
+    # Normalize relative labels before deduplication, including runtime tools.
+    data = depset([
+        native.package_relative_label(entry)
+        for entry in list(kwargs.pop("data", [])) + runfiles_env.values()
+    ]).to_list()
     if "crate" not in kwargs:
         kwargs.setdefault("crate_name", name.replace("-", "_"))
     _rust_test(
