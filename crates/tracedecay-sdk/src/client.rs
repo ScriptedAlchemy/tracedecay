@@ -1026,6 +1026,10 @@ pub struct StreamResume {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StreamOptions {
     pub resume: Option<StreamResume>,
+    /// Reconnect attempts allowed after the first connection. Each attempt,
+    /// including one that fails to connect, spends this budget, and only
+    /// transport failures are retried. After the budget is spent the iterator
+    /// yields one `Err` and then `None`.
     pub max_reconnects: usize,
 }
 
@@ -1111,6 +1115,9 @@ impl OperationStream {
                 "daemon did not open a canonical event stream",
             ));
         }
+        self.pending_event = None;
+        self.pending_id = None;
+        self.pending_data = None;
         self.reader = Some(BufReader::new(response));
         Ok(())
     }
@@ -1383,27 +1390,44 @@ impl Iterator for OperationStream {
             return None;
         }
         loop {
-            match self.read_event() {
+            let mut disconnect = match self.read_event() {
                 Ok(Some(event)) => return Some(Ok(event)),
-                Ok(None) if self.reconnects < self.options.max_reconnects => {
-                    if self.next_sequence.is_none() || self.resume_token.is_none() {
-                        return Some(Err(statusless_protocol(
-                            "stream ended without a resumable frontier",
-                        )));
-                    }
-                    self.reconnects += 1;
-                    if let Err(error) = self.connect() {
-                        return Some(Err(error));
-                    }
-                }
                 Ok(None) => {
-                    return Some(Err(ClientError::Transport(
-                        "event stream ended before a terminal event".into(),
-                    )));
+                    ClientError::Transport("event stream ended before a terminal event".into())
                 }
-                Err(error) => return Some(Err(error)),
+                Err(error @ ClientError::Transport(_)) => error,
+                Err(error) => return Some(Err(self.finish(error))),
+            };
+            // Every reconnect attempt, including one that fails to connect,
+            // spends budget. Only transport failures are retried; auth, problem,
+            // and protocol errors surface at once.
+            loop {
+                if self.reconnects >= self.options.max_reconnects {
+                    return Some(Err(self.finish(disconnect)));
+                }
+                if self.next_sequence.is_none() || self.resume_token.is_none() {
+                    return Some(Err(self.finish(statusless_protocol(
+                        "stream ended without a resumable frontier",
+                    ))));
+                }
+                self.reconnects += 1;
+                match self.connect() {
+                    Ok(()) => break,
+                    Err(error @ ClientError::Transport(_)) => disconnect = error,
+                    Err(error) => return Some(Err(self.finish(error))),
+                }
             }
         }
+    }
+}
+
+impl OperationStream {
+    /// Ends iteration after `error`, so a caller that keeps calling `next` sees
+    /// `None` instead of an endless error stream.
+    fn finish(&mut self, error: ClientError) -> ClientError {
+        self.terminal = true;
+        self.reader = None;
+        error
     }
 }
 

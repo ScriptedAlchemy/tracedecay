@@ -62,7 +62,12 @@ export interface OperationStreamResume {
 export interface OperationStreamOptions {
   resume?: OperationStreamResume;
   signal?: AbortSignal;
-  /** Explicit opt-in; transport reconnection is disabled by default. */
+  /**
+   * Explicit opt-in; reconnection is disabled by default. Each reconnect
+   * attempt, including one that fails to connect, spends this budget. Only
+   * transport failures are retried, never the first connection. After the
+   * budget is spent the generator throws one `TraceDecayDisconnectedError`.
+   */
   maxReconnects?: number;
 }
 
@@ -947,15 +952,31 @@ export class TraceDecayClient {
       if (resumeToken !== undefined) {
         url.searchParams.set("resume_token", resumeToken);
       }
-      const response = await this.fetchResponse(
-        url,
-        {
-          method: "GET",
-          headers: this.headers("text/event-stream"),
-          signal: options.signal,
-        },
-        options.signal,
-      );
+      let response: Response;
+      try {
+        response = await this.fetchResponse(
+          url,
+          {
+            method: "GET",
+            headers: this.headers("text/event-stream"),
+            signal: options.signal,
+          },
+          options.signal,
+        );
+      } catch (cause) {
+        // The first connection is not retried. A failed reconnect spends budget
+        // like any other disconnect and keeps the last accepted frontier.
+        if (
+          reconnects === 0 ||
+          reconnects >= maxReconnects ||
+          !(cause instanceof TraceDecayDisconnectedError)
+        ) {
+          throw cause;
+        }
+        reconnects += 1;
+        await waitForReconnect(reconnectDelayMs, options.signal);
+        continue;
+      }
       let streamFailed = false;
       try {
         if (!response.ok || response.body === null) {

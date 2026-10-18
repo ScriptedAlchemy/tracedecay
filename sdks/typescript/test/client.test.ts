@@ -25,6 +25,7 @@ import {
 
 import {
   TraceDecayAbortError,
+  TraceDecayDisconnectedError,
   TraceDecayMalformedResponseError,
   TraceDecayResetRequiredError,
   TraceDecayStaleError,
@@ -324,6 +325,18 @@ const OPEN_EVENT = {
     },
   },
 };
+const RESUME_URL =
+  "/projects/project.sdk/application/operations/request.operation/events?next_sequence=0&resume_token=resume";
+
+const openThenEof: RequestHandler = (_request, response) => {
+  response.writeHead(200, { "content-type": "text/event-stream" });
+  response.end(["event: open", `data: ${JSON.stringify(OPEN_EVENT)}`, "", ""].join("\n"));
+};
+
+const refuseConnection: RequestHandler = (request) => {
+  request.socket.destroy();
+};
+
 function json(
   response: ServerResponse,
   status: number,
@@ -2100,6 +2113,93 @@ describe("TraceDecayClient operation lifecycle", () => {
         );
       },
     );
+  });
+
+  it("retries refused reconnects within the budget and keeps the frontier", async () => {
+    await withServer(
+      [
+        openThenEof,
+        refuseConnection,
+        refuseConnection,
+        (request, response) => {
+          expect(request.url).toBe(RESUME_URL);
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: completed",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl, requests) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events = [];
+        for await (const event of client.streamOperation("request.operation", {
+          maxReconnects: 3,
+        })) {
+          events.push(event.event);
+        }
+        expect(events).toEqual(["open", "completed"]);
+        expect(requests).toHaveLength(4);
+      },
+    );
+  });
+
+  it("fails with a disconnect once refused reconnects exhaust the budget", async () => {
+    await withServer(
+      [openThenEof, refuseConnection, refuseConnection],
+      async (baseUrl, requests) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events: string[] = [];
+        const consume = async () => {
+          for await (const event of client.streamOperation("request.operation", {
+            maxReconnects: 2,
+          })) {
+            events.push(event.event);
+          }
+        };
+        await expect(consume()).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+        expect(events).toEqual(["open"]);
+        expect(requests).toHaveLength(3);
+      },
+    );
+  });
+
+  it("does not retry a refused first connection", async () => {
+    await withServer([refuseConnection], async (baseUrl, requests) => {
+      const client = createClient({
+        baseUrl,
+        projectId: "project.sdk",
+        token: "sdk-secret",
+      });
+      const consume = async () => {
+        for await (const _event of client.streamOperation("request.operation", {
+          maxReconnects: 3,
+        })) {
+          // Drain the stream.
+        }
+      };
+      await expect(consume()).rejects.toBeInstanceOf(TraceDecayDisconnectedError);
+      expect(requests).toHaveLength(1);
+    });
   });
 
   it("rejects an open event for a different operation", async () => {
