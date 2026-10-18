@@ -93,7 +93,6 @@ pub(crate) use context::evict_prior_context_for_test;
 #[cfg(test)]
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
-pub use observation::codex_observation_source_v2;
 pub(crate) use observation::try_admit_codex_jsonl_observations_for_project_window;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
@@ -102,6 +101,7 @@ pub use observation::{
     try_admit_codex_jsonl_observations_for_project_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation,
 };
+pub use observation::{codex_observation_source_v2, codex_rollout_observation_source};
 
 /// Project membership from a rollout's leading `session_meta` cwd.
 ///

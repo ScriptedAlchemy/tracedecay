@@ -497,3 +497,113 @@ pub(crate) fn write_codex_rollout_with_structured_events(
     );
     path
 }
+
+/// One Codex rollout under `sessions/<day>/` whose `session_meta` names
+/// `session`. `messages` are user prompts, one searchable record each.
+fn write_shared_id_rollout(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    day: &str,
+    session: &str,
+    messages: &[&str],
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01").join(day);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-{day}T00-00-00-{session}.jsonl"));
+    let mut lines = vec![serde_json::json!({
+        "timestamp": format!("2026-01-{day}T00:00:00.000Z"),
+        "type": "session_meta",
+        "payload": {"id": session, "cwd": project.to_string_lossy()}
+    })];
+    for (index, message) in messages.iter().enumerate() {
+        lines.push(serde_json::json!({
+            "timestamp": format!("2026-01-{day}T00:00:{:02}.000Z", index + 1),
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": message}
+        }));
+    }
+    write_jsonl(&path, &lines);
+    path
+}
+
+async fn codex_hit_count(
+    db: &crate::restart_atomicity::ProjectSessionTestRuntime,
+    text: &str,
+) -> usize {
+    db.search_session_messages("codex", None, text, 10)
+        .await
+        .len()
+}
+
+/// Two live rollout files that carry one session id are two independent
+/// ordered streams. Neither may read the other as a rewrite of itself, through
+/// the first pass, a rewrite of one file, or a restart.
+#[tokio::test]
+async fn two_rollouts_with_one_session_id_keep_each_others_messages() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = crate::support::setup(&tmp);
+    let session = "codex-shared-id";
+    let first = write_shared_id_rollout(
+        &home,
+        &project,
+        "01",
+        session,
+        &["alphafile original prompt"],
+    );
+    let second = write_shared_id_rollout(
+        &home,
+        &project,
+        "02",
+        session,
+        &["bravofile original prompt"],
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Codex)).await;
+    assert_eq!(codex_hit_count(&db, "alphafile original").await, 1);
+    assert_eq!(codex_hit_count(&db, "bravofile original").await, 1);
+    drop(db);
+
+    // Restart: nothing is re-read as a rewrite and nothing is lost.
+    let restarted = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&home, &restarted, &project, Some(SessionProvider::Codex))
+        .await;
+    assert_eq!(codex_hit_count(&restarted, "alphafile original").await, 1);
+    assert_eq!(codex_hit_count(&restarted, "bravofile original").await, 1);
+    drop(restarted);
+
+    // Replace the first file with different content. Only its own
+    // earlier content is superseded.
+    let replacement = first.with_extension("replacement");
+    write_jsonl(
+        &replacement,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": session, "cwd": project.to_string_lossy()}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:09.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "alphafile rewritten prompt"}
+            }),
+        ],
+    );
+    std::fs::rename(&replacement, &first).unwrap();
+    let rewritten = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&home, &rewritten, &project, Some(SessionProvider::Codex))
+        .await;
+    assert_eq!(codex_hit_count(&rewritten, "alphafile rewritten").await, 1);
+    assert_eq!(
+        codex_hit_count(&rewritten, "alphafile original").await,
+        0,
+        "the rewrite supersedes the earlier content of its own file"
+    );
+    assert_eq!(
+        codex_hit_count(&rewritten, "bravofile original").await,
+        1,
+        "the other file's content is not part of the rewrite"
+    );
+    assert!(second.exists());
+}

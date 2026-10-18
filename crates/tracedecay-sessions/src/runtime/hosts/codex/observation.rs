@@ -14,7 +14,7 @@ use tracedecay_capture::codex::{
     CodexObservationContext, codex_observation_record_supported,
     normalize_codex_observation_with_context,
 };
-use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_domain::canonical_text::{canonical_framed_sha256, encode_lowercase_hex};
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass,
     SessionId,
@@ -32,7 +32,11 @@ use crate::runtime::jsonl_observation_admission::{
     shared_jsonl_background_cpu, shared_jsonl_file_identity, shared_jsonl_preparation_capacity,
 };
 use crate::runtime::shared::TranscriptScopeMatcher;
-use crate::runtime::source::{JsonlIoAccounting, TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::snapshot_observation::host_admission_error;
+use crate::runtime::source::{
+    JsonlIoAccounting, TranscriptIngestError, TranscriptIngestResult, jsonl_file_identity,
+    run_blocking_transcript_section,
+};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
@@ -445,6 +449,9 @@ fn replay_identity(session_id: &str, domain: &[u8]) -> String {
     format!("sha256:{}", encode_lowercase_hex(&hasher.finalize()))
 }
 
+/// Source identity of the rollout files that carry `session_id`, as keyed
+/// before every file had its own source. A session's first rollout keeps it
+/// when it still owns the cursor stored under it; see [`resolve_codex_source`].
 pub fn codex_observation_source_v2(
     session_id: &str,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
@@ -456,6 +463,99 @@ pub fn codex_observation_source_v2(
             b"tracedecay.codex.observation-source.v2",
         ))?,
     )?)
+}
+
+/// Source identity of one rollout file.
+///
+/// A session id names a conversation, not a file, and Codex can leave several
+/// live rollout files that carry one id (a copied, restored or synced rollout).
+/// Each file is an independently ordered byte stream with its own cursor and
+/// its own rewrites, so each gets its own source. Keyed by the session id alone,
+/// the second file's pass read the first file's cursor generation as a rewrite
+/// of it and retired the first file's records.
+///
+/// The key is the path below the Codex `sessions` or `archived_sessions`
+/// directory, so relocating the Codex home keeps it. A file that moves between
+/// those directories is a new source whose records replay under the same native
+/// record ids.
+pub fn codex_rollout_observation_source(
+    session_id: &str,
+    rollout: &Path,
+) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
+    let below_root = rollout
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .is_some_and(|name| name == "sessions" || name == "archived_sessions")
+        })
+        .and_then(|root| rollout.strip_prefix(root).ok())
+        .unwrap_or(rollout);
+    let key = canonical_framed_sha256(
+        b"tracedecay.codex.observation-source.v3\0",
+        &[
+            session_id.as_bytes(),
+            &tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(below_root.as_os_str()),
+        ],
+    );
+    Ok(ObservationSourceIdentityV1::for_provider_source(
+        ProviderId::new(PROVIDER)?,
+        SessionId::new(session_id.to_string())?,
+        SessionId::new(format!(
+            "tracedecay-codex-observation-source-v3-sha256-{key}"
+        ))?,
+    )?)
+}
+
+/// Chooses the source a rollout's cursor and observations live under.
+///
+/// A rollout uses its own file source. One that already owns the cursor under
+/// the session-keyed source keeps it, so its record ids never change; any other
+/// file that carries the session id uses its file source instead of contending
+/// for that cursor. A session-keyed cursor without a recorded file identity
+/// cannot be attributed and keeps the behavior it had before file keying.
+///
+/// ponytail: a session-keyed rollout that is replaced by a new inode stops
+/// matching its cursor and moves to its file source, so its old records stay.
+async fn resolve_codex_source(
+    admission: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    session_id: &str,
+    path: &Path,
+) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
+    let file_source = codex_rollout_observation_source(session_id, path)?;
+    let host_error = |outcome| host_admission_error(PROVIDER, outcome);
+    if admission
+        .get_source_cursor(&file_source, scope)
+        .await
+        .map_err(host_error)?
+        .is_some()
+    {
+        return Ok(file_source);
+    }
+    let session_source = codex_observation_source_v2(session_id)?;
+    let Some(cursor) = admission
+        .get_source_cursor(&session_source, scope)
+        .await
+        .map_err(host_error)?
+    else {
+        return Ok(file_source);
+    };
+    let owns_cursor = match cursor.file_identity() {
+        None => true,
+        Some(recorded) => {
+            let path = path.to_path_buf();
+            run_blocking_transcript_section(PROVIDER, move || jsonl_file_identity(&path))
+                .await?
+                .is_ok_and(|physical| physical == recorded)
+        }
+    };
+    Ok(if owns_cursor {
+        session_source
+    } else {
+        file_source
+    })
 }
 
 async fn shared_session_meta_with_provenance(
@@ -572,7 +672,6 @@ async fn try_admit_codex_jsonl_observations(
     if !admission_scope.accepts_session(&meta.session_id) {
         return Ok(CodexJsonlAdmissionProgress::default());
     }
-    let canonical_source = codex_observation_source_v2(&meta.session_id)?;
     let context = CodexAdmissionContext {
         path,
         scope: &admission_scope,
@@ -581,12 +680,13 @@ async fn try_admit_codex_jsonl_observations(
         native_thread_id: native_thread_id.as_deref(),
         cancellation,
     };
-    let scope = admission_scope.scope();
     // Held across the cursor read and the admit below: both are one pass over
     // this rollout, and a peer that interleaves between them re-submits what
     // this pass is about to commit.
+    let scope = admission_scope.scope();
     let gate = codex_admission_gate(&scope, path);
     let _admitting = gate.lock().await;
+    let canonical_source = resolve_codex_source(admission, &scope, &meta.session_id, path).await?;
     admit_codex_jsonl_page(context, canonical_source, max_new_bytes, max_frames).await
 }
 
