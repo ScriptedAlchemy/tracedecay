@@ -1448,11 +1448,16 @@ async fn execute_app_server(
     let deadline_micros =
         u64::try_from(envelope.deadline().0.saturating_sub(now_micros().0)).unwrap_or(0);
     let wall = std::time::Duration::from_micros(deadline_micros);
+    // The coordinator's `wall` timeout is the authoritative deadline and seals
+    // `TimedOut`. The session's own timeout is only a backstop for a
+    // coordinator that is gone; at the same instant it would race the
+    // coordinator and seal a wall-exhausted attempt as a protocol failure.
+    let session_wall = wall.saturating_add(CANCELLATION_GRACE);
     let cancellation = CodexAppServerCancellation::default();
     let config = CodexAppServerSummaryConfig {
         codex_bin: selection.provider.executable.to_string_lossy().into_owned(),
         model: Some(snapshot.model().to_owned()),
-        timeout: wall,
+        timeout: session_wall,
     };
     let prompt = envelope.instructions().to_owned();
     let cwd = PathBuf::from(envelope.worktree_root());
@@ -1477,7 +1482,7 @@ async fn execute_app_server(
             CodexAppServerWorkExecution {
                 cancellation: &session_cancellation,
                 cwd: &cwd,
-                timeout: wall,
+                timeout: session_wall,
                 admitted_environment: &admitted_environment,
                 launch_receipt: &blocking_launch_receipt,
                 approval,
