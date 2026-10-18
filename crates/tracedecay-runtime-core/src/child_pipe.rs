@@ -44,7 +44,7 @@ impl<T: Read> WatchedPipe for T {}
 /// What a non-blocking look at the read end of a pipe found.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReadState {
+pub enum ReadState {
     /// Bytes are waiting, so a read returns without blocking.
     Buffered,
     /// Every write end is closed, so a read reports EOF without blocking.
@@ -72,7 +72,7 @@ const IDLE_POLL_CEILING: std::time::Duration = std::time::Duration::from_millis(
 /// The loop is the whole bound: nothing in it blocks, so a descendant holding
 /// the write end open cannot hold the reader past the abandonment.
 #[cfg(any(windows, test))]
-pub(crate) fn wait_readable(
+pub fn wait_readable(
     mut probe: impl FnMut() -> io::Result<ReadState>,
     abandoned: &AtomicBool,
     drain_after_abandon: bool,
@@ -97,9 +97,7 @@ pub(crate) fn wait_readable(
 
 /// Looks into the read end of a Windows child pipe without blocking.
 #[cfg(windows)]
-pub(crate) fn peek_read_state(
-    pipe: &impl std::os::windows::io::AsRawHandle,
-) -> io::Result<ReadState> {
+pub fn peek_read_state(pipe: &impl std::os::windows::io::AsRawHandle) -> io::Result<ReadState> {
     use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
     use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 

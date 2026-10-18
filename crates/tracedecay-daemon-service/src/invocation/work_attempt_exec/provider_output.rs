@@ -15,6 +15,7 @@ use tracedecay_domain::{
 };
 
 /// How often a reader parked on a quiet pipe re-checks its stop flag.
+#[cfg(unix)]
 const STOP_POLL_INTERVAL_MS: i32 = 50;
 
 /// A captured pipe end the reader can wait on without blocking in `read`.
@@ -22,15 +23,19 @@ const STOP_POLL_INTERVAL_MS: i32 = 50;
 pub(super) trait CapturedPipe: Read + std::os::fd::AsFd {}
 #[cfg(unix)]
 impl<T: Read + std::os::fd::AsFd> CapturedPipe for T {}
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(super) trait CapturedPipe: Read + std::os::windows::io::AsRawHandle {}
+#[cfg(windows)]
+impl<T: Read + std::os::windows::io::AsRawHandle> CapturedPipe for T {}
+#[cfg(not(any(unix, windows)))]
 pub(super) trait CapturedPipe: Read {}
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl<T: Read> CapturedPipe for T {}
 
 /// Whether the pipe has data, EOF, or an error to read. A pipe held open by a
 /// descendant stays quiet until `STOP_POLL_INTERVAL_MS` elapses.
 #[cfg(unix)]
-fn readable(stream: &impl std::os::fd::AsFd) -> bool {
+fn readable(stream: &impl std::os::fd::AsFd, _stop: &AtomicBool) -> bool {
     use std::os::fd::AsRawFd;
 
     let mut poll = libc::pollfd {
@@ -43,8 +48,18 @@ fn readable(stream: &impl std::os::fd::AsFd) -> bool {
     ready > 0 || (ready < 0 && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted)
 }
 
-#[cfg(not(unix))]
-fn readable(_stream: &impl Read) -> bool {
+/// Windows has no `poll`, so this peeks at the pipe on a growing pause until
+/// it has bytes or EOF, and gives up the moment `stop` is raised. A peek that
+/// fails reads as ready, leaving the `read` after it to report the error.
+#[cfg(windows)]
+fn readable(stream: &impl std::os::windows::io::AsRawHandle, stop: &AtomicBool) -> bool {
+    use tracedecay_runtime_core::child_pipe::{peek_read_state, wait_readable};
+
+    wait_readable(|| peek_read_state(stream), stop, false).unwrap_or(true)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn readable(_stream: &impl Read, _stop: &AtomicBool) -> bool {
     true
 }
 
@@ -61,7 +76,7 @@ pub(super) fn read_capped(
     let mut total: u64 = 0;
     let mut buffer = [0_u8; 16 * 1024];
     while !stop.load(Ordering::Acquire) {
-        if !readable(&stream) {
+        if !readable(&stream, stop) {
             continue;
         }
         match stream.read(&mut buffer) {
