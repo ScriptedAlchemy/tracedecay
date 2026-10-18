@@ -147,6 +147,7 @@ pub struct DaemonCodeIndexControlV1 {
     shutting_down: Arc<AtomicBool>,
     pressure: Option<Arc<ResidentMemoryPressureV1>>,
     tripped: Arc<AtomicBool>,
+    ignores_source_epoch: bool,
 }
 
 impl Default for DaemonCodeIndexControlV1 {
@@ -167,7 +168,31 @@ impl DaemonCodeIndexControlV1 {
             shutting_down,
             pressure: None,
             tripped: Arc::new(AtomicBool::new(false)),
+            ignores_source_epoch: false,
         }
+    }
+
+    /// Run this attempt to completion although a newer source epoch arrives.
+    /// A source that changes faster than a build lasts otherwise cancels every
+    /// attempt before it seals. Shutdown and the memory watermark still stop
+    /// it, and the caller owes the superseding epoch a follow-up pass
+    /// ([`Self::source_superseded`]).
+    #[must_use]
+    pub fn ignoring_source_epoch(mut self) -> Self {
+        self.ignores_source_epoch = true;
+        self
+    }
+
+    /// Whether a newer source epoch arrived since this attempt began.
+    #[must_use]
+    pub fn source_superseded(&self) -> bool {
+        self.epoch.load(Ordering::Acquire) != self.expected_epoch
+    }
+
+    /// The source epoch this attempt began under.
+    #[must_use]
+    pub fn expected_epoch(&self) -> u64 {
+        self.expected_epoch
     }
 
     /// Read `pressure` at each checkpoint. A watermark crossing stays tripped
@@ -188,14 +213,14 @@ impl DaemonCodeIndexControlV1 {
     pub fn refused_by_resident_memory(&self) -> bool {
         self.tripped.load(Ordering::Acquire)
             && !self.shutting_down.load(Ordering::Acquire)
-            && self.epoch.load(Ordering::Acquire) == self.expected_epoch
+            && (self.ignores_source_epoch || !self.source_superseded())
     }
 }
 
 impl CodeIndexExecutionControlV1 for DaemonCodeIndexControlV1 {
     fn is_cancelled(&self) -> bool {
         if self.shutting_down.load(Ordering::Acquire)
-            || self.epoch.load(Ordering::Acquire) != self.expected_epoch
+            || (!self.ignores_source_epoch && self.source_superseded())
         {
             return true;
         }
@@ -303,6 +328,26 @@ mod tests {
         assert_eq!(epoch.load(Ordering::Acquire), 3);
         assert!(!shutting_down.load(Ordering::Acquire));
         assert!(!control.is_deadline_exceeded());
+    }
+
+    #[test]
+    fn a_control_ignoring_the_source_epoch_stops_only_for_shutdown() {
+        let epoch = Arc::new(AtomicU64::new(0));
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let control = DaemonCodeIndexControlV1::new(Arc::clone(&epoch), Arc::clone(&shutting_down));
+        let committed = control.clone().ignoring_source_epoch();
+
+        DaemonCodeIndexControlV1::advance(&epoch);
+
+        assert!(control.is_cancelled(), "a newer epoch supersedes a build");
+        assert!(
+            !committed.is_cancelled(),
+            "a committed build runs past a newer epoch"
+        );
+        assert!(committed.source_superseded());
+        assert_eq!(committed.expected_epoch(), 0);
+        shutting_down.store(true, Ordering::Release);
+        assert!(committed.is_cancelled(), "shutdown still stops it");
     }
 
     #[test]

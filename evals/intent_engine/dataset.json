@@ -1,0 +1,1731 @@
+[
+ {
+  "id": "c001",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the celery worker keeps OOMing on the nightly export"
+   },
+   {
+    "role": "assistant",
+    "text": "Memory climbs in export_rows; it materializes the whole queryset."
+   },
+   {
+    "role": "tool",
+    "text": "Bash: rg -n 'iterator\\(' app/exports"
+   }
+  ],
+  "current_prompt": "didn't we already hit this a couple weeks back and settle on chunking with a server-side cursor? dig up what we decided",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c002",
+  "turns": [
+   {
+    "role": "user",
+    "text": "Codex worked out the root cause of the flaky checkout e2e test in another window yesterday"
+   },
+   {
+    "role": "assistant",
+    "text": "I don't see any notes about that in the repo or the PR description."
+   }
+  ],
+  "current_prompt": "can you find what it said?",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c003",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I've added the feature flag check to the pricing endpoint."
+   },
+   {
+    "role": "tool",
+    "text": "Bash: go test ./internal/pricing/..."
+   },
+   {
+    "role": "assistant",
+    "text": "All tests pass."
+   }
+  ],
+  "current_prompt": "what was the reasoning for keeping the legacy pricing path behind the flag instead of deleting it? I know we talked it through on monday",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c004",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the terraform plan wants to recreate the RDS instance"
+   },
+   {
+    "role": "assistant",
+    "text": "That's because engine_version changed from 14.9 to 15.4."
+   }
+  ],
+  "current_prompt": "same thing happened before and someone worked around it, I think it was in the session where we did the vpc split. what did we do then?",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c005",
+  "turns": [
+   {
+    "role": "user",
+    "text": "heads up, the reconnect test is the one the other agent fixed last thursday"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: cargo test -p sync"
+   },
+   {
+    "role": "assistant",
+    "text": "reconnect_after_timeout failed: expected Connected, got Backoff."
+   }
+  ],
+  "current_prompt": "that broke again, go look at how it was handled",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c006",
+  "turns": [
+   {
+    "role": "user",
+    "text": "let's continue the kafka consumer rewrite"
+   },
+   {
+    "role": "assistant",
+    "text": "I don't have context on prior work here. Which branch?"
+   }
+  ],
+  "current_prompt": "feature/consumer-v2. you had a plan with like 5 steps when we stopped yesterday, start from wherever you left off",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c007",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I can wire the webhook signature check with HMAC-SHA256."
+   },
+   {
+    "role": "user",
+    "text": "hold on"
+   }
+  ],
+  "current_prompt": "I'm pretty sure a teammate's Claude session already wrote this for the billing service and the transcript is in our shared logs. check before you reinvent it",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c008",
+  "turns": [
+   {
+    "role": "user",
+    "text": "why did we pin pydantic to 1.10?"
+   },
+   {
+    "role": "assistant",
+    "text": "I don't see a comment explaining the pin in pyproject.toml or the git log."
+   }
+  ],
+  "current_prompt": "it came up in one of our chats a while ago, look there",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c009",
+  "turns": [
+   {
+    "role": "user",
+    "text": "I had you write a migration script for the orders table sometime last week"
+   },
+   {
+    "role": "assistant",
+    "text": "I don't see it in the repo; it may never have been committed."
+   }
+  ],
+  "current_prompt": "yeah it never got committed. can you get it back?",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c010",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Should I use the same retry policy as the payments client?"
+   },
+   {
+    "role": "user",
+    "text": "which one was that"
+   },
+   {
+    "role": "assistant",
+    "text": "I'm not sure, I don't have it in this session."
+   }
+  ],
+  "current_prompt": "find it",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c011",
+  "turns": [
+   {
+    "role": "user",
+    "text": "rebuilding the release notes for 3.2"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: git log v3.1..HEAD --oneline | wc -l"
+   },
+   {
+    "role": "assistant",
+    "text": "There are 214 commits."
+   }
+  ],
+  "current_prompt": "what did I tell you yesterday about which ones to leave out?",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c012",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the summary the review agent gave this morning was really good"
+   },
+   {
+    "role": "assistant",
+    "text": "Glad it helped."
+   }
+  ],
+  "current_prompt": "paste its list of risks here again, I closed that tab",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c013",
+  "turns": [
+   {
+    "role": "user",
+    "text": "deploy failed with exit 137"
+   },
+   {
+    "role": "assistant",
+    "text": "137 usually means the container was OOM-killed."
+   }
+  ],
+  "current_prompt": "have we seen this in any earlier session? grep the transcripts for 137",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c014",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the other agent and I spent an hour on the bazel remote cache config earlier"
+   },
+   {
+    "role": "assistant",
+    "text": "Want me to start investigating the cache misses from scratch?"
+   }
+  ],
+  "current_prompt": "no, start from what it found",
+  "labels": [
+   "session_recall"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c015",
+  "turns": [
+   {
+    "role": "tool",
+    "text": "Bash: npm install zod"
+   },
+   {
+    "role": "assistant",
+    "text": "Added zod to dependencies."
+   }
+  ],
+  "current_prompt": "we use pnpm in this repo, not npm. from now on always use pnpm",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c016",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I formatted the new Go files with gofmt and the YAML with 4-space indent. Do you want 2-space YAML just here or going forward?"
+   }
+  ],
+  "current_prompt": "going forward, everywhere",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c017",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "FYI staging Postgres is at pg-stg-02.internal:6432 behind pgbouncer, per the runbook. Want me to keep that in mind for future sessions?"
+   }
+  ],
+  "current_prompt": "yes please",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c018",
+  "turns": [
+   {
+    "role": "user",
+    "text": "run the integration tests"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: make test-integration"
+   },
+   {
+    "role": "assistant",
+    "text": "They fail with connection refused; DOCKER_HOST isn't set."
+   }
+  ],
+  "current_prompt": "right, on my machine docker runs through colima, the socket is ~/.colima/default/docker.sock. keep that for next time so I don't have to tell you again",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c019",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I wrote the new endpoint tests using unittest.TestCase."
+   }
+  ],
+  "current_prompt": "we only use pytest-style functions with fixtures in this codebase, never TestCase classes. please don't make me say that again",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c020",
+  "turns": [
+   {
+    "role": "user",
+    "text": "commit that"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: git commit -m 'Fix null deref in parser'"
+   },
+   {
+    "role": "assistant",
+    "text": "Committed. The repo's recent history uses Conventional Commit prefixes like fix: and feat:."
+   }
+  ],
+  "current_prompt": "yeah, stick to that style in every commit from here on",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c021",
+  "turns": [
+   {
+    "role": "user",
+    "text": "add a dependency on lodash"
+   },
+   {
+    "role": "assistant",
+    "text": "Done, added lodash@4.17.21."
+   }
+  ],
+  "current_prompt": "actually we avoid lodash, the team decided on native array methods or remeda. remember this",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c022",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "The API returns timestamps in local time; should I convert to UTC in the serializer?"
+   },
+   {
+    "role": "user",
+    "text": "yes"
+   },
+   {
+    "role": "assistant",
+    "text": "Done. Is UTC-everywhere a general rule for this service or just this endpoint?"
+   }
+  ],
+  "current_prompt": "general rule, all services actually",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c023",
+  "turns": [
+   {
+    "role": "user",
+    "text": "deploy to staging"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: ./scripts/deploy.sh staging"
+   },
+   {
+    "role": "assistant",
+    "text": "Deployed."
+   }
+  ],
+  "current_prompt": "fyi for the future: never deploy on fridays after 3pm, our on-call is thin. that applies to any deploy you do for me",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c024",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the tests keep timing out"
+   },
+   {
+    "role": "assistant",
+    "text": "The full suite takes ~9 minutes; I can run just the affected package with go test ./pkg/auth/... instead."
+   }
+  ],
+  "current_prompt": "yes, do that by default always, only run the full suite when I ask",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c025",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I noticed you prefer early returns over nested ifs, so I restructured handle_request that way."
+   }
+  ],
+  "current_prompt": "correct, and that's how I want it in every file you touch. note it down",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c026",
+  "turns": [
+   {
+    "role": "user",
+    "text": "which python should I use for this"
+   },
+   {
+    "role": "assistant",
+    "text": "The repo's .python-version says 3.12 but CI uses 3.11."
+   },
+   {
+    "role": "user",
+    "text": "CI is right, 3.11 is the target"
+   },
+   {
+    "role": "assistant",
+    "text": "Got it. Should I record that as a project fact?"
+   }
+  ],
+  "current_prompt": "sure",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c027",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I used log.Printf for the new error path."
+   },
+   {
+    "role": "user",
+    "text": "we use zerolog"
+   },
+   {
+    "role": "assistant",
+    "text": "Switched it to zerolog. Want this saved as a convention?"
+   }
+  ],
+  "current_prompt": "do it",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c028",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I ran black with the default line length 88."
+   },
+   {
+    "role": "user",
+    "text": "we use 100"
+   },
+   {
+    "role": "assistant",
+    "text": "Reformatted with --line-length 100."
+   }
+  ],
+  "current_prompt": "and keep using that",
+  "labels": [
+   "memory_store"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c029",
+  "turns": [
+   {
+    "role": "user",
+    "text": "looking at the nightly batch"
+   },
+   {
+    "role": "assistant",
+    "text": "The nightly batch entry point is jobs/nightly.py."
+   }
+  ],
+  "current_prompt": "who calls reconcile_ledger and from which jobs?",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c030",
+  "turns": [
+   {
+    "role": "user",
+    "text": "where's the retry logic for outbound http"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: rg -n 'jitter' src/net"
+   },
+   {
+    "role": "assistant",
+    "text": "It's backoff_with_jitter in src/net/retry.rs."
+   }
+  ],
+  "current_prompt": "who uses it?",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c031",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Here's an overview of the router file: routes are registered in register_routes()."
+   }
+  ],
+  "current_prompt": "walk me through what happens from the moment POST /checkout hits the router until the order row is written, every function in between",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c032",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "OrderService.cancel() calls refundPayment() and releaseInventory()."
+   }
+  ],
+  "current_prompt": "and what does that second one call?",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c033",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the metrics counter double-increments"
+   },
+   {
+    "role": "assistant",
+    "text": "The increment happens in recordHit in metrics/cache.go."
+   }
+  ],
+  "current_prompt": "is it being invoked from two places?",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c034",
+  "turns": [],
+  "current_prompt": "trace how a websocket message gets from the client SDK through the gateway into the room actor",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c035",
+  "turns": [
+   {
+    "role": "user",
+    "text": "this normalize_email helper looks sketchy"
+   },
+   {
+    "role": "assistant",
+    "text": "It lowercases and strips plus-addressing."
+   }
+  ],
+  "current_prompt": "find everything that reaches it, directly or indirectly",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c036",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "flush_buffers is defined in io/writer.c."
+   }
+  ],
+  "current_prompt": "where's it reached from at startup?",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c037",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Found emit_audit_event in audit/emit.py."
+   }
+  ],
+  "current_prompt": "where's it coming from when a user deletes a project?",
+  "labels": [
+   "call_graph"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c038",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I'd change parse_config to return Result<Config, ConfigError> instead of panicking."
+   }
+  ],
+  "current_prompt": "what would that break?",
+  "labels": [
+   "impact"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c039",
+  "turns": [],
+  "current_prompt": "if I drop the legacy_id column from users, which queries and tests will fall over?",
+  "labels": [
+   "impact"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c040",
+  "turns": [
+   {
+    "role": "user",
+    "text": "working on the event bus"
+   },
+   {
+    "role": "assistant",
+    "text": "EventEnvelope is defined in proto/events.proto."
+   }
+  ],
+  "current_prompt": "I'm adding a required field to EventEnvelope. what's the blast radius?",
+  "labels": [
+   "impact"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c041",
+  "turns": [
+   {
+    "role": "user",
+    "text": "I just edited src/lib/money.ts to round half-even"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: git diff --stat"
+   },
+   {
+    "role": "assistant",
+    "text": "1 file changed, 6 insertions(+), 3 deletions(-)."
+   }
+  ],
+  "current_prompt": "which tests should I rerun for this?",
+  "labels": [
+   "impact"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c042",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Option A is to make Session non-Clone; option B is to wrap it in Arc."
+   }
+  ],
+  "current_prompt": "which one touches less code?",
+  "labels": [
+   "impact"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c043",
+  "turns": [],
+  "current_prompt": "before I change the default timeout in HttpClientConfig from 30s to 5s, show me everything downstream that depends on it",
+  "labels": [
+   "impact"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c044",
+  "turns": [
+   {
+    "role": "user",
+    "text": "thinking of making Money immutable"
+   },
+   {
+    "role": "assistant",
+    "text": "That would mean removing the add_in_place and set_currency methods."
+   }
+  ],
+  "current_prompt": "how much fallout are we talking?",
+  "labels": [
+   "impact"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c045",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Should I change the default page_size from 50 to 20?"
+   }
+  ],
+  "current_prompt": "first tell me how bad that'd be",
+  "labels": [
+   "impact"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c046",
+  "turns": [
+   {
+    "role": "user",
+    "text": "switch the postgres adapter to use the connection pool"
+   },
+   {
+    "role": "tool",
+    "text": "Edit: src/adapters/postgres.ts"
+   },
+   {
+    "role": "assistant",
+    "text": "The postgres adapter now acquires connections from pool.acquire()."
+   }
+  ],
+  "current_prompt": "ok do the same for the other adapters",
+  "labels": [
+   "refactor_edit"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c047",
+  "turns": [],
+  "current_prompt": "rename fetchUserData to loadUserProfile across the whole frontend, including tests and storybook",
+  "labels": [
+   "refactor_edit"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c048",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I replaced the unwrap() in config.rs line 88 with ? and a context message."
+   }
+  ],
+  "current_prompt": "there are like 30 more of those in the crate, fix them all the same way",
+  "labels": [
+   "refactor_edit"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c049",
+  "turns": [
+   {
+    "role": "user",
+    "text": "utils/misc.py is a mess"
+   }
+  ],
+  "current_prompt": "move all the date helpers out of utils/misc.py into a new utils/dates.py and fix the imports",
+  "labels": [
+   "refactor_edit"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c050",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the Logger constructor now takes a level arg"
+   },
+   {
+    "role": "assistant",
+    "text": "Updated api/server.go to pass LevelInfo."
+   }
+  ],
+  "current_prompt": "now everywhere else",
+  "labels": [
+   "refactor_edit"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c051",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I changed the first assert_eq! in test_parser.rs to include a context message. Want me to apply it to the remaining 41 call sites?"
+   }
+  ],
+  "current_prompt": "yep, go",
+  "labels": [
+   "refactor_edit"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c052",
+  "turns": [],
+  "current_prompt": "swap every moment() call for the dayjs equivalent in the dashboard package",
+  "labels": [
+   "refactor_edit"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c053",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Converted UserCard.jsx from a class component to hooks."
+   }
+  ],
+  "current_prompt": "great, now the remaining 12",
+  "labels": [
+   "refactor_edit"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c054",
+  "turns": [
+   {
+    "role": "tool",
+    "text": "Bash: git add -p"
+   },
+   {
+    "role": "assistant",
+    "text": "Staged 4 hunks across 3 files."
+   }
+  ],
+  "current_prompt": "look it over before I commit",
+  "labels": [
+   "review_changes"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c055",
+  "turns": [],
+  "current_prompt": "can you review PR #482? focus on the migration and error handling",
+  "labels": [
+   "review_changes"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c056",
+  "turns": [
+   {
+    "role": "user",
+    "text": "I pushed my changes to fix-rate-limit"
+   },
+   {
+    "role": "assistant",
+    "text": "Branch fix-rate-limit is 3 commits ahead of main."
+   }
+  ],
+  "current_prompt": "anything wrong in there?",
+  "labels": [
+   "review_changes"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c057",
+  "turns": [],
+  "current_prompt": "sanity check my diff, I'm worried I left debug prints and a hardcoded token",
+  "labels": [
+   "review_changes"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c058",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I've finished the auth middleware refactor; 7 files changed."
+   }
+  ],
+  "current_prompt": "go through your changes once more with a critical eye before we open the PR",
+  "labels": [
+   "review_changes"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c059",
+  "turns": [
+   {
+    "role": "user",
+    "text": "Priya opened a PR for the caching layer"
+   },
+   {
+    "role": "assistant",
+    "text": "PR #1207: 'Add read-through cache for catalog'."
+   }
+  ],
+  "current_prompt": "thoughts?",
+  "labels": [
+   "review_changes"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c060",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I've pushed 3 commits to the branch."
+   }
+  ],
+  "current_prompt": "go over them",
+  "labels": [
+   "review_changes"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c061",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Storage is a trait with put, get and delete."
+   }
+  ],
+  "current_prompt": "what implements it?",
+  "labels": [
+   "type_orientation"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c062",
+  "turns": [],
+  "current_prompt": "where do we construct RetryPolicy objects? I want to see every place one gets built",
+  "labels": [
+   "type_orientation"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c063",
+  "turns": [],
+  "current_prompt": "which code writes to Order.status and which code only reads it?",
+  "labels": [
+   "type_orientation"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c064",
+  "turns": [
+   {
+    "role": "user",
+    "text": "I think there are two different implementations of slugify floating around"
+   },
+   {
+    "role": "assistant",
+    "text": "I found slugify in utils/text.py."
+   }
+  ],
+  "current_prompt": "find the other copy and any other near-duplicates",
+  "labels": [
+   "type_orientation"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c065",
+  "turns": [],
+  "current_prompt": "show me the class hierarchy under BaseExporter in the java module",
+  "labels": [
+   "type_orientation"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c066",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "The Shape sealed interface is in geometry/Shape.kt."
+   }
+  ],
+  "current_prompt": "list the subclasses and where each gets instantiated",
+  "labels": [
+   "type_orientation"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c067",
+  "turns": [
+   {
+    "role": "user",
+    "text": "ctx.deadline seems to get clobbered"
+   },
+   {
+    "role": "assistant",
+    "text": "deadline is a field on RequestCtx in rpc/ctx.go."
+   }
+  ],
+  "current_prompt": "who sets it?",
+  "labels": [
+   "type_orientation"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c068",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "There's parse_date in utils/time.py and something similar in reports/fmt.py."
+   }
+  ],
+  "current_prompt": "are they the same thing? any others?",
+  "labels": [
+   "type_orientation"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c069",
+  "turns": [],
+  "current_prompt": "how does the ios-client repo call the /v2/feed endpoint? I want to make sure I don't break them",
+  "labels": [
+   "project_context",
+   "impact"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c070",
+  "turns": [
+   {
+    "role": "user",
+    "text": "our admin dashboard lives in a separate repo, acme/admin-web"
+   },
+   {
+    "role": "assistant",
+    "text": "Okay. This repo is the API."
+   }
+  ],
+  "current_prompt": "check how they're parsing the pagination cursor over there",
+  "labels": [
+   "project_context"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c071",
+  "turns": [],
+  "current_prompt": "the shared proto definitions are in the platform-schemas repo next to this one. pull the current definition of UserEvent from there",
+  "labels": [
+   "project_context"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c072",
+  "turns": [],
+  "current_prompt": "our sibling service ledger already has an idempotency-key middleware. look at how they did it and port it here",
+  "labels": [
+   "project_context"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c073",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the terraform modules are in ../infra-modules"
+   },
+   {
+    "role": "assistant",
+    "text": "This repo references source = \"../infra-modules/vpc\"."
+   }
+  ],
+  "current_prompt": "what variables does that module expect?",
+  "labels": [
+   "project_context"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c074",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the Android app is in a separate repo"
+   },
+   {
+    "role": "assistant",
+    "text": "Noted, this one is the backend."
+   }
+  ],
+  "current_prompt": "do they still send the old X-Client-Version header?",
+  "labels": [
+   "project_context"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c075",
+  "turns": [
+   {
+    "role": "tool",
+    "text": "Bash: git log --oneline -5"
+   },
+   {
+    "role": "assistant",
+    "text": "Top commit is 'wip: tweak timeouts' (a1b2c3d). I didn't create it."
+   }
+  ],
+  "current_prompt": "I didn't either. figure out where it came from",
+  "labels": [
+   "unexpected_changes"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c076",
+  "turns": [],
+  "current_prompt": "there are modified files in src/legacy that neither of us touched this session, what's going on",
+  "labels": [
+   "unexpected_changes"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c077",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I edited handlers/user.go to add validation."
+   },
+   {
+    "role": "tool",
+    "text": "Bash: git status"
+   },
+   {
+    "role": "assistant",
+    "text": "git status also shows handlers/admin.go and go.sum modified."
+   }
+  ],
+  "current_prompt": "wait, I never asked for those",
+  "labels": [
+   "unexpected_changes"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c078",
+  "turns": [],
+  "current_prompt": "someone force-pushed over my branch overnight, show me what changed versus my last commit",
+  "labels": [
+   "unexpected_changes"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c079",
+  "turns": [
+   {
+    "role": "user",
+    "text": "rebase onto main"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: git rebase origin/main"
+   },
+   {
+    "role": "assistant",
+    "text": "Rebased cleanly."
+   }
+  ],
+  "current_prompt": "hm, why does package-lock.json look totally different now? I didn't touch it",
+  "labels": [
+   "unexpected_changes"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c080",
+  "turns": [
+   {
+    "role": "user",
+    "text": "I stepped away for lunch"
+   },
+   {
+    "role": "tool",
+    "text": "Bash: git status --short"
+   },
+   {
+    "role": "assistant",
+    "text": "M src/billing/invoice.rb\n?? tmp/patch.diff"
+   }
+  ],
+  "current_prompt": "I didn't leave those there",
+  "labels": [
+   "unexpected_changes"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c081",
+  "turns": [],
+  "current_prompt": "rename UserId to AccountId everywhere and tell me which tests that touches",
+  "labels": [
+   "refactor_edit",
+   "impact"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c082",
+  "turns": [
+   {
+    "role": "user",
+    "text": "Priya's PR changes compute_tax"
+   },
+   {
+    "role": "assistant",
+    "text": "PR #88 modifies compute_tax's rounding."
+   }
+  ],
+  "current_prompt": "review it and list who calls compute_tax",
+  "labels": [
+   "review_changes",
+   "call_graph"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c083",
+  "turns": [],
+  "current_prompt": "last week in another session we agreed on a naming scheme for feature flags; find it and apply it to all the flags in config/flags.ts",
+  "labels": [
+   "session_recall",
+   "refactor_edit"
+  ],
+  "context_needed": false
+ },
+ {
+  "id": "c084",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "The ios-client repo calls /v2/feed with a cursor param."
+   }
+  ],
+  "current_prompt": "if I rename cursor to page_token what breaks over there?",
+  "labels": [
+   "impact",
+   "project_context"
+  ],
+  "context_needed": true
+ },
+ {
+  "id": "c085",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the cleanup command deletes too eagerly"
+   }
+  ],
+  "current_prompt": "add a --dry-run flag to the cleanup command",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c086",
+  "turns": [],
+  "current_prompt": "document how the memory allocator works in the README",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c087",
+  "turns": [
+   {
+    "role": "user",
+    "text": "disk is filling up on the worker"
+   }
+  ],
+  "current_prompt": "delete session files older than 30 days in the cleanup job",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c088",
+  "turns": [],
+  "current_prompt": "the chat history panel scrolls jumpy when new messages arrive, fix it",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c089",
+  "turns": [],
+  "current_prompt": "write a function that stores user preferences in localStorage",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c090",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the save button disappears on small screens"
+   }
+  ],
+  "current_prompt": "make the button always visible on mobile",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c091",
+  "turns": [],
+  "current_prompt": "add a deprecation warning that says 'from now on use the v2 endpoints'",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c092",
+  "turns": [],
+  "current_prompt": "the 'remember me' checkbox on the login form doesn't persist anything",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c093",
+  "turns": [],
+  "current_prompt": "what's the difference between a mutex and a rwlock?",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c094",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "All done: the endpoint, tests and docs are updated."
+   }
+  ],
+  "current_prompt": "thanks, that's all for now",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c095",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I added the migration file. Should I run the tests?"
+   }
+  ],
+  "current_prompt": "yes",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c096",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Draft of the setup section is ready. Want me to write it to docs/setup.md?"
+   }
+  ],
+  "current_prompt": "save it",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c097",
+  "turns": [
+   {
+    "role": "user",
+    "text": "fix the 500 on /login"
+   },
+   {
+    "role": "assistant",
+    "text": "Fixed: added a null check on user.org."
+   },
+   {
+    "role": "tool",
+    "text": "Bash: curl -i localhost:8080/login"
+   },
+   {
+    "role": "assistant",
+    "text": "Still returns 500, now from session.go line 42."
+   }
+  ],
+  "current_prompt": "that broke again?",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c098",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I bumped the version in package.json to 2.4.0."
+   }
+  ],
+  "current_prompt": "do the same for the changelog",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c099",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Should this retry setting be configurable per-tenant or a global constant?"
+   }
+  ],
+  "current_prompt": "global constant for now",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c100",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the history endpoint is slow"
+   },
+   {
+    "role": "assistant",
+    "text": "It's doing N+1 queries on events."
+   }
+  ],
+  "current_prompt": "fix it",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c101",
+  "turns": [],
+  "current_prompt": "run the linters and fix whatever they complain about",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c102",
+  "turns": [],
+  "current_prompt": "what does this regex do: ^(?:[a-z0-9-]+\\.)+[a-z]{2,}$",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c103",
+  "turns": [],
+  "current_prompt": "bump tokio to 1.40 and make sure it builds",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c104",
+  "turns": [],
+  "current_prompt": "add a session timeout of 15 minutes to the express app",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c105",
+  "turns": [],
+  "current_prompt": "write a parser for the Zoom transcript VTT files we export",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c106",
+  "turns": [],
+  "current_prompt": "write a blog post outline about how we refactored our billing system last year",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c107",
+  "turns": [],
+  "current_prompt": "add a 'previous' button to the pagination component",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c108",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Tests pass. Want me to open the PR?"
+   }
+  ],
+  "current_prompt": "sure, and use the usual template",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c109",
+  "turns": [],
+  "current_prompt": "the memory usage graph in grafana spiked after the deploy, can you look at the heap profile I attached",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c110",
+  "turns": [],
+  "current_prompt": "the cache should remember the last 100 lookups, implement an LRU",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c111",
+  "turns": [],
+  "current_prompt": "lol ok, coffee break, back in 10",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c112",
+  "turns": [
+   {
+    "role": "user",
+    "text": "always-on profiling is too expensive"
+   },
+   {
+    "role": "assistant",
+    "text": "I can gate it behind a PROFILING_ENABLED env var."
+   }
+  ],
+  "current_prompt": "do that, default off",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c113",
+  "turns": [],
+  "current_prompt": "write a code review checklist for new hires as a markdown doc",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c114",
+  "turns": [],
+  "current_prompt": "add a call to flush() at the end of shutdown()",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c115",
+  "turns": [],
+  "current_prompt": "add an 'impact' field to the incident report form",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c116",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I've restored the previous version of the config from git."
+   }
+  ],
+  "current_prompt": "great, now remember to restart the service",
+  "labels": [],
+  "context_needed": false
+ },
+ {
+  "id": "c117",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Should I apply the same fix to the staging config too?"
+   }
+  ],
+  "current_prompt": "no, just prod",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c118",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "Want me to add a unit test for this edge case?"
+   }
+  ],
+  "current_prompt": "do it",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c119",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "There are 14 call sites using the old API. Want me to update them all?"
+   }
+  ],
+  "current_prompt": "not yet, just the one in main.go",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c120",
+  "turns": [
+   {
+    "role": "assistant",
+    "text": "I can save the flag naming rule as a convention, or just apply it here."
+   }
+  ],
+  "current_prompt": "just here",
+  "labels": [],
+  "context_needed": true
+ },
+ {
+  "id": "c121",
+  "turns": [
+   {
+    "role": "user",
+    "text": "the other agent is working on the frontend in parallel"
+   },
+   {
+    "role": "assistant",
+    "text": "Okay, I'll stay inside /api."
+   }
+  ],
+  "current_prompt": "yes, and don't touch its files",
+  "labels": [],
+  "context_needed": true
+ }
+]

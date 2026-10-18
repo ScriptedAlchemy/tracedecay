@@ -1,0 +1,91 @@
+name: Package and verify release artifacts
+description: Package one Bazel-built CLI as the native archive and MCPB.
+
+inputs:
+  binary:
+    description: Exact staged CLI from the build-cli action.
+    required: true
+  tag:
+    description: Validated release tag, including v.
+    required: true
+  asset-prefix:
+    description: Channel-specific asset basename before the platform suffix.
+    required: true
+  platform:
+    description: Release target name.
+    required: true
+  archive:
+    description: Native archive format (tar.gz or zip).
+    required: true
+  epoch:
+    description: Immutable source commit timestamp.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Package the exact built binary
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+        TAG: ${{ inputs.tag }}
+        ASSET_PREFIX: ${{ inputs.asset-prefix }}
+        PLATFORM: ${{ inputs.platform }}
+        ARCHIVE_FORMAT: ${{ inputs.archive }}
+        SOURCE_EPOCH: ${{ inputs.epoch }}
+      run: |
+        set -euo pipefail
+        "$BINARY" --version
+        "$BINARY" --help >/dev/null
+        bundle="${ASSET_PREFIX}-${PLATFORM}.mcpb"
+        python3 scripts/build-mcpb.py build \
+          --binary "$BINARY" --output "$bundle" \
+          --version "${TAG#v}" --platform "$PLATFORM"
+        python3 scripts/build-mcpb.py verify \
+          --bundle "$bundle" --version "${TAG#v}" --platform "$PLATFORM"
+        entry_name=tracedecay
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          entry_name=tracedecay.exe
+        fi
+        python3 scripts/package-release-archive.py \
+          --binary "$BINARY" \
+          --output "${ASSET_PREFIX}-${PLATFORM}.${ARCHIVE_FORMAT}" \
+          --format "$ARCHIVE_FORMAT" --entry-name "$entry_name" --epoch "$SOURCE_EPOCH"
+
+    - name: Verify extracted executable modes and runtime (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        ASSET_PREFIX: ${{ inputs.asset-prefix }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        verify_dir="$(mktemp -d)"
+        trap 'rm -rf -- "$verify_dir"' EXIT
+        # unzip restores the executable mode stored in the MCPB, as hosts do.
+        unzip -q "${ASSET_PREFIX}-${PLATFORM}.mcpb" -d "$verify_dir/mcpb"
+        mkdir "$verify_dir/binary"
+        tar xzf "${ASSET_PREFIX}-${PLATFORM}.tar.gz" -C "$verify_dir/binary"
+        for binary in "$verify_dir/mcpb/server/tracedecay" "$verify_dir/binary/tracedecay"; do
+          test -x "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null
+        done
+
+    - name: Verify extracted binary runtime (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        ASSET_PREFIX: ${{ inputs.asset-prefix }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        $verifyDir = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+        try {
+          Expand-Archive -Path "${env:ASSET_PREFIX}-${env:PLATFORM}.zip" -DestinationPath $verifyDir
+          & "$verifyDir/tracedecay.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --version" }
+          & "$verifyDir/tracedecay.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Packaged binary failed --help" }
+        } finally {
+          Remove-Item $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
+        }

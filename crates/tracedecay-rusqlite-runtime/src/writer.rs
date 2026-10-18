@@ -68,7 +68,10 @@ impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
 }
 
 use request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand};
+pub use worker::FILE_PROBE_INTERVAL;
 use worker::Worker;
+
+pub(crate) type FileLossNotice = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub struct CheckpointHandle {
@@ -413,6 +416,7 @@ pub enum WriterState {
     Draining = 2,
     Closed = 3,
     Faulted = 4,
+    Lost = 5,
 }
 
 impl WriterState {
@@ -421,6 +425,7 @@ impl WriterState {
             1 => Self::Ready,
             2 => Self::Draining,
             4 => Self::Faulted,
+            5 => Self::Lost,
             _ => Self::Closed,
         }
     }
@@ -431,6 +436,7 @@ impl WriterState {
             Self::Draining => UnavailableReasonV1::Draining,
             Self::Closed => UnavailableReasonV1::Closed,
             Self::Faulted => UnavailableReasonV1::Faulted,
+            Self::Lost => UnavailableReasonV1::FileLost,
         }
     }
 }
@@ -470,15 +476,20 @@ impl PersistentWriter {
             admission,
             executor,
             Arc::new(NoCheckpointBlockers),
+            None,
         )
     }
 
+    /// `on_file_lost` runs on the writer's pool task once the probe finds the
+    /// pinned file unlinked or replaced, after the writer stopped and failed
+    /// its queued work; it must not wait.
     pub(crate) fn start_with_checkpoint_blockers<E>(
         runtime: &RuntimeHandle,
         locator: ExistingWriterLocator,
         admission: AdmissionConfigV1,
         executor: E,
         checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
+        on_file_lost: Option<FileLossNotice>,
     ) -> Result<Self, WriterStartError>
     where
         E: StorageOperationExecutor + Send + 'static,
@@ -489,6 +500,7 @@ impl PersistentWriter {
             admission,
             RuntimeWriterPersistence::new(Box::new(executor)),
             checkpoint_blockers,
+            on_file_lost,
         )
     }
 
@@ -498,6 +510,7 @@ impl PersistentWriter {
         config: AdmissionConfigV1,
         persistence: RuntimeWriterPersistence<Box<dyn StorageOperationExecutor + Send>>,
         checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
+        on_file_lost: Option<FileLossNotice>,
     ) -> Result<Self, WriterStartError> {
         if crate::storage_pool::on_pool() {
             return Err(WriterStartError::RuntimeUnavailable);
@@ -559,6 +572,7 @@ impl PersistentWriter {
             checkpoint_status: checkpoint_status_tx,
             checkpoint_pressure: checkpoint_pressure_tx,
             checkpoint_blockers,
+            on_file_lost,
             started: started_tx,
         };
         let join = crate::storage_pool::spawn(worker.run())
@@ -613,6 +627,13 @@ impl PersistentWriter {
     }
     pub fn opened_file_identity(&self) -> Option<u64> {
         self.opened_file_identity
+    }
+    /// Whether the worker task ended, which drops its SQLite connection.
+    /// Never waits, so a pool task may call it.
+    pub(crate) fn worker_exited(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_none_or(crate::storage_pool::PoolTask::is_finished)
     }
     pub fn state(&self) -> WriterState {
         WriterState::load(&self.state)

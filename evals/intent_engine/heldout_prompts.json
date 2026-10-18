@@ -1,0 +1,470 @@
+[
+ {
+  "name": "ho-recall-0",
+  "prompt": "didn't we already figure out why the indexer was stalling? what was the fix",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-1",
+  "prompt": "what was the conclusion yesterday about switching to the bazel remote cache",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-2",
+  "prompt": "pull up our earlier discussion on the hook budget",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-3",
+  "prompt": "I explained the deploy steps to you on Monday, use those",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-4",
+  "prompt": "go back to what I said about naming conventions a couple of chats ago",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-5",
+  "prompt": "we went through this exact error a week ago, find how we solved it",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-6",
+  "prompt": "what approach did the other agent take on the scheduler refactor",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-7",
+  "prompt": "summarize what happened in yesterday's session",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-8",
+  "prompt": "what did I tell you about not touching the migrations",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-9",
+  "prompt": "find the conversation where we picked sqlite over postgres",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-10",
+  "prompt": "you suggested a fix for this flaky test before, what was it?",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-11",
+  "prompt": "recover the plan we agreed on before the context got compacted",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-12",
+  "prompt": "which options did we rule out previously for the cache key?",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-13",
+  "prompt": "the codex session from this morning was working on this, see what it found",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-14",
+  "prompt": "we had a long thread about retry semantics, what did we land on",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-15",
+  "prompt": "check our chat history for the API key rotation steps",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-16",
+  "prompt": "I already gave you the repro steps in another session",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-17",
+  "prompt": "what were the open questions we left unresolved yesterday",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-18",
+  "prompt": "look through previous transcripts for when the dashboard build first broke",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-19",
+  "prompt": "earlier today you found the root cause of the leak, what was it again?",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-20",
+  "prompt": "restore context from the session before the crash",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-21",
+  "prompt": "what did the reviewer agent say in its last pass",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-22",
+  "prompt": "have we hit this panic before?",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-23",
+  "prompt": "recap our previous decisions on error handling",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-24",
+  "prompt": "find where I asked for dark mode support in a past chat",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-25",
+  "prompt": "what was my preferred commit message style that I mentioned before",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-26",
+  "prompt": "what did we try last week that didn't work for the deadlock",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-27",
+  "prompt": "search old conversations for 'lease expired'",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-28",
+  "prompt": "is there a session where someone already investigated the OOM?",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-recall-29",
+  "prompt": "continue from where the previous agent left off on the migration",
+  "expected": "SessionRecall",
+  "split": "recall"
+ },
+ {
+  "name": "ho-neg-0",
+  "prompt": "fix the memory leak in the session store",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-1",
+  "prompt": "add a session timeout setting to the config",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-2",
+  "prompt": "why is memory usage so high in the daemon",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-3",
+  "prompt": "write a unit test for the fact store search scoring",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-4",
+  "prompt": "rename SessionId to ConversationId across the crate",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-5",
+  "prompt": "document how the memory curator works in the README",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-6",
+  "prompt": "the session cookie is not being set on login",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-7",
+  "prompt": "implement a last-used timestamp on sessions",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-8",
+  "prompt": "add a git history view to the dashboard",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-9",
+  "prompt": "update the CHANGELOG with the last release notes",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-10",
+  "prompt": "optimize the history buffer to avoid reallocations",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-11",
+  "prompt": "explain how LRU caches work",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-12",
+  "prompt": "delete transcript files older than 30 days in the cleanup job",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-13",
+  "prompt": "the previous button in the pager is misaligned",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-14",
+  "prompt": "make the conversation list in the UI sortable by date",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-15",
+  "prompt": "what's the difference between stack and heap memory",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-16",
+  "prompt": "bump the version since the last release",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-17",
+  "prompt": "add a remember-me checkbox to the login form",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-18",
+  "prompt": "set up memory limits for the docker container",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-19",
+  "prompt": "write a migration that adds a sessions table",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-20",
+  "prompt": "run the tests again",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-21",
+  "prompt": "refactor the transcript parser to stream lines",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-22",
+  "prompt": "earlier versions of clippy didn't flag this, add an allow",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-23",
+  "prompt": "make the dashboard remember the selected tab",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-neg-24",
+  "prompt": "profile memory allocations in the indexer",
+  "expected": null,
+  "split": "hard_negative"
+ },
+ {
+  "name": "ho-other-0",
+  "prompt": "trace everything that ends up invoking flush_ledger",
+  "expected": "CallGraph",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-1",
+  "prompt": "what functions does parse_envelope call into",
+  "expected": "CallGraph",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-2",
+  "prompt": "if I delete the legacy adapter, what tests break?",
+  "expected": "Impact",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-3",
+  "prompt": "which modules depend on SchedulerConfig and would be affected by changing it",
+  "expected": "Impact",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-4",
+  "prompt": "look over my staged changes before I open the PR",
+  "expected": "ReviewChanges",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-5",
+  "prompt": "review this pull request's diff for bugs",
+  "expected": "ReviewChanges",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-6",
+  "prompt": "where is struct HintCategorySpec declared",
+  "expected": "SymbolLookup",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-7",
+  "prompt": "jump to the definition of decide_hint_delivery",
+  "expected": "SymbolLookup",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-8",
+  "prompt": "list all types implementing the Store trait",
+  "expected": "TypeOrientation",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-9",
+  "prompt": "where is the scheduler config struct constructed",
+  "expected": "TypeOrientation",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-10",
+  "prompt": "check how the sibling api-gateway repo handles auth",
+  "expected": "ProjectContext",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-11",
+  "prompt": "compare this with our other repo tracedecay-cloud",
+  "expected": "ProjectContext",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-12",
+  "prompt": "there are commits on my branch I don't recognize, who made them",
+  "expected": "UnexpectedChanges",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-13",
+  "prompt": "someone force pushed to my branch, what changed",
+  "expected": "UnexpectedChanges",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-14",
+  "prompt": "which files contain the codex adapter",
+  "expected": "FileLookup",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-15",
+  "prompt": "find the config files for the scheduler",
+  "expected": "FileLookup",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-16",
+  "prompt": "read through the entire repo and give me an architecture overview",
+  "expected": "BroadRead",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-17",
+  "prompt": "the build is failing with type errors, help me fix them",
+  "expected": "BuildDiagnostics",
+  "split": "other"
+ },
+ {
+  "name": "ho-other-18",
+  "prompt": "write a haiku about rust",
+  "expected": null,
+  "split": "other"
+ },
+ {
+  "name": "ho-other-19",
+  "prompt": "what's 15% of 80",
+  "expected": null,
+  "split": "other"
+ },
+ {
+  "name": "ho-other-20",
+  "prompt": "commit and push",
+  "expected": null,
+  "split": "other"
+ },
+ {
+  "name": "ho-other-21",
+  "prompt": "translate this paragraph to Spanish",
+  "expected": null,
+  "split": "other"
+ },
+ {
+  "name": "ho-other-22",
+  "prompt": "open a PR for this branch",
+  "expected": null,
+  "split": "other"
+ }
+]
