@@ -21,6 +21,9 @@ inputs:
   test-tools:
     description: Also install rust-analyzer and node for `bazel test`.
     default: "false"
+  tailscale-client-id:
+    description: OIDC client for trusted Linux CI; empty keeps the hosted-only build.
+    default: ""
 
 outputs:
   disk-cache-path:
@@ -86,11 +89,54 @@ runs:
     # source-build outputs even when MODULE.bazel and BUILD files are unchanged.
     - name: Restore master action cache
       id: disk-cache
+      if: inputs.tailscale-client-id == ''
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.disk-cache-config.outputs.path }}
         key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}
+
+    - name: Connect to the private Bazel fleet
+      if: inputs.tailscale-client-id != ''
+      uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4
+      with:
+        oauth-client-id: ${{ inputs.tailscale-client-id }}
+        audience: api.tailscale.com/${{ inputs.tailscale-client-id }}
+        tags: tag:bazel-ci
+        ping: ubuntu-main
+
+    - name: Share compilation between the hosted runner and private workers
+      if: inputs.tailscale-client-id != ''
+      shell: bash
+      run: |
+        if [[ $RUNNER_OS != Linux || $RUNNER_ARCH != X64 ]]; then
+          echo 'The CI fleet configuration requires a Linux x86_64 runner.' >&2
+          exit 1
+        fi
+        mkdir -p /tmp/zig-cache
+        # The generated workspace rc loads after setup-bazel's home rc.
+        # Tests need the hosted runner's installed tools and isolated services.
+        # Rust compilation can race sandboxed local work against remote work.
+        cat > .bazelrc.local <<'RC'
+        build --config=rbe-linux
+        build --remote_executor=grpc://ubuntu-main:50051
+        build --remote_cache=grpc://ubuntu-main:50051
+        build --remote_instance_name=main
+        build --remote_timeout=600
+        build --remote_local_fallback
+        build --remote_download_outputs=toplevel
+        build --jobs=40
+        build --local_resources=cpu=HOST_CPUS
+        build --local_resources=memory=HOST_RAM*.5
+        build --internal_spawn_scheduler
+        build --dynamic_local_strategy=sandboxed
+        build --dynamic_remote_strategy=remote
+        build --strategy=Rustc=dynamic
+        build --strategy=TestRunner=local
+        build --bes_backend=grpc://ubuntu-main:1985
+        build --bes_results_url=https://ubuntu-main.tail039078.ts.net/invocation/
+        build --bes_timeout=30s
+        RC
 
     # Test dependencies, not conveniences: the LSP negotiation acceptance
     # spawns rust-analyzer through the pinned toolchain, and host journeys

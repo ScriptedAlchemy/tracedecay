@@ -337,6 +337,9 @@ jobs:
   # family previously evicted the budget). root-b and workspace-c catch
   # unlisted targets in their groups.
   linux-test:
+    permissions:
+      contents: read
+      id-token: write
     name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -477,6 +480,9 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-test-v2
+          # Tailscale independently checks this repository and immutable actor
+          # ID. This condition avoids requesting credentials for fork PRs.
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
           # Prefer v2; keep legacy prefixes as restore fallbacks if still present.
           extra-restore-keys: ci-linux-test,ci-linux-workspace-test
           test-tools: "true"
@@ -570,6 +576,9 @@ jobs:
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:
+    permissions:
+      contents: read
+      id-token: write
     name: Clippy
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -586,6 +595,9 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-clippy
+          # Tailscale independently checks this repository and immutable actor
+          # ID. This condition avoids requesting credentials for fork PRs.
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
           extra-restore-keys: ci-linux-test-v2
 
       - name: Run blocking Clippy policy
