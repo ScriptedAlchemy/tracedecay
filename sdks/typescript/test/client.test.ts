@@ -1798,6 +1798,91 @@ describe("TraceDecayClient transport envelopes", () => {
   });
 });
 
+describe("TraceDecayClient operation stream disposal", () => {
+  const open = [
+    "event: open",
+    'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume"}}}',
+    "",
+    "",
+  ].join("\n");
+
+  it("cancels a live HTTP body and releases its reader on early iterator return", async () => {
+    let cancelled = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(open));
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:4317",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => response,
+    });
+    const iterator = client.streamOperation("request.operation");
+
+    expect((await iterator.next()).value?.event).toBe("open");
+    await iterator.return(undefined);
+
+    expect(cancelled).toBe(1);
+    expect(response.body?.locked).toBe(false);
+    expect(await iterator.next()).toEqual({ done: true, value: undefined });
+  });
+
+  it("closes a rejected non-SSE response without suppressing the protocol error", async () => {
+    let cancelled = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(open));
+      },
+      cancel() {
+        cancelled += 1;
+      },
+    }), { headers: { "content-type": "text/plain" } });
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:4317",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      fetch: async () => response,
+    });
+    await expect(client.streamOperation("request.operation").next()).rejects.toThrow(
+      "the daemon opened an operation stream with an invalid media type",
+    );
+    expect(cancelled).toBe(1);
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it("closes a live HTTP watcher without posting an operation cancellation", async () => {
+    let close: Promise<void> | undefined;
+    await withServer(
+      [
+        (_request, response) => {
+          close = new Promise<void>((resolve) => response.once("close", resolve));
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.write(open);
+        },
+      ],
+      async (baseUrl, requests) => {
+        const client = createClient({ baseUrl, projectId: "project.sdk", token: "sdk-secret" });
+        for await (const event of client.streamOperation("request.operation")) {
+          expect(event.event).toBe("open");
+          break;
+        }
+        expect(close).toBeDefined();
+        await Promise.race([
+          close,
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(() => reject(new Error("watcher HTTP connection never closed")), 2000)),
+        ]);
+        expect(requests.map(request => request.method)).toEqual(["GET"]);
+      },
+    );
+  });
+});
+
 describe("TraceDecayClient operation lifecycle", () => {
   it("accepts the server media type, UTF-8 BOM, and inherited SSE event ID", async () => {
     await withServer(

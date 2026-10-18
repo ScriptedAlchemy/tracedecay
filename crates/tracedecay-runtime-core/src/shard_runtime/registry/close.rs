@@ -1400,4 +1400,164 @@ mod tests {
         drop(state);
         drop(profile);
     }
+
+    /// This process's descriptors on files under `path` that were unlinked.
+    #[cfg(target_os = "linux")]
+    fn deleted_descriptors(path: &std::path::Path) -> Vec<String> {
+        let prefix = path.display().to_string();
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .map(|target| target.display().to_string())
+            .filter(|target| target.starts_with(&prefix) && target.ends_with(" (deleted)"))
+            .collect()
+    }
+
+    /// The first lookup that is not `Evicting`: a lost runtime stays mapped
+    /// until its reader workers have exited.
+    #[cfg(target_os = "linux")]
+    async fn lookup_after_lost_runtime_closes(
+        registry: &StoreRuntimeRegistry,
+        binding: &StoreRuntimeBindingV1,
+    ) -> StoreRuntimeLookup {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let lookup = registry.lookup(binding);
+            if !matches!(lookup, StoreRuntimeLookup::Evicting { .. }) {
+                return lookup;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a lost runtime's reader workers must exit"
+            );
+            let _ = crate::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[asupersync::test]
+    async fn a_store_unlinked_under_its_runtime_closes_its_files_and_reopens_fresh() {
+        use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlStatement, ExactSqlValue};
+
+        let statement = |sql: &str| ExactSqlStatement::new(sql.to_owned(), Vec::new()).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let (registry, profile, code, authority) =
+            mount_code_runtime(temporary.path().join("runtime.db")).await;
+        let path = authority.canonical_database_path().to_path_buf();
+        let handle = code.authorized_exact_sql_handle(authority.clone()).unwrap();
+        handle
+            .execute(statement("CREATE TABLE unlink_probe (value TEXT)"))
+            .unwrap();
+        handle
+            .execute(statement("INSERT INTO unlink_probe VALUES ('before')"))
+            .unwrap();
+        drop(handle);
+
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(file));
+        }
+
+        let deadline = std::time::Instant::now()
+            + tracedecay_rusqlite_runtime::FILE_PROBE_INTERVAL
+            + Duration::from_secs(2);
+        while code.physical_snapshot().healthy || !deleted_descriptors(&path).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "within one probe interval the store must report itself lost and hold no \
+                 descriptor on the unlinked files: {:?}",
+                deleted_descriptors(&path)
+            );
+            let _ = crate::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await;
+        }
+        assert!(!code.physical_snapshot().writer_present);
+        assert!(matches!(
+            lookup_after_lost_runtime_closes(&registry, code.binding()).await,
+            StoreRuntimeLookup::Missing { .. }
+        ));
+
+        let path = seed_final_graph_db(path).await;
+        let authority = DatabaseAuthority::for_runtime(&path, "reopen a lost store").unwrap();
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let fresh = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                StoreIncarnationV1::new(1).unwrap(),
+                Some(pin),
+                authority.clone(),
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("the next open must publish a fresh runtime: {failure:?}")
+            }
+        };
+        let handle = fresh.authorized_exact_sql_handle(authority).unwrap();
+        handle
+            .execute(statement("CREATE TABLE unlink_probe (value TEXT)"))
+            .unwrap();
+        let rows = handle
+            .query(
+                statement("SELECT count(*) FROM unlink_probe"),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
+        drop((handle, fresh, code, profile));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[asupersync::test]
+    async fn an_evicted_lost_runtime_leaves_no_pin_on_its_key() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (registry, profile, code, authority) =
+            mount_code_runtime(temporary.path().join("runtime.db")).await;
+        let key = StoreRuntimeKey::from_binding(code.binding());
+        registry
+            .lock_state()
+            .profile_pin_tokens
+            .entry(key.clone())
+            .or_default()
+            .insert(u64::MAX);
+        let path = authority.canonical_database_path().to_path_buf();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(file));
+        }
+        let deadline = std::time::Instant::now()
+            + tracedecay_rusqlite_runtime::FILE_PROBE_INTERVAL
+            + Duration::from_secs(2);
+        while code.physical_snapshot().healthy {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the store must report itself lost"
+            );
+            let _ = crate::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await;
+        }
+
+        assert!(matches!(
+            lookup_after_lost_runtime_closes(&registry, code.binding()).await,
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        assert!(
+            !registry.lock_state().profile_pin_tokens.contains_key(&key),
+            "pins held on the evicted runtime must not count against a reopened key"
+        );
+        drop((code, profile));
+    }
 }

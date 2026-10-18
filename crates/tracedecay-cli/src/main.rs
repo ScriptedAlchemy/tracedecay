@@ -1454,11 +1454,16 @@ async fn dispatch_daemon_command(
             // value — unboxed, the whole machine inlines into this dispatch future and
             // overflows the main thread's stack at startup (measured tonight;
             // same class as the 37MB serve_broker_socket_client machine).
-            Box::pin(tracing::Instrument::instrument(
+            let end = Box::pin(tracing::Instrument::instrument(
                 tracedecay::daemon::run_foreground(profile.clone(), socket_path, remote_tls),
                 tracing::trace_span!("cli.daemon.run"),
             ))
             .await?;
+            if end == tracedecay::daemon::DaemonRunEnd::ProfileLost {
+                return Ok(CommandOutcome::Exit(
+                    tracedecay::daemon::PROFILE_LOST_EXIT_CODE,
+                ));
+            }
         }
         DaemonAction::InstallService {
             socket,

@@ -1004,13 +1004,3 @@ pub fn admitted_root_uri_for_project(
         })?;
     Ok(uri.to_string())
 }
-
-pub fn locator_digest_for_project(
-    project_root: &Path,
-) -> Result<ManifestDigest, ApplicationContractError> {
-    tracedecay_runtime_core::worktree::locator_digest_for_project(project_root).map_err(|_| {
-        ApplicationContractError::Inconsistent {
-            field: "application primitive project locator digest",
-        }
-    })
-}
