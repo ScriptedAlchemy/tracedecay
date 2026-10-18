@@ -1628,7 +1628,7 @@ impl ProblemError {
 }
 
 fn status_matches_problem(status: u16, kind: tracedecay_contracts::ApplicationProblemKind) -> bool {
-    status == tracedecay_api::application_problem_status(kind).as_u16()
+    status == kind.http_status()
 }
 
 fn nullable_canonical_string<'a>(

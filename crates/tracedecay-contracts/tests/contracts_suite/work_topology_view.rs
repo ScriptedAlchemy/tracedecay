@@ -105,22 +105,21 @@ impl WorkPlacementStoragePort for PlacementStore {
             .cloned())
     }
 
-    fn target_holder(
+    fn target_held_by_other(
         &self,
         authority: &WorkAuthority,
+        identity: &WorkPlacementIdentityV1,
         root: &str,
-    ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError> {
-        Ok(self
-            .placements
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|((stored_authority, _), placement)| {
-                stored_authority == authority
+    ) -> Result<bool, WorkPlacementStorageError> {
+        Ok(self.placements.lock().unwrap().iter().any(
+            |((stored_authority, stored_identity), placement)| {
+                stored_authority.project_id() == authority.project_id()
+                    && stored_authority.repository_id() == authority.repository_id()
+                    && (stored_authority != authority || stored_identity != identity)
                     && placement.holds_target()
                     && placement.target().root() == Some(root)
-            })
-            .map(|((_, identity), _)| identity.clone()))
+            },
+        ))
     }
 }
 

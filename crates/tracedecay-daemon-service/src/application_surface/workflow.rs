@@ -2,21 +2,15 @@
 
 use std::sync::Arc;
 
-use super::registered_http::invoke_registered_http;
+use super::registered_http::invoke_registered;
 use super::require_public_catalog_route;
-use axum::response::Response;
+use axum::response::IntoResponse;
 use tracedecay_api::WorkflowOperation;
-use tracedecay_contracts::{
-    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
-    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
-    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
-    WorkflowDefinitionValidateRequest, WorkflowRunCancelRequest, WorkflowRunGetRequest,
-    WorkflowRunPauseRequest, WorkflowRunResumeRequest, WorkflowRunStartRequest,
-};
 use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
-use tracedecay_daemon_protocol::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
+use tracedecay_daemon_protocol::{
+    DaemonInvocationOutcome, DaemonInvocationRequest, WorkflowApplicationInvocation,
+};
 
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
@@ -50,7 +44,11 @@ impl tracedecay_api::WorkflowApplicationOwner for WorkflowExecutorOwner {
         request: tracedecay_api::WorkflowHttpRequest,
     ) -> tracedecay_api::WorkflowInvocationFuture {
         let executor = Arc::clone(&self.executor);
-        Box::pin(async move { invoke_workflow_operation(Some(executor.as_ref()), request).await })
+        Box::pin(async move {
+            invoke_workflow_operation(Some(executor.as_ref()), request)
+                .await
+                .into_response()
+        })
     }
 }
 
@@ -68,375 +66,43 @@ impl tracedecay_api::WorkflowApplicationOwner for WorkflowExecutorOwner {
 pub async fn invoke_workflow_operation(
     executor: Option<&dyn DaemonInvocationExecutor>,
     request: tracedecay_api::WorkflowHttpRequest,
-) -> Response {
+) -> Result<tracedecay_api::HttpJsonEnvelope<serde_json::Value>, tracedecay_api::HttpAdapterError> {
     let tracedecay_api::WorkflowHttpRequest {
         operation,
         request_id,
         controls,
         body,
     } = request;
-    match operation {
-        WorkflowOperation::RegisterDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionRegisterRequest>(body)
-            else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_domain::WorkflowDefinition>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::RegisterDefinition(decoded),
-                register_definition_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::ActivateDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionActivateRequest>(body)
-            else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::ActivateDefinition(decoded),
-                activate_definition_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::RetireDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionRetireRequest>(body)
-            else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::RetireDefinition(decoded),
-                retire_definition_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::RejectDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionRejectRequest>(body)
-            else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_contracts::WorkflowDefinitionDisposition>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::RejectDefinition(decoded),
-                reject_definition_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::ValidateDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionValidateRequest>(body)
-            else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_contracts::WorkflowDefinitionValidation>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::ValidateDefinition(decoded),
-                validate_definition_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::GetDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionGetRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_domain::WorkflowDefinition>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::GetDefinition(decoded),
-                get_definition_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::ListDefinitions => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionListRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<Vec<tracedecay_domain::WorkflowDefinition>>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::ListDefinitions(decoded),
-                list_definitions_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::DefinitionHistory => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionHistoryRequest>(body)
-            else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<Vec<tracedecay_domain::WorkflowDefinition>>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::DefinitionHistory(decoded),
-                definition_history_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::DiffDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionDiffRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_contracts::WorkflowDefinitionDiff>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::DiffDefinition(decoded),
-                diff_definition_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::HandoffIssue => {
-            let Ok(decoded) = serde_json::from_value::<TaskHandoffIssueRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_contracts::TaskHandoffGrant>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::HandoffIssue(decoded),
-                handoff_issue_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::HandoffRedeem => {
-            let Ok(decoded) = serde_json::from_value::<TaskHandoffRedeemRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_contracts::TaskHandoffRedeemed>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::HandoffRedeem(decoded),
-                handoff_redeem_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::StartRun => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowRunStartRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_domain::WorkflowRunProjection>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::StartRun(Box::new(decoded)),
-                start_run_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::PauseRun => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowRunPauseRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_domain::WorkflowRunProjection>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::PauseRun(decoded),
-                pause_run_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::ResumeRun => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowRunResumeRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_domain::WorkflowRunProjection>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::ResumeRun(decoded),
-                resume_run_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::CancelRun => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowRunCancelRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_domain::WorkflowRunProjection>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::CancelRun(decoded),
-                cancel_run_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::GetRun => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowRunGetRequest>(body) else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_domain::WorkflowRunProjection>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::GetRun(decoded),
-                get_run_outcome,
-            )
-            .await
-        }
-    }
-}
-
-async fn invoke<T>(
-    executor: Option<&dyn DaemonInvocationExecutor>,
-    operation: WorkflowOperation,
-    request_id: tracedecay_contracts::RequestId,
-    controls: tracedecay_api::HttpApplicationControls,
-    request: WorkflowApplicationInvocation,
-    select: fn(
-        tracedecay_daemon_protocol::DaemonInvocationOutcome,
-    ) -> Option<(
-        tracedecay_contracts::ResolvedScope,
-        tracedecay_contracts::ApplicationOutcome<T>,
-    )>,
-) -> Response
-where
-    T: serde::Serialize,
-{
-    let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::workflow_application(
+    let decoded = match WorkflowApplicationInvocation::decode(operation.operation_key(), body) {
+        Ok(request) => request,
+        Err(_) => return tracedecay_api::workflow_invalid_request(request_id),
+    };
+    let invocation = DaemonInvocationRequest::workflow_application(
         request_id.as_str(),
-        request,
+        decoded,
         tracedecay_contracts::now_micros(),
         controls.deadline.clone(),
         controls.cancellation.context(),
     );
     let Some(executor) = executor else {
-        return super::registered_executor_unavailable::<T, _>(operation, request_id);
+        return super::registered_executor_unavailable(operation, request_id);
     };
-    invoke_registered_http::<T, _>(
-        executor, operation, request_id, controls, invocation, select,
+    invoke_registered(
+        executor,
+        operation,
+        request_id,
+        controls,
+        invocation,
+        |response| match response {
+            DaemonInvocationOutcome::WorkflowApplication { scope, outcome }
+                if outcome.operation_key() == operation.operation_key() =>
+            {
+                outcome
+                    .into_application_outcome()
+                    .map(|outcome| Some((scope, outcome)))
+            }
+            _ => Ok(None),
+        },
     )
     .await
 }
-
-macro_rules! workflow_selector {
-    ($name:ident, $variant:ident, $output:ty) => {
-        fn $name(
-            outcome: tracedecay_daemon_protocol::DaemonInvocationOutcome,
-        ) -> Option<(
-            tracedecay_contracts::ResolvedScope,
-            tracedecay_contracts::ApplicationOutcome<$output>,
-        )> {
-            match outcome {
-                tracedecay_daemon_protocol::DaemonInvocationOutcome::WorkflowApplication {
-                    scope,
-                    outcome: WorkflowApplicationOutcome::$variant(outcome),
-                } => Some((scope, outcome)),
-                _ => None,
-            }
-        }
-    };
-}
-
-workflow_selector!(
-    register_definition_outcome,
-    RegisterDefinition,
-    tracedecay_domain::WorkflowDefinition
-);
-workflow_selector!(
-    activate_definition_outcome,
-    ActivateDefinition,
-    tracedecay_contracts::WorkflowDefinitionDisposition
-);
-workflow_selector!(
-    retire_definition_outcome,
-    RetireDefinition,
-    tracedecay_contracts::WorkflowDefinitionDisposition
-);
-workflow_selector!(
-    reject_definition_outcome,
-    RejectDefinition,
-    tracedecay_contracts::WorkflowDefinitionDisposition
-);
-workflow_selector!(
-    validate_definition_outcome,
-    ValidateDefinition,
-    tracedecay_contracts::WorkflowDefinitionValidation
-);
-workflow_selector!(
-    get_definition_outcome,
-    GetDefinition,
-    tracedecay_domain::WorkflowDefinition
-);
-workflow_selector!(
-    list_definitions_outcome,
-    ListDefinitions,
-    Vec<tracedecay_domain::WorkflowDefinition>
-);
-workflow_selector!(
-    definition_history_outcome,
-    DefinitionHistory,
-    Vec<tracedecay_domain::WorkflowDefinition>
-);
-workflow_selector!(
-    diff_definition_outcome,
-    DiffDefinition,
-    tracedecay_contracts::WorkflowDefinitionDiff
-);
-workflow_selector!(
-    handoff_issue_outcome,
-    HandoffIssue,
-    tracedecay_contracts::TaskHandoffGrant
-);
-workflow_selector!(
-    handoff_redeem_outcome,
-    HandoffRedeem,
-    tracedecay_contracts::TaskHandoffRedeemed
-);
-workflow_selector!(
-    start_run_outcome,
-    StartRun,
-    tracedecay_domain::WorkflowRunProjection
-);
-workflow_selector!(
-    pause_run_outcome,
-    PauseRun,
-    tracedecay_domain::WorkflowRunProjection
-);
-workflow_selector!(
-    resume_run_outcome,
-    ResumeRun,
-    tracedecay_domain::WorkflowRunProjection
-);
-workflow_selector!(
-    cancel_run_outcome,
-    CancelRun,
-    tracedecay_domain::WorkflowRunProjection
-);
-workflow_selector!(
-    get_run_outcome,
-    GetRun,
-    tracedecay_domain::WorkflowRunProjection
-);

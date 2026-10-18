@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracedecay_domain::EdgeAuthorityV1;
 
 use super::sparse_differential_tests::{FIXTURE_ROOT, fixture_files, language_for, publish};
-use super::worker_tests::{WorkerProjectionSink, WorkerPublicationStore, worker_config};
+use super::worker_tests::{WorkerPublicationStore, worker_config};
 use super::*;
 use crate::lineage::LineageKindV1;
 
@@ -59,7 +59,7 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
     }
 }
 
-type OwnerV1 = CodeIndexProductionOwnerV1<WorkerPublicationStore, WorkerProjectionSink>;
+type OwnerV1 = CodeIndexProductionOwnerV1<WorkerPublicationStore>;
 
 /// The file evidence segments a sparse successor wrote, by the logical
 /// path each names.
@@ -98,8 +98,7 @@ fn sealed_file_evidence_restores_the_built_edges_calls_and_lineage() {
     for language in ["rust", "typescript", "python", "go", "java", "ruby"] {
         let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
         let store = WorkerPublicationStore::default();
-        let mut owner = OwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-            .expect("production owner");
+        let mut owner = OwnerV1::new(worker_config(), store.clone()).expect("production owner");
         let cold = publish(&mut owner, &tree, None, false, 1_000_000);
         let built = cold.decoded().expect("a cold seal holds its generation");
         assert!(
@@ -209,8 +208,7 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
     const LEAVES: usize = 300;
     let store = CountingStoreV1::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
     let base_tree = hub_tree(LEAVES, "1");
     let edited_leaf = base_tree
         .iter()
@@ -305,8 +303,7 @@ fn a_body_edit_re_resolves_none_of_the_files_sharing_its_names() {
     const LEAVES: usize = 300;
     let store = CountingStoreV1::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
     let base_tree = shared_name_tree(LEAVES, "7");
     let hub = base_tree
         .iter()
@@ -354,12 +351,9 @@ fn a_body_edit_re_resolves_none_of_the_files_sharing_its_names() {
          and the crate manifest crate-rooted paths resolve through"
     );
 
-    let mut cold = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .expect("cold owner");
+    let mut cold =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .expect("cold owner");
     let rebuilt = publish(&mut cold, &edited_tree, Some(hub), false, 2_100_000);
     assert_eq!(
         edited.lane_digest(),

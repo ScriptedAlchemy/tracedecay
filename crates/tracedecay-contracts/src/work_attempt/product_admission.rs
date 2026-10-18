@@ -256,6 +256,7 @@ pub(crate) fn product_admission_problem(
         WorkProductAttemptAdmissionErrorV1::PlacementRootConflict => {
             placement_root_conflict_problem()
         }
+        WorkProductAttemptAdmissionErrorV1::Storage(failure) => failure.application_problem(),
         WorkProductAttemptAdmissionErrorV1::Unavailable => {
             ApplicationProblem::unavailable(crate::SafeDiagnostic {
                 code: "application.work-attempt.product-admission-unavailable".to_owned(),
@@ -516,6 +517,7 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
                               the relation scopes the excluded events were admitted under.",
             )
         }
+        WorkProductApplicationErrorV1::Storage(failure) => failure.application_problem(),
         WorkProductApplicationErrorV1::EventAuthorityUnavailable
         | WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable

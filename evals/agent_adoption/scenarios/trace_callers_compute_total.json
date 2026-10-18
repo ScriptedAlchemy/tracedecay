@@ -21,9 +21,17 @@
       "Read"
     ]
   },
-  "ground_truth": [
-    "place_order"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
   "notes": "Grep misses nothing here but call-graph is the intended tool; place_order is the only caller.",
   "expected_skill": "tracing-functions",

@@ -35,9 +35,23 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "compute_grand_total"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states compute_grand_total",
+          "pattern": "\\bcompute_grand_total\\b"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "claims there is no dead code",
+          "pattern": "^\\W*(?:there (?:is|are) )?(?:no|zero) (?:dead|unused|uncalled)"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
   "notes": "dead code; compute_grand_total has zero callers and zero test coverage."
 }

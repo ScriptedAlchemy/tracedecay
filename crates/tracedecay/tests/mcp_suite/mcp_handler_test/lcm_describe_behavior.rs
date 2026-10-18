@@ -343,7 +343,7 @@ fn session_document(node_id: &str, payload_ref: &str) -> Value {
                 }
             ],
             "session_id": SESSION,
-            "session_token_estimate": 15,
+            "session_token_estimate": 74,
             "summary_node": null,
             "summary_node_count": 1,
             "summary_nodes": [

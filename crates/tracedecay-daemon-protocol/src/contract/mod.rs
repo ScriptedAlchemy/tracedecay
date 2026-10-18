@@ -16,6 +16,8 @@
 //! resolution, and dispatch. Only construction, validation, and the
 //! application-DTO conversions travel with the types they belong to.
 
+#[macro_use]
+mod application_family;
 mod feedback;
 mod git;
 mod git_surface;
