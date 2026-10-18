@@ -41,7 +41,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay__bare__db3c5c040a0",
+    name = "tracedecay__bare__d219e4ede5b",
     srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "benches/session_temporal/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"],
     crate_root = "src/lib.rs",
     crate_name = "tracedecay",

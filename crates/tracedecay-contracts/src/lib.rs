@@ -137,8 +137,8 @@ pub use configuration::{
 pub use context::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationRequestControlV1, CancellationContext,
     CancellationSignal, CancellationState, CancellationTokenId, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestAdmission, RequestContext,
-    RequestId, ResolvedScope,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, REMOTE_ENROLLMENT_CREDENTIAL_HEADER,
+    RequestAdmission, RequestContext, RequestId, ResolvedScope,
 };
 pub use context_scout::{
     context_scout_surface_catalog_contribution, context_scout_surface_handler_descriptors,

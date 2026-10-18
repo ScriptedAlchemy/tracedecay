@@ -7186,7 +7186,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tracedecay-api",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-tool-catalog",

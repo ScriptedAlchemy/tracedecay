@@ -33,10 +33,27 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "audit.rs",
-    "raw_total_len"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states audit.rs",
+          "pattern": "\\baudit\\.rs\\b"
+        },
+        {
+          "id": "states raw_total_len",
+          "pattern": "\\braw_total_len\\b"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "claims there are no TODOs",
+          "pattern": "^\\W*(?:there (?:are|is) )?(?:no|zero) (?:todo|leftover|unfinished)"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
   "notes": "WIRED UP: lane 1's fixture/src/audit.rs plants a TODO(audit-fixture) marker inside raw_total_len. Live-verified against the built fixture: `tracedecay tool todos` returns match_count=2 (kind TODO) at src/audit.rs:11 and src/audit.rs:26, enclosing symbol src/audit.rs::raw_total_len -- matches the README's documented 'two matches'. Promoted from deferred now that the fixture marker exists and the tool reliably finds it."
 }

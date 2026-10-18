@@ -36,11 +36,25 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "inventory",
-    "on_hand",
-    "HashMap"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states inventory",
+          "pattern": "\\binventory\\b"
+        },
+        {
+          "id": "states on_hand",
+          "pattern": "\\bon_hand\\b"
+        },
+        {
+          "id": "states HashMap",
+          "pattern": "\\bHashMap\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
   "notes": "Symbol lookup; tracedecay_search/body pinpoints it without a file scan."
 }

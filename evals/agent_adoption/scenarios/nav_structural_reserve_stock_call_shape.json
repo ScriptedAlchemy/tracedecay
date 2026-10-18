@@ -36,10 +36,21 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "reserve_stock",
-    "place_order"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
   "notes": "structural call-shape search; the sole three-argument reserve_stock(...) call site is inside place_order (orders.rs). The neutral prompt stresses the argument shape so ast_grep_search is the natural opener, though callers/grep/context can also resolve it."
 }

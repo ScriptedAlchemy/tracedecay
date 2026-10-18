@@ -31,7 +31,18 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "effect",
+    "tool_effects": [
+      {
+        "id": "stores the SKU decision as a fact",
+        "tools": [
+          "tracedecay_fact_store_add"
+        ],
+        "input_pattern": "sku"
+      }
+    ]
+  },
   "max_tool_calls": 4,
-  "notes": "fact add; neutral phrasing ('make sure that's remembered') should still route to tracedecay_fact_store_add. No ground_truth text check -- graded on tool choice, since confirmation phrasing varies by model."
+  "notes": "fact add; neutral phrasing ('make sure that's remembered') should still route to tracedecay_fact_store_add. Correctness is a successful fact_store_add call mentioning the SKU decision (tool effect), not confirmation phrasing, which varies by model."
 }
