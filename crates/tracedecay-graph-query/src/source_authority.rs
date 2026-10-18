@@ -7,9 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::CodeGraphReadError;
 use tracedecay_contracts::RequestContext;
 use tracedecay_domain::ProjectId;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::SourceReadContext;
 
@@ -27,9 +27,12 @@ impl AdmittedSourceAuthority {
     /// Freezes the runtime's answers after validating its claimed identity
     /// against the admitted scope. Identity is denied before any other
     /// runtime surface is consulted.
-    pub(crate) fn capture(context: &RequestContext, source: SourceReadContext) -> Result<Self> {
+    pub(crate) fn capture(
+        context: &RequestContext,
+        source: SourceReadContext,
+    ) -> Result<Self, CodeGraphReadError> {
         if source.project_id() != context.scope().project_id.as_str() {
-            return Err(graph_source_scope_mismatch());
+            return Err(CodeGraphReadError::Denied);
         }
         Ok(Self {
             project_root: source.project_root,
@@ -44,20 +47,4 @@ impl AdmittedSourceAuthority {
     pub(crate) fn project_id(&self) -> &str {
         self.project_id.as_str()
     }
-}
-
-pub(crate) fn graph_source_unbound() -> TraceDecayError {
-    TraceDecayError::project_route(
-        "code-graph-denied",
-        false,
-        "the admitted graph query has no bound project source authority",
-    )
-}
-
-pub(crate) fn graph_source_scope_mismatch() -> TraceDecayError {
-    TraceDecayError::project_route(
-        "code-graph-denied",
-        false,
-        "the source read is outside the admitted graph query project scope",
-    )
 }
