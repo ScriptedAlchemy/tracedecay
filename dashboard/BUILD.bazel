@@ -28,7 +28,8 @@ vitest_bin.vitest_test(
         "e2e/**",
         "stories/**",
     ]),
-    args = ["run"],
+    # Remote actions reserve one CPU; Vitest otherwise sizes its pool to the host.
+    args = ["run", "--maxWorkers=1"],
     chdir = package_name(),
 )
 
