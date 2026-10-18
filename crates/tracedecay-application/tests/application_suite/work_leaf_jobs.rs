@@ -373,10 +373,11 @@ async fn placement_admit_and_release_awaited_on_a_native_worker_observe_off_the_
         "admit and release each observed the target once"
     );
     assert!(
-        threads
-            .iter()
-            .all(|name| name.as_deref() != Some("tracedecay-rusqlite-writer")),
-        "the Git observation never ran on the writer thread: {threads:?}"
+        threads.iter().all(|name| name
+            .as_deref()
+            .is_some_and(|name| name.contains("-blocking-"))),
+        "the Git observation ran on the blocking pool, never the writer or the native worker: \
+         {threads:?}"
     );
     assert_eq!(
         database

@@ -6,10 +6,10 @@ use tracedecay_contracts::{
     AuthorityReceipt, Deadline, EffectId, EffectTermination, IdempotencyKey, LegalAction,
     PolicyDecisionRef, RequestContext, RequestId, RetryDirective, SafeDiagnostic, TaskHandoffError,
     TaskHandoffGrant, TaskHandoffRedeemed, WorkflowCoordinationError,
-    WorkflowDefinitionDisposition, WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1,
-    WorkflowEffectIdentityV1, WorkflowEffectOperationV1, WorkflowEffectOutcomeV1,
-    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1,
-    WorkflowEffectSuccessV1, WorkflowEffectTerminalV1,
+    WorkflowDefinitionDisposition, WorkflowEffectAuthorityErrorV1, WorkflowEffectIdentityV1,
+    WorkflowEffectOperationV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
+    WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
+    WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
     ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
@@ -126,9 +126,9 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn execute_journaled_workflow_effect(
+pub(super) async fn execute_journaled_workflow_effect(
     registered: &RegisteredWorkRuntime,
-    authority: &impl WorkflowEffectAuthorityPortV1,
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -216,7 +216,10 @@ pub(super) fn execute_journaled_workflow_effect(
     } else {
         prepared
     };
-    let record = match authority.execute_effect(&identity, &prepared, now_micros()) {
+    let record = match services
+        .execute_effect(identity, prepared, now_micros())
+        .await
+    {
         Ok(record) => record,
         Err(WorkflowEffectAuthorityErrorV1::ResetRequired) => {
             return DaemonInvocationResponse::application_problem(

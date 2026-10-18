@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use tracedecay_contracts::{
     WorkflowAdmissionSnapshot, WorkflowRunAppendOutcome, WorkflowRunAppendRequest,
-    WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
-    work_executable_catalog_digest,
+    WorkflowRunReadPort, WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError,
+    WorkflowRunStoragePort, work_executable_catalog_digest,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
@@ -90,7 +90,7 @@ struct MemoryRunStorage {
     events: Arc<Mutex<BTreeMap<RunId, Vec<WorkflowRunEvent>>>>,
 }
 
-impl WorkflowRunStoragePort for MemoryRunStorage {
+impl WorkflowRunReadPort for MemoryRunStorage {
     fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let events = self.events.lock().unwrap();
         let history = events
@@ -99,6 +99,19 @@ impl WorkflowRunStoragePort for MemoryRunStorage {
         WorkflowRunProjection::rebuild(history).map_err(|_| WorkflowRunStorageError::InvalidHistory)
     }
 
+    fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
+        let events = self.events.lock().unwrap();
+        events
+            .values()
+            .map(|history| {
+                WorkflowRunProjection::rebuild(history)
+                    .map_err(|_| WorkflowRunStorageError::InvalidHistory)
+            })
+            .collect()
+    }
+}
+
+impl WorkflowRunStoragePort for MemoryRunStorage {
     fn append(
         &self,
         request: &WorkflowRunAppendRequest,
@@ -124,17 +137,6 @@ impl WorkflowRunStoragePort for MemoryRunStorage {
         WorkflowRunProjection::rebuild(history)
             .map(WorkflowRunAppendOutcome::Appended)
             .map_err(|_| WorkflowRunStorageError::InvalidHistory)
-    }
-
-    fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
-        let events = self.events.lock().unwrap();
-        events
-            .values()
-            .map(|history| {
-                WorkflowRunProjection::rebuild(history)
-                    .map_err(|_| WorkflowRunStorageError::InvalidHistory)
-            })
-            .collect()
     }
 }
 
