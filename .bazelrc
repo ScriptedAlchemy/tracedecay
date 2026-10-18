@@ -112,4 +112,17 @@ build:rbe-linux --sandbox_writable_path=/tmp/zig-cache
 build:rbe-macos --host_platform=//scripts/bazel/platforms:macos_aarch64
 build:rbe-macos --platforms=//scripts/bazel/platforms:macos_aarch64
 
+# Linux-hosted type check of cfg(windows) code: clippy's check-only actions
+# against the Windows target, so nothing links and no Windows SDK is needed.
+# Build scripts' C code compiles with the hermetic zig toolchain.
+build:windows-check --platforms=//scripts/bazel/platforms:windows_x86_64
+build:windows-check --extra_toolchains=@zig_sdk//toolchain:windows_amd64
+build:windows-check --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:windows-check --output_groups=clippy_checks
+# A type check, like `cargo check`: lints and warnings stay allowed. The
+# aspect's default -Dwarnings would fail on Windows-only lint debt.
+build:windows-check --@rules_rust//rust/settings:clippy_flag=-Awarnings
+# build:linux's -Csplit-debuginfo=unpacked is unstable for a Windows target.
+build:windows-check "--@rules_rust//rust/settings:extra_rustc_flag=-Zunstable-options"
+
 try-import %workspace%/.bazelrc.local

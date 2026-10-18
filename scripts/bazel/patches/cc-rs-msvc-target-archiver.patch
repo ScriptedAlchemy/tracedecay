@@ -1,0 +1,14 @@
+--- a/src/lib.rs	2026-10-18 17:14:30.972739916 +0000
++++ b/src/lib.rs	2026-10-18 17:14:36.286815873 +0000
+@@ -3629,7 +3629,10 @@
+         let is_llvm_ar = program.file_name().map_or(false, |name| {
+             name.to_string_lossy().contains_ignore_ascii_case("llvm-ar")
+         });
+-        if target.env == "msvc" && !is_llvm_ar {
++        // lib.exe flags belong to an MSVC-style toolchain; a clang or gcc
++        // compiler cross-compiling to an msvc target still uses an ar.
++        let msvc_archiver = self.get_base_compiler()?.is_like_msvc();
++        if target.env == "msvc" && !is_llvm_ar && msvc_archiver {
+             // NOTE: -out: here is an I/O flag, and so must be included even if $ARFLAGS/ar_flag is
+             // in use. -nologo on the other hand is just a regular flag, and one that we'll skip if
+             // the caller has explicitly dictated the flags they want. See

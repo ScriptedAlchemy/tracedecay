@@ -47,6 +47,18 @@ rust.toolchain(
         "fastbuild": "1",
         "opt": "3",
     },
+    # rules_rust's default cross targets plus Windows, so a Linux host can
+    # type-check cfg(windows) code (`--config=windows-check`).
+    extra_target_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "wasm32-unknown-unknown",
+        "wasm32-wasip1",
+        "wasm32-wasip2",
+    ],
     versions = ["nightly/2026-10-18"],
     rustfmt_version = "nightly/2026-10-18",
     rust_analyzer_version = "nightly/2026-10-18",
@@ -76,6 +88,16 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//scripts:bazel/patches/aws-lc-sys-jitterentropy-include.patch"],
     version = "0.46.0",
+)
+
+# --config=windows-check compiles build scripts' C for an msvc target with the
+# hermetic zig toolchain. cc-rs then hands zig's `ar` lib.exe flags (`-out:`)
+# because the target env is msvc; only an MSVC-style compiler gets them.
+crate.annotation(
+    crate = "cc",
+    patch_args = ["-p1"],
+    patches = ["//scripts:bazel/patches/cc-rs-msvc-target-archiver.patch"],
+    version = "1.8.0",
 )
 
 # arborium grammar build scripts read `env!("CARGO_MANIFEST_DIR")`, which bakes
