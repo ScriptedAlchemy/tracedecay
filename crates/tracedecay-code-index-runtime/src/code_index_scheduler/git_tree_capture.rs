@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use gix::bstr::ByteSlice;
-use tracedecay_application::code_index::open_production_code_index_owner_v1;
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_code_index::production::CodeIndexProductionOwnerV1;
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
     CodeSourceOmissionReasonV1, OmittedCodeSourceV1, SanitizationReceiptId, SanitizedCodeFileV1,
@@ -21,10 +21,9 @@ use tracedecay_runtime_core::resident_memory::ResidentMemoryReservationV1;
 
 use super::{
     CapturedCandidateV1, CapturedSnapshotV1, CodeIndexSchedulerErrorV1,
-    CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1, DaemonProjectionSinkV1,
-    LatestCompleteCodeIndexV1, branch_generations, cancelled_code_index_reconcile,
-    file_occurrence_id, id, identity, omitted_file_occurrence_id, privacy, projection_key,
-    snapshot_content_identity,
+    CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1, LatestCompleteCodeIndexV1,
+    branch_generations, cancelled_code_index_reconcile, file_occurrence_id, id, identity,
+    omitted_file_occurrence_id, privacy, projection_key, snapshot_content_identity,
 };
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
@@ -692,13 +691,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
             None => self.publication.clone(),
         };
-        let mut owner = open_production_code_index_owner_v1(
-            self.production_config.clone(),
-            publication,
-            DaemonProjectionSinkV1,
-        )
-        .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?
-        .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
+        let mut owner =
+            CodeIndexProductionOwnerV1::new(self.production_config.clone(), publication)
+                .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?
+                .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
         let generation = owner
             .build_and_publish(
                 CodeIndexBuildRequestV1 {

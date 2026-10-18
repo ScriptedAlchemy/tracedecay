@@ -15,21 +15,13 @@ use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::CodeGenerationId;
 
 use tracedecay_code_index::{
-    chunks::CodeIndexImportEvidenceV1,
-    production::{
-        CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexProductionConfigV1,
-        CodeIndexProductionOpenErrorV1, CodeIndexProductionOwnerV1,
-    },
-    projection::CodeChunkProjectionSink,
+    chunks::CodeIndexImportEvidenceV1, production::CodeIndexExecutionControlV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
 };
 use tracedecay_session_memory::context::{RequestInterruption, application_request_interruption};
-
-/// Production owner type exposed to daemon, CLI, MCP, and hook composition.
-pub type ProductionCodeIndexOwnerV1<P, S> = CodeIndexProductionOwnerV1<P, S>;
 
 /// One admitted lazy-index request, pinned to the graph generation whose
 /// verified parser evidence motivated it.
@@ -245,20 +237,6 @@ impl CodeIndexExecutionControlV1 for DaemonCodeIndexControlV1 {
     fn is_deadline_exceeded(&self) -> bool {
         false
     }
-}
-
-/// Open the production code-index owner with only the established projection
-/// and store-owned atomic-publication seams left injectable.
-pub fn open_production_code_index_owner_v1<P, S>(
-    config: CodeIndexProductionConfigV1,
-    publication: P,
-    projection: S,
-) -> Result<ProductionCodeIndexOwnerV1<P, S>, CodeIndexProductionOpenErrorV1>
-where
-    P: CodeIndexAtomicPublicationPort,
-    S: CodeChunkProjectionSink,
-{
-    CodeIndexProductionOwnerV1::new(config, publication, projection)
 }
 
 #[cfg(test)]

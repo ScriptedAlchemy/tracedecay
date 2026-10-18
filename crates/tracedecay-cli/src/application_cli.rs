@@ -3,7 +3,6 @@
 use std::io::Read;
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracedecay_api::{WorkOperation, WorkflowOperation};
 use tracedecay_contracts::now_micros;
@@ -31,13 +30,10 @@ pub(crate) const WORK: ApplicationKind = ApplicationKind("Work", "work");
 pub(crate) const WORKFLOW: ApplicationKind = ApplicationKind("Workflow", "workflow");
 
 impl ApplicationKind {
-    pub(crate) fn decode<T>(self, body: Value) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
-        serde_json::from_value(body).map_err(|error| TraceDecayError::Config {
+    pub(crate) fn decode_error(self, error: serde_json::Error) -> TraceDecayError {
+        TraceDecayError::Config {
             message: format!("invalid typed {} request: {error}", self.0),
-        })
+        }
     }
 
     pub(crate) fn invalid_request(self) -> ApplicationProblem {
@@ -274,15 +270,15 @@ pub(crate) async fn invoke(
         (
             ApplicationOperation::Work(operation),
             DaemonInvocationOutcome::WorkApplication { scope, outcome },
-        ) if work_cli::work_outcome_matches(operation, &outcome) => {
+        ) if outcome.operation_key() == operation.operation_key() => {
             delivery_eligible = work_cli::work_delivery_is_eligible(operation, &outcome);
-            Ok((scope, work_cli::erase_work_outcome(outcome)?))
+            Ok((scope, outcome.into_application_outcome()?))
         }
         (
             ApplicationOperation::Workflow(operation),
             DaemonInvocationOutcome::WorkflowApplication { scope, outcome },
-        ) if workflow_cli::workflow_outcome_matches(operation, &outcome) => {
-            Ok((scope, workflow_cli::erase_workflow_outcome(outcome)?))
+        ) if outcome.operation_key() == operation.operation_key() => {
+            Ok((scope, outcome.into_application_outcome()?))
         }
         (_, DaemonInvocationOutcome::ApplicationProblem { problem }) => Err(problem),
         (_, DaemonInvocationOutcome::Problem { problem }) => Err(kind.daemon_problem(problem)),

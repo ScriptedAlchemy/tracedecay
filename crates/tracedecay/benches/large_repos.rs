@@ -464,15 +464,18 @@ fn verify_dashboard_fixture(
     if launched.status().as_u16() != 303 {
         return Err("dashboard launch did not exchange the credential".into());
     }
-    let cookie = launched
-        .headers()
-        .get("set-cookie")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .ok_or("dashboard launch omitted its session cookie")?;
+    if launched.headers().contains_key("set-cookie") {
+        return Err("dashboard launch must not set a host-wide cookie".into());
+    }
+    let token = launch_url
+        .split_once("?token=")
+        .map(|(_, token)| token)
+        .ok_or("dashboard launch URL omitted its token")?;
     let mut response = agent
-        .get(&format!("{origin}/api/projects"))
-        .header("Cookie", cookie)
+        .get(&format!(
+            "http://tracedecay:{token}@{}/api/projects",
+            origin.trim_start_matches("http://")
+        ))
         .call()
         .map_err(|error| error.to_string())?;
     if response.status().as_u16() != 200 {
