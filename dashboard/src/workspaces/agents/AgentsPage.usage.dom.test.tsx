@@ -92,18 +92,6 @@ describe('agents per-session provider usage', () => {
     expect(inspectorUsage().textContent).toBe('tokens absent · usage read partial · absent may be unread');
   });
 
-  it('the timeline rows carry the same labels', async () => {
-    await renderAgents('/agents?view=timeline');
-    expect(usageLabels('[data-delegation-timeline]').map(([id, state, total]) => [id, state, total])).toEqual([
-      ['codex:session.codex.root', 'measured', '1,515,630 tokens'],
-      ['codex:session.codex.child', 'partial', '357,250 tokens'],
-      ['codex:session.codex.grandchild', 'absent', 'tokens absent'],
-      ['claude:session.claude.orphan', 'measured', '108,400 tokens'],
-      ['cursor:session.cursor.solo', 'absent', 'tokens absent'],
-    ]);
-    expect(document.querySelector('[data-usage-coverage]')!.getAttribute('data-usage-coverage')).toBe('partial');
-  });
-
   it('a failed usage read is distinguishable from none recorded', async () => {
     const served = resolveFixture('/api/plugins/analytics/subagent-tree') as {
       payload: { nodes: Record<string, unknown>[] };

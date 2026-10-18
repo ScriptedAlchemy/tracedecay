@@ -4,12 +4,10 @@ import type {
   AnalyticsSubagentTreePayloadV1,
 } from '../../contracts/generated.ts';
 import { ringCoreAlpha, ringKind, ringRadius } from './delegationRings.tsx';
-import { timelineRecency } from './DelegationTimeline.tsx';
-import { layoutDelegationTimeline, timelineTickLabel, timelineTicks } from './delegationTimeline.ts';
 import { fitDelegationTopology, subtree, type TopologySessionMark } from './delegationTopology.ts';
 
 /**
- * The ring and timeline views re-read one fitted topology. The
+ * The ring view re-reads one fitted topology. The
  * reading is the story fixture's shape: a three-level Codex tree whose
  * grandchild never recorded an end, a Claude session whose parent was never
  * ingested, and one flat Cursor session.
@@ -90,53 +88,5 @@ describe('ring marks', () => {
     const lifted = [...subtree(model, mark('child').id)].map((id) => id.split(':')[1]);
     expect(lifted).toEqual(['child', 'grandchild']);
     expect(subtree(model, 'codex:not-drawn').size).toBe(0);
-  });
-});
-
-describe('layoutDelegationTimeline', () => {
-  const timeline = layoutDelegationTimeline(model);
-
-  it('reads rows in pre-order, one lane per top', () => {
-    expect(timeline.rows.map((row) => [(row.mark as TopologySessionMark).node.session_id, row.lane])).toEqual([
-      ['root', 0],
-      ['child', 0],
-      ['grandchild', 0],
-      ['orphan', 1],
-      ['solo', 2],
-    ]);
-    expect(timeline.domain).toEqual({ start: T0, end: T0 + 3_600 });
-    expect(timeline.open).toBe(1);
-    expect(timeline.unplaced).toBe(0);
-  });
-
-  it('brackets spawns at the child start and joins only where an end was recorded', () => {
-    expect(timeline.brackets).toEqual([
-      { kind: 'spawn', parentRow: 0, childRow: 1, at: T0 + 600 },
-      { kind: 'join', parentRow: 0, childRow: 1, at: T0 + 2_000 },
-      { kind: 'spawn', parentRow: 1, childRow: 2, at: T0 + 900 },
-    ]);
-  });
-
-  it('counts lane concurrency over sessions with both ends, and says what it left out', () => {
-    const lane = timeline.lanes[0]!;
-    expect(lane.density).toEqual([
-      { at: T0, count: 1 },
-      { at: T0 + 600, count: 2 },
-      { at: T0 + 2_000, count: 1 },
-      { at: T0 + 3_600, count: 0 },
-    ]);
-    expect([lane.peak, lane.measured, lane.unmeasured]).toEqual([2, 2, 1]);
-  });
-
-  it('ramps bar fill by recency within the loaded page', () => {
-    const domain = timeline.domain!;
-    expect(timeline.rows.map((row) => timelineRecency(row, domain))).toEqual([0.4, 0.267, 0.4, 0.225, 0.308]);
-  });
-
-  it('spaces ticks by label width and prints them in UTC', () => {
-    const ticks = timelineTicks({ start: T0, end: T0 + 3_600 }, 600);
-    expect(ticks.step).toBe(600);
-    expect(ticks.ticks).toHaveLength(6);
-    expect(timelineTickLabel(ticks.ticks[0]!, ticks.step)).toBe('09:00');
   });
 });

@@ -259,12 +259,11 @@ describe('AgentsPage delegation topology', () => {
 
   it('opens on the session a link names and reads that session\'s token frontier', async () => {
     const asked = recordFrontierRequests();
-    renderAgents('/agents?view=timeline&sessionId=session.codex.child&sessionProvider=codex');
+    renderAgents('/agents?sessionId=session.codex.child&sessionProvider=codex');
     await waitFor(() =>
       expect(inspector().getAttribute('data-agent-inspector-id')).toBe('codex:session.codex.child'),
     );
     expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('selected');
-    expect(document.querySelector('[data-agents-view]')?.getAttribute('data-agents-view')).toBe('timeline');
     await waitFor(() => expect(asked).toEqual(['session.codex.child']));
     const links = within(inspector() as HTMLElement).getByRole('navigation', { name: 'Open this session in' });
     const loom = new URL(within(links).getByRole('link', { name: /Open in Loom/ }).getAttribute('href')!, 'http://dashboard.test');
@@ -283,15 +282,15 @@ describe('AgentsPage delegation topology', () => {
     expect(within(inspector() as HTMLElement).queryByRole('navigation', { name: 'Open this session in' })).toBeNull();
   });
 
-  it('writes a selection to the link and clears it on a second click, keeping the view', async () => {
-    renderAgents('/agents?view=timeline');
+  it('writes a selection to the link and clears it on a second click', async () => {
+    renderAgents('/agents');
     await settled();
     fireEvent.click(mark('codex:session.codex.child'));
     expect(new URLSearchParams(address.search)).toEqual(
-      new URLSearchParams({ view: 'timeline', sessionId: 'session.codex.child', sessionProvider: 'codex' }),
+      new URLSearchParams({ sessionId: 'session.codex.child', sessionProvider: 'codex' }),
     );
     fireEvent.click(mark('codex:session.codex.child'));
-    expect(address.search).toBe('?view=timeline');
+    expect(address.search).toBe('');
     expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('default');
   });
 

@@ -23,7 +23,6 @@ import { AgentHandoffs } from './AgentHandoffs.tsx';
 import { AgentHandoffTokens } from './AgentHandoffTokens.tsx';
 import { AgentInspector, type DiagnosticsForInspector } from './AgentInspector.tsx';
 import { AgentTelemetryRegister } from './AgentTelemetryRegister.tsx';
-import { DelegationTimeline } from './DelegationTimeline.tsx';
 import { DelegationTopology, type TopologyInteraction } from './DelegationTopology.tsx';
 import { SubagentTree } from './SubagentTree.tsx';
 import { resolveSubject } from './agentInspector.ts';
@@ -40,13 +39,7 @@ import { readAttemptFailures } from './failure.ts';
 import { readHandoffFrontier } from './handoff.ts';
 import { newestTreeSession, useAgentHandoffTokens } from './handoffTokenQuery.ts';
 import { readHandoffTokens } from './handoffTokens.ts';
-import {
-  AgentsViewSwitcher,
-  agentsViewNote,
-  useAgentsSelection,
-  useAgentsView,
-  type AgentsView,
-} from './agentsView.tsx';
+import { useAgentsSelection } from './agentsView.tsx';
 
 const BASE = '/api/plugins/analytics';
 
@@ -110,7 +103,6 @@ export function AgentsPage() {
 
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  const [view, setView] = useAgentsView();
   const toggleExpanded = useCallback((id: string) => {
     setExpanded((current) => {
       const next = new Set(current);
@@ -218,11 +210,8 @@ export function AgentsPage() {
       <WorkspaceHeader
         path="agents"
         title="Agents"
-        note={`${view} · ${agentsViewNote(view)} · handoffs, tokens and failures from their own authorities`}
+        note="delegation topology · handoffs, tokens and failures from their own authorities"
       />
-      <div className="flex flex-wrap items-center gap-2 border-b border-edge-subtle bg-surface-1 pr-2">
-        <AgentsViewSwitcher active={view} onSelect={setView} />
-      </div>
 
       <AgentAuthorityRegister authorities={authorities} />
 
@@ -239,7 +228,7 @@ export function AgentsPage() {
             />
           ) : null}
           <Panel
-            legend={view === 'timeline' ? 'Delegation timeline · read-only' : 'Delegation topology · read-only'}
+            legend="Delegation topology · read-only"
             // Withdrawn below `sm`: the register above already prints this
             // reading, and in a fixed-height header the detail wraps over the
             // legend at 320px.
@@ -271,8 +260,7 @@ export function AgentsPage() {
                   <div className="flex min-w-0 flex-col gap-3">
                     {fit !== null && fit.model.marks.length > 0 ? (
                       <>
-                        <TopologyRenderer
-                          view={view}
+                        <DelegationTopology
                           fit={fit}
                           interaction={{
                             inspectedId,
@@ -409,27 +397,6 @@ export function AgentsPage() {
       />
     </div>
   );
-}
-
-function TopologyRenderer({
-  view,
-  fit,
-  interaction,
-}: {
-  view: AgentsView;
-  fit: FittedTopology;
-  interaction: TopologyInteraction;
-}) {
-  switch (view) {
-    case 'topology':
-      return <DelegationTopology fit={fit} interaction={interaction} />;
-    case 'timeline':
-      return <DelegationTimeline fit={fit} interaction={interaction} />;
-    default: {
-      const unhandled: never = view;
-      return unhandled;
-    }
-  }
 }
 
 function UnresolvedLink({
