@@ -8,17 +8,34 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use tempfile::TempDir;
+use tracedecay_agent_hosts::agents::context_scout::intent_pass::intent_hint_emitted_event;
+use tracedecay_agent_hosts::agents::context_scout::{
+    ContextScoutSessionClaimInputV1, ContextScoutSessionEvidenceExt,
+};
 use tracedecay_agent_hosts::hooks::hint_outcomes::HintOutcomeStats;
 use tracedecay_agent_hosts::hooks::hint_outcomes::settlement::{
     HintOutcomeSettlement, settle_project_hint_outcomes,
 };
 use tracedecay_application::observability::RegisteredObservabilityPortV1;
-use tracedecay_contracts::{ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1};
-use tracedecay_domain::{
-    AdoptionOutcomeLinkedV1, CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ProjectId,
+use tracedecay_contracts::context_scout::{
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
+    ContextScoutDurableQueueEntryV1, ContextScoutEvidenceAvailabilityV1,
+    ContextScoutIntentAnswerV1, ContextScoutIntentKindV1, ContextScoutIntentReceiptV1,
+    ContextScoutModelOutcomeV1, ContextScoutRedactionReceiptV1, ContextScoutRouteV1,
+    ContextScoutSessionEvidenceV1, ContextScoutSessionWindowV1, ContextScoutSuggestionEnvelopeV1,
+    ContextScoutWorkV1, DecisionEngineIdentityV1, IntentDecisionSourceV1,
 };
-use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
+use tracedecay_contracts::{
+    AuthorityReceipt, CapabilityGrantId, DisclosureClass, ObservabilityHorizonV1,
+    ObservabilityQueryPort, ObservabilityQueryV1, PolicyDecisionRef, ResolvedScope,
+};
+use tracedecay_domain::{
+    AdoptionOutcomeLinkedV1, CodeGenerationId, ComponentVersion, CoverageStateV1, ManifestDigest,
+    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ProjectId, ProviderId, RefId, RepositoryId,
+    SessionId, UtcMicros, WorktreeId,
+};
+use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -303,5 +320,204 @@ async fn fully_settled_pass_records_a_known_coverage_census() {
         events[0].coverage,
         CoverageStateV1::Known,
         "a pass that settled every scanned hint is a complete census"
+    );
+}
+
+/// The daemon's delivery row for one intent-pass suggestion, built by the
+/// production builder from a delivered session-evidence entry.
+fn delivered_intent_hint(
+    project_key: &str,
+    session_id: &str,
+    intent: ContextScoutIntentKindV1,
+    envelope_id: [u8; 16],
+) -> AnalyticsEventInsert {
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.hint.intent").unwrap(),
+        RepositoryId::new("repository.hint.intent").unwrap(),
+        WorktreeId::new("worktree.hint.intent").unwrap(),
+        Some(RefId::new("refs/heads/main").unwrap()),
+    )
+    .unwrap();
+    let digest = |fill: char| {
+        ManifestDigest::new(format!("sha256:{}", fill.to_string().repeat(64))).unwrap()
+    };
+    let authority = AuthorityReceipt {
+        grant_id: CapabilityGrantId::new("grant.hint.intent".to_owned()).unwrap(),
+        grant_revision: 1,
+        grant_digest: digest('a'),
+        authorized_scope_digest: scope.scope_digest.clone(),
+        disclosure: DisclosureClass::Evidence,
+        policy: PolicyDecisionRef::new(
+            "policy.context-scout.intent-pass.v1",
+            1,
+            digest('b'),
+            ComponentVersion::new("tracedecay.context-scout.intent-pass.v1").unwrap(),
+        )
+        .unwrap(),
+        revalidated_at: UtcMicros(1),
+    };
+    let evidence = ContextScoutSessionEvidenceV1::claim(ContextScoutSessionClaimInputV1 {
+        authorized_scope: scope,
+        provider_id: ProviderId::new("claude").unwrap(),
+        session_id: SessionId::new(session_id.to_owned()).unwrap(),
+        protected_session_id: [3; 32],
+        window: ContextScoutSessionWindowV1 {
+            first_store_id: 1,
+            last_store_id: 4,
+            message_count: 4,
+            window_digest: digest('c'),
+            newest_timestamp: Some(HINT_TS * 1_000_000),
+        },
+        prompt_excerpt_digest: None,
+        code_generation_id: Some(CodeGenerationId::new("generation.hint.intent").unwrap()),
+        authority,
+        redaction: ContextScoutRedactionReceiptV1::MetadataOnly {
+            disclosure: DisclosureClass::Evidence,
+        },
+        availability: ContextScoutEvidenceAvailabilityV1::Complete,
+        decision: ContextScoutIntentReceiptV1 {
+            engine: Some(DecisionEngineIdentityV1 {
+                base_url_digest: digest('d'),
+                model: Some("kev-4b".to_owned()),
+            }),
+            outcome: ContextScoutModelOutcomeV1::Succeeded,
+            answers: vec![ContextScoutIntentAnswerV1 {
+                intent,
+                probability_permille: 910,
+                threshold_permille: 600,
+            }],
+            facts: Vec::new(),
+            selected: intent,
+            source: IntentDecisionSourceV1::Model,
+        },
+        claimed_at: UtcMicros(2),
+    })
+    .unwrap();
+    let address = ContextScoutAddressV1 {
+        profile_id: [1; 16],
+        provider_id: [2; 16],
+        protected_session_id: [3; 32],
+        thread_id: [4; 16],
+        turn_id: [5; 16],
+        agent_id: [6; 16],
+        logical_message_id: [7; 16],
+        project_id: [8; 16],
+    };
+    let entry = ContextScoutDurableQueueEntryV1 {
+        work: ContextScoutWorkV1 {
+            address,
+            generation: 1,
+            input_watermark: [9; 32],
+        },
+        route: ContextScoutRouteV1::DecisionEngine,
+        model_outcome: ContextScoutModelOutcomeV1::Succeeded,
+        model_receipt: None,
+        envelope: ContextScoutSuggestionEnvelopeV1 {
+            envelope_id,
+            address,
+            input_watermark: [9; 32],
+            configuration_revision: [10; 32],
+            delivery_window: ContextScoutDeliveryWindowV1::Immediate,
+            candidate: ContextScoutCandidateV1 {
+                dedupe_key: [11; 32],
+                category: ContextScoutCategoryV1::Retrieval,
+                relevance_score: 59_637,
+                suggestion_text: tracedecay_policy::intent_catalog::suggestion_text(intent),
+                evidence: evidence.into(),
+                expires_at: UtcMicros((HINT_TS + 600) * 1_000_000),
+            },
+        },
+    };
+    intent_hint_emitted_event(
+        project_key,
+        &entry,
+        &ContextScoutDeliveryReceiptV1 {
+            receipt_id: [12; 16],
+            envelope_id,
+            delivered_at: UtcMicros(HINT_TS * 1_000_000),
+            outcome: ContextScoutDeliveryOutcomeV1::Displayed,
+        },
+    )
+    .expect("session evidence emits a hint")
+}
+
+/// A daemon-written intent delivery row settles like a hook hint: the
+/// intent key selects the catalog's expected tools, so a later message search
+/// acts on a session-recall suggestion and an unrelated read ignores it.
+#[tokio::test]
+async fn daemon_intent_delivery_rows_settle_against_their_intent_key() {
+    let fixture = ProjectSettlementFixture::open("project.hint.intent").await;
+    let project_key = fixture.analytics_project_key();
+    for (session, envelope_id) in [("s-intent-acted", [21; 16]), ("s-intent-ignored", [22; 16])] {
+        let row = delivered_intent_hint(
+            &project_key,
+            session,
+            ContextScoutIntentKindV1::SessionRecall,
+            envelope_id,
+        );
+        assert_eq!(row.provider, "hook_claude");
+        assert_eq!(row.hint_category.as_deref(), Some("session_recall"));
+        assert_eq!(row.timestamp, HINT_TS);
+        fixture
+            .runtime
+            .append_profile_analytics_event_for_test(&row)
+            .await
+            .expect("append daemon hint_emitted");
+    }
+    fixture
+        .seed_session_activity(
+            "s-intent-acted",
+            Some("mcp__tracedecay__tracedecay_message_search"),
+        )
+        .await;
+    fixture
+        .seed_session_activity("s-intent-ignored", Some("Read"))
+        .await;
+
+    let stats = fixture.settle(AFTER_HORIZON).await;
+    assert_eq!(
+        stats,
+        HintOutcomeStats {
+            scanned: 2,
+            acted: 1,
+            ignored: 1,
+            unresolved: 0,
+        }
+    );
+    let outcomes = fixture
+        .analytics()
+        .query_analytics_events(&AnalyticsEventQuery {
+            project_id: Some(project_key),
+            event_kind: Some("hint_outcome".to_owned()),
+            limit: 8,
+            ..Default::default()
+        })
+        .await
+        .expect("read hint outcomes");
+    let mut settled = outcomes
+        .iter()
+        .map(|event| {
+            (
+                event.hint_id.clone().unwrap_or_default(),
+                event.hint_category.clone().unwrap_or_default(),
+                event.outcome.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    settled.sort();
+    assert_eq!(
+        settled,
+        vec![
+            (
+                hex::encode([21; 16]),
+                "session_recall".to_owned(),
+                "acted".to_owned()
+            ),
+            (
+                hex::encode([22; 16]),
+                "session_recall".to_owned(),
+                "ignored".to_owned()
+            ),
+        ]
     );
 }

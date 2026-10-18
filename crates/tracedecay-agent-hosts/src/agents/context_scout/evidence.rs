@@ -1,19 +1,27 @@
 #[cfg(test)]
 use tracedecay_contracts::context_scout::ContextScoutEvidenceSourceKindV1;
 use tracedecay_contracts::context_scout::{
-    ContextScoutEvidenceAvailabilityV1, ContextScoutEvidenceEnvelopeV1,
-    ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
+    ContextScoutCandidateEvidenceV1, ContextScoutEvidenceAvailabilityV1,
+    ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceReceiptV1, ContextScoutIntentKindV1,
+    ContextScoutIntentReceiptV1, ContextScoutModelOutcomeV1, ContextScoutRedactionReceiptV1,
+    ContextScoutSessionEvidenceV1, ContextScoutSessionWindowV1, IntentDecisionSourceV1,
 };
 use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, OmissionReason, ResolvedScope,
     RetrieverContributionState,
 };
 use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
-use tracedecay_domain::{CodeGenerationId, RetrievalAnchorId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    CodeGenerationId, ManifestDigest, ProviderId, RetrievalAnchorId, SessionId, UtcMicros,
+    canonical_sha256,
+};
 
 use super::{ContextScoutErrorV1, MAX_SCOUT_EVIDENCE};
 
 const EVIDENCE_CLAIM_DIGEST_DOMAIN: &str = "tracedecay.context-scout.evidence-claim.v1";
+const SESSION_EVIDENCE_CLAIM_DIGEST_DOMAIN: &str =
+    "tracedecay.context-scout.session-evidence-claim.v1";
+pub(super) const MAX_DECISION_ENGINE_MODEL_BYTES: usize = 256;
 
 trait ContextScoutRedactionReceiptExt {
     fn validate(&self, authority: &AuthorityReceipt) -> Result<(), ContextScoutErrorV1>;
@@ -169,15 +177,7 @@ impl ContextScoutEvidenceEnvelopeExt for ContextScoutEvidenceEnvelopeV1 {
         mut sources: Vec<ContextScoutEvidenceSourceReceiptV1>,
         claimed_at: UtcMicros,
     ) -> Result<Self, ContextScoutErrorV1> {
-        match &mut redaction {
-            ContextScoutRedactionReceiptV1::MetadataOnly { .. } => {}
-            ContextScoutRedactionReceiptV1::Sanitized { receipts, .. } => {
-                receipts.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-            }
-            ContextScoutRedactionReceiptV1::Redacted { omissions, .. } => {
-                omissions.sort_by_key(|omission| (omission.domain, omission.reason));
-            }
-        }
+        canonicalize_redaction(&mut redaction);
         for source in &mut sources {
             source
                 .anchors
@@ -290,6 +290,232 @@ impl ContextScoutEvidenceEnvelopeExt for ContextScoutEvidenceEnvelopeV1 {
 
     fn anchors(&self) -> impl Iterator<Item = &RetrievalAnchorId> {
         self.sources.iter().flat_map(|source| source.anchors.iter())
+    }
+}
+
+/// Validation and anchors for either candidate evidence variant. Session
+/// evidence cites no code anchors.
+pub trait ContextScoutCandidateEvidenceExt {
+    fn validate(&self) -> Result<(), ContextScoutErrorV1>;
+    fn anchor_count(&self) -> usize;
+    fn anchors(&self) -> impl Iterator<Item = &RetrievalAnchorId>;
+}
+
+impl ContextScoutCandidateEvidenceExt for ContextScoutCandidateEvidenceV1 {
+    fn validate(&self) -> Result<(), ContextScoutErrorV1> {
+        match self {
+            Self::Code(evidence) => ContextScoutEvidenceEnvelopeExt::validate(evidence),
+            Self::Session(evidence) => ContextScoutSessionEvidenceExt::validate(evidence),
+        }
+    }
+
+    fn anchor_count(&self) -> usize {
+        self.as_code()
+            .map_or(0, ContextScoutEvidenceEnvelopeExt::anchor_count)
+    }
+
+    fn anchors(&self) -> impl Iterator<Item = &RetrievalAnchorId> {
+        self.as_code()
+            .into_iter()
+            .flat_map(|evidence| evidence.sources.iter())
+            .flat_map(|source| source.anchors.iter())
+    }
+}
+
+/// Everything a session-evidence claim binds, before its digest exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextScoutSessionClaimInputV1 {
+    pub authorized_scope: ResolvedScope,
+    pub provider_id: ProviderId,
+    pub session_id: SessionId,
+    pub protected_session_id: [u8; 32],
+    pub window: ContextScoutSessionWindowV1,
+    pub prompt_excerpt_digest: Option<ManifestDigest>,
+    pub code_generation_id: Option<CodeGenerationId>,
+    pub authority: AuthorityReceipt,
+    pub redaction: ContextScoutRedactionReceiptV1,
+    pub availability: ContextScoutEvidenceAvailabilityV1,
+    pub decision: ContextScoutIntentReceiptV1,
+    pub claimed_at: UtcMicros,
+}
+
+pub trait ContextScoutSessionEvidenceExt: Sized {
+    /// Canonicalizes (sorted receipts, answers, and facts), digests, and
+    /// validates one session-evidence claim.
+    fn claim(input: ContextScoutSessionClaimInputV1) -> Result<Self, ContextScoutErrorV1>;
+    fn validate(&self) -> Result<(), ContextScoutErrorV1>;
+}
+
+impl ContextScoutSessionEvidenceExt for ContextScoutSessionEvidenceV1 {
+    fn claim(input: ContextScoutSessionClaimInputV1) -> Result<Self, ContextScoutErrorV1> {
+        let ContextScoutSessionClaimInputV1 {
+            authorized_scope,
+            provider_id,
+            session_id,
+            protected_session_id,
+            window,
+            prompt_excerpt_digest,
+            code_generation_id,
+            authority,
+            mut redaction,
+            availability,
+            mut decision,
+            claimed_at,
+        } = input;
+        canonicalize_redaction(&mut redaction);
+        decision.answers.sort_by_key(|answer| answer.intent);
+        decision.facts.sort();
+        let mut evidence = Self {
+            authorized_scope,
+            provider_id,
+            session_id,
+            protected_session_id,
+            window,
+            prompt_excerpt_digest,
+            code_generation_id,
+            authority,
+            redaction,
+            availability,
+            decision,
+            claimed_at,
+            claim_digest: ManifestDigest::zero()
+                .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?,
+        };
+        evidence.claim_digest = session_claim_digest(&evidence)?;
+        ContextScoutSessionEvidenceExt::validate(&evidence)?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<(), ContextScoutErrorV1> {
+        self.authorized_scope
+            .validate()
+            .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
+        self.provider_id
+            .validate()
+            .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
+        self.session_id
+            .validate()
+            .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
+        self.window
+            .window_digest
+            .validate()
+            .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
+        if let Some(digest) = &self.prompt_excerpt_digest {
+            digest
+                .validate()
+                .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
+        }
+        if let Some(generation) = &self.code_generation_id {
+            generation
+                .validate()
+                .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
+        }
+        if self.protected_session_id == [0; 32]
+            || self.window.message_count == 0
+            || self.window.first_store_id > self.window.last_store_id
+            || self.claimed_at.0 <= 0
+            || self.authority.revalidated_at > self.claimed_at
+        {
+            return Err(ContextScoutErrorV1::InvalidEvidence);
+        }
+        self.authority
+            .validate_for(&self.authorized_scope)
+            .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
+        self.redaction.validate(&self.authority)?;
+        validate_intent_receipt(&self.decision)?;
+        if session_claim_digest(self)? != self.claim_digest {
+            return Err(ContextScoutErrorV1::InvalidEvidence);
+        }
+        Ok(())
+    }
+}
+
+fn session_claim_digest(
+    evidence: &ContextScoutSessionEvidenceV1,
+) -> Result<ManifestDigest, ContextScoutErrorV1> {
+    canonical_sha256(&(
+        SESSION_EVIDENCE_CLAIM_DIGEST_DOMAIN,
+        &evidence.authorized_scope,
+        &evidence.provider_id,
+        &evidence.session_id,
+        evidence.protected_session_id,
+        &evidence.window,
+        &evidence.prompt_excerpt_digest,
+        &evidence.code_generation_id,
+        &evidence.authority,
+        &evidence.redaction,
+        evidence.availability,
+        &evidence.decision,
+        evidence.claimed_at,
+    ))
+    .map_err(|_| ContextScoutErrorV1::InvalidEvidence)
+}
+
+/// A receipt is canonical (answers and facts strictly ordered by intent),
+/// bounded, and names its selected intent through the source it claims: a
+/// `Model` selection was answered at or above its threshold, an `ActionFact`
+/// selection is an observed fact, and `Both` is both. Engine answers exist
+/// only from an identified engine that succeeded.
+fn validate_intent_receipt(
+    receipt: &ContextScoutIntentReceiptV1,
+) -> Result<(), ContextScoutErrorV1> {
+    let max_intents = ContextScoutIntentKindV1::ALL.len();
+    if receipt.answers.len() > max_intents
+        || receipt.facts.len() > max_intents
+        || receipt
+            .answers
+            .windows(2)
+            .any(|pair| pair[0].intent >= pair[1].intent)
+        || receipt.facts.windows(2).any(|pair| pair[0] >= pair[1])
+        || receipt
+            .answers
+            .iter()
+            .any(|answer| answer.probability_permille > 1_000 || answer.threshold_permille > 1_000)
+    {
+        return Err(ContextScoutErrorV1::InvalidEvidence);
+    }
+    if let Some(engine) = &receipt.engine {
+        engine
+            .base_url_digest
+            .validate()
+            .map_err(|_| ContextScoutErrorV1::InvalidEvidence)?;
+        if engine.model.as_deref().is_some_and(|model| {
+            model.trim().is_empty()
+                || model.len() > MAX_DECISION_ENGINE_MODEL_BYTES
+                || model.chars().any(char::is_control)
+        }) {
+            return Err(ContextScoutErrorV1::InvalidEvidence);
+        }
+    }
+    let succeeded = receipt.outcome == ContextScoutModelOutcomeV1::Succeeded;
+    if (succeeded || !receipt.answers.is_empty()) && !(succeeded && receipt.engine.is_some()) {
+        return Err(ContextScoutErrorV1::InvalidEvidence);
+    }
+    let model_selected = receipt.answers.iter().any(|answer| {
+        answer.intent == receipt.selected
+            && answer.probability_permille >= answer.threshold_permille
+    });
+    let fact_selected = receipt.facts.contains(&receipt.selected);
+    let consistent = match receipt.source {
+        IntentDecisionSourceV1::Model => model_selected,
+        IntentDecisionSourceV1::ActionFact => fact_selected,
+        IntentDecisionSourceV1::Both => model_selected && fact_selected,
+    };
+    if !consistent {
+        return Err(ContextScoutErrorV1::InvalidEvidence);
+    }
+    Ok(())
+}
+
+fn canonicalize_redaction(redaction: &mut ContextScoutRedactionReceiptV1) {
+    match redaction {
+        ContextScoutRedactionReceiptV1::MetadataOnly { .. } => {}
+        ContextScoutRedactionReceiptV1::Sanitized { receipts, .. } => {
+            receipts.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        }
+        ContextScoutRedactionReceiptV1::Redacted { omissions, .. } => {
+            omissions.sort_by_key(|omission| (omission.domain, omission.reason));
+        }
     }
 }
 
@@ -411,4 +637,232 @@ pub(super) fn fixture_context_scout_evidence() -> ContextScoutEvidenceEnvelopeV1
         UtcMicros(2),
     )
     .unwrap()
+}
+
+#[cfg(test)]
+pub(super) fn fixture_context_scout_session_claim() -> ContextScoutSessionClaimInputV1 {
+    use tracedecay_contracts::context_scout::{
+        ContextScoutIntentAnswerV1, DecisionEngineIdentityV1,
+    };
+
+    let code = fixture_context_scout_evidence();
+    ContextScoutSessionClaimInputV1 {
+        authorized_scope: code.authorized_scope,
+        provider_id: tracedecay_domain::test_fixtures::id("provider.claude"),
+        session_id: tracedecay_domain::test_fixtures::id("session.scout"),
+        protected_session_id: [3; 32],
+        window: ContextScoutSessionWindowV1 {
+            first_store_id: 40,
+            last_store_id: 52,
+            message_count: 6,
+            window_digest: tracedecay_domain::test_fixtures::digest('f'),
+            newest_timestamp: Some(1_700_000_000_000),
+        },
+        prompt_excerpt_digest: Some(tracedecay_domain::test_fixtures::digest('9')),
+        code_generation_id: Some(code.code_generation_id),
+        authority: code.authority,
+        redaction: code.redaction,
+        availability: ContextScoutEvidenceAvailabilityV1::Complete,
+        decision: ContextScoutIntentReceiptV1 {
+            engine: Some(DecisionEngineIdentityV1 {
+                base_url_digest: tracedecay_domain::test_fixtures::digest('8'),
+                model: Some("intent-small".to_owned()),
+            }),
+            outcome: ContextScoutModelOutcomeV1::Succeeded,
+            answers: vec![
+                ContextScoutIntentAnswerV1 {
+                    intent: ContextScoutIntentKindV1::SessionRecall,
+                    probability_permille: 910,
+                    threshold_permille: 600,
+                },
+                ContextScoutIntentAnswerV1 {
+                    intent: ContextScoutIntentKindV1::CallGraph,
+                    probability_permille: 120,
+                    threshold_permille: 600,
+                },
+            ],
+            facts: vec![
+                ContextScoutIntentKindV1::Search,
+                ContextScoutIntentKindV1::SessionRecall,
+            ],
+            selected: ContextScoutIntentKindV1::SessionRecall,
+            source: IntentDecisionSourceV1::Both,
+        },
+        claimed_at: UtcMicros(2),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fixture_context_scout_session_evidence() -> ContextScoutSessionEvidenceV1 {
+    ContextScoutSessionEvidenceV1::claim(fixture_context_scout_session_claim()).unwrap()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use tracedecay_contracts::context_scout::ContextScoutIntentAnswerV1;
+
+    use super::*;
+
+    fn rejected(mutate: impl FnOnce(&mut ContextScoutSessionClaimInputV1)) {
+        let mut claim = fixture_context_scout_session_claim();
+        mutate(&mut claim);
+        assert_eq!(
+            ContextScoutSessionEvidenceV1::claim(claim),
+            Err(ContextScoutErrorV1::InvalidEvidence)
+        );
+    }
+
+    #[test]
+    fn session_claim_canonicalizes_and_validates() {
+        let evidence = fixture_context_scout_session_evidence();
+        assert_eq!(
+            evidence
+                .decision
+                .answers
+                .iter()
+                .map(|answer| answer.intent)
+                .collect::<Vec<_>>(),
+            vec![
+                ContextScoutIntentKindV1::CallGraph,
+                ContextScoutIntentKindV1::SessionRecall
+            ],
+            "claim sorts answers by intent"
+        );
+        assert_eq!(
+            evidence.decision.facts,
+            vec![
+                ContextScoutIntentKindV1::Search,
+                ContextScoutIntentKindV1::SessionRecall
+            ]
+        );
+        ContextScoutSessionEvidenceExt::validate(&evidence).unwrap();
+        assert_eq!(
+            ContextScoutSessionEvidenceV1::claim(fixture_context_scout_session_claim()).unwrap(),
+            evidence,
+            "claims are deterministic"
+        );
+    }
+
+    #[test]
+    fn session_claim_digest_binds_every_field() {
+        let evidence = fixture_context_scout_session_evidence();
+        let mut tampered = evidence.clone();
+        tampered.window.last_store_id += 1;
+        assert_eq!(
+            ContextScoutSessionEvidenceExt::validate(&tampered),
+            Err(ContextScoutErrorV1::InvalidEvidence)
+        );
+        let mut tampered = evidence.clone();
+        tampered.decision.answers[1].probability_permille = 950;
+        assert_eq!(
+            ContextScoutSessionEvidenceExt::validate(&tampered),
+            Err(ContextScoutErrorV1::InvalidEvidence)
+        );
+        let mut tampered = evidence;
+        tampered.claim_digest = tracedecay_domain::test_fixtures::digest('7');
+        assert_eq!(
+            ContextScoutSessionEvidenceExt::validate(&tampered),
+            Err(ContextScoutErrorV1::InvalidEvidence)
+        );
+    }
+
+    #[test]
+    fn session_claim_requires_matching_scope_and_ordered_authority() {
+        rejected(|claim| {
+            claim.authority.authorized_scope_digest = tracedecay_domain::test_fixtures::digest('6');
+        });
+        rejected(|claim| claim.claimed_at = UtcMicros(0));
+        rejected(|claim| claim.authority.revalidated_at = UtcMicros(3));
+        rejected(|claim| claim.protected_session_id = [0; 32]);
+        rejected(|claim| {
+            claim.redaction = ContextScoutRedactionReceiptV1::MetadataOnly {
+                disclosure: tracedecay_contracts::DisclosureClass::Metadata,
+            };
+        });
+    }
+
+    #[test]
+    fn session_window_must_be_non_empty_and_ordered() {
+        rejected(|claim| claim.window.message_count = 0);
+        rejected(|claim| {
+            claim.window.first_store_id = 53;
+        });
+        let mut single = fixture_context_scout_session_claim();
+        single.window.first_store_id = 52;
+        single.window.message_count = 1;
+        ContextScoutSessionEvidenceV1::claim(single).unwrap();
+    }
+
+    #[test]
+    fn intent_receipt_source_must_name_its_evidence() {
+        // Model selection needs a qualifying answer.
+        rejected(|claim| {
+            claim.decision.selected = ContextScoutIntentKindV1::CallGraph;
+            claim.decision.source = IntentDecisionSourceV1::Model;
+        });
+        // ActionFact selection needs the fact.
+        rejected(|claim| {
+            claim.decision.selected = ContextScoutIntentKindV1::Impact;
+            claim.decision.source = IntentDecisionSourceV1::ActionFact;
+        });
+        // Both needs both.
+        rejected(|claim| {
+            claim.decision.selected = ContextScoutIntentKindV1::Search;
+        });
+        // Answers exist only from an identified, successful engine.
+        rejected(|claim| claim.decision.engine = None);
+        rejected(|claim| claim.decision.outcome = ContextScoutModelOutcomeV1::DeadlineExceeded);
+        // Repeated answers or facts are not canonical.
+        rejected(|claim| {
+            claim.decision.answers.push(ContextScoutIntentAnswerV1 {
+                intent: ContextScoutIntentKindV1::CallGraph,
+                probability_permille: 100,
+                threshold_permille: 600,
+            });
+        });
+        rejected(|claim| {
+            claim.decision.facts.push(ContextScoutIntentKindV1::Search);
+        });
+        rejected(|claim| claim.decision.answers[0].probability_permille = 1_001);
+        rejected(|claim| {
+            claim.decision.engine.as_mut().unwrap().model = Some(" ".to_owned());
+        });
+        // A fact-only pass with a backpressured engine is valid.
+        let mut fact_only = fixture_context_scout_session_claim();
+        fact_only.decision.engine = None;
+        fact_only.decision.outcome = ContextScoutModelOutcomeV1::Backpressured;
+        fact_only.decision.answers.clear();
+        fact_only.decision.selected = ContextScoutIntentKindV1::Search;
+        fact_only.decision.source = IntentDecisionSourceV1::ActionFact;
+        ContextScoutSessionEvidenceV1::claim(fact_only).unwrap();
+    }
+
+    #[test]
+    fn candidate_evidence_union_is_tagged_and_dispatches() {
+        let session: ContextScoutCandidateEvidenceV1 =
+            fixture_context_scout_session_evidence().into();
+        let code: ContextScoutCandidateEvidenceV1 = fixture_context_scout_evidence().into();
+        ContextScoutCandidateEvidenceExt::validate(&session).unwrap();
+        ContextScoutCandidateEvidenceExt::validate(&code).unwrap();
+        assert_eq!(session.anchor_count(), 0);
+        assert_eq!(session.anchors().count(), 0);
+        assert_eq!(code.anchor_count(), 1);
+
+        let encoded = serde_json::to_value(&session).unwrap();
+        assert_eq!(encoded["kind"], "session");
+        assert_eq!(
+            serde_json::from_value::<ContextScoutCandidateEvidenceV1>(encoded).unwrap(),
+            session
+        );
+        let encoded = serde_json::to_value(&code).unwrap();
+        assert_eq!(encoded["kind"], "code");
+        assert_eq!(
+            serde_json::from_value::<ContextScoutCandidateEvidenceV1>(encoded).unwrap(),
+            code
+        );
+        // The pre-union shape (a bare code envelope) does not decode.
+        let bare = serde_json::to_value(fixture_context_scout_evidence()).unwrap();
+        assert!(serde_json::from_value::<ContextScoutCandidateEvidenceV1>(bare).is_err());
+    }
 }

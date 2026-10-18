@@ -152,14 +152,14 @@ if ! python3 "$here/grade.py" --lint-only --scenarios "$EVAL_SCENARIOS_DIR"; the
 fi
 
 # Hint-signature drift guard: channel attribution mirrors distinctive fragments
-# of crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. If that wording
+# of crates/tracedecay-policy/src/intent_catalog.rs. If that wording
 # drifted and the mirror did not, a live run would silently misclassify
 # hint-driven adoptions as steering, so fail fast here, before building
 # fixtures or spending a token. Skips cleanly when run from a published package
 # without the Rust source tree.
-echo "checking hint signatures against tool_hints.rs..."
+echo "checking hint signatures against intent_catalog.rs..."
 if ! python3 "$here/grade.py" --check-hints; then
-  echo "abort: hint signatures drifted from crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs (see above)." >&2
+  echo "abort: hint signatures drifted from crates/tracedecay-policy/src/intent_catalog.rs (see above)." >&2
   exit 3
 fi
 
