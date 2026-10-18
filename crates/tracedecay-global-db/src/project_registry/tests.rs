@@ -3,6 +3,10 @@
 
 use std::cell::Cell;
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 
 use tracedecay_runtime_core::db::engine::{
@@ -964,6 +968,39 @@ async fn anchors_do_not_keep_a_missing_project_alive_but_its_store_does() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[asupersync::test]
+async fn native_path_aliases_protect_roots_from_lossy_registry_reaping() {
+    let harness = RegisteredGlobalDbHarness::open("project-registry-native-reap").await;
+    let root = harness
+        .registered
+        .db_path()
+        .parent()
+        .unwrap()
+        .join(OsString::from_vec(b"native-root-\xff".to_vec()));
+    std::fs::create_dir_all(&root).unwrap();
+    register(&harness.registered, "project-native", &root).await;
+
+    let plan = harness.registered.plan_registry_reap().await.unwrap();
+    assert!(plan.reapable.is_empty());
+    assert!(
+        plan.retained
+            .iter()
+            .any(|entry| entry.entry.key == "project-native")
+    );
+    harness.registered.apply_registry_reap(&plan).await.unwrap();
+    assert!(root.exists());
+    assert_eq!(
+        harness
+            .registered
+            .project_id_by_alias_key(&super::project_path_alias_key(&root))
+            .await
+            .unwrap(),
+        Some("project-native".to_owned()),
+        "lossy display paths must not allow a live native root to be unregistered"
     );
 }
 

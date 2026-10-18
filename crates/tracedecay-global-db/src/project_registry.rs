@@ -2276,6 +2276,7 @@ impl RegisteredGlobalDb {
         }
 
         let mut live_roots_by_project: BTreeMap<String, usize> = BTreeMap::new();
+        let mut native_path_projects = BTreeSet::new();
         let mut dead_aliases = Vec::new();
         let mut rows = snapshot
             .query(
@@ -2303,7 +2304,15 @@ impl RegisteredGlobalDb {
                     *live_roots_by_project.entry(project_id).or_default() += 1;
                     continue;
                 }
-                None => continue,
+                None => {
+                    let key = alias
+                        .strip_prefix(GIT_COMMON_DIR_ALIAS_PREFIX)
+                        .unwrap_or(&alias);
+                    if key.starts_with(NATIVE_PROJECT_PATH_ALIAS_PREFIX) {
+                        native_path_projects.insert(project_id);
+                    }
+                    continue;
+                }
             };
             dead_aliases.push(RegistryReapEntry {
                 kind: ReapEntryKind::ProjectAlias,
@@ -2352,7 +2361,14 @@ impl RegisteredGlobalDb {
                 &profile_root,
                 &project_id,
             );
-            if store_root.exists() {
+            if native_path_projects.contains(&project_id) {
+                // The reap receipt carries a display string, so it cannot
+                // safely recheck a native path that does not round-trip as UTF-8.
+                plan.retained.push(RetainedRegistryEntry {
+                    entry,
+                    reason: "native path aliases require lossless reap evidence".to_owned(),
+                });
+            } else if store_root.exists() {
                 plan.retained.push(RetainedRegistryEntry {
                     entry,
                     reason: format!(
