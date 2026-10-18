@@ -41,7 +41,10 @@
       "git status"
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "deferred scenario: no verifiable ground truth until its fixture gap is closed"
+  },
   "max_tool_calls": 6,
   "requires_fixture": "git-history",
   "notes": "DEFERRED: 'last touched' needs blame-worthy history beyond the single initial commit."

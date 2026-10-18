@@ -21,9 +21,23 @@
       "Read"
     ]
   },
-  "ground_truth": [
-    "reserve_stock"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "claims the change was made",
+          "pattern": "\\bI(?:'ve| have)?\\s+(?:already\\s+)?(?:changed|updated|modified|edited|implemented|renamed|applied)\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
   "notes": "rename-this-function-safely; reserve_stock is the one call site rename_preview should surface.",
   "expected_skill": "editing-safely",

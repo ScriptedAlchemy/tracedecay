@@ -8,9 +8,23 @@
   "fixture": "main",
   "status": "active",
   "prompt": "Copyedit this supplied documentation sentence and return only the corrected sentence: \"The warehouse track stock by SKU.\"",
-  "ground_truth": [
-    "The warehouse tracks stock by SKU."
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "returns the corrected sentence",
+          "pattern": "The warehouse tracks stock by SKU\\."
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "echoes the uncorrected sentence",
+          "pattern": "warehouse track stock"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 0,
   "allowed_skills": [],
   "max_tracedecay_calls": 0

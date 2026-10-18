@@ -36,9 +36,27 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "average"
-  ],
+  "outcome": {
+    "kind": "effect",
+    "files": {
+      "src/pricing.rs": {
+        "required": [
+          {
+            "id": "compute_total kept",
+            "pattern": "pub fn compute_total\\("
+          },
+          {
+            "id": "compute_grand_total kept",
+            "pattern": "pub fn compute_grand_total\\("
+          },
+          {
+            "id": "average function inserted right after compute_total",
+            "pattern": "pub fn compute_total\\([^)]*\\)[^{]*\\{(?:[^{}]|\\{[^{}]*\\})*\\}\\s*(?:(?:///|//)[^\\n]*\\n\\s*|#\\[[^\\n]*\\]\\s*)*(?:pub\\s+)?fn\\s+\\w*average\\w*\\s*\\("
+          }
+        ]
+      }
+    }
+  },
   "max_tool_calls": 6,
-  "notes": "add-a-function-after-X; anchors on compute_total via tracedecay_insert_at_symbol."
+  "notes": "add-a-function-after-X; anchors on compute_total via tracedecay_insert_at_symbol. Correctness is the resulting src/pricing.rs: an average function directly after compute_total, both existing functions kept. run.sh snapshots src/ after the run and restores it."
 }

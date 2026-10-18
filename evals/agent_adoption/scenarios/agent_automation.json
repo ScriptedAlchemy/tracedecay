@@ -6,6 +6,10 @@
   "fixture": "main",
   "status": "active",
   "prompt": "Audit the recent background improvement runs for skipped cycles, unsafe retries, or weak evidence.",
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "routing-only specialist scenario: measures whether the expected specialist was invoked; answer quality is not verified"
+  },
   "expected_agent": "automation-auditor",
   "max_tool_calls": 10,
   "notes": "Neutral routing eval for automation artifacts, retries, policy, and adoption outcomes."
