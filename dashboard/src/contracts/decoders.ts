@@ -9455,13 +9455,11 @@ export const UserSettingsPatchSchema: z.ZodObject<{
   expected_revision_id: z.ZodType<string, unknown>;
   extraction_timeout_secs: z.ZodOptional<z.ZodType<number | null, unknown>>;
   idempotency_key: z.ZodType<string, unknown>;
-  upload_enabled: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
   watcher_debounce: z.ZodOptional<z.ZodType<string | null, unknown>>;
 }, z.core.$strict> = z.object({
   expected_revision_id: z.string(),
   extraction_timeout_secs: z.number().int().min(0).nullable().optional(),
   idempotency_key: z.string(),
-  upload_enabled: z.boolean().nullable().optional(),
   watcher_debounce: z.string().nullable().optional(),
 }).strict();
 
@@ -9474,7 +9472,6 @@ export const UserSettingsPayloadV1Schema: z.ZodObject<{
   configuration_snapshot_id: z.ZodType<string, unknown>;
   extraction_timeout_secs: z.ZodType<number, unknown>;
   installed_agents: z.ZodType<Array<string>, unknown>;
-  upload_enabled: z.ZodType<boolean, unknown>;
   watcher_debounce: z.ZodType<string, unknown>;
 }> = z.object({
   code_index_worker_configuration_revision_id: z.string(),
@@ -9485,7 +9482,6 @@ export const UserSettingsPayloadV1Schema: z.ZodObject<{
   configuration_snapshot_id: z.string(),
   extraction_timeout_secs: z.number().int().min(0),
   installed_agents: z.array(z.string()),
-  upload_enabled: z.boolean(),
   watcher_debounce: z.string(),
 });
 
