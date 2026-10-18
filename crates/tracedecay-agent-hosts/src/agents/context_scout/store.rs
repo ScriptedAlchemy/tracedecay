@@ -1309,6 +1309,24 @@ impl ProjectContextScoutDurableStoreV1 {
             return ContextScoutDurableStoreOutcomeV1::Unavailable;
         }
         self.update_state("enqueue Context Scout suggestion", move |state| {
+            // A re-judged copy of a suggestion already claimed or delivered at
+            // this address never replaces it: the session would see it twice.
+            let same_suggestion = |other: &ContextScoutDurableQueueEntryV1| {
+                other.work.address == entry.work.address
+                    && other.envelope.candidate.dedupe_key == entry.envelope.candidate.dedupe_key
+            };
+            if state
+                .entries
+                .iter()
+                .any(|stored| stored.lease.is_some() && same_suggestion(&stored.entry))
+                || state
+                    .delivery_addresses
+                    .iter()
+                    .filter_map(|binding| binding.entry.as_ref())
+                    .any(same_suggestion)
+            {
+                return ContextScoutDurableStoreOutcomeV1::Duplicate;
+            }
             if state.tombstones.contains(&entry.work) {
                 return ContextScoutDurableStoreOutcomeV1::Superseded;
             }
@@ -1329,24 +1347,6 @@ impl ProjectContextScoutDurableStoreV1 {
                 } else {
                     ContextScoutDurableStoreOutcomeV1::Superseded
                 };
-            }
-            // A re-judged copy of a suggestion already claimed or delivered at
-            // this address never replaces it: the session would see it twice.
-            let same_suggestion = |other: &ContextScoutDurableQueueEntryV1| {
-                other.work.address == entry.work.address
-                    && other.envelope.candidate.dedupe_key == entry.envelope.candidate.dedupe_key
-            };
-            if state
-                .entries
-                .iter()
-                .any(|stored| stored.lease.is_some() && same_suggestion(&stored.entry))
-                || state
-                    .delivery_addresses
-                    .iter()
-                    .filter_map(|binding| binding.entry.as_ref())
-                    .any(same_suggestion)
-            {
-                return ContextScoutDurableStoreOutcomeV1::Duplicate;
             }
             if let Some(index) = state
                 .entries

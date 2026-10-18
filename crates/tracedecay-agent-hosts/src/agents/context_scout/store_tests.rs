@@ -756,6 +756,13 @@ async fn a_claimed_or_delivered_suggestion_is_never_replaced_by_its_rejudged_cop
         ContextScoutDurableStoreOutcomeV1::Stored,
         "the claimed suggestion is still the one delivered"
     );
+    let mut rejudged_work = first.clone();
+    rejudged_work.envelope.envelope_id = [77; 16];
+    assert_eq!(
+        store.enqueue(rejudged_work).await,
+        ContextScoutDurableStoreOutcomeV1::Duplicate,
+        "the delivered work judged again under a restarted generation is a duplicate"
+    );
     rejudged.work.generation = 3;
     rejudged.envelope.envelope_id = [74; 16];
     assert_eq!(
