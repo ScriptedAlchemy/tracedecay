@@ -305,12 +305,6 @@ impl From<FeedbackCyclePublicationError> for DaemonFeedbackRuntimeRegistrationEr
     }
 }
 
-impl From<ProjectRuntimeAlreadyRegistered> for DaemonFeedbackRuntimeRegistrationError {
-    fn from(_: ProjectRuntimeAlreadyRegistered) -> Self {
-        Self::AlreadyRegistered
-    }
-}
-
 /// Maps registry refusals into one per-runtime registration enum.
 /// Callers match on the per-runtime variants (and each carries its own error
 /// message), so the enums keep their own `AlreadyRegistered`/`RegistryClosed`
@@ -546,7 +540,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         let publication_gate = self.publication_gate.clone();
         self.service
             .project_runtimes
-            .publish_feedback_atomically(project_root, move |mut publication| async move {
+            .publish_feedback_atomically(project_root, move || async move {
                 let project_id = scope.project_id.clone();
                 #[cfg(any(test, feature = "test-helpers"))]
                 producer_constructions.fetch_add(1, Ordering::SeqCst);
@@ -565,24 +559,26 @@ impl DaemonFeedbackRuntimeRegistrar {
                     project_id.clone(),
                     runtime.source_observation_port(),
                 ));
-                publication.stage(RegisteredCallableCodeRuntime {
-                    scope,
-                    authorization,
-                })?;
-                publication.stage(RegisteredFeedbackRuntime {
-                    project_id,
-                    runtime,
-                })?;
-                publication.stage(Arc::new(SwitchableFeedbackCycleRuntimeV1::new(
-                    unavailable_cycle,
-                )))?;
+                let bundle = crate::project_runtime::FeedbackRegistrationBundle {
+                    callable_code: RegisteredCallableCodeRuntime {
+                        scope,
+                        authorization,
+                    },
+                    feedback: RegisteredFeedbackRuntime {
+                        project_id,
+                        runtime,
+                    },
+                    feedback_cycle_input: Arc::new(SwitchableFeedbackCycleRuntimeV1::new(
+                        unavailable_cycle,
+                    )),
+                };
                 #[cfg(any(test, feature = "test-helpers"))]
                 if let Some(gate) = publication_gate
                     && !gate.wait().await
                 {
                     return Err(DaemonFeedbackRuntimeRegistrationError::CyclePublication);
                 }
-                Ok((publication, publications))
+                Ok((bundle, publications))
             })
             .await
     }
