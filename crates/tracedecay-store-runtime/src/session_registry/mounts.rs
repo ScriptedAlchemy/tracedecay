@@ -1263,8 +1263,12 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// The dropped owners leave their `SQLite` runtimes mounted, so the
     /// profile database owner and pin are released too and every store
     /// runtime no longer held is then closed: its writer runs the shutdown
-    /// TRUNCATE checkpoint instead of leaving a retained WAL.
-    pub async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
+    /// TRUNCATE checkpoint instead of leaving a retained WAL. A runtime still
+    /// held is waited on until `deadline`, the caller's store-close budget.
+    pub async fn close_retained_graph_runtimes_for_shutdown(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
         let identities = self.drain_retained_graph_owners_for_shutdown()?;
         let mut first_error = None;
         for (binding, locator) in identities {
@@ -1286,7 +1290,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 .take(),
         );
         drop(self.profile_pin.lock().await.take());
-        if let Err(failure) = self.registry.close_idle_for_shutdown().await
+        if let Err(failure) = self.registry.close_idle_for_shutdown(deadline).await
             && first_error.is_none()
         {
             first_error = Some(session_registry_error(

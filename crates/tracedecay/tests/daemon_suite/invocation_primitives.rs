@@ -50,7 +50,9 @@ async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown
         .await
         .expect("memory graph reconciliation joins");
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("session-holder lease is released before graph shutdown");
 }

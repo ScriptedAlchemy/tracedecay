@@ -426,7 +426,9 @@ impl HostAdmissionTestRuntimeV1 {
         terminal.map_err(|message| TraceDecayError::Config { message })?;
         reconciliation.map_err(|message| TraceDecayError::Config { message })?;
         session_registry
-            .close_retained_graph_runtimes_for_shutdown()
+            .close_retained_graph_runtimes_for_shutdown(
+                std::time::Instant::now() + std::time::Duration::from_mins(1),
+            )
             .await?;
         drop((session_registry, database_scope));
         Ok(())
