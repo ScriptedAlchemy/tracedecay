@@ -585,13 +585,11 @@ pub enum LcmMaintenanceDebt {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmPreflightRequest {
-    pub provider: String,
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub messages: Vec<serde_json::Value>,
-    pub current_tokens: Option<i64>,
+/// Caller-selected compression budget and shape overrides shared by preflight
+/// and compression requests. Absent fields keep the engine defaults; the wire
+/// shape stays flat in both requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmCompressionOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -614,6 +612,17 @@ pub struct LcmPreflightRequest {
     pub context_length: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reserve_tokens_floor: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPreflightRequest {
+    pub provider: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<serde_json::Value>,
+    pub current_tokens: Option<i64>,
+    #[serde(flatten)]
+    pub overrides: LcmCompressionOverrides,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -760,5 +769,168 @@ mod tests {
 
         assert!(config.reap_missing_enabled);
         assert_eq!(config.reap_missing_after, 0);
+    }
+
+    fn full_overrides() -> LcmCompressionOverrides {
+        LcmCompressionOverrides {
+            threshold_tokens: Some(11),
+            max_assembly_tokens: Some(12),
+            leaf_chunk_tokens: Some(13),
+            max_source_messages: Some(14),
+            summary_fan_in: Some(15),
+            incremental_max_depth: Some(-1),
+            fresh_tail_count: Some(0),
+            dynamic_leaf_chunk_enabled: Some(false),
+            dynamic_leaf_chunk_max: Some(18),
+            context_length: Some(19),
+            reserve_tokens_floor: Some(0),
+        }
+    }
+
+    const OVERRIDE_KEYS: [&str; 11] = [
+        "threshold_tokens",
+        "max_assembly_tokens",
+        "leaf_chunk_tokens",
+        "max_source_messages",
+        "summary_fan_in",
+        "incremental_max_depth",
+        "fresh_tail_count",
+        "dynamic_leaf_chunk_enabled",
+        "dynamic_leaf_chunk_max",
+        "context_length",
+        "reserve_tokens_floor",
+    ];
+
+    fn preflight_json(extra: &str) -> String {
+        format!(r#"{{"provider":"p","session_id":"s","current_tokens":null{extra}}}"#)
+    }
+
+    fn compression_json(extra: &str) -> String {
+        format!(
+            r#"{{"provider":"p","session_id":"s","messages":[],"current_tokens":null,"focus_topic":null,"summarizer":{{"mode":"noop"}}{extra}}}"#
+        )
+    }
+
+    #[test]
+    fn overrides_keep_the_flat_wire_shape_in_both_requests() {
+        let overrides = full_overrides();
+        let preflight = LcmPreflightRequest {
+            provider: "p".into(),
+            session_id: "s".into(),
+            messages: Vec::new(),
+            current_tokens: None,
+            overrides: overrides.clone(),
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+        };
+        let compression = crate::LcmCompressionRequest {
+            provider: "p".into(),
+            session_id: "s".into(),
+            messages: Vec::new(),
+            current_tokens: None,
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            overrides,
+            summarizer: crate::LcmSummarizerMode::Noop,
+        };
+
+        for value in [
+            serde_json::to_value(&preflight).expect("preflight serializes"),
+            serde_json::to_value(&compression).expect("compression serializes"),
+        ] {
+            assert!(
+                value.get("overrides").is_none(),
+                "no nested overrides object"
+            );
+            for key in OVERRIDE_KEYS {
+                assert!(value.get(key).is_some(), "{key} stays a top-level key");
+            }
+            assert_eq!(value["incremental_max_depth"], -1);
+            assert_eq!(value["dynamic_leaf_chunk_enabled"], false);
+            assert_eq!(value["fresh_tail_count"], 0);
+        }
+        let preflight_back: LcmPreflightRequest =
+            serde_json::from_value(serde_json::to_value(&preflight).expect("serialize"))
+                .expect("preflight round-trips");
+        assert_eq!(preflight_back, preflight);
+        let compression_back: crate::LcmCompressionRequest =
+            serde_json::from_value(serde_json::to_value(&compression).expect("serialize"))
+                .expect("compression round-trips");
+        assert_eq!(compression_back, compression);
+    }
+
+    #[test]
+    fn absent_and_null_overrides_deserialize_to_none_and_stay_omitted() {
+        let null_extra = OVERRIDE_KEYS
+            .iter()
+            .map(|key| format!(r#","{key}":null"#))
+            .collect::<String>();
+        for extra in ["", null_extra.as_str()] {
+            let preflight: LcmPreflightRequest =
+                serde_json::from_str(&preflight_json(extra)).expect("preflight parses");
+            let compression: crate::LcmCompressionRequest =
+                serde_json::from_str(&compression_json(extra)).expect("compression parses");
+            assert_eq!(preflight.overrides, LcmCompressionOverrides::default());
+            assert_eq!(compression.overrides, LcmCompressionOverrides::default());
+            let value = serde_json::to_value(&preflight).expect("serialize");
+            for key in OVERRIDE_KEYS {
+                assert!(value.get(key).is_none(), "{key} is omitted when unset");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_zero_false_and_negative_overrides_are_preserved() {
+        let extra = r#","threshold_tokens":0,"fresh_tail_count":0,"dynamic_leaf_chunk_enabled":false,"incremental_max_depth":-1"#;
+        let preflight: LcmPreflightRequest =
+            serde_json::from_str(&preflight_json(extra)).expect("preflight parses");
+        let compression: crate::LcmCompressionRequest =
+            serde_json::from_str(&compression_json(extra)).expect("compression parses");
+        for overrides in [preflight.overrides, compression.overrides] {
+            assert_eq!(overrides.threshold_tokens, Some(0));
+            assert_eq!(overrides.fresh_tail_count, Some(0));
+            assert_eq!(overrides.dynamic_leaf_chunk_enabled, Some(false));
+            assert_eq!(overrides.incremental_max_depth, Some(-1));
+            assert_eq!(overrides.max_assembly_tokens, None);
+        }
+    }
+
+    #[test]
+    fn duplicate_override_keys_are_rejected_and_unknown_keys_ignored() {
+        let duplicate = r#","threshold_tokens":1,"threshold_tokens":2"#;
+        assert!(serde_json::from_str::<LcmPreflightRequest>(&preflight_json(duplicate)).is_err());
+        assert!(
+            serde_json::from_str::<crate::LcmCompressionRequest>(&compression_json(duplicate))
+                .is_err()
+        );
+        let unknown = r#","not_an_override":7"#;
+        assert!(serde_json::from_str::<LcmPreflightRequest>(&preflight_json(unknown)).is_ok());
+        assert!(
+            serde_json::from_str::<crate::LcmCompressionRequest>(&compression_json(unknown))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn wrongly_typed_overrides_are_rejected() {
+        for extra in [
+            r#","threshold_tokens":"5""#,
+            r#","max_source_messages":-1"#,
+            r#","dynamic_leaf_chunk_enabled":1"#,
+            r#","context_length":1.5"#,
+        ] {
+            assert!(
+                serde_json::from_str::<LcmPreflightRequest>(&preflight_json(extra)).is_err(),
+                "{extra}"
+            );
+            assert!(
+                serde_json::from_str::<crate::LcmCompressionRequest>(&compression_json(extra))
+                    .is_err(),
+                "{extra}"
+            );
+        }
     }
 }

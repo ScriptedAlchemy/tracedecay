@@ -9,6 +9,7 @@ use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_lcm::LcmCompressionOverrides;
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
     SessionStoreId, session_application_grant_digest,
@@ -209,17 +210,10 @@ fn preflight(provider: &str) -> LcmPreflightRequest {
         session_id: "session.lcm-test".to_owned(),
         messages: Vec::new(),
         current_tokens: Some(1),
-        threshold_tokens: Some(100),
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
+        overrides: LcmCompressionOverrides {
+            threshold_tokens: Some(100),
+            ..Default::default()
+        },
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
     }
@@ -635,4 +629,56 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
         ),
     );
     assert!(mount_registered_lcm_authority(database, project_identity, &shard).is_none());
+}
+
+#[test]
+fn pressure_conversion_moves_every_override_and_drops_host_content() {
+    type Setter = fn(&mut LcmCompressionOverrides);
+    let setters: [(&str, Setter); 11] = [
+        ("threshold_tokens", |o| o.threshold_tokens = Some(101)),
+        ("max_assembly_tokens", |o| o.max_assembly_tokens = Some(102)),
+        ("leaf_chunk_tokens", |o| o.leaf_chunk_tokens = Some(103)),
+        ("max_source_messages", |o| o.max_source_messages = Some(104)),
+        ("summary_fan_in", |o| o.summary_fan_in = Some(105)),
+        ("incremental_max_depth", |o| {
+            o.incremental_max_depth = Some(-1)
+        }),
+        ("fresh_tail_count", |o| o.fresh_tail_count = Some(0)),
+        ("dynamic_leaf_chunk_enabled", |o| {
+            o.dynamic_leaf_chunk_enabled = Some(false);
+        }),
+        ("dynamic_leaf_chunk_max", |o| {
+            o.dynamic_leaf_chunk_max = Some(109)
+        }),
+        ("context_length", |o| o.context_length = Some(110)),
+        ("reserve_tokens_floor", |o| o.reserve_tokens_floor = Some(0)),
+    ];
+    for (name, set) in setters {
+        let mut preflight = preflight("cursor");
+        preflight.overrides = LcmCompressionOverrides::default();
+        set(&mut preflight.overrides);
+        preflight.messages = vec![serde_json::json!({"role": "user", "content": "host text"})];
+        preflight.ignore_session_patterns = vec!["ignored-*".to_owned()];
+        preflight.stateless_session_patterns = vec!["stateless-*".to_owned()];
+        let expected = preflight.overrides.clone();
+
+        let request = pressure_compression_request(preflight);
+
+        assert_eq!(request.overrides, expected, "{name} survives conversion");
+        assert_ne!(
+            request.overrides,
+            LcmCompressionOverrides::default(),
+            "{name}"
+        );
+        assert!(
+            request.messages.is_empty(),
+            "{name}: host messages are dropped"
+        );
+        assert_eq!(request.ignore_session_patterns, ["ignored-*"]);
+        assert_eq!(request.stateless_session_patterns, ["stateless-*"]);
+        assert_eq!(request.summarizer, LcmSummarizerMode::HermesAuxiliary);
+        assert_eq!(request.focus_topic, None);
+        assert_eq!(request.expected_current_frontier_store_id, None);
+        assert!(request.ignore_message_patterns.is_empty());
+    }
 }

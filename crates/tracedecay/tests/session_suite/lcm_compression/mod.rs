@@ -3,9 +3,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_lcm::{
-    LcmCompressionRequest, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt,
-    LcmPreflightRequest, LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind,
-    LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
+    LcmCompressionOverrides, LcmCompressionRequest, LcmLifecycleUpdate, LcmLoadSessionRequest,
+    LcmMaintenanceDebt, LcmPreflightRequest, LcmSessionBoundaryRequest, LcmSourceRef,
+    LcmStorageKind, LcmSummarizerMode, LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -160,17 +160,7 @@ fn preflight_request(
         session_id: session_id.to_string(),
         messages,
         current_tokens,
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
+        overrides: Default::default(),
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
     }
@@ -198,7 +188,7 @@ async fn ingest_active_messages(
     let message_count = messages.len();
     let mut request = compress_request(provider, session_id, LcmSummarizerMode::Noop);
     request.messages = messages;
-    request.fresh_tail_count = Some(message_count.max(1));
+    request.overrides.fresh_tail_count = Some(message_count.max(1));
     let response = db
         .lcm_compress(request)
         .await
@@ -223,17 +213,7 @@ fn compress_request(
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
+        overrides: Default::default(),
         summarizer,
     }
 }
@@ -256,17 +236,12 @@ fn limited_compress_request(
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
-        threshold_tokens: None,
-        max_assembly_tokens,
-        leaf_chunk_tokens,
-        max_source_messages,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
+        overrides: LcmCompressionOverrides {
+            max_assembly_tokens,
+            leaf_chunk_tokens,
+            max_source_messages,
+            ..Default::default()
+        },
         summarizer,
     }
 }

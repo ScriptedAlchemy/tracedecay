@@ -110,17 +110,7 @@ fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressio
         stateless_session_patterns: preflight.stateless_session_patterns,
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
-        threshold_tokens: preflight.threshold_tokens,
-        max_assembly_tokens: preflight.max_assembly_tokens,
-        leaf_chunk_tokens: preflight.leaf_chunk_tokens,
-        max_source_messages: preflight.max_source_messages,
-        summary_fan_in: preflight.summary_fan_in,
-        incremental_max_depth: preflight.incremental_max_depth,
-        fresh_tail_count: preflight.fresh_tail_count,
-        dynamic_leaf_chunk_enabled: preflight.dynamic_leaf_chunk_enabled,
-        dynamic_leaf_chunk_max: preflight.dynamic_leaf_chunk_max,
-        context_length: preflight.context_length,
-        reserve_tokens_floor: preflight.reserve_tokens_floor,
+        overrides: preflight.overrides,
         summarizer: LcmSummarizerMode::HermesAuxiliary,
     }
 }

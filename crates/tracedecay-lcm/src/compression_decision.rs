@@ -33,7 +33,7 @@ pub struct PreflightDecision {
 pub struct CompressionPlanInput<'a> {
     pub request: &'a LcmCompressionRequest,
     /// The effective assembly cap from [`effective_assembly_token_cap`]; the
-    /// raw `request.max_assembly_tokens` is never read for pressure decisions.
+    /// raw `request.overrides.max_assembly_tokens` is never read for pressure decisions.
     pub assembly_token_cap: Option<i64>,
     pub backlog: &'a [LcmRawMessage],
 }
@@ -114,7 +114,7 @@ pub fn condensation_policy_decision(input: CondensationDecisionInput<'_>) -> Con
 pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecision {
     if forced_overflow_pressure(
         input.request.current_tokens,
-        input.request.max_assembly_tokens,
+        input.request.overrides.max_assembly_tokens,
     ) {
         return PreflightDecision {
             should_compress: true,
@@ -129,7 +129,10 @@ pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecisio
         };
     }
 
-    if threshold_pressure(input.request.current_tokens, input.request.threshold_tokens) {
+    if threshold_pressure(
+        input.request.current_tokens,
+        input.request.overrides.threshold_tokens,
+    ) {
         if input.backlog.is_empty() {
             return PreflightDecision {
                 should_compress: false,
@@ -137,9 +140,9 @@ pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecisio
             };
         }
         let leaf_chunk_tokens = effective_leaf_chunk_tokens(
-            input.request.leaf_chunk_tokens,
-            input.request.dynamic_leaf_chunk_enabled,
-            input.request.dynamic_leaf_chunk_max,
+            input.request.overrides.leaf_chunk_tokens,
+            input.request.overrides.dynamic_leaf_chunk_enabled,
+            input.request.overrides.dynamic_leaf_chunk_max,
             source_token_count(input.backlog),
         );
         if has_eligible_backlog(input.backlog, leaf_chunk_tokens) {
@@ -164,15 +167,15 @@ pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
     let forced_overflow_recovery =
         forced_overflow_pressure(input.request.current_tokens, input.assembly_token_cap);
     let leaf_chunk_tokens = effective_leaf_chunk_tokens(
-        input.request.leaf_chunk_tokens,
-        input.request.dynamic_leaf_chunk_enabled,
-        input.request.dynamic_leaf_chunk_max,
+        input.request.overrides.leaf_chunk_tokens,
+        input.request.overrides.dynamic_leaf_chunk_enabled,
+        input.request.overrides.dynamic_leaf_chunk_max,
         source_token_count(input.backlog),
     );
     let selected_len = progress_leaf_chunk_len(
         input.backlog,
         leaf_chunk_tokens,
-        input.request.max_source_messages,
+        input.request.overrides.max_source_messages,
     );
     CompressionPlan {
         selected_len,
@@ -190,7 +193,7 @@ pub fn frontier_has_maintenance_debt(frontier: &LcmLifecycleState) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::LcmSummarizerMode;
+    use super::super::{LcmCompressionOverrides, LcmSummarizerMode};
     use super::*;
 
     fn boundary_request() -> LcmSessionBoundaryRequest {
@@ -322,17 +325,10 @@ mod tests {
             session_id: "session-1".to_string(),
             messages: Vec::new(),
             current_tokens: Some(12),
-            threshold_tokens: None,
-            max_assembly_tokens: Some(8),
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: LcmCompressionOverrides {
+                max_assembly_tokens: Some(8),
+                ..Default::default()
+            },
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
         };

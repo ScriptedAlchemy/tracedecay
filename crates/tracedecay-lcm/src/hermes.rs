@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+use super::types::LcmCompressionOverrides;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmCompressionRequest {
     pub provider: String,
@@ -17,28 +19,8 @@ pub struct LcmCompressionRequest {
     pub ignore_message_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_current_frontier_store_id: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threshold_tokens: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_assembly_tokens: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leaf_chunk_tokens: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_source_messages: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary_fan_in: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub incremental_max_depth: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fresh_tail_count: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic_leaf_chunk_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic_leaf_chunk_max: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_length: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reserve_tokens_floor: Option<i64>,
+    #[serde(flatten)]
+    pub overrides: LcmCompressionOverrides,
     pub summarizer: LcmSummarizerMode,
 }
 

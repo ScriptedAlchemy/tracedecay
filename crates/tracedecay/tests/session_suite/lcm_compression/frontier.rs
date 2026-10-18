@@ -177,8 +177,8 @@ async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_
         Some(1),
         None,
     );
-    request.threshold_tokens = Some(1);
-    request.fresh_tail_count = Some(2);
+    request.overrides.threshold_tokens = Some(1);
+    request.overrides.fresh_tail_count = Some(2);
     request.messages = with_authoritative_timestamps(vec![
         json!({
             "id": "large-tool-result",
@@ -298,17 +298,7 @@ async fn compression_noops_when_expected_frontier_is_stale() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: Some(0),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: Default::default(),
             summarizer: LcmSummarizerMode::Fake {
                 summary_text: "stale summary".into(),
             },
@@ -359,17 +349,7 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
+        overrides: Default::default(),
         summarizer: LcmSummarizerMode::Noop,
     })
     .await

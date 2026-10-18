@@ -288,11 +288,11 @@ pub async fn preflight(
     request: LcmPreflightRequest,
 ) -> Result<LcmPreflightResponse, LcmError> {
     let mut request = request;
-    request.max_assembly_tokens =
+    request.overrides.max_assembly_tokens =
         compression_decision::effective_assembly_token_cap(AssemblyCapInput {
-            max_assembly_tokens: request.max_assembly_tokens,
-            context_length: request.context_length,
-            reserve_tokens_floor: request.reserve_tokens_floor,
+            max_assembly_tokens: request.overrides.max_assembly_tokens,
+            context_length: request.overrides.context_length,
+            reserve_tokens_floor: request.overrides.reserve_tokens_floor,
         });
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
@@ -336,9 +336,9 @@ pub async fn preflight(
     let window = compression_window(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
-        request.fresh_tail_count,
+        request.overrides.fresh_tail_count,
         request.current_tokens,
-        request.threshold_tokens,
+        request.overrides.threshold_tokens,
     );
     let decision = compression_decision::preflight_decision(PreflightDecisionInput {
         request: &request,
@@ -475,9 +475,9 @@ pub async fn begin_compression_pass(
     retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<CompressionAdmission, LcmError> {
     let assembly_token_cap = compression_decision::effective_assembly_token_cap(AssemblyCapInput {
-        max_assembly_tokens: request.max_assembly_tokens,
-        context_length: request.context_length,
-        reserve_tokens_floor: request.reserve_tokens_floor,
+        max_assembly_tokens: request.overrides.max_assembly_tokens,
+        context_length: request.overrides.context_length,
+        reserve_tokens_floor: request.overrides.reserve_tokens_floor,
     });
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
@@ -631,9 +631,9 @@ async fn prepare_compression_context(
     let window = compression_window(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
-        request.fresh_tail_count,
+        request.overrides.fresh_tail_count,
         request.current_tokens,
-        request.threshold_tokens,
+        request.overrides.threshold_tokens,
     );
     let plan = compression_decision::compression_plan(CompressionPlanInput {
         request,
@@ -991,15 +991,15 @@ async fn persist_compression_transaction_writes<'a>(
 
     while !remaining_backlog.is_empty() && created_summaries.len() < pass_limit {
         let leaf_chunk_tokens = compression_decision::effective_leaf_chunk_tokens(
-            write.request.leaf_chunk_tokens,
-            write.request.dynamic_leaf_chunk_enabled,
-            write.request.dynamic_leaf_chunk_max,
+            write.request.overrides.leaf_chunk_tokens,
+            write.request.overrides.dynamic_leaf_chunk_enabled,
+            write.request.overrides.dynamic_leaf_chunk_max,
             source_token_count(remaining_backlog),
         );
         let selected_len = compression_decision::progress_leaf_chunk_len(
             remaining_backlog,
             leaf_chunk_tokens,
-            write.request.max_source_messages,
+            write.request.overrides.max_source_messages,
         );
         let (selected_backlog, deferred_backlog) = remaining_backlog.split_at(selected_len);
 
@@ -1798,8 +1798,8 @@ async fn condense_summary_nodes_if_ready(
     let CondensationDecision::QueryCandidates(policy) =
         compression_decision::condensation_policy_decision(CondensationDecisionInput {
             has_backlog: !window.backlog.is_empty(),
-            summary_fan_in: request.summary_fan_in,
-            incremental_max_depth: request.incremental_max_depth,
+            summary_fan_in: request.overrides.summary_fan_in,
+            incremental_max_depth: request.overrides.incremental_max_depth,
             summarizer,
         })
     else {

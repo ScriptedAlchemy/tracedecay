@@ -22,8 +22,8 @@ async fn compress_forces_overflow_recovery_with_reserve_derived_cap() {
         None,
         None,
     );
-    request.context_length = Some(150);
-    request.reserve_tokens_floor = Some(50);
+    request.overrides.context_length = Some(150);
+    request.overrides.reserve_tokens_floor = Some(50);
 
     let response = db.lcm_compress(request).await.unwrap();
 
@@ -60,7 +60,7 @@ async fn forced_overflow_summary_replay_keeps_latest_message_when_nothing_fits()
         Some(1),
     );
     request.current_tokens = Some(20_000);
-    request.fresh_tail_count = Some(2);
+    request.overrides.fresh_tail_count = Some(2);
 
     let response = db.lcm_compress(request).await.unwrap();
 
