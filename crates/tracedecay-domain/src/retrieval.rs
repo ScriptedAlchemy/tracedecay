@@ -931,6 +931,28 @@ pub enum RetrieverOutcome<T> {
     Cancelled,
 }
 
+impl<T> RetrieverOutcome<T> {
+    /// Transform available evidence while preserving the lane's terminal state.
+    pub fn try_map<U, E>(
+        self,
+        map: impl FnOnce(T) -> Result<U, E>,
+    ) -> Result<RetrieverOutcome<U>, E> {
+        Ok(match self {
+            Self::Complete(value) => RetrieverOutcome::Complete(map(value)?),
+            Self::Partial { value, reason } => RetrieverOutcome::Partial {
+                value: map(value)?,
+                reason,
+            },
+            Self::Unavailable(reason) => RetrieverOutcome::Unavailable(reason),
+            Self::Denied => RetrieverOutcome::Denied,
+            Self::Stale(freshness) => RetrieverOutcome::Stale(freshness),
+            Self::BudgetExceeded(usage) => RetrieverOutcome::BudgetExceeded(usage),
+            Self::TimedOut(usage) => RetrieverOutcome::TimedOut(usage),
+            Self::Cancelled => RetrieverOutcome::Cancelled,
+        })
+    }
+}
+
 /// The sole authority that may mint an [`ExactAdmissionProof`].
 /// Implemented once, centrally; lane adapters consume proofs, they never
 /// construct them.
