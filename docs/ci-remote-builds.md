@@ -1,20 +1,28 @@
 # Bazel CI on the private fleet
 
 GitHub-hosted runners remain the workflow runners. Linux x86_64 test shards
-and Clippy connect to the private NativeLink coordinator through the official
-Tailscale action. GitHub supplies checkout, analysis, local compilation, test
-execution, artifacts, and check reporting; Ubuntu-main and Omarchy supply
-additional Linux compilation capacity. The Mac worker serves macOS actions;
+and Clippy, plus repository gates, connect to the private NativeLink coordinator
+through the official Tailscale action. GitHub supplies checkout, analysis, local
+compilation, test execution, artifacts, and check reporting; Ubuntu-main and
+Omarchy supply additional Linux compilation and test capacity. The Mac worker
+serves macOS actions;
 this CI integration does not send Linux actions to it. Windows, ARM Linux,
-and macOS CI retain their existing hosted execution.
+and macOS CI retain their existing hosted execution. The Mac currently has a
+newer Xcode/SDK than the macos-26 image; matching OS and CPU alone does not make
+native compilation compatible.
 
-Rustc actions use Bazel dynamic execution with sandboxed local execution and
-remote execution. Both may start the same action; Bazel keeps the first result
-and cancels the other. Local work respects the runner CPU count and half its
-RAM. The shared action cache remains enabled. TestRunner stays local because
-these suites use tools installed on the GitHub runner. Remote failures allow
-local fallback. Fleet jobs skip restoring and saving the multi-GB Actions disk
-cache; other jobs retain it.
+Rustc and TestRunner actions use Bazel dynamic execution with sandboxed local
+execution and remote execution. Both may start the same action; Bazel keeps the
+first result and cancels the other. Local work respects the runner CPU count and half its
+RAM. The shared action cache remains enabled. Tests carry Node, Rust Analyzer,
+and their compiler tools as declared runfiles.
+Each remote test reserves four worker CPU units and the Rust harness uses four
+threads. The local branch reserves the hosted runner CPU budget so suites do not
+compete with one another for local cores. Remote infrastructure failures allow
+local fallback; an actual test failure still fails the test. BuildBuddy events
+upload asynchronously, so a reporting outage does not fail a successful build.
+A terminated runner can leave an incomplete report. Fleet jobs skip restoring
+and saving the multi-GB Actions disk cache; other jobs retain it.
 
 ## Trust configuration
 

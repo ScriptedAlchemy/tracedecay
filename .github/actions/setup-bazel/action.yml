@@ -5,8 +5,8 @@ description: >
   master's entry, and their own saves would be multi-GB copies that ordinary
   master and PR runs cannot reuse. Jobs with the same configuration and
   runner image share a restore prefix; master callers save fresh
-  action outputs after the build, including failed tests. With `test-tools`,
-  also installs the host tools the test suites spawn.
+  action outputs after the build, including failed tests. Test runtimes are
+  declared Bazel inputs.
 
 inputs:
   cache-key:
@@ -18,14 +18,14 @@ inputs:
       prefix misses. Use when two jobs share rustc flags and runner image so
       Clippy can reuse Test Linux action outputs.
     default: ""
-  test-tools:
-    description: Also install rust-analyzer and node for `bazel test`.
-    default: "false"
   tailscale-client-id:
     description: OIDC client for trusted Linux CI; empty keeps the hosted-only build.
     default: ""
 
 outputs:
+  fleet-enabled:
+    description: Whether this job uses private workers and dynamic execution.
+    value: ${{ inputs.tailscale-client-id != '' }}
   disk-cache-path:
     description: Action-cache directory to save after the caller's build.
     value: ${{ steps.disk-cache-config.outputs.path }}
@@ -105,7 +105,7 @@ runs:
         tags: tag:bazel-ci
         ping: ubuntu-main
 
-    - name: Share compilation between the hosted runner and private workers
+    - name: Share compilation and tests with private workers
       if: inputs.tailscale-client-id != ''
       shell: bash
       run: |
@@ -114,9 +114,8 @@ runs:
           exit 1
         fi
         mkdir -p /tmp/zig-cache
-        # The generated workspace rc loads after setup-bazel's home rc.
-        # Tests need the hosted runner's installed tools and isolated services.
-        # Rust compilation can race sandboxed local work against remote work.
+        # Use the checkout's existing local rc import for fleet settings.
+        # Tests carry their tools in runfiles, so both branches use identical inputs.
         cat > .bazelrc.local <<'RC'
         build --config=rbe-linux
         build --remote_executor=grpc://ubuntu-main:50051
@@ -132,30 +131,9 @@ runs:
         build --dynamic_local_strategy=sandboxed
         build --dynamic_remote_strategy=remote
         build --strategy=Rustc=dynamic
-        build --strategy=TestRunner=local
+        build --strategy=TestRunner=dynamic
         build --bes_backend=grpc://ubuntu-main:1985
         build --bes_results_url=https://ubuntu-main.tail039078.ts.net/invocation/
         build --bes_timeout=30s
+        build --bes_upload_mode=fully_async
         RC
-
-    # Test dependencies, not conveniences: the LSP negotiation acceptance
-    # spawns rust-analyzer through the pinned toolchain, and host journeys
-    # run node.
-    # Bazel isolates HOME; retain the installed analyzer proxy and rustup
-    # toolchain locations explicitly for the test launcher.
-    - name: Install the pinned toolchain's components
-      if: inputs.test-tools == 'true'
-      shell: bash
-      run: |
-        rustup toolchain install
-        # Git Bash spells $HOME as /c/...; native Windows programs need C:\...
-        native() { if command -v cygpath >/dev/null; then cygpath -w "$1"; else echo "$1"; fi; }
-        {
-          echo "CARGO_HOME=$(native "${CARGO_HOME:-$HOME/.cargo}")"
-          echo "RUSTUP_HOME=$(native "${RUSTUP_HOME:-$HOME/.rustup}")"
-        } >> "$GITHUB_ENV"
-
-    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-      if: inputs.test-tools == 'true'
-      with:
-        node-version: 26

@@ -308,7 +308,6 @@ jobs:
         id: bazel
         with:
           cache-key: ci-macos-test
-          test-tools: "true"
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
@@ -489,7 +488,6 @@ jobs:
           tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
           # Prefer v2; keep legacy prefixes as restore fallbacks if still present.
           extra-restore-keys: ci-linux-test,ci-linux-workspace-test
-          test-tools: "true"
 
       # Root suites exercise latency-sensitive daemon journeys. Finish their
       # compilation before testing so compiler work cannot consume that budget.
@@ -498,7 +496,7 @@ jobs:
         run: bazel build --config=ci ${{ matrix.targets }}
 
       - name: Build and test this shard
-        run: bazel test --config=ci ${{ matrix.test_resources }} ${{ matrix.targets }}
+        run: bazel test --config=ci ${{ steps.bazel.outputs.fleet-enabled == 'true' && '--default_test_resources=cpu=HOST_CPUS' || matrix.test_resources }} ${{ matrix.targets }}
 
       - name: Upload failed test diagnostics
         if: failure()
@@ -553,7 +551,6 @@ jobs:
         id: bazel
         with:
           cache-key: ci-windows-test
-          test-tools: "true"
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
