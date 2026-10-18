@@ -239,21 +239,19 @@ impl DaemonInvocationService {
             .get::<RegisteredWorkRuntime>(project_root?)
             .await?;
         let identity = identity.clone();
-        // The port waits on the writer; keep that wait off native workers.
-        tracedecay_runtime_core::native_runtime::off_native_thread(async move {
-            let workflow =
-                tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
-                    &runtime.database,
-                )
-                .ok()?;
-            tracedecay_contracts::WorkflowRunStoragePort::fan_out_binding(
+        tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
+            &runtime.database,
+        )
+        .await
+        .ok()?
+        .read(move |workflow| {
+            Ok(tracedecay_contracts::WorkflowRunReadPort::fan_out_binding(
                 workflow.effects(),
                 &identity,
-            )
-            .ok()
-            .flatten()
+            ))
         })
         .await
+        .ok()?
         .ok()
         .flatten()
     }

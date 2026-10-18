@@ -39,6 +39,7 @@ pub use rmcp::{
     RmcpWorkDeliverySettlement, attach_stateless_request_context, await_dispatch_with_cancellation,
     opens_rmcp_session, project_server_retired_error, rmcp_response_result,
 };
+pub use session::MAX_PENDING_REQUESTS;
 pub use settlement::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest, DispatchFailure,
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, RetainedDispatchAuthority,

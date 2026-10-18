@@ -965,6 +965,8 @@ fn build_job_prompt(
 enum PreRunCommandError {
     #[error("command timed out after {JOB_COMMAND_TIMEOUT_SECS}s")]
     TimedOut,
+    #[error("command output exceeded the capture byte limit")]
+    OutputTooLarge,
     #[error("failed to spawn command: {0}")]
     Spawn(std::io::Error),
     #[error("command exited with {status}: {stderr}")]
@@ -979,7 +981,7 @@ impl PreRunCommandError {
         match self {
             Self::TimedOut => AgentTaskFailureClass::Timeout,
             Self::Spawn(_) => AgentTaskFailureClass::Unavailable,
-            Self::Exited { .. } => AgentTaskFailureClass::Permanent,
+            Self::Exited { .. } | Self::OutputTooLarge => AgentTaskFailureClass::Permanent,
         }
     }
 }
@@ -992,9 +994,8 @@ impl From<GitCommandError> for PreRunCommandError {
             | GitCommandError::Wait(source)
             | GitCommandError::WriteInput(source)
             | GitCommandError::ReadOutput { source, .. } => Self::Spawn(source),
-            error @ (GitCommandError::Cancelled | GitCommandError::OutputLimitExceeded { .. }) => {
-                Self::Spawn(std::io::Error::other(error))
-            }
+            GitCommandError::OutputLimitExceeded { .. } => Self::OutputTooLarge,
+            error @ GitCommandError::Cancelled => Self::Spawn(std::io::Error::other(error)),
         }
     }
 }
@@ -1031,8 +1032,8 @@ async fn run_pre_run_command(
     let bounds = GitCommandBounds {
         deadline: Instant::now() + timeout,
         cancel: Some(cancel.clone()),
-        max_stdout_bytes: usize::MAX,
-        max_stderr_bytes: usize::MAX,
+        max_stdout_bytes: JOB_COMMAND_OUTPUT_CAP_CHARS * 4,
+        max_stderr_bytes: JOB_COMMAND_OUTPUT_CAP_CHARS * 4,
     };
     // Scheduler shutdown drops the owning future. Cancelling makes the
     // supervisor kill the command, so it cannot keep the daemon cgroup alive.

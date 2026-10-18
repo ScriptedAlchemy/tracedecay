@@ -132,6 +132,11 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     // A restart follows the first daemon's store shutdown: its detached
     // session-runtime workers still write the profile database until joined.
     first_admin
+        .session_temporal_refresh_schedulers()
+        .shutdown()
+        .await;
+    first_admin.release_profile_session_refresh_services().await;
+    first_admin
         .prepare_memory_graph_reconciliation_shutdown()
         .await
         .unwrap()
@@ -139,7 +144,9 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         .await
         .unwrap();
     first_admin
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .unwrap();
     drop(first_admin);

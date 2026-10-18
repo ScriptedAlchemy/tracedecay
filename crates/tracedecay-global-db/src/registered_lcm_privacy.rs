@@ -73,11 +73,11 @@ impl From<LcmPrivacyRescanOutcomeV1> for tracedecay_privacy::PrivacyLcmRemediati
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LcmPrivacyRescanReceiptV1 {
     pub detector_revision: String,
-    /// Rows whose at-rest body was re-evaluated under the current detector.
+    /// Rows whose available body and provider metadata were re-evaluated.
     pub scanned_rows: u64,
     /// Rows the current detector left byte-identical.
     pub clean_rows: u64,
-    /// Rows re-ingested because the current detector changed their body or
+    /// Rows remediated because the current detector changed their body or
     /// provider metadata.
     pub remediated_rows: u64,
     /// Unreceipted rows re-protected through the canonical protect pass
@@ -159,32 +159,44 @@ impl RegisteredGlobalDb {
             };
             after_store_id = last.store_id;
             for row in page {
-                let (text, replaced_payload_ref) =
-                    match self.rescan_input(&storage_root, &row).await? {
-                        RescanInput::Body {
-                            text,
-                            replaced_payload_ref,
-                        } => (text, replaced_payload_ref),
-                        RescanInput::PayloadUnavailable => {
-                            unavailable_payload_rows += 1;
-                            continue;
-                        }
-                    };
-                scanned_rows += 1;
                 let provider_metadata = stored_provider_metadata(&row)?;
-                if !requires_remediation(&text, provider_metadata.as_deref())? {
-                    clean_rows += 1;
-                    continue;
+                let metadata_dirty = match provider_metadata.as_deref() {
+                    Some(metadata) => raw::provider_metadata_requires_resanitization(metadata)?,
+                    None => false,
+                };
+                scanned_rows += 1;
+                match self.rescan_input(&storage_root, &row).await? {
+                    RescanInput::Body {
+                        text,
+                        replaced_payload_ref,
+                    } => {
+                        if requires_remediation(&text, None)? {
+                            self.remediate_row(
+                                &storage_root,
+                                &row,
+                                text,
+                                provider_metadata,
+                                replaced_payload_ref,
+                            )
+                            .await?;
+                            remediated_rows += 1;
+                        } else if metadata_dirty {
+                            self.remediate_row_metadata(&row).await?;
+                            remediated_rows += 1;
+                        } else {
+                            clean_rows += 1;
+                        }
+                    }
+                    RescanInput::PayloadUnavailable => {
+                        unavailable_payload_rows += 1;
+                        if metadata_dirty {
+                            self.remediate_row_metadata(&row).await?;
+                            remediated_rows += 1;
+                        } else {
+                            clean_rows += 1;
+                        }
+                    }
                 }
-                self.remediate_row(
-                    &storage_root,
-                    &row,
-                    text,
-                    provider_metadata,
-                    replaced_payload_ref,
-                )
-                .await?;
-                remediated_rows += 1;
             }
         }
 
@@ -241,21 +253,18 @@ impl RegisteredGlobalDb {
 
     async fn load_rescan_page(&self, after_store_id: i64) -> Result<Vec<RescanRow>, LcmError> {
         let snapshot = self.lcm_read_snapshot().await?;
+        let columns = raw::stored_message_record_select_columns("r");
+        let sql = format!(
+            "SELECT r.store_id, {columns}, r.payload_ref
+             FROM lcm_raw_messages AS r
+             WHERE r.store_id > ?1 ORDER BY r.store_id LIMIT ?2"
+        );
         let mut rows = snapshot
-            .query(
-                "SELECT store_id, provider, message_id, session_id, role, ordinal, timestamp,
-                        content, storage_kind, payload_ref, metadata_json, kind, model,
-                        tool_names, source_path, source_offset
-                 FROM lcm_raw_messages
-                 WHERE store_id > ?1
-                 ORDER BY store_id
-                 LIMIT ?2",
-                params![after_store_id, RESCAN_PAGE_LIMIT],
-            )
+            .query(&sql, params![after_store_id, RESCAN_PAGE_LIMIT])
             .await?;
         let mut page = Vec::new();
         while let Some(row) = rows.next().await? {
-            let storage_kind_text: String = row.get(8)?;
+            let storage_kind_text: String = row.get(15)?;
             let storage_kind = LcmStorageKind::from_db(&storage_kind_text).ok_or_else(|| {
                 LcmError::Db(format!("invalid storage_kind: {storage_kind_text}"))
             })?;
@@ -265,17 +274,17 @@ impl RegisteredGlobalDb {
                 message_id: row.get(2)?,
                 session_id: row.get(3)?,
                 role: row.get(4)?,
-                ordinal: row.get(5)?,
-                timestamp: row.get(6)?,
-                content: row.get(7)?,
+                timestamp: row.get(5)?,
+                ordinal: row.get(6)?,
+                content: Some(raw::message_body_from_record_row(&row, 1)?),
+                kind: row.get(8)?,
+                model: row.get(9)?,
+                tool_names: row.get(10)?,
+                source_path: row.get(11)?,
+                source_offset: row.get(12)?,
+                metadata_json: row.get(13)?,
                 storage_kind,
-                payload_ref: row.get(9)?,
-                metadata_json: row.get(10)?,
-                kind: row.get(11)?,
-                model: row.get(12)?,
-                tool_names: row.get(13)?,
-                source_path: row.get(14)?,
-                source_offset: row.get(15)?,
+                payload_ref: row.get(20)?,
             });
         }
         Ok(page)
@@ -337,6 +346,29 @@ impl RegisteredGlobalDb {
         }
     }
 
+    /// Changes metadata without rewriting or deleting the independently receipted body.
+    async fn remediate_row_metadata(&self, row: &RescanRow) -> Result<(), LcmError> {
+        let stored = row.metadata_json.as_deref().ok_or_else(|| {
+            LcmError::Db("metadata remediation requires stored metadata".to_owned())
+        })?;
+        let sanitized = raw::resanitize_stored_provider_metadata_json(stored)?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let changed = transaction.execute(
+            "UPDATE lcm_raw_messages SET metadata_json = ?1 WHERE store_id = ?2 AND provider = ?3 AND message_id = ?4 AND metadata_json IS ?5",
+            params![sanitized, row.store_id, row.provider.as_str(), row.message_id.as_str(), stored],
+        ).await?;
+        if changed != 1 {
+            return Err(LcmError::Db(
+                "stored metadata changed during privacy remediation".to_owned(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Re-ingests one dirty row through the canonical staging and commit
     /// path and tombstones a replaced
     /// external payload so the superseded bytes leave the disk.
@@ -348,6 +380,44 @@ impl RegisteredGlobalDb {
         provider_metadata_json: Option<String>,
         replaced_payload_ref: Option<String>,
     ) -> Result<(), LcmError> {
+        let provider_metadata_json = if row.storage_kind == LcmStorageKind::External {
+            match provider_metadata_json {
+                Some(metadata) => {
+                    let mut value: serde_json::Value = serde_json::from_str(&metadata)
+                        .map_err(|error| LcmError::Db(error.to_string()))?;
+                    if let Some(object) = value.as_object_mut()
+                        && object
+                            .get("external_payload")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                        && row.payload_ref.as_deref().is_some_and(|expected| {
+                            object
+                                .get("payload_ref")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(expected)
+                        })
+                    {
+                        for key in [
+                            "external_payload",
+                            "payload_ref",
+                            "kind",
+                            "byte_count",
+                            "char_count",
+                            "sha256",
+                        ] {
+                            object.remove(key);
+                        }
+                    }
+                    Some(
+                        serde_json::to_string(&value)
+                            .map_err(|error| LcmError::Db(error.to_string()))?,
+                    )
+                }
+                None => None,
+            }
+        } else {
+            provider_metadata_json
+        };
         let record = SessionMessageRecord {
             provider: row.provider.clone(),
             message_id: row.message_id.clone(),
@@ -365,19 +435,21 @@ impl RegisteredGlobalDb {
         };
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
-        let staged = raw::stage_raw_message_with_payload_tracked(
+        let mut staged = raw::stage_raw_message_with_payload_tracked(
             storage_root,
             &record,
             &mut payload_rollback,
         )?;
+        staged.retain_provider_metadata()?;
+        let replaced_payload_ref = replaced_payload_ref
+            .filter(|old_ref| Some(old_ref.as_str()) != staged.external_payload_ref());
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
         raw::commit_staged_raw_message(&transaction, &record, staged).await?;
-        // An external row remediates only when its body changed, and payload
-        // refs are content-addressed, so the re-ingest can never reuse the
-        // replaced ref: the superseded payload is always safe to delete.
+        // Metadata-only remediation can reuse the content-addressed body.
+        // Tombstone only a payload no longer referenced by the replacement.
         if let Some(old_ref) = replaced_payload_ref.as_deref() {
             payload::delete_external_payload_in_transaction(
                 &transaction,
@@ -391,8 +463,9 @@ impl RegisteredGlobalDb {
             )
             .await?;
         }
-        transaction.commit().await?;
-        payload_rollback.disarm();
+        transaction
+            .commit_with_on_commit(move || payload_rollback.disarm())
+            .await?;
         if let Some(old_ref) = replaced_payload_ref.as_deref() {
             let transaction = self
                 .begin_write_transaction()
@@ -427,13 +500,9 @@ fn requires_remediation(text: &str, provider_metadata: Option<&str>) -> Result<b
 /// Recovers the provider metadata a re-ingest must carry: the stored metadata
 /// without the `ingest_protection` envelope the ingest path re-derives.
 ///
-/// Whole-message external rows never persisted provider metadata (their
-/// stored metadata is the payload envelope ingest builds fresh), so they
-/// re-ingest with none, exactly what ingest produced the first time.
+/// Retention offloads preserve provider metadata even when the body becomes
+/// external. Its privacy policy must therefore be independent of body storage.
 fn stored_provider_metadata(row: &RescanRow) -> Result<Option<String>, LcmError> {
-    if row.storage_kind == LcmStorageKind::External {
-        return Ok(None);
-    }
     let Some(metadata_json) = row.metadata_json.as_deref() else {
         return Ok(None);
     };

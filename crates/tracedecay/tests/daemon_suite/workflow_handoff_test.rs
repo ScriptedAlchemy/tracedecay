@@ -130,6 +130,7 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
         let runtime = open_daemon_runtime(&profile_root, &project_root).await;
         let authority = runtime
             .project_workflow_storage_for_test()
+            .await
             .expect("registered workflow authority must be mounted for a project runtime");
 
         WorkflowDefinitionAuthorityPort::insert(&authority, &definition).unwrap();
@@ -162,6 +163,7 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
     let restarted = open_daemon_runtime(&profile_root, &project_root).await;
     let authority = restarted
         .project_workflow_storage_for_test()
+        .await
         .expect("registered workflow authority must remount after a daemon restart");
 
     assert_eq!(

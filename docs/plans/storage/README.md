@@ -708,7 +708,24 @@ changes a file that holds memory.
     storage holds no `ExactSqlHandle`. Effects outside storage (Git, providers,
     other stores) stay outside the job.
   - Shipped so far: handoff grants (#4133), pause and resume of a run (#4139),
-    and the git-index store, whose actor thread is deleted (#4140).
+    the git-index store, whose actor thread is deleted (#4140), placement and
+    the leaf Work ports (#4142), native integration (#4143), remote replay with
+    its actor thread deleted (#4157), the attempt chain and product mutations
+    (#4158), and Workflow (#4235).
+  - Workflow slice (2026-10-17). The Workflow ports are implemented on the Work
+    job storage itself, the design's one `JournalTx`, not on a second job type.
+    Effects, run-journal appends, artifact persists and census writes are writer
+    jobs; a workflow effect (reserve, claim, apply, commit, reconcile) is one
+    job, so a failure after the reservation now rolls the reservation back too.
+    Every Work and Workflow dispatch now runs as a detached native task that the
+    request awaits (`off_native_worker` is deleted), so a caller that stops
+    waiting abandons only the wait and settlement outlives the request (#3711).
+    The attempt task is an ordinary native task. Sync reads run through a
+    `read` helper on the blocking pool, which step 7 replaces with a reader
+    lane. Evidence retrieval stays whole on the blocking pool, because its
+    contracts service interleaves sync Work reads with awaited session-evidence
+    reads. Proof: a fan-out run driven from a native worker adds no native wait
+    at any Work or Workflow storage call site.
   - `transact` has no operation-id ledger yet. The ledger is new schema on stores
     with no migration path, so it ships with `journal.db` in step 8. Until then
     each domain keeps its own idempotency.
@@ -760,6 +777,30 @@ changes a file that holds memory.
   `global.db` rows) or a store the daemon does not mount (orphan collection's
   memory check), and neither holds a read slot on a live file. It goes with step
   8, where a project directory describes itself and memory has its own file.
+- Step 7, shared pool (2026-10-17, #4242). Every
+  attached file's writer and readers are tasks on one fixed pool of
+  `tracedecay-store-N` threads, so the thread count no longer grows with the file
+  count. N defaults to the host's available parallelism clamped to 6..16, not the
+  flat 6 of section 4: with 6, the `//crates/tracedecay:unit_test` binary, which
+  opens many stores at once in one process, timed out cold opens in 3 of 5 runs
+  and ran 24% slower than master; with 16 it passed 3 of 3 and ran faster. A task
+  holds a pool thread only while it runs SQL; idle waits, batch dwell, snapshot
+  polls, busy-begin and WAL-recovery retries are awaits on the pool timer. A synchronous store wait issued from a pool thread
+  (writer start, reply waits, reader acquire and snapshot calls, task join, drain)
+  refuses with the existing unavailable errors in every build profile instead of
+  parking. FairQueue, batching, the ledger, the checkpoint controller and the
+  step 6 fence are unchanged. Deviations, each with the slice that closes it:
+  - The override is `TRACEDECAY_STORE_THREADS`, not daemon configuration; it moves to
+    `StorageConfig` with the executor's public surface.
+  - No thread is reserved for foreground classes yet. Today's files mix classes
+    (Work shares `sessions.db` with observation ingest), so a reservation by file
+    has nothing to key on until step 8. Until then N statements running long at
+    once delay every other store. Measured under host load at N=6, three runs
+    each: `mcp_suite` 193 to 242 s on this branch against 224 to 227 s on master,
+    `daemon_suite` 92 to 123 s against 97 to 124 s.
+  - Fenced TRUNCATE on lanes, idle close, the unlink probe and `ProfileLost` are the
+    next slices of this step.
+  Proof: 64 attached stores add exactly N threads, all of them pool threads.
 - Step 8, repository identity (2026-10-17, branch `feat/storage-repository-identity`).
   A second full clone, a shallow clone, and a checkout after a merge of unrelated
   histories open the project that first enrolled the repository, with no `init`.
@@ -832,7 +873,8 @@ changes a file that holds memory.
 
 ## Next implementation step
 
-The rest of step 5, slice by slice: placement and the leaf Work ports, the
-native-integration and remote-replay actor threads, then the attempt chain together
-with run control and Workflow. After those, delete `off_native_thread` for Work and
-the native wait counters.
+The rest of step 5: the native writer-wait counter becomes a refusal of any
+synchronous writer wait on a native thread and both counters are deleted; then
+the interactive exact-SQL transactions (56 direct sites and about 190 behind the
+runtime-core async `Transaction`) become jobs. Step 7's first slice, writers and
+readers as tasks on one fixed pool, is in progress in parallel.

@@ -377,3 +377,168 @@ async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
     assert_eq!(repeat.remediated_rows, 0);
     assert_eq!(repeat.protected_rows, 0);
 }
+
+#[asupersync::test]
+async fn rescan_hydrates_canonical_inline_bodies() {
+    let harness = RegisteredGlobalDbHarness::open("privacy-canonical-body").await;
+    let storage_root = harness
+        .registered
+        .db_path()
+        .parent()
+        .expect("store root")
+        .to_path_buf();
+    let session_id = "canonical-body-session";
+    seed_session(&harness, session_id).await;
+    let text = "ordinary captured output\n".repeat(200);
+    harness
+        .registered
+        .lcm_ingest_raw_message(
+            &storage_root,
+            &SessionMessageRecord {
+                provider: "cursor".to_owned(),
+                message_id: "large".to_owned(),
+                session_id: session_id.to_owned(),
+                role: "user".to_owned(),
+                timestamp: Some(1),
+                ordinal: 0,
+                text: text.clone(),
+                kind: None,
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: None,
+            },
+        )
+        .await
+        .expect("ingest canonical body");
+    let outcome = harness
+        .registered
+        .lcm_privacy_rescan_raw_messages()
+        .await
+        .expect("rescan valid canonical body");
+    let LcmPrivacyRescanOutcomeV1::Completed(receipt) = outcome else {
+        panic!("first scan must run")
+    };
+    assert_eq!(receipt.scanned_rows, 1);
+    assert_eq!(receipt.clean_rows, 1);
+    let snapshot = harness
+        .registered
+        .lcm_read_snapshot()
+        .await
+        .expect("snapshot");
+    let message =
+        tracedecay_lcm::raw::load_raw_message_by_identity(&snapshot, "cursor", session_id, "large")
+            .await
+            .expect("hydrate message")
+            .expect("message present");
+    assert_eq!(message.content, text);
+}
+
+#[asupersync::test]
+async fn rescan_remediates_external_metadata_even_when_body_is_unavailable() {
+    for unavailable in [false, true] {
+        let harness = RegisteredGlobalDbHarness::open("privacy-external-metadata").await;
+        let root = harness
+            .registered
+            .db_path()
+            .parent()
+            .expect("root")
+            .to_path_buf();
+        seed_session(&harness, "metadata-session").await;
+        let body = "clean historical external body";
+        let reference =
+            seed_legacy_external_row(&harness, "metadata-session", "external", body).await;
+        let path = payload::payload_dir(&root).join(&reference);
+        let before = std::fs::read(&path).expect("payload");
+        let writer = harness.registered.writer_connection().expect("writer");
+        writer.execute("UPDATE lcm_raw_messages SET metadata_json = json_set(metadata_json, '$.provider_note', ?1) WHERE message_id = 'external'", params![format!("api_key={}", secret())]).await.expect("legacy metadata");
+        if unavailable {
+            std::fs::remove_file(&path).expect("offload fixture");
+        }
+        let result = harness
+            .registered
+            .lcm_privacy_rescan_raw_messages()
+            .await
+            .expect("rescan metadata");
+        let LcmPrivacyRescanOutcomeV1::Completed(receipt) = result else {
+            panic!("first scan")
+        };
+        assert_eq!(receipt.scanned_rows, 1);
+        assert_eq!(receipt.remediated_rows, 1);
+        assert_eq!(receipt.unavailable_payload_rows, u64::from(unavailable));
+        let snapshot = harness
+            .registered
+            .lcm_read_snapshot()
+            .await
+            .expect("snapshot");
+        let mut rows = snapshot.query("SELECT metadata_json, payload_ref FROM lcm_raw_messages WHERE message_id = 'external'", ()).await.expect("query");
+        let row = rows.next().await.expect("row").expect("present");
+        let metadata: String = row.get(0).expect("metadata");
+        assert!(!metadata.contains(&secret()));
+        let parsed: Value = serde_json::from_str(&metadata).expect("JSON");
+        assert_eq!(
+            parsed["ingest_protection"]["sanitization_receipt"],
+            json!(legacy_receipt(body))
+        );
+        assert_eq!(row.get::<String>(1).expect("reference"), reference);
+        if unavailable {
+            assert!(!path.exists());
+        } else {
+            assert_eq!(std::fs::read(&path).expect("payload retained"), before);
+        }
+    }
+}
+
+#[asupersync::test]
+async fn rescan_keeps_provider_metadata_when_reexternalizing_a_dirty_body() {
+    let harness = RegisteredGlobalDbHarness::open("privacy-external-provider-metadata").await;
+    seed_session(&harness, "provider-session").await;
+    let mut body = (0..20_000)
+        .map(|line| format!("captured tool output line {line}\n"))
+        .collect::<String>();
+    body.push_str(&format!("leaked api_key={}\n", secret()));
+    let old_reference =
+        seed_legacy_external_row(&harness, "provider-session", "offloaded", &body).await;
+    let writer = harness.registered.writer_connection().expect("writer");
+    writer
+        .execute(
+            "UPDATE lcm_raw_messages SET role = 'tool', metadata_json = json_set(metadata_json, '$.provider_note', 'reviewed') WHERE message_id = 'offloaded'",
+            (),
+        )
+        .await
+        .expect("provider metadata");
+
+    let outcome = harness
+        .registered
+        .lcm_privacy_rescan_raw_messages()
+        .await
+        .expect("rescan dirty external body");
+    let LcmPrivacyRescanOutcomeV1::Completed(receipt) = outcome else {
+        panic!("first scan must run")
+    };
+    assert_eq!(receipt.remediated_rows, 1);
+
+    let snapshot = harness
+        .registered
+        .lcm_read_snapshot()
+        .await
+        .expect("snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT metadata_json, payload_ref, storage_kind FROM lcm_raw_messages WHERE message_id = 'offloaded'",
+            (),
+        )
+        .await
+        .expect("query");
+    let row = rows.next().await.expect("row").expect("present");
+    let metadata: Value =
+        serde_json::from_str(&row.get::<String>(0).expect("metadata")).expect("JSON");
+    let reference: String = row.get(1).expect("reference");
+    assert_eq!(row.get::<String>(2).expect("storage kind"), "external");
+    assert_ne!(reference, old_reference);
+    assert_eq!(metadata["provider_note"], json!("reviewed"));
+    assert_eq!(metadata["external_payload"], json!(true));
+    assert_eq!(metadata["payload_ref"], json!(reference));
+    assert_eq!(metadata["ingest_protection"]["redacted"], json!(true));
+}
