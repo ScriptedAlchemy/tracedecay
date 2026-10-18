@@ -298,9 +298,14 @@ async fn next_ready_projection_head(
     ))
 }
 
+/// Whether a later drain still has work. A row parked on a terminal collision
+/// is never drained again, so it must not keep every pass reporting more work.
 async fn projection_queue_has_items(conn: &impl QueryExecutor) -> ProjectionStoreResult<bool> {
     let mut rows = conn
-        .query("SELECT 1 FROM projection_queue LIMIT 1", ())
+        .query(
+            "SELECT 1 FROM projection_queue WHERE next_retry_at_micros < ?1 LIMIT 1",
+            params![PROJECTION_TERMINAL_RETRY_MICROS],
+        )
         .await
         .map_err(|error| storage("probe projection queue", error))?;
     Ok(rows

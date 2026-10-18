@@ -652,6 +652,15 @@ async fn genuine_session_collision_is_recorded_and_later_sessions_project() {
         store.next_queued_observation().await.unwrap().is_none(),
         "the terminal collision must not stay at the head of the queue"
     );
+    let window = store
+        .project_queued_observations(8)
+        .await
+        .unwrap()
+        .expect("the store drains in windows");
+    assert!(
+        window.items.is_empty() && !window.has_more,
+        "a parked terminal collision is not pending work, or every pass reports backpressure"
+    );
 }
 
 fn session_fact_with_transcript(cwd: &str, transcript_path: &str) -> CanonicalObservationFactV1 {

@@ -218,6 +218,23 @@ pub(super) async fn ingest_user_provider(
     provider: SessionProvider,
     registered_roots: Vec<PathBuf>,
 ) -> IngestPassOutcome {
+    let outcome = run_user_provider_pass(runtime, home, provider, registered_roots).await;
+    assert!(
+        outcome.failures.is_empty(),
+        "user {provider:?} pass failed: {:?}",
+        outcome.failures
+    );
+    outcome
+}
+
+/// One production user-scope pass, whatever it reports. A bounded pass may
+/// report backpressure while discovery still has ground to cover.
+pub(super) async fn run_user_provider_pass(
+    runtime: &HostAdmissionTestRuntimeV1,
+    home: &Path,
+    provider: SessionProvider,
+    registered_roots: Vec<PathBuf>,
+) -> IngestPassOutcome {
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("fixture mounts its profile session store");
@@ -236,11 +253,6 @@ pub(super) async fn ingest_user_provider(
         ),
     )
     .await;
-    assert!(
-        outcome.failures.is_empty(),
-        "user {provider:?} pass failed: {:?}",
-        outcome.failures
-    );
     outcome
 }
 
