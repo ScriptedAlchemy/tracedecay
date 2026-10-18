@@ -16,7 +16,6 @@
  * last real reading on screen and reports the failure beside it.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { z } from "zod";
 
 import { fetchPayloadWrite, type PayloadResult, type PayloadWriteResult } from "./payload.ts";
 import { usePayload } from "./usePayload.ts";
@@ -39,15 +38,20 @@ import {
   AutomationSkillsPayloadV1Schema,
   ApplicationProblemEnvelopeSchema,
   FactStoreCurateResultV1Schema,
-  ResolvedScopeSchema,
+  ResultContractRefSchema,
   type ApplicationProblemEnvelope,
   type AutomaticFactReceipt,
   type AutomationRunRowV1,
   type AutomationRunsPayloadV1,
   type AutomationSchedulerStatusV1,
   type FactStoreCurateResultV1,
-  type ResolvedScope,
 } from "../../contracts/generated.ts";
+import {
+  decodeApplicationHttpProblem,
+  decodeApplicationHttpSuccess,
+  factStoreCurateProblemMatches,
+  factStoreCurateReceiptMatches,
+} from "../../contracts/application.ts";
 
 // Re-export the generated validator for the query-layer tests and consumers.
 // The generated contract remains the sole schema authority; this is only a
@@ -269,59 +273,11 @@ export function useAutomationFactReceipts() {
   );
 }
 
-const FACT_STORE_CURATE_HTTP_BINDING_ID = "binding.http.fact_store_curate.v1";
-const FACT_STORE_CURATE_RESULT_SCHEMA_ID =
-  "schema.application.retained.fact-store-curate.result";
-const FACT_STORE_CURATE_RESULT_SCHEMA_REVISION = 1;
-const CanonicalApplicationIdentifierSchema = z.string().refine(
-  canonicalApplicationIdentifier,
-);
-const CuratorResolvedScopeSchema = ResolvedScopeSchema.extend({
-  project_id: CanonicalApplicationIdentifierSchema,
-  repository_id: CanonicalApplicationIdentifierSchema,
-  worktree_id: CanonicalApplicationIdentifierSchema,
-  reference: CanonicalApplicationIdentifierSchema.nullable(),
-  scope_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-});
-
-export const AutomaticCuratorResponseSchema = z
-  .object({
-    kind: z.literal("success"),
-    value: z.object({
-      binding_id: z.literal(FACT_STORE_CURATE_HTTP_BINDING_ID),
-      contract: z
-        .object({
-          schema_id: z.literal(FACT_STORE_CURATE_RESULT_SCHEMA_ID),
-          schema_revision: z.literal(FACT_STORE_CURATE_RESULT_SCHEMA_REVISION),
-        })
-        .strict(),
-      request_id: CanonicalApplicationIdentifierSchema,
-      scope: CuratorResolvedScopeSchema,
-      outcome: z.object({
-        outcome: z.literal("effect"),
-        value: z.object({ payload: FactStoreCurateResultV1Schema }),
-      }),
-    }),
-  })
-  .strict();
-
-const ApplicationProblemResponseSchema = z
-  .object({
-    kind: z.literal("problem"),
-    value: ApplicationProblemEnvelopeSchema.extend({
-      binding_id: z.literal(FACT_STORE_CURATE_HTTP_BINDING_ID),
-    }),
-  })
-  .strict();
-
-const CuratorApplicationProblemClaimSchema = z.object({
-  kind: z.literal("problem"),
-  value: z.object({
-    problem: z.object({
-      kind: z.enum(["conflict", "partial_effect", "reset_required"]),
-    }),
-  }),
-});
+const AUTOMATIC_CURATOR_OPERATION = "operation.application.fact_store_curate";
+const AUTOMATIC_CURATOR_REQUEST = {
+  fact_review_limit: 24,
+  min_confidence_millionths: 720_000,
+} as const;
 
 /** The admitted run; its terminal is the run-ledger row for `run_id`. */
 export type AutomaticCuratorReceipt = FactStoreCurateResultV1;
@@ -356,10 +312,7 @@ export async function runAutomaticCurator(
     response = await fetch(url, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
-      body: JSON.stringify({
-        fact_review_limit: 24,
-        min_confidence_millionths: 720_000,
-      }),
+      body: JSON.stringify(AUTOMATIC_CURATOR_REQUEST),
     });
   } catch {
     return { outcome: "offline", detail: "the daemon could not be reached" };
@@ -375,61 +328,64 @@ export async function runAutomaticCurator(
     };
   }
 
+  const envelope = typeof body === "object" && body !== null && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : undefined;
   if (response.ok) {
-    const result = AutomaticCuratorResponseSchema.safeParse(body);
-    if (result.success) {
-      const receipt = result.data.value.outcome.value.payload;
-      if (
-        receipt.run_id === result.data.value.request_id &&
-        (await automaticCuratorScopeMatchesEndpoint(result.data.value.scope)) &&
-        (await automaticCuratorReceiptMatchesEndpoint(receipt))
-      ) {
-        return { outcome: "started", receipt };
+    try {
+      if (envelope?.kind !== "success" || Object.keys(envelope).length !== 2) {
+        throw new TypeError("the daemon returned an unknown HTTP success envelope");
       }
+      const decoded = decodeApplicationHttpSuccess(
+        AUTOMATIC_CURATOR_OPERATION,
+        envelope.value,
+        (value) => FactStoreCurateResultV1Schema.parse(value),
+      );
+      ResultContractRefSchema.parse(decoded.contract);
+      if (
+        decoded.outcome.outcome !== "effect" || decoded.outcome.value.payload === null ||
+        !await factStoreCurateReceiptMatches(AUTOMATIC_CURATOR_REQUEST, decoded)
+      ) {
+        throw new TypeError("automatic curation receipt invariants are invalid");
+      }
+      return { outcome: "started", receipt: decoded.outcome.value.payload };
+    } catch {
+      return {
+        outcome: "unsupported_schema",
+        detail: "the automatic curator result does not match this build",
+      };
     }
-    return {
-      outcome: "unsupported_schema",
-      detail: "the automatic curator result does not match this build",
-    };
   }
 
-  const problemResponse = ApplicationProblemResponseSchema.safeParse(body);
-  if (problemResponse.success) {
-    const problem = problemResponse.data.value;
-    if (
-      response.status === 409 &&
-      await automaticCuratorProblemMatchesEndpoint(problem, "partial_effect")
-    ) {
-      return { outcome: "partial_effect", problem };
-    }
-    if (
-      response.status === 503 &&
-      await automaticCuratorProblemMatchesEndpoint(problem, "reset_required")
-    ) {
-      return { outcome: "reset_required", problem };
-    }
-    if (
-      response.status === 409 &&
-      await automaticCuratorProblemMatchesEndpoint(problem, "conflict")
-    ) {
-      return { outcome: "conflicting", detail: "the automation request conflicted" };
-    }
-    if (
-      problem.problem.kind === "conflict" ||
-      problem.problem.kind === "partial_effect" ||
-      problem.problem.kind === "reset_required"
-    ) {
+  if (envelope?.kind === "problem") {
+    try {
+      if (Object.keys(envelope).length !== 2) {
+        throw new TypeError("the daemon returned an unknown HTTP problem envelope");
+      }
+      const decoded = decodeApplicationHttpProblem(
+        AUTOMATIC_CURATOR_OPERATION,
+        response.status,
+        envelope.value,
+      );
+      if (!await factStoreCurateProblemMatches(decoded)) {
+        throw new TypeError("automatic curation problem invariants are invalid");
+      }
+      const { binding_id: _bindingId, ...applicationProblem } = decoded;
+      const problem = ApplicationProblemEnvelopeSchema.parse(applicationProblem);
+      switch (problem.problem.kind) {
+        case "partial_effect":
+          return { outcome: "partial_effect", problem };
+        case "reset_required":
+          return { outcome: "reset_required", problem };
+        case "conflict":
+          return { outcome: "conflicting", detail: "the automation request conflicted" };
+      }
+    } catch {
       return {
         outcome: "unsupported_schema",
         detail: "the application problem does not match fact_store_curate",
       };
     }
-  }
-  if (CuratorApplicationProblemClaimSchema.safeParse(body).success) {
-    return {
-      outcome: "unsupported_schema",
-      detail: "the application problem does not match fact_store_curate",
-    };
   }
 
   switch (response.status) {
@@ -454,97 +410,6 @@ export async function runAutomaticCurator(
     default:
       return { outcome: "error", detail: `the automatic run failed with HTTP ${response.status}` };
   }
-}
-
-async function automaticCuratorReceiptMatchesEndpoint(
-  receipt: FactStoreCurateResultV1,
-): Promise<boolean> {
-  return (
-    receipt.task === "memory_curator" &&
-    receipt.state === "started" &&
-    receipt.request_digest === await canonicalSha256([
-      "tracedecay.automation-run.request-identity.v1",
-      {
-        kind: "memory_curator",
-        options: {
-          fact_review_limit: 24,
-          min_confidence_millionths: 720_000,
-        },
-      },
-    ])
-  );
-}
-
-async function automaticCuratorScopeMatchesEndpoint(
-  scope: ResolvedScope,
-): Promise<boolean> {
-  const parsed = CuratorResolvedScopeSchema.safeParse(scope);
-  if (!parsed.success) return false;
-  const canonical = parsed.data;
-  return canonical.scope_digest === await canonicalSha256([
-    "tracedecay.application.scope.v1",
-    canonical.project_id,
-    canonical.repository_id,
-    canonical.worktree_id,
-    canonical.reference,
-  ]);
-}
-
-const FACT_STORE_CURATE_USE_CASE_ID =
-  "use-case.application.retained.fact-store-curate";
-
-async function automaticCuratorProblemMatchesEndpoint(
-  terminal: ApplicationProblemEnvelope,
-  kind: "conflict" | "partial_effect" | "reset_required",
-): Promise<boolean> {
-  if (
-    terminal.contract.schema_id !== FACT_STORE_CURATE_RESULT_SCHEMA_ID ||
-    terminal.contract.schema_revision !== FACT_STORE_CURATE_RESULT_SCHEMA_REVISION ||
-    !canonicalApplicationIdentifier(terminal.request_id) ||
-    terminal.request_id !== terminal.problem.request_id ||
-    terminal.problem.kind !== kind
-  ) {
-    return false;
-  }
-  const receipt = terminal.problem.committed_receipt;
-  if (kind === "conflict" || kind === "reset_required") return receipt === null;
-  return (
-    receipt !== null &&
-    receipt.operation === FACT_STORE_CURATE_USE_CASE_ID &&
-    receipt.request_id === terminal.request_id &&
-    receipt.outcome === "partial" &&
-    receipt.committed_state !== null &&
-    (await automaticCuratorScopeMatchesEndpoint(receipt.scope))
-  );
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value)
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-async function canonicalSha256(value: unknown): Promise<string | null> {
-  try {
-    const bytes = new TextEncoder().encode(canonicalJson(value));
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
-      byte.toString(16).padStart(2, "0")).join("")}`;
-  } catch {
-    return null;
-  }
-}
-
-function canonicalApplicationIdentifier(value: string): boolean {
-  return value.length > 0 &&
-    value.trim() === value &&
-    new TextEncoder().encode(value).length <= 512 &&
-    !/\p{Cc}/u.test(value);
 }
 
 export function useAutomaticCurator() {

@@ -7,7 +7,6 @@ import {
   type ResponseFor,
   type ResultFor,
 } from "./operations";
-import { factStoreCurateReceiptMatches } from "./automation-receipt";
 import {
   applyHttpRequestControls,
   type OperationRequestOptions,
@@ -16,6 +15,7 @@ import {
 export type { OperationRequestOptions, PageOptions } from "./request-control";
 import {
   applicationProblemStatusMatches,
+  factStoreCurateReceiptMatches,
   isHttpProblemEnvelope,
   type ApplicationProblemRecord,
   type HttpProblemEnvelope,
