@@ -679,6 +679,7 @@ impl_send_projection_derive!(DatabaseWriteTransaction<'_>);
 impl_send_projection_derive!(DatabaseEngineReadConnection);
 impl_send_projection_derive!(DatabaseEngineReadSnapshot);
 impl_send_projection_derive!(crate::registered::RegisteredGlobalDbWriteTransaction<'_>);
+impl_send_projection_derive!(crate::registered::RegisteredGlobalDbWriteTx<'_, '_>);
 
 /// Objective used for goal-state dedupe: prefer native `/objective` (Codex),
 /// else the already-extracted `content_text`.
