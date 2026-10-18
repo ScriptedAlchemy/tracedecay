@@ -1,19 +1,35 @@
-/** Sentinel for a body that was not JSON at all, kept distinct from a body
- * that decoded to `null`, the second is a legal body that must still fail
- * the caller's schema rather than being mistaken for a decode failure. */
+/** Distinguish invalid JSON from the valid JSON value `null`. */
 export const UNDECODABLE: unique symbol = Symbol('undecodable');
 
-/**
- * Decode a response body as JSON without laundering a cancellation.
- *
- * `response.json()` rejects identically for a malformed body and for a body
- * whose consumption was aborted after the headers arrived. Only the second is
- * the caller's own doing, a scope change or an SSE invalidation abandoning a
- * read, and it must stay a rejection: React Query recognises the abort and
- * leaves the cache entry untouched, whereas a fabricated `UNDECODABLE` would
- * be written into the abandoned scope as a schema mismatch nobody observed.
- * Every fetch seam therefore threads its request signal through here.
- */
+export type JsonResponse =
+  | { outcome: 'response'; response: Response }
+  | { outcome: 'offline' }
+  | { outcome: 'unauthorized' }
+  | { outcome: 'denied' };
+
+/** Shared request/authentication policy. Domain envelopes remain the caller's
+ * authority; a non-2xx response may still carry a useful typed reading. */
+export async function fetchJsonResponse(
+  url: string,
+  init?: RequestInit,
+): Promise<JsonResponse> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has('accept')) headers.set('accept', 'application/json');
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, headers });
+  } catch (err) {
+    // Cancellation is not evidence that the daemon is offline.
+    if (init?.signal?.aborted === true || isAbortError(err)) throw err;
+    return { outcome: 'offline' };
+  }
+  if (response.status === 401) return { outcome: 'unauthorized' };
+  if (response.status === 403) return { outcome: 'denied' };
+  return { outcome: 'response', response };
+}
+
+/** Decode JSON while preserving cancellation during body consumption. A
+ * cancelled query must not cache an invented schema or connectivity failure. */
 export async function decodeJsonBody(
   response: Response,
   signal: AbortSignal | null | undefined,
