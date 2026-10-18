@@ -731,7 +731,7 @@ changes a file that holds memory.
     each domain keeps its own idempotency.
   - Reads use `query_async` and preview/apply use `on_blocking_pool`. Both are
     blocking-pool hops that step 7 replaces.
-- Step 5, job transactions (2026-10-18, branch `refactor/storage-job-transactions`).
+- Step 5, job transactions (2026-10-18, #4244).
   The interactive transactions that remain become writer jobs without rewriting
   the async helpers that run inside them. `ExactSqlHandle::transact_async` takes an
   async body and polls it once, with a no-op waker, inside the job. The body's
