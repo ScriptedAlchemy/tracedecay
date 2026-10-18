@@ -44,6 +44,14 @@ py_test(
 )
 
 py_test(
+    name = "build_eval_binary_test",
+    size = "small",
+    srcs = ["test-build-eval-binary.py"],
+    data = ["build-eval-binary.sh"],
+    main = "test-build-eval-binary.py",
+)
+
+py_test(
     name = "ambient_tokio_check_test",
     size = "small",
     srcs = [

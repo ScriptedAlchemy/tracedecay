@@ -71,6 +71,33 @@ class HermesHomeSelectionTest(unittest.TestCase):
         self.assertEqual(run_mock.call_args.kwargs["env"], env.env)
 
 
+class BinaryResolutionTest(unittest.TestCase):
+    def test_explicit_binary_is_used_and_must_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "tracedecay"
+            binary.write_text("#!/bin/sh\necho tracedecay 0.0.0\n")
+            binary.chmod(0o755)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(
+                    run_real_model.resolve_tracedecay_bin(binary), str(binary)
+                )
+                with self.assertRaises(SystemExit):
+                    run_real_model.resolve_tracedecay_bin(Path(tmp) / "missing")
+
+    def test_default_never_falls_back_to_a_prebuilt_or_path_binary(self):
+        failed = subprocess.CompletedProcess([], 2, stdout="")
+        with tempfile.TemporaryDirectory() as tmp:
+            path_binary = Path(tmp) / "tracedecay"
+            path_binary.write_text("#!/bin/sh\n")
+            path_binary.chmod(0o755)
+            with (
+                mock.patch.dict("os.environ", {"PATH": tmp}),
+                mock.patch.object(run_real_model.subprocess, "run", return_value=failed),
+                self.assertRaises(SystemExit),
+            ):
+                run_real_model.resolve_tracedecay_bin(None)
+
+
 class CursorComposerSelectionTest(unittest.TestCase):
     def test_cursor_driver_loads_the_installed_plugin_in_composer(self):
         env = run_real_model.create_eval_environment("cursor-composer")
