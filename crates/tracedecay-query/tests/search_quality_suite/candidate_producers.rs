@@ -2685,12 +2685,13 @@ fn reader_refuses_historical_v10_writer_artifact_as_incompatible() {
 
     let directory = tempfile::tempdir().expect("private v10 reopen dir");
     let artifact_path = directory.path().join("lexical-artifact-v10.sqlite");
-    std::fs::copy(checked_in, &artifact_path).expect("copy historical v10 fixture");
+    let bytes = std::fs::read(checked_in).expect("read historical v10 fixture");
+    // Bazel runfiles are read-only; create an owned file without copying their mode.
+    std::fs::write(&artifact_path, &bytes).expect("write historical v10 fixture");
     drop(
         tracedecay_private_fs::make_private_file(&artifact_path)
             .expect("restore private-file protection for content-addressed open"),
     );
-    let bytes = std::fs::read(&artifact_path).expect("read historical v10 fixture");
     let file_size_bytes = u64::try_from(bytes.len()).expect("v10 fixture length");
     let digest = ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
         .expect("v10 fixture digest");
