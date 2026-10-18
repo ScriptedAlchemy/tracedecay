@@ -855,9 +855,19 @@ changes a file that holds memory.
   existing creation rules. The daemon pins `profile-identity.json` by inode at
   start and checks it every second from its accept loop; once the file is gone
   or replaced it logs `daemon_shutdown outcome=profile_lost` and leaves through
-  the ordinary graceful shutdown, which closes every store. Deviations:
+  the ordinary graceful shutdown, which closes every store, then exits with
+  status 66 (`EX_NOINPUT`). The launchd unit restarts only after a failed exit
+  (`SuccessfulExit=false`), so a zero exit would leave the daemon down; systemd
+  uses `Restart=always` and restarts on either. Evicting a lost runtime also
+  clears the profile pins recorded on its key, so a reopened key does not count
+  them. Deviations:
   - Read-only attachments have no writer and so no probe. Their file stays open
     until the store closes.
+  - A lost attachment drops its reader pool at once, and the registry drops the
+    runtime without waiting for the reader workers to exit. The pool's pinned
+    file descriptor lives in its shared state, so it also stays open until the
+    last reader lease drops. Retaining the pool until it quiesces needs that
+    descriptor released on loss; it is a follow-up.
   - Owners that hold a lease on the lost runtime (mounted project and profile
     owners) keep it, so they answer `FileLost` until a restart remounts them.
     #4130's reset-required record therefore stays, with its reason updated:
