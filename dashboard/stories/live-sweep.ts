@@ -14,7 +14,11 @@
 import { chromium } from '@playwright/test';
 
 const BASE = process.env['SWEEP_BASE_URL'] ?? 'http://127.0.0.1:5199';
-const ROUTES =['brain','explorer','loom','sessions','agents','code','knowledge','delivery','automations','observatory','costs','settings'];
+const ROUTES = [
+  'memory', 'memory/explorer', 'memory/loom', 'memory/sessions', 'memory/agents', 'memory/knowledge',
+  'code', 'code/delivery', 'work', 'work/workflows',
+  'operations', 'operations/automations', 'operations/costs', 'settings',
+];
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage();
 const errors: string[] = [];
@@ -35,6 +39,6 @@ for (const route of ROUTES) {
     `${route.padEnd(12)} ${status.padEnd(15)} chars=${String(text.length).padStart(5)} pageerrors=${errors.length}${errors.length ? ' :: ' + errors[0] : ''}`,
   );
 }
-console.log(bad === 0 ? 'LIVE SWEEP PASS: all 12 workspaces rendered against the daemon' : `LIVE SWEEP FAIL: ${bad} workspace(s)`);
+console.log(bad === 0 ? `LIVE SWEEP PASS: all ${ROUTES.length} views rendered against the daemon` : `LIVE SWEEP FAIL: ${bad} view(s)`);
 await browser.close();
 process.exitCode = bad === 0 ? 0 : 1;

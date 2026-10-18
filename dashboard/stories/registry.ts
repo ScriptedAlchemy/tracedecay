@@ -4,11 +4,12 @@
  * screenshot each surface across themes and widths, and the axe pass reports
  * per-surface accessibility violations against the same set.
  *
- * This mirrors `WORKSPACES` in `src/app/routes.tsx`. It is kept as a standalone
- * data module (no JSX / CSS imports) so it can be consumed from a plain Node /
- * Playwright context without dragging in the React app bundle. When a surface
- * is added or removed in routes.tsx, update this list in the same change. The
- * audit's coverage is only as complete as this registry.
+ * This mirrors the view list in `src/app/channels.ts`, the five task
+ * families and their views. It is kept as a standalone data module (no JSX /
+ * CSS imports) so it can be consumed from a plain Node / Playwright context
+ * without dragging in the React app bundle. When a view is added or removed in
+ * channels.ts, update this list in the same change. The audit's coverage is
+ * only as complete as this registry.
  */
 
 interface StorySurface {
@@ -36,14 +37,14 @@ interface StorySurface {
 export const STORY_SURFACES: readonly StorySurface[] = [
   {
     id: 'brain',
-    path: '/brain',
+    path: '/memory',
     label: 'Brain',
     description: 'Whole-system and scoped summaries, health, activity, and freshness.',
     wired: true,
   },
   {
     id: 'explorer',
-    path: '/explorer',
+    path: '/memory/explorer',
     label: 'Explorer',
     description:
       'One query across four independent lanes: code, sessions, knowledge, semantic. Each with its own lifecycle and typed absence.',
@@ -51,14 +52,14 @@ export const STORY_SURFACES: readonly StorySurface[] = [
   },
   {
     id: 'loom',
-    path: '/loom',
+    path: '/memory/loom',
     label: 'Loom',
     description: 'Temporal and causal traces linking prompts, tools, code, and outcomes.',
     wired: true,
   },
   {
     id: 'sessions',
-    path: '/sessions',
+    path: '/memory/sessions',
     label: 'Sessions',
     description:
       'Message volume timeline, provider-qualified session index, transcript search, and the session provenance inspector.',
@@ -66,7 +67,7 @@ export const STORY_SURFACES: readonly StorySurface[] = [
   },
   {
     id: 'agents',
-    path: '/agents',
+    path: '/memory/agents',
     label: 'Agents',
     description: 'Agent trees, status, handoffs, tool activity, and failure context.',
     wired: true,
@@ -80,35 +81,35 @@ export const STORY_SURFACES: readonly StorySurface[] = [
   },
   {
     id: 'knowledge',
-    path: '/knowledge',
+    path: '/memory/knowledge',
     label: 'Knowledge',
     description: 'Facts, evidence, contradictions, supersession, and curation.',
     wired: true,
   },
   {
     id: 'delivery',
-    path: '/delivery',
+    path: '/code/delivery',
     label: 'Delivery',
     description: 'Changes, commits, branches, worktrees, PRs, CI, and releases.',
     wired: true,
   },
   {
     id: 'automations',
-    path: '/automations',
+    path: '/operations/automations',
     label: 'Automations',
     description: 'Schedules, run history, artifacts, approvals, and skills.',
     wired: true,
   },
   {
     id: 'observatory',
-    path: '/observatory',
+    path: '/operations',
     label: 'Observatory',
     description: 'Hook hints, event flow, latency, daemon and storage health.',
     wired: true,
   },
   {
     id: 'costs',
-    path: '/costs',
+    path: '/operations/costs',
     label: 'Costs',
     description: 'Provider and model usage, tokens, latency, and estimated cost.',
     wired: true,
@@ -126,12 +127,12 @@ export const STORY_SURFACES: readonly StorySurface[] = [
     path: '/work',
     label: 'Work',
     description:
-      'The canonical task graph for the active project, over nine mounted routes.',
+      'The canonical task graph for the active project as a board and a dependency DAG, with a task inspector.',
     wired: true,
   },
   {
     id: 'workflows',
-    path: '/workflows',
+    path: '/work/workflows',
     label: 'Workflows',
     description:
       'Registered workflow definitions, lifecycle control, and run projections.',
