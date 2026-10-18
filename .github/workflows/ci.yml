@@ -749,8 +749,7 @@ jobs:
     env:
       # Stock (upstream) Hermes pin. The generated plugin must keep working
       # against this exact upstream commit. Bump deliberately after rerunning
-      # scripts/hermes_stock_integration.sh and
-      # scripts/opencode_stock_integration.sh against the new versions locally.
+      # scripts/hermes_stock_integration.sh against the new ref locally.
       HERMES_UPSTREAM_REPO: https://github.com/NousResearch/hermes-agent.git
       HERMES_UPSTREAM_REF: 9dd9ef0ec99a87f078f7272b4323df5440b4b3f9
     steps:
