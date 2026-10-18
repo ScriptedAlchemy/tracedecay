@@ -26,6 +26,7 @@ use super::util::{JsonPath, JsonQuery, query_rows};
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
+use crate::graph::{CodeGraphReadError, GraphQueryError};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
@@ -42,6 +43,10 @@ const TEST_CALLER_DEPTH: usize = 3;
 const FACT_MATCH_LIMIT: usize = 100;
 const STRATA_MAX_FILES: usize = 50_000;
 const STRATA_MAX_DEPENDENCY_EDGES: usize = 250_000;
+
+#[cfg(test)]
+#[path = "graph_structure_api_tests.rs"]
+mod tests;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CallChainParamsV1 {
@@ -424,7 +429,7 @@ async fn strata(
                     let dependencies = match match_result {
                         Ok(dependencies) => dependencies,
                         Err(error) => {
-                            return Err(graph_runtime_error_response::<StrataMeasurementV1>(
+                            return Err(graph_query_error_response::<StrataMeasurementV1>(
                                 &state, error,
                             ));
                         }
@@ -722,7 +727,7 @@ async fn node_tests(
             if !callers.complete && callers.impacted.len() == STRATA_MAX_FILES {
                 return graph_error_response::<TestMapMeasurementV1>(
                     &state,
-                    crate::graph::CodeGraphReadError::BudgetExhausted {
+                    CodeGraphReadError::BudgetExhausted {
                         detail: "test-map caller expansion exceeded its complete-symbol budget"
                             .to_owned(),
                     },
@@ -991,7 +996,7 @@ fn parse_occurrence<T: Serialize>(
 fn symbol_summary(
     graph: &AdmittedGraphReadV1,
     occurrence: &SymbolOccurrenceId,
-) -> std::result::Result<Option<CodeGraphSymbolSummaryV1>, crate::graph::CodeGraphReadError> {
+) -> std::result::Result<Option<CodeGraphSymbolSummaryV1>, CodeGraphReadError> {
     graph
         .reader
         .symbol_summary(occurrence, Arc::clone(&graph.cancellation))
@@ -1001,7 +1006,7 @@ fn symbol_summary(
 fn node_ref(
     state: &DashboardState,
     symbol: &CodeGraphSymbolSummaryV1,
-) -> std::result::Result<NodeRefV1, crate::graph::CodeGraphReadError> {
+) -> std::result::Result<NodeRefV1, CodeGraphReadError> {
     let metadata = symbol.metadata.as_ref().ok_or_else(|| {
         graph_reset_required("verified graph symbol is missing its lineage metadata")
     })?;
@@ -1015,7 +1020,7 @@ fn node_ref(
         graph_reset_required("verified graph symbol binding is missing its source span")
     })?;
     let source = std::fs::read(state.project_root.join(&file_path)).map_err(|error| {
-        crate::graph::CodeGraphReadError::Stale {
+        CodeGraphReadError::Stale {
             detail: format!(
                 "verified graph source {file_path:?} cannot be read for line mapping: {error}"
             ),
@@ -1041,7 +1046,7 @@ fn call_chain_steps(
     graph: &AdmittedGraphReadV1,
     from: CodeGraphSymbolSummaryV1,
     path: Option<&[tracedecay_domain::CanonicalRelationEdgeV1]>,
-) -> std::result::Result<Vec<CallChainStepV1>, crate::graph::CodeGraphReadError> {
+) -> std::result::Result<Vec<CallChainStepV1>, CodeGraphReadError> {
     let mut previous = node_ref(state, &from)?;
     let mut steps = vec![CallChainStepV1 {
         node: previous.clone(),
@@ -1102,7 +1107,7 @@ fn is_callable_kind(kind: &str) -> bool {
 
 fn has_test_annotation(
     annotations: &[CodeGraphSemanticEdgeV1],
-) -> std::result::Result<bool, crate::graph::CodeGraphReadError> {
+) -> std::result::Result<bool, CodeGraphReadError> {
     for annotation in annotations {
         let metadata = annotation.neighbor.metadata.as_ref().ok_or_else(|| {
             graph_reset_required("verified annotation edge is missing source-symbol metadata")
@@ -1114,8 +1119,8 @@ fn has_test_annotation(
     Ok(false)
 }
 
-fn graph_reset_required(detail: &str) -> crate::graph::CodeGraphReadError {
-    crate::graph::CodeGraphReadError::ResetRequired {
+fn graph_reset_required(detail: &str) -> CodeGraphReadError {
+    CodeGraphReadError::ResetRequired {
         detail: detail.to_owned(),
     }
 }
@@ -1131,10 +1136,8 @@ fn fact_arm_coverage(returned: usize, truncated: bool) -> FactArmCoverageV1 {
 
 fn graph_error_response<T: Serialize>(
     state: &DashboardState,
-    error: crate::graph::CodeGraphReadError,
+    error: CodeGraphReadError,
 ) -> Response {
-    use crate::graph::CodeGraphReadError;
-
     match error {
         CodeGraphReadError::MissingRegistry => unmeasured_response::<T>(
             state,
@@ -1207,14 +1210,19 @@ fn graph_error_response<T: Serialize>(
     }
 }
 
-fn graph_runtime_error_response<T: Serialize>(
+fn graph_query_error_response<T: Serialize>(
     state: &DashboardState,
-    error: tracedecay_domain::errors::TraceDecayError,
+    error: GraphQueryError,
 ) -> Response {
-    if let Some(graph_error) = crate::graph::code_graph_read_error_from_runtime(&error) {
-        return graph_error_response::<T>(state, graph_error);
+    match error {
+        GraphQueryError::Read(error) => graph_error_response::<T>(state, error),
+        GraphQueryError::EvidenceUnavailable { detail, .. } => {
+            graph_error_response::<T>(state, CodeGraphReadError::Unavailable { detail })
+        }
+        GraphQueryError::Runtime(error) => {
+            failed_response::<T>(state, "strata_read_failed", error.to_string(), false)
+        }
     }
-    failed_response::<T>(state, "strata_read_failed", error.to_string(), false)
 }
 
 fn measured_response<T: Serialize>(
