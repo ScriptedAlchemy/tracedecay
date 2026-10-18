@@ -4,7 +4,7 @@ use super::{
     DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, Result,
     TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
-use crate::db::engine::{Result as EngineResult, WriteTx};
+use crate::db::engine::{Executor, Result as EngineResult, WriteTx};
 use tracedecay_rusqlite_runtime::exact_sql::JobPolicy;
 
 enum JobAbort<E> {
@@ -84,30 +84,34 @@ impl Database {
     where
         P: crate::db::engine::IntoParams,
     {
-        let transaction = self.begin_write_transaction(operation).await?;
-        let changed = transaction
-            .execute_engine(sql, params)
-            .await
-            .map_err(|error| TraceDecayError::Database {
+        let params = params.into_params();
+        let (operation_name, sql) = (operation.to_owned(), sql.to_owned());
+        self.transact(operation, async move |tx| {
+            let changed = match params.clone() {
+                Ok(params) => tx.execute(&sql, params).await,
+                Err(error) => Err(error),
+            };
+            changed.map_err(|error| TraceDecayError::Database {
                 message: format!("failed to execute brokered write: {error}"),
-                operation: operation.to_owned(),
-            })?;
-        transaction.commit().await?;
-        Ok(changed)
+                operation: operation_name.clone(),
+            })
+        })
+        .await?
     }
 
     /// Executes a SQL batch atomically through the canonical writer broker.
     #[doc(hidden)]
     pub async fn execute_write_batch(&self, operation: &str, sql: &str) -> Result<()> {
-        let transaction = self.begin_write_transaction(operation).await?;
-        transaction
-            .execute_batch(sql)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to execute brokered write batch: {error}"),
-                operation: operation.to_string(),
-            })?;
-        transaction.commit().await
+        let (operation_name, sql) = (operation.to_owned(), sql.to_owned());
+        self.transact(operation, async move |tx| {
+            tx.execute_batch(&sql)
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to execute brokered write batch: {error}"),
+                    operation: operation_name.clone(),
+                })
+        })
+        .await?
     }
 
     /// Executes one authority-revalidated schema or bulk-maintenance batch
