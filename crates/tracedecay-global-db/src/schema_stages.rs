@@ -1201,21 +1201,7 @@ pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
-    // A journal an earlier release wrote converts in bounded batches, and Work
-    // product reads and appends answer `Busy` until it has. A conversion that
-    // cannot verify its chain leaves the legacy rows untouched and the journal
-    // closed; it must not also stop the rest of the schema from converging.
-    let work: Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>> =
-        Box::pin(async {
-            database
-                .work_storage()?
-                .converge_product_journal()
-                .await
-                .map_err(|error| global_db_operation_error("converge Work product journal", error))
-        });
-    if let Err(error) = work.await {
-        tracing::error!(%error, "Work product journal conversion did not complete");
-    }
+    converge_work_product_journal(database).await;
     let bodies: Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>> =
         Box::pin(observation::converge_canonical_bodies(database));
     bodies.await?;
@@ -1239,6 +1225,31 @@ pub async fn converge_registered_schema(
         Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
     > = Box::pin(converge_registered_schema_on(database, convergence));
     invariants.await
+}
+
+/// Converts a Work product journal an earlier release wrote, in bounded batches.
+///
+/// Work product reads and appends answer `Busy` until the legacy tables are
+/// gone. A conversion that cannot verify its chain leaves the legacy rows
+/// untouched and the journal closed; it is logged and must not also stop the
+/// rest of the schema from converging.
+async fn converge_work_product_journal(database: &Database) {
+    // A read-only attach cannot convert; the writer that owns the store does.
+    if !database.is_writable() {
+        return;
+    }
+    let converted: Pin<
+        Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+    > = Box::pin(async {
+        database
+            .work_storage()?
+            .converge_product_journal()
+            .await
+            .map_err(|error| global_db_operation_error("converge Work product journal", error))
+    });
+    if let Err(error) = converted.await {
+        tracing::error!(%error, "Work product journal conversion did not complete");
+    }
 }
 
 /// Runs one store-sized migration as a sequence of independently durable
@@ -1322,6 +1333,7 @@ async fn converge_registered_schema_on(
 pub async fn converge_attached_registered_schema(
     database: &Database,
 ) -> tracedecay_domain::errors::Result<()> {
+    converge_work_product_journal(database).await;
     if hosts_session_features(&database.registered_binding().shard_id.scope) {
         converge_migration_batches(
             database,

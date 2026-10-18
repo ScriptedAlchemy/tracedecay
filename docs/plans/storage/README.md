@@ -773,6 +773,18 @@ changes a file that holds memory.
   clones what it owns into the closure. A rollup rebuild that finds its stored
   receipt still ends by rolling back, so replay does not advance the transaction
   generation.
+- Work product journal head (2026-10-18, #4199, `docs/plans/work-current-state.md`).
+  The owner journal stops being recovered by replay. Every append writes the
+  current graph to a head row, checkpoints every 128th version and registers the
+  scope set of its event in its own transaction, so no append, current read or
+  covered-prefix lookup loads the chain, and the 10,000-row result cap no longer
+  bounds how long a journal can grow. Historical versions rebuild from the
+  nearest checkpoint, accepted-attempt hydration batches 64 identities per query,
+  and an existing database converts in bounded batches from `converge_registered_schema`
+  (Work answers `Busy` until the legacy tables are gone). The tables are keyed by
+  owner and reference nothing else, so step 8 moves them into `journal.db`
+  unchanged. Scoped views that let one selection keep writing while another
+  scope appends (#4215) are designed in the plan and not built.
 - #4138 (2026-10-16). Shutdown store close waits up to 3 s for leases to drain
   before deciding a store's WAL cannot be truncated. Under load, owners joined
   before store close could still be unwinding the tasks that held their leases,

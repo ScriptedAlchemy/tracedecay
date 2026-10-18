@@ -1,207 +1,215 @@
-# Work current state: scoped aggregates, a projection and checkpoints
+# Work current state: a head projection, checkpoints and a scope registry
 
-Status: design, implemented by the PR that closes #4199 and #4215.
+Status: the owner-journal part is implemented (closes #4199). The scoped-view
+part that #4215 needs is designed here and not implemented; "What #4215 still
+needs" says exactly what remains.
 
 ## Problem
 
 Work product storage keeps one append-only event chain per profile owner and
 recovers every answer by replaying it.
 
-- Each append inserts its event, then `publish_in_transaction` loads the whole
-  chain with an unpaged query and folds it. The exact-SQL materializer refuses
+- Each append inserted its event, then loaded the whole chain with an unpaged
+  query and folded it to publish the version. The exact-SQL materializer refuses
   any result over 10,000 rows or 64 MiB, so the append that would make the chain
-  10,001 events long reads its own new row, trips the cap and rolls back. A retry
-  cannot advance it. Cumulative payload reaches the byte cap earlier than the
-  row cap.
-- A current read loads every event and every published version, folds all of
-  them, and hydrates each accepted attempt with one query.
-- A selection is answered over the chain's covered prefix. The first event
-  outside the selection ends the prefix, so once an unrelated scope appends, a
-  previously valid selection is a historical cutoff and every mutation under it
-  fails with `SelectionCoverageIncomplete`. The storage test
-  `a_mutation_over_a_partially_covered_selection_is_refused_by_name` asserts
-  that outcome.
+  10,001 events long read its own new row, tripped the cap and rolled back. A
+  retry could not advance it. Cumulative payload reaches the byte cap earlier
+  than the row cap.
+- A current read loaded every event and every published version, folded all of
+  them, and hydrated each accepted attempt with one query. A selection's covered
+  prefix was found by scanning the same events.
 
-Raising the global query cap changes where the first failure happens, not
-whether it happens, and every append and read would still be linear in lifetime
-history. The cap stays.
+Raising the global query cap moves the first failure and leaves every operation
+linear in lifetime history, so the cap stays.
 
 ## Data shape
 
-The unit of storage, consistency and authorization is the **scoped aggregate**.
+The unit is the owner journal: one chain per `(owner brain, owner profile)`. The
+event sequence equals the graph version it produces (`Created` is 1, every
+change adds 1), so a position in the chain is also a version, and the schema
+enforces it. All rows are keyed by the owner.
 
-An aggregate is identified by `(owner_brain_id, owner_profile_id, scope_key)`.
-`scope_key` is the SHA-256 of the canonical, sorted set of relation scopes the
-selection names. `ProfileOwnedNoGit` is the empty set. Two selections share an
-aggregate only when their relation-scope sets are equal. Authorization is not
-containment: the aggregate for `{Repository r}` and the aggregate for `{}` are
-separate stores of separate work, and neither can read, order or block the
-other.
-
-Per aggregate:
-
-| Table | Row | Purpose |
+| Table | Rows | Purpose |
 |---|---|---|
-| `work_product_aggregates_v1` | one | The **current-state projection**: `head_version`, the head graph (canonical JSON) and the relation-scope set. Written in the same transaction as every event, by compare-and-swap on `head_version`. |
-| `work_product_aggregate_events_v1` | one per event | The immutable journal. Primary key `(owner, scope_key, sequence)`. `sequence` equals the graph version it produces (`Created` is 1, each change adds 1), so a position in the chain is also a version. `command_id` and `event_id` stay unique per owner so idempotency keys are not scoped by selection. |
-| `work_product_aggregate_versions_v1` | one per event | The verified version: `valid_at`, `observed_at`, `source_watermark`, `recovered_graph_digest`. Indexed on `(valid_at, observed_at, graph_version)` for bounded timeline pages. |
-| `work_product_aggregate_checkpoints_v1` | one per `CHECKPOINT_INTERVAL` (128) versions | The graph at that version with its digest. Bounds historical reconstruction to fewer than 128 events folded after a read of one stored graph. |
+| `work_product_journal_head_v1` | one | The **current-state projection**: `head_version` and the head graph. Every append rewrites it in its own transaction by compare-and-swap on `head_version`. |
+| `work_product_journal_events_v1` | one per event | The immutable journal. `(owner, sequence)` is the key; `command_id` and `event_id` are unique per owner; `scope_key` names the relation-scope set the event was admitted under. |
+| `work_product_journal_versions_v1` | one per event | The verified version: `valid_at`, `observed_at`, `source_watermark`, `recovered_graph_digest`. Indexed on `(valid_at, observed_at, graph_version)` for bounded timeline pages. |
+| `work_product_journal_checkpoints_v1` | one per 128 versions | The graph at that version. Reconstructing any older version folds fewer than 128 events, read 16 at a time. |
+| `work_product_journal_scopes_v1` | one per distinct scope set | The scope set and the sequence it first appeared at. |
 
-The head graph is the only per-aggregate value that grows with the *content* of
-the work and not with the number of events. Its size is capped by
-`MAX_WORK_PRODUCT_ITEMS`, which is the existing graph bound. Checkpoint storage
-is `versions / 128` graphs. That amplification is the price of bounded
-historical reads and is the first thing a retention lever should thin (old
-checkpoints may be dropped, because a longer fold from an earlier checkpoint or
-from the `Created` payload is still correct).
+A selection's covered prefix is the journal up to the first event it does not
+cover (an event is covered when the selection names every relation scope the
+event was admitted under, and a no-Git event is covered by every selection).
+The first uncovered sequence is the minimum `first_sequence` over the registry
+rows the selection does not cover, a read of a handful of rows. It never scans
+events, and it is the same prefix the previous implementation computed.
 
-Batch attempt hydration is one `(task_id, run_id, attempt_id) IN (VALUES ...)`
-query per chunk of accepted attempts, replacing one query per attempt.
+The head is the only value that grows with the content of the work and not with
+the number of events; its size is capped by `MAX_WORK_PRODUCT_ITEMS`. Checkpoint
+storage is `versions / 128` graphs. That amplification is the price of bounded
+historical reads, and the first thing a retention lever should thin: a longer
+fold from an earlier checkpoint, or from the `Created` payload, is still correct.
+
+Accepted-attempt hydration is one `(task_id, run_id, attempt_id) IN (VALUES ...)`
+query per 64 identities, replacing one query per attempt. An identity with no
+row, a row another authority owns, or a row that does not decode is absent from
+the answer, which is how the read reports it unavailable.
 
 ## Semantics
 
 ### Append (the only write)
 
-One transaction, in this order:
+One transaction:
 
-1. The authorized owner must match the draft's owner, and the draft's relation
-   scopes must equal the selection's. The aggregate key is derived from the
-   selection and never from the request body.
-2. Replay by `command_id` (owner-wide point lookup). A different input digest is
-   an idempotency conflict. A command recorded under another aggregate is
-   `NotFoundOrNotAuthorized`, the same answer an unauthorized event gets today.
-3. Load the aggregate head row. No row means the draft must be a `Created`
-   event with no expected version. A row means `expected_graph_version` must
-   equal `head_version`, otherwise `VersionConflict`.
-4. Apply the payload to the head graph (one `WorkProductGraphV1::apply`, the same
-   validation the fold used), check the result version, digest it.
-5. Insert the event, the verified version, the new head (compare-and-swap on
-   `head_version`, one changed row required) and, on every 128th version, a
-   checkpoint.
+1. The authorized owner must match the draft's owner.
+2. Replay by `command_id` (an owner-wide point lookup). A different input digest
+   is an idempotency conflict; an event outside the selection is
+   `NotFoundOrNotAuthorized`.
+3. Load the head. No head means the draft must be a `Created` event with no
+   expected version. Otherwise `expected_graph_version` must equal
+   `head_version`, or the append is a `VersionConflict`.
+4. Apply the event to the head graph (one `WorkProductGraphV1::apply`, the same
+   validation the replay used), check the result version, digest it.
+5. Insert the event, register its scope set, insert the verified version, move
+   the head (compare-and-swap, one changed row required) and, on every 128th
+   version, insert the checkpoint.
 
-Any refusal rolls the whole transaction back: the event, the version row and
-the head stay as they were, and a retry sees the same pre-state. A retry of a
-committed command replays and writes nothing. Cost is the head graph read and
-write plus one event row, independent of history length.
+Any refusal rolls the whole transaction back: event, version, registry, head
+and checkpoint stay as they were, and a retry sees the same state. A retry of a
+committed command replays and writes nothing. The cost is the head graph plus
+one event row, whatever the journal's length.
 
 ### Reads
 
-- **Current** reads the head row and verifies it against its version row (the
-  digest of the stored graph must equal `recovered_graph_digest`). No event is
-  read. If the caller's `observed_at` predates the head, the newest version
-  observed by then is reconstructed instead, because a prepared mutation must be
-  able to read its former head and reach the compare-and-swap conflict.
+- **Current** reads the head when the selection covers the whole journal, and
+  proves it against the head version's own digest, so a head that disagrees with
+  what was verified fails closed. No event is read. A narrower selection
+  reconstructs its prefix head from the nearest checkpoint.
 - **AsOf, Evolution, Forensic** are historical. A version row selects the
-  version; the graph is `checkpoint(<= v)` plus the events after it, at most 127,
-  read in pages of 64, and the result must reproduce the stored digest. A
-  timeline page selects at most 513 version rows with `LIMIT`, in the existing
-  `(valid_at, observed_at, graph_version)` order, and reconstructs ascending so
-  nearby versions share a fold.
-- **History** pages events by `sequence` with `LIMIT limit + 1`.
-- `selection_coverage` is always `Complete` over the aggregate. There is no
-  prefix and no partial slice, so there is nothing for a current request to
-  present as stale. Historical requests keep their explicit version semantics.
+  version; the graph is `checkpoint(<= v)` plus the events after it, and it must
+  reproduce the stored digest. A timeline page selects at most 513 version rows
+  with `LIMIT`, in the existing `(valid_at, observed_at, graph_version)` order,
+  and reconstructs them ascending so nearby versions share a fold.
+- **History** pages events by sequence. A page reads at most one row past its
+  limit, in queries of 16 rows, and stops early at an 8 MiB payload budget with
+  a continuation, so no stored history makes one result too big.
+- Current and historical keep their separate meanings: a current request names
+  the newest observed version of the covered prefix, and a historical request
+  names its version or window explicitly. The coverage disclosure still reports
+  a prefix as `Partial`.
 
-No reader loads a journal. Every query is keyed by aggregate and bounded by a
-page size or by `CHECKPOINT_INTERVAL`.
-
-### Optimistic concurrency
-
-Per aggregate. Two scopes advance independently and never conflict. Within one
-aggregate two writers that read version `n` race on the head compare-and-swap
-and the unique `(owner, scope_key, result_graph_version)` key; the loser gets
-`VersionConflict` with nothing written.
-
-### Cross-scope dependencies
-
-Work that spans scopes belongs to the aggregate whose selection names every
-scope involved; that selection must itself be authorized by the request context.
-A change that references a task, hierarchy node, evidence link or proposal that
-is not in the selected aggregate fails the existing graph validation with
-`UnknownTask`. The contracts layer maps that to a typed
-`ReferenceOutsideSelection` denial (`work.reference_outside_selection`) in place
-of `SelectionCoverageIncomplete`. The answer is identical for a missing
-reference and for one that exists under a hidden scope, so it is not an
-existence oracle, and it never replays a hidden event into a visible graph. The
-remedy in the message is to select the scopes that contain all the work involved.
+No operation loads a journal. Every query is keyed by the owner and bounded by
+a page size, the checkpoint interval, or the registry's row count.
 
 ### Restart
 
-All state is persisted. The head row is the projection, so a restart reads it
-as-is. Nothing is rebuilt at open for databases created by this version.
+All state is persisted; the head is the projection, so a restart reads it
+as-is. Nothing is rebuilt at open for a database created by this version.
 
 ## Migration of existing journals
 
 Existing databases hold `work_product_events_v1` and
-`work_product_graph_versions_v1`, one chain per owner whose events may carry
-different relation scopes. They are immutable events with baked-in versions, so
-a mixed chain cannot be split without rewriting history.
+`work_product_graph_versions_v1`. The chain is the same chain; what is new is the
+head, the checkpoints and the registry. `converge_registered_schema` runs
+`WorkSqliteStorage::converge_product_journal`, one writer job per batch:
 
-The chain becomes one aggregate keyed by the **union** of the relation scopes its
-events name, so the only selection that can read it is one that already
-authorized everything in it. Production wrote only `{Repository r}` selections,
-so a production chain maps to exactly the selection it was written under. A
-mixed legacy chain (tests and multi-repository projects) is readable only under
-the union selection; the narrower selections start their own aggregates. The
-legacy rows are not lost, they remain in the union aggregate's history.
-
-`WorkSqliteStorage::converge_product_journal` runs from
-`converge_registered_schema`, one writer job per batch:
-
-1. Take the owner with the lowest remaining legacy sequence. Compute its union
-   key from `SELECT DISTINCT json_extract(event_payload, '$.authorized_relation_scopes')`.
-2. Read the next 256 legacy events and their version rows. Fold them onto the
-   aggregate head (or onto nothing for a first batch), re-deriving each digest,
-   and require it to equal the legacy digest, `sequence == version`, and the
-   recorded expected/result chain.
-3. Insert the events, versions and any 128th-version checkpoints, upsert the head
-   row, and delete the legacy rows just migrated, in the same transaction.
+1. Take the owner with the lowest remaining legacy sequence and load its head,
+   if a previous batch left one.
+2. Read the next 256 legacy events (16 per query, stopping at a 16 MiB payload
+   budget) and their version rows. Fold them onto the head; require the chain to
+   be contiguous, and re-derive the digest at each checkpoint version and at the
+   end of the batch. Other version rows are copied as recorded, and a read that
+   rebuilds one proves it against that row.
+3. Insert the events, register their scope sets, insert the versions and any
+   checkpoint, write the head, and delete the legacy rows just copied, in the
+   same transaction.
 4. Repeat until no legacy event remains, then drop both legacy tables.
 
-Each batch is its own durable transaction. A crash resumes from the head row, so
-re-running the step is idempotent. Memory is one graph and one page of events.
-A broken legacy chain (gap, digest mismatch, undecodable row) stops the
-migration, leaves the legacy tables and the remaining rows untouched, and keeps
-the gate below closed.
+Each batch is its own durable transaction. A crash resumes from the head, so
+the step is idempotent, and memory is one graph and one page of events. A chain
+that does not verify stops the conversion, leaves the remaining legacy rows
+untouched and keeps the gate below closed. A failed conversion is logged and
+does not stop the rest of schema convergence.
 
-**Gate.** While a legacy table exists, every Work product read and append answers
-`Storage(Busy)`. A database created by this version never has the legacy tables,
-so the check is a single `sqlite_master` lookup that is false for it. This keeps
-a reader or writer that runs while the converge advances from seeing an owner as
-empty and starting a second chain.
+**Gate.** While a legacy table exists every Work product read and append answers
+`Storage(Busy)`. A database created by this version never has them, so the check
+is one `sqlite_master` lookup that is false for it. The gate keeps a reader or
+writer that runs while the conversion advances from seeing an owner as empty and
+starting a second chain.
 
 ## Fit with the storage redesign
 
 Step 5 runs Work as writer jobs over a `JournalTx` that "loads and stores any
-journal aggregate", with the decision a pure function over the loaded aggregates.
-The scoped aggregate is that unit: the append is `load head -> apply -> store
-head + event`, and the write set never leaves the aggregate. Step 8 moves the
-journal into `journal.db`. These tables move unchanged because they are keyed by
-owner and aggregate and reference nothing outside themselves. Step 7's rule that
-non-additive changes copy forward is what the migration above does, inside the
-existing database. Idempotency stays per domain (`command_id`), as step 5
-records for the ledger-less `transact`.
+journal aggregate", with the decision a pure function over the loaded aggregate.
+The append is `load head -> apply -> store head + event`, with no other read and
+no history in the write set. Step 8 moves the journal into `journal.db`; these
+tables are keyed by owner and reference nothing outside themselves, so they move
+unchanged. Step 7's rule that a non-additive change copies forward is what the
+migration does, inside the existing database. Idempotency stays per domain
+(`command_id`), as step 5 records for the ledger-less `transact`.
 
 ## What is deleted
 
-`covered_prefix`, `selection_covers`, `load_journal`, `load_covered_journal`,
-`JournalFoldV1`, `fold_graph`, the per-publish journal reload, the per-attempt
-hydration loop, the partial `WorkGraphSelectionCoverageV1` arm and
-`SelectionCoverageIncomplete`.
+`covered_prefix`, `selection_covers` over a loaded journal, `load_journal`,
+`load_covered_journal`, `JournalFoldV1`, `fold_graph`, the per-publish journal
+reload, the per-attempt hydration loop, and `publication.rs`.
 
-## Acceptance map
+## What #4215 still needs
 
-| Criterion | Proven by |
+#4215 asks that a selection's current work stay writable when another scope
+appends to the journal. The prefix semantics cannot give that: after a
+repository-scoped event the no-Git prefix ends before it, and a no-Git mutation
+is refused with `SelectionCoverageIncomplete`, so the first thing this change
+establishes is that the refusal is a consequence of the model and no longer of
+storage cost.
+
+Two designs were considered and one was rejected.
+
+- **Independent aggregates per relation-scope set, with no cross-visibility.**
+  Rejected. A repository selection reads no-Git work today, and attempt
+  admission, workflow fan-out, handoff open and the dashboard all read the
+  repository selection to reach tasks created under the no-Git selection. A
+  separate chain per scope would end that, and the chains could not share graph
+  versions: a change embeds the version it was written against
+  (`ExecutionAdmitted`, `AcceptedAttemptLinked`, `ProposalDecided`), so an event
+  cannot be replayed into a view numbered differently from the one it was
+  written in.
+- **One ordered journal with scoped views that share its numbering.** This is the
+  design to build. Every view of a selection has the journal's version numbers.
+  An event the selection does not cover advances the view's version without
+  changing its content (a version-only step, which needs one new domain
+  operation, `WorkProductGraphV1::advanced_to`), so embedded versions stay valid
+  in every view and no hidden event is read into a visible response. A view is
+  `(selection scope set, head_version, head_graph, through_sequence)`; the append
+  validates the event against its own view and against every existing view whose
+  scope set contains it, in one transaction, and a conflict in a wider view is
+  the typed denial the issue asks for. The version rows and checkpoints become
+  per view (`view_key` in their keys, a data migration the conversion above
+  already shows how to do), a view is created by forking the largest existing
+  subset view, and reads of a view that has no own events resolve to that
+  subset view. A narrow writer's expected version is the journal tail, so a
+  write by another scope between its read and its append is a retryable
+  `VersionConflict`, as every cross-writer race is today.
+
+What that changes outside storage: `WorkGraphSelectionCoverageV1::Partial` and
+`SelectionCoverageIncomplete` go away (the daemon-service and attempt-admission
+mappings with them); `Absent` for a view with no content while the journal has
+events needs a defined first-event rule, because `Created` carries a version-1
+graph; and the generated SDK, dashboard and ChatGPT-extension contracts are
+regenerated. The acceptance criteria to prove it are the sequence no-Git ->
+repository -> no-Git succeeding, a later authorized event visible in a narrow
+view past a hidden one, a typed denial for a reference to a hidden entity, a
+version conflict only between writers of the same view's lineage, and the same
+boundaries after a restart.
+
+## Acceptance map (#4199)
+
+| Criterion | Test |
 |---|---|
-| #4199 journal passes 10,000 events and survives restart | `a_journal_advances_past_ten_thousand_events_and_survives_restart` |
-| #4199 payload over 64 MiB, no oversized result | `cumulative_payload_over_the_result_cap_never_needs_one_oversized_result` |
-| #4199 failed mutations leave event, version and head unchanged; retries idempotent | `a_failed_append_leaves_event_version_and_head_unchanged` |
-| #4199 appends and current reads do not touch the lifetime journal | `appends_and_current_reads_read_a_constant_number_of_rows` |
-| #4199 bounded batch hydration | `accepted_attempts_hydrate_in_bounded_batches` |
-| #4199 historical agrees with replay across checkpoints | `historical_reconstruction_agrees_with_full_replay_across_checkpoints` |
-| #4215 no-Git, repository, no-Git succeeds | `unrelated_scoped_events_do_not_freeze_current_work` |
-| #4215 later authorized events appear in a narrow view | same test, current read after the sequence |
-| #4215 cross-scope dependency is a typed denial | `a_cross_scope_reference_is_a_typed_denial` |
-| #4215 OCC within the aggregate | `concurrent_scoped_writers_conflict_only_within_their_aggregate` |
-| #4215 restart and denied access keep the boundary | same tests across a restart; `a_selection_naming_another_project_is_refused_rather_than_narrowed` |
-| Migration | `a_legacy_journal_migrates_in_batches_and_resumes` |
+| Journal advances past 10,000 events and survives restart | `a_journal_advances_past_ten_thousand_events_and_survives_restart` |
+| History over 64 MiB, no oversized single result | `cumulative_payload_over_the_result_cap_never_needs_one_oversized_result` |
+| Failed mutations change nothing; retries idempotent | `a_failed_append_leaves_event_version_and_projection_unchanged` |
+| Appends and current reads do not process the journal | `appends_and_current_reads_read_a_constant_number_of_rows` |
+| Bounded attempt hydration, missing/denied/unavailable preserved | `accepted_attempts_hydrate_in_bounded_batches` |
+| Historical reconstruction agrees with replay across checkpoints and scopes | `historical_reconstruction_agrees_with_full_replay_across_checkpoints`, `a_narrow_selection_rebuilds_its_prefix_across_a_checkpoint_boundary` |
+| Existing journals convert in bounded batches and resume | `a_legacy_journal_converts_in_batches_and_resumes_after_an_interruption`, `a_legacy_chain_that_does_not_verify_is_not_converted` |
