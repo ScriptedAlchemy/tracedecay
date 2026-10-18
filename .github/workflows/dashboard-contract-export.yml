@@ -20,7 +20,6 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_BAZEL_TIMEOUT: "3600"
-      EXPORT_DIRECTORY: ${{ runner.temp }}/dashboard-contract-export
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,6 +39,7 @@ jobs:
       - name: Export the canonical dashboard schema
         run: |
           set -euo pipefail
+          EXPORT_DIRECTORY="$RUNNER_TEMP/dashboard-contract-export"
           mkdir -p "$EXPORT_DIRECTORY"
           bazel run --config=ci --jobs=1 //sdks/codegen:dashboard_schema -- "$EXPORT_DIRECTORY/dashboard-contracts.schema.json"
           test -s "$EXPORT_DIRECTORY/dashboard-contracts.schema.json"
@@ -56,6 +56,7 @@ jobs:
       - name: Serialize the real settings response fixture
         run: |
           set -euo pipefail
+          EXPORT_DIRECTORY="$RUNNER_TEMP/dashboard-contract-export"
           bazel test --config=ci --jobs=1 //crates/tracedecay-dashboard-api:unit_test \
             --test_arg=settings_api::tests::wire::project_patch_serialization_preserves_settlement_and_refusals \
             --test_arg=--exact --test_output=all --cache_test_results=no \
