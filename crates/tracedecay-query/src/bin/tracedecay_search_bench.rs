@@ -30,9 +30,9 @@
 mod artifact_bench;
 
 use artifact_bench::{
-    ActiveControl, AdmittedFile, ApplyingProjectionSink, SealedDrainBounds, decoded_generation,
-    default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
-    replicate, seal_partitioned,
+    ActiveControl, AdmittedFile, SealedDrainBounds, decoded_generation, default_corpus_root,
+    drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile, replicate,
+    seal_partitioned,
 };
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -334,7 +334,7 @@ fn run(options: &Options) -> Result<String, String> {
         max_snapshot_age_micros: None,
     };
     let store = MemorySealedPublicationStoreV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
         .map_err(|error| format!("open production owner: {error}"))?;
 
     let request = build_request(&repository, &sanitizer_revision, &files);

@@ -23,22 +23,17 @@ use tracedecay_code_index::production::{
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-};
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, CompactCandidate, ComponentRevision,
     EphemeralSanitizedQueryViewV1, ExactAdmissionProof, ExactAdmissionRuleRevision,
     ExactAdmissionValidator, ExactFieldV1, ExactTechnicalTermKindV1, FileOccurrenceId,
     FreshnessCompatibilityV1, ManifestDigest, PolicyRevisionId, PrincipalId, PrivacyDomainId,
-    ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, QueryNormalizationRevision, RepositoryDirtyStateV1, RepositoryId,
-    RetrievalBudget, RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverBatch, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SensitivityLevelV1,
-    SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey,
-    SourceNamespace, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
+    ProjectId, ProjectionKeyV1, ProjectionKindV1, QueryNormalizationRevision,
+    RepositoryDirtyStateV1, RepositoryId, RetrievalBudget, RetrievalError, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverOutcome, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId,
+    SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness,
+    SourceInstanceKey, SourceNamespace, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -93,51 +88,6 @@ impl CodeIndexExecutionControlV1 for ArtifactControl {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
-    }
-}
-
-struct ArtifactProjectionSink;
-
-impl CodeChunkProjectionSink for ArtifactProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .collect::<Vec<_>>();
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
 }
 
@@ -492,12 +442,9 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config,
-        MemorySealedPublicationStoreV1::default(),
-        ArtifactProjectionSink,
-    )
-    .expect("artifact production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config, MemorySealedPublicationStoreV1::default())
+            .expect("artifact production owner");
     let published = owner
         .build_and_publish(request, &ArtifactControl { cancelled: false })
         .expect("production generation");

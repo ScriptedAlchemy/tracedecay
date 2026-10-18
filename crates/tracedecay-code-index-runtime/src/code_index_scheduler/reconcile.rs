@@ -16,9 +16,8 @@ use gix::{
     object::tree::diff::{Action as TreeDiffAction, Change as TreeDiffChange},
 };
 use thiserror::Error;
-use tracedecay_application::code_index::{
-    DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
-};
+use tracedecay_application::code_index::DaemonCodeIndexControlV1;
+use tracedecay_code_index::production::CodeIndexProductionOwnerV1;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeIndexScopeStoreResetV1, DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
 };
@@ -69,7 +68,7 @@ use super::{
     CodeGraphActivationStateV1, CodeGraphReplayBindingV1, CodeIndexBuildProgressSlotStateV1,
     CodeIndexBuildProgressSlotV1, CodeIndexBuildProgressStateV1, CodeIndexHintPolicyV1,
     CodeIndexIgnoredDependencyRefusalV1, CodeTextProjectionStateV1,
-    DaemonCodeIndexPublicationStoreV1, DaemonCodeTextArtifactStoreV1, DaemonProjectionSinkV1,
+    DaemonCodeIndexPublicationStoreV1, DaemonCodeTextArtifactStoreV1,
     DurableActiveSealedGenerationBindingV1, GenerationDecodeAdmissionV1, GenerationServingCachesV1,
     GenerationTextControlV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
     SharedCodeIndexBytePoolV1, branch_generations, classification, file_occurrence_id,
@@ -85,8 +84,7 @@ const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
 pub(super) const CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1: &str = "code-index-build-workers-v1";
 
 const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
-type ProductionOwner =
-    ProductionCodeIndexOwnerV1<DaemonCodeIndexPublicationStoreV1, DaemonProjectionSinkV1>;
+type ProductionOwner = CodeIndexProductionOwnerV1<DaemonCodeIndexPublicationStoreV1>;
 
 #[derive(Default)]
 pub(super) struct PendingHintsV1 {
@@ -1273,13 +1271,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             privacy_key_epoch: 1,
             max_snapshot_age_micros: None,
         };
-        let owner = open_production_code_index_owner_v1(
-            production_config.clone(),
-            publication.clone(),
-            DaemonProjectionSinkV1,
-        )
-        .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
-        .with_physical_artifact_pool(byte_pool.physical_artifacts.clone());
+        let owner = CodeIndexProductionOwnerV1::new(production_config.clone(), publication.clone())
+            .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
+            .with_physical_artifact_pool(byte_pool.physical_artifacts.clone());
         let latest_content_identity = None;
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
@@ -2388,13 +2382,12 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .map_err(CodeIndexProductionErrorV1::Publication)?;
                 CodeIndexPublishedBuildV1::new(pending, manifest_bytes)?
             } else {
-                let mut owner = open_production_code_index_owner_v1(
-                    self.production_config.clone(),
-                    publication,
-                    DaemonProjectionSinkV1,
-                )
-                .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
-                .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
+                let mut owner =
+                    CodeIndexProductionOwnerV1::new(self.production_config.clone(), publication)
+                        .map_err(|error| {
+                            CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string())
+                        })?
+                        .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
                 owner
                     .build_and_publish(
                         CodeIndexBuildRequestV1 {

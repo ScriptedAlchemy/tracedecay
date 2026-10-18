@@ -11,7 +11,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay_application::code_index::open_production_code_index_owner_v1;
+use tracedecay_code_index::production::CodeIndexProductionOwnerV1;
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, OpaqueCursor,
@@ -320,13 +320,10 @@ fn scheduler(
 fn replace_scheduler_policy_revision(scheduler: &mut CodeIndexWorktreeSchedulerV1, revision: &str) {
     let mut config = scheduler.production_config.clone();
     config.policy_revision = PolicyRevisionId::new(revision).expect("policy revision");
-    scheduler.owner = open_production_code_index_owner_v1(
-        config.clone(),
-        scheduler.publication.clone(),
-        super::DaemonProjectionSinkV1,
-    )
-    .expect("open reconfigured production owner")
-    .with_physical_artifact_pool(scheduler.byte_pool.physical_artifacts.clone());
+    scheduler.owner =
+        CodeIndexProductionOwnerV1::new(config.clone(), scheduler.publication.clone())
+            .expect("open reconfigured production owner")
+            .with_physical_artifact_pool(scheduler.byte_pool.physical_artifacts.clone());
     scheduler.production_config = config;
 }
 
@@ -336,13 +333,10 @@ fn replace_scheduler_chunker_revision(
 ) {
     let mut config = scheduler.production_config.clone();
     config.chunker_revision = ChunkerRevision::new(revision).expect("chunker revision");
-    scheduler.owner = open_production_code_index_owner_v1(
-        config.clone(),
-        scheduler.publication.clone(),
-        super::DaemonProjectionSinkV1,
-    )
-    .expect("open reconfigured production owner")
-    .with_physical_artifact_pool(scheduler.byte_pool.physical_artifacts.clone());
+    scheduler.owner =
+        CodeIndexProductionOwnerV1::new(config.clone(), scheduler.publication.clone())
+            .expect("open reconfigured production owner")
+            .with_physical_artifact_pool(scheduler.byte_pool.physical_artifacts.clone());
     scheduler.production_config = config;
 }
 
