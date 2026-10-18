@@ -823,6 +823,17 @@ async fn run_foreground_unix(
             None
         }
     };
+    let profile_watch = super::profile_watch::ProfileIdentityWatch::pin(&profile_root)
+        .inspect_err(|error| {
+            log_daemon_event("profile_watch_unavailable", &[("error", error.to_string())]);
+        })
+        .ok();
+    let mut profile_lost = std::pin::pin!(async {
+        match &profile_watch {
+            Some(watch) => watch.profile_lost().await,
+            None => std::future::pending::<()>().await,
+        }
+    });
     log_daemon_event(
         "daemon_ready",
         &[(
@@ -847,6 +858,22 @@ async fn run_foreground_unix(
                 continue;
             },
             () = shutdown_signals.recv() => break,
+            () = &mut profile_lost => {
+                log_daemon_event(
+                    "daemon_shutdown",
+                    &[
+                        ("outcome", "profile_lost".to_owned()),
+                        (
+                            "identity",
+                            profile_watch
+                                .as_ref()
+                                .map(|watch| watch.path().display().to_string())
+                                .unwrap_or_default(),
+                        ),
+                    ],
+                );
+                break;
+            },
         };
         let permit = match admission.try_admit() {
             DaemonClientAdmissionOutcome::Admitted(permit) => permit,

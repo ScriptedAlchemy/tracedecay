@@ -409,6 +409,8 @@ pub use production_harness::capture_exact_git_snapshot_for_test;
 mod profile_configuration;
 mod profile_owner;
 mod profile_retained;
+#[cfg(unix)]
+mod profile_watch;
 mod projectless;
 mod remote_deletion;
 mod remote_drain;
