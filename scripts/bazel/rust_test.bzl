@@ -149,14 +149,14 @@ def _isolated_rust_test_impl(ctx):
         runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
     test_environment = ctx.attr.test_binary[RunEnvironmentInfo]
     environment = dict(test_environment.environment)
-    # rustup names a dated nightly or beta `<channel>-<date>`. `version` alone
-    # is the compiler's semver (1.100.0 for nightly-2026-09-27), which rustup
-    # treats as an uninstalled stable toolchain, so rust-analyzer never starts.
+    # Child fixtures retain the declared compiler's channel identity while
+    # executables and standard sources come from runfiles, without rustup.
     environment["RUSTUP_TOOLCHAIN"] = (
         "{}-{}".format(toolchain.channel, toolchain.iso_date) if toolchain.iso_date else toolchain.version
     )
     environment["RUSTC_WRAPPER"] = ""
     environment["RUSTC_WORKSPACE_WRAPPER"] = ""
+    environment.setdefault("RUST_TEST_THREADS", "4")
     return [
         DefaultInfo(executable = executable, runfiles = runfiles),
         OutputGroupInfo(
@@ -165,7 +165,11 @@ def _isolated_rust_test_impl(ctx):
         ),
         RunEnvironmentInfo(
             environment = environment,
-            inherited_environment = test_environment.inherited_environment,
+            inherited_environment = [
+                variable
+                for variable in test_environment.inherited_environment
+                if variable != "RUSTUP_TOOLCHAIN"
+            ],
         ),
     ]
 
@@ -256,7 +260,9 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
         }.keys()),
     }
     wrapper_args.update(test_attributes)
-    wrapper_args.setdefault("exec_properties", {"cpu_count": "4"})
+    exec_properties = {"cpu_count": "4"}
+    exec_properties.update(wrapper_args.get("exec_properties", {}))
+    wrapper_args["exec_properties"] = exec_properties
     if visibility != None:
         wrapper_args["visibility"] = visibility
     _isolated_rust_test(**wrapper_args)
