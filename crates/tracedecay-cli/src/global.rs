@@ -32,55 +32,6 @@ pub(crate) async fn classify_project_storage_with_registry(
         .await
 }
 
-/// Returns how many seconds have elapsed since a persisted timestamp.
-///
-/// User config timestamps can land in the future because of clock skew,
-/// manual edits, or state copied across machines. Clamp those cases to zero so
-/// cooldown/version-cache logic degrades gracefully instead of getting stuck on
-/// a negative delta.
-fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
-    if recorded_at >= now {
-        0
-    } else {
-        now - recorded_at
-    }
-}
-
-/// Best-effort: try to flush pending tokens to the worldwide counter.
-///
-/// `upload_enabled` is the already-resolved canonical user-profile setting;
-/// `config` only carries the pending counter and cooldown timestamps.
-/// `force` = true on status/sync commands (always attempt), false on others
-/// (only flush if stale > 30s).
-pub(crate) fn try_flush(
-    config: &mut tracedecay_session_memory::user_config::UserConfig,
-    force: bool,
-    upload_enabled: bool,
-) {
-    if config.pending_upload == 0 || !upload_enabled {
-        return;
-    }
-    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-
-    // Cooldown: skip if last flush attempt failed less than 60s ago
-    if config.last_flush_attempt_at > config.last_upload_at
-        && elapsed_since(now, config.last_flush_attempt_at) < 60
-    {
-        return;
-    }
-
-    // Staleness check for non-force commands
-    if !force && elapsed_since(now, config.last_upload_at) < 30 {
-        return;
-    }
-
-    config.last_flush_attempt_at = now;
-    if crate::cloud::flush_pending(config.pending_upload).is_some() {
-        config.pending_upload = 0;
-        config.last_upload_at = now;
-    }
-}
-
 /// Returns the project paths the `wipe` command should act on.
 ///
 /// `--all` returns every path tracked in the global DB (including stale rows).
@@ -701,25 +652,5 @@ mod gather_tests {
             ),
             vec![std::path::PathBuf::from("/repos/a")]
         );
-    }
-
-    #[test]
-    fn elapsed_since_clamps_future_timestamps() {
-        assert_eq!(elapsed_since(100, 40), 60);
-        assert_eq!(elapsed_since(100, 100), 0);
-        assert_eq!(elapsed_since(100, 140), 0);
-    }
-
-    #[test]
-    fn canonical_upload_denial_leaves_pending_tokens_unflushed() {
-        let mut config = tracedecay_session_memory::user_config::UserConfig {
-            pending_upload: 42,
-            ..tracedecay_session_memory::user_config::UserConfig::default()
-        };
-
-        try_flush(&mut config, true, false);
-
-        assert_eq!(config.pending_upload, 42);
-        assert_eq!(config.last_flush_attempt_at, 0);
     }
 }

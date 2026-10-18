@@ -18,10 +18,10 @@ use tracedecay_domain::configuration::{
     ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
-    RETIRED_CORE_SETTING_KEYS_V1, RedactedConfigurationChangeV1, RollbackModeV1,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
+    RETIRED_CORE_SETTING_KEYS_V1, RETIRED_PROFILE_SETTING_KEYS_V1, RedactedConfigurationChangeV1,
+    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    ScopeControlOperationV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_REPEATED_QUERY_HINTS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
@@ -666,7 +666,6 @@ pub struct ProfileCodeIndexWorkerCommitV1 {
 /// Profile settings registered after a profile store was first initialized.
 /// A store written before one existed converges by adding its default.
 const PROFILE_ADDITIVE_SETTING_KEYS: &[&str] = &[
-    USER_UPLOAD_ENABLED_SETTING_KEY,
     USER_REPEATED_QUERY_HINTS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
@@ -725,12 +724,19 @@ impl<'db> ProfileConfigurationStore<'db> {
             }
         }
         let current = self.current_state().await?;
-        if registry.definitions().all(|definition| {
-            current
-                .snapshot
-                .effective_values
-                .contains_key(&definition.key)
-        }) {
+        let carries_retired_key = current.snapshot.effective_values.keys().any(|key| {
+            RETIRED_PROFILE_SETTING_KEYS_V1
+                .iter()
+                .any(|retired| key.as_str() == *retired)
+        });
+        if !carries_retired_key
+            && registry.definitions().all(|definition| {
+                current
+                    .snapshot
+                    .effective_values
+                    .contains_key(&definition.key)
+            })
+        {
             return Self::project(&self.profile_id, current, &registry);
         }
         let converged = match self
@@ -740,7 +746,7 @@ impl<'db> ProfileConfigurationStore<'db> {
                 occurred_at,
                 &registry,
                 PROFILE_ADDITIVE_SETTING_KEYS,
-                &[],
+                RETIRED_PROFILE_SETTING_KEYS_V1,
             )
             .await
         {

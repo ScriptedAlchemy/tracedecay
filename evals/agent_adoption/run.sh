@@ -358,7 +358,6 @@ echo "query hints:  $REPEATED_QUERY_HINTS"
 if [[ -n "$LEARNED_SKILL_WORKFLOW" ]]; then
   echo "learned:      $LEARNED_SKILL_WORKFLOW variants=[${ACTIVE_VARIANTS# }]"
 fi
-"$TD" disable-upload-counter >/dev/null 2>&1 || true
 
 # ---- build fixtures -------------------------------------------------------- #
 gitc() { git -C "$1" -c user.email=eval@tracedecay -c user.name=eval "${@:2}"; }

@@ -3,9 +3,9 @@ use super::{
     DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, PackageHookAction, RAYON_NUM_THREADS_ENV,
     ScoopPackageHookAction, StderrTracingDefault, async_worker_threads, command_profile_label,
     command_runtime, daemon_cpu_threads_from, is_one_shot_daemon_client,
-    normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
-    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
-    try_print_cli_version, validate_host_bundle_options,
+    normalize_tool_reserved_global_flags, should_skip_agent_install_check,
+    should_skip_startup_maintenance, stderr_tracing_default, try_print_cli_version,
+    validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -284,7 +284,10 @@ fn representative_commands_route_to_their_dispatch_family() {
             },
             CommandFamily::Update,
         ),
-        (Commands::DisableUploadCounter, CommandFamily::Configuration),
+        (
+            Commands::CurrentCounter { path: None },
+            CommandFamily::Configuration,
+        ),
         (Commands::Monitor, CommandFamily::Diagnostics),
         (
             Commands::Analytics {
@@ -692,20 +695,20 @@ fn post_update_full_reinstall_advances_both_version_markers() {
 }
 
 #[test]
-fn init_defers_worldwide_counter_flush_but_retains_other_startup_maintenance() {
-    let command = parse_command(&["init", "/tmp/project"]);
-    assert!(!runs_worldwide_counter_flush(&command));
-    assert!(!should_skip_startup_maintenance(&command));
-    assert!(runs_worldwide_counter_flush(&parse_command(&["sync"])));
+fn retired_worldwide_counter_commands_are_refused_by_the_parser() {
+    for retired in ["enable-upload-counter", "disable-upload-counter"] {
+        let error = Cli::try_parse_from(["tracedecay", retired])
+            .expect_err("a retired subcommand must not parse");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
 }
 
 #[test]
 fn claude_and_kiro_hooks_skip_startup_maintenance() {
     // Claude and Kiro lifecycle hooks are agent-invoked hot-path
     // commands, exactly like the Cursor/Codex hooks already in the
-    // skip-list. They must skip the synchronous `try_flush` network
-    // round-trip (and the rest of the pre-command startup maintenance)
-    // so they stay fast on every tool-use/prompt/stop event (#84).
+    // skip-list. They must skip the pre-command startup maintenance so they
+    // stay fast on every tool-use/prompt/stop event (#84).
     assert!(should_skip_startup_maintenance(&Commands::HookPreToolUse));
     assert!(should_skip_startup_maintenance(&Commands::HookPromptSubmit));
     assert!(should_skip_startup_maintenance(&Commands::HookStop));

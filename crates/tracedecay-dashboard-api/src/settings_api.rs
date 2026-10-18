@@ -212,7 +212,6 @@ struct UserSettingsPayloadV1 {
     /// user settings revision above.
     code_index_worker_configuration_snapshot_id: String,
     code_index_worker_configuration_revision_id: String,
-    upload_enabled: bool,
     code_index_workers: CodeIndexWorkerSelectionV1,
     /// The admitted process-wide plan. A persisted selection may differ until
     /// the daemon restarts, so unavailable is carried as `null` rather than
@@ -431,7 +430,6 @@ pub async fn patch_user_settings(
         &current,
         profile_id,
         UserSettingsMutationV1 {
-            upload_enabled: admitted.upload_enabled,
             watcher_debounce_ms: admitted.watcher_debounce_ms,
             extraction_timeout_secs: admitted.extraction_timeout_secs,
         },
@@ -678,7 +676,6 @@ fn user_settings_payload(
         code_index_worker_configuration_revision_id: worker_configuration
             .configuration_revision_id
             .clone(),
-        upload_enabled: user.upload_enabled,
         code_index_workers: worker_configuration.code_index_workers,
         code_index_worker_status: tracedecay_code_index::parallelism::installed_worker_status(),
         watcher_debounce: user.watcher_debounce.clone(),

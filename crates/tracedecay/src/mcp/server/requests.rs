@@ -996,7 +996,6 @@ impl McpServer {
             accounting.net_saved_tokens(),
             accounting.raw_file_tokens,
         );
-        self.maybe_flush_worldwide();
         accounting
     }
 
