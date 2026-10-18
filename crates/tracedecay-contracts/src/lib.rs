@@ -611,8 +611,8 @@ pub use workflow_effect::{
 pub use workflow_fan_out_census::{
     WorkflowFanOutCensusBackfillPageV1, WorkflowFanOutCensusError, WorkflowFanOutCensusEvidenceV1,
     WorkflowFanOutCensusObservationV1, WorkflowFanOutCensusPersistOutcomeV1,
-    WorkflowFanOutCensusStoragePort, WorkflowNonDuplicateAttemptsEvidenceV1,
-    derive_workflow_fan_out_census,
+    WorkflowFanOutCensusReadPort, WorkflowFanOutCensusStoragePort,
+    WorkflowNonDuplicateAttemptsEvidenceV1, derive_workflow_fan_out_census,
 };
 pub use workflow_provider::{
     WorkflowProviderPlacementError, WorkflowProviderPlacementService, WorkflowProviderRegistration,
@@ -624,9 +624,9 @@ pub use workflow_run::{
     WorkflowArtifactPayload, WorkflowArtifactPersistOutcome, WorkflowArtifactStoreError,
     WorkflowArtifactStorePort, WorkflowFanOutAttemptBindingV1, WorkflowRunAppendOutcome,
     WorkflowRunAppendRequest, WorkflowRunCancelRequest, WorkflowRunGetRequest,
-    WorkflowRunPauseRequest, WorkflowRunResumeRequest, WorkflowRunService, WorkflowRunServiceError,
-    WorkflowRunStartRequest, WorkflowRunStorageError, WorkflowRunStoragePort,
-    workflow_artifact_payload_digest,
+    WorkflowRunPauseRequest, WorkflowRunReadPort, WorkflowRunResumeRequest, WorkflowRunService,
+    WorkflowRunServiceError, WorkflowRunStartRequest, WorkflowRunStorageError,
+    WorkflowRunStoragePort, workflow_artifact_payload_digest,
 };
 pub use workflow_runtime::{
     WorkflowExecutionFence, WorkflowExecutionIdentity, WorkflowFailurePolicy, WorkflowFanOutInput,

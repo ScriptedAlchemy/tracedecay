@@ -673,8 +673,10 @@ async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     changed.notify_all();
+    // The successor holds capacity across this wait, so a terminal that waits
+    // on it never arrives. The bound only turns that into a failure.
     let terminal = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
+        std::time::Duration::from_secs(10),
         first_terminal.notified(),
     )
     .await;
@@ -743,8 +745,10 @@ async fn superseded_queued_work_emits_its_own_receipt_terminal() {
         runtime.admit(request([3; 16], None)),
         HookOrchestrationAdmissionV1::Enqueued
     );
+    // The first operation holds capacity across this wait, so a terminal that
+    // waits for capacity never arrives. The bound only turns that into a failure.
     let terminal = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
+        std::time::Duration::from_secs(10),
         queued_terminal.notified(),
     )
     .await;

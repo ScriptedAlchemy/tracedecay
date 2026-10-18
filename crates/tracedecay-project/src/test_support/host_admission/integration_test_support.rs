@@ -119,10 +119,10 @@ impl HostAdmissionTestRuntimeV1 {
 
     /// Bind the registered workflow/handoff authority for the mounted project.
     #[doc(hidden)]
-    pub fn project_workflow_storage_for_test(
+    pub async fn project_workflow_storage_for_test(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
-        self.project_database_for_test()?.workflow_storage()
+        self.project_database_for_test()?.workflow_storage().await
     }
 
     #[doc(hidden)]

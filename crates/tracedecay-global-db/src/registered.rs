@@ -625,12 +625,12 @@ impl RegisteredGlobalDb {
 
     /// Attaches the workflow source and journal authority over the registered
     /// exact-SQL handle.
-    pub fn workflow_storage(
+    pub async fn workflow_storage(
         &self,
     ) -> tracedecay_domain::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
-        self.database.workflow_storage()
+        self.database.workflow_storage().await
     }
 
     pub async fn handoff_open_storage(
