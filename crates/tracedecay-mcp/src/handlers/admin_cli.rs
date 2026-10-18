@@ -22,6 +22,7 @@ use tracedecay_dashboard_api::project_registry::{
     public_code_project_from_record,
 };
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
+use tracedecay_maintenance::retention::storage_report::StorageReportControlV1;
 
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -48,6 +49,8 @@ struct AdminCliContext<'a> {
     /// The daemon's code-index scheduler registry, which resolves the
     /// retention protection set a storage report plans against.
     code_index_schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
+    /// The request's bound on a storage report's filesystem walks.
+    storage_report_control: StorageReportControlV1,
 }
 
 impl<'a> AdminCliContext<'a> {
@@ -80,6 +83,7 @@ impl<'a> AdminCliContext<'a> {
             deadline,
             cancellation,
             code_index_schedulers: None,
+            storage_report_control: StorageReportControlV1::budget_only(),
         }
     }
 
@@ -89,6 +93,7 @@ impl<'a> AdminCliContext<'a> {
         profile_root: &'a Path,
         active_checkout: Option<&'a Path>,
         code_index_schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
+        storage_report_control: StorageReportControlV1,
     ) -> Self {
         Self {
             global_db,
@@ -104,6 +109,7 @@ impl<'a> AdminCliContext<'a> {
             deadline: None,
             cancellation: None,
             code_index_schedulers,
+            storage_report_control,
         }
     }
 
@@ -232,6 +238,7 @@ pub async fn compute_projectless_admin_cli(
     profile_root: &Path,
     active_checkout: Option<&Path>,
     code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    storage_report_control: StorageReportControlV1,
 ) -> Result<AdminCliResultV1> {
     dispatch_admin_cli(
         AdminCliContext::projectless(
@@ -240,6 +247,7 @@ pub async fn compute_projectless_admin_cli(
             profile_root,
             active_checkout,
             code_index_schedulers,
+            storage_report_control,
         ),
         request,
     )
@@ -432,6 +440,7 @@ async fn dispatch_admin_cli(
                         &project_root,
                         global_db,
                         context.code_index_schedulers,
+                        context.storage_report_control.clone(),
                     )
                     .await?
                 }
@@ -442,6 +451,7 @@ async fn dispatch_admin_cli(
                         context.code_index_schedulers,
                         cursor.as_deref(),
                         limit,
+                        context.storage_report_control.clone(),
                     )
                     .await?
                 }
@@ -882,8 +892,14 @@ mod tests {
             .profile_sessions()
             .await
             .unwrap();
-        let mut context =
-            AdminCliContext::projectless(&profile_database, None, &profile, None, None);
+        let mut context = AdminCliContext::projectless(
+            &profile_database,
+            None,
+            &profile,
+            None,
+            None,
+            StorageReportControlV1::budget_only(),
+        );
         context.project = Some(&project);
         // A supplied foreign session pointer must never substitute for the
         // current project's registered runtime authority.
@@ -970,6 +986,7 @@ mod tests {
                 state: tracedecay_maintenance::retention::storage_report::ProfileTotalCoverageStateV1::Complete,
                 total_bytes: 12_288,
                 unavailable_entry_count: 0,
+                truncated: false,
             },
         );
         let body = serde_json::to_value(&storage).unwrap();

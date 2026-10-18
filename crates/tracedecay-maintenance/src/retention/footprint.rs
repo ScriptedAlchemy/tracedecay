@@ -171,6 +171,7 @@ impl ProfileFootprintV1 {
             },
             total_bytes: self.total_bytes,
             unavailable_entry_count: self.unavailable_entry_count,
+            truncated: self.truncated,
         }
     }
 }
@@ -185,6 +186,37 @@ pub enum WalkedEntryV1 {
     Unavailable,
 }
 
+/// Directory entries one request may still visit across every walk it runs,
+/// and the checkpoint that stops those walks once the request is cancelled or
+/// past its deadline.
+pub struct EntryBudgetV1<'a> {
+    remaining: usize,
+    interrupted: &'a dyn Fn() -> bool,
+}
+
+impl<'a> EntryBudgetV1<'a> {
+    #[must_use]
+    pub fn new(entries: usize, interrupted: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            remaining: entries,
+            interrupted,
+        }
+    }
+
+    #[must_use]
+    pub const fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    fn take_entry(&mut self) -> bool {
+        if self.remaining == 0 || (self.interrupted)() {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
+
 /// Visit every regular file under `root` with its byte length, without
 /// following symlinks or reading contents. Stops after `entry_ceiling`
 /// directory entries and returns whether it did, which makes any total built
@@ -194,7 +226,20 @@ pub fn walk_regular_files(
     entry_ceiling: usize,
     visit: &mut dyn FnMut(&Path, WalkedEntryV1),
 ) -> bool {
-    let mut visited = 0usize;
+    walk_regular_files_within(
+        root,
+        &mut EntryBudgetV1::new(entry_ceiling, &|| false),
+        visit,
+    )
+}
+
+/// [`walk_regular_files`] charged to a budget shared with the caller's other
+/// walks. Returns whether the budget or its interruption stopped the walk.
+pub fn walk_regular_files_within(
+    root: &Path,
+    budget: &mut EntryBudgetV1<'_>,
+    visit: &mut dyn FnMut(&Path, WalkedEntryV1),
+) -> bool {
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&directory) else {
@@ -202,10 +247,9 @@ pub fn walk_regular_files(
             continue;
         };
         for entry in entries {
-            if visited >= entry_ceiling {
+            if !budget.take_entry() {
                 return true;
             }
-            visited += 1;
             let Ok(entry) = entry else {
                 visit(&directory, WalkedEntryV1::Unavailable);
                 continue;

@@ -324,12 +324,11 @@ fn merge_storage_report_page(
     report
         .code_generation_retention_availability
         .extend(page.code_generation_retention_availability);
-    report.unregistered_dir_count = report
-        .unregistered_dir_count
-        .saturating_add(page.unregistered_dir_count);
-    report.unregistered_bytes = report
-        .unregistered_bytes
-        .saturating_add(page.unregistered_bytes);
+    report.add_unregistered(
+        page.unregistered_dir_count,
+        page.unregistered_bytes,
+        page.unregistered_size_coverage,
+    );
     report.global_db_bytes = report.global_db_bytes.max(page.global_db_bytes);
     report.user_sessions_db_bytes = report
         .user_sessions_db_bytes
@@ -395,6 +394,7 @@ async fn handle_storage_report(
                     project_id,
                     project_root,
                     Err(tracedecay_maintenance::retention::storage_report::RETENTION_PROTECTION_UNRESOLVED),
+                    &tracedecay_maintenance::retention::storage_report::StorageReportControlV1::budget_only(),
                 )
             }
             (None, None) => {
@@ -459,7 +459,7 @@ async fn handle_storage_report(
             "    {} ({}, {root_state}): {} total, {free}",
             store.project_id,
             store.canonical_root,
-            format_bytes(store.total_bytes),
+            measured_bytes(store.total_bytes, store.size_coverage),
         );
         let kinds = &store.kinds;
         for (family, bytes) in [
@@ -474,11 +474,8 @@ async fn handle_storage_report(
         ] {
             println!("      {family}: {}", format_bytes(bytes));
         }
-        if store.unavailable_entry_count > 0 {
-            println!(
-                "      not sized: {} unreadable or non-regular entries",
-                store.unavailable_entry_count
-            );
+        for line in not_sized_lines(store.size_coverage) {
+            println!("      {line}");
         }
     }
     for retention in &report.code_generation_retention {
@@ -536,8 +533,11 @@ async fn handle_storage_report(
     println!(
         "  unregistered directories: {} ({})",
         report.unregistered_dir_count,
-        format_bytes(report.unregistered_bytes)
+        measured_bytes(report.unregistered_bytes, report.unregistered_size_coverage)
     );
+    for line in not_sized_lines(report.unregistered_size_coverage) {
+        println!("    {line}");
+    }
     if report.unregistered_dir_count > 0 {
         println!("  run the daemon's automatic sweep to reclaim unregistered directories");
     }
@@ -559,6 +559,35 @@ async fn handle_storage_report(
         );
     }
     Ok(())
+}
+
+/// Bytes a bounded walk measured: exact, a floor, or not measured at all.
+fn measured_bytes(
+    bytes: u64,
+    coverage: tracedecay_maintenance::retention::storage_report::SizeCoverageV1,
+) -> String {
+    use tracedecay_maintenance::retention::storage_report::SizeCoverageStateV1;
+    match coverage.state {
+        SizeCoverageStateV1::Complete => format_bytes(bytes),
+        SizeCoverageStateV1::Partial => format!("at least {}", format_bytes(bytes)),
+        SizeCoverageStateV1::Unavailable => "not measured".to_owned(),
+    }
+}
+
+/// Why a walk's bytes are not exact.
+fn not_sized_lines(
+    coverage: tracedecay_maintenance::retention::storage_report::SizeCoverageV1,
+) -> Vec<String> {
+    let unreadable = (coverage.unavailable_entry_count > 0).then(|| {
+        format!(
+            "not sized: {} unreadable or non-regular entries",
+            coverage.unavailable_entry_count
+        )
+    });
+    let truncated = coverage
+        .truncated
+        .then(|| "not sized: entries beyond this request's entry budget".to_owned());
+    unreadable.into_iter().chain(truncated).collect()
 }
 
 /// The footprint section: every entry against its bound, largest first, then

@@ -18,6 +18,7 @@
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::{Map, Value};
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
@@ -37,12 +38,13 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::DaemonProjectRegistryReadService;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_maintenance::retention::storage_report::StorageReportControlV1;
 use tracedecay_mcp::handlers::{
     SessionAuthorities, decode_primitive_request, hook_runtime, unknown_tool_error,
 };
 use tracedecay_mcp::server::join_hook_ingest_refresh;
 use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
-use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -65,6 +67,13 @@ pub(super) async fn invoke_profile_owner_operation(
     cancellation: CancellationContext,
     request_cancellation: Option<CancellationToken>,
 ) -> DaemonInvocationResponse {
+    // Blocking-pool walks cannot be dropped with the awaiting future, so they
+    // observe the same budget and cancellation the answer below enforces.
+    let budget = tool_dispatch_budget(operation.mcp_tool_name(), Some(&deadline));
+    let storage_report_control = StorageReportControlV1::new(
+        request_cancellation.clone().unwrap_or_default(),
+        MonotonicDeadline::at(Instant::now() + budget.unwrap_or_default()),
+    );
     answer_profile_owner_operation(
         request_id,
         operation,
@@ -79,6 +88,7 @@ pub(super) async fn invoke_profile_owner_operation(
                 active_project_root,
                 operation,
                 arguments,
+                storage_report_control,
             )
         },
     )
@@ -93,6 +103,7 @@ async fn compute_profile_owner_operation(
     active_project_root: Option<&Path>,
     operation: ApplicationSurfaceOperation,
     arguments: Map<String, Value>,
+    storage_report_control: StorageReportControlV1,
 ) -> Result<(ResolvedScope, GraphToolCompletionV1)> {
     let profile_identity = store_administration.profile_identity()?;
     let scope = profile_session_scope(profile_identity)?;
@@ -150,6 +161,7 @@ async fn compute_profile_owner_operation(
                         profile_identity.profile_root(),
                         active_project_root,
                         code_index_schedulers,
+                        storage_report_control,
                     ),
                 )
                 .await?,

@@ -376,6 +376,9 @@ pub struct AdminCliStorageReportV1 {
     pub code_generation_retention_availability: Vec<Value>,
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
+    /// Whether `unregistered_bytes` is exact, a floor, or unmeasured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unregistered_size_coverage: Option<Value>,
     pub global_db_bytes: u64,
     #[serde(default)]
     pub user_sessions_db_bytes: u64,

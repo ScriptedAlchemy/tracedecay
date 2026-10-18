@@ -43,14 +43,22 @@ use tracedecay_runtime_core::config::GLOBAL_DB_FILENAME;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::storage::{SESSIONS_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
 
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+
 use super::footprint::{
-    ProfileFootprintV1, ProjectRootStateV1, WalkedEntryV1, census_profile_footprint,
-    walk_regular_files,
+    EntryBudgetV1, MAX_FOOTPRINT_ENTRIES, ProfileFootprintV1, ProjectRootStateV1, WalkedEntryV1,
+    census_profile_footprint, walk_regular_files_within,
 };
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
+/// Directory entries one storage-report call may visit across every store and
+/// directory it sizes, so a page of large stores is bounded like one store.
+pub const STORAGE_REPORT_ENTRY_BUDGET: usize = MAX_FOOTPRINT_ENTRIES;
 const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
+/// Generation files the digest preflight lists before it settles for a
+/// metadata-only census; zero-byte files cannot slip under the byte budget.
+const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_ENTRIES: usize = 1_024;
 const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
 const CODE_INDEX_DIRECTORY: &str = "code-index-v1";
 const SEALED_GRAPH_DIRECTORY: &str = "tracedecay.sealed";
@@ -66,6 +74,51 @@ pub const RETENTION_PROTECTION_UNRESOLVED: &str =
 /// be resolved.
 type RetentionProtection = Result<BTreeSet<CodeGenerationId>, &'static str>;
 
+/// What bounds one storage-report call's filesystem work: its entry budget
+/// and the request's cancellation and deadline, observed on the blocking pool.
+#[derive(Clone, Debug)]
+pub struct StorageReportControlV1 {
+    cancellation: Option<CancellationToken>,
+    deadline: Option<MonotonicDeadline>,
+    entry_budget: usize,
+}
+
+impl StorageReportControlV1 {
+    #[must_use]
+    pub const fn new(cancellation: CancellationToken, deadline: MonotonicDeadline) -> Self {
+        Self {
+            cancellation: Some(cancellation),
+            deadline: Some(deadline),
+            entry_budget: STORAGE_REPORT_ENTRY_BUDGET,
+        }
+    }
+
+    /// A report no request can cancel; only the entry budget bounds it.
+    #[must_use]
+    pub const fn budget_only() -> Self {
+        Self {
+            cancellation: None,
+            deadline: None,
+            entry_budget: STORAGE_REPORT_ENTRY_BUDGET,
+        }
+    }
+
+    #[cfg(test)]
+    const fn with_entry_budget(mut self, entry_budget: usize) -> Self {
+        self.entry_budget = entry_budget;
+        self
+    }
+
+    fn interrupted(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+            || self
+                .deadline
+                .is_some_and(|deadline| deadline.is_elapsed_at(std::time::Instant::now()))
+    }
+}
+
 /// One registered profile-sharded store's size/free-page snapshot.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StoreSizeReportEntry {
@@ -79,6 +132,9 @@ pub struct StoreSizeReportEntry {
     /// Entries under the store that could not be read or are neither regular
     /// files nor directories. Non-zero makes `total_bytes` a floor.
     pub unavailable_entry_count: usize,
+    /// How completely `total_bytes` was measured.
+    #[serde(default)]
+    pub size_coverage: SizeCoverageV1,
     /// Reclaimable free-page bytes of the graph database, or `None` when it
     /// could not be sampled without waiting on a live writer.
     pub free_bytes: Option<u64>,
@@ -187,6 +243,9 @@ pub struct StorageReport {
     pub code_generation_retention_availability: Vec<CodeGenerationRetentionAvailabilityEntry>,
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
+    /// How completely `unregistered_bytes` was measured.
+    #[serde(default)]
+    pub unregistered_size_coverage: SizeCoverageV1,
     pub global_db_bytes: u64,
     /// `user-sessions.db` with its `-wal` and `-shm`. Profile-level, not a
     /// project store; omitted from older reports.
@@ -245,6 +304,91 @@ pub struct FullProfileSizeV1 {
     pub state: ProfileTotalCoverageStateV1,
     pub total_bytes: u64,
     pub unavailable_entry_count: usize,
+    /// The census stopped at its entry ceiling before visiting every entry.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// Whether a bounded metadata walk measured every byte it reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SizeCoverageStateV1 {
+    /// Every entry was sized; the bytes are exact.
+    #[default]
+    Complete,
+    /// Some entries were unreadable or left unvisited; the bytes are a floor.
+    Partial,
+    /// The request's entry budget was spent, or the request interrupted,
+    /// before the walk visited anything; no bytes were measured.
+    Unavailable,
+}
+
+/// How completely the bytes beside it were measured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct SizeCoverageV1 {
+    pub state: SizeCoverageStateV1,
+    /// Entries that could not be read or are neither regular files nor
+    /// directories.
+    pub unavailable_entry_count: usize,
+    /// The request's entry budget, cancellation, or deadline stopped the walk
+    /// before it visited every entry.
+    pub truncated: bool,
+}
+
+impl SizeCoverageV1 {
+    fn of_walk(visited_any: bool, unavailable_entry_count: usize, truncated: bool) -> Self {
+        let state = if !visited_any && truncated {
+            SizeCoverageStateV1::Unavailable
+        } else if unavailable_entry_count > 0 || truncated {
+            SizeCoverageStateV1::Partial
+        } else {
+            SizeCoverageStateV1::Complete
+        };
+        Self {
+            state,
+            unavailable_entry_count,
+            truncated,
+        }
+    }
+
+    /// The coverage of two disjoint measurements summed together.
+    fn merge(self, other: Self) -> Self {
+        use SizeCoverageStateV1::{Complete, Partial, Unavailable};
+        Self {
+            state: match (self.state, other.state) {
+                (Complete, Complete) => Complete,
+                (Unavailable, Unavailable) => Unavailable,
+                _ => Partial,
+            },
+            unavailable_entry_count: self
+                .unavailable_entry_count
+                .saturating_add(other.unavailable_entry_count),
+            truncated: self.truncated || other.truncated,
+        }
+    }
+}
+
+/// Bytes of every regular file under `root`, charged to the request's budget.
+fn measure_subtree(
+    root: &Path,
+    budget: &mut EntryBudgetV1<'_>,
+    visit: &mut dyn FnMut(&Path, u64),
+) -> (u64, SizeCoverageV1) {
+    let start = budget.remaining();
+    let mut bytes = 0u64;
+    let mut unavailable_entry_count = 0usize;
+    let truncated = walk_regular_files_within(root, budget, &mut |path, walked| match walked {
+        WalkedEntryV1::File { bytes: file } => {
+            bytes = bytes.saturating_add(file);
+            visit(path, file);
+        }
+        WalkedEntryV1::Unavailable => unavailable_entry_count += 1,
+    });
+    let visited_any = budget.remaining() < start;
+    (
+        bytes,
+        SizeCoverageV1::of_walk(visited_any, unavailable_entry_count, truncated),
+    )
 }
 
 /// Profile-wide on-disk total, with any family it could not size named.
@@ -268,6 +412,21 @@ pub struct ProfileTotalSizeV1 {
 }
 
 impl StorageReport {
+    /// Adds `dir_count` more unregistered directories measured as `bytes`
+    /// with `coverage`, such as one directory or another page's total.
+    pub fn add_unregistered(&mut self, dir_count: usize, bytes: u64, coverage: SizeCoverageV1) {
+        if dir_count == 0 {
+            return;
+        }
+        self.unregistered_size_coverage = if self.unregistered_dir_count == 0 {
+            coverage
+        } else {
+            self.unregistered_size_coverage.merge(coverage)
+        };
+        self.unregistered_dir_count = self.unregistered_dir_count.saturating_add(dir_count);
+        self.unregistered_bytes = self.unregistered_bytes.saturating_add(bytes);
+    }
+
     /// Total on-disk bytes this report accounts for, and what it excludes.
     pub fn profile_total_size(&self) -> ProfileTotalSizeV1 {
         let registered_store_bytes = self
@@ -280,12 +439,15 @@ impl StorageReport {
             .saturating_add(self.unregistered_bytes);
 
         if let Some(full_profile_size) = self.full_profile_size {
-            let excluded_families = (full_profile_size.unavailable_entry_count > 0).then(|| {
+            let unreadable = (full_profile_size.unavailable_entry_count > 0).then(|| {
                 format!(
                     "{} unreadable or non-regular profile entries",
                     full_profile_size.unavailable_entry_count
                 )
             });
+            let truncated = full_profile_size
+                .truncated
+                .then(|| "profile entries beyond the census entry ceiling".to_owned());
             return ProfileTotalSizeV1 {
                 state: full_profile_size.state,
                 accounted_bytes: full_profile_size.total_bytes,
@@ -293,7 +455,7 @@ impl StorageReport {
                 global_db_bytes: self.global_db_bytes,
                 user_sessions_db_bytes: self.user_sessions_db_bytes,
                 unregistered_bytes: self.unregistered_bytes,
-                excluded_families: excluded_families.into_iter().collect(),
+                excluded_families: unreadable.into_iter().chain(truncated).collect(),
             };
         }
 
@@ -313,6 +475,28 @@ impl StorageReport {
             excluded_families.push(format!(
                 "{unreadable_store_entries} unreadable entries under registered stores"
             ));
+        }
+        let truncated_stores = self
+            .stores
+            .iter()
+            .filter(|store| store.size_coverage.truncated)
+            .count();
+        if truncated_stores > 0 {
+            excluded_families.push(format!(
+                "{truncated_stores} registered stores not fully sized within the entry budget"
+            ));
+        }
+        let unregistered = self.unregistered_size_coverage;
+        if unregistered.unavailable_entry_count > 0 {
+            excluded_families.push(format!(
+                "{} unreadable entries under unregistered directories",
+                unregistered.unavailable_entry_count
+            ));
+        }
+        if unregistered.truncated {
+            excluded_families.push(
+                "unregistered directories not fully sized within the entry budget".to_owned(),
+            );
         }
         ProfileTotalSizeV1 {
             state: ProfileTotalCoverageStateV1::Partial,
@@ -413,35 +597,19 @@ pub async fn build_storage_report(
     .await
     .map_err(|error| report_error("join profile footprint census", error))?;
     let profile_root_buf = profile_root.to_path_buf();
-    let sampled = native_runtime::spawn_blocking(move || {
-        sample_registered_storage(&profile_root_buf, &global_db_path, registered_projects)
+    let mut report = native_runtime::spawn_blocking(move || {
+        sample_registered_storage(
+            &profile_root_buf,
+            &global_db_path,
+            registered_projects,
+            &StorageReportControlV1::budget_only(),
+        )
     })
     .await
     .map_err(|error| report_error("join storage report sample", error))??;
-
-    Ok(StorageReport {
-        profile_root: profile_root.display().to_string(),
-        stores: sampled.stores,
-        code_generation_retention: sampled.code_generation_retention,
-        code_generation_retention_availability: sampled.code_generation_retention_availability,
-        unregistered_dir_count: sampled.unregistered_dir_count,
-        unregistered_bytes: sampled.unregistered_bytes,
-        global_db_bytes: sampled.global_db_bytes,
-        user_sessions_db_bytes: sampled.user_sessions_db_bytes,
-        full_profile_size: Some(footprint.full_profile_size()),
-        footprint: Some(footprint),
-        coverage: StorageReportCoverage::default(),
-    })
-}
-
-struct SampledRegisteredStorage {
-    stores: Vec<StoreSizeReportEntry>,
-    code_generation_retention: Vec<CodeGenerationRetentionDryRunEntry>,
-    code_generation_retention_availability: Vec<CodeGenerationRetentionAvailabilityEntry>,
-    unregistered_dir_count: usize,
-    unregistered_bytes: u64,
-    global_db_bytes: u64,
-    user_sessions_db_bytes: u64,
+    report.full_profile_size = Some(footprint.full_profile_size());
+    report.footprint = Some(footprint);
+    Ok(report)
 }
 
 /// Copies `global.db` off-profile on the blocking pool, then lists registered
@@ -516,11 +684,17 @@ fn sample_registered_storage(
     profile_root: &Path,
     global_db_path: &Path,
     registered_projects: Vec<(String, String)>,
-) -> tracedecay_domain::errors::Result<SampledRegisteredStorage> {
+    control: &StorageReportControlV1,
+) -> tracedecay_domain::errors::Result<StorageReport> {
+    let interrupted = || control.interrupted();
+    let mut budget = EntryBudgetV1::new(control.entry_budget, &interrupted);
+    let mut report = StorageReport {
+        profile_root: profile_root.display().to_string(),
+        global_db_bytes: database_family_bytes(global_db_path),
+        user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
+        ..StorageReport::default()
+    };
     let mut registered_ids = HashSet::new();
-    let mut stores = Vec::new();
-    let mut code_generation_retention = Vec::new();
-    let mut code_generation_retention_availability = Vec::new();
     for (project_id, canonical_root) in registered_projects {
         registered_ids.insert(project_id.clone());
         // Offline reports have no mounted scheduler identity authority, so
@@ -531,22 +705,27 @@ fn sample_registered_storage(
             &project_id,
             &canonical_root,
             Err(RETENTION_PROTECTION_UNRESOLVED),
-            &mut stores,
-            &mut code_generation_retention,
-            &mut code_generation_retention_availability,
+            &mut budget,
+            &mut report,
         )?;
     }
-    let (unregistered_dir_count, unregistered_bytes) =
-        scan_unregistered_dirs(profile_root, &registered_ids);
-    Ok(SampledRegisteredStorage {
-        stores,
-        code_generation_retention,
-        code_generation_retention_availability,
-        unregistered_dir_count,
-        unregistered_bytes,
-        global_db_bytes: database_family_bytes(global_db_path),
-        user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
-    })
+    let unregistered = unregistered_project_dirs(profile_root, &registered_ids);
+    add_unregistered_dirs(&mut report, &unregistered, &mut budget);
+    Ok(report)
+}
+
+/// Sizes unregistered store directories into `report` from the request's
+/// shared budget. Shares the footprint walker so these bytes are the bytes
+/// every other storage surface reports for the same directory.
+fn add_unregistered_dirs(
+    report: &mut StorageReport,
+    directories: &[PathBuf],
+    budget: &mut EntryBudgetV1<'_>,
+) {
+    for directory in directories {
+        let (bytes, coverage) = measure_subtree(directory, budget, &mut |_, _| {});
+        report.add_unregistered(1, bytes, coverage);
+    }
 }
 
 /// Where a profile storage report page resumes: after a registered project,
@@ -584,7 +763,10 @@ fn storage_report_cursor_refusal(mismatch: &CursorBindingMismatchV1) -> TraceDec
 /// Builds one bounded page through the daemon's retained global registry
 /// authority. Registered projects and top-level profile directories are
 /// separate cursor phases so neither the registry query nor the filesystem
-/// census performs an unbounded profile-wide scan.
+/// census performs an unbounded profile-wide scan. Every store and directory
+/// the page sizes draws from one `control` entry budget, so the cursor bounds
+/// how many subtrees a page visits and the budget bounds the entries inside
+/// them; a subtree the budget cut short says so in its own size coverage.
 #[tracing::instrument(
     name = "maintenance.storage_report.build_page",
     level = "trace",
@@ -596,6 +778,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
     code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     cursor: Option<&str>,
     limit: usize,
+    control: StorageReportControlV1,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
     let global_db_bytes = database_family_bytes(&profile_root.join(GLOBAL_DB_FILENAME));
@@ -620,6 +803,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
                 limit,
                 global_db_bytes,
                 user_sessions_db_bytes,
+                control,
             )
             .await;
         }
@@ -646,14 +830,6 @@ pub async fn build_storage_report_page_from_registered_global_db(
         .filter(|(name, _)| !registered.contains(name))
         .map(|(_, path)| path.clone())
         .collect::<Vec<_>>();
-    let (unregistered_dir_count, unregistered_bytes) = native_runtime::spawn_blocking(move || {
-        let bytes = unregistered.iter().fold(0u64, |total, path| {
-            total.saturating_add(super::orphan_stores::dir_size_bytes(path))
-        });
-        (unregistered.len(), bytes)
-    })
-    .await
-    .map_err(|error| report_error("join unregistered storage page", error))?;
     let next_cursor = directory_page
         .next_cursor
         .map(|after| {
@@ -663,10 +839,8 @@ pub async fn build_storage_report_page_from_registered_global_db(
             )
         })
         .transpose()?;
-    Ok(StorageReport {
+    let mut report = StorageReport {
         profile_root: profile_root.display().to_string(),
-        unregistered_dir_count,
-        unregistered_bytes,
         global_db_bytes,
         user_sessions_db_bytes,
         coverage: next_cursor.map_or_else(
@@ -674,7 +848,15 @@ pub async fn build_storage_report_page_from_registered_global_db(
             StorageReportCoverage::partial,
         ),
         ..StorageReport::default()
+    };
+    native_runtime::spawn_blocking(move || {
+        let interrupted = || control.interrupted();
+        let mut budget = EntryBudgetV1::new(control.entry_budget, &interrupted);
+        add_unregistered_dirs(&mut report, &unregistered, &mut budget);
+        report
     })
+    .await
+    .map_err(|error| report_error("join unregistered storage page", error))
 }
 
 async fn project_storage_report_page(
@@ -686,6 +868,7 @@ async fn project_storage_report_page(
     limit: usize,
     global_db_bytes: u64,
     user_sessions_db_bytes: u64,
+    control: StorageReportControlV1,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let mut projects = global_db
         .list_code_projects_after(after_project_id, limit.saturating_add(1))
@@ -718,6 +901,8 @@ async fn project_storage_report_page(
     }
     let profile_root = profile_root.to_path_buf();
     native_runtime::spawn_blocking(move || {
+        let interrupted = || control.interrupted();
+        let mut budget = EntryBudgetV1::new(control.entry_budget, &interrupted);
         let mut report = StorageReport {
             profile_root: profile_root.display().to_string(),
             global_db_bytes,
@@ -731,9 +916,8 @@ async fn project_storage_report_page(
                 &project.project_id,
                 &project.canonical_root,
                 protection,
-                &mut report.stores,
-                &mut report.code_generation_retention,
-                &mut report.code_generation_retention_availability,
+                &mut budget,
+                &mut report,
             )?;
         }
         Ok(report)
@@ -815,6 +999,7 @@ pub async fn build_project_storage_report_from_daemon(
     canonical_root: &Path,
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
     code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    control: StorageReportControlV1,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let protection =
         resolve_retention_protection(code_index_schedulers, global_db, canonical_root).await;
@@ -822,7 +1007,13 @@ pub async fn build_project_storage_report_from_daemon(
     let project_id = project_id.to_owned();
     let canonical_root = canonical_root.to_path_buf();
     native_runtime::spawn_blocking(move || {
-        build_project_storage_report(&profile_root, &project_id, &canonical_root, protection)
+        build_project_storage_report(
+            &profile_root,
+            &project_id,
+            &canonical_root,
+            protection,
+            &control,
+        )
     })
     .await
     .map_err(|error| report_error("join daemon-backed project storage report", error))?
@@ -856,38 +1047,30 @@ pub fn build_project_storage_report(
     project_id: &str,
     canonical_root: &Path,
     vector_readable_sources: Result<BTreeSet<CodeGenerationId>, &'static str>,
+    control: &StorageReportControlV1,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: message.to_owned(),
         }
     })?;
-    let mut stores = Vec::new();
-    let mut code_generation_retention = Vec::new();
-    let mut code_generation_retention_availability = Vec::new();
+    let interrupted = || control.interrupted();
+    let mut budget = EntryBudgetV1::new(control.entry_budget, &interrupted);
+    let mut report = StorageReport {
+        profile_root: profile_root.display().to_string(),
+        global_db_bytes: database_family_bytes(&profile_root.join(GLOBAL_DB_FILENAME)),
+        user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
+        ..StorageReport::default()
+    };
     append_project_report(
         profile_root,
         project_id,
         &canonical_root.to_string_lossy(),
         vector_readable_sources,
-        &mut stores,
-        &mut code_generation_retention,
-        &mut code_generation_retention_availability,
+        &mut budget,
+        &mut report,
     )?;
-    let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
-    Ok(StorageReport {
-        profile_root: profile_root.display().to_string(),
-        stores,
-        code_generation_retention,
-        code_generation_retention_availability,
-        unregistered_dir_count: 0,
-        unregistered_bytes: 0,
-        global_db_bytes: database_family_bytes(&global_db_path),
-        user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
-        full_profile_size: None,
-        footprint: None,
-        coverage: StorageReportCoverage::default(),
-    })
+    Ok(report)
 }
 
 fn append_project_report(
@@ -895,33 +1078,30 @@ fn append_project_report(
     project_id: &str,
     canonical_root: &str,
     vector_readable_sources: RetentionProtection,
-    stores: &mut Vec<StoreSizeReportEntry>,
-    code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
-    code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
+    budget: &mut EntryBudgetV1<'_>,
+    report: &mut StorageReport,
 ) -> tracedecay_domain::errors::Result<()> {
     let data_root = profile_root.join("projects").join(project_id);
     if data_root.is_dir() {
         let mut kinds = StoreKindBytesV1::default();
-        let mut unavailable_entry_count = 0usize;
-        walk_regular_files(&data_root, usize::MAX, &mut |path, walked| match walked {
-            WalkedEntryV1::File { bytes } => {
+        let (total_bytes, size_coverage) =
+            measure_subtree(&data_root, budget, &mut |path, bytes| {
                 if let Ok(relative) = path.strip_prefix(&data_root) {
                     kinds.add(relative, bytes);
                 }
-            }
-            WalkedEntryV1::Unavailable => unavailable_entry_count += 1,
-        });
+            });
         let (free_bytes, free_page_ratio) =
             sample_free_pages(&data_root.join(tracedecay_runtime_core::config::DB_FILENAME))
                 .map_or((None, None), |(free_bytes, ratio)| {
                     (Some(free_bytes), Some(ratio))
                 });
-        stores.push(StoreSizeReportEntry {
+        report.stores.push(StoreSizeReportEntry {
             project_id: project_id.to_owned(),
             canonical_root: canonical_root.to_owned(),
-            total_bytes: kinds.total(),
+            total_bytes,
             kinds,
-            unavailable_entry_count,
+            unavailable_entry_count: size_coverage.unavailable_entry_count,
+            size_coverage,
             free_bytes,
             free_page_ratio,
             root_state: Some(ProjectRootStateV1::probe(Some(canonical_root))),
@@ -935,20 +1115,37 @@ fn append_project_report(
     {
         return Ok(());
     }
-    let digest_scan_exceeds_budget = match generation_digest_scan_exceeds_budget(
-        &code_index_store_root,
-        CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES,
-    ) {
-        Ok(exceeds_budget) => exceeds_budget,
-        Err(_) => {
-            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-                project_id: project_id.to_owned(),
-                store_root: code_index_store_root.display().to_string(),
-                state: StorageReportAvailabilityState::Unavailable,
-                reason: Some("generation_retention_scan_unavailable".to_owned()),
-            });
+    let store_root = code_index_store_root.display().to_string();
+    let availability = |state, reason: Option<&str>| CodeGenerationRetentionAvailabilityEntry {
+        project_id: project_id.to_owned(),
+        store_root: store_root.clone(),
+        state,
+        reason: reason.map(str::to_owned),
+    };
+    let unavailable =
+        |reason| availability(StorageReportAvailabilityState::Unavailable, Some(reason));
+    // The serving generation and live native-preview bindings are only
+    // provable from daemon authorities. Without them the dry run is reported
+    // unavailable rather than planned against an empty protection set, and
+    // the digest preflight that only serves such a plan is never run.
+    let readable_sources = match vector_readable_sources {
+        Ok(sources) => sources,
+        Err(reason) => {
+            report
+                .code_generation_retention_availability
+                .push(unavailable(reason));
             return Ok(());
         }
+    };
+    let Ok(digest_scan_exceeds_budget) = generation_digest_scan_exceeds_budget(
+        &code_index_store_root,
+        CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES,
+        CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_ENTRIES,
+    ) else {
+        report
+            .code_generation_retention_availability
+            .push(unavailable("generation_retention_scan_unavailable"));
+        return Ok(());
     };
     // Exceeding the digest budget bounds how hard the census may *verify*, not
     // whether it may run. A single sealed generation is routinely larger than
@@ -960,83 +1157,65 @@ fn append_project_report(
     } else {
         GenerationDigestVerificationV1::Full
     };
-    // The serving generation and live native-preview bindings are only
-    // provable from daemon authorities. Without them the dry run is reported
-    // unavailable rather than planned against an empty protection set.
-    let readable_sources = match vector_readable_sources {
-        Ok(sources) => sources,
-        Err(reason) => {
-            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-                project_id: project_id.to_owned(),
-                store_root: code_index_store_root.display().to_string(),
-                state: StorageReportAvailabilityState::Unavailable,
-                reason: Some(reason.to_owned()),
-            });
-            return Ok(());
-        }
-    };
-    let plan = match plan_code_generation_retention_with_verification(
+    let Ok(plan) = plan_code_generation_retention_with_verification(
         &code_index_store_root,
         &readable_sources,
         verification,
-    ) {
-        Ok(plan) => plan,
-        Err(_) => {
-            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-                project_id: project_id.to_owned(),
-                store_root: code_index_store_root.display().to_string(),
-                state: StorageReportAvailabilityState::Unavailable,
-                reason: Some("generation_retention_plan_unavailable".to_owned()),
-            });
-            return Ok(());
-        }
+    ) else {
+        report
+            .code_generation_retention_availability
+            .push(unavailable("generation_retention_plan_unavailable"));
+        return Ok(());
     };
-    code_generation_retention.push(CodeGenerationRetentionDryRunEntry {
-        project_id: project_id.to_owned(),
-        store_root: code_index_store_root.display().to_string(),
-        active_generation_id: plan
-            .active_generation_id
-            .as_ref()
-            .map(|generation| generation.as_str().to_owned()),
-        active_generation_file: plan.active_generation_file().map(str::to_owned),
-        vector_readable_sources: plan
-            .vector_readable_sources
-            .iter()
-            .map(|source| source.as_str().to_owned())
-            .collect(),
-        superseded_generation_count: plan.superseded_generations.len(),
-        superseded_generation_bytes: plan.superseded_generation_bytes(),
-        collectable_generation_count: plan.collectable_generations.len(),
-        collectable_generation_bytes: plan.collectable_generation_bytes(),
-        collectable_text_artifact_count: plan.collectable_text_artifact_count(),
-        collectable_text_artifact_bytes: plan.collectable_text_artifact_bytes(),
-        collectable_generations: plan.collectable_generations,
-        digest_verified: verification == GenerationDigestVerificationV1::Full,
-    });
     let (state, reason) = match verification {
         GenerationDigestVerificationV1::Full => (StorageReportAvailabilityState::Available, None),
         GenerationDigestVerificationV1::MetadataOnly => (
             StorageReportAvailabilityState::MetadataOnly,
-            Some("generation_digest_scan_budget_exceeded".to_owned()),
+            Some("generation_digest_scan_budget_exceeded"),
         ),
     };
-    code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-        project_id: project_id.to_owned(),
-        store_root: code_index_store_root.display().to_string(),
-        state,
-        reason,
-    });
+    report
+        .code_generation_retention_availability
+        .push(availability(state, reason));
+    report
+        .code_generation_retention
+        .push(CodeGenerationRetentionDryRunEntry {
+            project_id: project_id.to_owned(),
+            store_root,
+            active_generation_id: plan
+                .active_generation_id
+                .as_ref()
+                .map(|generation| generation.as_str().to_owned()),
+            active_generation_file: plan.active_generation_file().map(str::to_owned),
+            vector_readable_sources: plan
+                .vector_readable_sources
+                .iter()
+                .map(|source| source.as_str().to_owned())
+                .collect(),
+            superseded_generation_count: plan.superseded_generations.len(),
+            superseded_generation_bytes: plan.superseded_generation_bytes(),
+            collectable_generation_count: plan.collectable_generations.len(),
+            collectable_generation_bytes: plan.collectable_generation_bytes(),
+            collectable_text_artifact_count: plan.collectable_text_artifact_count(),
+            collectable_text_artifact_bytes: plan.collectable_text_artifact_bytes(),
+            collectable_generations: plan.collectable_generations,
+            digest_verified: verification == GenerationDigestVerificationV1::Full,
+        });
     Ok(())
 }
 
 fn generation_digest_scan_exceeds_budget(
     store_root: &Path,
     maximum_bytes: u64,
+    maximum_entries: usize,
 ) -> tracedecay_domain::errors::Result<bool> {
     let entries = std::fs::read_dir(store_root.join(CODE_GENERATIONS_DIRECTORY))
         .map_err(|error| report_error("list code-generation retention files", error))?;
     let mut bytes = 0u64;
-    for entry in entries {
+    for (listed, entry) in entries.enumerate() {
+        if listed >= maximum_entries {
+            return Ok(true);
+        }
         let entry =
             entry.map_err(|error| report_error("read code-generation retention entry", error))?;
         if !entry
@@ -1152,13 +1331,15 @@ fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
     Some((free_bytes, free_page_ratio))
 }
 
-fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>) -> (usize, u64) {
+fn unregistered_project_dirs(
+    profile_root: &Path,
+    registered_ids: &HashSet<String>,
+) -> Vec<PathBuf> {
     let projects_dir = profile_root.join("projects");
     let Ok(entries) = std::fs::read_dir(&projects_dir) else {
-        return (0, 0);
+        return Vec::new();
     };
-    let mut count = 0usize;
-    let mut bytes = 0u64;
+    let mut directories = Vec::new();
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -1174,12 +1355,9 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
         {
             continue;
         }
-        count += 1;
-        // Shares the orphan sweep's walker so the bytes this report shows for
-        // a backlog directory are the same bytes that sweep would reclaim.
-        bytes = bytes.saturating_add(super::orphan_stores::dir_size_bytes(&entry.path()));
+        directories.push(entry.path());
     }
-    (count, bytes)
+    directories
 }
 
 fn report_error(
@@ -1208,6 +1386,7 @@ mod tests {
             total_bytes,
             kinds: StoreKindBytesV1::default(),
             unavailable_entry_count: 0,
+            size_coverage: SizeCoverageV1::default(),
             free_bytes: None,
             free_page_ratio: None,
             root_state: None,
@@ -1448,10 +1627,16 @@ mod tests {
             std::fs::create_dir_all(&project).unwrap();
             std::fs::write(project.join("payload"), b"1234").unwrap();
         }
-        let registry =
-            build_storage_report_page_from_registered_global_db(profile_root, &db, None, None, 1)
-                .await
-                .unwrap();
+        let registry = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            None,
+            None,
+            1,
+            StorageReportControlV1::budget_only(),
+        )
+        .await
+        .unwrap();
         assert_eq!(registry.stores.len(), 0);
         let directories = registry.coverage.next_cursor.unwrap();
         assert!(directories.starts_with("bc1."), "{directories}");
@@ -1461,6 +1646,7 @@ mod tests {
             None,
             Some(&directories),
             1,
+            StorageReportControlV1::budget_only(),
         )
         .await
         .unwrap();
@@ -1475,6 +1661,7 @@ mod tests {
             None,
             Some(&cursor),
             1,
+            StorageReportControlV1::budget_only(),
         )
         .await
         .unwrap();
@@ -1484,6 +1671,7 @@ mod tests {
             None,
             Some(&cursor),
             1,
+            StorageReportControlV1::budget_only(),
         )
         .await
         .unwrap();
@@ -1514,6 +1702,7 @@ mod tests {
                 None,
                 Some(presented),
                 limit,
+                StorageReportControlV1::budget_only(),
             )
             .await
             .unwrap_err();
@@ -1528,6 +1717,7 @@ mod tests {
             None,
             second.coverage.next_cursor.as_deref(),
             1,
+            StorageReportControlV1::budget_only(),
         )
         .await
         .unwrap();
@@ -1541,6 +1731,7 @@ mod tests {
             None,
             third.coverage.next_cursor.as_deref(),
             1,
+            StorageReportControlV1::budget_only(),
         )
         .await
         .unwrap();
@@ -2015,6 +2206,7 @@ mod tests {
             "proj_a",
             Path::new("/repos/a"),
             Err(RETENTION_PROTECTION_UNRESOLVED),
+            &StorageReportControlV1::budget_only(),
         )
         .unwrap();
 
@@ -2092,6 +2284,7 @@ mod tests {
             Some(&schedulers),
             None,
             8,
+            StorageReportControlV1::budget_only(),
         )
         .await
         .unwrap();
@@ -2130,10 +2323,16 @@ mod tests {
             StorageReportAvailabilityState::Available
         );
 
-        let without_authority =
-            build_storage_report_page_from_registered_global_db(&profile_root, &db, None, None, 8)
-                .await
-                .unwrap();
+        let without_authority = build_storage_report_page_from_registered_global_db(
+            &profile_root,
+            &db,
+            None,
+            None,
+            8,
+            StorageReportControlV1::budget_only(),
+        )
+        .await
+        .unwrap();
         assert_eq!(without_authority.code_generation_retention.len(), 0);
         assert_eq!(
             without_authority.code_generation_retention_availability[0]
@@ -2167,6 +2366,7 @@ mod tests {
                 state: ProfileTotalCoverageStateV1::Complete,
                 total_bytes: 1_000,
                 unavailable_entry_count: 0,
+                truncated: false,
             }
         );
     }
@@ -2183,6 +2383,7 @@ mod tests {
             "proj_a",
             Path::new("/repos/a"),
             Err(RETENTION_PROTECTION_UNRESOLVED),
+            &StorageReportControlV1::budget_only(),
         )
         .unwrap();
 
@@ -2211,6 +2412,7 @@ mod tests {
             "proj_a",
             canonical_root,
             Err(RETENTION_PROTECTION_UNRESOLVED),
+            &StorageReportControlV1::budget_only(),
         )
         .unwrap();
 
@@ -2264,6 +2466,7 @@ mod tests {
             "proj_a",
             canonical_root,
             Ok(BTreeSet::new()),
+            &StorageReportControlV1::budget_only(),
         )
         .unwrap();
         let payload = serde_json::to_value(report).unwrap();
