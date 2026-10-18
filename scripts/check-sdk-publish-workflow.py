@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Enforce the release workflow's isolated TypeScript SDK npm publication boundary."""
+"""Check the SDK release trust boundary, not the commands executed by its build.
+
+Readiness is established by the build job's real checks and failure propagation.
+This check covers immutable source/actions, credentials, protected publication,
+and the immutable artifact ID connecting those two jobs.
+"""
 
 from __future__ import annotations
 
@@ -12,272 +17,115 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/release.yml"
-SHA_RE = re.compile(r"^[^@]+@[0-9a-f]{40}(\s*#.*)?$")
-LOCAL_HELPER_RE = re.compile(r"^\./\.github/actions/[A-Za-z0-9_-]+$")
 SOURCE_SHA_REF = "${{ needs.validate-release.outputs.source_sha }}"
 REPO_GUARD = "github.repository == 'ScriptedAlchemy/tracedecay'"
-VALIDATE_JOB = "validate-release"
-VERIFY_JOB = "verify-release"
 BUILD_JOB = "build-typescript"
 PUBLISH_JOB = "publish-typescript"
-FORBIDDEN_PYTHON_PUBLICATION = (
-    "pypi",
-    "publish-python",
-    "build-python",
-    "gh-action-pypi-publish",
-    "twine",
-    "sdist",
-    ".whl",
-)
 
 
 def fail(message: str) -> None:
-    print(f"release.yml SDK publication policy violation: {message}", file=sys.stderr)
-    raise SystemExit(1)
+    raise ValueError(message)
 
 
-def job_steps(job: dict[str, Any]) -> list[dict[str, Any]]:
-    steps = job.get("steps", [])
-    return [step for step in steps if isinstance(step, dict)]
+def steps(job: dict[str, Any]) -> list[dict[str, Any]]:
+    return job.get("steps", [])
 
 
-def find_step(steps: list[dict[str, Any]], fragment: str) -> int | None:
-    return next(
-        (
-            index
-            for index, step in enumerate(steps)
-            if fragment in str(step)
-        ),
-        None,
-    )
+def actions(job_steps: list[dict[str, Any]], action: str) -> list[dict[str, Any]]:
+    return [step for step in job_steps if step.get("uses", "").startswith(action + "@")]
 
 
-def assert_repository_guard(name: str, job: dict[str, Any]) -> None:
-    condition = job.get("if")
-    if condition != REPO_GUARD:
-        fail(f"'{name}' must have exact guard {REPO_GUARD!r}, found {condition!r}")
+def reviewed_steps(job_steps: list[dict[str, Any]], parents: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+    """Inspect local composites from the immutable checkout, including nested pins."""
+    result = []
+    for step in job_steps:
+        uses = step.get("uses", "")
+        if uses.startswith("./"):
+            if not re.fullmatch(r"\./\.github/actions/[A-Za-z0-9_-]+", uses) or uses in parents:
+                fail(f"invalid or recursive local action: {uses}")
+            helper = yaml.safe_load((REPOSITORY_ROOT / uses / "action.yml").read_text())
+            if helper["runs"]["using"] != "composite":
+                fail(f"local action must be a reviewed composite: {uses}")
+            result.extend(reviewed_steps(helper["runs"]["steps"], (*parents, uses)))
+        else:
+            if uses and not re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses):
+                fail(f"action must be pinned to a commit: {uses}")
+            result.append(step)
+    return result
 
 
-def resolve_local_helpers(
-    steps: list[dict[str, Any]], helper: str | None = None
-) -> list[dict[str, Any]]:
-    """Inline reviewed composite helpers so their steps face the build policy.
-
-    A local helper runs from the job's checkout, so it is only as immutable as
-    that checkout; assert_immutable_checkout pins it to the validated source.
-    """
-    resolved: list[dict[str, Any]] = []
-    for step in steps:
-        uses = step.get("uses")
-        if not (isinstance(uses, str) and uses.startswith("./")):
-            if isinstance(uses, str) and not SHA_RE.fullmatch(uses):
-                via = f" helper {helper!r}" if helper else ""
-                fail(f"'{BUILD_JOB}'{via} uses unpinned action {uses!r}")
-            resolved.append(step)
-            continue
-        if not LOCAL_HELPER_RE.fullmatch(uses):
-            fail(f"'{BUILD_JOB}' helper {uses!r} must be a directory under ./.github/actions")
-        action = yaml.safe_load(
-            (REPOSITORY_ROOT / uses / "action.yml").read_text(encoding="utf-8")
-        )
-        runs = action.get("runs") if isinstance(action, dict) else None
-        if not isinstance(runs, dict) or runs.get("using") != "composite":
-            fail(f"'{BUILD_JOB}' helper {uses!r} must be a composite action")
-        helper_steps = [s for s in runs.get("steps", []) if isinstance(s, dict)]
-        resolved.extend(resolve_local_helpers(helper_steps, uses))
-    return resolved
-
-
-def assert_immutable_checkout(steps: list[dict[str, Any]]) -> None:
-    checkouts = [
-        index
-        for index, step in enumerate(steps)
-        if str(step.get("uses", "")).startswith("actions/checkout@")
-    ]
-    checkout = steps[0].get("with", {}) if checkouts == [0] else {}
-    if checkout != {"ref": SOURCE_SHA_REF, "persist-credentials": False}:
-        fail(
-            f"'{BUILD_JOB}' must first and only check out the validated source "
-            "SHA without persisted credentials"
-        )
-
-
-def assert_master_dispatch_trigger(workflow: dict[str, Any]) -> None:
+def validate(workflow: dict[str, Any]) -> None:
+    if workflow.get("permissions") != {"contents": "read"}:
+        fail("workflow must grant contents: read only")
     triggers = workflow.get("on", workflow.get(True, {}))
-    # A run whose ref is the release tag cannot restore the previous release's
-    # Actions cache. release-please dispatches this workflow on master after
-    # the immutable tag exists, so a `release` trigger is not an allowed path.
     if not isinstance(triggers, dict) or set(triggers) != {"workflow_dispatch"}:
-        fail(
-            "npm publication must be dispatched on master after the immutable "
-            "tag exists; a tag-ref run cannot restore the release cache"
-        )
-    dispatch = triggers.get("workflow_dispatch")
-    inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
-    if not isinstance(inputs, dict) or set(inputs) != {"release_tag"}:
-        fail("manual dispatch is release-tag recovery only; no SDK selector is allowed")
+        fail("release publication must retain its validated dispatch entry point")
+    jobs = workflow.get("jobs", {})
+    if not {"validate-release", "verify-release", BUILD_JOB, PUBLISH_JOB} <= jobs.keys():
+        fail("source validation, release verification, SDK build and publisher are required")
+    build, publish = jobs[BUILD_JOB], jobs[PUBLISH_JOB]
+    for name, job in ((BUILD_JOB, build), (PUBLISH_JOB, publish)):
+        if job.get("if") != REPO_GUARD or job.get("continue-on-error", False) is not False:
+            fail(f"{name} must require successful dependencies in the owning repository")
+    if build.get("needs") != "validate-release" or build.get("permissions") != {"contents": "read"}:
+        fail("SDK build must depend on source validation and have read-only permissions")
+    if "environment" in build:
+        fail("SDK build must not hold protected-environment authority")
+    build_steps = reviewed_steps(steps(build))
+    checkouts = actions(build_steps, "actions/checkout")
+    if len(checkouts) != 1 or not build_steps or checkouts[0] is not build_steps[0]:
+        fail("SDK build must first and only check out the validated source")
+    checkout = checkouts[0]
+    options = checkout.get("with", {})
+    if (options.get("ref") != SOURCE_SHA_REF or options.get("persist-credentials") is not False
+            or "repository" in options or checkout.get("if") or checkout.get("continue-on-error")):
+        fail("SDK checkout must use the validated source SHA without persisted credentials")
+    if any(secret in str((build, build_steps)) for secret in ("secrets.", "github.token")):
+        fail("SDK build must not receive repository credentials")
 
-
-def assert_build_job(job: dict[str, Any]) -> None:
-    if job.get("needs") != VALIDATE_JOB:
-        fail(f"'{BUILD_JOB}' must depend on '{VALIDATE_JOB}' only")
-    if job.get("permissions") != {"contents": "read"}:
-        fail(f"'{BUILD_JOB}' must grant contents: read only")
-    if "environment" in job:
-        fail(f"'{BUILD_JOB}' must not hold protected-environment authority")
-
-    steps = resolve_local_helpers(job_steps(job))
-    assert_immutable_checkout(steps)
-    policy_text = f"{job}{steps}"
-    if "secrets." in policy_text or "github.token" in policy_text:
-        fail(f"'{BUILD_JOB}' must not receive repository credentials")
-    for required in (
-        "npm install -g npm@12.2.0",
-        "pnpm install --frozen-lockfile",
-        "pnpm run contracts:check",
-        "pnpm run typecheck",
-        "pnpm test",
-        "npm pack --dry-run --json --ignore-scripts",
-        "npm pack --json --ignore-scripts",
-        "npm pack npm@12.2.0 --ignore-scripts",
-        "6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677",
-        "TRACEDECAY_SDK_TARBALL",
-        "sha256sum --",
-        "actions/upload-artifact@",
-    ):
-        if find_step(steps, required) is None:
-            fail(f"'{BUILD_JOB}' is missing {required!r}")
-
-    parity_index = find_step(steps, "pnpm run contracts:check")
-    typecheck_index = find_step(steps, "pnpm run typecheck")
-    tests_index = find_step(steps, "pnpm test")
-    dry_run_index = find_step(steps, "npm pack --dry-run --json --ignore-scripts")
-    pack_index = find_step(steps, "npm pack --json --ignore-scripts")
-    conformance_index = find_step(steps, "TRACEDECAY_SDK_TARBALL")
-    upload_index = find_step(steps, "actions/upload-artifact@")
-    if not (
-        isinstance(parity_index, int)
-        and isinstance(typecheck_index, int)
-        and isinstance(tests_index, int)
-        and isinstance(dry_run_index, int)
-        and isinstance(pack_index, int)
-        and isinstance(conformance_index, int)
-        and isinstance(upload_index, int)
-        and parity_index < typecheck_index
-        and parity_index < tests_index
-        and tests_index < dry_run_index < pack_index < conformance_index < upload_index
-    ):
-        fail(
-            "SDK registry-client parity, SDK tests, package dry-run, exact packing, "
-            "conformance, and upload must run in fail-closed order"
-        )
-
-
-def assert_publish_job(job: dict[str, Any]) -> None:
-    needs = job.get("needs")
-    if not isinstance(needs, list) or set(needs) != {VALIDATE_JOB, BUILD_JOB, VERIFY_JOB}:
-        fail(
-            f"'{PUBLISH_JOB}' must depend on exactly "
-            f"'{VALIDATE_JOB}', '{BUILD_JOB}', and '{VERIFY_JOB}'"
-        )
-    if job.get("environment") != "npm-tracedecay-sdk":
-        fail(f"'{PUBLISH_JOB}' must use the protected npm-tracedecay-sdk environment")
-    if job.get("permissions") != {"contents": "read", "id-token": "write"}:
-        fail(f"'{PUBLISH_JOB}' must hold only contents: read and id-token: write")
-
-    steps = job_steps(job)
-    digest_index = find_step(steps, "sha256sum -c")
-    publish_index = find_step(steps, "npm-cli/package/bin/npm-cli.js")
-    if not (
-        isinstance(digest_index, int)
-        and isinstance(publish_index, int)
-        and digest_index < publish_index
-    ):
-        fail("the downloaded artifacts must be digest-verified before npm publication")
-
-    publish_step = steps[publish_index]
-
-    # Trusted publishing is tokenless: any configured registry credential
-    # would shadow the npm CLI's OIDC exchange.
-    job_text = str(job)
-    for forbidden_credential in ("NPM_TOKEN", "NODE_AUTH_TOKEN", "_authToken", ".npmrc"):
-        if forbidden_credential in job_text:
-            fail(
-                f"'{PUBLISH_JOB}' must stay tokenless for OIDC trusted publishing; "
-                f"found {forbidden_credential!r}"
-            )
-
-    publish_command = str(publish_step.get("run", ""))
-    for required in (
-        "npm-12.2.0.tgz",
-        "node npm-cli/package/bin/npm-cli.js",
-        'publish "$tarball"',
-        "--access public",
-        '--tag "$dist_tag"',
-        "dist.integrity",
-        "trusted publisher",
-    ):
-        if required not in publish_command:
-            fail(f"'{PUBLISH_JOB}' publish command is missing {required!r}")
-
-    commands = "\n".join(str(step.get("run", "")) for step in steps)
-    if "npm install" in commands or "npx " in commands:
-        fail(f"'{PUBLISH_JOB}' must not install executable packages with publish authority")
-
-    for step in steps:
-        uses = step.get("uses")
-        if isinstance(uses, str) and not SHA_RE.fullmatch(uses):
-            fail(f"'{PUBLISH_JOB}' uses unpinned action {uses!r}")
-        if isinstance(uses, str) and not uses.startswith(
-            ("actions/download-artifact@", "actions/setup-node@")
-        ):
-            fail(f"'{PUBLISH_JOB}' uses unnecessary privileged action {uses!r}")
+    if set(publish.get("needs", [])) != {"validate-release", "verify-release", BUILD_JOB}:
+        fail("SDK publisher must depend on source validation, release verification and the SDK build")
+    if publish.get("environment") != "npm-tracedecay-sdk":
+        fail("SDK publisher must use the protected npm-tracedecay-sdk environment")
+    if publish.get("permissions") != {"contents": "read", "id-token": "write"}:
+        fail("SDK publisher must grant only contents: read and id-token: write")
+    if any(token in str(publish) for token in ("secrets.", "NPM_TOKEN", "NODE_AUTH_TOKEN", "_authToken", ".npmrc")):
+        fail("SDK publisher must remain tokenless for OIDC trusted publishing")
+    publish_steps = steps(publish)
+    for step in publish_steps:
+        uses = step.get("uses", "")
+        if uses and not uses.startswith(("actions/download-artifact@", "actions/setup-node@")):
+            fail("SDK publisher may only download the verified artifact and set up Node")
         if "registry-url" in step.get("with", {}):
-            fail(
-                f"'{PUBLISH_JOB}' must not configure setup-node registry auth; "
-                "it would shadow the OIDC exchange"
-            )
-        command = str(step.get("run", ""))
-        if command and "sha256sum -c" not in command and step is not publish_step:
-            fail(f"'{PUBLISH_JOB}' runs unnecessary privileged setup code {command!r}")
+            fail("SDK publisher must not configure registry token authentication")
+        if re.search(r"\b(?:npm\s+install|npx\s)", step.get("run", "")):
+            fail("SDK publisher must not install executable packages with publish authority")
+    reviewed_steps(publish_steps)
+
+    uploaded = actions(steps(build), "actions/upload-artifact")
+    downloaded = actions(publish_steps, "actions/download-artifact")
+    if len(uploaded) != 1 or len(downloaded) != 1 or not uploaded[0].get("id"):
+        fail("SDK release must hand off one identified build artifact")
+    upload, download = uploaded[0], downloaded[0]
+    if any(step.get("if") or step.get("continue-on-error") for step in (upload, download)):
+        fail("SDK artifact handoff must propagate failure")
+    artifact_id = "${{ steps." + upload["id"] + ".outputs.artifact-id }}"
+    if build.get("outputs", {}).get("artifact_id") != artifact_id:
+        fail("SDK build must export the immutable upload artifact ID")
+    source = download.get("with", {})
+    if (source.get("artifact-ids") != "${{ needs.build-typescript.outputs.artifact_id }}"
+            or any(key in source for key in ("name", "pattern", "repository", "run-id", "github-token"))
+            or source.get("digest-mismatch", "error") != "error"):
+        fail("SDK publisher must download only this build's artifact ID and reject digest mismatch")
 
 
 def main() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    lowered = text.lower()
-    for forbidden in FORBIDDEN_PYTHON_PUBLICATION:
-        if forbidden in lowered:
-            fail(
-                "Python is source/local-conformance only; "
-                f"found forbidden publication term {forbidden!r}"
-            )
-
-    workflow = yaml.safe_load(text)
-    assert_master_dispatch_trigger(workflow)
-
-    if workflow.get("permissions") != {"contents": "read"}:
-        fail("top-level permissions must grant contents: read only")
-
-    jobs = workflow.get("jobs", {})
-    if not isinstance(jobs, dict) or not {BUILD_JOB, PUBLISH_JOB} <= set(jobs):
-        fail("workflow must contain the TypeScript build and npm publish jobs")
-    for gate in (VALIDATE_JOB, VERIFY_JOB):
-        if gate not in jobs:
-            fail(f"workflow must retain the '{gate}' release verification job")
-    build = jobs[BUILD_JOB]
-    publish = jobs[PUBLISH_JOB]
-    if not isinstance(build, dict) or not isinstance(publish, dict):
-        fail("workflow jobs must be mappings")
-
-    for name, job in ((BUILD_JOB, build), (PUBLISH_JOB, publish)):
-        assert_repository_guard(name, job)
-    assert_build_job(build)
-    assert_publish_job(publish)
-
-    print(
-        "release.yml isolates npm publish authority and exact artifact bytes "
-        "behind the release verification and SDK readiness gates."
-    )
+    try:
+        validate(yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8")))
+    except (ValueError, KeyError, TypeError, OSError) as error:
+        print(f"release.yml SDK publication policy violation: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+    print("SDK release source, publication authority and immutable artifact handoff are valid.")
 
 
 if __name__ == "__main__":

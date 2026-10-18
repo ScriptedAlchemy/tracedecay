@@ -661,6 +661,8 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    outputs:
+      artifact_id: ${{ steps.sdk-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -749,7 +751,8 @@ jobs:
             > "${{ steps.pack.outputs.filename }}.sha256"
           sha256sum -- npm-12.2.0.tgz > npm-12.2.0.tgz.sha256
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - id: sdk-artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-tarball
           path: |
@@ -773,12 +776,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: npm-tarball
+          artifact-ids: ${{ needs.build-typescript.outputs.artifact_id }}
           path: artifact
-
-      - name: Verify the downloaded artifact digests
-        working-directory: artifact
-        run: sha256sum -c -- *.sha256
+          digest-mismatch: error
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -797,6 +797,7 @@ jobs:
         working-directory: artifact
         run: |
           set -euo pipefail
+          sha256sum -c -- *.sha256
           tarball="$(ls -- tracedecay-sdk-*.tgz)"
           version="${tarball#tracedecay-sdk-}"
           version="${version%.tgz}"
