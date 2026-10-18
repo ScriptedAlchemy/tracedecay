@@ -1,15 +1,23 @@
 # Private Bazel execution
 
-Bazel can use a private Remote Execution API service without changing the
-repository's ordinary local builds. Put the pool address and capacity in the
-checkout's ignored `.bazelrc.local`, which `.bazelrc` imports last:
+The repository always expands its `tracedecay` Bazel configuration, which
+selects the pinned nightly toolchain. Add the following to the host's
+`~/.bazelrc` to extend that profile with private execution settings:
 
 ```bazelrc
-build --config=rbe-linux
-build --remote_executor=grpc://YOUR_PRIVATE_SCHEDULER:50051
-build --remote_instance_name=main
-build --remote_local_fallback
+build:tracedecay --config=rbe-linux
+build:tracedecay --config=fleet
+build:fleet --remote_executor=grpc://YOUR_PRIVATE_SCHEDULER:50051
+build:fleet --remote_cache=grpc://YOUR_PRIVATE_SCHEDULER:50051
+build:fleet --remote_instance_name=main
+build:fleet --remote_local_fallback
 ```
+
+Every new TraceDecay worktree inherits this host profile automatically. Other
+repositories do not select it. Without a host extension, including under
+`--nohome_rc` in CI, the repository still selects nightly and builds locally.
+The ignored `.bazelrc.local` remains available for later per-checkout overrides;
+command-line options take precedence over rc settings.
 
 Use `rbe-linux` on Linux x86_64 clients, or `rbe-macos` on Apple Silicon macOS
 clients. These configurations attach `OSFamily` and `cpu_arch` execution
