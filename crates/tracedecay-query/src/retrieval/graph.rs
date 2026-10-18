@@ -230,16 +230,6 @@ impl GraphLaneEvidence {
     }
 }
 
-/// Graph-lane retriever contract over generation-matched evidence.
-pub trait GraphLaneRetriever {
-    /// Retrieve the committed graph candidate prefix for `request`.
-    fn retrieve_graph(
-        &self,
-        request: &GraphLaneRequest,
-        control: Arc<dyn RetrievalExecutionControl>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
-}
-
 /// Adapter over one read-only, generation-bound graph evidence port.
 /// It validates path identity and authority, commits a deterministic compact
 /// candidate prefix, and never owns graph traversal storage.
@@ -331,14 +321,10 @@ where
         check_graph_control(request, control)?;
         Ok(rebuilt)
     }
-}
 
-impl<P> GraphLaneRetriever for GraphLane<P>
-where
-    P: GraphEvidenceReadPort,
-{
+    /// Retrieve the committed graph candidate prefix for `request`.
     #[tracing::instrument(name = "query.lane.graph", level = "trace", skip_all)]
-    fn retrieve_graph(
+    pub fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
         control: Arc<dyn RetrievalExecutionControl>,
