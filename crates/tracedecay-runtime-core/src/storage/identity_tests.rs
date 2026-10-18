@@ -328,6 +328,7 @@ mod identity_anchor_tests {
         let expected = Some("https://github.com/owner/repo".to_owned());
         for spelling in [
             "https://github.com/Owner/Repo.git",
+            "https://github.com/Owner/Repo.GIT/",
             "https://github.com/owner/repo/",
             "ssh://git@github.com/owner/repo.git",
             "ssh://git@github.com/owner/repo",
