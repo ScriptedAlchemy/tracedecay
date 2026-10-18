@@ -4,9 +4,13 @@ use std::sync::Arc;
 use asupersync::Budget;
 use asupersync::sync::{Mutex, OwnedMutexGuard};
 
-use tracedecay_rusqlite_runtime::exact_sql::ExactSqlTransaction as RuntimeTransaction;
+use tracedecay_rusqlite_runtime::exact_sql::{
+    ExactSqlJobTransaction, ExactSqlTransaction as RuntimeTransaction,
+};
 
-use super::{Error, IntoParams, Result, Rows, WriteStatement, connection::statement};
+use super::{
+    Error, Executor, IntoParams, QueryExecutor, Result, Rows, WriteStatement, connection::statement,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionBehavior {
@@ -183,6 +187,51 @@ impl Transaction {
             Ok(())
         })
         .await
+    }
+}
+
+/// One write job's transaction, seen through the executor traits so the
+/// async helpers written against them run inside the job unchanged. Each
+/// statement runs synchronously on the writer, so these futures are ready on
+/// their first poll.
+pub struct WriteTx<'a, 'b> {
+    job: &'a ExactSqlJobTransaction<'b>,
+}
+
+impl<'a, 'b> WriteTx<'a, 'b> {
+    pub(super) const fn new(job: &'a ExactSqlJobTransaction<'b>) -> Self {
+        Self { job }
+    }
+}
+
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "A statement must run when its future is polled inside the job, not when it is built."
+)]
+impl QueryExecutor for WriteTx<'_, '_> {
+    async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        Ok(Rows::from_exact(self.job.query(statement(sql, params)?)?))
+    }
+}
+
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "A statement must run when its future is polled inside the job, not when it is built."
+)]
+impl Executor for WriteTx<'_, '_> {
+    async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    where
+        P: IntoParams,
+    {
+        Ok(self.job.execute(statement(sql, params)?)?.changed_rows as u64)
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<()> {
+        self.job.execute_batch(sql.to_owned())?;
+        Ok(())
     }
 }
 

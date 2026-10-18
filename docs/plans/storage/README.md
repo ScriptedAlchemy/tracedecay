@@ -269,7 +269,7 @@ in.
   validates, builds a job over owned inputs, `try_send`s it to the file's lane
   (full means `Busy`), and awaits a oneshot. No storage API is sync, so nothing
   parks a native worker, a Tokio worker or a blocking-pool thread on SQLite.
-- Jobs are re-runnable: `Fn(&mut WriteTx) -> Result<R>` and `Fn(&ReadTx) ->
+- Jobs are re-runnable: `Fn(&WriteTx) -> Result<R>` and `Fn(&ReadTx) ->
   Result<R>` over owned or shared inputs, with no effect outside their transaction.
   That is what lets the executor run a job again after a fence interrupt or a
   reconnect. Batched writes take one savepoint per job, so a job's ordinary error
@@ -731,6 +731,48 @@ changes a file that holds memory.
     each domain keeps its own idempotency.
   - Reads use `query_async` and preview/apply use `on_blocking_pool`. Both are
     blocking-pool hops that step 7 replaces.
+- Step 5, job transactions (2026-10-18, #4244).
+  The interactive transactions that remain become writer jobs without rewriting
+  the async helpers that run inside them. `ExactSqlHandle::transact_async` takes an
+  async body and polls it once, with a no-op waker, inside the job. The body's
+  statements are synchronous, so a body that awaits only them completes on that
+  poll. A body that awaits anything else returns `Pending`, and the job rolls back
+  with `ExactSqlError::JobAwaitedForeignFuture` instead of holding the writer
+  across the wait. That is section 4's "a write is one job, which cannot `.await`"
+  as a test. The job transaction is now `Sync`, so `&ExactSqlJobTransaction` crosses
+  the `Send` boundaries the helpers already require. It holds the writer task's
+  transaction in a `Mutex` behind a trait object, which keeps the type covariant
+  and adds no `unsafe impl`. `JobPolicy::AuthorizedLongLease` with
+  `transact_with_policy` renews the lease after each successful statement, as the
+  interactive long lease does, and `execute_batch` runs a batch inside the job.
+  Existing `transact` callers are unchanged. Next, in order: runtime-core `WriteTx`
+  over the executor traits with `Database::transact` and `transact_bulk`, then the
+  call sites one crate per PR (runtime-core, global-db in five slices, sessions,
+  session-memory, schema stages and invariants, `remote/*`, graph publication),
+  then deletion of the interactive APIs in runtime-core and global-db, and last in
+  rusqlite-runtime.
+  - Slice 2 (2026-10-18, #4248). runtime-core's
+    `WriteTx` implements `QueryExecutor` and `Executor` over the job transaction,
+    so a helper written against `&impl Executor` runs inside a job unchanged.
+    `Database::transact` and `transact_bulk` check the write scope at begin and
+    advance `graph_transaction_generation` inside the job, as a committed
+    `DatabaseWriteTransaction` does, and hold the writer lane so they queue
+    behind interactive writers instead of retrying `Busy`. `set_metadata`, the
+    retrieval-anchor disposition and derivative writes, and
+    `execute_write_engine` and `execute_write_batch` run as jobs.
+- Step 5i-3, global-db configuration and rollup writes (2026-10-18, branch
+  `refactor/storage-global-db-config-jobs`). `RegisteredGlobalDb::transact` runs a
+  body as one writer job over `Database::transact`, handing it a
+  `RegisteredGlobalDbWriteTx` that implements the executor traits, so the existing
+  `&impl Executor` helpers run in it unchanged. It checks the daemon write scope
+  before queueing; the runtime verifies the same authority again at COMMIT, so a
+  scope that ends mid-body rolls the job back. The configuration store, control and
+  revision writes and the observability rollup rebuild, claim, release, frontier
+  and compaction writes now use it. The interactive transaction stays for the other
+  global-db sites, which move in the next slices. Bodies are `Fn`, so each site
+  clones what it owns into the closure. A rollup rebuild that finds its stored
+  receipt still ends by rolling back, so replay does not advance the transaction
+  generation.
 - #4138 (2026-10-16). Shutdown store close waits up to 3 s for leases to drain
   before deciding a store's WAL cannot be truncated. Under load, owners joined
   before store close could still be unwinding the tasks that held their leases,

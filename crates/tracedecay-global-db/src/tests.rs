@@ -1420,6 +1420,70 @@ async fn begun_registered_transaction_rolls_back_when_scope_drops_before_commit(
 }
 
 #[asupersync::test]
+async fn copied_transact_handle_cannot_write_after_scope_drop_inside_the_body() {
+    use tracedecay_runtime_core::db::engine::Executor as _;
+    let mut harness = RegisteredGlobalDbHarness::open("transact-copied-handle").await;
+    let db = harness.registered.clone();
+    let scope = std::sync::Arc::new(std::sync::Mutex::new(harness.take_scope()));
+
+    let outcome = db
+        .transact(async move |transaction| {
+            transaction
+                .execute(
+                    "CREATE TABLE transact_written_before_revoke (value INTEGER)",
+                    (),
+                )
+                .await?;
+            let copy = transaction;
+            drop(scope.lock().unwrap().take());
+            copy.execute(
+                "CREATE TABLE transact_written_after_revoke (value INTEGER)",
+                (),
+            )
+            .await?;
+            Ok::<_, tracedecay_runtime_core::db::engine::Error>(())
+        })
+        .await
+        .expect("job transport");
+
+    let error = outcome.expect_err("copied handle wrote after the scope ended");
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    assert!(!table_exists(&db, "transact_written_after_revoke").await);
+    assert!(
+        !table_exists(&db, "transact_written_before_revoke").await,
+        "refused body did not roll back"
+    );
+}
+
+#[asupersync::test]
+async fn transact_rolls_back_when_scope_ends_before_commit() {
+    use tracedecay_runtime_core::db::engine::Executor as _;
+    let mut harness = RegisteredGlobalDbHarness::open("transact-commit-check").await;
+    let db = harness.registered.clone();
+    let scope = std::sync::Arc::new(std::sync::Mutex::new(harness.take_scope()));
+
+    let error = db
+        .transact(async move |transaction| {
+            transaction
+                .execute(
+                    "CREATE TABLE transact_staged_before_commit (value INTEGER)",
+                    (),
+                )
+                .await?;
+            drop(scope.lock().unwrap().take());
+            Ok::<_, tracedecay_runtime_core::db::engine::Error>(())
+        })
+        .await
+        .expect_err("transact committed after the scope ended");
+
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    assert!(
+        !table_exists(&db, "transact_staged_before_commit").await,
+        "failed commit did not roll back staged writes"
+    );
+}
+
+#[asupersync::test]
 async fn begun_registered_transaction_can_roll_back_after_scope_drop() {
     let mut harness = RegisteredGlobalDbHarness::open("registered-rollback").await;
     let db = harness.registered.clone();

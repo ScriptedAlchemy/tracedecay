@@ -4,7 +4,8 @@ use crate::RegisteredGlobalDb;
 
 use super::{
     ObservabilityRollupEmptyDayClaimOutcomeV1, ObservabilityRollupEmptyDayClaimV1,
-    ObservabilityRollupFrontierV1, SECONDS_PER_DAY, validate_day, validate_identifier,
+    ObservabilityRollupFrontierV1, SECONDS_PER_DAY, transact_rollup, validate_day,
+    validate_identifier,
 };
 
 impl RegisteredGlobalDb {
@@ -20,48 +21,55 @@ impl RegisteredGlobalDb {
         authorized_scope_ref: &str,
     ) -> Result<ObservabilityRollupFrontierV1, String> {
         validate_identifier("scope", authorized_scope_ref)?;
-        let transaction = self.begin_write_transaction().await.map_err(|error| {
-            format!("failed to begin empty-day frontier initialization: {error}")
-        })?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO observability_rollup_frontiers
+        let authorized_scope_ref = authorized_scope_ref.to_owned();
+        transact_rollup(
+            self,
+            "initialize empty-day frontier",
+            async move |transaction| {
+                let authorized_scope_ref = authorized_scope_ref.as_str();
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO observability_rollup_frontiers
                      (scope_ref, coverage_start_day_seconds, next_day_start_seconds)
                  VALUES (?1,
                          ((unixepoch() / 86400) + 1) * 86400,
                          ((unixepoch() / 86400) + 1) * 86400)",
-                tracedecay_runtime_core::db::engine::params![authorized_scope_ref],
-            )
-            .await
-            .map_err(|error| format!("failed to initialize empty-day frontier: {error}"))?;
-        let mut rows = transaction
-            .query(
-                "SELECT coverage_start_day_seconds, next_day_start_seconds
+                        tracedecay_runtime_core::db::engine::params![authorized_scope_ref],
+                    )
+                    .await
+                    .map_err(|error| format!("failed to initialize empty-day frontier: {error}"))?;
+                let mut rows = transaction
+                    .query(
+                        "SELECT coverage_start_day_seconds, next_day_start_seconds
                  FROM observability_rollup_frontiers WHERE scope_ref = ?1",
-                tracedecay_runtime_core::db::engine::params![authorized_scope_ref],
-            )
-            .await
-            .map_err(|error| {
-                format!("failed to inspect initialized empty-day frontier: {error}")
-            })?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read initialized empty-day frontier: {error}"))?
-            .ok_or_else(|| "empty-day frontier initialization returned no row".to_owned())?;
-        let frontier = ObservabilityRollupFrontierV1 {
-            coverage_start_day_seconds: row
-                .get(0)
-                .map_err(|error| format!("failed to decode coverage start day: {error}"))?,
-            next_day_start_seconds: row
-                .get(1)
-                .map_err(|error| format!("failed to decode next empty day: {error}"))?,
-        };
-        drop(rows);
-        transaction.commit().await.map_err(|error| {
-            format!("failed to commit empty-day frontier initialization: {error}")
-        })?;
-        Ok(frontier)
+                        tracedecay_runtime_core::db::engine::params![authorized_scope_ref],
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("failed to inspect initialized empty-day frontier: {error}")
+                    })?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(|error| {
+                        format!("failed to read initialized empty-day frontier: {error}")
+                    })?
+                    .ok_or_else(|| {
+                        "empty-day frontier initialization returned no row".to_owned()
+                    })?;
+                let frontier = ObservabilityRollupFrontierV1 {
+                    coverage_start_day_seconds: row
+                        .get(0)
+                        .map_err(|error| format!("failed to decode coverage start day: {error}"))?,
+                    next_day_start_seconds: row
+                        .get(1)
+                        .map_err(|error| format!("failed to decode next empty day: {error}"))?,
+                };
+                drop(rows);
+                Ok(frontier)
+            },
+        )
+        .await
     }
 
     /// Claims at most one completed quiet UTC day at or after this scope's
@@ -79,148 +87,136 @@ impl RegisteredGlobalDb {
         if lease_seconds == 0 || lease_seconds > 300 {
             return Err("invalid observability rollup empty-day lease".to_owned());
         }
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin empty-day frontier claim: {error}"))?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO observability_rollup_frontiers
+        let authorized_scope_ref = authorized_scope_ref.to_owned();
+        let claimant_id = claimant_id.to_owned();
+        transact_rollup(self, "claim empty-day frontier", async move |transaction| {
+            let authorized_scope_ref = authorized_scope_ref.as_str();
+            let claimant_id = claimant_id.as_str();
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO observability_rollup_frontiers
                      (scope_ref, coverage_start_day_seconds, next_day_start_seconds)
                  VALUES (?1,
                          ((unixepoch() / 86400) + 1) * 86400,
                          ((unixepoch() / 86400) + 1) * 86400)",
-                tracedecay_runtime_core::db::engine::params![authorized_scope_ref],
-            )
-            .await
-            .map_err(|error| format!("failed to initialize empty-day frontier: {error}"))?;
-        let mut rows = transaction
-            .query(
-                "SELECT coverage_start_day_seconds, next_day_start_seconds,
+                    tracedecay_runtime_core::db::engine::params![authorized_scope_ref],
+                )
+                .await
+                .map_err(|error| format!("failed to initialize empty-day frontier: {error}"))?;
+            let mut rows = transaction
+                .query(
+                    "SELECT coverage_start_day_seconds, next_day_start_seconds,
                         claimant_id, lease_until_seconds,
                         (unixepoch() / 86400) * 86400, unixepoch()
                  FROM observability_rollup_frontiers WHERE scope_ref = ?1",
-                tracedecay_runtime_core::db::engine::params![authorized_scope_ref],
-            )
-            .await
-            .map_err(|error| format!("failed to inspect empty-day frontier: {error}"))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read empty-day frontier: {error}"))?
-            .ok_or_else(|| "empty-day frontier initialization returned no row".to_owned())?;
-        let coverage_start_day_seconds = row
-            .get::<i64>(0)
-            .map_err(|error| format!("failed to decode coverage start day: {error}"))?;
-        let next_day_start_seconds = row
-            .get::<i64>(1)
-            .map_err(|error| format!("failed to decode next empty day: {error}"))?;
-        let active_claimant = row
-            .get::<Option<String>>(2)
-            .map_err(|error| format!("failed to decode empty-day claimant: {error}"))?;
-        let lease_until_seconds = row
-            .get::<Option<i64>>(3)
-            .map_err(|error| format!("failed to decode empty-day lease: {error}"))?;
-        let current_day_start_seconds = row
-            .get::<i64>(4)
-            .map_err(|error| format!("failed to decode current UTC day: {error}"))?;
-        let now_seconds = row
-            .get::<i64>(5)
-            .map_err(|error| format!("failed to decode current time: {error}"))?;
-        drop(rows);
+                    tracedecay_runtime_core::db::engine::params![authorized_scope_ref],
+                )
+                .await
+                .map_err(|error| format!("failed to inspect empty-day frontier: {error}"))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| format!("failed to read empty-day frontier: {error}"))?
+                .ok_or_else(|| "empty-day frontier initialization returned no row".to_owned())?;
+            let coverage_start_day_seconds = row
+                .get::<i64>(0)
+                .map_err(|error| format!("failed to decode coverage start day: {error}"))?;
+            let next_day_start_seconds = row
+                .get::<i64>(1)
+                .map_err(|error| format!("failed to decode next empty day: {error}"))?;
+            let active_claimant = row
+                .get::<Option<String>>(2)
+                .map_err(|error| format!("failed to decode empty-day claimant: {error}"))?;
+            let lease_until_seconds = row
+                .get::<Option<i64>>(3)
+                .map_err(|error| format!("failed to decode empty-day lease: {error}"))?;
+            let current_day_start_seconds = row
+                .get::<i64>(4)
+                .map_err(|error| format!("failed to decode current UTC day: {error}"))?;
+            let now_seconds = row
+                .get::<i64>(5)
+                .map_err(|error| format!("failed to decode current time: {error}"))?;
+            drop(rows);
 
-        if next_day_start_seconds >= current_day_start_seconds {
-            transaction.commit().await.map_err(|error| {
-                format!("failed to close not-ready empty-day frontier: {error}")
-            })?;
-            return Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::NotReady {
-                coverage_start_day_seconds,
-                next_day_start_seconds,
-            });
-        }
-        if active_claimant.is_some() && lease_until_seconds.is_some_and(|lease| lease > now_seconds)
-        {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| format!("failed to close leased empty-day frontier: {error}"))?;
-            return Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::Leased {
-                day_start_seconds: next_day_start_seconds,
-            });
-        }
-        if day_is_dirty(&transaction, authorized_scope_ref, next_day_start_seconds).await? {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| format!("failed to close dirty empty-day frontier: {error}"))?;
-            return Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::DirtyDay {
-                day_start_seconds: next_day_start_seconds,
-            });
-        }
-        if day_has_generation(&transaction, authorized_scope_ref, next_day_start_seconds).await? {
-            let following_day = next_day_start_seconds
-                .checked_add(SECONDS_PER_DAY)
-                .ok_or_else(|| "empty-day frontier overflow".to_owned())?;
-            transaction
-                .execute(
-                    "UPDATE observability_rollup_frontiers
+            if next_day_start_seconds >= current_day_start_seconds {
+                return Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::NotReady {
+                    coverage_start_day_seconds,
+                    next_day_start_seconds,
+                });
+            }
+            if active_claimant.is_some()
+                && lease_until_seconds.is_some_and(|lease| lease > now_seconds)
+            {
+                return Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::Leased {
+                    day_start_seconds: next_day_start_seconds,
+                });
+            }
+            if day_is_dirty(&transaction, authorized_scope_ref, next_day_start_seconds).await? {
+                return Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::DirtyDay {
+                    day_start_seconds: next_day_start_seconds,
+                });
+            }
+            if day_has_generation(&transaction, authorized_scope_ref, next_day_start_seconds)
+                .await?
+            {
+                let following_day = next_day_start_seconds
+                    .checked_add(SECONDS_PER_DAY)
+                    .ok_or_else(|| "empty-day frontier overflow".to_owned())?;
+                transaction
+                    .execute(
+                        "UPDATE observability_rollup_frontiers
                      SET next_day_start_seconds = ?2,
                          claimant_id = NULL, lease_until_seconds = NULL
                      WHERE scope_ref = ?1 AND next_day_start_seconds = ?3",
-                    tracedecay_runtime_core::db::engine::params![
-                        authorized_scope_ref,
-                        following_day,
-                        next_day_start_seconds
-                    ],
-                )
-                .await
-                .map_err(|error| format!("failed to advance existing-day frontier: {error}"))?;
-            transaction.commit().await.map_err(|error| {
-                format!("failed to commit existing-day frontier advance: {error}")
-            })?;
-            return Ok(
-                ObservabilityRollupEmptyDayClaimOutcomeV1::AdvancedExisting {
-                    day_start_seconds: next_day_start_seconds,
-                },
-            );
-        }
+                        tracedecay_runtime_core::db::engine::params![
+                            authorized_scope_ref,
+                            following_day,
+                            next_day_start_seconds
+                        ],
+                    )
+                    .await
+                    .map_err(|error| format!("failed to advance existing-day frontier: {error}"))?;
+                return Ok(
+                    ObservabilityRollupEmptyDayClaimOutcomeV1::AdvancedExisting {
+                        day_start_seconds: next_day_start_seconds,
+                    },
+                );
+            }
 
-        let mut claimed = transaction
-            .query(
-                "UPDATE observability_rollup_frontiers
+            let mut claimed = transaction
+                .query(
+                    "UPDATE observability_rollup_frontiers
                  SET claimant_id = ?2, lease_until_seconds = unixepoch() + ?3
                  WHERE scope_ref = ?1 AND next_day_start_seconds = ?4
                    AND (claimant_id IS NULL OR lease_until_seconds <= unixepoch())
                  RETURNING lease_until_seconds",
-                tracedecay_runtime_core::db::engine::params![
-                    authorized_scope_ref,
-                    claimant_id,
-                    i64::from(lease_seconds),
-                    next_day_start_seconds
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to claim empty-day frontier: {error}"))?;
-        let lease_until_seconds = claimed
-            .next()
-            .await
-            .map_err(|error| format!("failed to read empty-day claim: {error}"))?
-            .ok_or_else(|| "empty-day frontier claim changed concurrently".to_owned())?
-            .get::<i64>(0)
-            .map_err(|error| format!("failed to decode claimed empty-day lease: {error}"))?;
-        drop(claimed);
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit empty-day claim: {error}"))?;
-        Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::Claimed(
-            ObservabilityRollupEmptyDayClaimV1 {
-                authorized_scope_ref: authorized_scope_ref.to_owned(),
-                day_start_seconds: next_day_start_seconds,
-                claimant_id: claimant_id.to_owned(),
-                lease_until_seconds,
-            },
-        ))
+                    tracedecay_runtime_core::db::engine::params![
+                        authorized_scope_ref,
+                        claimant_id,
+                        i64::from(lease_seconds),
+                        next_day_start_seconds
+                    ],
+                )
+                .await
+                .map_err(|error| format!("failed to claim empty-day frontier: {error}"))?;
+            let lease_until_seconds = claimed
+                .next()
+                .await
+                .map_err(|error| format!("failed to read empty-day claim: {error}"))?
+                .ok_or_else(|| "empty-day frontier claim changed concurrently".to_owned())?
+                .get::<i64>(0)
+                .map_err(|error| format!("failed to decode claimed empty-day lease: {error}"))?;
+            drop(claimed);
+            Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::Claimed(
+                ObservabilityRollupEmptyDayClaimV1 {
+                    authorized_scope_ref: authorized_scope_ref.to_owned(),
+                    day_start_seconds: next_day_start_seconds,
+                    claimant_id: claimant_id.to_owned(),
+                    lease_until_seconds,
+                },
+            ))
+        })
+        .await
     }
 
     pub async fn release_observability_rollup_empty_day(
@@ -228,30 +224,26 @@ impl RegisteredGlobalDb {
         claim: &ObservabilityRollupEmptyDayClaimV1,
     ) -> Result<bool, String> {
         validate_empty_day_claim(claim)?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin empty-day release: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE observability_rollup_frontiers
+        let claim = claim.clone();
+        transact_rollup(self, "release empty-day claim", async move |transaction| {
+            let changed = transaction
+                .execute(
+                    "UPDATE observability_rollup_frontiers
                  SET claimant_id = NULL, lease_until_seconds = NULL
                  WHERE scope_ref = ?1 AND next_day_start_seconds = ?2
                    AND claimant_id = ?3 AND lease_until_seconds = ?4",
-                tracedecay_runtime_core::db::engine::params![
-                    claim.authorized_scope_ref.as_str(),
-                    claim.day_start_seconds,
-                    claim.claimant_id.as_str(),
-                    claim.lease_until_seconds
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to release empty-day claim: {error}"))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit empty-day release: {error}"))?;
-        Ok(changed == 1)
+                    tracedecay_runtime_core::db::engine::params![
+                        claim.authorized_scope_ref.as_str(),
+                        claim.day_start_seconds,
+                        claim.claimant_id.as_str(),
+                        claim.lease_until_seconds
+                    ],
+                )
+                .await
+                .map_err(|error| format!("failed to release empty-day claim: {error}"))?;
+            Ok(changed == 1)
+        })
+        .await
     }
 }
 

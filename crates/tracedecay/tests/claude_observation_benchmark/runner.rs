@@ -10,10 +10,10 @@ use tracedecay_store::{
 };
 
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
+use tracedecay_rusqlite_runtime::open_immutable_reader;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::hosts::claude::ClaudeSource;
@@ -485,7 +485,7 @@ impl ProviderFixture {
             }
             ProviderKind::Hermes => {
                 let state_db = self.source_path.join("profiles/benchmark/state.db");
-                let connection = open_immutable_read_only(&state_db)
+                let connection = open_immutable_reader(&state_db)
                     .expect("open immutable Hermes parse-phase fixture database");
                 let count = connection
                     .query_row("SELECT COUNT(*) FROM messages", (), |row| {

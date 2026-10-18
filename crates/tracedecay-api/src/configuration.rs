@@ -11,7 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_contracts::{ApplicationProblemEnvelope, ApplicationProblemKind};
-use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+use tracedecay_domain::configuration::{CodeIndexWorkerSelectionV1, ContextScoutIntentSettingsV1};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Application operation behind the project settings write.
@@ -43,6 +43,8 @@ pub struct ProjectSettingsPatch {
     pub sync: Option<SyncSettingsPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_scout: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_scout_intent: Option<ContextScoutIntentSettingsV1>,
 }
 
 /// Nested synchronization settings patch.

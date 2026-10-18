@@ -1,4 +1,4 @@
-use crate::db::engine::params;
+use crate::db::engine::{Executor, params};
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -144,10 +144,11 @@ impl Database {
 
     /// Sets a metadata value, creating or replacing the entry.
     pub async fn set_metadata(&self, key: &str, value: &str) -> Result<()> {
-        let transaction = self.begin_write_transaction("set_metadata").await?;
-        self.set_metadata_unguarded(&transaction, key, value)
-            .await?;
-        transaction.commit().await
+        let (key, value) = (key.to_owned(), value.to_owned());
+        self.transact("set_metadata", async move |tx| {
+            set_metadata_on(tx, &key, &value).await
+        })
+        .await?
     }
 
     pub async fn set_metadata_unguarded(
@@ -156,18 +157,22 @@ impl Database {
         key: &str,
         value: &str,
     ) -> Result<()> {
-        transaction
-            .execute_engine(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
-                params![key, value],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to set metadata: {e}"),
-                operation: "set_metadata".to_string(),
-            })?;
-        Ok(())
+        set_metadata_on(transaction, key, value).await
     }
+}
+
+async fn set_metadata_on(transaction: &impl Executor, key: &str, value: &str) -> Result<()> {
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to set metadata: {e}"),
+            operation: "set_metadata".to_string(),
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]

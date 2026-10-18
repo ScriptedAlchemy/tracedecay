@@ -28,6 +28,18 @@ pub(super) fn real_world_prompt_cases() -> Vec<HintEval> {
             &[],
         ),
         prompt_eval(
+            "memory-curator-docs-task-is-not-recall",
+            "document how the memory curator works in the README",
+            None,
+            &[],
+        ),
+        prompt_eval(
+            "transcript-cleanup-task-is-not-recall",
+            "delete transcript files older than 30 days in the cleanup job",
+            None,
+            &[],
+        ),
+        prompt_eval(
             "what-did-we-decide-before",
             "where did we decide how memory curation should work before?",
             Some(HintCategory::SessionRecall),
