@@ -65,11 +65,19 @@ impl StoreObservabilityCoreV1 {
         StoreObservabilityCompletionV1,
     ) {
         let mut first_error = None;
-        if let Err(error) = self.work_observations.shutdown().await {
+        let work_observations = match deadline {
+            Some(deadline) => self.work_observations.shutdown_until(deadline).await,
+            None => self.work_observations.shutdown().await,
+        };
+        if let Err(error) = work_observations {
             tracing::warn!(%error, "registered Work owner-observation recovery was incomplete");
             first_error = Some(error);
         }
-        if let Err(error) = self.delivery_settlements.shutdown().await {
+        let delivery_settlements = match deadline {
+            Some(deadline) => self.delivery_settlements.shutdown_until(deadline).await,
+            None => self.delivery_settlements.shutdown().await,
+        };
+        if let Err(error) = delivery_settlements {
             tracing::warn!(%error, "registered delivery settlement drain was incomplete");
             if first_error.is_none() {
                 first_error = Some(error);
