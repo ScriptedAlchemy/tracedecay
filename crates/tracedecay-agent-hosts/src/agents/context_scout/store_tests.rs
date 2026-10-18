@@ -722,6 +722,65 @@ async fn older_work_generation_cannot_replace_newer_durable_entry() {
 }
 
 #[tokio::test]
+async fn a_claimed_or_delivered_suggestion_is_never_replaced_by_its_rejudged_copy() {
+    let (_temporary, database) = database().await;
+    let project_id = [70; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let first = entry(project_id, 1);
+    assert_eq!(
+        store.enqueue(first.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let ContextScoutDurableClaimOutcomeV1::Claimed(claim) = store
+        .claim(address(project_id), UtcMicros(10), lease(71, 40))
+        .await
+    else {
+        panic!("the first suggestion claims");
+    };
+    let mut rejudged = entry(project_id, 2);
+    rejudged.envelope.envelope_id = [72; 16];
+    assert_eq!(
+        store.enqueue(rejudged.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Duplicate,
+        "a suggestion mid-delivery keeps its claim"
+    );
+    let receipt = ContextScoutDeliveryReceiptV1 {
+        receipt_id: [73; 16],
+        envelope_id: first.envelope.envelope_id,
+        delivered_at: UtcMicros(20),
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
+    };
+    assert_eq!(
+        store.record_delivery(&claim, &receipt).await,
+        ContextScoutDurableStoreOutcomeV1::Stored,
+        "the claimed suggestion is still the one delivered"
+    );
+    let mut rejudged_work = first.clone();
+    rejudged_work.envelope.envelope_id = [77; 16];
+    assert_eq!(
+        store.enqueue(rejudged_work).await,
+        ContextScoutDurableStoreOutcomeV1::Duplicate,
+        "the delivered work judged again under a restarted generation is a duplicate"
+    );
+    rejudged.work.generation = 3;
+    rejudged.envelope.envelope_id = [74; 16];
+    assert_eq!(
+        store.enqueue(rejudged.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Duplicate,
+        "a delivered suggestion is not queued again"
+    );
+    rejudged.work.generation = 4;
+    rejudged.envelope.envelope_id = [75; 16];
+    rejudged.envelope.candidate.dedupe_key = [76; 32];
+    assert_eq!(
+        store.enqueue(rejudged).await,
+        ContextScoutDurableStoreOutcomeV1::Stored,
+        "another suggestion at the address still enqueues"
+    );
+}
+
+#[tokio::test]
 async fn exact_project_scope_and_durable_generation_are_enforced() {
     let (_temporary, database) = database().await;
     let project_id = [8; 16];
