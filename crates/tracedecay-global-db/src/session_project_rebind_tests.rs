@@ -78,10 +78,36 @@ fn observation(
     receipt_id: &str,
     session: Option<CanonicalObservationFactV1>,
 ) -> DurableObservationV1 {
+    observation_from_source(
+        provider, session_id, None, scope, record_id, text, receipt_id, session,
+    )
+}
+
+/// `source_key` names the rollout file the record came from, so one session can
+/// be read through several sources, each with its own cursor.
+#[allow(clippy::too_many_arguments)]
+fn observation_from_source(
+    provider: &str,
+    session_id: &str,
+    source_key: Option<&str>,
+    scope: ObservationScopeV1,
+    record_id: &str,
+    text: &str,
+    receipt_id: &str,
+    session: Option<CanonicalObservationFactV1>,
+) -> DurableObservationV1 {
     let provider_id = ProviderId::new(provider).unwrap();
     let session_id = SessionId::new(session_id).unwrap();
-    let source =
-        ObservationSourceIdentityV1::for_provider(provider_id.clone(), session_id.clone()).unwrap();
+    let source = match source_key {
+        Some(key) => ObservationSourceIdentityV1::for_provider_source(
+            provider_id.clone(),
+            session_id.clone(),
+            SessionId::new(key).unwrap(),
+        )
+        .unwrap(),
+        None => ObservationSourceIdentityV1::for_provider(provider_id.clone(), session_id.clone())
+            .unwrap(),
+    };
     let range = ObservationSourceRangeV1::new(0, 1).unwrap();
     let record = ObservationId::new(record_id).unwrap();
     let mut facts = Vec::new();
@@ -680,4 +706,118 @@ async fn queue_last_error(database: &RegisteredGlobalDb, observation_id: &str) -
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     row.get(0).unwrap()
+}
+
+async fn queue_attempts(
+    database: &RegisteredGlobalDb,
+    observation_id: &str,
+) -> Option<(i64, Option<String>)> {
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT attempt_count, last_error FROM projection_queue WHERE observation_id = ?1",
+            params![observation_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap()?;
+    Some((row.get(0).unwrap(), row.get(1).unwrap()))
+}
+
+/// A Codex session whose later records name another working directory (a
+/// rollout resumed from a linked worktree) is one session. Its messages must
+/// project and the session row keeps the first cwd instead of colliding on
+/// `project_path` for every later record.
+#[asupersync::test]
+async fn session_seen_from_another_cwd_projects_every_message() {
+    let tmp = TempDir::new().unwrap();
+    let profile = tmp.path().join("profile");
+    let first_cwd = tmp.path().join("repo");
+    let second_cwd = tmp.path().join("repo-worktree");
+    std::fs::create_dir_all(&first_cwd).unwrap();
+    std::fs::create_dir_all(&second_cwd).unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+
+    let mut ids = Vec::new();
+    for (record, text, cwd) in [
+        (
+            "record.codex.cwd-a",
+            "message from the first cwd",
+            &first_cwd,
+        ),
+        (
+            "record.codex.cwd-b-1",
+            "message from the second cwd",
+            &second_cwd,
+        ),
+        (
+            "record.codex.cwd-b-2",
+            "another message from the second cwd",
+            &second_cwd,
+        ),
+    ] {
+        let write = observation_from_source(
+            "codex",
+            CODEX_SESSION,
+            Some(&format!("rollout.{record}")),
+            ObservationScopeV1::Profile,
+            record,
+            text,
+            &format!("receipt.{record}"),
+            Some(session_fact(&cwd.to_string_lossy())),
+        );
+        ids.push(write.observation_id().clone());
+        persist(&store, write).await;
+    }
+    drain_projection_queue(&store).await;
+
+    let texts = [
+        "message from the first cwd",
+        "message from the second cwd",
+        "another message from the second cwd",
+    ];
+    let expected_path = durable_project_path_key(&first_cwd.to_string_lossy());
+    for id in &ids {
+        assert_eq!(
+            queue_attempts(database, id.as_str()).await,
+            None,
+            "a projected observation leaves the queue instead of parking on an error"
+        );
+    }
+    for text in texts {
+        assert!(
+            projected_text_contains(database, "codex", CODEX_SESSION, text).await,
+            "{text:?} must project"
+        );
+    }
+    let (_, project_path) = session_project_binding(database, "codex", CODEX_SESSION).await;
+    assert_eq!(project_path, expected_path);
+
+    // A rebuild replays the same records through the staging path.
+    let frontier = store.projection_checkpoint().await.unwrap().last_sequence();
+    let rebuilt = loop {
+        let outcome = store.rebuild_projection(frontier).await.unwrap();
+        if outcome.is_complete() {
+            break outcome;
+        }
+    };
+    assert_eq!(
+        rebuilt.skipped_observations(),
+        0,
+        "no replayed record is skipped"
+    );
+    for text in texts {
+        assert!(
+            projected_text_contains(database, "codex", CODEX_SESSION, text).await,
+            "{text:?} must survive the rebuild"
+        );
+    }
+    let (_, project_path) = session_project_binding(database, "codex", CODEX_SESSION).await;
+    assert_eq!(project_path, expected_path);
 }

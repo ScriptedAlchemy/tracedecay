@@ -2559,7 +2559,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projected_session_enrichment_is_commutative_and_rejects_real_path_collisions() {
+    fn projected_session_enrichment_is_commutative_and_rejects_real_transcript_collisions() {
         let sparse = SessionRecord {
             provider: "cursor".to_owned(),
             session_id: "session.fixture".to_owned(),
@@ -2623,10 +2623,20 @@ mod tests {
             Some(r#"{"source":"runtime_preflight"}"#)
         );
 
-        let conflicting = SessionRecord {
+        let other_cwd = SessionRecord {
             project_path: "/workspace/other".to_owned(),
-            ..rich
+            ..rich.clone()
         };
-        assert!(reconcile_session_rows_detailed(&forward, &conflicting).is_err());
+        let kept = reconcile_session_rows_detailed(&forward, &other_cwd).unwrap();
+        assert_eq!(kept.project_path, "/workspace/project");
+
+        let transcript = |path: &str| SessionRecord {
+            transcript_path: Some(path.to_owned()),
+            ..rich.clone()
+        };
+        let conflict =
+            reconcile_session_rows_detailed(&transcript("/a.jsonl"), &transcript("/b.jsonl"))
+                .unwrap_err();
+        assert_eq!(conflict.field(), "transcript_path");
     }
 }

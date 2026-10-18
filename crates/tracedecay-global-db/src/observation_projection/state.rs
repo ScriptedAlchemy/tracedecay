@@ -1156,10 +1156,14 @@ pub(super) fn reconcile_session_rows_detailed(
         // A rebind whose paths are both project ids takes the current id.
         // A stored path-shaped key takes the incoming path.
         expected.project_path.clone()
-    } else if expected.project_path == expected.project_key {
-        actual.project_path.clone()
     } else {
-        return Err(SessionReconcileConflict("project_path"));
+        // Two concrete working directories name one session: it was read
+        // through another rollout, or a resumed rollout moved its cwd. The
+        // stored cwd stays, like the session's title and annotations, and each
+        // message row keeps its own source. Replaying the same records in the
+        // same order therefore reaches the same row, instead of dropping every
+        // later message of the session as a collision.
+        actual.project_path.clone()
     };
     Ok(SessionRecord {
         provider: actual.provider.clone(),
@@ -1569,20 +1573,23 @@ mod reconcile_tests {
             super::durable_project_path_key(&expected.project_path)
         );
 
+        // Another directory under the same project key is the same session
+        // seen from another cwd: the stored path stays and nothing collides.
         let other = tmp.path().join("other-project");
         std::fs::create_dir_all(&other).unwrap();
         expected.project_path = other.to_string_lossy().into_owned();
         let transaction = harness.registered.begin_write_transaction().await.unwrap();
-        assert!(matches!(
-            super::super::apply::apply_session(&transaction, &expected).await,
-            Err(
-                tracedecay_store::ProjectionStoreError::SessionOutputCollision {
-                    field: "project_path",
-                    ..
-                }
-            )
-        ));
-        transaction.rollback().await.unwrap();
+        super::super::apply::apply_session(&transaction, &expected)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let kept = harness
+            .registered
+            .get_session(&original.provider, &original.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.project_path, persisted.project_path);
     }
 
     #[cfg(target_os = "macos")]
