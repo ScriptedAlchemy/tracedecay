@@ -28,7 +28,7 @@ use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
 };
 use tracedecay_query::retrieval::fusion::CompositionLaneInput;
-use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
+use tracedecay_query::retrieval::graph::GraphLaneRequest;
 use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
     LexicalRouteReceiptV1, LexicalRoutingV1, merge_lexical_routes,

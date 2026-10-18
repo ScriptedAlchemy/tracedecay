@@ -8,15 +8,14 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, FusionStageInput,
 };
 use tracedecay_query::retrieval::graph::GraphLaneEvidence;
 use tracedecay_query::retrieval::lexical::{
-    LexicalLane, LexicalLaneRequest, LexicalLaneRetriever, LexicalRouteOutcomeV1,
-    LexicalRoutePlanV1, LexicalRoutingV1, merge_lexical_routes,
+    LexicalLane, LexicalLaneRequest, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
+    merge_lexical_routes,
 };
 use tracedecay_query::retrieval::{
     QUERY_EXACT_RULE_REVISION_V1, QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1,
