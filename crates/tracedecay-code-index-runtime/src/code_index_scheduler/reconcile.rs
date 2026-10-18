@@ -600,6 +600,13 @@ impl SourceFreshnessFenceV1 {
             .store(micros, Ordering::Release);
     }
 
+    fn rewind_reconciled_epoch(&self, epoch: u64) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reconciled_source_epoch = epoch;
+    }
+
     /// Record that the running pass captured changed source and is building
     /// its successor; the next completed proof clears it.
     fn note_successor_build(&self) {
@@ -2864,6 +2871,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
             let control = self.reconcile_control();
+            // Every earlier attempt was cancelled by a newer source epoch. A
+            // source that changes faster than a pass lasts would cancel this
+            // one too, so it seals what it captured; the epoch that
+            // superseded it stays owed to the follow-up pass.
+            let control = if retry == MAX_SUPERSEDED_RECONCILE_RETRIES {
+                control.ignoring_source_epoch()
+            } else {
+                control
+            };
             let mut captured = match capture(self, &control) {
                 Ok(captured) => captured,
                 Err(CodeIndexSchedulerErrorV1::Production(
@@ -2886,7 +2902,15 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .hints
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                (!control.is_cancelled()).then(|| hints.take())
+                (!control.is_cancelled()).then(|| {
+                    if control.source_superseded() {
+                        // The arrival that superseded this capture is not in
+                        // it: leave its marker for the follow-up pass.
+                        PendingHintsV1::default()
+                    } else {
+                        hints.take()
+                    }
+                })
             };
             let Some(hints) = hints else {
                 stop_if_resident_memory(&control)?;
@@ -2940,7 +2964,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 drop(std::mem::take(&mut captured.captured_files));
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
-                self.mark_reconciled(SourceContentManifestV1::for_snapshot(&captured.snapshot));
+                self.mark_reconciled_under(
+                    SourceContentManifestV1::for_snapshot(&captured.snapshot),
+                    &control,
+                );
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
                     overflow_reconciled,
@@ -3014,7 +3041,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
-                    self.mark_reconciled(source_manifest);
+                    self.mark_reconciled_under(source_manifest, &control);
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                         snapshot_content_identity,
                         overflow_reconciled,
@@ -3024,12 +3051,28 @@ impl CodeIndexWorktreeSchedulerV1 {
             };
             self.require_reusable_publication(&generation)?;
             self.latest_content_identity = Some(snapshot_content_identity);
-            self.mark_reconciled(source_manifest);
+            self.mark_reconciled_under(source_manifest, &control);
             return Ok(CodeIndexReconcileOutcomeV1::Published(
                 self.publish_evidence(&generation, reextracted_files, overflow_reconciled),
             ));
         }
         unreachable!("the bounded reconciliation loop returns on its final attempt")
+    }
+
+    /// [`Self::mark_reconciled`] for a pass that ran under `control`. One that
+    /// sealed past a newer source epoch proves only the epoch it began under,
+    /// so freshness keeps reporting the source as moved until the follow-up
+    /// pass.
+    fn mark_reconciled_under(
+        &mut self,
+        source_manifest: SourceContentManifestV1,
+        control: &DaemonCodeIndexControlV1,
+    ) {
+        self.mark_reconciled(source_manifest);
+        if control.source_superseded() {
+            self.freshness_fence
+                .rewind_reconciled_epoch(control.expected_epoch());
+        }
     }
 
     /// Record that the worktree was just reconciled against `source_manifest`,
@@ -3443,6 +3486,11 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub fn verified_against_source(&self) -> bool {
         self.freshness_fence.verified_against_source()
+    }
+
+    #[cfg(test)]
+    pub(super) fn source_change_pending_for_test(&self) -> bool {
+        self.freshness_fence.source_change_pending()
     }
 
     /// True when reconciliation has verified the live worktree against source
