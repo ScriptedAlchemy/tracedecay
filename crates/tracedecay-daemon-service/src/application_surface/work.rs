@@ -6,35 +6,14 @@
 
 use std::sync::Arc;
 
-use super::registered_http::invoke_registered_http;
+use super::registered_http::invoke_registered;
 use super::require_public_catalog_route;
-use axum::response::Response;
+use axum::response::IntoResponse;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
-use tracedecay_contracts::{
-    AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
-    AdvanceWorkJobRequestV1, AdvanceWorkJobResultV1, CancelWorkAttemptCommand,
-    CreateWorkTaskRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
-    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
-    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
-    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
-    WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
-    WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
-    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
-    WorkProposalComparisonV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
-    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
-};
 use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
-use tracedecay_daemon_protocol::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
-use tracedecay_domain::{
-    WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
-    WorkRunControlV1,
+use tracedecay_daemon_protocol::{
+    DaemonInvocationOutcome, DaemonInvocationRequest, WorkApplicationInvocationV1,
 };
 
 pub(super) fn router_with_executor(
@@ -76,7 +55,11 @@ struct WorkExecutorOwner {
 impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
     fn invoke_work(&self, request: WorkHttpRequest) -> tracedecay_api::WorkInvocationFuture {
         let executor = Arc::clone(&self.executor);
-        Box::pin(async move { invoke_work_operation(Some(executor.as_ref()), request).await })
+        Box::pin(async move {
+            invoke_work_operation(Some(executor.as_ref()), request)
+                .await
+                .into_response()
+        })
     }
 }
 
@@ -88,228 +71,43 @@ impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
 pub(crate) async fn invoke_work_operation(
     executor: Option<&dyn DaemonInvocationExecutor>,
     request: WorkHttpRequest,
-) -> Response {
+) -> Result<tracedecay_api::HttpJsonEnvelope<serde_json::Value>, tracedecay_api::HttpAdapterError> {
     let WorkHttpRequest {
         operation,
         request_id,
         controls,
         body,
     } = request;
-
-    macro_rules! core {
-        // Same as the plain arm, for outcome variants whose payload is boxed
-        // to keep the wire outcome enum compact.
-        (boxed $request_ty:ty, $variant:ident, $output:ty) => {{
-            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
-            };
-            let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::work_application(
-                request_id.as_str(),
-                WorkApplicationInvocationV1::$variant(decoded),
-                tracedecay_contracts::now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            let Some(executor) = executor else {
-                return super::registered_executor_unavailable::<$output, _>(operation, request_id);
-            };
-            invoke_registered_http::<$output, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    tracedecay_daemon_protocol::DaemonInvocationOutcome::WorkApplication {
-                        scope,
-                        outcome: WorkApplicationOutcomeV1::$variant(outcome),
-                    } => Some((scope, *outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }};
-        ($request_ty:ty, $variant:ident, $output:ty) => {{
-            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
-            };
-            let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::work_application(
-                request_id.as_str(),
-                WorkApplicationInvocationV1::$variant(decoded),
-                tracedecay_contracts::now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            let Some(executor) = executor else {
-                return super::registered_executor_unavailable::<$output, _>(operation, request_id);
-            };
-            invoke_registered_http::<$output, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    tracedecay_daemon_protocol::DaemonInvocationOutcome::WorkApplication {
-                        scope,
-                        outcome: WorkApplicationOutcomeV1::$variant(outcome),
-                    } => Some((scope, outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }};
-    }
-
-    match operation {
-        WorkOperation::GenerateProposal => core!(
-            GenerateProposalRequest,
-            GenerateProposal,
-            GeneratedWorkProposal
-        ),
-        WorkOperation::Create => core!(
-            CreateWorkTaskRequestV1,
-            Create,
-            WorkProductMutationReceiptV1
-        ),
-        WorkOperation::ReviewProposal => {
-            core!(
-                ReviewWorkProposalRequestV1,
-                ReviewProposal,
-                WorkProductMutationReceiptV1
-            )
-        }
-        WorkOperation::AcceptProposal => {
-            core!(
-                AcceptWorkProposalRequestV1,
-                AcceptProposal,
-                WorkProductMutationReceiptV1
-            )
-        }
-        WorkOperation::AdmitExecution => {
-            core!(
-                AdmitWorkExecutionRequestV1,
-                AdmitExecution,
-                AdmittedWorkExecutionV1
-            )
-        }
-        WorkOperation::StartAttempt => {
-            core!(StartWorkAttemptCommand, StartAttempt, WorkAttemptV1)
-        }
-        WorkOperation::Synthesize => {
-            core!(
-                AdmitWorkSynthesisCommand,
-                Synthesize,
-                WorkSynthesisAttemptV1
-            )
-        }
-        WorkOperation::AttemptStatus => {
-            core!(WorkAttemptStatusRequestV1, AttemptStatus, WorkAttemptV1)
-        }
-        WorkOperation::CancelAttempt => {
-            core!(CancelWorkAttemptCommand, CancelAttempt, WorkAttemptV1)
-        }
-        WorkOperation::ResumeAttempts => {
-            core!(
-                ResumeWorkAttemptsCommand,
-                ResumeAttempts,
-                WorkAttemptRecoveryReportV1
-            )
-        }
-        WorkOperation::RetryAttempt => core!(
-            boxed RetryWorkAttemptCommandV1,
-            RetryAttempt,
-            tracedecay_contracts::WorkRetryAttemptOutcomeV1
-        ),
-        WorkOperation::ListAttempts => {
-            core!(WorkAttemptListRequestV1, ListAttempts, WorkAttemptListV1)
-        }
-        WorkOperation::ExecutionHistory => core!(
-            WorkAttemptListRequestV1,
-            ExecutionHistory,
-            WorkExecutionHistoryV1
-        ),
-        WorkOperation::HydrateArtifacts => {
-            core!(
-                WorkArtifactHydrationRequestV1,
-                HydrateArtifacts,
-                WorkArtifactHydrationV1
-            )
-        }
-        WorkOperation::RetrieveEvidence => core!(
-            WorkEvidenceRetrieveRequestV1,
-            RetrieveEvidence,
-            WorkEvidenceRetrievalV1
-        ),
-        WorkOperation::Views => core!(WorkGraphReadRequestV1, Views, WorkGraphReadV1),
-        WorkOperation::Experience => core!(WorkExperienceRequestV1, Experience, WorkExperienceV1),
-        WorkOperation::CompareProposal => core!(
-            WorkProposalComparisonRequestV1,
-            CompareProposal,
-            WorkProposalComparisonV1
-        ),
-        WorkOperation::PrepareGraphMutation => core!(
-            PrepareWorkProductMutationRequestV1,
-            PrepareGraphMutation,
-            WorkProductMutationRequestV1
-        ),
-        WorkOperation::MutateGraph => core!(
-            WorkProductMutationRequestV1,
-            MutateGraph,
-            WorkProductMutationReceiptV1
-        ),
-        WorkOperation::Topology => {
-            core!(WorkTopologyViewRequestV1, Topology, ExecutionTopologyViewV1)
-        }
-        WorkOperation::TopologyMetrics => core!(
-            ExecutionTopologyMetricsRequestV1,
-            TopologyMetrics,
-            ExecutionTopologyMetricsV1
-        ),
-        WorkOperation::PrepareDuplicateAdjudication => core!(
-            PrepareWorkDuplicateAdjudicationRequestV1,
-            PrepareDuplicateAdjudication,
-            WorkDuplicateAdjudicationCommandV1
-        ),
-        WorkOperation::AdjudicateDuplicate => core!(
-            WorkDuplicateAdjudicationCommandV1,
-            AdjudicateDuplicate,
-            WorkDuplicateAdjudicationAppendOutcomeV1
-        ),
-        WorkOperation::AdjudicateLeak => core!(
-            AdjudicateWorkLeakCommandV1,
-            AdjudicateLeak,
-            WorkLeakAdjudicationOutcomeV1
-        ),
-        WorkOperation::PauseRun => core!(PauseWorkRunCommand, PauseRun, WorkRunControlV1),
-        WorkOperation::ResumeRun => core!(ResumeWorkRunCommand, ResumeRun, WorkRunControlV1),
-        WorkOperation::RunControl => {
-            core!(WorkRunControlRequestV1, RunControl, WorkRunControlReadingV1)
-        }
-        WorkOperation::PlacementPreflight => core!(
-            WorkPlacementPreflightRequestV1,
-            PlacementPreflight,
-            WorkPlacementPreflightV1
-        ),
-        WorkOperation::AdmitPlacement => {
-            core!(AdmitWorkPlacementCommand, AdmitPlacement, WorkPlacementV1)
-        }
-        WorkOperation::PlacementStatus => {
-            core!(
-                WorkPlacementStatusRequestV1,
-                PlacementStatus,
-                WorkPlacementReadingV1
-            )
-        }
-        WorkOperation::ReleasePlacement => {
-            core!(
-                ReleaseWorkPlacementCommand,
-                ReleasePlacement,
-                WorkPlacementV1
-            )
-        }
-        WorkOperation::AdvanceJob => {
-            core!(AdvanceWorkJobRequestV1, AdvanceJob, AdvanceWorkJobResultV1)
-        }
-    }
+    let decoded = match WorkApplicationInvocationV1::decode(operation.operation_key(), body) {
+        Ok(request) => request,
+        Err(_) => return tracedecay_api::work_invalid_request(request_id),
+    };
+    let invocation = DaemonInvocationRequest::work_application(
+        request_id.as_str(),
+        decoded,
+        tracedecay_contracts::now_micros(),
+        controls.deadline.clone(),
+        controls.cancellation.context(),
+    );
+    let Some(executor) = executor else {
+        return super::registered_executor_unavailable(operation, request_id);
+    };
+    invoke_registered(
+        executor,
+        operation,
+        request_id,
+        controls,
+        invocation,
+        |response| match response {
+            DaemonInvocationOutcome::WorkApplication { scope, outcome }
+                if outcome.operation_key() == operation.operation_key() =>
+            {
+                outcome
+                    .into_application_outcome()
+                    .map(|outcome| Some((scope, outcome)))
+            }
+            _ => Ok(None),
+        },
+    )
+    .await
 }

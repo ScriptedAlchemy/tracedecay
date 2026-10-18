@@ -556,6 +556,24 @@ def target_sources(t, extra_dirs=()):
     return rust_sources((Path(t["src_path"]).resolve().parent, *extra_dirs))
 
 
+def test_resource_globs(p, t, extra_dirs=()):
+    """Resources owned by a test directory and its explicit shared modules.
+
+    Crate-wide fixtures are shared data; sibling test suites are not. Rust
+    include macros that reach elsewhere are handled by extra_compile_data.
+    """
+    crate_dir = Path(p["manifest_path"]).parent
+    directories = {Path(t["src_path"]).resolve().parent, *extra_dirs}
+    patterns = {"tests/fixtures/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"}
+    for directory in directories:
+        if directory.is_relative_to(crate_dir) and not any(
+            parent != directory and directory.is_relative_to(parent)
+            for parent in directories
+        ):
+            patterns.add(directory.relative_to(crate_dir).as_posix() + "/**")
+    return sorted(patterns)
+
+
 RE_PATH_ATTR = re.compile(r'^[ \t]*#\[\s*path\s*=\s*"([^"]+)"\]', re.M)
 RE_BIN_EXE = re.compile(r'CARGO_BIN_EXE_([A-Za-z0-9_-]+)')
 RE_INCLUDE = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^"]+)"')
@@ -840,13 +858,13 @@ def main():
         "src", "assets", "fixtures", "data", "resources", "vendor", "tests",
     )
 
-    def extra_compile_data(p, t, extra_dirs=()):
+    def extra_compile_data(p, t, extra_dirs=(), resource_dirs=RESOURCE_DIRS):
         """(in_crate_globs, filegroup_labels) for include_str!/include_bytes!
         paths escaping the crate. `extra_dirs` are additional source dirs to
         scan (dirs of files pulled in via #[path]). Dirs already covered by
         the standard resource globs are skipped."""
         crate_dir = Path(p["manifest_path"]).parent
-        covered = tuple(crate_dir / d for d in RESOURCE_DIRS)
+        covered = tuple(crate_dir / d for d in resource_dirs)
         local, labels = set(), set()
         for f, text in target_sources(t, tuple(extra_dirs)):
             include_hits = [
@@ -1236,16 +1254,16 @@ def main():
                 deps.append(":build_script_build")
             srcs, crate_root = srcs_for(p, t)
             mod_local, mod_labels, mod_pulled = extra_mod_srcs(p, t)
-            inc_local_t, inc_labels_t = extra_compile_data(p, t, mod_pulled)
+            runtime_globs = test_resource_globs(p, t, mod_pulled)
+            inc_local_t, inc_labels_t = extra_compile_data(
+                p, t, mod_pulled,
+                resource_dirs=("src", *(pattern.removesuffix("/**") for pattern in runtime_globs)),
+            )
             if mod_local:
                 srcs += " + glob([" + q(mod_local) + "])"
             if mod_labels:
                 srcs += " + [" + q(mod_labels) + "]"
             format_sources(srcs, t["edition"])
-            runtime_globs = dedup([
-                f"{Path(rel_src(p, t)).parent.as_posix()}/**",
-                *[f"{directory}/**" for directory in RESOURCE_DIRS if directory != "src"],
-            ])
             # Source groups keep separate full resource groups for runfiles.
             data = srcs.replace("_sources\"", "\"") if srcs.startswith("[") else (
                 f"glob([{q(runtime_globs)}], allow_empty = True)"
@@ -1256,9 +1274,7 @@ def main():
             data += shared_fixture_data(t, mod_pulled)
             # include_str!/include_bytes! are compile-time inputs. They cover crate-root
             # resource dirs beside tests/; inc_labels_t covers repository files.
-            compile_data = (
-                'glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
-            )
+            compile_data = f"glob([{q(runtime_globs)}], allow_empty = True)"
             if inc_local_t:
                 compile_data += (
                     " + glob([" + q(inc_local_t) + "], allow_empty = True)"

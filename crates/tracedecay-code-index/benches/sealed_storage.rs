@@ -46,17 +46,13 @@ use tracedecay_code_index::{
         SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1,
     },
-    projection::{
-        ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-        ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-    },
 };
 use tracedecay_domain::{
     ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, TreeId, UtcMicros, WorktreeId,
+    PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1, RepositoryDirtyStateV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, TreeId, UtcMicros,
+    WorktreeId,
 };
 
 const REPO_ENV: &str = "SEALED_STORAGE_REPO";
@@ -73,50 +69,6 @@ struct SourceFile {
     logical_path: String,
     language: LanguageId,
     bytes: Arc<[u8]>,
-}
-
-struct ApplyingProjection;
-
-impl CodeChunkProjectionSink for ApplyingProjection {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let changes = &request.changes;
-        let decisions = changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .chain(
-                changes
-                    .deleted
-                    .iter()
-                    .map(|change| ChunkProjectionDecisionV1 {
-                        chunk_id: change.chunk_id.clone(),
-                        prior_chunk_digest: change.prior_digest.clone(),
-                        current_chunk_digest: None,
-                        operation: ProjectionOperationV1::Deleted,
-                        outcome: ProjectionOutcomeV1::Applied,
-                        output_digest: None,
-                    }),
-            )
-            .collect::<Vec<_>>();
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
 }
 
 struct ActiveControl;
@@ -198,7 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let corpus_bytes = sources.iter().map(|source| source.bytes.len()).sum();
 
     let store = MemorySealedPublicationStoreV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config()?, store.clone(), ApplyingProjection)?;
+    let mut owner = CodeIndexProductionOwnerV1::new(config()?, store.clone())?;
     let all_paths = sources
         .iter()
         .map(|source| source.logical_path.clone())
@@ -214,21 +166,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         &ActiveControl,
     )?;
     // The same tree sealed again as a linked worktree of the project.
-    let linked = CodeIndexProductionOwnerV1::new(
-        config()?,
-        MemorySealedPublicationStoreV1::default(),
-        ApplyingProjection,
-    )?
-    .build_and_publish(
-        request(
-            &sources,
-            all_paths,
-            "tree.sealed-storage.clean",
-            2_000_000,
-            Some(id::<WorktreeId>("worktree.sealed-storage.linked")?),
-        )?,
-        &ActiveControl,
-    )?;
+    let linked =
+        CodeIndexProductionOwnerV1::new(config()?, MemorySealedPublicationStoreV1::default())?
+            .build_and_publish(
+                request(
+                    &sources,
+                    all_paths,
+                    "tree.sealed-storage.clean",
+                    2_000_000,
+                    Some(id::<WorktreeId>("worktree.sealed-storage.linked")?),
+                )?,
+                &ActiveControl,
+            )?;
     let (edited, edited_paths) = edit(&sources);
     let edited_files = edited_paths.len();
     let successor = owner.build_and_publish(

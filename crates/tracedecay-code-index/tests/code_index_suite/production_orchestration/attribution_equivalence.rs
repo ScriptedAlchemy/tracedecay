@@ -7,9 +7,7 @@ use tracedecay_code_index::provider::GenerationTestAttributionJoinReadPort;
 use tracedecay_code_index::test_attribution::{GenerationTestJoinV1, TestAttributionOccurrenceV1};
 use tracedecay_domain::RelationEdgeKindV1;
 
-use super::{
-    ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
-};
+use super::{ActiveControl, SharedPublicationStore, config, request_with_source};
 
 #[test]
 fn indexed_test_traversal_preserves_complete_authority_and_digest() {
@@ -31,8 +29,7 @@ fn indexed_test_traversal_preserves_complete_authority_and_digest() {
     }
     source.push_str("#[test] fn self_cycle() { self_cycle(); }\n#[test] fn isolated() {}\n");
     let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink).unwrap();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone()).unwrap();
     let published = owner
         .build_and_publish(
             request_with_source(

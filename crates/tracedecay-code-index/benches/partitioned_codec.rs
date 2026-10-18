@@ -21,17 +21,12 @@ use tracedecay_code_index::{
         SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1,
     },
-    projection::{
-        ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-        ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-    },
 };
 use tracedecay_domain::{
     ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
+    PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1, RepositoryDirtyStateV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
 };
 
 const CORPUS_ROOT: &str = "../../benchmark_data/index-bench/corpus";
@@ -58,51 +53,6 @@ struct SourceFile {
     logical_path: String,
     language: LanguageId,
     bytes: Arc<[u8]>,
-}
-
-struct ApplyingProjection;
-
-impl CodeChunkProjectionSink for ApplyingProjection {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let decisions = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .chain(
-                request
-                    .changes
-                    .deleted
-                    .iter()
-                    .map(|change| ChunkProjectionDecisionV1 {
-                        chunk_id: change.chunk_id.clone(),
-                        prior_chunk_digest: change.prior_digest.clone(),
-                        current_chunk_digest: None,
-                        operation: ProjectionOperationV1::Deleted,
-                        outcome: ProjectionOutcomeV1::Applied,
-                        output_digest: None,
-                    }),
-            )
-            .collect::<Vec<_>>();
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
 }
 
 struct ActiveControl;
@@ -345,7 +295,6 @@ fn build_generation(
     let mut owner = CodeIndexProductionOwnerV1::new(
         production_config()?,
         MemorySealedPublicationStoreV1::default(),
-        ApplyingProjection,
     )?;
     let published = owner.build_and_publish(request, &ActiveControl)?;
     let generation = published

@@ -21,7 +21,7 @@ use tracedecay_tool_catalog::{
     OperationId, ProfileId, SchemaId, ScopeDimension,
 };
 
-use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
+use crate::{CanonicalInvocationResult, HttpAdapterError, HttpJsonEnvelope};
 mod application_operation_owner;
 pub use application_operation_owner::http_application_owner_kind;
 
@@ -255,41 +255,40 @@ pub fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
     StatusCode::from_u16(kind.http_status()).expect("canonical problem status is a valid code")
 }
 
-impl<T> CanonicalInvocationResult<T> {
-    fn http_status(&self) -> StatusCode {
-        match &self.result {
-            Ok(_) => StatusCode::OK,
-            Err(problem) => application_problem_status(problem.problem.kind()),
-        }
-    }
-}
-
 impl<T> CanonicalInvocationResult<T>
 where
     T: Serialize,
 {
     pub fn into_http_response(self) -> Response {
-        let status = self.http_status();
-        if let Err(problem) = &self.result {
-            crate::observe::record_error_class(problem.problem.kind());
-        }
-        let envelope = self.into_http_json();
-        crate::observe::json_response(status, &envelope)
+        self.into_http_json().into_response()
+    }
+}
+
+impl<T: Serialize> IntoResponse for HttpJsonEnvelope<T> {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            Self::Success(_) => StatusCode::OK,
+            Self::Problem(problem) => {
+                crate::observe::record_error_class(problem.application.problem.kind());
+                application_problem_status(problem.application.problem.kind())
+            }
+        };
+        crate::observe::json_response(status, &self)
+    }
+}
+
+impl IntoResponse for HttpAdapterError {
+    fn into_response(self) -> Response {
+        tracing::error!(error = %self, "application response could not be presented");
+        crate::observe::record_contract_error_class();
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     }
 }
 
 /// Encode a canonical problem for HTTP routes that do not have a catalog
 /// binding, such as operation-event subscription and cancellation.
 pub fn application_problem_response(application: ApplicationProblemEnvelope) -> Response {
-    crate::observe::record_error_class(application.problem.kind());
-    let status = application_problem_status(application.problem.kind());
-    crate::observe::json_response(
-        status,
-        &HttpJsonEnvelope::<Value>::Problem(Box::new(HttpProblemEnvelope {
-            binding_id: None,
-            application,
-        })),
-    )
+    HttpJsonEnvelope::<Value>::from(application).into_response()
 }
 
 /// Report an internal contract violation before a canonical problem envelope

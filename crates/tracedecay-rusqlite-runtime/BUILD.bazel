@@ -51,8 +51,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["test-runtime", "test-transport"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
+    compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
 )
 
 rust_test(
@@ -66,8 +66,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["test-runtime", "test-transport"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["tests/rusqlite_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
+    compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/rusqlite_suite/**", "tests/support/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/rusqlite_suite/**", "tests/support/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
 )
 
 rust_test(
@@ -81,8 +81,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["test-runtime", "test-transport"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
+    compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
 )
 
 rust_test(
@@ -96,8 +96,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["test-runtime", "test-transport"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
+    compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
 )
 
 rust_test(

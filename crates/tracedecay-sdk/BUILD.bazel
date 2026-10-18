@@ -51,8 +51,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures_remote_tls"],
-    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
+    compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures_remote_tls"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
@@ -67,8 +67,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(1),
     crate_features = [],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures_remote_tls"],
-    data = glob(["tests/sdk_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:support"],
+    compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/sdk_suite/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures_remote_tls"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/sdk_suite/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
     runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
