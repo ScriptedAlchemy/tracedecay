@@ -95,6 +95,19 @@ async fn open_registry_at(
     (identity, scope, registry)
 }
 
+/// Closes a registry the way daemon shutdown does. A bare drop leaves the
+/// session relation-graph open task holding the store registry, and that task
+/// closes the store writer on a native worker after the drop returns. A reopen
+/// then races the old writer's shutdown checkpoint for the write lock.
+async fn close_registry(registry: DaemonSessionRuntimeRegistryV1) {
+    let cx = tracedecay_runtime_core::native_runtime::cx().unwrap();
+    registry.shutdown_terminal_tasks(&cx).await.unwrap();
+    registry
+        .close_retained_graph_runtimes_for_shutdown()
+        .await
+        .unwrap();
+}
+
 async fn profile_test_runtime() -> IngestTestRuntime {
     let (profile, scope, registry) = open_registry("sessions-ingest-profile-test").await;
     let database = registry.profile_sessions().await.unwrap();
@@ -311,7 +324,7 @@ async fn one_profile_root_reopens_with_its_persisted_session_identity() {
     let first_database = first_registry.profile_sessions().await.unwrap();
     let first_shard = first_database.binding().shard_id.clone();
     drop(first_database);
-    drop(first_registry);
+    close_registry(first_registry).await;
     drop(first_scope);
 
     let (second_identity, second_scope, second_registry) =
