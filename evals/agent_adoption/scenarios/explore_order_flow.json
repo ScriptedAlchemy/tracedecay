@@ -23,11 +23,25 @@
       "Read"
     ]
   },
-  "ground_truth": [
-    "place_order",
-    "reserve_stock",
-    "compute_total"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        },
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states compute_total",
+          "pattern": "\\bcompute_total\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 7,
   "notes": "Flow question; graph traversal (context/callees) beats file scanning.",
   "expected_skill": "exploring-code",

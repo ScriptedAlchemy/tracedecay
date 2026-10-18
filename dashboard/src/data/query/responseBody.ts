@@ -1,3 +1,5 @@
+import { dashboardFetch } from '../auth/credential.ts';
+
 /** Distinguish invalid JSON from the valid JSON value `null`. */
 export const UNDECODABLE: unique symbol = Symbol('undecodable');
 
@@ -17,7 +19,7 @@ export async function fetchJsonResponse(
   if (!headers.has('accept')) headers.set('accept', 'application/json');
   let response: Response;
   try {
-    response = await fetch(url, { ...init, headers });
+    response = await dashboardFetch(url, { ...init, headers });
   } catch (err) {
     // Cancellation is not evidence that the daemon is offline.
     if (init?.signal?.aborted === true || isAbortError(err)) throw err;

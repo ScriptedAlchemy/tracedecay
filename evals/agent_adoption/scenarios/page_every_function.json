@@ -36,15 +36,41 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "raw_total_len",
-    "apply_discount",
-    "check_availability",
-    "reserve_stock",
-    "place_order",
-    "compute_total",
-    "compute_grand_total"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states raw_total_len",
+          "pattern": "\\braw_total_len\\b"
+        },
+        {
+          "id": "states apply_discount",
+          "pattern": "\\bapply_discount\\b"
+        },
+        {
+          "id": "states check_availability",
+          "pattern": "\\bcheck_availability\\b"
+        },
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        },
+        {
+          "id": "states compute_total",
+          "pattern": "\\bcompute_total\\b"
+        },
+        {
+          "id": "states compute_grand_total",
+          "pattern": "\\bcompute_grand_total\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 8,
   "repeated_query_class": "pagination",
   "notes": "Exhaustive enumeration: per-file outlines and paged listings repeat one question over different files or pages. A hint here is a false-positive opportunity."

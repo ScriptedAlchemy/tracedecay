@@ -40,7 +40,10 @@
       "git status"
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "deferred scenario: no verifiable ground truth until its fixture gap is closed"
+  },
   "max_tool_calls": 5,
   "requires_fixture": "git-history",
   "notes": "DEFERRED: needs a seeded commit with a meaningful, nameable payload (the current fixture's sole commit is the initial import)."

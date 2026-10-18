@@ -13,6 +13,7 @@ use tracedecay_sdk::operations::{
     ApplicationFactStoreCurate, MultiRootScopeSetRead, OperationTransport, TypedOperation,
     WorkflowListDefinitions,
 };
+use tracedecay_tool_catalog::TerminalState;
 
 #[derive(Debug, Default)]
 struct RecordingMcpTransport {
@@ -820,6 +821,177 @@ fn near_limit_multiline_sse_frames_still_decode() {
         Some(padding.len())
     );
     assert!(events[1].terminal());
+    server.join().unwrap();
+}
+
+fn terminal_frame(event: &str, receipt_termination: &str) -> String {
+    format!(
+        concat!(
+            "event: {event}\nid: 0\n",
+            "data: {{\"event\":\"{event}\",\"data\":{{\"sequence\":0,\"terminal\":{{",
+            "\"termination\":\"{event}\",\"receipt\":{{\"started_at\":1,\"ended_at\":2,",
+            "\"effective_deadline\":{{\"expires_at\":3}},\"cancellation\":null,",
+            "\"budget\":{{\"units_consumed\":1,\"bytes_consumed\":1,\"elapsed_micros\":1}},",
+            "\"termination\":\"{receipt}\"}}}}}}}}\n\n"
+        ),
+        event = event,
+        receipt = receipt_termination,
+    )
+}
+
+#[test]
+fn every_server_terminal_state_ends_the_stream_without_reconnecting() {
+    for state in TerminalState::ALL {
+        let name = state.as_str();
+        let body = format!("{SSE_OPEN_FRAME}{}", terminal_frame(name, name));
+        let (base_url, server) = serve(vec![event_response(&body)]);
+        let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+            .build()
+            .unwrap();
+        let mut stream = client
+            .stream_operation(
+                "request.operation",
+                StreamOptions {
+                    resume: None,
+                    max_reconnects: 3,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(stream.next().unwrap().unwrap().event, "open");
+        let terminal = stream.next().unwrap().unwrap();
+        assert_eq!(terminal.event, name);
+        assert!(terminal.terminal(), "{name} must be terminal");
+        assert!(stream.next().is_none(), "{name} must end iteration");
+        assert_eq!(server.join().unwrap().len(), 1, "{name} must not reconnect");
+    }
+}
+
+/// Serves one scripted reply per connection: `Some` writes the response and
+/// `None` reads the request and drops the connection, a transient transport
+/// failure. Joins to the number of connections accepted.
+fn serve_scripted(script: Vec<Option<String>>) -> (String, thread::JoinHandle<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let attempts = script.len();
+        for reply in script {
+            let (mut stream, _) = listener.accept().unwrap();
+            request(&mut stream);
+            if let Some(response) = reply {
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        }
+        attempts
+    });
+    (format!("http://{address}"), task)
+}
+
+fn scripted_stream(
+    script: Vec<Option<String>>,
+    max_reconnects: usize,
+) -> (
+    Result<tracedecay_sdk::client::OperationStream, ClientError>,
+    thread::JoinHandle<usize>,
+) {
+    let (base_url, server) = serve_scripted(script);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let stream = client.stream_operation(
+        "request.operation",
+        StreamOptions {
+            resume: None,
+            max_reconnects,
+        },
+    );
+    (stream, server)
+}
+
+fn open_then_eof() -> Option<String> {
+    Some(event_response(SSE_OPEN_FRAME))
+}
+
+#[test]
+fn dropped_reconnects_are_retried_within_the_budget() {
+    let completed = terminal_frame("completed", "completed");
+    let (stream, server) = scripted_stream(
+        vec![
+            open_then_eof(),
+            None,
+            None,
+            Some(event_response(&completed)),
+        ],
+        3,
+    );
+    let events = stream
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("two failed reconnects recover within three attempts");
+
+    assert_eq!(
+        events.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+        ["open", "completed"]
+    );
+    assert_eq!(server.join().unwrap(), 4);
+}
+
+#[test]
+fn exhausted_reconnect_budget_yields_one_error_then_ends() {
+    let (stream, server) = scripted_stream(vec![open_then_eof(), None, None], 2);
+    let mut stream = stream.unwrap();
+
+    assert_eq!(stream.next().unwrap().unwrap().event, "open");
+    assert!(matches!(
+        stream.next(),
+        Some(Err(ClientError::Transport(_)))
+    ));
+    assert!(stream.next().is_none(), "the error ends the iteration");
+    assert!(stream.next().is_none());
+    assert_eq!(server.join().unwrap(), 3);
+}
+
+#[test]
+fn the_first_connection_is_not_retried() {
+    let (stream, server) = scripted_stream(vec![None], 3);
+
+    assert!(matches!(stream, Err(ClientError::Transport(_))));
+    assert_eq!(server.join().unwrap(), 1);
+}
+
+#[test]
+fn authentication_failures_on_reconnect_are_not_retried() {
+    let denied = "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+    let (stream, server) = scripted_stream(vec![open_then_eof(), Some(denied.to_owned())], 3);
+    let mut stream = stream.unwrap();
+
+    assert_eq!(stream.next().unwrap().unwrap().event, "open");
+    assert!(matches!(
+        stream.next(),
+        Some(Err(ClientError::Authentication(401)))
+    ));
+    assert!(stream.next().is_none());
+    assert_eq!(server.join().unwrap(), 2);
+}
+
+#[test]
+fn unavailable_terminal_with_a_disagreeing_receipt_is_a_protocol_error() {
+    let body = format!(
+        "{SSE_OPEN_FRAME}{}",
+        terminal_frame("unavailable", "completed")
+    );
+    let (base_url, server) = serve(vec![event_response(&body)]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let mut stream = client
+        .stream_operation("request.operation", StreamOptions::default())
+        .unwrap();
+    assert_eq!(stream.next().unwrap().unwrap().event, "open");
+    assert!(matches!(
+        stream.next(),
+        Some(Err(ClientError::Protocol { .. }))
+    ));
     server.join().unwrap();
 }
 

@@ -255,12 +255,8 @@ impl IsolatedHome {
         TraceDecayOpenOptions::for_profile(&self.profile)
     }
 
-    /// Reuses the installed toolchain in a child whose `HOME` is this
-    /// isolated home: rustup and cargo would otherwise resolve their state
-    /// under the empty throwaway home. The child's hermetic `PATH` prefers
-    /// the declared compiler toolchain, then the installed rust-analyzer
-    /// proxy directory retained by the test launcher. Cargo state stays in
-    /// the launcher's isolated `CARGO_HOME`.
+    /// Keeps the declared compiler and analyzer available inside an isolated
+    /// child home. Cargo and rustup state stay in the launcher's scratch tree.
     pub fn apply_toolchain_env(&self, command: &mut Command) {
         for (key, value) in &self.toolchain_environment {
             match value {
@@ -270,12 +266,13 @@ impl IsolatedHome {
                             .map(PathBuf::from)
                             .expect("Bazel must provide the fixture compiler");
                         let compiler_bin = compiler.parent().expect("compiler directory");
-                        let rustup_bin = std::env::var_os("TRACEDECAY_TEST_RUSTUP_BIN")
+                        let analyzer = std::env::var_os("RUST_ANALYZER")
                             .map(PathBuf::from)
-                            .expect("Bazel must provide the installed analyzer proxy directory");
+                            .expect("Bazel must provide the declared analyzer");
+                        let analyzer_bin = analyzer.parent().expect("analyzer directory");
                         command.env(
                             "PATH",
-                            hermetic_path(&[compiler_bin.to_owned(), rustup_bin]),
+                            hermetic_path(&[compiler_bin.to_owned(), analyzer_bin.to_owned()]),
                         );
                     }
                     command.env(key, value);
@@ -336,30 +333,10 @@ pub fn rerun_test_in_child(test_path: &str, env: &[(&str, Option<&OsStr>)]) {
 }
 
 fn toolchain_environment() -> [(&'static str, Option<OsString>); 3] {
-    let real_home =
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
     [
-        (
-            "RUSTUP_HOME",
-            std::env::var_os("RUSTUP_HOME").or_else(|| {
-                real_home
-                    .as_ref()
-                    .map(|home| home.join(".rustup").into_os_string())
-            }),
-        ),
-        (
-            "CARGO_HOME",
-            std::env::var_os("CARGO_HOME").or_else(|| {
-                real_home
-                    .as_ref()
-                    .map(|home| home.join(".cargo").into_os_string())
-            }),
-        ),
-        (
-            "RUSTUP_TOOLCHAIN",
-            std::env::var_os("RUSTUP_TOOLCHAIN")
-                .or_else(|| option_env!("RUSTUP_TOOLCHAIN").map(OsString::from)),
-        ),
+        ("RUSTUP_HOME", std::env::var_os("RUSTUP_HOME")),
+        ("CARGO_HOME", std::env::var_os("CARGO_HOME")),
+        ("RUSTUP_TOOLCHAIN", std::env::var_os("RUSTUP_TOOLCHAIN")),
     ]
 }
 

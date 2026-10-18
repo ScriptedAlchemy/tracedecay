@@ -36,10 +36,21 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "reserve_stock",
-    "compute_total"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states compute_total",
+          "pattern": "\\bcompute_total\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
   "notes": "Callees of place_order."
 }

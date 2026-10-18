@@ -34,7 +34,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "deferred scenario: no verifiable ground truth until its fixture gap is closed"
+  },
   "max_tool_calls": 5,
   "notes": "DEFERRED: requires a seeded prior host session bound to the fixture project path plus ingest, which the fixture cannot reproduce deterministically without recording a real transcript first. Kept in the corpus as a documented gap; the runner skips status=deferred scenarios unless EVAL_INCLUDE_DEFERRED=1."
 }

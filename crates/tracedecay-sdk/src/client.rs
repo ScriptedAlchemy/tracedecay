@@ -373,7 +373,7 @@ impl Client {
             if !Operation::TERMINAL_STATES
                 .iter()
                 .copied()
-                .any(|state| terminal_state_name(state) == termination)
+                .any(|state| state.as_str() == termination)
             {
                 return Err(protocol(
                     response.status(),
@@ -718,18 +718,6 @@ fn admit_canonical_sdk_http_binding(
     }
 }
 
-const fn terminal_state_name(state: TerminalState) -> &'static str {
-    match state {
-        TerminalState::Completed => "completed",
-        TerminalState::Cancelled => "cancelled",
-        TerminalState::TimedOut => "timed_out",
-        TerminalState::Failed => "failed",
-        TerminalState::Unavailable => "unavailable",
-        TerminalState::EffectUnknown => "effect_unknown",
-        TerminalState::Partial => "partial",
-    }
-}
-
 const fn cancellation_point_name(point: CancellationPoint) -> &'static str {
     match point {
         CancellationPoint::BeforeAdmission => "before_admission",
@@ -803,10 +791,9 @@ pub(crate) fn problem_error(body: &Value, status: u16, missing_value: &'static s
 
 /// Whether an event name ends the operation's stream.
 fn is_terminal_event(event: &str) -> bool {
-    matches!(
-        event,
-        "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown"
-    )
+    TerminalState::ALL
+        .iter()
+        .any(|state| state.as_str() == event)
 }
 
 fn protocol(status: u16, message: impl Into<String>) -> ClientError {
@@ -1039,6 +1026,10 @@ pub struct StreamResume {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StreamOptions {
     pub resume: Option<StreamResume>,
+    /// Reconnect attempts allowed after the first connection. Each attempt,
+    /// including one that fails to connect, spends this budget, and only
+    /// transport failures are retried. After the budget is spent the iterator
+    /// yields one `Err` and then `None`.
     pub max_reconnects: usize,
 }
 
@@ -1124,6 +1115,9 @@ impl OperationStream {
                 "daemon did not open a canonical event stream",
             ));
         }
+        self.pending_event = None;
+        self.pending_id = None;
+        self.pending_data = None;
         self.reader = Some(BufReader::new(response));
         Ok(())
     }
@@ -1396,27 +1390,44 @@ impl Iterator for OperationStream {
             return None;
         }
         loop {
-            match self.read_event() {
+            let mut disconnect = match self.read_event() {
                 Ok(Some(event)) => return Some(Ok(event)),
-                Ok(None) if self.reconnects < self.options.max_reconnects => {
-                    if self.next_sequence.is_none() || self.resume_token.is_none() {
-                        return Some(Err(statusless_protocol(
-                            "stream ended without a resumable frontier",
-                        )));
-                    }
-                    self.reconnects += 1;
-                    if let Err(error) = self.connect() {
-                        return Some(Err(error));
-                    }
-                }
                 Ok(None) => {
-                    return Some(Err(ClientError::Transport(
-                        "event stream ended before a terminal event".into(),
-                    )));
+                    ClientError::Transport("event stream ended before a terminal event".into())
                 }
-                Err(error) => return Some(Err(error)),
+                Err(error @ ClientError::Transport(_)) => error,
+                Err(error) => return Some(Err(self.finish(error))),
+            };
+            // Every reconnect attempt, including one that fails to connect,
+            // spends budget. Only transport failures are retried; auth, problem,
+            // and protocol errors surface at once.
+            loop {
+                if self.reconnects >= self.options.max_reconnects {
+                    return Some(Err(self.finish(disconnect)));
+                }
+                if self.next_sequence.is_none() || self.resume_token.is_none() {
+                    return Some(Err(self.finish(statusless_protocol(
+                        "stream ended without a resumable frontier",
+                    ))));
+                }
+                self.reconnects += 1;
+                match self.connect() {
+                    Ok(()) => break,
+                    Err(error @ ClientError::Transport(_)) => disconnect = error,
+                    Err(error) => return Some(Err(self.finish(error))),
+                }
             }
         }
+    }
+}
+
+impl OperationStream {
+    /// Ends iteration after `error`, so a caller that keeps calling `next` sees
+    /// `None` instead of an endless error stream.
+    fn finish(&mut self, error: ClientError) -> ClientError {
+        self.terminal = true;
+        self.reader = None;
+        error
     }
 }
 
@@ -1628,7 +1639,7 @@ impl ProblemError {
 }
 
 fn status_matches_problem(status: u16, kind: tracedecay_contracts::ApplicationProblemKind) -> bool {
-    status == tracedecay_api::application_problem_status(kind).as_u16()
+    status == kind.http_status()
 }
 
 fn nullable_canonical_string<'a>(

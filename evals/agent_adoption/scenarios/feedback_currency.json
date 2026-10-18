@@ -32,9 +32,27 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "USD"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states USD",
+          "pattern": "\\bUSD\\b"
+        },
+        {
+          "id": "states multi-currency is not supported",
+          "pattern": "multi-?currency[^.\\n]{0,60}(?:not|n't|rejected|unsupported|no )|(?:not|n't|rejected|unsupported|no )[^.\\n]{0,60}multi-?currency"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "claims multi-currency is supported",
+          "pattern": "multi-?currency\\W+(?:support\\w*\\W+)?(?:is|are)\\s+(?:fully\\s+)?(?:supported|available|enabled)"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
   "seeded_fact": "currency_fact_id",
   "grade_feedback": true,

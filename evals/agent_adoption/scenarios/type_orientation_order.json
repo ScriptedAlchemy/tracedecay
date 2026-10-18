@@ -37,11 +37,25 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "id",
-    "customer",
-    "items"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states id",
+          "pattern": "\\bid\\b"
+        },
+        {
+          "id": "states customer",
+          "pattern": "\\bcustomer\\b"
+        },
+        {
+          "id": "states items",
+          "pattern": "\\bitems\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
   "notes": "Order has id, customer, items."
 }

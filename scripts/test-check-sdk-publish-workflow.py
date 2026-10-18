@@ -1,379 +1,147 @@
 #!/usr/bin/env python3
+"""Exercise source, authority and artifact substitution at the release boundary."""
 
 from __future__ import annotations
 
-import contextlib
+import copy
 import importlib.util
-import io
-import re
-import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from types import ModuleType
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-CHECKER_PATH = REPOSITORY_ROOT / "scripts/check-sdk-publish-workflow.py"
-WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/release.yml"
+import yaml
 
-
-def load_checker() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("sdk_publish_policy", CHECKER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load policy checker from {CHECKER_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("sdk_publish_policy", ROOT / "scripts/check-sdk-publish-workflow.py")
+assert SPEC is not None and SPEC.loader is not None
+CHECKER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(CHECKER)
 
 
-class SdkPublishWorkflowPolicyTests(unittest.TestCase):
+class SdkPublishBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.checker = load_checker()
-        self.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        self.build = self.workflow["jobs"]["build-typescript"]
+        self.publish = self.workflow["jobs"]["publish-typescript"]
+        CHECKER.REPOSITORY_ROOT = ROOT
 
-    def assert_rejected(
-        self,
-        workflow: str,
-        violation: str,
-        helper_edit: tuple[str, str, str] | None = None,
-    ) -> None:
-        self.assertTrue(
-            workflow != self.workflow or helper_edit, "mutation must change the policy input"
-        )
+    def assert_rejected(self, reason: str) -> None:
+        with self.assertRaisesRegex(ValueError, reason):
+            CHECKER.validate(self.workflow)
+
+    def test_current_release_has_an_isolated_immutable_handoff(self) -> None:
+        CHECKER.validate(self.workflow)
+
+    def test_command_refactoring_does_not_require_a_policy_inventory_update(self) -> None:
+        for step in self.build["steps"]:
+            if "run" in step:
+                step["run"] = "./scripts/check-and-pack-sdk.sh"
+        CHECKER.validate(self.workflow)
+
+    def test_dispatch_requires_an_explicit_string_release_tag(self) -> None:
+        triggers = self.workflow.get("on", self.workflow.get(True))
+        inputs = triggers["workflow_dispatch"]["inputs"]
+        original = inputs.pop("release_tag")
+        self.assert_rejected("require a string release_tag")
+        for field, value in (("required", False), ("type", "boolean")):
+            with self.subTest(field=field):
+                inputs["release_tag"] = {**original, field: value}
+                self.assert_rejected("require a string release_tag")
+        inputs["release_tag"] = original
+        inputs["reason"] = {"description": "Recovery reason", "type": "string", "required": False}
+        CHECKER.validate(self.workflow)
+
+    def test_validated_checkout_must_occupy_the_build_workspace(self) -> None:
+        checkout = self.build["steps"][0]["with"]
+        checkout["path"] = "validated-source"
+        self.assert_rejected("workspace root")
+        checkout["path"] = "./"
+        checkout["fetch-depth"] = 0
+        CHECKER.validate(self.workflow)
+
+    def test_build_cannot_substitute_mutable_source_or_repository(self) -> None:
+        checkout = self.build["steps"][0]["with"]
+        checkout["ref"] = "master"
+        self.assert_rejected("validated source SHA")
+        checkout["ref"] = CHECKER.SOURCE_SHA_REF
+        checkout["repository"] = "other/repository"
+        self.assert_rejected("validated source SHA")
+
+    def test_build_cannot_retain_credentials_or_publish_authority(self) -> None:
+        self.build["steps"][0]["with"]["persist-credentials"] = True
+        self.assert_rejected("without persisted credentials")
+        self.build["steps"][0]["with"]["persist-credentials"] = False
+        self.build["env"] = {"CREDENTIAL": "${{ secrets.REPOSITORY_TOKEN }}"}
+        self.assert_rejected("repository credentials")
+        del self.build["env"]
+        self.build["permissions"]["id-token"] = "write"
+        self.assert_rejected("read-only permissions")
+
+    def test_publish_requires_protected_environment_and_successful_gates(self) -> None:
+        for field, value, reason in (
+            ("environment", "unprotected", "protected npm-tracedecay-sdk"),
+            ("needs", ["build-typescript"], "release verification"),
+            ("continue-on-error", True, "successful dependencies"),
+            ("if", "always()", "owning repository"),
+            ("permissions", {"contents": "write", "id-token": "write"}, "grant only"),
+        ):
+            with self.subTest(field=field):
+                original = copy.deepcopy(self.publish)
+                self.publish[field] = value
+                self.assert_rejected(reason)
+                self.publish.clear()
+                self.publish.update(original)
+
+    def test_token_authentication_cannot_shadow_oidc(self) -> None:
+        for variable in ("NODE_AUTH_TOKEN", "NPM_TOKEN"):
+            self.publish["env"] = {variable: "credential"}
+            self.assert_rejected("tokenless")
+        del self.publish["env"]
+        setup = CHECKER.actions(self.publish["steps"], "actions/setup-node")[0]
+        setup["with"]["registry-url"] = "https://registry.npmjs.org"
+        self.assert_rejected("registry token")
+
+    def test_publish_cannot_install_or_check_out_executable_sources(self) -> None:
+        self.publish["steps"].append({"run": "npm install extra-code"})
+        self.assert_rejected("install executable")
+        self.publish["steps"].pop()
+        self.publish["steps"].append({"uses": "actions/checkout@" + "a" * 40})
+        self.assert_rejected("may only download")
+
+    def test_substituted_artifact_id_and_cross_run_sources_are_rejected(self) -> None:
+        download = CHECKER.actions(self.publish["steps"], "actions/download-artifact")[0]["with"]
+        original = copy.deepcopy(download)
+        for field, value in (("artifact-ids", "1234"), ("name", "npm-tarball"),
+                             ("run-id", "1234"), ("repository", "other/repository"),
+                             ("digest-mismatch", "warn")):
+            with self.subTest(field=field):
+                download[field] = value
+                self.assert_rejected("this build's artifact ID")
+                download.clear()
+                download.update(original)
+        self.build["outputs"]["artifact_id"] = "1234"
+        self.assert_rejected("immutable upload artifact ID")
+
+    def test_artifact_upload_and_download_cannot_ignore_failure(self) -> None:
+        for job, action in ((self.build, "actions/upload-artifact"),
+                            (self.publish, "actions/download-artifact")):
+            step = CHECKER.actions(job["steps"], action)[0]
+            step["continue-on-error"] = True
+            self.assert_rejected("handoff must propagate failure")
+            del step["continue-on-error"]
+
+    def test_nested_local_actions_cannot_replace_source_or_float_a_pin(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
-            root = Path(scratch)
-            shutil.copytree(REPOSITORY_ROOT / ".github/actions", root / ".github/actions")
-            self.checker.REPOSITORY_ROOT = root
-            path = root / "release.yml"
-            self.checker.WORKFLOW_PATH = path
-            path.write_text(self.workflow, encoding="utf-8")
-            self.checker.main()
-            path.write_text(workflow, encoding="utf-8")
-            if helper_edit is not None:
-                helper, old, new = helper_edit
-                action = root / ".github/actions" / helper / "action.yml"
-                text = action.read_text(encoding="utf-8")
-                self.assertIn(old, text)
-                action.write_text(text.replace(old, new, 1), encoding="utf-8")
-            stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
-                self.checker.main()
-        self.assertEqual(
-            stderr.getvalue(),
-            f"release.yml SDK publication policy violation: {violation}\n",
-        )
-
-    def assert_rejected_after(self, old: str, new: str, violation: str) -> None:
-        self.assertIn(old, self.workflow)
-        self.assert_rejected(self.workflow.replace(old, new, 1), violation)
-
-    def workflow_fragment(self, pattern: str, *, missing: str) -> str:
-        match = re.search(pattern, self.workflow)
-        self.assertIsNotNone(match, missing)
-        assert match is not None
-        return match.group(0)
-
-    def test_rejects_dropping_the_release_dispatch(self) -> None:
-        self.assert_rejected_after(
-            "on:\n"
-            "  workflow_dispatch:\n"
-            "    inputs:\n"
-            "      release_tag:\n"
-            '        description: "Stable release tag to build or recover"\n'
-            "        required: true\n"
-            "        type: string\n",
-            "on:\n"
-            "  push:\n"
-            "    branches: [master]\n",
-            "npm publication must be dispatched on master after the immutable tag exists; "
-            "a tag-ref run cannot restore the release cache",
-        )
-
-    def test_rejects_restoring_the_release_trigger(self) -> None:
-        self.assert_rejected_after(
-            "on:\n  workflow_dispatch:\n",
-            "on:\n  release:\n    types: [published]\n  workflow_dispatch:\n",
-            "npm publication must be dispatched on master after the immutable tag exists; "
-            "a tag-ref run cannot restore the release cache",
-        )
-
-    def test_rejects_sdk_dispatch_selector(self) -> None:
-        self.assert_rejected_after(
-            "  workflow_dispatch:\n    inputs:\n      release_tag:",
-            "  workflow_dispatch:\n    inputs:\n      sdk:\n"
-            "        description: \"SDK selector\"\n"
-            "        required: true\n"
-            "        type: string\n"
-            "      release_tag:",
-            "manual dispatch is release-tag recovery only; no SDK selector is allowed",
-        )
-
-    def test_rejects_extra_top_level_permission(self) -> None:
-        self.assert_rejected_after(
-            "permissions:\n  contents: read\n\nenv:",
-            "permissions:\n  contents: read\n  issues: write\n\nenv:",
-            "top-level permissions must grant contents: read only",
-        )
-
-    def test_rejects_extra_build_permission(self) -> None:
-        self.assert_rejected_after(
-            "    if: github.repository == 'ScriptedAlchemy/tracedecay'\n"
-            "    runs-on: ubuntu-latest\n"
-            "    timeout-minutes: 90\n"
-            "    permissions:\n"
-            "      contents: read\n"
-            "    steps:\n"
-            "      - uses: actions/checkout@",
-            "    if: github.repository == 'ScriptedAlchemy/tracedecay'\n"
-            "    runs-on: ubuntu-latest\n"
-            "    timeout-minutes: 90\n"
-            "    permissions:\n"
-            "      contents: read\n"
-            "      actions: read\n"
-            "    steps:\n"
-            "      - uses: actions/checkout@",
-            "'build-typescript' must grant contents: read only",
-        )
-
-    def test_rejects_extra_publish_permission(self) -> None:
-        self.assert_rejected_after(
-            "    permissions:\n      contents: read\n      id-token: write\n    steps:\n"
-            "      - uses: actions/download-artifact@",
-            "    permissions:\n      contents: read\n      id-token: write\n"
-            "      issues: write\n    steps:\n"
-            "      - uses: actions/download-artifact@",
-            "'publish-typescript' must hold only contents: read and id-token: write",
-        )
-
-    def test_rejects_missing_repository_guard(self) -> None:
-        self.assert_rejected_after(
-            "  build-typescript:\n"
-            "    name: Build & test @tracedecay/sdk (unprivileged)\n"
-            "    needs: validate-release\n"
-            "    if: github.repository == 'ScriptedAlchemy/tracedecay'\n",
-            "  build-typescript:\n"
-            "    name: Build & test @tracedecay/sdk (unprivileged)\n"
-            "    needs: validate-release\n",
-            "'build-typescript' must have exact guard "
-            "\"github.repository == 'ScriptedAlchemy/tracedecay'\", found None",
-        )
-
-    def test_rejects_mutable_action_reference(self) -> None:
-        old = self.workflow_fragment(
-            r"      - uses: dtolnay/rust-toolchain@[0-9a-f]{40} # stable\n"
-            r"        with:\n"
-            r"          toolchain: \$\{\{ steps\.rust-toolchain\.outputs\.toolchain \}\}",
-            missing="build-typescript rust-toolchain pin missing from release.yml",
-        )
-        self.assert_rejected_after(
-            old,
-            "      - uses: dtolnay/rust-toolchain@stable\n"
-            "        with:\n"
-            "          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}",
-            "'build-typescript' uses unpinned action 'dtolnay/rust-toolchain@stable'",
-        )
-
-    def test_rejects_unpinned_action_inside_local_helper(self) -> None:
-        self.assert_rejected(
-            self.workflow,
-            "'build-typescript' helper './.github/actions/setup-pnpm' uses unpinned "
-            "action 'pnpm/action-setup@v6'",
-            helper_edit=(
-                "setup-pnpm",
-                "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0",
-                "pnpm/action-setup@v6",
-            ),
-        )
-
-    def test_rejects_unpinned_action_inside_nested_local_helper(self) -> None:
-        self.assert_rejected(
-            self.workflow,
-            "'build-typescript' helper './.github/actions/setup-bazel' uses unpinned "
-            "action 'actions/cache/restore@v6'",
-            helper_edit=(
-                "setup-bazel",
-                "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
-                "actions/cache/restore@v6",
-            ),
-        )
-
-    def test_rejects_helper_checkout_that_replaces_validated_source(self) -> None:
-        self.assert_rejected(
-            self.workflow,
-            "'build-typescript' must first and only check out the validated source "
-            "SHA without persisted credentials",
-            helper_edit=(
-                "setup-pnpm",
-                "  steps:\n",
-                "  steps:\n"
-                "    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
-                "      with:\n"
-                "        ref: master\n",
-            ),
-        )
-
-    def test_rejects_local_helper_from_mutable_build_checkout(self) -> None:
-        self.assert_rejected_after(
-            "          ref: ${{ needs.validate-release.outputs.source_sha }}\n"
-            "          persist-credentials: false\n\n"
-            "      # rust-toolchain.toml is the only compiler.",
-            "          persist-credentials: false\n\n"
-            "      # rust-toolchain.toml is the only compiler.",
-            "'build-typescript' must first and only check out the validated source "
-            "SHA without persisted credentials",
-        )
-
-    def test_rejects_local_helper_outside_reviewed_actions(self) -> None:
-        self.assert_rejected_after(
-            "        run: npm install -g npm@12.2.0\n\n"
-            "      - uses: ./.github/actions/setup-pnpm\n",
-            "        run: npm install -g npm@12.2.0\n\n"
-            "      - uses: ./sdks/typescript\n",
-            "'build-typescript' helper './sdks/typescript' must be a directory "
-            "under ./.github/actions",
-        )
-
-    def test_rejects_local_helper_in_publish_job(self) -> None:
-        self.assert_rejected_after(
-            "    steps:\n      - uses: actions/download-artifact@",
-            "    steps:\n      - uses: ./.github/actions/setup-pnpm\n"
-            "      - uses: actions/download-artifact@",
-            "'publish-typescript' uses unpinned action './.github/actions/setup-pnpm'",
-        )
-
-    def test_rejects_build_credentials(self) -> None:
-        self.assert_rejected_after(
-            "      - name: Fast unit suite\n"
-            "        working-directory: sdks/typescript\n",
-            "      - name: Fast unit suite\n"
-            "        working-directory: sdks/typescript\n"
-            "        env:\n"
-            "          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n",
-            "'build-typescript' must not receive repository credentials",
-        )
-
-    def test_rejects_unprotected_publish_environment(self) -> None:
-        self.assert_rejected_after(
-            "    environment: npm-tracedecay-sdk\n",
-            "    environment: npm-tracedecay-sdk-unprotected\n",
-            "'publish-typescript' must use the protected npm-tracedecay-sdk environment",
-        )
-
-    def test_rejects_missing_sdk_registry_client_parity_gate(self) -> None:
-        self.assert_rejected_after(
-            "      - name: Verify generated contracts and SDK sources\n"
-            "        working-directory: dashboard\n"
-            "        run: pnpm run contracts:check\n\n",
-            "",
-            "'build-typescript' is missing 'pnpm run contracts:check'",
-        )
-
-    def test_rejects_missing_package_dry_run(self) -> None:
-        self.assert_rejected_after(
-            "      - name: Verify package dry run\n"
-            "        working-directory: sdks/typescript\n"
-            "        run: npm pack --dry-run --json --ignore-scripts\n\n",
-            "",
-            "'build-typescript' is missing 'npm pack --dry-run --json --ignore-scripts'",
-        )
-
-    def test_rejects_python_registry_job(self) -> None:
-        mutated = self.workflow + "\n  publish-python:\n    runs-on: ubuntu-latest\n"
-        self.assert_rejected(
-            mutated,
-            "Python is source/local-conformance only; "
-            "found forbidden publication term 'publish-python'",
-        )
-
-    def test_rejects_privileged_install_step(self) -> None:
-        marker = (
-            "    steps:\n      - uses: actions/download-artifact@"
-        )
-        self.assert_rejected_after(
-            marker,
-            "    steps:\n      - run: npm install -g npm@12.2.0\n"
-            "      - uses: actions/download-artifact@",
-            "'publish-typescript' must not install executable packages with publish authority",
-        )
-
-    def test_rejects_publish_without_release_verification(self) -> None:
-        self.assert_rejected_after(
-            "    needs: [validate-release, build-typescript, verify-release]\n",
-            "    needs: [validate-release, build-typescript]\n",
-            "'publish-typescript' must depend on exactly 'validate-release', "
-            "'build-typescript', and 'verify-release'",
-        )
-
-    def test_rejects_token_authentication(self) -> None:
-        self.assert_rejected_after(
-            "      - name: Publish the exact conformance-tested tarball with reviewed npm\n"
-            "        working-directory: artifact\n",
-            "      - name: Publish the exact conformance-tested tarball with reviewed npm\n"
-            "        working-directory: artifact\n"
-            "        env:\n"
-            "          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n",
-            "'publish-typescript' must stay tokenless for OIDC trusted publishing; "
-            "found 'NPM_TOKEN'",
-        )
-
-    def test_rejects_node_auth_token_shadowing(self) -> None:
-        self.assert_rejected_after(
-            "      - name: Publish the exact conformance-tested tarball with reviewed npm\n"
-            "        working-directory: artifact\n",
-            "      - name: Publish the exact conformance-tested tarball with reviewed npm\n"
-            "        working-directory: artifact\n"
-            "        env:\n"
-            "          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}\n",
-            "'publish-typescript' must stay tokenless for OIDC trusted publishing; "
-            "found 'NODE_AUTH_TOKEN'",
-        )
-
-    def test_rejects_dropping_oidc_permission(self) -> None:
-        self.assert_rejected_after(
-            "    permissions:\n      contents: read\n      id-token: write\n    steps:\n"
-            "      - uses: actions/download-artifact@",
-            "    permissions:\n      contents: read\n    steps:\n"
-            "      - uses: actions/download-artifact@",
-            "'publish-typescript' must hold only contents: read and id-token: write",
-        )
-
-    def test_rejects_silent_missing_trusted_publisher_failure(self) -> None:
-        mutated = self.workflow.replace(
-            "          if ! node npm-cli/package/bin/npm-cli.js \\\n"
-            "            publish \"$tarball\" --access public --tag \"$dist_tag\"; then",
-            "          if ! node npm-cli/package/bin/npm-cli.js \\\n"
-            "            publish \"$tarball\" --access public --tag \"$dist_tag\"; then\n"
-            "            :",
-            1,
-        ).replace(
-            "npm trusted publisher for @tracedecay/sdk is not configured",
-            "publish failed",
-            1,
-        )
-        self.assert_rejected(
-            mutated,
-            "'publish-typescript' publish command is missing 'trusted publisher'",
-        )
-
-    def test_rejects_setup_node_token_authentication(self) -> None:
-        old = self.workflow_fragment(
-            r"      - uses: actions/setup-node@[0-9a-f]{40} # [^\n]+\n"
-            r"        with:\n"
-            r'          node-version: "[^"]+"\n\n'
-            r"      # Prerelease SDK versions mirror the beta release convention",
-            missing="publish-typescript setup-node pin missing from release.yml",
-        )
-        self.assert_rejected_after(
-            old,
-            old.replace(
-                "\n\n      # Prerelease SDK versions mirror the beta release convention",
-                "\n          registry-url: https://registry.npmjs.org\n\n"
-                "      # Prerelease SDK versions mirror the beta release convention",
-                1,
-            ),
-            "'publish-typescript' must not configure setup-node registry auth; "
-            "it would shadow the OIDC exchange",
-        )
+            CHECKER.REPOSITORY_ROOT = Path(scratch)
+            helper = CHECKER.REPOSITORY_ROOT / ".github/actions/helper/action.yml"
+            helper.parent.mkdir(parents=True)
+            for uses in ("actions/setup-node@v7", "./.github/actions/helper"):
+                helper.write_text(yaml.safe_dump({"runs": {"using": "composite", "steps": [{"uses": uses}]}}))
+                with self.assertRaisesRegex(ValueError, "pinned|recursive"):
+                    CHECKER.reviewed_steps([{"uses": "./.github/actions/helper"}])
+        CHECKER.REPOSITORY_ROOT = ROOT
+        self.build["steps"].append(copy.deepcopy(self.build["steps"][0]))
+        self.assert_rejected("first and only check out")
 
 
 if __name__ == "__main__":

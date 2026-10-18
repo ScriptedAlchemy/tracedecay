@@ -33,10 +33,42 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "compute_grand_total"
-  ],
+  "outcome": {
+    "kind": "effect",
+    "files": {
+      "src/pricing.rs": {
+        "required": [
+          {
+            "id": "pricing.rs keeps compute_total",
+            "pattern": "pub fn compute_total\\("
+          }
+        ],
+        "forbidden": [
+          {
+            "id": "compute_grand_total still defined in pricing.rs",
+            "pattern": "\\bfn\\s+compute_grand_total\\b"
+          }
+        ]
+      },
+      "src/*.rs": {
+        "required": [
+          {
+            "id": "compute_grand_total defined somewhere",
+            "pattern": "\\bfn\\s+compute_grand_total\\b"
+          }
+        ]
+      },
+      "src/lib.rs": {
+        "required": [
+          {
+            "id": "lib.rs declares a new module",
+            "pattern": "^\\s*(?:pub\\s+)?mod\\s+(?!audit\\b|discount\\b|inventory\\b|orders\\b|pricing\\b)\\w+\\s*;"
+          }
+        ]
+      }
+    }
+  },
   "max_tool_calls": 6,
   "requires_tool": "move_symbol",
-  "notes": "move-a-function-to-its-own-module. tracedecay_move_symbol relocates compute_grand_total from pricing.rs, auto-inserts `use crate::pricing::LineItem;` at the destination, and reports the module_missing hint (`pub mod grand_total;`) — verified live against the fixture crate. Ground truth is the moved symbol name, which any correct final answer states regardless of the destination module the agent picks. Live runs mutate the throwaway fixture copy."
+  "notes": "move-a-function-to-its-own-module. tracedecay_move_symbol relocates compute_grand_total from pricing.rs, auto-inserts `use crate::pricing::LineItem;` at the destination, and reports the module_missing hint (`pub mod grand_total;`) — verified live against the fixture crate. Correctness is the resulting source: compute_grand_total gone from pricing.rs, defined in another src file, and a new module declared in lib.rs. The check is structural; nothing compiles the crate. run.sh snapshots src/ after the run and restores it."
 }

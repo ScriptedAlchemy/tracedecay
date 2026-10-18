@@ -1442,22 +1442,6 @@ fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
 #[cfg(target_os = "linux")]
 #[test]
 fn dropping_a_live_provider_kills_its_whole_process_group() {
-    fn alive(pid: &str) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-            !stat
-                .rsplit(')')
-                .next()
-                .is_some_and(|state| state.trim_start().starts_with('Z'))
-        })
-    }
-    async fn pause() {
-        native_runtime::sleep_until(
-            std::time::Instant::now() + std::time::Duration::from_millis(10),
-        )
-        .await
-        .expect("native timer");
-    }
-
     without_tokio(async {
         let directory = tempfile::TempDir::new().unwrap();
         let pids = directory.path().join("pids");
@@ -1500,6 +1484,339 @@ fn dropping_a_live_provider_kills_its_whole_process_group() {
                 pause().await;
             }
         }
+    });
+}
+
+/// Whether `pid` is a live (non-zombie) process.
+#[cfg(target_os = "linux")]
+fn alive(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .is_some_and(|state| state.trim_start().starts_with('Z'))
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn pause() {
+    native_runtime::sleep_until(std::time::Instant::now() + std::time::Duration::from_millis(10))
+        .await
+        .expect("native timer");
+}
+
+/// Runs the production provider path over `executable`, failing the test if
+/// the attempt is still open after `limit`: a drain outside the lifecycle
+/// would otherwise hang for as long as a descendant holds the pipes.
+#[cfg(target_os = "linux")]
+async fn run_attempt_within(
+    fixture: &Fixture,
+    workflow_artifacts: &tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    executable: PathBuf,
+    cancel: Arc<Notify>,
+    limit: std::time::Duration,
+) -> std::time::Duration {
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    let started = std::time::Instant::now();
+    native_runtime::timeout(
+        limit,
+        execute_provider_with_environment(
+            &fixture.steps(),
+            Some(workflow_artifacts),
+            &fixture.context,
+            &fixture.attempt,
+            &preferred(
+                executable,
+                WorkProviderProtocol::ClaudeStreamJson,
+                &CLAUDE_STREAM_JSON_ARGV,
+                requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+            ),
+            &admitted_environment,
+            cancel,
+            None,
+            None,
+            AttemptAdmissionTimingV1::for_test(),
+        ),
+    )
+    .await
+    .expect("the attempt was still open after its lifecycle bound");
+    started.elapsed()
+}
+
+/// Reads the `<leader pid> <descendant pid>` line a fixture provider wrote.
+#[cfg(target_os = "linux")]
+async fn provider_pids(path: &Path) -> (String, String) {
+    loop {
+        if let Some(pids) = std::fs::read_to_string(path)
+            .ok()
+            .filter(|pids| pids.ends_with('\n'))
+        {
+            let mut pids = pids.split_whitespace();
+            return (
+                pids.next().unwrap().to_owned(),
+                pids.next().unwrap().to_owned(),
+            );
+        }
+        pause().await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn assert_dead_soon(pid: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while alive(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "process {pid} outlived its attempt"
+        );
+        pause().await;
+    }
+}
+
+/// A provider that exits while a descendant keeps stdout, stderr, or an
+/// over-cap stream open must still settle `TimedOut` at the attempt deadline,
+/// with the bytes read so far and the descendant killed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descendant_holding_the_provider_pipes_settles_timed_out_at_the_deadline() {
+    // (name, descendant redirections, bytes the leader writes first, cap)
+    let cases = [
+        ("stdout", "2>/dev/null", "hello", 65_536_u64),
+        ("stderr", ">/dev/null", "hello", 65_536),
+        ("over the cap", "", "hello hello hello hello", 8),
+    ];
+    for (name, redirect, written, cap) in cases {
+        without_tokio(async move {
+            let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+            let directory = tempfile::TempDir::new().unwrap();
+            let root = directory.path();
+            let pids = root.join("pids");
+            let executable = fake_executable(
+                root,
+                "lingering-provider",
+                &format!(
+                    "#!/bin/sh\nprintf '{written}'\nsleep 300 </dev/null {redirect} &\nprintf '%s %s\\n' $$ $! > {pids}\nexit 0\n",
+                    pids = pids.display(),
+                ),
+            );
+            let fixture = leased_attempt(
+                root,
+                "Leave a descendant holding the pipes.",
+                &SnapshotShape {
+                    deadline: deadline_in(2),
+                    max_stdout_bytes: cap,
+                    max_stderr_bytes: cap,
+                    ..SnapshotShape::default()
+                },
+            );
+
+            let elapsed = run_attempt_within(
+                &fixture,
+                &workflow_artifacts,
+                executable,
+                Arc::new(Notify::new()),
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+
+            assert!(
+                elapsed < CANCELLATION_GRACE,
+                "{name}: the deadline bounded the drain, got {elapsed:?}"
+            );
+            assert_eq!(fixture.state(), WorkAttemptStateV1::TimedOut, "{name}");
+            assert_eq!(
+                fixture.rows.observed_states(),
+                vec![
+                    WorkAttemptStateV1::Leased,
+                    WorkAttemptStateV1::Running,
+                    WorkAttemptStateV1::TimedOut,
+                ],
+                "{name}: the attempt settles once"
+            );
+            let evidence = fixture.sealed_evidence();
+            assert_eq!(evidence.outcome, WorkAttemptProviderOutcomeV1::TimedOut);
+            let held = evidence.stdout.expect("stdout summary");
+            assert_eq!(held.byte_length, written.len() as u64, "{name}");
+            assert_eq!(held.truncated, written.len() as u64 > cap, "{name}");
+            let (_, descendant) = provider_pids(&pids).await;
+            assert_dead_soon(&descendant).await;
+        });
+    }
+}
+
+/// A descendant that left the provider's group cannot be killed with it. The
+/// attempt abandons its pipes after the kill grace instead of waiting on it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descendant_outside_the_provider_group_cannot_pin_the_attempt() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let pids = root.join("pids");
+        let executable = fake_executable(
+            root,
+            "escaping-provider",
+            &format!(
+                "#!/bin/sh\nsetsid sleep 300 </dev/null &\nprintf '%s %s\\n' $$ $! > {pids}\nexit 0\n",
+                pids = pids.display(),
+            ),
+        );
+        let fixture = leased_attempt(
+            root,
+            "Leave a descendant in its own session.",
+            &SnapshotShape {
+                deadline: deadline_in(2),
+                ..SnapshotShape::default()
+            },
+        );
+
+        let elapsed = run_attempt_within(
+            &fixture,
+            &workflow_artifacts,
+            executable,
+            Arc::new(Notify::new()),
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(
+            elapsed < CANCELLATION_GRACE,
+            "the kill grace bounded the drain, got {elapsed:?}"
+        );
+        assert_eq!(fixture.state(), WorkAttemptStateV1::TimedOut);
+        let (_, descendant) = provider_pids(&pids).await;
+        // SAFETY: SIGKILL to the one pid this test spawned and still owns.
+        unsafe { libc::kill(descendant.parse().unwrap(), libc::SIGKILL) };
+    });
+}
+
+/// Cancellation after the provider exited, while a descendant still holds its
+/// pipes, ends the group and settles `Cancelled` without the escalation rung.
+#[cfg(target_os = "linux")]
+#[test]
+fn cancelling_while_a_descendant_holds_the_pipes_settles_cancelled() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let pids = root.join("pids");
+        let executable = fake_executable(
+            root,
+            "lingering-provider",
+            &format!(
+                "#!/bin/sh\nsleep 300 </dev/null 2>/dev/null &\nprintf '%s %s\\n' $$ $! > {pids}\nexit 0\n",
+                pids = pids.display(),
+            ),
+        );
+        let fixture = leased_attempt(
+            root,
+            "Cancel during the drain.",
+            &SnapshotShape {
+                deadline: deadline_in(300),
+                ..SnapshotShape::default()
+            },
+        );
+        let cancel = Arc::new(Notify::new());
+        let identity = fixture.identity().clone();
+
+        let driver = async {
+            let (leader, _) = provider_pids(&pids).await;
+            while alive(&leader) || fixture.state() != WorkAttemptStateV1::Running {
+                pause().await;
+            }
+            // Let the lifeline reap the leader and the attempt enter its drain.
+            native_runtime::sleep_until(
+                std::time::Instant::now() + std::time::Duration::from_millis(200),
+            )
+            .await
+            .expect("native timer");
+            fixture
+                .attempts
+                .request_cancellation(
+                    &fixture.context,
+                    CancelWorkAttemptCommand {
+                        task_id: identity.task_id().clone(),
+                        run_id: identity.run_id().clone(),
+                        attempt_id: identity.attempt_id().clone(),
+                        request_id: id("cancellation.work-attempt-exec.drain"),
+                        occurred_at: now_micros(),
+                    },
+                )
+                .unwrap();
+            cancel.notify_one();
+            std::future::pending::<std::time::Duration>().await
+        };
+        let run = run_attempt_within(
+            &fixture,
+            &workflow_artifacts,
+            executable,
+            Arc::clone(&cancel),
+            std::time::Duration::from_secs(30),
+        );
+        let elapsed = tokio::select! {
+            elapsed = run => elapsed,
+            elapsed = driver => elapsed,
+        };
+
+        assert!(
+            elapsed < CANCELLATION_GRACE,
+            "cancellation reached the drain, got {elapsed:?}"
+        );
+        assert_eq!(
+            fixture.rows.observed_states(),
+            vec![
+                WorkAttemptStateV1::Leased,
+                WorkAttemptStateV1::Running,
+                WorkAttemptStateV1::CancellationRequested,
+                WorkAttemptStateV1::CancellationAcknowledged,
+                WorkAttemptStateV1::Cancelled,
+            ]
+        );
+        assert_eq!(
+            fixture.sealed_evidence().outcome,
+            WorkAttemptProviderOutcomeV1::Cancelled
+        );
+        let (_, descendant) = provider_pids(&pids).await;
+        assert_dead_soon(&descendant).await;
+    });
+}
+
+/// A provider whose descendant keeps writing after the provider exits still
+/// has every byte captured, and still settles with the provider's own status.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descendant_finishing_within_the_deadline_has_its_output_captured() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let executable = fake_executable(
+            root,
+            "trailing-provider",
+            "#!/bin/sh\nprintf early\n(sleep 1; printf late) &\nexit 7\n",
+        );
+        let fixture = leased_attempt(root, "Write after exit.", &SnapshotShape::default());
+
+        run_attempt_within(
+            &fixture,
+            &workflow_artifacts,
+            executable,
+            Arc::new(Notify::new()),
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+
+        let evidence = fixture.sealed_evidence();
+        assert_eq!(
+            evidence.outcome,
+            WorkAttemptProviderOutcomeV1::Exited { code: 7 }
+        );
+        let stdout = evidence.stdout.expect("stdout summary");
+        assert_eq!(stdout.byte_length, "earlylate".len() as u64);
+        assert!(!stdout.truncated);
+        assert_eq!(stdout.digest, sha256_digest(b"earlylate"));
     });
 }
 

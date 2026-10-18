@@ -37,11 +37,25 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "reserve_stock",
-    "check_availability",
-    "stock"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "states check_availability",
+          "pattern": "\\bcheck_availability\\b"
+        },
+        {
+          "id": "states stock",
+          "pattern": "\\bstock\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 6,
   "notes": "Expect tracedecay_context/search/body as the opening move, not Grep/Glob/cat."
 }

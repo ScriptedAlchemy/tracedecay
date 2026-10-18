@@ -33,10 +33,21 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "raw_total_len",
-    "unsafe"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states raw_total_len",
+          "pattern": "\\braw_total_len\\b"
+        },
+        {
+          "id": "states unsafe",
+          "pattern": "\\bunsafe\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
-  "notes": "ACTIVE. The tool bug is fixed: `tracedecay_unsafe_patterns` previously returned an empty 'No diagnostics' response because its Markdown renderer (src/mcp/tools/render.rs) only understood the compiler-`diagnostics` payload shape and silently dropped the `matches` shape this tool emits. With the dedicated `risky_patterns_md` renderer it now surfaces findings. Live-verified against the built fixture (fresh `tracedecay tool unsafe_patterns`): the sole finding across the crate is the needless `unsafe { }` block at fixture/src/audit.rs:28, enclosing symbol `raw_total_len`, kind `unsafe_block` (there are no unwrap/panic/todo-macro sites; the planted TODO is a `//` comment, not `todo!(`). ground_truth fragments are the enclosing symbol name and the `unsafe` nature that any correct answer must report."
+  "notes": "ACTIVE. The tool bug is fixed: `tracedecay_unsafe_patterns` previously returned an empty 'No diagnostics' response because its Markdown renderer (src/mcp/tools/render.rs) only understood the compiler-`diagnostics` payload shape and silently dropped the `matches` shape this tool emits. With the dedicated `risky_patterns_md` renderer it now surfaces findings. Live-verified against the built fixture (fresh `tracedecay tool unsafe_patterns`): the sole finding across the crate is the needless `unsafe { }` block at fixture/src/audit.rs:28, enclosing symbol `raw_total_len`, kind `unsafe_block` (there are no unwrap/panic/todo-macro sites; the planted TODO is a `//` comment, not `todo!(`). The required conclusions are the enclosing symbol name and the `unsafe` nature that any correct answer must report."
 }
