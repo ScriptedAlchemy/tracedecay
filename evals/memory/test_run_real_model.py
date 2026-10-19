@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -123,6 +124,117 @@ class EvalStorageIsolationTest(unittest.TestCase):
 
             self.assertFalse(fixture.exists())
             self.assertFalse(eval_env.root.exists())
+
+
+FAKE_BIN = """#!/usr/bin/env python3
+import os, socket, sys, time
+args = sys.argv[1:]
+if args[:2] == ["daemon", "run"]:
+    if os.environ.get("FAKE_DAEMON_FAIL"):
+        sys.exit(3)
+    path = args[3]
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(path)
+    srv.listen(8)
+    open(os.environ["TRACEDECAY_DATA_DIR"] + "/daemon.pid", "w").write(str(os.getpid()))
+    time.sleep(600)
+elif args[:1] == ["init"]:
+    if os.environ.get("FAKE_INIT_FAIL"):
+        print("code_index_scheduler_unavailable")
+        sys.exit(1)
+    c = socket.socket(socket.AF_UNIX)
+    c.connect(os.environ["TRACEDECAY_DAEMON_SOCKET"])
+elif args[:1] == ["tool"]:
+    print('{"fact": {"fact_id": "fact.1"}}')
+"""
+
+
+class IsolatedLifecycleTest(unittest.TestCase):
+    def make_bin(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "tracedecay"
+        path.write_text(FAKE_BIN)
+        path.chmod(0o755)
+        return str(path)
+
+    def scenario(self):
+        return {
+            "id": "lifecycle",
+            "setup": {
+                "facts": [
+                    {"content": "c", "category": "project", "source": "s", "trust": 0.5}
+                ]
+            },
+        }
+
+    def test_fresh_environment_inits_and_seeds_against_isolated_daemon(self):
+        binary = self.make_bin()
+        eval_env = run_real_model.create_eval_environment("lifecycle")
+        try:
+            eval_env.start_daemon(binary, ready_timeout=15)
+            fixture = run_real_model.build_fixture(
+                self.scenario(), binary, eval_env.env, parent=eval_env.root
+            )
+            self.assertTrue(fixture.is_relative_to(eval_env.root))
+            pid = int((eval_env.data_dir / "daemon.pid").read_text())
+        finally:
+            run_real_model.cleanup_eval_artifacts(None, eval_env)
+        self.assertFalse(eval_env.root.exists())
+        self.assertFalse(Path(eval_env.env["TRACEDECAY_DAEMON_SOCKET"]).parent.exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_init_failure_removes_fixture_and_raises_typed_error(self):
+        binary = self.make_bin()
+        eval_env = run_real_model.create_eval_environment("lifecycle")
+        self.addCleanup(eval_env.cleanup)
+        eval_env.start_daemon(binary, ready_timeout=15)
+        eval_env.env["FAKE_INIT_FAIL"] = "1"
+        with self.assertRaises(run_real_model.EvalSetupError):
+            run_real_model.build_fixture(
+                self.scenario(), binary, eval_env.env, parent=eval_env.root
+            )
+        self.assertEqual(
+            [p.name for p in eval_env.root.glob("tracedecay-eval-*")], []
+        )
+
+    def test_daemon_startup_failure_is_reported_and_cleaned(self):
+        binary = self.make_bin()
+        eval_env = run_real_model.create_eval_environment("lifecycle")
+        eval_env.env["FAKE_DAEMON_FAIL"] = "1"
+        try:
+            with self.assertRaises(run_real_model.EvalSetupError):
+                eval_env.start_daemon(binary, ready_timeout=15)
+        finally:
+            eval_env.cleanup()
+        self.assertFalse(eval_env.root.exists())
+
+    def run_scenario_with(self, binary, driver):
+        args = argparse.Namespace(tracedecay_bin=binary, driver="hermes")
+        report = {"scenarios": []}
+        with tempfile.TemporaryDirectory() as run_dir, mock.patch.object(
+            run_real_model, "drive_hermes", side_effect=driver
+        ):
+            result = run_real_model.run_scenario(
+                args, self.scenario(), Path(run_dir), report
+            )
+        return result, report
+
+    def test_agent_failure_and_cancellation_write_error_entries(self):
+        binary = self.make_bin()
+        for exc, status, cancelled in (
+            (RuntimeError("agent exploded"), "error", False),
+            (KeyboardInterrupt("stop"), "cancelled", True),
+        ):
+            with self.subTest(status=status):
+                result, report = self.run_scenario_with(binary, exc)
+                self.assertEqual(result, (False, cancelled))
+                entry = report["scenarios"][0]
+                self.assertTrue(entry["status"].startswith(status))
+                self.assertEqual(
+                    entry["error"], str(exc) or "interrupted"
+                )
 
 
 class ExactFactStoreEvaluationTest(unittest.TestCase):

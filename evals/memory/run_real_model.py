@@ -29,6 +29,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,9 @@ EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parent.parent
 SCENARIO_DIR = EVAL_DIR / "scenarios"
 RUNS_DIR = EVAL_DIR / "runs"
+PROCESS_HELPER = REPO_ROOT / "scripts/lib/portable_process.py"
+DAEMON_READY_TIMEOUT_SECONDS = 60
+DAEMON_STOP_GRACE_SECONDS = 5
 
 DEFAULT_HERMES_DIR = Path.home() / "hermes-agent"
 DEFAULT_MODEL = "gpt-5.4-mini"
@@ -120,15 +124,110 @@ class EvalEnvironment:
     global_db: Path
     env: dict[str, str]
     _temp_dir: tempfile.TemporaryDirectory
+    socket_dir: Path | None = None
+    daemon: subprocess.Popen | None = None
+    daemon_log: Path | None = None
+
+    def start_daemon(self, tracedecay_bin, ready_timeout=DAEMON_READY_TIMEOUT_SECONDS):
+        """Launches the selected binary's daemon on a socket private to this profile."""
+        if self.daemon is not None:
+            raise EvalSetupError("isolated daemon already started")
+        # Unix socket paths are length-limited, so keep the socket in a short directory.
+        self.socket_dir = Path(tempfile.mkdtemp(prefix="td-eval-"))
+        socket_path = self.socket_dir / "daemon.sock"
+        self.env["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
+        self.daemon_log = self.root / "daemon.log"
+        with open(self.daemon_log, "wb") as log:
+            self.daemon = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-S",
+                    str(PROCESS_HELPER),
+                    "exec-session",
+                    "--parent-pid",
+                    str(os.getpid()),
+                    "--",
+                    tracedecay_bin,
+                    "daemon",
+                    "run",
+                    "--socket",
+                    str(socket_path),
+                ],
+                env=self.env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        ready = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                str(PROCESS_HELPER),
+                "wait-unix-socket",
+                "--path",
+                str(socket_path),
+                "--pid",
+                str(self.daemon.pid),
+                "--timeout",
+                str(ready_timeout),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if ready.returncode != 0:
+            raise EvalSetupError(
+                f"isolated daemon did not become ready ({ready.returncode}): "
+                f"{ready.stdout.strip()}\n{self.daemon_log_tail()}"
+            )
+
+    def daemon_log_tail(self):
+        if self.daemon_log is None or not self.daemon_log.exists():
+            return "(no daemon output captured)"
+        return self.daemon_log.read_text(errors="replace")[-4096:] or "(no daemon output captured)"
+
+    def stop_daemon(self):
+        daemon, self.daemon = self.daemon, None
+        if daemon is None:
+            return
+        subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                str(PROCESS_HELPER),
+                "stop-group",
+                "--pid",
+                str(daemon.pid),
+                "--grace",
+                str(DAEMON_STOP_GRACE_SECONDS),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            daemon.wait(timeout=DAEMON_STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+            daemon.wait()
 
     def cleanup(self):
-        self._temp_dir.cleanup()
+        try:
+            self.stop_daemon()
+        finally:
+            if self.socket_dir is not None:
+                shutil.rmtree(self.socket_dir, ignore_errors=True)
+            self._temp_dir.cleanup()
+
+
+class EvalSetupError(RuntimeError):
+    """An operational failure (daemon, init, install) reported instead of exiting."""
 
 
 def cleanup_eval_artifacts(fixture, eval_env):
-    if fixture is not None:
-        shutil.rmtree(fixture, ignore_errors=True)
-    eval_env.cleanup()
+    try:
+        if fixture is not None:
+            shutil.rmtree(fixture, ignore_errors=True)
+    finally:
+        eval_env.cleanup()
 
 
 def create_eval_environment(scenario_id):
@@ -203,7 +302,9 @@ def run(cmd, cwd=None, env=None, timeout=None, check=True):
         timeout=timeout,
     )
     if check and result.returncode != 0:
-        sys.exit(f"command failed ({result.returncode}): {' '.join(map(str, cmd))}\n{result.stdout}")
+        raise EvalSetupError(
+            f"command failed ({result.returncode}): {' '.join(map(str, cmd))}\n{result.stdout}"
+        )
     return result
 
 
@@ -242,8 +343,24 @@ def require_fact_record(response, operation):
     return fact
 
 
-def build_fixture(scenario, tracedecay_bin, env):
-    fixture = Path(tempfile.mkdtemp(prefix=f"tracedecay-eval-{scenario['id']}-"))
+def build_fixture(scenario, tracedecay_bin, env, parent=None):
+    """Creates and seeds the fixture; removes it again if any setup step fails."""
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario["id"])
+    fixture = Path(
+        tempfile.mkdtemp(
+            prefix=f"tracedecay-eval-{safe_id}-",
+            dir=str(parent) if parent is not None else None,
+        )
+    )
+    try:
+        seed_fixture(scenario, tracedecay_bin, env, fixture)
+    except BaseException:
+        shutil.rmtree(fixture, ignore_errors=True)
+        raise
+    return fixture
+
+
+def seed_fixture(scenario, tracedecay_bin, env, fixture):
     (fixture / "src").mkdir()
     (fixture / "src/lib.rs").write_text("pub fn eval_fixture_marker() {}\n")
     for name, contents in scenario["setup"].get("files", {}).items():
@@ -287,7 +404,6 @@ def build_fixture(scenario, tracedecay_bin, env):
                     f"fixture preload search `{preload_query}` did not return "
                     f"FactId {seeded_fact['fact_id']}"
                 )
-    return fixture
 
 
 def provider_env_passthrough(env):
@@ -685,6 +801,77 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
     return outcomes
 
 
+def run_scenario(args, scenario, run_dir, report):
+    """Runs one scenario in an owned profile/daemon/fixture scope.
+
+    Returns (ok, cancelled). Operational failures and cancellation are recorded
+    in the report; the daemon, fixture, and profile are removed on every path.
+    """
+    eval_env = create_eval_environment(scenario["id"])
+    fixture = None
+    try:
+        eval_env.start_daemon(args.tracedecay_bin)
+        fixture = build_fixture(
+            scenario, args.tracedecay_bin, eval_env.env, parent=eval_env.root
+        )
+        if args.driver == "hermes":
+            transcripts = drive_hermes(args, scenario, fixture, run_dir, eval_env.env)
+        else:
+            transcripts = drive_cursor_agent(args, scenario, fixture, run_dir, eval_env.env)
+        outcomes = evaluate_assertions(scenario, args.tracedecay_bin, fixture, eval_env.env)
+    except KeyboardInterrupt as exc:
+        report["scenarios"].append(error_entry(scenario, "cancelled", str(exc) or "interrupted"))
+        print(f"[{scenario['id']}] cancelled")
+        return False, True
+    except Exception as exc:
+        report["scenarios"].append(
+            error_entry(scenario, "error (setup or agent failure)", str(exc))
+        )
+        print(f"[{scenario['id']}] error: {exc}", file=sys.stderr)
+        return False, False
+    finally:
+        cleanup_eval_artifacts(fixture, eval_env)
+
+    failed = [o for o in outcomes if not o["passed"]]
+    status = "pass" if not failed else "fail"
+    if failed and scenario.get("contract") == "pending-sibling":
+        status = "fail (note: scenario contract is pending-sibling, see contract_notes)"
+    if not all(t["turn_valid"] for t in transcripts):
+        status = "error (agent turn invalid, see transcript logs)"
+        failed = failed or [{"name": "agent-turn", "passed": False}]
+    report["scenarios"].append(
+        {
+            "id": scenario["id"],
+            "contract": scenario.get("contract", "stable"),
+            "status": status,
+            "assertions": outcomes,
+            "transcripts": transcripts,
+        }
+    )
+    print(f"[{scenario['id']}] {status}")
+    for outcome in outcomes:
+        marker = "pass" if outcome["passed"] else "FAIL"
+        if outcome.get("error"):
+            print(f"  [{marker}] {outcome['name']}, {outcome['error']}")
+        else:
+            print(
+                f"  [{marker}] {outcome['name']}, actual {outcome['actual']} "
+                f"{outcome['op']} expected {outcome['expected']}"
+            )
+    return not failed, False
+
+
+def error_entry(scenario, status, error):
+    return {
+        "id": scenario["id"],
+        "contract": scenario.get("contract", "stable"),
+        "status": status,
+        "error": error,
+        "assertions": [],
+        "transcripts": [],
+    }
+
+
 def main(argv):
     args = parse_args(argv)
     args.tracedecay_bin = resolve_tracedecay_bin(args.tracedecay_bin)
@@ -717,48 +904,27 @@ def main(argv):
         print(f"\nblocked report written to {report_path}", file=sys.stderr)
         return 2
 
+    def raise_cancelled(signum, _frame):
+        raise KeyboardInterrupt(f"cancelled by signal {signum}")
+
+    previous_term = signal.signal(signal.SIGTERM, raise_cancelled)
     overall_ok = True
-    for scenario in scenarios:
-        eval_env = create_eval_environment(scenario["id"])
-        fixture = None
-        try:
-            fixture = build_fixture(scenario, args.tracedecay_bin, eval_env.env)
-            if args.driver == "hermes":
-                transcripts = drive_hermes(args, scenario, fixture, run_dir, eval_env.env)
-            else:
-                transcripts = drive_cursor_agent(args, scenario, fixture, run_dir, eval_env.env)
-            outcomes = evaluate_assertions(
-                scenario, args.tracedecay_bin, fixture, eval_env.env
-            )
-            failed = [o for o in outcomes if not o["passed"]]
-            status = "pass" if not failed else "fail"
-            if failed and scenario.get("contract") == "pending-sibling":
-                status = "fail (note: scenario contract is pending-sibling, see contract_notes)"
-            if not all(t["turn_valid"] for t in transcripts):
-                status = "error (agent turn invalid, see transcript logs)"
-                failed = failed or [{"name": "agent-turn", "passed": False}]
-            report["scenarios"].append(
-                {
-                    "id": scenario["id"],
-                    "contract": scenario.get("contract", "stable"),
-                    "status": status,
-                    "assertions": outcomes,
-                    "transcripts": transcripts,
-                }
-            )
-            overall_ok &= not failed
-            print(f"[{scenario['id']}] {status}")
-            for outcome in outcomes:
-                marker = "pass" if outcome["passed"] else "FAIL"
-                if outcome.get("error"):
-                    print(f"  [{marker}] {outcome['name']}, {outcome['error']}")
-                else:
-                    print(
-                        f"  [{marker}] {outcome['name']}, actual {outcome['actual']} "
-                        f"{outcome['op']} expected {outcome['expected']}"
-                    )
-        finally:
-            cleanup_eval_artifacts(fixture, eval_env)
+    cancelled = False
+    try:
+        for scenario in scenarios:
+            ok, cancelled = run_scenario(args, scenario, run_dir, report)
+            overall_ok &= ok
+            if cancelled:
+                break
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+
+    if cancelled:
+        report["status"] = "cancelled"
+        report_path = run_dir / "report.json"
+        report_path.write_text(json.dumps(report, indent=2) + "\n")
+        print(f"\ncancelled; report written to {report_path}", file=sys.stderr)
+        return 130
 
     report["status"] = "pass" if overall_ok else "fail"
     report_path = run_dir / "report.json"
