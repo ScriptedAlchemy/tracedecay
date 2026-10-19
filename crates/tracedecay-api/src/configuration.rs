@@ -398,6 +398,9 @@ mod tests {
 
         let (status, Json(body)) = result.expect_err("a retired field must be refused");
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["validation_errors"][0]["field"], "upload_enabled");
+        assert_eq!(
+            serde_json::to_value(body).unwrap()["validation_errors"][0]["field"],
+            "upload_enabled"
+        );
     }
 }
