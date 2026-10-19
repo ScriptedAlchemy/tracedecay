@@ -6,8 +6,7 @@
 # softening -D warnings.
 name: Hawk
 
-# On demand only; see distribution-acceptance.yml for why nothing runs on a
-# timer here.
+# On demand only; an optional diagnostic should run when someone will read it.
 on:
   workflow_dispatch:
 

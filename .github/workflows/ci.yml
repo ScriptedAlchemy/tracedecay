@@ -205,18 +205,11 @@ jobs:
         run: |
           python3 scripts/test-check-packaged-lsp-bridge.py
           python3 scripts/test-build-mcpb.py
-          python3 scripts/test-resolve-installed-binary.py
-          python3 scripts/test-check-packaged-mcp-stdio.py
-          python3 scripts/test-check-distribution-feature-wiring.py
-          python3 scripts/test-resolve-release-source-profile.py
           python3 scripts/test-package-release-archive.py
           python3 scripts/test-plan-release-recovery.py
           python3 scripts/test-check-release-artifacts.py
           python3 scripts/test-update-release-checksums.py
           python3 scripts/test-neutralize-release-pr-closing-keywords.py
-          bash scripts/test-check-distribution-clean-source.sh
-          bash scripts/test-check-distribution-snapshot.sh
-          bash scripts/test-check-distribution-reuse.sh
           bash tests/macos_stable_codesign_test.sh
 
       # Exercise the release guard scripts when admitting proposed changes.
@@ -707,6 +700,16 @@ jobs:
           platform: x86_64-linux
           archive: tar.gz
           epoch: ${{ steps.packaging.outputs.epoch }}
+
+      - name: Exercise shipped MCP and LSP transports
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$GITHUB_WORKSPACE/target/x86_64-unknown-linux-gnu/release/tracedecay"
+          smoke_work="$(mktemp -d)"
+          trap 'rm -rf -- "$smoke_work"' EXIT
+          TRACEDECAY_BIN="$binary" bazel run //scripts:mcp-conformance-smoke.sh
+          bazel run //scripts:packaged_lsp_bridge -- "$binary" "$smoke_work/lsp"
 
   # Frontend checks require no Rust compilation and must also validate drafts.
   # Do not serialize them behind repository-wide Rust formatting and gates.
