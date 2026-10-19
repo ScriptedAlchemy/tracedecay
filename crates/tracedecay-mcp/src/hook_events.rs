@@ -137,6 +137,13 @@ fn push_admission_identity_part(buffer: &mut Vec<u8>, label: &str, value: &[u8])
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookEventPlan {
     SyncFiles(Vec<String>),
+    SyncFilesAt {
+        root: PathBuf,
+        scope: tracedecay_contracts::ResolvedScope,
+        agent: HostIntegrationIdV1,
+        route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
+        rel_paths: Vec<String>,
+    },
     AddBranch(String),
     AddBranchAt {
         root: PathBuf,
@@ -163,6 +170,13 @@ pub enum HookEventPlan {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum DurableHookEventPlan {
     SyncFiles {
+        rel_paths: Vec<String>,
+    },
+    SyncFilesAt {
+        root: PathBuf,
+        scope: tracedecay_contracts::ResolvedScope,
+        agent: String,
+        route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
         rel_paths: Vec<String>,
     },
     AddBranch {
@@ -356,6 +370,14 @@ fn normalize_durable_effect_root(root: &Path) -> Result<PathBuf, ()> {
     bound_absolute_add_branch_at_root(root).map_err(|_| ())
 }
 
+fn durable_registered_root(root: &Path) -> Result<PathBuf, ()> {
+    let normalized = normalize_durable_effect_root(root)?;
+    if normalized.as_os_str().as_encoded_bytes() != root.as_os_str().as_encoded_bytes() {
+        return Err(());
+    }
+    Ok(normalized)
+}
+
 fn sanitize_durable_rel_paths(rel_paths: &[String]) -> Result<Vec<String>, ()> {
     let sanitized = safe_hook_rel_paths(rel_paths);
     if sanitized.len() != rel_paths.len() || sanitized.len() > DURABLE_MAX_REL_PATHS {
@@ -373,6 +395,22 @@ fn sanitize_durable_rel_paths(rel_paths: &[String]) -> Result<Vec<String>, ()> {
 fn durable_plan_from_runtime(plan: &HookEventPlan) -> Result<DurableHookEventPlan, ()> {
     Ok(match plan {
         HookEventPlan::SyncFiles(rel_paths) => DurableHookEventPlan::SyncFiles {
+            rel_paths: sanitize_durable_rel_paths(rel_paths)?,
+        },
+        HookEventPlan::SyncFilesAt {
+            root,
+            scope,
+            agent,
+            route,
+            rel_paths,
+        } => DurableHookEventPlan::SyncFilesAt {
+            root: durable_registered_root(root)?,
+            scope: {
+                scope.validate().map_err(|_| ())?;
+                scope.clone()
+            },
+            agent: agent.as_wire().to_string(),
+            route: sanitize_durable_route(route.as_ref())?,
             rel_paths: sanitize_durable_rel_paths(rel_paths)?,
         },
         HookEventPlan::AddBranch(branch) => DurableHookEventPlan::AddBranch {
@@ -426,6 +464,28 @@ fn runtime_plan_from_durable(
             sanitize_durable_rel_paths(&rel_paths)
                 .map_err(|()| DurableHookEventDecodeError::Malformed)?,
         )),
+        DurableHookEventPlan::SyncFilesAt {
+            root,
+            scope,
+            agent,
+            route,
+            rel_paths,
+        } => Ok(HookEventPlan::SyncFilesAt {
+            root: durable_registered_root(&root)
+                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+            scope: {
+                scope
+                    .validate()
+                    .map_err(|_| DurableHookEventDecodeError::Malformed)?;
+                scope
+            },
+            agent: HostIntegrationIdV1::from_wire(&agent)
+                .ok_or(DurableHookEventDecodeError::Malformed)?,
+            route: sanitize_durable_route(route.as_ref())
+                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+            rel_paths: sanitize_durable_rel_paths(&rel_paths)
+                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+        }),
         DurableHookEventPlan::AddBranch { branch } => Ok(HookEventPlan::AddBranch(
             durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
                 .map_err(|()| DurableHookEventDecodeError::Malformed)?,

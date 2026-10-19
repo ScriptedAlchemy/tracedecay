@@ -342,12 +342,29 @@ impl McpServer {
         // survives the envelope move into `tools/call` preparation below.
         let method_name = request.method();
         if matches!(method, McpMethod::HookEvent) {
-            Box::pin(self.handle_hook_event_notification(
+            let Some(id) = request.cloned_id() else {
+                Box::pin(self.handle_hook_event_notification(
+                    request.raw_notification_params(),
+                    &mut connection.route_cache,
+                ))
+                .await;
+                return None;
+            };
+            let admitted = Box::pin(self.admit_hook_event_notification(
                 request.raw_notification_params(),
                 &mut connection.route_cache,
+                false,
             ))
             .await;
-            return None;
+            return Some(match admitted {
+                Ok(_) => JsonRpcResponse::success(id, json!({})),
+                Err(outcome) => JsonRpcResponse::error_with_data(
+                    id,
+                    ErrorCode::InternalError,
+                    "hook event was not durably admitted".to_owned(),
+                    Some(json!(outcome)),
+                ),
+            });
         }
         if matches!(method, McpMethod::Cancelled) {
             self.record_request_accounting(method_name, false);
@@ -437,21 +454,34 @@ impl McpServer {
         result
     }
 
-    #[tracing::instrument(name = "mcp.server.hook_event", level = "trace", skip_all)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Hook-event notification is one decode-admit-ack of a host envelope."
-    )]
     pub(crate) async fn handle_hook_event_notification(
         &self,
         params: Option<&Value>,
         route_cache: &mut HookProjectRouteCache,
     ) -> HostAdmissionOutcome {
+        self.admit_hook_event_notification(params, route_cache, true)
+            .await
+            .unwrap_or_else(|outcome| outcome)
+    }
+
+    /// Admission failure and postcommit replay outcome are separate: a retained
+    /// effect can wait for its owner after the request has a durable receipt.
+    #[tracing::instrument(name = "mcp.server.hook_event", level = "trace", skip_all)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Hook-event admission is one route-admit-replay of a host envelope."
+    )]
+    async fn admit_hook_event_notification(
+        &self,
+        params: Option<&Value>,
+        route_cache: &mut HookProjectRouteCache,
+        replay_inline: bool,
+    ) -> std::result::Result<HostAdmissionOutcome, HostAdmissionOutcome> {
         let Some(event) = hook_events::parse_hook_event(params) else {
             self.record_request_accounting("tracedecay/hookEvent", false);
             let outcome = HostAdmissionOutcome::degraded("malformed_event");
             Self::report_host_admission_outcome(&outcome);
-            return outcome;
+            return Err(outcome);
         };
         // Resolve the hook's exact project before opening a graph, publishing
         // activity, touching an indexing sink, or admitting durable work. The
@@ -466,7 +496,7 @@ impl McpServer {
                     "project_registry_route_unavailable",
                 );
                 Self::report_host_admission_outcome(&outcome);
-                return outcome;
+                return Err(outcome);
             }
         };
         let dispatch_server = match hook_route.retained_server() {
@@ -484,7 +514,7 @@ impl McpServer {
                 let outcome =
                     HostAdmissionOutcome::retained_unavailable("project_route_unavailable");
                 Self::report_host_admission_outcome(&outcome);
-                return outcome;
+                return Err(outcome);
             }
         };
         dispatch_server.record_request_accounting("tracedecay/hookEvent", false);
@@ -517,7 +547,10 @@ impl McpServer {
         // event is observed. Independent of host-admission durability so an
         // after-edit reaches indexing even when effect processing is deferred.
         // Best-effort: a policy refusal or unavailable scheduler emits no activity.
-        if !event.rel_paths.is_empty()
+        if !matches!(
+            event.kind,
+            hook_events::HookEventKind::FileEdit | hook_events::HookEventKind::IncrementalSync
+        ) && !event.rel_paths.is_empty()
             && let Some(sink) = &dispatch_server.code_index_hook_sink
         {
             // An accepted admission means the paths really entered a mounted
@@ -540,11 +573,22 @@ impl McpServer {
             }
         }
         let current_branch = live_branch.resolve_for(&root);
-        let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
+        let plan = match hook_events::plan_hook_event(&event, &root, current_branch.as_deref()) {
+            hook_events::HookEventPlan::SyncFiles(rel_paths) => {
+                hook_events::HookEventPlan::SyncFilesAt {
+                    root: root.clone(),
+                    scope: hook_route.scope.clone(),
+                    agent: event.agent,
+                    route: event.route.clone(),
+                    rel_paths,
+                }
+            }
+            plan => plan,
+        };
         let Ok(payload) = hook_events::encode_durable_hook_event_plan(&plan) else {
             let outcome = HostAdmissionOutcome::degraded("invalid_host_event_plan");
             Self::report_host_admission_outcome(&outcome);
-            return outcome;
+            return Err(outcome);
         };
         let admission_source = event.admission_source();
         let admitted = match dispatch_server.host_admission_broker.as_ref() {
@@ -557,15 +601,20 @@ impl McpServer {
             Ok(admitted) => admitted,
             Err(outcome) => {
                 Self::report_host_admission_outcome(&outcome);
-                return outcome;
+                return Err(outcome);
             }
         };
-        let outcome = Box::pin(dispatch_server.replay_host_admission(Some(admitted.seq))).await;
-        // Route analytics + span observations are side writes: only after the
-        // durable spool record is authoritatively committed (Committed or
-        // ExactDuplicate). Failures are best-effort and must never change the
-        // admission outcome already decided above.
-        if outcome.status.commits_replay_record() {
+        let outcome = if replay_inline {
+            Box::pin(dispatch_server.replay_host_admission(Some(admitted.seq))).await
+        } else {
+            // The mounted replay owner is woken by broker admission. Request
+            // delivery waits for the durable receipt, not for the effect owner.
+            HostAdmissionOutcome::accepted_for_replay()
+        };
+        // Request observations follow durable admission. Notifications preserve
+        // their settled-effect accounting; these side writes never change the
+        // admission or replay outcome.
+        if !replay_inline || outcome.status.commits_replay_record() {
             if let Some(wake) = &dispatch_server.project_session_refresh_wake {
                 wake.wake();
             }
@@ -581,7 +630,7 @@ impl McpServer {
             dispatch_server.record_hook_span_observation(&event, &hook_route);
         }
         Self::report_host_admission_outcome(&outcome);
-        outcome
+        Ok(outcome)
     }
 
     /// Records the caller's negotiated `clientInfo.name` (e.g.

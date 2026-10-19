@@ -117,6 +117,256 @@ fn success_reconcile_sink() -> CodeIndexReconcileSink {
 }
 
 #[tokio::test]
+async fn file_edit_commit_failure_queues_no_sync() {
+    let (cg, project, authority) = init_indexed_repo().await;
+    let spool = TempDir::new().unwrap();
+    let broker = default_spool_broker(spool.path());
+    let effects = Arc::new(AtomicUsize::new(0));
+    let context = with_broker(
+        registered_context(cg, &authority),
+        Arc::clone(&broker),
+        success_reconcile_sink(),
+    )
+    .with_code_index_hook_sink({
+        let effects = Arc::clone(&effects);
+        Arc::new(move |_, _| {
+            effects.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { super::CodeIndexDemandAdmissionV1::Queued })
+        })
+    });
+    let server = McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .unwrap();
+    let metadata = spool.path().join("meta.json");
+    std::fs::remove_file(&metadata).unwrap();
+    std::fs::create_dir(&metadata).unwrap();
+    let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
+        HostIntegrationIdV1::Claude,
+        vec!["src/lib.rs".to_owned()],
+        project.path().to_path_buf(),
+    ))
+    .unwrap();
+    let response = server
+        .handle_request(&super::JsonRpcRequest {
+            jsonrpc: "2.0".to_owned(),
+            id: Some(json!(17)),
+            method: tracedecay_hooks::core_events::HOOK_EVENT_METHOD.to_owned(),
+            params: Some(event.clone()),
+        })
+        .await
+        .unwrap();
+    assert!(response.result.is_none(), "failed commit must not ACK");
+    let failure = response.error.unwrap().data.unwrap();
+    assert_eq!(failure["reason_code"], "spool_io_failed");
+    assert_eq!(failure["status"], "unavailable");
+    let outcome = server
+        .handle_hook_event_notification(Some(&event), &mut HookProjectRouteCache::default())
+        .await;
+    assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(outcome.reason_code, Some("spool_recovery_required"));
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    assert_eq!(broker.pending_replay_count().await.unwrap(), 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn file_edit_request_acks_durable_work_while_effect_is_held() {
+    let (cg, project, authority) = init_indexed_repo().await;
+    let spool = TempDir::new().unwrap();
+    let broker = default_spool_broker(spool.path());
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let effects = Arc::new(AtomicUsize::new(0));
+    let context = with_broker(
+        registered_context(cg, &authority),
+        Arc::clone(&broker),
+        success_reconcile_sink(),
+    )
+    .with_owned_project_host_admission_replay()
+    .with_code_index_hook_sink({
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        let effects = Arc::clone(&effects);
+        let expected_root = project.path().canonicalize().unwrap();
+        Arc::new(move |root, paths| {
+            assert_eq!(root, expected_root);
+            assert_eq!(paths, ["src/lib.rs"]);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let effects = Arc::clone(&effects);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                effects.fetch_add(1, Ordering::SeqCst);
+                super::CodeIndexDemandAdmissionV1::Queued
+            })
+        })
+    });
+    let server = McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .unwrap();
+    let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
+        HostIntegrationIdV1::Claude,
+        vec!["src/lib.rs".to_owned()],
+        project.path().to_path_buf(),
+    ))
+    .unwrap();
+    let response = server
+        .handle_request(&super::JsonRpcRequest {
+            jsonrpc: "2.0".to_owned(),
+            id: Some(json!(19)),
+            method: tracedecay_hooks::core_events::HOOK_EVENT_METHOD.to_owned(),
+            params: Some(event),
+        })
+        .await
+        .unwrap();
+    assert!(response.error.is_none(), "{response:?}");
+    assert_eq!(response.result, Some(json!({})));
+    entered.notified().await;
+    assert_eq!(broker.pending_count().await, 1);
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    release.notify_one();
+    server.wait_project_host_admission_replay_idle().await;
+    assert_eq!(broker.pending_count().await, 0);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    server.replay_host_admission(None).await;
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_file_edits_replay_once_on_each_exact_linked_worktree() {
+    let (cg, project, authority) = init_indexed_repo().await;
+    let spool = TempDir::new().unwrap();
+    let broker = default_spool_broker(spool.path());
+    let effects = Arc::new(Mutex::new(Vec::new()));
+    let sink: super::CodeIndexHookSink = {
+        let effects = Arc::clone(&effects);
+        Arc::new(move |root, paths| {
+            let effects = Arc::clone(&effects);
+            Box::pin(async move {
+                effects.lock().unwrap().push((root, paths));
+                super::CodeIndexDemandAdmissionV1::Queued
+            })
+        })
+    };
+    let runtime = registered_runtime(&authority);
+    let owner = runtime
+        .project_registry_context_by_alias(project.path())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut servers = Vec::new();
+    let mut plans = Vec::new();
+    let mut roots = Vec::new();
+    for (name, directory) in [
+        ("linked-a", "linked-a-api_key=locator-required"),
+        ("linked-b", "linked-b"),
+    ] {
+        let root = project.path().join(directory);
+        git(
+            project.path(),
+            &["worktree", "add", "-q", "-b", name, root.to_str().unwrap()],
+        );
+        std::fs::write(root.join("src/lib.rs"), "pub fn edited() {}\n").unwrap();
+        let graph = authority.reopen_project_graph(&root).await;
+        let (_, scope) = tracedecay_mcp::scope::resolve_query_scope(&owner, &root).unwrap();
+        let mut context =
+            registered_context(graph, &authority).with_code_index_hook_sink(Arc::clone(&sink));
+        context.host_admission_broker = Some(Arc::clone(&broker));
+        servers.push(
+            McpServer::new_with_registered_test_context(context, Vec::new())
+                .await
+                .unwrap(),
+        );
+        let plan = tracedecay_mcp::hook_events::HookEventPlan::SyncFilesAt {
+            root: root.clone(),
+            scope,
+            agent: HostIntegrationIdV1::Claude,
+            route: Some(HookRouteMetadata {
+                session_id: Some("AKIASYNTHETICCANARY3".to_owned()),
+                thread_id: Some(name.to_owned()),
+                cwd: Some(root.clone()),
+                worktree: Some(root.clone()),
+                branch: None,
+            }),
+            rel_paths: vec!["src/lib.rs".to_owned()],
+        };
+        let encoded = tracedecay_mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap();
+        assert!(!String::from_utf8_lossy(&encoded).contains("AKIASYNTHETICCANARY3"));
+        let decoded =
+            tracedecay_mcp::hook_events::decode_durable_hook_event_plan(&encoded).unwrap();
+        let tracedecay_mcp::hook_events::HookEventPlan::SyncFilesAt {
+            root: decoded_root,
+            scope: decoded_scope,
+            ..
+        } = &decoded
+        else {
+            panic!("routed edit")
+        };
+        assert_eq!(decoded_root, &root);
+        let tracedecay_mcp::hook_events::HookEventPlan::SyncFilesAt { scope, .. } = &plan else {
+            unreachable!()
+        };
+        assert_eq!(decoded_scope, scope);
+        broker.admit(name, &encoded).await.unwrap();
+        plans.push(decoded);
+        roots.push(root);
+    }
+    let mut context = registered_context(cg, &authority);
+    context.host_admission_broker = Some(Arc::clone(&broker));
+    context = context.with_code_index_hook_sink(Arc::clone(&sink));
+    let server = McpServer::new_with_registered_test_context(context, servers.clone())
+        .await
+        .unwrap();
+    assert_eq!(broker.pending_replay_count().await.unwrap(), 2);
+    let drained = server.replay_host_admission(None).await;
+    assert_eq!(drained, HostAdmissionOutcome::accepted_for_replay());
+    assert_eq!(broker.pending_replay_count().await.unwrap(), 0);
+    server.replay_host_admission(None).await;
+    assert_eq!(
+        *effects.lock().unwrap(),
+        roots
+            .iter()
+            .map(|root| (root.clone(), vec!["src/lib.rs".to_owned()]))
+            .collect::<Vec<_>>()
+    );
+    let warm_edit = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
+        HostIntegrationIdV1::Claude,
+        vec!["src/lib.rs".to_owned()],
+        roots[0].clone(),
+    ))
+    .unwrap();
+    let outcome = server
+        .handle_hook_event_notification(Some(&warm_edit), &mut HookProjectRouteCache::default())
+        .await;
+    assert_eq!(outcome.status, HostAdmissionStatus::Committed);
+    assert_eq!(broker.pending_replay_count().await.unwrap(), 0);
+    assert_eq!(
+        effects.lock().unwrap().len(),
+        3,
+        "one warm admission queues one sync"
+    );
+    assert_eq!(
+        effects.lock().unwrap()[2],
+        (roots[0].clone(), vec!["src/lib.rs".to_owned()])
+    );
+    let tracedecay_mcp::hook_events::HookEventPlan::SyncFilesAt { root, .. } = &mut plans[0] else {
+        unreachable!()
+    };
+    *root = roots[1].clone();
+    let outcome = server
+        .run_hook_event_plan(server.cg().await, project.path(), plans.remove(0))
+        .await;
+    assert_eq!(outcome.reason_code, Some("project_route_stale"));
+    assert_eq!(effects.lock().unwrap().len(), 3);
+    server.shutdown().await;
+    for server in servers {
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn hook_watch_policy_refusal_is_not_scheduler_unavailable() {
     let (cg, project, authority) = init_indexed_repo().await;
     let context = registered_context(cg, &authority)
