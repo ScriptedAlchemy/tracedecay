@@ -43,6 +43,10 @@ pub(super) fn is_module_import_language(language: &str) -> bool {
     matches!(language, "python" | "go" | "java" | "ruby")
 }
 
+pub(super) fn binds_through_caller_scope(language: &str) -> bool {
+    language == "ruby"
+}
+
 type SymbolRef<'a> = (usize, &'a LineageSymbolRecordV1);
 
 /// A module path under a source root to its `(root, target)` candidates.
