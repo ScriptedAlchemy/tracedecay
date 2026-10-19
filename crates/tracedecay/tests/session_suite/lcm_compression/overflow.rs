@@ -15,9 +15,7 @@ async fn compress_forces_overflow_recovery_with_reserve_derived_cap() {
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "forced summary".into(),
-        },
+        provided_summary("forced summary".into()),
         Some(10),
         None,
         None,
@@ -52,9 +50,7 @@ async fn forced_overflow_summary_replay_keeps_latest_message_when_nothing_fits()
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "summary too large for cap".into(),
-        },
+        provided_summary("summary too large for cap".into()),
         Some(1),
         None,
         Some(1),
@@ -91,9 +87,7 @@ async fn forced_overflow_compresses_sub_threshold_backlog() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "forced summary".into(),
-            },
+            provided_summary("forced summary".into()),
             Some(10),
             None,
             Some(100),
@@ -128,9 +122,7 @@ async fn forced_overflow_recovery_compacts_additional_backlog_and_reports_reason
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "forced overflow summary".into(),
-        },
+        provided_summary("forced overflow summary".into()),
         Some(2),
         Some(1),
         Some(20),
@@ -196,9 +188,7 @@ async fn forced_overflow_triggers_at_configured_cap_and_catches_up_in_passes() {
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "catchup summary".into(),
-        },
+        provided_summary("catchup summary".into()),
         Some(2 * budget_tokens("old-1 token")),
         Some(2),
         Some(40),
@@ -234,9 +224,7 @@ async fn forced_overflow_without_backlog_reports_irreducible_best_effort() {
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "unused summary".into(),
-        },
+        provided_summary("unused summary".into()),
         None,
         None,
         Some(3),
@@ -287,9 +275,7 @@ async fn forced_overflow_trims_replay_to_assembly_cap() {
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "small summary".into(),
-        },
+        provided_summary("small summary".into()),
         None,
         None,
         Some(6),
@@ -334,9 +320,7 @@ async fn forced_overflow_replay_budget_accounts_for_prompt_overhead_delta() {
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "unused summary".into(),
-        },
+        provided_summary("unused summary".into()),
         None,
         None,
         Some(12),
@@ -381,9 +365,7 @@ async fn oversized_authoritative_summary_is_preserved_exactly() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: exact_summary.clone(),
-            },
+            provided_summary(exact_summary.clone()),
         ))
         .await
         .unwrap();
@@ -415,9 +397,7 @@ async fn authoritative_summary_reports_attempt_state() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "oversized ".repeat(100),
-            },
+            provided_summary("oversized ".repeat(100)),
         ))
         .await
         .unwrap();
@@ -455,9 +435,7 @@ async fn critical_pressure_catch_up_reports_attempts_debt_and_budget_state() {
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "catchup summary".into(),
-        },
+        provided_summary("catchup summary".into()),
         Some(budget_tokens("old-1 token")),
         Some(1),
         Some(budget_tokens("fresh-1") + budget_tokens("fresh-2") + 1),
@@ -522,9 +500,7 @@ async fn maintenance_debt_clears_when_retry_compacts_remaining_backlog() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "first retry summary".into(),
-            },
+            provided_summary("first retry summary".into()),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
@@ -543,9 +519,7 @@ async fn maintenance_debt_clears_when_retry_compacts_remaining_backlog() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "second retry summary".into(),
-            },
+            provided_summary("second retry summary".into()),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
@@ -585,9 +559,7 @@ async fn compression_reinjects_latest_user_objective_when_tail_is_tool_heavy() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "historical summary".into(),
-            },
+            provided_summary("historical summary".into()),
         ))
         .await
         .unwrap();
@@ -633,9 +605,7 @@ async fn overflow_recovery_keeps_preserved_objective_scaffold_when_evicting_tail
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "unused summary".into(),
-        },
+        provided_summary("unused summary".into()),
         None,
         None,
         Some(
@@ -688,9 +658,7 @@ async fn overflow_recovery_without_backlog_evicts_droppable_tail() {
     let mut request = limited_compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "unused summary".into(),
-        },
+        provided_summary("unused summary".into()),
         None,
         None,
         Some(5),

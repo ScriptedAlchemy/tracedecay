@@ -262,9 +262,7 @@ async fn preflight_requests_compression_for_maintenance_debt() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "first chunk summary".into(),
-            },
+            provided_summary("first chunk summary".into()),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,

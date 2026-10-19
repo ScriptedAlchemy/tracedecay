@@ -16,9 +16,7 @@ async fn fresh_tail_boundary_keeps_multi_tool_transaction_atomic_and_shrinking()
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-tail",
-        LcmSummarizerMode::Fake {
-            summary_text: "compact summary".into(),
-        },
+        provided_summary("compact summary".into()),
         None,
         None,
         Some(400),
@@ -68,9 +66,7 @@ async fn bounded_leaf_chunk_backs_off_before_multi_tool_transaction() {
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-leaf",
-        LcmSummarizerMode::Fake {
-            summary_text: "transaction summary".into(),
-        },
+        provided_summary("transaction summary".into()),
         None,
         Some(2),
         None,
@@ -106,9 +102,7 @@ async fn budget_and_overflow_replay_never_split_tool_transaction() {
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-budget",
-        LcmSummarizerMode::Fake {
-            summary_text: "summary".into(),
-        },
+        provided_summary("summary".into()),
         None,
         None,
         Some(8),
@@ -172,9 +166,7 @@ async fn legacy_partial_tool_transaction_drops_invalid_group_and_repairs_orphans
     let mut request = compress_request(
         "cursor",
         "session-legacy-tools",
-        LcmSummarizerMode::Fake {
-            summary_text: "unused".into(),
-        },
+        provided_summary("unused".into()),
     );
     request.messages = transaction;
     request.fresh_tail_count = Some(10);

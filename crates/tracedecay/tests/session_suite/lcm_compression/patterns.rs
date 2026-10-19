@@ -32,9 +32,7 @@ async fn ignored_session_pattern_skips_active_ingest_and_compression() {
             dynamic_leaf_chunk_max: None,
             context_length: None,
             reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "should not be used".into(),
-            },
+            summarizer: provided_summary("should not be used".into()),
         })
         .await
         .unwrap();
@@ -123,9 +121,7 @@ async fn stateless_session_pattern_keeps_replay_but_does_not_persist_lcm_rows() 
             dynamic_leaf_chunk_max: None,
             context_length: None,
             reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "should not be used".into(),
-            },
+            summarizer: provided_summary("should not be used".into()),
         })
         .await
         .unwrap();

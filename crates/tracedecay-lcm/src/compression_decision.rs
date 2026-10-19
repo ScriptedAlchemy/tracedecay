@@ -273,6 +273,7 @@ mod tests {
         let summarizer = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: "summary".to_string(),
             route: None,
+            extraction_result: None,
         });
         assert_eq!(
             condensation_policy_decision(CondensationDecisionInput {
@@ -290,8 +291,10 @@ mod tests {
 
     #[test]
     fn condensation_policy_skips_backlog_and_auxiliary_modes() {
-        let persisted = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Fake {
+        let persisted = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: "summary".to_string(),
+            route: None,
+            extraction_result: None,
         });
         assert_eq!(
             condensation_policy_decision(CondensationDecisionInput {

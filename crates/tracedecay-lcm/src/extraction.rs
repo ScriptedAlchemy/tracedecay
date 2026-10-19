@@ -16,17 +16,6 @@ If there is nothing worth extracting, respond with exactly: NOTHING_TO_EXTRACT
 CONTENT:
 {text}";
 
-// Route-envelope contract with Hermes plugin:
-// - `route`: caller-provided summarizer route string
-// - `pre_compaction_extraction`: optional extraction result object
-#[derive(Debug, serde::Deserialize)]
-struct LcmProvidedSummaryRouteEnvelope {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    route: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pre_compaction_extraction: Option<LcmExtractionResult>,
-}
-
 pub fn build_extraction_request(
     session_id: &str,
     source_range: &LcmSummarySourceRange,
@@ -42,28 +31,6 @@ pub fn build_extraction_request(
         source_range: source_range.clone(),
         prompt,
     })
-}
-
-pub fn split_summary_route(route: Option<&str>) -> (Option<String>, Option<LcmExtractionResult>) {
-    let route = route.and_then(non_empty).map(str::to_string);
-    let Some(route) = route else {
-        return (None, None);
-    };
-    if !(route.starts_with('{') && route.ends_with('}')) {
-        return (Some(route), None);
-    }
-    let parsed = serde_json::from_str::<LcmProvidedSummaryRouteEnvelope>(&route);
-    if let Ok(envelope) = parsed {
-        return (
-            envelope
-                .route
-                .as_deref()
-                .and_then(non_empty)
-                .map(str::to_string),
-            envelope.pre_compaction_extraction,
-        );
-    }
-    (Some(route), None)
 }
 
 pub fn summary_metadata_extraction(

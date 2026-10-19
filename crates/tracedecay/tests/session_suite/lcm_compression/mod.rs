@@ -238,6 +238,14 @@ fn compress_request(
     }
 }
 
+fn provided_summary(summary_text: impl Into<String>) -> LcmSummarizerMode {
+    LcmSummarizerMode::Provided {
+        summary_text: summary_text.into(),
+        route: None,
+        extraction_result: None,
+    }
+}
+
 fn limited_compress_request(
     provider: &str,
     session_id: &str,

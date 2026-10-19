@@ -85,9 +85,15 @@ fn compression_request(session_id: &str) -> LcmCompressionRequest {
         dynamic_leaf_chunk_max: None,
         context_length: None,
         reserve_tokens_floor: None,
-        summarizer: LcmSummarizerMode::Fake {
-            summary_text: "fixture summary preserving canonical historical context".to_string(),
-        },
+        summarizer: provided_summary("fixture summary preserving canonical historical context".to_string()),
+    }
+}
+
+fn provided_summary(summary_text: impl Into<String>) -> LcmSummarizerMode {
+    LcmSummarizerMode::Provided {
+        summary_text: summary_text.into(),
+        route: None,
+        extraction_result: None,
     }
 }
 
@@ -1284,6 +1290,7 @@ async fn interrupted_atomic_summary_settlement_resumes_without_duplicate() {
     interrupted_request.summarizer = LcmSummarizerMode::Provided {
         summary_text: summary_text.to_string(),
         route: Some("codex_native_compaction".to_string()),
+        extraction_result: None,
     };
     let interrupted = db
         .lcm_compress_retained_page_guarded(
@@ -1334,9 +1341,7 @@ async fn retained_commit_defers_whole_session_replay_and_relation_application() 
             .unwrap();
     }
     let mut initial = compression_request(session_id);
-    initial.summarizer = LcmSummarizerMode::Fake {
-        summary_text: "old whole-session replay sentinel".to_string(),
-    };
+    initial.summarizer = provided_summary("old whole-session replay sentinel".to_string());
     DaemonLcmEffectService::new(db.clone(), None, None)
         .compress(initial)
         .await
@@ -1355,9 +1360,7 @@ async fn retained_commit_defers_whole_session_replay_and_relation_application() 
         .unwrap();
     drop(snapshot);
     let mut retained = compression_request(session_id);
-    retained.summarizer = LcmSummarizerMode::Fake {
-        summary_text: "new bounded-page summary".to_string(),
-    };
+    retained.summarizer = provided_summary("new bounded-page summary".to_string());
     let bounded = db
         .lcm_compress_retained_page_guarded(
             &retained,
@@ -1959,6 +1962,7 @@ async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
     request.summarizer = LcmSummarizerMode::Provided {
         summary_text: "summary before the raw revision".to_string(),
         route: Some("test_partial_invalidation_fairness".to_string()),
+        extraction_result: None,
     };
     db.lcm_compress_retained_page_guarded(
         &request,
@@ -2089,6 +2093,7 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     poison_request.summarizer = LcmSummarizerMode::Provided {
         summary_text: "summary with a poisoned relation receipt".to_string(),
         route: Some("test_relation_poison".to_string()),
+        extraction_result: None,
     };
     let poison = db
         .lcm_compress_retained_page_guarded(
@@ -2440,6 +2445,7 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
         initial_request.summarizer = LcmSummarizerMode::Provided {
             summary_text: old_text.to_string(),
             route: Some("test_exact_source_summary".to_string()),
+            extraction_result: None,
         };
         let initial = db
             .lcm_compress_retained_page_guarded(
@@ -2597,6 +2603,7 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
             request.summarizer = LcmSummarizerMode::Provided {
                 summary_text: summary_text.to_string(),
                 route: Some("test_disjoint_revision".to_string()),
+                extraction_result: None,
             };
             let compressed = db
                 .lcm_compress_retained_page_guarded(
@@ -2871,6 +2878,7 @@ async fn raw_message_identity_cannot_move_between_sessions_after_summary_publica
     request.summarizer = LcmSummarizerMode::Provided {
         summary_text: "summary owned by the original session".to_string(),
         route: Some("test_exact_source_summary".to_string()),
+        extraction_result: None,
     };
     let initial = db
         .lcm_compress_retained_page_guarded(
@@ -2955,6 +2963,7 @@ async fn retained_summary_publication_requires_the_exact_planned_source_range() 
     request.summarizer = LcmSummarizerMode::Provided {
         summary_text: "summary generated for a different page".to_string(),
         route: Some("test_exact_source_summary".to_string()),
+        extraction_result: None,
     };
     let error = db
         .lcm_compress_retained_page_guarded(

@@ -95,6 +95,7 @@ async fn provided_summarizer_advances_frontier_consistently() {
             LcmSummarizerMode::Provided {
                 summary_text: "one two three".into(),
                 route: Some("test-route".into()),
+                extraction_result: None,
             },
         ))
         .await
@@ -112,6 +113,7 @@ async fn provided_summarizer_advances_frontier_consistently() {
             LcmSummarizerMode::Provided {
                 summary_text: "four five".into(),
                 route: Some("test-route".into()),
+                extraction_result: None,
             },
         ))
         .await
@@ -130,7 +132,7 @@ async fn provided_summarizer_advances_frontier_consistently() {
 }
 
 #[tokio::test]
-async fn provided_route_envelope_persists_extraction_metadata() {
+async fn provided_route_and_extraction_metadata_persist() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_raw_messages(&db, "cursor", "session-1", &["old-1", "old-2", "fresh-1"]).await;
@@ -141,21 +143,18 @@ async fn provided_route_envelope_persists_extraction_metadata() {
             "session-1",
             LcmSummarizerMode::Provided {
                 summary_text: "summary with extraction".into(),
-                route: Some(
-                    json!({
-                        "route": "backup",
-                        "pre_compaction_extraction": {
-                            "status": "ok",
-                            "items": [
-                                "Decision: keep nightly backups",
-                                "Commitment: rotate keys weekly"
-                            ],
-                            "model": "openai/gpt-5.4-mini",
-                            "output_path": "/tmp/extractions"
-                        }
-                    })
-                    .to_string(),
-                ),
+                route: Some("backup".into()),
+                extraction_result: Some(tracedecay_lcm::types::LcmExtractionResult {
+                    status: "ok".into(),
+                    items: vec![
+                        "Decision: keep nightly backups".into(),
+                        "Commitment: rotate keys weekly".into(),
+                    ],
+                    text: None,
+                    model: Some("openai/gpt-5.4-mini".into()),
+                    output_path: Some("/tmp/extractions".into()),
+                    error: None,
+                }),
             },
         ))
         .await

@@ -271,8 +271,10 @@ async fn seed_production_summary(
                 dynamic_leaf_chunk_max: None,
                 context_length: None,
                 reserve_tokens_floor: None,
-                summarizer: tracedecay_lcm::LcmSummarizerMode::Fake {
+                summarizer: tracedecay_lcm::LcmSummarizerMode::Provided {
                     summary_text: "production dirty summary sentinel".to_string(),
+                    route: None,
+                    extraction_result: None,
                 },
             },
             &ExecutionControl::default(),

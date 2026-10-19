@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+use crate::types::LcmExtractionResult;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmCompressionRequest {
     pub provider: String,
@@ -46,12 +48,19 @@ pub struct LcmCompressionRequest {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum LcmSummarizerMode {
     Noop,
-    Fake {
-        summary_text: String,
-    },
     Provided {
         summary_text: String,
         route: Option<String>,
+        extraction_result: Option<LcmExtractionResult>,
     },
     HermesAuxiliary,
+}
+
+impl LcmSummarizerMode {
+    pub fn has_nonempty_provided_summary(&self) -> bool {
+        matches!(
+            self,
+            Self::Provided { summary_text, .. } if !summary_text.trim().is_empty()
+        )
+    }
 }

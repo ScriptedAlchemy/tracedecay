@@ -120,11 +120,7 @@ impl DaemonLcmEffectService {
                 )),
             )
             .await?;
-        if matches!(
-            &request.summarizer,
-            LcmSummarizerMode::Provided { summary_text, .. } if !summary_text.trim().is_empty()
-        ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
-        {
+        if request.summarizer.has_nonempty_provided_summary() {
             return self.commit_compression(&request).await;
         }
 
@@ -161,6 +157,7 @@ impl DaemonLcmEffectService {
         request.summarizer = LcmSummarizerMode::Provided {
             summary_text: summary.text,
             route: Some(summary.route),
+            extraction_result: None,
         };
         self.commit_compression(&request).await
     }
@@ -170,11 +167,7 @@ impl DaemonLcmEffectService {
         mut request: LcmCompressionRequest,
         convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
     ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-        if matches!(
-            &request.summarizer,
-            LcmSummarizerMode::Provided { summary_text, .. } if !summary_text.trim().is_empty()
-        ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
-        {
+        if request.summarizer.has_nonempty_provided_summary() {
             return self
                 .commit_retained_compression(&request, Some(convergence_candidate), None)
                 .await;
@@ -237,6 +230,7 @@ impl DaemonLcmEffectService {
         request.summarizer = LcmSummarizerMode::Provided {
             summary_text: summary.text,
             route: Some(summary.route),
+            extraction_result: None,
         };
         let mut committed = self
             .commit_retained_compression(
