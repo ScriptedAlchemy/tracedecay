@@ -53,36 +53,40 @@ mod session_runtime_shutdown;
 #[derive(Default)]
 pub(super) struct HostAdmissionBrokerSlot {
     broker: tokio::sync::OnceCell<tracedecay_host_admission::SharedHostAdmissionBroker>,
-    initialized: tokio::sync::Notify,
+    available: tokio::sync::Notify,
 }
 
 impl HostAdmissionBrokerSlot {
-    pub(super) async fn get_or_try_init<F, Fut>(
-        &self,
-        initialize: F,
-    ) -> Result<&tracedecay_host_admission::SharedHostAdmissionBroker>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<tracedecay_host_admission::SharedHostAdmissionBroker>>,
-    {
-        let broker = self.broker.get_or_try_init(initialize).await?;
-        self.initialized.notify_waiters();
-        Ok(broker)
-    }
-
     pub(super) fn get(&self) -> Option<&tracedecay_host_admission::SharedHostAdmissionBroker> {
         self.broker.get()
     }
 
-    pub(super) async fn wait_initialized(&self) {
-        loop {
-            let notified = self.initialized.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.get().is_some() {
-                return;
+    pub(super) fn progress_revision(&self) -> u64 {
+        self.get()
+            .map_or(0, |broker| broker.progress_revision().wrapping_add(1))
+    }
+
+    pub(super) async fn wait_for_progress(&self, observed: u64) {
+        let available = self.available.notified();
+        tokio::pin!(available);
+        available.as_mut().enable();
+        match self.get() {
+            Some(broker) => {
+                if self.progress_revision() == observed {
+                    broker.wait_for_progress(observed.wrapping_sub(1)).await;
+                }
             }
-            notified.await;
+            None => available.await,
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<tracedecay_host_admission::SharedHostAdmissionBroker> for HostAdmissionBrokerSlot {
+    fn from(broker: tracedecay_host_admission::SharedHostAdmissionBroker) -> Self {
+        Self {
+            broker: tokio::sync::OnceCell::new_with(Some(broker)),
+            available: tokio::sync::Notify::new(),
         }
     }
 }
@@ -448,25 +452,29 @@ async fn open_host_admission_broker(
     open: impl FnOnce(&Path) -> Result<(HostAdmissionRuntime, SpoolOpenReport)> + Send + 'static,
 ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
     let slot = Arc::clone(brokers.lock().await.entry(path.to_path_buf()).or_default());
-    slot.get_or_try_init(|| async {
-        let open_path = path.to_path_buf();
-        let (runtime, _) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let _span =
-                tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open").entered();
-            open(&open_path)
+    let broker = slot
+        .broker
+        .get_or_try_init(|| async {
+            let open_path = path.to_path_buf();
+            let (runtime, _) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                let _span = tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open")
+                    .entered();
+                open(&open_path)
+            })
+            .await
+            .map_err(|_| {
+                TraceDecayError::project_route(
+                    "spool_runtime_unavailable",
+                    true,
+                    "host-admission spool runtime task failed",
+                )
+            })??;
+            Ok::<_, TraceDecayError>(Arc::new(HostAdmissionBroker::new(runtime)))
         })
         .await
-        .map_err(|_| {
-            TraceDecayError::project_route(
-                "spool_runtime_unavailable",
-                true,
-                "host-admission spool runtime task failed",
-            )
-        })??;
-        Ok(Arc::new(HostAdmissionBroker::new(runtime)))
-    })
-    .await
-    .cloned()
+        .cloned()?;
+    slot.available.notify_waiters();
+    Ok(broker)
 }
 
 /// Coordinates every daemon operation that can create, rekey, or remove a
@@ -1241,21 +1249,32 @@ impl StoreAdministration {
             .await
     }
 
-    /// Borrow the canonical slot without making spool availability a prerequisite
-    /// for unrelated project reads. A later successful open fills this same slot.
-    pub(super) async fn host_admission_broker_slot(
+    /// Bind source currency to the existing broker slot even when its local
+    /// spool cannot open. Read/query composition can retain that typed
+    /// unavailability without granting host admission or losing recovery.
+    pub(super) async fn host_admission_source_broker(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<Arc<HostAdmissionBrokerSlot>> {
         self.refuse_remotely_deleted_profile(database).await?;
         let path = authority::canonical_identity_path(database.db_path())?;
-        Ok(Arc::clone(
+        let slot = Arc::clone(
             self.host_admission_brokers
                 .lock()
                 .await
-                .entry(path)
+                .entry(path.clone())
                 .or_default(),
-        ))
+        );
+        if let Err(error) = open_host_admission_broker(
+            &self.host_admission_brokers,
+            &path,
+            HostAdmissionRuntime::open_for_database,
+        )
+        .await
+        {
+            tracing::warn!(%error, "host-admission source currency is unavailable");
+        }
+        Ok(slot)
     }
 
     #[tracing::instrument(
@@ -2245,6 +2264,79 @@ mod tests {
             .await
             .unwrap();
         administration.shutdown_host_admission_replay().await;
+    }
+
+    #[tokio::test]
+    async fn unavailable_broker_slot_recovers_and_wakes_every_progress_observer() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("sessions.db");
+        let spool = temp.path().join(".sessions.db.host-admission");
+        std::fs::write(&spool, "blocked").unwrap();
+        let brokers: HostAdmissionBrokers = Arc::default();
+        assert!(
+            open_host_admission_broker(
+                &brokers,
+                &database,
+                HostAdmissionRuntime::open_for_database
+            )
+            .await
+            .is_err()
+        );
+        let slot = Arc::clone(brokers.lock().await.get(&database).unwrap());
+        assert!(slot.get().is_none());
+        let unavailable = slot.progress_revision();
+        let first = slot.wait_for_progress(unavailable);
+        let second = slot.wait_for_progress(unavailable);
+        tokio::pin!(first, second);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx).is_pending()))
+                .await
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                second.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
+        std::fs::remove_file(&spool).unwrap();
+        let broker = open_host_admission_broker(
+            &brokers,
+            &database,
+            HostAdmissionRuntime::open_for_database,
+        )
+        .await
+        .unwrap();
+        assert!(Arc::ptr_eq(slot.get().unwrap(), &broker));
+        assert_ne!(slot.progress_revision(), unavailable);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(first, second);
+            // Opening between revision capture and waiter registration is
+            // observable even when the ready broker has made no progress yet.
+            slot.wait_for_progress(unavailable).await;
+        })
+        .await
+        .unwrap();
+        let ready = slot.progress_revision();
+        let first = slot.wait_for_progress(ready);
+        let second = slot.wait_for_progress(ready);
+        tokio::pin!(first, second);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx).is_pending()))
+                .await
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                second.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
+        broker.admit("source", b"edit").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(first, second);
+        })
+        .await
+        .unwrap();
+        assert_ne!(slot.progress_revision(), ready);
     }
 
     /// A spool open can stall for seconds on fsync under load. A first open of

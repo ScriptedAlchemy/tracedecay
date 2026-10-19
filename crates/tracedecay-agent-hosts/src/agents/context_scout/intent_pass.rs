@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracedecay_contracts::context_scout::{
-    ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutDeliveryReceiptV1,
-    ContextScoutDeliveryWindowV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
+    ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1, ContextScoutDurableQueueEntryV1,
     ContextScoutEvidenceAvailabilityV1, ContextScoutIntentAnswerV1, ContextScoutIntentReceiptV1,
     ContextScoutModelOutcomeV1, ContextScoutRedactionReceiptV1, ContextScoutSessionEvidenceV1,
     ContextScoutSessionWindowV1, DecisionEngineIdentityV1 as ReceiptEngineIdentityV1,
@@ -228,6 +228,40 @@ pub fn intent_hint_emitted_event(
     })
 }
 
+/// Recover only this boundary's original queue commit. The caller must still
+/// mount it through the current durable configuration and address authority.
+async fn pending_intent_entry(
+    pass: &ContextScoutIntentPassV1<'_>,
+    address: ContextScoutAddressV1,
+) -> Result<Option<Box<ContextScoutDurableQueueEntryV1>>, ContextScoutIntentPassOutcomeV1> {
+    let recent = tokio::select! {
+        biased;
+        () = pass.cancellation.cancelled() => return Err(ContextScoutIntentPassOutcomeV1::Cancelled),
+        recent = native_runtime::timeout_at(pass.deadline.instant(), pass.owner.recent_exact(address, 1)) => {
+            match recent {
+                Ok(Ok(recent)) => recent,
+                _ => return Err(ContextScoutIntentPassOutcomeV1::Unavailable),
+            }
+        }
+    };
+    let revision = pass.pin.configuration().control().configuration_revision;
+    if recent.configuration_revision != revision {
+        return Err(ContextScoutIntentPassOutcomeV1::Unavailable);
+    }
+    let envelope_id =
+        intent_envelope_id(pass.hook).ok_or(ContextScoutIntentPassOutcomeV1::Unavailable)?;
+    Ok(recent
+        .pending
+        .into_iter()
+        .find(|entry| {
+            entry.work.address == address
+                && entry.envelope.envelope_id == envelope_id
+                && entry.envelope.configuration_revision == revision
+                && entry.envelope.candidate.expires_at.0 > pass.observed_at.0
+        })
+        .map(Box::new))
+}
+
 /// Runs one intent pass. The engine is asked at most once.
 #[tracing::instrument(
     name = "hosts.agent.context_scout.intent_pass",
@@ -283,6 +317,16 @@ pub async fn run_context_scout_intent_pass(
             return ContextScoutIntentPassOutcomeV1::AddressUnavailable;
         }
     };
+    match pending_intent_entry(&pass, address).await {
+        Ok(Some(entry)) => {
+            return ContextScoutIntentPassOutcomeV1::Enqueued {
+                entry,
+                lifecycle: Box::new(intent_lifecycle),
+            };
+        }
+        Ok(None) => {}
+        Err(outcome) => return outcome,
+    }
     let Ok(session) = pass
         .owner
         .intent_session_state(
@@ -424,18 +468,7 @@ pub async fn run_context_scout_intent_pass(
     let prepared = pass
         .owner
         .prepare_intent(&input, pass.deadline, pass.cancellation.clone())
-        .await
-        .map(|outcome| match outcome {
-            // The store kept the copy of this suggestion it already claimed
-            // or delivered to the session.
-            ContextScoutRuntimeOutcomeV1::Enqueued {
-                store_outcome: ContextScoutDurableStoreOutcomeV1::Duplicate,
-                ..
-            } => ContextScoutRuntimeOutcomeV1::Suppressed {
-                reason: ContextScoutSuppressionV1::Duplicate,
-            },
-            outcome => outcome,
-        });
+        .await;
     match prepared {
         Ok(ContextScoutRuntimeOutcomeV1::Enqueued {
             entry,
@@ -443,6 +476,21 @@ pub async fn run_context_scout_intent_pass(
         }) => ContextScoutIntentPassOutcomeV1::Enqueued {
             entry,
             lifecycle: Box::new(intent_lifecycle),
+        },
+        // A concurrent queue commit can land after the initial read. Store
+        // duplication alone does not prove delivery or a mounted claim.
+        Ok(ContextScoutRuntimeOutcomeV1::Enqueued {
+            store_outcome:
+                ContextScoutDurableStoreOutcomeV1::Duplicate
+                | ContextScoutDurableStoreOutcomeV1::Superseded,
+            ..
+        }) => match pending_intent_entry(&pass, address).await {
+            Ok(Some(entry)) => ContextScoutIntentPassOutcomeV1::Enqueued {
+                entry,
+                lifecycle: Box::new(intent_lifecycle),
+            },
+            Ok(None) => ContextScoutIntentPassOutcomeV1::Unavailable,
+            Err(outcome) => outcome,
         },
         Ok(ContextScoutRuntimeOutcomeV1::Suppressed { reason }) => {
             let withheld = match reason {

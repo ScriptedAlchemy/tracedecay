@@ -26,56 +26,61 @@ struct HookSourcePending {
     scope: ResolvedScope,
 }
 
+impl HookSourcePending {
+    fn matches_pending(&self, payload: &[u8]) -> std::result::Result<bool, HostAdmissionOutcome> {
+        let plan = decode_durable_hook_event_plan(payload).map_err(|error| {
+            HostAdmissionOutcome::degraded(match error {
+                DurableHookEventDecodeError::Malformed => "malformed_host_event_plan",
+                DurableHookEventDecodeError::UnsupportedVersion => "unsupported_host_event_plan",
+            })
+        })?;
+        match plan {
+            HookEventPlan::SyncFilesAt { root, scope, .. } => {
+                // Reference is mutable attribution. The canonical route's
+                // project, repository, worktree and byte-exact locator own
+                // the event through checkout changes.
+                Ok(root.as_os_str() == self.root.as_os_str()
+                    && scope.project_id == self.scope.project_id
+                    && scope.repository_id == self.scope.repository_id
+                    && scope.worktree_id == self.scope.worktree_id)
+            }
+            // Shipped unscoped file edits cannot prove a different route.
+            // Keep their source currency unresolved until replay settles.
+            HookEventPlan::SyncFiles(_) => Ok(true),
+            HookEventPlan::AddBranch(_)
+            | HookEventPlan::AddBranchAt { .. }
+            | HookEventPlan::SyncCurrentBranch { .. }
+            | HookEventPlan::DebouncedIncrementalSync(_)
+            | HookEventPlan::RecordTerminalReceipt { .. }
+            | HookEventPlan::MarkTurnIngested { .. }
+            | HookEventPlan::Noop => Ok(false),
+        }
+    }
+}
+
 impl CodeIndexSourcePendingReaderV1 for HookSourcePending {
     fn read_pending(&self) -> std::result::Result<bool, CodeIndexFreshnessReadFailureV1> {
         self.broker
             .get()
             .ok_or(CodeIndexFreshnessReadFailureV1::ReadFailed)?
-            .pending_replay_matches(|payload| {
-                let plan = decode_durable_hook_event_plan(payload).map_err(|error| {
-                    HostAdmissionOutcome::degraded(match error {
-                        DurableHookEventDecodeError::Malformed => "malformed_host_event_plan",
-                        DurableHookEventDecodeError::UnsupportedVersion => {
-                            "unsupported_host_event_plan"
-                        }
-                    })
-                })?;
-                match plan {
-                    HookEventPlan::SyncFilesAt { root, scope, .. } => {
-                        // Reference is mutable attribution. The canonical route's
-                        // project, repository, worktree and byte-exact locator own
-                        // the event through checkout changes.
-                        Ok(root.as_os_str() == self.root.as_os_str()
-                            && scope.project_id == self.scope.project_id
-                            && scope.repository_id == self.scope.repository_id
-                            && scope.worktree_id == self.scope.worktree_id)
-                    }
-                    // Shipped unscoped file edits cannot prove a different route.
-                    // Keep their source currency unresolved until replay settles.
-                    HookEventPlan::SyncFiles(_) => Ok(true),
-                    HookEventPlan::AddBranch(_)
-                    | HookEventPlan::AddBranchAt { .. }
-                    | HookEventPlan::SyncCurrentBranch { .. }
-                    | HookEventPlan::DebouncedIncrementalSync(_)
-                    | HookEventPlan::RecordTerminalReceipt { .. }
-                    | HookEventPlan::MarkTurnIngested { .. }
-                    | HookEventPlan::Noop => Ok(false),
-                }
-            })
+            .pending_replay_matches(|payload| self.matches_pending(payload))
+            .map_err(|_| CodeIndexFreshnessReadFailureV1::ReadFailed)
+    }
+
+    fn read_pending_blocking(&self) -> std::result::Result<bool, CodeIndexFreshnessReadFailureV1> {
+        self.broker
+            .get()
+            .ok_or(CodeIndexFreshnessReadFailureV1::ReadFailed)?
+            .pending_replay_matches_blocking(|payload| self.matches_pending(payload))
             .map_err(|_| CodeIndexFreshnessReadFailureV1::ReadFailed)
     }
 
     fn revision(&self) -> u64 {
-        self.broker
-            .get()
-            .map_or(0, |broker| broker.progress_revision())
+        self.broker.progress_revision()
     }
 
     fn changed(&self, observed: u64) -> CodeIndexSourcePendingChangedFutureV1<'_> {
-        match self.broker.get() {
-            Some(broker) => Box::pin(broker.wait_for_progress(observed)),
-            None => Box::pin(self.broker.wait_initialized()),
-        }
+        Box::pin(self.broker.wait_for_progress(observed))
     }
 }
 
@@ -115,7 +120,7 @@ pub(in crate::daemon) async fn project_hook_source_pending(
         ));
     }
     let database = stores
-        .registered_project_session_database(graph.project_root(), graph.store_layout())
+        .registered_project_configuration_database(graph.project_root(), graph.store_layout())
         .await?;
     if !matches!(&database.binding().shard_id.scope, StoreShardScopeV1::ProjectSessions { project_id } if project_id == &scope.project_id)
     {
@@ -125,13 +130,7 @@ pub(in crate::daemon) async fn project_hook_source_pending(
             "hook source writer belongs to a different project",
         ));
     }
-    let broker = stores.host_admission_broker_slot(&database).await?;
-    if let Err(error) = stores.host_admission_broker(&database).await {
-        if error.hook_runtime_context().is_none() {
-            return Err(error);
-        }
-        tracing::warn!(%error, "hook source currency unavailable until admission spool opens");
-    }
+    let broker = stores.host_admission_source_broker(&database).await?;
     let reader: Arc<dyn CodeIndexSourcePendingReaderV1> = Arc::new(HookSourcePending {
         broker,
         root,

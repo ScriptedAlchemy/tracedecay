@@ -587,6 +587,15 @@ impl SourceFreshnessFenceV1 {
             .map_or(Ok(false), |reader| reader.read_pending())
     }
 
+    pub(super) fn read_pending_source_blocking(
+        &self,
+    ) -> Result<bool, tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1>
+    {
+        self.pending_source
+            .as_ref()
+            .map_or(Ok(false), |reader| reader.read_pending_blocking())
+    }
+
     fn snapshot(&self) -> SourceFreshnessFenceStateV1 {
         self.state
             .lock()

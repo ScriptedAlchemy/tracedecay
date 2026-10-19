@@ -8,17 +8,13 @@ use super::*;
 use crate::mcp::server::writer_test_support::init_indexed_repo;
 use crate::test_support::git::git;
 
-async fn reader(
+fn reader(
     broker: &SharedHostAdmissionBroker,
     root: &Path,
     scope: &ResolvedScope,
 ) -> HookSourcePending {
-    let slot = Arc::new(HostAdmissionBrokerSlot::default());
-    slot.get_or_try_init(|| async { Ok(Arc::clone(broker)) })
-        .await
-        .unwrap();
     HookSourcePending {
-        broker: slot,
+        broker: Arc::new(HostAdmissionBrokerSlot::from(Arc::clone(broker))),
         root: root.to_owned(),
         scope: scope.clone(),
     }
@@ -74,8 +70,8 @@ async fn pending_source_is_exactly_routed_across_linked_worktrees_and_branch_cha
         tracedecay_code_index_runtime::resolved_scope_for_project(&linked, &project_id).unwrap();
     let spool = tempfile::tempdir().unwrap();
     let broker = broker(spool.path());
-    let main = reader(&broker, project.path(), &main_scope).await;
-    let other = reader(&broker, &linked, &linked_scope).await;
+    let main = reader(&broker, project.path(), &main_scope);
+    let other = reader(&broker, &linked, &linked_scope);
     broker
         .admit("linked", &edit(&linked, linked_scope))
         .await
@@ -93,7 +89,6 @@ async fn pending_source_is_exactly_routed_across_linked_worktrees_and_branch_cha
         .unwrap();
     assert!(
         reader(&broker, project.path(), &current)
-            .await
             .read_pending()
             .unwrap()
     );
@@ -151,10 +146,9 @@ async fn unscoped_legacy_edits_remain_pending_and_invalid_plans_fail_closed() {
         let spool = tempfile::tempdir().unwrap();
         let broker = broker(spool.path());
         broker.admit("source", &payload).await.unwrap();
-        assert_eq!(
-            reader(&broker, project.path(), &scope).await.read_pending(),
-            expected
-        );
+        let reader = reader(&broker, project.path(), &scope);
+        assert_eq!(reader.read_pending(), expected);
+        assert_eq!(reader.read_pending_blocking(), expected);
     }
     let mut corrupt: serde_json::Value =
         serde_json::from_slice(&edit(project.path(), scope.clone())).unwrap();
@@ -166,8 +160,53 @@ async fn unscoped_legacy_edits_remain_pending_and_invalid_plans_fail_closed() {
         .admit("source", &serde_json::to_vec(&corrupt).unwrap())
         .await
         .unwrap();
+    let reader = reader(&broker, project.path(), &scope);
     assert_eq!(
-        reader(&broker, project.path(), &scope).await.read_pending(),
+        reader.read_pending(),
+        Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
+    );
+    assert_eq!(
+        reader.read_pending_blocking(),
+        Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
+    );
+}
+
+#[tokio::test]
+async fn poisoned_pending_source_remains_a_typed_read_failure() {
+    let (graph, project, _authority) = init_indexed_repo().await;
+    let project_id = graph
+        .store_layout()
+        .identity
+        .project_id
+        .as_ref()
+        .unwrap()
+        .clone()
+        .try_into()
+        .unwrap();
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
+            .unwrap();
+    let spool = tempfile::tempdir().unwrap();
+    let broker = broker(spool.path());
+    broker
+        .admit(
+            "source",
+            &encode_durable_hook_event_plan(&HookEventPlan::Noop).unwrap(),
+        )
+        .await
+        .unwrap();
+    let poison = std::thread::spawn({
+        let broker = Arc::clone(&broker);
+        move || broker.pending_replay_matches(|_| panic!("poison the owned test broker runtime"))
+    });
+    assert!(poison.join().is_err());
+    let reader = reader(&broker, project.path(), &scope);
+    assert_eq!(
+        reader.read_pending(),
+        Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
+    );
+    assert_eq!(
+        reader.read_pending_blocking(),
         Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
     );
 }

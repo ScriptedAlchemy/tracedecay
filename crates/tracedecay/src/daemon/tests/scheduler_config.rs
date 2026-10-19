@@ -506,7 +506,7 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
         .project_server(&handshake)
         .await
         .expect("read/query server must open when admission spool is unavailable");
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         &project,
         &graph
@@ -535,7 +535,7 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
         ),
         "an unreadable spool cannot prove current source currency"
     );
-    let recovered = reader.changed(reader.revision());
+    let observed = reader.revision();
     std::fs::remove_file(&spool_path).unwrap();
     let database = engine
         .store_administration
@@ -547,7 +547,7 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
         .host_admission_broker(&database)
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), recovered)
+    tokio::time::timeout(Duration::from_secs(5), reader.changed(observed))
         .await
         .expect("the original reader must observe the recovered canonical broker");
     assert_eq!(reader.read_pending(), Ok(false));

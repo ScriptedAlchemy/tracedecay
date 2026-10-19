@@ -36,6 +36,10 @@ pub trait CodeIndexSourcePendingReaderV1: Send + Sync {
     fn read_pending(
         &self,
     ) -> Result<bool, tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1>;
+    /// May wait for the canonical writer; call only from a blocking worker.
+    fn read_pending_blocking(
+        &self,
+    ) -> Result<bool, tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1>;
     fn revision(&self) -> u64;
     fn changed(&self, observed: u64) -> CodeIndexSourcePendingChangedFutureV1<'_>;
 }

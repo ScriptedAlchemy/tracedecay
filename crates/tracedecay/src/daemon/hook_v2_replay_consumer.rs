@@ -736,6 +736,34 @@ mod tests {
             ),
             tracedecay_daemon_service::context_scout_lifecycle::AuthorityRegistrationV1::Registered
         );
+        let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tracedecay_daemon_service::BoundedHookOrchestratorV1::new(
+            1,
+            move |request: tracedecay_daemon_service::HookOrchestrationRequestV1, _| {
+                let ran = ran.clone();
+                async move {
+                    if request.trigger
+                        == tracedecay_daemon_service::HookOrchestrationTriggerV1::IntentBoundary
+                    {
+                        assert!(request.lifecycle.is_some());
+                    } else {
+                        assert_eq!(
+                            request.trigger,
+                            tracedecay_daemon_service::HookOrchestrationTriggerV1::SavedEdit
+                        );
+                        ran.send(request.lifecycle).unwrap();
+                    }
+                }
+            },
+        )
+        .unwrap();
+        assert!(
+            tracedecay_daemon_service::register_hook_orchestration_runtime(
+                project_id,
+                binding.worktree_id,
+                &runtime,
+            )
+        );
         // An earlier call establishes the session, but cannot supply this
         // edit's own native call identity when its spool copy is delayed.
         let mut prior_envelope = envelope.clone();
@@ -770,7 +798,18 @@ mod tests {
             ).await,
             Some(prior_lifecycle.session_id),
         );
-        // Commit admission while no orchestrator is mounted, reproducing the
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while runtime.active_tasks() != 0
+                || !hook_v2_pending_work_envelopes(data_root, host, hook_replay_now())
+                    .unwrap()
+                    .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Commit the edit before its own lifecycle arrives, reproducing the
         // durable state left by a caller cancelled before lifecycle persistence.
         assert!(matches!(
             admit_hook_v2_replayed_envelope_with_lifecycle(
@@ -788,22 +827,6 @@ mod tests {
         let pending =
             || hook_v2_pending_work_envelopes(data_root, host, hook_replay_now()).unwrap();
         assert_eq!(pending(), vec![envelope.clone()]);
-        let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = tracedecay_daemon_service::BoundedHookOrchestratorV1::new(
-            1,
-            move |request: tracedecay_daemon_service::HookOrchestrationRequestV1, _| {
-                let ran = ran.clone();
-                async move { ran.send(request.lifecycle).unwrap() }
-            },
-        )
-        .unwrap();
-        assert!(
-            tracedecay_daemon_service::register_hook_orchestration_runtime(
-                project_id,
-                binding.worktree_id,
-                &runtime,
-            )
-        );
         let sweep = drain_all_hosts(
             &graph,
             data_root,
