@@ -13,9 +13,10 @@ use super::admission::AdmittedRoot;
 use super::dto::{
     CallHierarchyItem, DiagnosticTrigger, DocumentSymbol, FeedbackCyclePort, FeedbackCycleRequest,
     FeedbackCycleResponse, GatewayMethod, GatewayResponse, Hover, IncomingCall, LspLocation,
-    LspSemanticOperationOutcome, LspSemanticRequest, MethodUnavailableReason, OutgoingCall,
-    RenameCandidateResult, SemanticProviderOutcome, SemanticRequest, SemanticResponse,
-    SignatureHelp, TypeHierarchyItem, WorkspaceSymbol, empty_semantic_response,
+    LspSemanticDocumentSnapshot, LspSemanticOperationOutcome, LspSemanticRequest,
+    MethodUnavailableReason, OutgoingCall, RenameCandidateResult, SemanticProviderOutcome,
+    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
+    empty_semantic_response,
     lsp_semantic_request, project_semantic_outcome,
 };
 use crate::capabilities::{
@@ -206,7 +207,18 @@ impl SemanticProviderAdapter {
         request_id: &LspRequestId,
         request: &SemanticRequest,
     ) -> SemanticProviderOutcome<SemanticResponse> {
-        let wire_request = match lsp_semantic_request(request) {
+        self.request_with_document(root, request_id, request, None, None)
+    }
+
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<std::time::Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        let mut wire_request = match lsp_semantic_request(request) {
             Ok(request) => request,
             Err(coverage) => {
                 return SemanticProviderOutcome::Partial {
@@ -216,6 +228,12 @@ impl SemanticProviderAdapter {
                 };
             }
         };
+        if let Some(snapshot) = document_snapshot {
+            wire_request = wire_request.with_document_snapshot(snapshot.clone());
+        }
+        if let Some(deadline) = deadline {
+            wire_request = wire_request.with_deadline(deadline);
+        }
         let method = wire_request.method();
         let key = Self::key(root, request_id);
         match self
@@ -278,6 +296,24 @@ impl SemanticProviderPort for SemanticProviderAdapter {
         request: &SemanticRequest,
     ) -> SemanticProviderOutcome<SemanticResponse> {
         SemanticProviderAdapter::request(self, root, request_id, request)
+    }
+
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<std::time::Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        SemanticProviderAdapter::request_with_document(
+            self,
+            root,
+            request_id,
+            request,
+            document_snapshot,
+            deadline,
+        )
     }
 }
 
@@ -404,6 +440,17 @@ pub trait SemanticProviderPort {
                 .rename_candidate(root, document_uri, *position)
                 .map(SemanticResponse::RenameCandidate),
         }
+    }
+
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        _document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        _deadline: Option<std::time::Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        self.request(root, request_id, request)
     }
 
     fn declaration(
@@ -1031,6 +1078,16 @@ where
         request_id: &LspRequestId,
         request: &SemanticRequest,
     ) -> GatewayResponse<SemanticResponse> {
+        self.semantic_request_with_document(request_id, request, None, None)
+    }
+
+    pub fn semantic_request_with_document(
+        &self,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<std::time::Instant>,
+    ) -> GatewayResponse<SemanticResponse> {
         if let SemanticRequest::WorkspaceSymbols { query } = request {
             return match self.workspace_symbols(query) {
                 GatewayResponse::Value(value) => {
@@ -1056,7 +1113,13 @@ where
             request.method(),
             request.capability(),
             request.document_uri(),
-            |provider, root| provider.request(root, request_id, request),
+            |provider, root| provider.request_with_document(
+                root,
+                request_id,
+                request,
+                document_snapshot,
+                deadline,
+            ),
         )
     }
 

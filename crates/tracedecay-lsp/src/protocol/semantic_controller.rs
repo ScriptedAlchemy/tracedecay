@@ -1,16 +1,21 @@
+use std::time::{Duration, Instant};
+
 use crate::session::RequestAdmission;
 
 use super::{
     AnalyzerCancellationPort, Arc, BTreeMap, CompletionDisposition, DaemonLspProtocolSession,
     DiagnosticSnapshotPort, FeedbackCyclePort, GatewayResponse, LspRequestFailure, LspRequestId,
-    RpcFailure, SemanticProviderPort, SemanticRequest, Value, error_response, json,
-    partial_failure_data, request_id, semantic_response_value, success_response,
+    LspSemanticDocumentSnapshot, RpcFailure, SemanticProviderPort, SemanticRequest, Value,
+    error_response, json, partial_failure_data, request_id, semantic_response_value,
+    success_response,
 };
 
 #[derive(Clone)]
 pub(super) struct PendingSemanticRequest {
     pub(super) response_id: Value,
     pub(super) request: SemanticRequest,
+    pub(super) document_snapshot: Option<LspSemanticDocumentSnapshot>,
+    pub(super) deadline: Instant,
 }
 
 #[derive(Default)]
@@ -74,6 +79,8 @@ where
             return;
         };
         let deadline = now_ms.saturating_add(self.lifecycle.request_deadline_ms);
+        let operation_deadline =
+            Instant::now() + Duration::from_millis(self.lifecycle.request_deadline_ms);
         let admission = self.lifecycle.control.admit_request_with_deadline(
             request_id.clone(),
             document,
@@ -83,13 +90,24 @@ where
             let _ = self.enqueue_value(error_response(response_id, failure));
             return;
         }
-        match self.semantic_request_value(&request_id, &request) {
+        let document_snapshot = request
+            .document_uri()
+            .and_then(|uri| self.lifecycle.overlays.snapshot(uri))
+            .map(|snapshot| LspSemanticDocumentSnapshot::from_overlay(&snapshot));
+        match self.semantic_request_value(
+            &request_id,
+            &request,
+            document_snapshot.as_ref(),
+            operation_deadline,
+        ) {
             Ok(None) => {
                 self.semantic.pending.insert(
                     request_id,
                     PendingSemanticRequest {
                         response_id,
                         request,
+                        document_snapshot,
+                        deadline: operation_deadline,
                     },
                 );
             }
@@ -101,8 +119,15 @@ where
         &self,
         request_id: &LspRequestId,
         request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Instant,
     ) -> Result<Option<Value>, RpcFailure> {
-        match self.lifecycle.gateway.semantic_request(request_id, request) {
+        match self.lifecycle.gateway.semantic_request_with_document(
+            request_id,
+            request,
+            document_snapshot,
+            Some(deadline),
+        ) {
             GatewayResponse::Value(value) => Ok(Some(semantic_response_value(value))),
             GatewayResponse::Partial {
                 coverage, detail, ..
@@ -126,7 +151,12 @@ where
             let Some(pending) = self.semantic.pending.get(&request_id).cloned() else {
                 continue;
             };
-            let result = self.semantic_request_value(&request_id, &pending.request);
+            let result = self.semantic_request_value(
+                &request_id,
+                &pending.request,
+                pending.document_snapshot.as_ref(),
+                pending.deadline,
+            );
             if matches!(result, Ok(None)) {
                 continue;
             }

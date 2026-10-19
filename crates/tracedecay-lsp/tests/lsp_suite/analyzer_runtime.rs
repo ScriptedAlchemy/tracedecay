@@ -481,16 +481,22 @@ async fn stdio_client_collects_publish_diagnostics() {
     });
     control.wait_for("initialized").await.release().await;
     control.wait_for("document-written").await.release().await;
-    let diagnostics = collect.await.unwrap().unwrap();
+    let refresh = collect.await.unwrap().unwrap();
 
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].file, "src/lib.fake");
-    assert_eq!(diagnostics[0].line_start, 1);
+    assert_eq!(refresh.diagnostics.len(), 1);
+    assert_eq!(refresh.diagnostics[0].file, "src/lib.fake");
+    assert_eq!(refresh.diagnostics[0].line_start, 1);
     assert_eq!(
-        diagnostics[0].severity,
+        refresh.diagnostics[0].severity,
         lsp::broker::DiagnosticSeverity::Error
     );
-    assert_eq!(diagnostics[0].code.as_deref(), Some("E_FAKE"));
+    assert_eq!(refresh.diagnostics[0].code.as_deref(), Some("E_FAKE"));
+    assert_eq!(
+        refresh.documents.get(FAKE_PATH),
+        Some(&lsp::client::DiagnosticDocumentCoverage::Published {
+            version_verified: false,
+        })
+    );
 }
 
 #[test]
@@ -499,7 +505,7 @@ fn stdio_client_collects_diagnostics_without_a_tokio_runtime() {
     let script_path = temp.path().join("fake_lsp.py");
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
 
-    let diagnostics = block(lsp::client::collect_document_diagnostics(
+    let refresh = block(lsp::client::collect_document_diagnostics(
         python_command(),
         &[script_path.display().to_string()],
         temp.path(),
@@ -508,8 +514,8 @@ fn stdio_client_collects_diagnostics_without_a_tokio_runtime() {
     ))
     .unwrap();
 
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code.as_deref(), Some("E_FAKE"));
+    assert_eq!(refresh.diagnostics.len(), 1);
+    assert_eq!(refresh.diagnostics[0].code.as_deref(), Some("E_FAKE"));
 }
 
 #[tokio::test]
@@ -518,7 +524,7 @@ async fn stdio_client_keeps_listening_after_initial_empty_publish() {
     let script_path = temp.path().join("late_fake_lsp.py");
     std::fs::write(&script_path, fake_lsp_script_with_initial_empty_publish()).unwrap();
 
-    let diagnostics = lsp::client::collect_document_diagnostics(
+    let refresh = lsp::client::collect_document_diagnostics(
         python_command(),
         &[script_path.display().to_string()],
         temp.path(),
@@ -533,8 +539,8 @@ async fn stdio_client_keeps_listening_after_initial_empty_publish() {
     .await
     .unwrap();
 
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].message, "late semantic error");
+    assert_eq!(refresh.diagnostics.len(), 1);
+    assert_eq!(refresh.diagnostics[0].message, "late semantic error");
 }
 
 fn assert_engine_state(

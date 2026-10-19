@@ -1,17 +1,21 @@
+use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
 
-use super::super::client::{LspDocument, LspRefreshError, LspRefreshTimeouts, StdioLspClient};
+use super::super::client::{
+    DiagnosticDocumentCoverage, DiagnosticRefreshResult, DiagnosticRootCoverage, LspDocument,
+    LspRefreshError, LspRefreshTimeouts, StdioLspClient,
+};
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
 use super::super::launch::AnalyzerLaunch;
 use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
-use super::{CodeDiagnostic, EngineState};
+use super::EngineState;
 use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
@@ -68,8 +72,14 @@ pub(crate) struct PreparedRefreshReservation {
 }
 
 impl PreparedRefreshReservation {
-    async fn acquire_run(&self) -> Option<OwnedSemaphorePermit> {
-        self.running.clone().acquire_owned().await.ok()
+    async fn acquire_run(&self, deadline: Instant) -> Option<OwnedSemaphorePermit> {
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.running.clone().acquire_owned(),
+        )
+        .await
+        .ok()?
+        .ok()
     }
 }
 
@@ -95,12 +105,17 @@ pub struct CompletedRefresh {
     pub(crate) language: String,
     pub(crate) command: String,
     pub(crate) epoch: u64,
-    pub(crate) result: std::result::Result<Vec<CodeDiagnostic>, RefreshFailure>,
+    pub(crate) result: std::result::Result<DiagnosticRefreshResult, RefreshFailure>,
+    pub(crate) root_failures: BTreeMap<PathBuf, RefreshFailure>,
 }
 
 impl CompletedRefresh {
     pub fn is_ok(&self) -> bool {
-        self.result.is_ok()
+        self.result.is_ok() && self.root_failures.is_empty()
+    }
+
+    pub fn diagnostic_refresh(&self) -> Option<&DiagnosticRefreshResult> {
+        self.result.as_ref().ok()
     }
 }
 
@@ -147,58 +162,115 @@ impl PreparedRefresh {
         self,
         timeouts: LspRefreshTimeouts,
     ) -> CompletedRefresh {
+        let timeouts = timeouts.with_deadline(timeouts.operation_deadline());
         let language = self.language.clone();
         let command = self.spawn.command.clone();
         let epoch = self.epoch;
-        let result = self.collect(timeouts).await;
+        let collected = self.collect(timeouts).await;
+        let (result, root_failures) = match collected {
+            Ok((result, failures)) => (Ok(result), failures),
+            Err(error) => (Err(error), BTreeMap::new()),
+        };
         CompletedRefresh {
             language,
             command,
             epoch,
             result,
+            root_failures,
         }
     }
 
     async fn collect(
         self,
         timeouts: LspRefreshTimeouts,
-    ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
+    ) -> std::result::Result<
+        (DiagnosticRefreshResult, BTreeMap<PathBuf, RefreshFailure>),
+        RefreshFailure,
+    > {
         // Batches run concurrently inside this future rather than as spawned
         // tasks, so dropping the refresh drops every batch with it. Each batch
         // waits for its run permit inside the set, which keeps the batches
         // already holding permits polled while later ones queue.
         let reservation = &self.reservation;
+        let deadline = timeouts.operation_deadline();
         let mut pending = self
             .batches
             .into_iter()
             .enumerate()
             .map(|(ordinal, batch)| {
+                let workspace_root = batch.workspace_root.clone();
+                let documents = batch
+                    .documents
+                    .iter()
+                    .map(|document| document.relative_path.clone())
+                    .collect::<Vec<_>>();
                 let project_root = self.project_root.clone();
                 let spawn = self.spawn.clone();
-                AssertUnwindSafe(async move {
-                    let run_permit = reservation.acquire_run().await.ok_or_else(|| {
-                        RefreshFailure::crashed_message(
-                            "broker run capacity unavailable".to_owned(),
+                async move {
+                    let result = AssertUnwindSafe(async move {
+                        let run_permit = reservation
+                            .acquire_run(deadline)
+                            .await
+                            .ok_or_else(RefreshFailure::timed_out)?;
+                        collect_refresh_batch(
+                            ordinal,
+                            batch,
+                            project_root,
+                            spawn,
+                            timeouts,
+                            run_permit,
                         )
-                    })?;
-                    collect_refresh_batch(ordinal, batch, project_root, spawn, timeouts, run_permit)
                         .await
-                })
-                .catch_unwind()
+                    })
+                    .catch_unwind()
+                    .await;
+                    (ordinal, workspace_root, documents, result)
+                }
             })
             .collect::<FuturesUnordered<_>>();
         let mut completed = Vec::with_capacity(pending.len());
         while let Some(result) = pending.next().await {
-            let result = result.map_err(|_| {
-                RefreshFailure::crashed_message("analyzer refresh task panicked".to_owned())
-            })?;
-            completed.push(result?);
+            completed.push(result);
         }
-        completed.sort_by_key(|(ordinal, _)| *ordinal);
-        Ok(completed
-            .into_iter()
-            .flat_map(|(_, diagnostics)| diagnostics)
-            .collect())
+        completed.sort_by_key(|(ordinal, _, _, _)| *ordinal);
+        let mut refresh = DiagnosticRefreshResult::default();
+        let mut failures = BTreeMap::new();
+        for (_, workspace_root, documents, result) in completed {
+            match result {
+                Ok(Ok((_, batch))) => {
+                    refresh.diagnostics.extend(batch.diagnostics);
+                    refresh.documents.extend(batch.documents);
+                    refresh
+                        .roots
+                        .insert(workspace_root, DiagnosticRootCoverage::Completed);
+                }
+                Ok(Err(failure)) => {
+                    for document in documents {
+                        refresh
+                            .documents
+                            .insert(document, DiagnosticDocumentCoverage::RootFailed);
+                    }
+                    refresh
+                        .roots
+                        .insert(workspace_root.clone(), DiagnosticRootCoverage::Failed);
+                    failures.insert(workspace_root, failure);
+                }
+                Err(_) => {
+                    let failure =
+                        RefreshFailure::crashed_message("analyzer refresh task panicked".to_owned());
+                    for document in documents {
+                        refresh
+                            .documents
+                            .insert(document, DiagnosticDocumentCoverage::RootFailed);
+                    }
+                    refresh
+                        .roots
+                        .insert(workspace_root.clone(), DiagnosticRootCoverage::Failed);
+                    failures.insert(workspace_root, failure);
+                }
+            }
+        }
+        Ok((refresh, failures))
     }
 }
 
@@ -210,14 +282,18 @@ async fn collect_refresh_batch(
     spawn: AnalyzerSpawn,
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
-) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
+) -> std::result::Result<(usize, DiagnosticRefreshResult), RefreshFailure> {
     let AnalyzerSpawn { command, args } = spawn;
     let launch = batch.launch;
     let shared = batch.client;
-    let mut client_slot = shared
-        .client()
-        .await
-        .map_err(|error| RefreshFailure::crashed(&error))?;
+    let deadline = timeouts.operation_deadline();
+    let mut client_slot = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        shared.client(),
+    )
+    .await
+    .map_err(|_| RefreshFailure::timed_out())?
+    .map_err(|error| RefreshFailure::crashed(&error))?;
     let mut use_of_analyzer = if let Some(client) = client_slot.take() {
         RefreshUseOfAnalyzer::new(&shared, client_slot, shared.current_attempt(), Some(client))
     } else {
@@ -240,6 +316,10 @@ async fn collect_refresh_batch(
         {
             Ok(client) => Some(client),
             Err(error) => {
+                if Instant::now() >= deadline {
+                    use_of_analyzer.retire(AnalyzerEvent::TimedOut);
+                    return Err(RefreshFailure::timed_out());
+                }
                 use_of_analyzer.retire(AnalyzerEvent::StartupFailed);
                 return Err(RefreshFailure::unstartable(
                     &error,
@@ -347,7 +427,9 @@ pub(crate) struct RefreshFailure {
 impl RefreshFailure {
     fn client(error: &LspRefreshError) -> Self {
         Self {
-            state: if error.is_policy_retirement() {
+            state: if error.is_policy_retirement()
+                || matches!(error, LspRefreshError::TimedOut { .. })
+            {
                 EngineState::Available
             } else {
                 EngineState::Crashed
@@ -372,6 +454,14 @@ impl RefreshFailure {
         Self {
             state: EngineState::Crashed,
             message,
+            unstartable_launch_root: None,
+        }
+    }
+
+    pub(crate) fn timed_out() -> Self {
+        Self {
+            state: EngineState::Available,
+            message: "analyzer refresh timed out before completion".to_owned(),
             unstartable_launch_root: None,
         }
     }

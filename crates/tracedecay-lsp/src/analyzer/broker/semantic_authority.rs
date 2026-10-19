@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use tracedecay_runtime_core::logging::log_daemon_event;
 
@@ -183,11 +184,17 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
         request_id: LspRequestId,
         request: crate::LspSemanticRequest,
     ) -> LspRuntimeFuture<LspSemanticOperationOutcome> {
+        let deadline = request
+            .deadline()
+            .unwrap_or_else(|| self.inner.timeouts.operation_deadline());
+        let timeouts = self.inner.timeouts.with_deadline(deadline);
         // Read the addressed document before the typed decode consumes the
         // request: every `textDocument/*` method names it the same way, and a
         // method that names none (workspace symbols) simply has nothing to
         // open.
+        let document_uri = semantic_request_document_uri(&request);
         let document = semantic_request_document(&request);
+        let document_snapshot = request.document_snapshot().cloned();
         let request = match decode_semantic_request(request) {
             Ok(request) => request,
             Err(error) => {
@@ -195,6 +202,16 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             }
         };
         if root.uri() != self.inner.root_uri {
+            return Box::pin(async { LspSemanticOperationOutcome::Unavailable });
+        }
+        if document_uri
+            .as_deref()
+            .is_some_and(|uri| !root.contains_document(uri))
+            || document_snapshot.as_ref().is_some_and(|snapshot| {
+                document_uri.as_deref() != Some(snapshot.uri.as_str())
+                    || !root.contains_document(&snapshot.uri)
+            })
+        {
             return Box::pin(async { LspSemanticOperationOutcome::Unavailable });
         }
         if let Some(outcome) = self.terminal_outcome() {
@@ -205,6 +222,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             request_id,
         };
         let cancellation = Arc::new(CancellationToken::new());
+        let deadline = timeouts.operation_deadline();
         let inserted = {
             let mut operations = self.inner.operations();
             if operations.contains_key(&key) {
@@ -232,7 +250,12 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
             let _registration = registration;
+            let document_snapshot = document_snapshot;
+            let document = document;
             let outcome = tokio::select! {
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    analyzer_event_outcome(AnalyzerEvent::TimedOut)
+                }
                 () = cancellation.cancelled() => {
                     LspSemanticOperationOutcome::Partial {
                         value: serde_json::Value::Null,
@@ -264,11 +287,16 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     } else if let Some(attempt) = inner.shared.begin_start() {
                         let started = tokio::select! {
                             () = cancellation.cancelled() => Ok(None),
+                            () = tokio::time::sleep_until(
+                                tokio::time::Instant::from_std(deadline)
+                            ) => Err(TraceDecayError::Config {
+                                message: "LSP semantic request timed out during analyzer startup".to_owned(),
+                            }),
                             client = StdioLspClient::start_with_launch(
                                 &inner.launch,
                                 &inner.args,
                                 &inner.project_root,
-                                inner.timeouts,
+                                timeouts,
                             ) => client.map(Some),
                         };
                         (attempt, started)
@@ -288,14 +316,58 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             // The analyzer answers only for documents in its
                             // own view, and this lane is reached for documents
                             // the diagnostics sweep may never have opened.
-                            if let Some(document) = document.as_deref() {
-                                let _ = client
-                                    .ensure_document_open(
-                                        document,
-                                        &inner.language,
-                                        inner.timeouts,
-                                    )
-                                    .await;
+                            let document_sync = tokio::select! {
+                                result = async {
+                                    match (
+                                        document.as_deref(),
+                                        document_snapshot.as_ref(),
+                                    ) {
+                                        (Some(path), Some(snapshot)) => {
+                                            client
+                                                .ensure_document_snapshot(path, snapshot, timeouts)
+                                                .await
+                                        }
+                                        (Some(path), None) => {
+                                            client
+                                                .ensure_document_open(path, &inner.language, timeouts)
+                                                .await
+                                        }
+                                        (None, Some(_)) => {
+                                            Err(LspSemanticRequestError::InvalidResponse {
+                                                class: "semantic document snapshot has no request document"
+                                                    .to_owned(),
+                                            })
+                                        }
+                                        (None, None) => Ok(()),
+                                    }
+                                } => Some(result),
+                                () = cancellation.cancelled() => None,
+                                () = tokio::time::sleep_until(
+                                    tokio::time::Instant::from_std(deadline)
+                                ) => None,
+                            };
+                            let Some(document_sync) = document_sync else {
+                                let event = if cancellation.is_cancelled() {
+                                    AnalyzerEvent::Cancelled
+                                } else {
+                                    AnalyzerEvent::TimedOut
+                                };
+                                slot.retire(client);
+                                inner.shared.record(attempt, event);
+                                return analyzer_event_outcome(event);
+                            };
+                            if let Err(error) = document_sync {
+                                if matches!(
+                                    &error,
+                                    LspSemanticRequestError::Transport { .. }
+                                        | LspSemanticRequestError::TimedOut
+                                ) {
+                                    slot.retire(client);
+                                } else {
+                                    slot.replace(client);
+                                }
+                                inner.shared.record(attempt, error.analyzer_event());
+                                return semantic_operation_outcome(Err(error));
                             }
                             // Boxed: this future covers the whole semantic
                             // request dispatch, so it is the widest one held
@@ -305,7 +377,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             let result = Box::pin(client.semantic_request(
                                 request,
                                 &cancellation,
-                                inner.timeouts,
+                                timeouts,
                             ))
                             .await;
                             // Cancellation drops `read_message_until` wherever
@@ -320,6 +392,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 Err(LspSemanticRequestError::Transport { .. }
                                     | LspSemanticRequestError::ProcessExited { .. }
                                     | LspSemanticRequestError::InvalidResponse { .. }
+                                    | LspSemanticRequestError::TimedOut
                                     | LspSemanticRequestError::Cancelled)
                             ) {
                                 slot.retire(client);
@@ -343,6 +416,10 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             analyzer_event_outcome(AnalyzerEvent::Cancelled)
                         }
                         Err(error) => {
+                            if Instant::now() >= deadline {
+                                inner.shared.record(attempt, AnalyzerEvent::TimedOut);
+                                return analyzer_event_outcome(AnalyzerEvent::TimedOut);
+                            }
                             // Coverage is a stable token vocabulary that callers
                             // match on, so the analyzer's own message cannot live
                             // in it: slugifying stripped the punctuation and cut it
@@ -380,6 +457,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
 fn semantic_request_document(request: &crate::LspSemanticRequest) -> Option<PathBuf> {
     let uri = request.params().get("textDocument")?.get("uri")?.as_str()?;
     url::Url::parse(uri).ok()?.to_file_path().ok()
+}
+
+fn semantic_request_document_uri(request: &crate::LspSemanticRequest) -> Option<String> {
+    request
+        .params()
+        .get("textDocument")?
+        .get("uri")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn analyzer_event_outcome(event: AnalyzerEvent) -> LspSemanticOperationOutcome {

@@ -8,7 +8,9 @@ use url::Url;
 
 use super::activity::{adapter_workspace_root_from_canonical_root, canonicalize_project_root};
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
-use super::client::{LspDocument, LspRefreshTimeouts, file_uri};
+use super::client::{
+    DiagnosticDocumentCoverage, DiagnosticRootCoverage, LspDocument, LspRefreshTimeouts, file_uri,
+};
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
 pub use super::launch::command_available;
 use super::launch::{AnalyzerLaunch, AnalyzerLaunchError, AnalyzerLaunchResolver};
@@ -709,13 +711,55 @@ impl DiagnosticBroker {
             return Ok(RefreshCommitOutcome::Superseded);
         }
         match completed.result {
-            Ok(mut diagnostics) => {
-                self.diagnostics
-                    .retain(|diagnostic| diagnostic.language != language);
-                self.diagnostics.append(&mut diagnostics);
-                self.engine_errors.remove(&language);
-                self.engine_overrides.insert(language, EngineState::Ready);
-                Ok(RefreshCommitOutcome::Applied(self.snapshot()))
+            Ok(mut refresh) => {
+                self.diagnostics.retain(|diagnostic| {
+                    diagnostic.language != language
+                        || !matches!(
+                            refresh.documents.get(&diagnostic.file),
+                            Some(DiagnosticDocumentCoverage::Published { .. })
+                        )
+                });
+                self.diagnostics.append(&mut refresh.diagnostics);
+                if completed.root_failures.is_empty() {
+                    self.engine_errors.remove(&language);
+                    self.engine_overrides.insert(language, EngineState::Ready);
+                    Ok(RefreshCommitOutcome::Applied(self.snapshot()))
+                } else {
+                    for failure in completed.root_failures.values() {
+                        if let Some(workspace_root) = &failure.unstartable_launch_root {
+                            self.evict_launch(&completed.command, workspace_root);
+                        }
+                    }
+                    let failed_documents = refresh
+                        .documents
+                        .values()
+                        .filter(|coverage| {
+                            matches!(coverage, DiagnosticDocumentCoverage::RootFailed)
+                        })
+                        .count();
+                    let all_roots_failed = !refresh.roots.is_empty()
+                        && refresh
+                            .roots
+                            .values()
+                            .all(|coverage| *coverage == DiagnosticRootCoverage::Failed);
+                    let state = if all_roots_failed && failed_documents == refresh.documents.len() {
+                        completed
+                            .root_failures
+                            .values()
+                            .next()
+                            .map_or(EngineState::Available, |failure| failure.state)
+                    } else {
+                        EngineState::Available
+                    };
+                    let message = format!(
+                        "{} of {} analyzer workspace root(s) failed",
+                        completed.root_failures.len(),
+                        refresh.roots.len()
+                    );
+                    self.engine_errors.insert(language.clone(), message.clone());
+                    self.engine_overrides.insert(language, state);
+                    Err(TraceDecayError::Config { message })
+                }
             }
             Err(failure) => {
                 if let Some(workspace_root) = &failure.unstartable_launch_root {

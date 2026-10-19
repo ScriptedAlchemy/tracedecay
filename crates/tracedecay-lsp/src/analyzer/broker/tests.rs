@@ -808,7 +808,8 @@ fn superseded_refresh_cannot_supply_a_snapshot_to_its_caller() {
         language: "rust".to_owned(),
         command: "rust-analyzer".to_owned(),
         epoch,
-        result: Ok(Vec::new()),
+        result: Ok(crate::analyzer::client::DiagnosticRefreshResult::default()),
+        root_failures: BTreeMap::new(),
     };
 
     assert!(matches!(
@@ -819,4 +820,84 @@ fn superseded_refresh_cannot_supply_a_snapshot_to_its_caller() {
         broker.finish_refresh_snapshot(completed(3)),
         Ok(RefreshCommitOutcome::Superseded)
     ));
+}
+
+#[test]
+fn partial_root_refresh_replaces_only_published_document_diagnostics() {
+    let mut broker = DiagnosticBroker::new_for_test(
+        "/project",
+        vec![adapter("fake", "fake-ls", "fake", "workspace.marker")],
+    );
+    broker.refresh_epochs.insert("fake".to_owned(), 1);
+    broker.diagnostics = vec![
+        code_diagnostic("src/a.fake", "old a"),
+        code_diagnostic("member/src/b.fake", "old b"),
+    ];
+    let root = PathBuf::from("/project/member");
+    let failure = super::refresh::RefreshFailure::crashed_message("member exited".to_owned());
+    let completed = CompletedRefresh {
+        language: "fake".to_owned(),
+        command: "fake-ls".to_owned(),
+        epoch: 1,
+        result: Ok(crate::analyzer::client::DiagnosticRefreshResult {
+            diagnostics: vec![code_diagnostic("src/a.fake", "new a")],
+            documents: BTreeMap::from([
+                (
+                    "src/a.fake".to_owned(),
+                    DiagnosticDocumentCoverage::Published {
+                        version_verified: true,
+                    },
+                ),
+                (
+                    "member/src/b.fake".to_owned(),
+                    DiagnosticDocumentCoverage::RootFailed,
+                ),
+            ]),
+            roots: BTreeMap::from([
+                (
+                    PathBuf::from("/project"),
+                    crate::analyzer::client::DiagnosticRootCoverage::Completed,
+                ),
+                (
+                    root.clone(),
+                    crate::analyzer::client::DiagnosticRootCoverage::Failed,
+                ),
+            ]),
+        }),
+        root_failures: BTreeMap::from([(root, failure)]),
+    };
+
+    assert!(
+        broker.finish_refresh_snapshot(completed).is_err(),
+        "the caller must see that one root was incomplete"
+    );
+    let diagnostics = broker.snapshot().diagnostics;
+    assert_eq!(diagnostics.len(), 2);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.file == "src/a.fake" && diagnostic.message == "new a")
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.file == "member/src/b.fake" && diagnostic.message == "old b"
+        })
+    );
+}
+
+fn code_diagnostic(file: &str, message: &str) -> CodeDiagnostic {
+    CodeDiagnostic {
+        language: "fake".to_owned(),
+        source: "fake-ls".to_owned(),
+        file: file.to_owned(),
+        line_start: 0,
+        line_end: 0,
+        character_start: None,
+        character_end: None,
+        severity: DiagnosticSeverity::Error,
+        code: None,
+        message: message.to_owned(),
+        enclosing_node: None,
+        updated_at: 0,
+    }
 }

@@ -30,7 +30,7 @@ fn broker_marks_active_command_available_before_first_refresh() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake_lsp.py");
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
-    let broker = lsp::broker::DiagnosticBroker::new_for_test(
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
         temp.path(),
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
     );
@@ -345,8 +345,8 @@ async fn stdio_client_allows_slow_but_progressing_document_writes() {
     .expect("slow progressing write should stay bounded")
     .expect("slow progressing write should not crash the client");
 
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].message, "fake type error");
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert_eq!(diagnostics.diagnostics[0].message, "fake type error");
 }
 
 #[tokio::test]
@@ -475,9 +475,19 @@ async fn stdio_client_returns_diagnostics_for_suppress_empty_servers() {
     .await
     .expect("diagnostics from the responding file should be returned, not dropped");
 
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].file, "src/first.fake");
-    assert_eq!(diagnostics[0].message, "first file error");
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert_eq!(diagnostics.diagnostics[0].file, "src/first.fake");
+    assert_eq!(diagnostics.diagnostics[0].message, "first file error");
+    assert_eq!(
+        diagnostics.documents.get("src/first.fake"),
+        Some(&lsp::client::DiagnosticDocumentCoverage::Published {
+            version_verified: false,
+        })
+    );
+    assert_eq!(
+        diagnostics.documents.get("src/second.fake"),
+        Some(&lsp::client::DiagnosticDocumentCoverage::NoPublication)
+    );
 }
 
 #[tokio::test]
@@ -1487,4 +1497,790 @@ while True:
         authority.analyzer_readiness().last_failure(),
         Some(AnalyzerEvent::TransportFailed)
     );
+}
+
+#[tokio::test]
+async fn semantic_process_exit_is_classified_before_the_response_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let document_path = temp.path().join(FAKE_PATH);
+    std::fs::create_dir_all(document_path.parent().unwrap()).unwrap();
+    std::fs::write(&document_path, "let value = 1;").unwrap();
+    let script_path = temp.path().join("exit_during_semantic_lsp.py");
+    std::fs::write(
+        &script_path,
+        r#"
+import json
+import sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    if message.get("method") == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif message.get("method") == "textDocument/documentSymbol":
+        sys.exit(17)
+"#,
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap()
+        .expect("fake analyzer is executable");
+
+    let outcome = authority
+        .start(
+            AdmittedRoot::new(root_uri.clone()),
+            LspRequestId::Number(31),
+            tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+                document_uri: format!("{root_uri}{FAKE_PATH}"),
+            })
+            .unwrap(),
+        )
+        .await;
+
+    assert!(matches!(
+        outcome,
+        tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
+            if coverage == "analyzer-crashed"
+    ));
+    assert_eq!(
+        authority.analyzer_readiness().last_failure(),
+        Some(AnalyzerEvent::Crashed)
+    );
+}
+
+#[tokio::test]
+async fn semantic_gateway_synchronizes_the_admitted_overlay_snapshot_once() {
+    use tracedecay_lsp::{
+        ClientCapabilities, DaemonLspGateway, FeedbackCyclePort, FeedbackCycleRequest,
+        FeedbackCycleResponse, GatewayCapabilities, GatewayResponse, LspRuntimeFuture,
+        LspRuntimeSpawner, LspRuntimeTask, LspSemanticDocumentSnapshot, SemanticCapability,
+        SemanticProviderAdapter, SemanticResponse, UpstreamCapabilities, negotiate_capabilities,
+    };
+
+    struct NoopFeedback;
+
+    impl FeedbackCyclePort for NoopFeedback {
+        fn request_feedback_cycle(
+            &self,
+            _request: FeedbackCycleRequest,
+        ) -> FeedbackCycleResponse {
+            FeedbackCycleResponse::Deferred {
+                reason: "test-not-configured".to_owned(),
+            }
+        }
+    }
+
+    struct TokioTask(tokio::task::JoinHandle<()>);
+
+    impl LspRuntimeTask for TokioTask {
+        fn abort(&self) {
+            self.0.abort();
+        }
+    }
+
+    struct TokioSpawner;
+
+    impl LspRuntimeSpawner for TokioSpawner {
+        fn spawn(&self, future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
+            Box::new(TokioTask(tokio::spawn(future)))
+        }
+    }
+
+    async fn complete_semantic_request<P, S>(
+        gateway: &DaemonLspGateway<P, S>,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        snapshot: Option<&LspSemanticDocumentSnapshot>,
+    ) -> SemanticResponse
+    where
+        P: FeedbackCyclePort,
+        S: SemanticProviderPort,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match gateway.semantic_request_with_document(
+                    request_id,
+                    request,
+                    snapshot,
+                    None,
+                ) {
+                    GatewayResponse::Pending => tokio::task::yield_now().await,
+                    GatewayResponse::Value(value) => return value,
+                    other => panic!("semantic request did not complete: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("semantic request should complete")
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let document_path = temp.path().join(FAKE_PATH);
+    std::fs::create_dir_all(document_path.parent().unwrap()).unwrap();
+    std::fs::write(&document_path, "stale disk text").unwrap();
+    let script_path = temp.path().join("snapshot_lsp.py");
+    let events_path = temp.path().join("events.jsonl");
+    std::fs::write(
+        &script_path,
+        format!(
+            r#"
+import json
+import sys
+
+documents = {{}}
+
+def read_message():
+    headers = {{}}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+def record(event):
+    with open({events_path:?}, "a", encoding="utf-8") as output:
+        output.write(json.dumps(event) + "\n")
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({{"jsonrpc": "2.0", "id": message["id"], "result": {{"capabilities": {{}}}}}})
+    elif method == "textDocument/didOpen":
+        document = message["params"]["textDocument"]
+        documents[document["uri"]] = document["text"]
+        record({{"method": "open", "text": document["text"]}})
+    elif method == "textDocument/didChange":
+        document = message["params"]["textDocument"]
+        text = message["params"]["contentChanges"][0]["text"]
+        documents[document["uri"]] = text
+        record({{"method": "change", "text": text}})
+    elif method == "textDocument/documentSymbol":
+        uri = message["params"]["textDocument"]["uri"]
+        text = documents.get(uri, "missing document")
+        record({{"method": "request", "text": text}})
+        send({{
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": [{{
+                "name": text,
+                "kind": 13,
+                "range": {{"start": {{"line": 0, "character": 0}}, "end": {{"line": 0, "character": 1}}}},
+                "selectionRange": {{"start": {{"line": 0, "character": 0}}, "end": {{"line": 0, "character": 1}}}}
+            }}]
+        }})
+"#,
+            events_path = events_path.display().to_string(),
+        ),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap()
+        .expect("fake analyzer is executable");
+    let upstream = UpstreamCapabilities {
+        supports_diagnostics: true,
+        semantic: SemanticCapability::ALL.into_iter().collect(),
+    };
+    let mut client = ClientCapabilities::default();
+    client.semantic = SemanticCapability::ALL.into_iter().collect();
+    let capabilities =
+        negotiate_capabilities(&client, &GatewayCapabilities::default(), &upstream);
+    let semantic = SemanticProviderAdapter::new(Arc::new(TokioSpawner), authority);
+    let gateway = DaemonLspGateway::new(
+        AdmittedRoot::new(root_uri.clone()),
+        capabilities,
+        NoopFeedback,
+        semantic,
+    );
+    let uri = format!("{root_uri}{FAKE_PATH}");
+    let mut overlays = tracedecay_lsp::OverlayStore::default();
+    let initial = overlays
+        .open(
+            &AdmittedRoot::new(root_uri.clone()),
+            uri.clone(),
+            "fake",
+            1,
+            "unsaved snapshot one",
+        )
+        .unwrap();
+    let request = SemanticRequest::DocumentSymbols {
+        document_uri: uri.clone(),
+    };
+    let result = complete_semantic_request(
+        &gateway,
+        &LspRequestId::Number(11),
+        &request,
+        Some(&LspSemanticDocumentSnapshot::from_overlay(&initial)),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        SemanticResponse::DocumentSymbols(ref symbols)
+            if symbols.first().is_some_and(|symbol| symbol.name == "unsaved snapshot one")
+    ));
+
+    let same = LspSemanticDocumentSnapshot::from_overlay(&initial);
+    let result =
+        complete_semantic_request(&gateway, &LspRequestId::Number(12), &request, Some(&same)).await;
+    assert!(matches!(
+        result,
+        SemanticResponse::DocumentSymbols(ref symbols)
+            if symbols.first().is_some_and(|symbol| symbol.name == "unsaved snapshot one")
+    ));
+
+    let changed = overlays
+        .change(
+            &uri,
+            2,
+            &[tracedecay_lsp::OverlayChange {
+                range: None,
+                range_length: None,
+                text: "unsaved snapshot two".to_owned(),
+            }],
+        )
+        .unwrap();
+    let result = complete_semantic_request(
+        &gateway,
+        &LspRequestId::Number(13),
+        &request,
+        Some(&LspSemanticDocumentSnapshot::from_overlay(&changed)),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        SemanticResponse::DocumentSymbols(ref symbols)
+            if symbols.first().is_some_and(|symbol| symbol.name == "unsaved snapshot two")
+    ));
+
+    let events = std::fs::read_to_string(events_path).unwrap();
+    let events = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "open")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "change")
+            .map(|event| event["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["unsaved snapshot two"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "request")
+            .map(|event| event["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "unsaved snapshot one",
+            "unsaved snapshot one",
+            "unsaved snapshot two"
+        ]
+    );
+}
+
+#[test]
+fn semantic_request_synchronizes_saved_edits_without_a_diagnostic_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let document_path = temp.path().join(FAKE_PATH);
+    std::fs::create_dir_all(document_path.parent().unwrap()).unwrap();
+    std::fs::write(&document_path, "saved version one").unwrap();
+    let script_path = temp.path().join("saved_document_lsp.py");
+    let events_path = temp.path().join("saved_events.jsonl");
+    std::fs::write(
+        &script_path,
+        format!(
+            r#"
+import json
+import sys
+
+documents = {{}}
+
+def read_message():
+    headers = {{}}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+def record(method, text):
+    with open({events_path:?}, "a", encoding="utf-8") as output:
+        output.write(json.dumps({{"method": method, "text": text}}) + "\n")
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({{"jsonrpc": "2.0", "id": message["id"], "result": {{"capabilities": {{}}}}}})
+    elif method == "textDocument/didOpen":
+        document = message["params"]["textDocument"]
+        documents[document["uri"]] = document["text"]
+        record("open", document["text"])
+    elif method == "textDocument/didChange":
+        document = message["params"]["textDocument"]
+        text = message["params"]["contentChanges"][0]["text"]
+        documents[document["uri"]] = text
+        record("change", text)
+    elif method == "textDocument/documentSymbol":
+        uri = message["params"]["textDocument"]["uri"]
+        text = documents.get(uri, "missing document")
+        record("request", text)
+        send({{
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": [{{
+                "name": text,
+                "kind": 13,
+                "range": {{"start": {{"line": 0, "character": 0}}, "end": {{"line": 0, "character": 1}}}},
+                "selectionRange": {{"start": {{"line": 0, "character": 0}}, "end": {{"line": 0, "character": 1}}}}
+            }}]
+        }})
+"#,
+            events_path = events_path.display().to_string(),
+        ),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = block(broker.semantic_authority_if_available(
+        FAKE_LANGUAGE,
+        temp.path().to_path_buf(),
+        root_uri.clone(),
+        recovery_fake_lsp_timeouts(),
+    ))
+    .unwrap()
+    .expect("fake analyzer is executable");
+    let root = AdmittedRoot::new(root_uri.clone());
+    let request = || {
+        tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+            document_uri: format!("{root_uri}{FAKE_PATH}"),
+        })
+        .unwrap()
+    };
+    for (request_id, expected) in [(21, "saved version one"), (22, "saved version two")] {
+        if request_id == 22 {
+            std::fs::write(&document_path, expected).unwrap();
+        }
+        let outcome = block(authority.start(
+            root.clone(),
+            LspRequestId::Number(request_id),
+            request(),
+        ));
+        let tracedecay_lsp::LspSemanticOperationOutcome::Complete(value) = outcome else {
+            panic!("semantic request was incomplete: {outcome:?}");
+        };
+        assert_eq!(value[0]["name"], expected);
+    }
+    let missing = block(authority.start(
+        root,
+        LspRequestId::Number(23),
+        tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+            document_uri: format!("{root_uri}src/missing.fake"),
+        })
+        .unwrap(),
+    ));
+    assert!(matches!(
+        missing,
+        tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
+            if coverage == "analyzer-invalid-response"
+    ));
+
+    let events = std::fs::read_to_string(events_path).unwrap();
+    let events = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "open")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "change")
+            .map(|event| event["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["saved version two"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "request")
+            .map(|event| event["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["saved version one", "saved version two"]
+    );
+}
+
+#[tokio::test]
+async fn partial_diagnostic_publications_clear_only_explicitly_reported_documents() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("partial_diagnostics_lsp.py");
+    std::fs::write(
+        &script_path,
+        r#"
+import json
+import sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+def publish(uri, diagnostics):
+    send({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {"uri": uri, "diagnostics": diagnostics}
+    })
+
+def publish_version(uri, version, diagnostics):
+    send({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {"uri": uri, "version": version, "diagnostics": diagnostics}
+    })
+
+def finding(message):
+    return {
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 1}
+        },
+        "severity": 1,
+        "message": message,
+        "source": "fake-ls"
+    }
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "textDocument/didOpen":
+        uri = message["params"]["textDocument"]["uri"]
+        publish(uri, [finding("initial finding")])
+    elif method == "textDocument/didChange":
+        uri = message["params"]["textDocument"]["uri"]
+        text = message["params"]["contentChanges"][0]["text"]
+        if uri.endswith("a.fake"):
+            publish(uri, [])
+        elif text == "stale b":
+            publish_version(uri, 1, [finding("stale replacement")])
+"#,
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+
+    broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![
+                fake_document(FAKE_LANGUAGE, "src/a.fake", "initial a"),
+                fake_document(FAKE_LANGUAGE, "src/b.fake", "initial b"),
+            ],
+            FAKE_LSP_TIMEOUT,
+        )
+        .await
+        .expect("both initial versionless publications should be accepted");
+    assert_eq!(broker.snapshot().diagnostics.len(), 2);
+
+    broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![
+                fake_document(FAKE_LANGUAGE, "src/a.fake", "updated a"),
+                fake_document(FAKE_LANGUAGE, "src/b.fake", "updated b"),
+            ],
+            FAKE_LSP_TIMEOUT,
+        )
+        .await
+        .expect("an explicit clean publication makes the partial refresh useful");
+
+    broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![
+                fake_document(FAKE_LANGUAGE, "src/a.fake", "updated a again"),
+                fake_document(FAKE_LANGUAGE, "src/b.fake", "stale b"),
+            ],
+            FAKE_LSP_TIMEOUT,
+        )
+        .await
+        .expect("the current clean publication makes a stale sibling incomplete");
+
+    let diagnostics = broker.snapshot().diagnostics;
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].file, "src/b.fake");
+    assert_eq!(diagnostics[0].message, "initial finding");
+}
+
+#[tokio::test]
+async fn successful_root_findings_survive_a_failed_sibling_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let member = temp.path().join("member");
+    std::fs::create_dir_all(member.join("src")).unwrap();
+    std::fs::write(temp.path().join("workspace.marker"), "").unwrap();
+    std::fs::write(member.join("workspace.marker"), "").unwrap();
+    std::fs::write(temp.path().join("src/a.fake"), "initial root").unwrap();
+    std::fs::write(member.join("src/b.fake"), "initial nested").unwrap();
+    let script_path = temp.path().join("rooted_diagnostics_lsp.py");
+    std::fs::write(
+        &script_path,
+        r#"
+import json
+import os
+import sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+def publish(uri, message):
+    send({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {
+            "uri": uri,
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 1}
+                },
+                "severity": 1,
+                "message": message,
+                "source": "fake-ls"
+            }]
+        }
+    })
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "textDocument/didOpen":
+        document = message["params"]["textDocument"]
+        publish(document["uri"], "initial " + document["text"])
+    elif method == "textDocument/didChange":
+        document = message["params"]["textDocument"]
+        text = message["params"]["contentChanges"][0]["text"]
+        if os.path.basename(os.getcwd()) == "member" and text == "fail nested":
+            sys.exit(17)
+        publish(document["uri"], "updated " + text)
+"#,
+    )
+    .unwrap();
+    let adapter = fake_adapter_with_root_markers(
+        FAKE_LANGUAGE,
+        "fake",
+        python_command(),
+        vec![script_path.display().to_string()],
+        vec!["workspace.marker".to_owned()],
+    );
+    let mut broker =
+        lsp::broker::DiagnosticBroker::new_for_test(temp.path(), vec![adapter]);
+    let documents = |root_text: &str, nested_text: &str| {
+        vec![
+            fake_document(FAKE_LANGUAGE, "src/a.fake", root_text),
+            fake_document(FAKE_LANGUAGE, "member/src/b.fake", nested_text),
+        ]
+    };
+
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            documents("initial root", "initial nested"),
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .expect("both workspace roots should initially publish");
+    assert_eq!(broker.snapshot().diagnostics.len(), 2);
+
+    let error = broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            documents("updated root", "fail nested"),
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .expect_err("a failed sibling root must remain visible to the caller");
+    assert!(error.to_string().contains("workspace root"));
+    let diagnostics = broker.snapshot().diagnostics;
+    assert_eq!(diagnostics.len(), 2);
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.file == "src/a.fake" && diagnostic.message == "updated updated root"
+        })
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.file == "member/src/b.fake"
+                && diagnostic.message == "initial initial nested"
+        })
+    );
+}
+
+#[tokio::test]
+async fn semantic_cancellation_reaches_and_releases_the_registered_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("cancelled_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script_that_never_initializes()).unwrap();
+    let broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap()
+        .expect("fake analyzer is executable");
+    let root = AdmittedRoot::new(root_uri.clone());
+    let request_id = LspRequestId::Number(19);
+    let operation = authority.start(
+        root.clone(),
+        request_id.clone(),
+        tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+            document_uri: format!("{root_uri}{FAKE_PATH}"),
+        })
+        .unwrap(),
+    );
+
+    assert!(authority.cancel_request(&root, &request_id));
+    assert!(matches!(
+        operation.await,
+        tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
+            if coverage == "semantic-cancelled"
+    ));
+    assert!(!authority.cancel_request(&root, &request_id));
+    assert!(!authority.cancel_request(&root, &LspRequestId::Number(20)));
 }
