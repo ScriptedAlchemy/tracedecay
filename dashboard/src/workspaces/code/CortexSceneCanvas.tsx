@@ -14,7 +14,7 @@
  * layout that failed. The ledger beside the field keeps every symbol either
  * way.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import type { ActivationField } from '../../viz/graph/activation.ts';
 import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
@@ -97,16 +97,22 @@ export function CortexSceneCanvas<L>({
   // captured by scene A must never paint a layout produced for scene B.
   const paintRef = useRef<() => void>(() => {});
   const queueLatestFrame = useCallback(() => {
-    frameRequest.current = requestAnimationFrame(() => paintRef.current());
+    if (frameRequest.current !== null) return;
+    const handle = requestAnimationFrame(() => {
+      // A cancelled callback may already have been dequeued. It must not
+      // clear a replacement frame's handle or restart an obsolete loop.
+      if (frameRequest.current !== handle) return;
+      frameRequest.current = null;
+      paintRef.current();
+    });
+    frameRequest.current = handle;
   }, []);
   const layoutGeneration = useRef(0);
   const state = useRef({ selectedId, inspectedId, hovered, cursor, reduced, layoutState, box });
-  state.current = { selectedId, inspectedId, hovered, cursor, reduced, layoutState, box };
 
   const order = useMemo(() => keyboardOrder(scene), [scene]);
 
   const paint = useCallback(() => {
-    frameRequest.current = null;
     const canvas = canvasRef.current;
     const host = hostRef.current;
     const current = state.current;
@@ -159,11 +165,15 @@ export function CortexSceneCanvas<L>({
     }
   }, [activation, painter, scene, queueLatestFrame]);
 
-  paintRef.current = paint;
+  // Publish the callback and its input snapshot together after commit. A
+  // suspended or abandoned render must not change what an already queued
+  // frame sees while the previous scene remains on screen.
+  useLayoutEffect(() => {
+    state.current = { selectedId, inspectedId, hovered, cursor, reduced, layoutState, box };
+    paintRef.current = paint;
+  });
 
-  const schedule = useCallback(() => {
-    if (frameRequest.current === null) queueLatestFrame();
-  }, [queueLatestFrame]);
+  const schedule = queueLatestFrame;
 
   useEffect(
     () => () => {
@@ -275,7 +285,7 @@ export function CortexSceneCanvas<L>({
 
   useEffect(() => {
     schedule();
-  }, [selectedId, inspectedId, hovered, cursor, reduced, schedule]);
+  }, [selectedId, inspectedId, hovered, cursor, reduced, activation, schedule]);
 
   useEffect(() => activation?.subscribe(schedule), [activation, schedule]);
 
