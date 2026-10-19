@@ -532,14 +532,15 @@ jobs:
     name: Windows Bazel check
     needs: scope-gate
     if: >-
-      ${{ needs.scope-gate.outputs.run-heavy == 'true' &&
+      ${{ github.event_name == 'pull_request' ||
+      (needs.scope-gate.outputs.run-heavy == 'true' &&
       (github.event_name != 'workflow_dispatch' ||
-      needs.scope-gate.outputs.run-os == 'true') }}
+      needs.scope-gate.outputs.run-os == 'true')) }}
     runs-on: windows-latest
     timeout-minutes: 330
     steps:
       # Linux builds do not enable cfg(windows). Compile every Bazel target on
-      # native Windows for ready PRs and pushes; full tests remain dispatch-only.
+      # native Windows for every PR and push; full tests remain dispatch-only.
       # Full history: the search-quality workload fixture pins a
       # `source_repository_commit`, and `validate_source_bindings` resolves that
       # object out of this checkout.
