@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// Fetched from the Vite server once, at collection, so each test's re-import
+// after vi.resetModules() evaluates cached code instead of waiting on the server.
+import './credential.ts';
+import '../query/responseBody.ts';
 
 const TOKEN = 'ab'.repeat(32);
 const BASIC = `Basic ${btoa(`tracedecay:${TOKEN}`)}`;
