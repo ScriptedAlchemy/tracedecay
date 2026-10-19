@@ -12,7 +12,8 @@ use serde_json::Value;
 use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_domain::canonical_text::sha256_hex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HookEventKind {
     FileEdit,
     Shell,
@@ -141,6 +142,8 @@ pub enum HookEventPlan {
         root: PathBuf,
         scope: tracedecay_contracts::ResolvedScope,
         agent: HostIntegrationIdV1,
+        event_kind: HookEventKind,
+        had_command: bool,
         route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
         rel_paths: Vec<String>,
     },
@@ -176,6 +179,8 @@ enum DurableHookEventPlan {
         root: PathBuf,
         scope: tracedecay_contracts::ResolvedScope,
         agent: String,
+        event_kind: HookEventKind,
+        had_command: bool,
         route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
         rel_paths: Vec<String>,
     },
@@ -401,6 +406,8 @@ fn durable_plan_from_runtime(plan: &HookEventPlan) -> Result<DurableHookEventPla
             root,
             scope,
             agent,
+            event_kind,
+            had_command,
             route,
             rel_paths,
         } => DurableHookEventPlan::SyncFilesAt {
@@ -410,6 +417,11 @@ fn durable_plan_from_runtime(plan: &HookEventPlan) -> Result<DurableHookEventPla
                 scope.clone()
             },
             agent: agent.as_wire().to_string(),
+            event_kind: match event_kind {
+                HookEventKind::FileEdit | HookEventKind::IncrementalSync => *event_kind,
+                _ => return Err(()),
+            },
+            had_command: *had_command,
             route: sanitize_durable_route(route.as_ref())?,
             rel_paths: sanitize_durable_rel_paths(rel_paths)?,
         },
@@ -468,6 +480,8 @@ fn runtime_plan_from_durable(
             root,
             scope,
             agent,
+            event_kind,
+            had_command,
             route,
             rel_paths,
         } => Ok(HookEventPlan::SyncFilesAt {
@@ -481,6 +495,11 @@ fn runtime_plan_from_durable(
             },
             agent: HostIntegrationIdV1::from_wire(&agent)
                 .ok_or(DurableHookEventDecodeError::Malformed)?,
+            event_kind: match event_kind {
+                HookEventKind::FileEdit | HookEventKind::IncrementalSync => event_kind,
+                _ => return Err(DurableHookEventDecodeError::Malformed),
+            },
+            had_command,
             route: sanitize_durable_route(route.as_ref())
                 .map_err(|()| DurableHookEventDecodeError::Malformed)?,
             rel_paths: sanitize_durable_rel_paths(&rel_paths)

@@ -342,29 +342,7 @@ impl McpServer {
         // survives the envelope move into `tools/call` preparation below.
         let method_name = request.method();
         if matches!(method, McpMethod::HookEvent) {
-            let Some(id) = request.cloned_id() else {
-                Box::pin(self.handle_hook_event_notification(
-                    request.raw_notification_params(),
-                    &mut connection.route_cache,
-                ))
-                .await;
-                return None;
-            };
-            let admitted = Box::pin(self.admit_hook_event_notification(
-                request.raw_notification_params(),
-                &mut connection.route_cache,
-                false,
-            ))
-            .await;
-            return Some(match admitted {
-                Ok(_) => JsonRpcResponse::success(id, json!({})),
-                Err(outcome) => JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InternalError,
-                    "hook event was not durably admitted".to_owned(),
-                    Some(json!(outcome)),
-                ),
-            });
+            return Box::pin(self.dispatch_hook_event(request, &mut connection.route_cache)).await;
         }
         if matches!(method, McpMethod::Cancelled) {
             self.record_request_accounting(method_name, false);
@@ -452,6 +430,35 @@ impl McpServer {
         }
 
         result
+    }
+
+    async fn dispatch_hook_event(
+        &self,
+        request: McpDispatchRequest<'_>,
+        route_cache: &mut HookProjectRouteCache,
+    ) -> Option<JsonRpcResponse> {
+        let Some(id) = request.cloned_id() else {
+            Box::pin(
+                self.handle_hook_event_notification(request.raw_notification_params(), route_cache),
+            )
+            .await;
+            return None;
+        };
+        let admitted = Box::pin(self.admit_hook_event_notification(
+            request.raw_notification_params(),
+            route_cache,
+            false,
+        ))
+        .await;
+        Some(match admitted {
+            Ok(_) => JsonRpcResponse::success(id, json!({})),
+            Err(outcome) => JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InternalError,
+                "hook event was not durably admitted".to_owned(),
+                Some(json!(outcome)),
+            ),
+        })
     }
 
     pub(crate) async fn handle_hook_event_notification(
@@ -579,12 +586,15 @@ impl McpServer {
                     root: root.clone(),
                     scope: hook_route.scope.clone(),
                     agent: event.agent,
+                    event_kind: event.kind,
+                    had_command: event.had_command,
                     route: event.route.clone(),
                     rel_paths,
                 }
             }
             plan => plan,
         };
+        let routed_file_edit = matches!(plan, HookEventPlan::SyncFilesAt { .. });
         let Ok(payload) = hook_events::encode_durable_hook_event_plan(&plan) else {
             let outcome = HostAdmissionOutcome::degraded("invalid_host_event_plan");
             Self::report_host_admission_outcome(&outcome);
@@ -614,7 +624,7 @@ impl McpServer {
         // Request observations follow durable admission. Notifications preserve
         // their settled-effect accounting; these side writes never change the
         // admission or replay outcome.
-        if !replay_inline || outcome.status.commits_replay_record() {
+        if !routed_file_edit && (!replay_inline || outcome.status.commits_replay_record()) {
             if let Some(wake) = &dispatch_server.project_session_refresh_wake {
                 wake.wake();
             }

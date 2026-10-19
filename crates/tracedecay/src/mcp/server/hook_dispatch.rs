@@ -79,38 +79,42 @@ impl McpServer {
         })
     }
 
-    async fn run_routed_file_edit(
+    async fn resolve_file_edit_route(
         &self,
-        effect_root: PathBuf,
-        scope: tracedecay_contracts::ResolvedScope,
-        agent: tracedecay_domain::HostIntegrationIdV1,
-        route: Option<tracedecay_hooks::core_events::HookRouteMetadata>,
-        rel_paths: Vec<String>,
-    ) -> HostAdmissionOutcome {
+        effect_root: &Path,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> std::result::Result<crate::mcp::project_route::ResolvedProjectRoute, HostAdmissionOutcome>
+    {
         let Some(registry) = self.registry_db.as_deref() else {
-            return HostAdmissionOutcome::retained_unavailable(
+            return Err(HostAdmissionOutcome::retained_unavailable(
                 "project_registry_route_unavailable",
-            );
+            ));
         };
         let owner = match registry
             .project_registry_context_by_id(scope.project_id.as_str())
             .await
         {
             Ok(Some(owner)) => owner,
-            Ok(None) => return HostAdmissionOutcome::degraded("project_route_stale"),
+            Ok(None) => return Err(HostAdmissionOutcome::degraded("project_route_stale")),
             Err(_) => {
-                return HostAdmissionOutcome::retained_unavailable(
+                return Err(HostAdmissionOutcome::retained_unavailable(
                     "project_registry_route_unavailable",
-                );
+                ));
             }
         };
         let (root, current_scope) =
-            match tracedecay_mcp::scope::resolve_query_scope(&owner, &effect_root) {
+            match tracedecay_mcp::scope::resolve_query_scope(&owner, effect_root) {
                 Ok(resolved) => resolved,
-                Err(_) => return HostAdmissionOutcome::degraded("project_route_stale"),
+                Err(_) => return Err(HostAdmissionOutcome::degraded("project_route_stale")),
             };
-        if root != effect_root || current_scope != scope {
-            return HostAdmissionOutcome::degraded("project_route_stale");
+        // Ref is mutable checkout state. Fixed route identity must still match
+        // exactly; indexing reconciles the canonical current branch below.
+        if root.as_path() != effect_root
+            || current_scope.project_id != scope.project_id
+            || current_scope.repository_id != scope.repository_id
+            || current_scope.worktree_id != scope.worktree_id
+        {
+            return Err(HostAdmissionOutcome::degraded("project_route_stale"));
         }
         let resolved = match crate::mcp::project_route::resolve_registered_project_route(
             owner,
@@ -122,21 +126,29 @@ impl McpServer {
         {
             Ok(resolved) => resolved,
             Err(_) => {
-                return HostAdmissionOutcome::retained_unavailable("project_route_unavailable");
+                return Err(HostAdmissionOutcome::retained_unavailable(
+                    "project_route_unavailable",
+                ));
             }
         };
-        if resolved.requested_root != root || resolved.scope != scope {
-            return HostAdmissionOutcome::degraded("project_route_stale");
+        if resolved.requested_root != root || resolved.scope != current_scope {
+            return Err(HostAdmissionOutcome::degraded("project_route_stale"));
         }
-        let event = hook_events::HookEvent {
-            agent,
-            kind: hook_events::HookEventKind::FileEdit,
-            rel_paths,
-            had_command: false,
-            cwd: Some(root),
-            route,
-            receipt: None,
+        Ok(resolved)
+    }
+
+    async fn run_routed_file_edit(
+        &self,
+        effect_root: PathBuf,
+        scope: tracedecay_contracts::ResolvedScope,
+        event: hook_events::HookEvent,
+        admission_seq: Option<u64>,
+    ) -> HostAdmissionOutcome {
+        let resolved = match self.resolve_file_edit_route(&effect_root, &scope).await {
+            Ok(resolved) => resolved,
+            Err(outcome) => return outcome,
         };
+        let root = resolved.requested_root.clone();
         let server = match resolved.retained_server() {
             Ok(server) => server,
             Err(_) => {
@@ -168,9 +180,42 @@ impl McpServer {
                 "project_registry_route_unavailable",
             );
         }
+        let (cg, branch) = server.reopen_if_branch_drifted_memoized().await;
+        if cg.project_root() != root {
+            return HostAdmissionOutcome::degraded("project_route_stale");
+        }
+        if let Some(seq) = admission_seq {
+            if let Some(wake) = &server.project_session_refresh_wake {
+                wake.wake();
+            }
+            if let Some(wake) = &server.user_session_refresh_wake {
+                wake.wake();
+            }
+            server.record_hook_route_analytics(
+                &root,
+                &event,
+                branch.resolve_for(&root).as_deref(),
+                seq,
+            );
+            server.record_hook_span_observation(&event, &resolved);
+        }
         match server.code_index_hook_sink.as_ref() {
             Some(sink) => {
-                code_index_host_outcome(&sink(resolved.requested_root, event.rel_paths).await)
+                let admission = sink(root.clone(), event.rel_paths.clone()).await;
+                if admission.is_queued()
+                    && let Some(db) = server.project_session_db.as_deref()
+                {
+                    tracedecay_session_memory::event_lane::publish(
+                        db,
+                        tracedecay_session_memory::event_lane::ActivityFamilyV1::CodeIndex,
+                        &root,
+                        Some(scope.project_id.as_str()),
+                        event.rel_paths.len() as u64,
+                        Some(event.kind.as_key()),
+                    )
+                    .await;
+                }
+                code_index_host_outcome(&admission)
             }
             None => HostAdmissionOutcome::retained_unavailable(CODE_INDEX_SCHEDULER_UNAVAILABLE),
         }
@@ -181,12 +226,15 @@ impl McpServer {
         cg: Arc<TraceDecay>,
         root: &Path,
         plan: HookEventPlan,
+        admission_seq: Option<u64>,
     ) -> HostAdmissionOutcome {
         match plan {
             HookEventPlan::SyncFilesAt {
                 root: effect_root,
                 scope,
                 agent,
+                event_kind,
+                had_command,
                 route,
                 rel_paths,
             } => {
@@ -195,7 +243,16 @@ impl McpServer {
                 {
                     return HostAdmissionOutcome::degraded("project_store_mismatch");
                 }
-                self.run_routed_file_edit(effect_root, scope, agent, route, rel_paths)
+                let event = hook_events::HookEvent {
+                    agent,
+                    kind: event_kind,
+                    rel_paths,
+                    had_command,
+                    cwd: Some(effect_root.clone()),
+                    route,
+                    receipt: None,
+                };
+                self.run_routed_file_edit(effect_root, scope, event, admission_seq)
                     .await
             }
             HookEventPlan::SyncFiles(rel_paths) => {
