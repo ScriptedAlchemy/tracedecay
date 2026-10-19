@@ -1,5 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{OnceLock, Weak};
 use tracedecay_hooks::{HookEventFamily, HookEventSupportV1};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
@@ -843,39 +844,40 @@ impl OrderedHookFixture {
     }
 
     fn request(&self, order: u8) -> HookOrchestrationRequestV1 {
-        let template = native_request(111);
-        let mut envelope = template.hook.envelope().clone();
-        envelope.event_id = [order; 16];
-        let binding = HookScopeBindingV1 {
-            host: envelope.producer,
-            project_id: envelope.project_id,
-            repository_id: envelope.repository_id,
-            worktree_id: envelope.worktree_id,
-            worktree_epoch: envelope.worktree_epoch,
-            binding_token: envelope.binding_token,
-            capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
-                family: tracedecay_hooks::HookEventFamily::SavedEdit,
-                support: tracedecay_hooks::stock_event_support(
-                    envelope.producer,
-                    tracedecay_hooks::HookEventFamily::SavedEdit,
-                ),
-            }],
-        };
-        let mut request = HookOrchestrationRequestV1::from_envelope(
-            envelope,
-            &binding,
-            template.lifecycle,
-            1,
-            false,
-        )
-        .unwrap();
-        request.admission_order = Some(u64::from(order));
-        let settled = self.settled.clone();
-        request.completion = Some(Arc::new(move |terminal| {
-            settled.send((u64::from(order), terminal)).unwrap();
-        }));
-        request
+        ordered_request(order, self.settled.clone())
     }
+}
+
+fn ordered_request(
+    order: u8,
+    settled: tokio::sync::mpsc::UnboundedSender<(u64, HookOrchestrationSettlementV1)>,
+) -> HookOrchestrationRequestV1 {
+    let template = native_request(111);
+    let mut envelope = template.hook.envelope().clone();
+    envelope.event_id = [order; 16];
+    let binding = HookScopeBindingV1 {
+        host: envelope.producer,
+        project_id: envelope.project_id,
+        repository_id: envelope.repository_id,
+        worktree_id: envelope.worktree_id,
+        worktree_epoch: envelope.worktree_epoch,
+        binding_token: envelope.binding_token,
+        capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
+            family: tracedecay_hooks::HookEventFamily::SavedEdit,
+            support: tracedecay_hooks::stock_event_support(
+                envelope.producer,
+                tracedecay_hooks::HookEventFamily::SavedEdit,
+            ),
+        }],
+    };
+    let mut request =
+        HookOrchestrationRequestV1::from_envelope(envelope, &binding, template.lifecycle, 1, false)
+            .unwrap();
+    request.admission_order = Some(u64::from(order));
+    request.completion = Some(Arc::new(move |terminal| {
+        settled.send((u64::from(order), terminal)).unwrap();
+    }));
+    request
 }
 
 #[tokio::test]
@@ -960,4 +962,54 @@ async fn concurrent_live_admission_and_delayed_replay_keep_newest_boundary() {
         assert!(terminals.contains(&(1, HookOrchestrationSettlementV1::Superseded)));
     }
     assert!(fixture.runtime.shutdown().await);
+}
+
+/// The outer biased select has already polled cancellation when this work
+/// admits its successor. Its ready retryable result must still settle the
+/// incumbent's canonically proven supersession.
+#[tokio::test]
+async fn cooperative_failure_during_supersession_emits_the_owed_terminal() {
+    let (settled, mut terminals) = tokio::sync::mpsc::unbounded_channel();
+    let successor = Arc::new(StdMutex::new(Some(ordered_request(2, settled.clone()))));
+    let owner = Arc::new(OnceLock::<Weak<BoundedHookOrchestratorV1>>::new());
+    let runtime = BoundedHookOrchestratorV1::new(1, {
+        let successor = Arc::clone(&successor);
+        let owner = Arc::clone(&owner);
+        move |request: HookOrchestrationRequestV1, cancellation: CancellationToken| {
+            let successor = Arc::clone(&successor);
+            let owner = Arc::clone(&owner);
+            async move {
+                if request.admission_order == Some(1) {
+                    assert!(!cancellation.is_cancelled());
+                    let runtime = owner.get().unwrap().upgrade().unwrap();
+                    assert_eq!(
+                        runtime.admit(successor.lock().unwrap().take().unwrap()),
+                        HookOrchestrationAdmissionV1::Enqueued
+                    );
+                    assert!(cancellation.is_cancelled());
+                    HookOrchestrationWorkOutcomeV1::RetryableFailure
+                } else {
+                    HookOrchestrationWorkOutcomeV1::Completed
+                }
+            }
+        }
+    })
+    .unwrap();
+    assert!(owner.set(Arc::downgrade(&runtime)).is_ok());
+    assert_eq!(
+        runtime.admit(ordered_request(1, settled)),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        [
+            terminals.recv().await.unwrap(),
+            terminals.recv().await.unwrap(),
+        ]
+    })
+    .await
+    .expect("both admitted events retain their typed terminal");
+    assert!(observed.contains(&(1, HookOrchestrationSettlementV1::Superseded)));
+    assert!(observed.contains(&(2, HookOrchestrationSettlementV1::Completed)));
+    assert!(terminals.try_recv().is_err());
+    assert!(runtime.shutdown().await);
 }

@@ -267,7 +267,7 @@ impl BoundedHookOrchestratorV1 {
         emit_terminal: bool,
         permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
-        let completions = {
+        let (completions, superseded) = {
             let mut in_flight = in_flight
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -298,20 +298,24 @@ impl BoundedHookOrchestratorV1 {
             // free while it still looks in flight. Its terminals, the host's
             // cue to send the session's next boundary, follow.
             drop(permit);
-            completions
+            // A cooperative producer can return a retryable result after the
+            // outer select polled cancellation. The same incumbent lock owns
+            // supersession and removal, so its proof remains terminal even
+            // when the work result itself does not report completion.
+            (
+                completions,
+                operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
         };
-        if emit_terminal {
+        if emit_terminal || superseded {
             for completion in completions {
-                completion(
-                    if operation
-                        .superseded
-                        .load(std::sync::atomic::Ordering::Acquire)
-                    {
-                        HookOrchestrationSettlementV1::Superseded
-                    } else {
-                        HookOrchestrationSettlementV1::Completed
-                    },
-                );
+                completion(if superseded {
+                    HookOrchestrationSettlementV1::Superseded
+                } else {
+                    HookOrchestrationSettlementV1::Completed
+                });
             }
         }
     }
