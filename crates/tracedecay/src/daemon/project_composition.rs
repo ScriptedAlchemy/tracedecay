@@ -26,6 +26,7 @@ mod code_index_activation;
 mod full_owner_mount;
 #[cfg(test)]
 mod future_size_tests;
+mod hook_source_pending;
 mod runtime;
 mod session_database_admission;
 use code_index_activation::{
@@ -33,6 +34,7 @@ use code_index_activation::{
     code_index_freshness_probe_sink, code_index_hook_sink, code_index_reconcile_sink,
 };
 use full_owner_mount::join_independent_full_owner_mounts;
+pub(in crate::daemon) use hook_source_pending::project_hook_source_pending;
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
 use runtime::bind_verified_project_graph_runtime;
 use session_database_admission::{join_independent_session_opens, log_session_database_admission};
@@ -574,6 +576,7 @@ struct OpenedProjectGraph {
 /// Ports both of this route's MCP servers publish. Built once before the core
 /// server; the full server that replaces the core publishes the same ports.
 struct ProjectRoutePorts {
+    host_admission_broker: tracedecay_host_admission::SharedHostAdmissionBroker,
     code_index: ProjectCodeIndexAuthorities,
     dashboard_code_index_freshness_reader:
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
@@ -937,6 +940,13 @@ impl ProjectOpenInputs<'_> {
             &route_registered,
             *project_database_is_read_only,
         )?;
+        let (host_admission_broker, pending_source) = project_hook_source_pending(
+            self.store_administration,
+            cg,
+            self.canonical_project_path,
+            &code_index.scope,
+        )
+        .await?;
         let code_index_mount = code_index_activation_mount(CodeIndexActivationMountInputs {
             invocation: self.invocation.clone(),
             project_id: code_index.project_id.clone(),
@@ -949,6 +959,7 @@ impl ProjectOpenInputs<'_> {
             cancellation: route_cancellation.clone(),
             graph_runtime: Arc::clone(&graph_runtime),
             graph_publication_database: Arc::new(cg.db().clone()),
+            pending_source,
         });
         let code_index_hint_sink = code_index_activation_hint_sink(
             self.invocation.code_index_schedulers.clone(),
@@ -1023,6 +1034,7 @@ impl ProjectOpenInputs<'_> {
             transcript_source_profile,
             code_index_activation,
             ports: ProjectRoutePorts {
+                host_admission_broker,
                 code_index,
                 dashboard_code_index_freshness_reader,
                 code_index_readiness_waiter,
@@ -1371,11 +1383,7 @@ impl ProjectOpenInputs<'_> {
             &delivery_access,
         )
         .await?;
-        let host_admission_broker = Some(
-            self.store_administration
-                .host_admission_broker(&session_db)
-                .await?,
-        );
+        let host_admission_broker = Some(Arc::clone(&core.ports.host_admission_broker));
         let refresh_schedulers = self
             .store_administration
             .session_temporal_refresh_schedulers();

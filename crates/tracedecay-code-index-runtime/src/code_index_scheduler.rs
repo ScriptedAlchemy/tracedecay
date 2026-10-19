@@ -29,6 +29,26 @@ use tracedecay_contracts::now_micros;
 const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 pub use tracedecay_code_index_retention::code_index_generations::scoped_code_index_store_root;
 
+/// Route-bound input already durably admitted outside the index scheduler.
+/// The reader borrows its owning broker; progress only wakes callers to reread
+/// that authority. It neither owns work nor grants source currency.
+pub trait CodeIndexSourcePendingReaderV1: Send + Sync {
+    fn read_pending(
+        &self,
+    ) -> Result<bool, tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1>;
+    fn revision(&self) -> u64;
+    fn changed(&self, observed: u64) -> CodeIndexSourcePendingChangedFutureV1<'_>;
+}
+
+pub type CodeIndexSourcePendingChangedFutureV1<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+/// Source inputs installed together before a worktree becomes visible.
+pub struct CodeIndexSourceInputsV1 {
+    pub path_policy: tracedecay_domain::IndexPathPolicyV1,
+    pub pending_admission: Option<std::sync::Arc<dyn CodeIndexSourcePendingReaderV1>>,
+}
+
 /// How the scheduler is hinted about changes.
 ///
 /// `TraceDecay`'s edits are agent-driven, so the daemon already learns about

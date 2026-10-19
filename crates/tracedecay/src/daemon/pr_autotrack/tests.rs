@@ -167,6 +167,7 @@ async fn cancelled_pr_teardown_preserves_artifacts_and_retries_exactly() {
         schedulers: Some(&schedulers),
         graph: None,
         command_control: &cancelled_control,
+        stores: None,
     };
     let report = reconcile_project_with_administration(
         repo.path(),
@@ -196,6 +197,7 @@ async fn cancelled_pr_teardown_preserves_artifacts_and_retries_exactly() {
         schedulers: Some(&schedulers),
         graph: None,
         command_control: &retry_control,
+        stores: None,
     };
     let report = reconcile_project_with_administration(
         repo.path(),
@@ -415,7 +417,7 @@ async fn assert_pr_11_head_reconciles(repo: &Path) {
         &data_root,
         &discovery,
         10,
-        PrStoreAdministration::with_control(&schedulers, &graph, &command_control),
+        PrStoreAdministration::unhosted_with_control(&schedulers, &graph, &command_control),
     )
     .await
     .expect("load managed PR state");
@@ -767,7 +769,7 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     )
     .expect("linked-worktree scope");
     let schedulers = CodeIndexSchedulerRegistryV1::new(1);
-    activate_linked_worktree(&schedulers, &graph, &linked)
+    activate_linked_worktree(None, &schedulers, &graph, &linked)
         .await
         .expect("mount retained linked-worktree generation");
     let latest = tokio::time::timeout(Duration::from_secs(5), async {
@@ -853,23 +855,12 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
-    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
-
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/advance");
-    let graph = Arc::new(
-        tracedecay_project::project::TraceDecay::open_with_options_for_test(
-            repo.path(),
-            tracedecay_project::project::TraceDecayOpenOptions::default(),
-        )
-        .await
-        .unwrap(),
-    );
-    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
-    let initial =
-        activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/advance")
-            .await
-            .expect("initial activation");
+    let hosted = HostedManualBranchFixture::open(repo.path()).await;
+    let graph = Arc::clone(&hosted.graph);
+    let schedulers = hosted.engine.invocation.code_index_schedulers.clone();
+    let initial = hosted.activate(&schedulers, "feature/advance").await;
 
     let publication = crate::daemon::branch_add::branch_publication_context(&graph).unwrap();
     publication
@@ -904,6 +895,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     let staged_graph = Arc::clone(&graph);
     let staged_schedulers = schedulers.clone();
     let staged_repo = repo.path().to_path_buf();
+    let staged_stores = hosted.engine.store_administration.clone();
     let (staged_sender, staged_receiver) = tokio::sync::oneshot::channel();
     let owner = tokio::spawn(async move {
         let lifecycle = acquire_manual_branch_lifecycle(
@@ -913,6 +905,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
         .await
         .unwrap();
         let staged = activate_manual_branch_head_with_lifecycle(
+            &staged_stores,
             &staged_repo,
             &staged_graph,
             Some(&staged_schedulers),
@@ -953,7 +946,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
         Arc::clone(&graph),
         schedulers.clone(),
         "feature/advance".to_owned(),
-        data_root.clone(),
+        hosted.engine.store_administration.clone(),
         acquire_manual_branch_lifecycle(&data_root, "feature/advance")
             .await
             .unwrap(),
@@ -981,7 +974,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
         Arc::clone(&graph),
         schedulers.clone(),
         "feature/advance".to_owned(),
-        data_root.clone(),
+        hosted.engine.store_administration.clone(),
         acquire_manual_branch_lifecycle(&data_root, "feature/advance")
             .await
             .unwrap(),
@@ -1016,6 +1009,8 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
         "the new candidate must carry the newly resolved branch head"
     );
     schedulers.shutdown().await;
+    let shutdown = hosted.engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1089,7 +1084,7 @@ async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_track
     let lifecycle = acquire_manual_branch_lifecycle(&data_root, "feature/failure-cleanup")
         .await
         .expect("lifecycle owner");
-    let activation = activate_manual_branch_head_with_lifecycle(
+    let activation = unhosted_manual_activation_with_lifecycle(
         repo.path(),
         &graph,
         Some(&schedulers),
@@ -1256,7 +1251,7 @@ async fn manual_branch_head_git_failure_is_retryable_not_missing_ref() {
         let lifecycle = acquire_manual_branch_lifecycle(&data_root, branch)
             .await
             .expect("lifecycle owner");
-        let error = activate_manual_branch_head_with_lifecycle(
+        let error = unhosted_manual_activation_with_lifecycle(
             repo.path(),
             &graph,
             Some(&schedulers),
@@ -1289,7 +1284,7 @@ async fn manual_branch_head_git_failure_is_retryable_not_missing_ref() {
     let lifecycle = acquire_manual_branch_lifecycle(&data_root, branch)
         .await
         .expect("lifecycle owner");
-    let activation = activate_manual_branch_head_with_lifecycle(
+    let activation = unhosted_manual_activation_with_lifecycle(
         repo.path(),
         &graph,
         Some(&schedulers),
@@ -1391,7 +1386,7 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
                 &owner_repo,
                 &owner_data_root,
                 &owner_branch,
-                PrStoreAdministration::with_control(
+                PrStoreAdministration::unhosted_with_control(
                     &owner_schedulers,
                     &owner_graph,
                     &owner_control,
@@ -1586,4 +1581,117 @@ fn dashboard_managed_summary_reader_is_empty_without_state() {
             .len(),
         0
     );
+}
+
+async fn unhosted_manual_activation_with_lifecycle(
+    repo_root: &Path,
+    graph: &Arc<tracedecay_project::project::TraceDecay>,
+    schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    branch: &str,
+    lifecycle: &ManualBranchLifecycleLeaseV1,
+    command_control: &PrCommandControl,
+) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
+    let administration = match schedulers {
+        Some(schedulers) => {
+            PrStoreAdministration::unhosted_with_control(schedulers, graph, command_control)
+        }
+        None => PrStoreAdministration {
+            schedulers: None,
+            graph: Some(graph),
+            command_control,
+            stores: None,
+        },
+    };
+    activate_manual_branch_with_administration(
+        repo_root,
+        &graph.store_layout().data_root,
+        branch,
+        administration,
+        lifecycle,
+    )
+    .await
+}
+
+#[cfg(unix)]
+struct HostedManualBranchFixture {
+    engine: crate::daemon::DaemonEngine,
+    graph: Arc<tracedecay_project::project::TraceDecay>,
+    _profile: tempfile::TempDir,
+    _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+}
+
+#[cfg(unix)]
+impl HostedManualBranchFixture {
+    async fn open(repo: &Path) -> Self {
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let temporary = tempfile::tempdir().unwrap();
+        let profile =
+            tracedecay_runtime_core::config::ProfileRoot::new(temporary.path().join("profile"));
+        let identity =
+            tracedecay_daemon_identity::profile_identity::load_or_create(profile.data_dir())
+                .unwrap();
+        let handshake = crate::daemon::handshake_for_current_client(
+            &profile,
+            Some(repo.to_path_buf()),
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        crate::daemon::tests::initialize_test_project(repo, &handshake.client_identity).await;
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            profile.data_dir(),
+            1,
+            "manual-branch-fixture",
+        )
+        .unwrap();
+        let engine = crate::daemon::DaemonEngine::default()
+            .with_owner_profile(profile.clone())
+            .with_profile_identity(identity);
+        engine
+            .invocation
+            .install_worker_selection(
+                &engine.store_administration,
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
+            )
+            .unwrap();
+        let graph = Arc::new(
+            Box::pin(crate::daemon::open_project_for_handshake(
+                repo,
+                &handshake,
+                &engine.store_administration,
+                &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+            ))
+            .await
+            .unwrap(),
+        );
+        Self {
+            engine,
+            graph,
+            _profile: temporary,
+            _scope: scope,
+        }
+    }
+
+    async fn activate(
+        &self,
+        schedulers: &CodeIndexSchedulerRegistryV1,
+        branch: &str,
+    ) -> ManualBranchActivation {
+        let lifecycle =
+            acquire_manual_branch_lifecycle(&self.graph.store_layout().data_root, branch)
+                .await
+                .unwrap();
+        activate_manual_branch_head_with_lifecycle(
+            &self.engine.store_administration,
+            self.graph.project_root(),
+            &self.graph,
+            Some(schedulers),
+            branch,
+            &lifecycle,
+            default_pr_command_control(),
+        )
+        .await
+        .unwrap()
+    }
 }

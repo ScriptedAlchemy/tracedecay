@@ -111,7 +111,11 @@ export function generationAnchor() { return 1; }
                     runtime.code_graph_seat_port(),
                     database,
                     CodeGraphActivationPolicyV1::Enabled,
-                    tracedecay_code_index_runtime::registry_default_index_path_policy(),
+                    tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSourceInputsV1 {
+                        path_policy:
+                            tracedecay_code_index_runtime::registry_default_index_path_policy(),
+                        pending_admission: None,
+                    },
                 )
                 .await
                 .expect("mount persistent graph-backed scheduler");

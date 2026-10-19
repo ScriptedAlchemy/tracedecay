@@ -133,6 +133,8 @@ async fn admit_registered_file_edit(
         root: root.clone(),
         scope,
         agent: event.agent,
+        event_kind: event.kind,
+        had_command: event.had_command,
         route: event.route.clone(),
         rel_paths: event.rel_paths.clone(),
     })
@@ -157,9 +159,9 @@ async fn admit_registered_file_edit(
     Ok(routed)
 }
 
-/// Delivers `event` and resolves once the daemon acknowledges it, however
-/// long admission takes. A host hook that must not block its agent bounds
-/// this call itself.
+/// Delivers `event` and resolves after the daemon commits durable admission.
+/// Index effects may still be owed; source currency includes that canonical
+/// pending work until scheduler acceptance. A host bounds this call itself.
 #[tracing::instrument(name = "daemon.engine.hooks.notify", level = "trace", skip_all)]
 pub async fn notify_hook_event(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
@@ -199,9 +201,9 @@ async fn notify_hook_event_to_connection(
     };
     // A stateless request, not a notification: its own daemon connection has
     // no `initialize` session for a notification to ride. The daemon answers
-    // once it has admitted the event, the edited paths into the code-index
-    // queue included, so `Delivered` means a status read issued afterwards
-    // already sees the save.
+    // after the broker commits admission. `Delivered` does not wait for
+    // scheduler acceptance; subsequent source-currency reads account for the
+    // exact routed edit while the broker still owes that handoff.
     let mut request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(serde_json::Value::from(1)),

@@ -17,6 +17,9 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::*;
 
+#[cfg(unix)]
+mod host_index_handoff;
+
 const PHASE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Wall-clock bound for the dedicated-runtime drain. Isolation `--exact`
 /// hangs sat in `Runtime::drop` after the two servers were already down;
