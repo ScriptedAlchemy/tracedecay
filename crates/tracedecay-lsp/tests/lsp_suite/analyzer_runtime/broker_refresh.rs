@@ -1404,3 +1404,87 @@ while True:
     assert_eq!(reply["id"], 2);
     assert_eq!(reply["result"]["applied"], false);
 }
+
+#[tokio::test]
+async fn semantic_eof_is_retired_as_transport_failure_not_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let document_path = temp.path().join(FAKE_PATH);
+    std::fs::create_dir_all(document_path.parent().unwrap()).unwrap();
+    std::fs::write(&document_path, "let value = 1;").unwrap();
+    let script_path = temp.path().join("closed_stdout_lsp.py");
+    std::fs::write(
+        &script_path,
+        r#"
+import json
+import sys
+import time
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    if message.get("method") == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif message.get("method") == "textDocument/documentSymbol":
+        sys.stdout.close()
+        time.sleep(60)
+"#,
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap()
+        .expect("fake analyzer is executable");
+
+    let outcome = authority
+        .start(
+            AdmittedRoot::new(root_uri.clone()),
+            LspRequestId::Number(3),
+            tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+                document_uri: format!("{root_uri}{FAKE_PATH}"),
+            })
+            .unwrap(),
+        )
+        .await;
+
+    assert!(matches!(
+        outcome,
+        tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
+            if coverage == "analyzer-transport-failed"
+    ));
+    assert_eq!(
+        authority.analyzer_readiness().last_failure(),
+        Some(AnalyzerEvent::TransportFailed)
+    );
+}

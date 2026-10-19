@@ -318,6 +318,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             if matches!(
                                 &result,
                                 Err(LspSemanticRequestError::Transport { .. }
+                                    | LspSemanticRequestError::ProcessExited { .. }
                                     | LspSemanticRequestError::InvalidResponse { .. }
                                     | LspSemanticRequestError::Cancelled)
                             ) {

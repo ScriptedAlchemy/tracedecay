@@ -200,6 +200,7 @@ impl LspSemanticRequest {
 pub enum LspSemanticRequestError {
     Cancelled,
     TimedOut,
+    ProcessExited { status: String },
     Remote { code: Option<i64>, message: String },
     Transport { class: String },
     InvalidResponse { class: String },
@@ -210,6 +211,7 @@ impl LspSemanticRequestError {
         match self {
             Self::Cancelled => AnalyzerEvent::Cancelled,
             Self::TimedOut => AnalyzerEvent::TimedOut,
+            Self::ProcessExited { .. } => AnalyzerEvent::Crashed,
             Self::Remote { .. } => AnalyzerEvent::RemoteError,
             Self::Transport { .. } => AnalyzerEvent::TransportFailed,
             Self::InvalidResponse { .. } => AnalyzerEvent::InvalidResponse,
@@ -228,6 +230,9 @@ impl std::fmt::Display for LspSemanticRequestError {
         match self {
             Self::Cancelled => f.write_str("analyzer request was cancelled"),
             Self::TimedOut => f.write_str("analyzer request timed out"),
+            Self::ProcessExited { status } => {
+                write!(f, "analyzer process exited before responding ({status})")
+            }
             Self::Remote {
                 code: Some(code),
                 message,
@@ -818,6 +823,9 @@ impl StdioLspClient {
                     let _ = self.cancel_request(request_id, timeouts).await;
                     return Err(LspSemanticRequestError::TimedOut);
                 }
+                SemanticMessagePoll::Closed => {
+                    return Err(self.closed_semantic_error().await);
+                }
             };
             match message {
                 JsonRpcMessage::Request { id, method, params } => {
@@ -1030,6 +1038,26 @@ impl StdioLspClient {
         }
     }
 
+    async fn closed_semantic_error(&self) -> LspSemanticRequestError {
+        match self.process.try_wait().await {
+            Ok(Some(status)) => LspSemanticRequestError::ProcessExited {
+                status: status.to_string(),
+            },
+            Ok(None) => LspSemanticRequestError::Transport {
+                class: format!(
+                    "LSP server '{}' closed its semantic transport",
+                    self.command
+                ),
+            },
+            Err(error) => LspSemanticRequestError::Transport {
+                class: format!(
+                    "failed to inspect LSP server '{}' after its semantic transport closed: {error}",
+                    self.command
+                ),
+            },
+        }
+    }
+
     /// Terminates and waits for a retired process. The shared client slot
     /// stores this future when an in-flight owner is dropped, and no successor
     /// may acquire that slot until the future completes.
@@ -1212,7 +1240,7 @@ async fn read_message_until(
                 class: error.to_string(),
             }),
         Ok(FramePoll::Pending) => Ok(SemanticMessagePoll::Pending),
-        Ok(FramePoll::Closed) => Ok(SemanticMessagePoll::Pending),
+        Ok(FramePoll::Closed) => Ok(SemanticMessagePoll::Closed),
         Err(AsyncContentLengthError::DeadlineElapsed) => Err(LspSemanticRequestError::TimedOut),
         Err(AsyncContentLengthError::Io(error)) => Err(LspSemanticRequestError::Transport {
             class: format!("failed to read LSP frame: {error}"),
@@ -1228,6 +1256,7 @@ async fn read_message_until(
 enum SemanticMessagePoll {
     Message(JsonRpcMessage),
     Pending,
+    Closed,
 }
 
 #[tracing::instrument(name = "lsp.analyzer.response_parse", level = "trace", skip_all)]
