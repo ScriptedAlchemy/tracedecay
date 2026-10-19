@@ -847,11 +847,13 @@ mod tests {
             admit_hook_v2_envelope(&graph, &second_edit, None, hook_replay_now()).await,
             HookV2AdmissionOutcomeV1::Admitted { .. }
         ));
-        assert!(tracedecay_daemon_service::register_hook_orchestration_runtime(
-            project_id,
-            binding.worktree_id,
-            &runtime,
-        ));
+        assert!(
+            tracedecay_daemon_service::register_hook_orchestration_runtime(
+                project_id,
+                binding.worktree_id,
+                &runtime,
+            )
+        );
         drain_all_hosts(
             &graph,
             data_root,
@@ -897,7 +899,10 @@ mod tests {
         })
         .await
         .expect("second mounted edit must settle its ledger debt");
-        assert!(runs.try_recv().is_err(), "second edit executes exactly once");
+        assert!(
+            runs.try_recv().is_err(),
+            "second edit executes exactly once"
+        );
         // Claude deliberately omits lifecycle writes while intent is disabled;
         // an acknowledged edit can therefore need ledger-only recovery.
         tracedecay_daemon_service::unregister_hook_orchestration_runtime(
