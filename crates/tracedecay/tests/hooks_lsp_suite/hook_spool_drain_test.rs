@@ -549,7 +549,9 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     assert_eq!(
         claude_edit(&home, &worktree, &data_root, "toolu_unbound_first"),
         "hook_v2_accepted",
-        "the first edit in an unbound worktree must reach the daemon, not be dropped"
+        "the first edit in an unbound worktree must reach the daemon: {}\n{}",
+        std::fs::read_to_string(&log).unwrap(),
+        std::fs::read_to_string(data_root.join("hook_analytics.jsonl")).unwrap()
     );
     assert!(
         latency_until(PROMPT_DRAIN, || entered.is_file()).is_some(),
