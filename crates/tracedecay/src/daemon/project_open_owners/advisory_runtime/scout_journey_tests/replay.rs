@@ -624,3 +624,52 @@ async fn enqueued_intent_recovery_cannot_mount_past_durable_configuration_drift(
         &sessions
     ));
 }
+
+#[tokio::test]
+async fn mounted_intent_refuses_corrupt_entries_at_the_same_configuration_revision() {
+    let (fixture, graph, runtime) = registered_fixture().await;
+    let sessions = runtime
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    let (_, entry) = mount_intent(&fixture, &graph, &sessions).await;
+    let lifecycle = fixture.lifecycle.intent_scoped().unwrap();
+    assert_eq!(
+        graph
+            .resolve_mounted_context_scout_claim_authority(&lifecycle)
+            .await,
+        Some((entry.work.address, entry.work.input_watermark))
+    );
+    // Immutable updates do not prevent a malformed writer from inserting a
+    // second layer for an existing key. Revision equality alone is insufficient.
+    let transaction = sessions.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction.execute(
+            "INSERT INTO configuration_entries
+             (revision_id, key, layer_kind, layer_id, schema_revision, typed_value)
+             SELECT revision_id, key, layer_kind, 'corrupt-extra-layer', schema_revision, typed_value
+             FROM configuration_entries ORDER BY key LIMIT 1",
+            (),
+        ).await.unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+    assert!(
+        graph
+            .configuration_runtime()
+            .client()
+            .current_state()
+            .await
+            .is_err()
+    );
+    assert!(
+        graph
+            .resolve_mounted_context_scout_claim_authority(&lifecycle)
+            .await
+            .is_none()
+    );
+    assert!(unregister_context_scout_lifecycle_authority(
+        fixture.binding.project_id,
+        fixture.binding.worktree_id,
+        &sessions,
+    ));
+}
