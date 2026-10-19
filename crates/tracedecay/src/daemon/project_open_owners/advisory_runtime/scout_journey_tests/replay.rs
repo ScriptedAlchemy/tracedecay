@@ -5,9 +5,13 @@ use std::time::Duration;
 
 use tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1;
 use tracedecay_agent_hosts::agents::context_scout::intent_pass::ContextScoutIntentPassOutcomeV1;
+use tracedecay_agent_hosts::agents::context_scout::{
+    ContextScoutDurableStoreOutcomeV1, ContextScoutSuppressionV1,
+};
 use tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding;
 use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutModelOutcomeV1,
 };
 use tracedecay_contracts::retrieval::{
     ContextScoutStoreStatusV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
@@ -309,6 +313,95 @@ async fn mount_intent(
             .await
     );
     (engine, entry)
+}
+
+async fn intent_pass_overlapping_a_claim_is_suppressed(record_delivery: bool) {
+    let (fixture, graph, runtime) = registered_fixture().await;
+    let sessions = runtime
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    let (engine, entry) = mount_intent(&fixture, &graph, &sessions).await;
+    let stop = fixture.hook(
+        73,
+        HookEventV2::SessionBoundary {
+            boundary: HookBoundaryV1::TurnComplete,
+        },
+    );
+    let project_key = RegisteredGlobalDb::canonical_project_key(graph.project_root());
+    let (started, release) = engine.hold_next_request();
+    let claim_during_evaluation = async {
+        started.await.unwrap();
+        let claimed_at = now_utc_micros();
+        let (guidance, claim) = fixture
+            .owner
+            .claim_ready_guidance_exact(
+                stop.envelope(),
+                entry.work.address,
+                entry.work.input_watermark,
+                1,
+                claimed_at,
+            )
+            .await
+            .unwrap();
+        assert_eq!(guidance.text, entry.envelope.candidate.suggestion_text);
+        if record_delivery {
+            let receipt = ContextScoutDeliveryReceiptV1 {
+                receipt_id: context_scout_delivery_receipt_id(
+                    stop.envelope().event_id,
+                    guidance.guidance_id,
+                ),
+                envelope_id: guidance.guidance_id,
+                delivered_at: now_utc_micros(),
+                outcome: ContextScoutDeliveryOutcomeV1::Attempted,
+            };
+            assert_eq!(
+                fixture.owner.record_delivery(&claim, &receipt).await,
+                ContextScoutDurableStoreOutcomeV1::Stored
+            );
+        }
+        release.send(()).unwrap();
+    };
+    let (outcome, ()) = tokio::join!(
+        fixture.pass(&stop, &sessions, &project_key, &engine),
+        claim_during_evaluation,
+    );
+    assert_eq!(
+        outcome,
+        ContextScoutIntentPassOutcomeV1::Suppressed {
+            reason: ContextScoutSuppressionV1::Duplicate,
+            model_outcome: ContextScoutModelOutcomeV1::Succeeded,
+        },
+        "the original suggestion is already claimed; delivered={record_delivery}"
+    );
+    assert_eq!(engine.requests(), 2);
+    let recent = fixture
+        .owner
+        .recent_exact(entry.work.address, 8)
+        .await
+        .unwrap();
+    if record_delivery {
+        assert_eq!(recent.pending, Vec::new());
+        assert_eq!(recent.deliveries.len(), 1);
+        assert_eq!(recent.deliveries[0].entry, *entry);
+    } else {
+        assert_eq!(recent.pending, vec![*entry]);
+        assert_eq!(recent.deliveries, Vec::new());
+    }
+    assert!(unregister_context_scout_lifecycle_authority(
+        fixture.binding.project_id,
+        fixture.binding.worktree_id,
+        &sessions,
+    ));
+}
+
+#[tokio::test]
+async fn intent_pass_with_an_already_claimed_suggestion_is_suppressed() {
+    Box::pin(intent_pass_overlapping_a_claim_is_suppressed(false)).await;
+}
+
+#[tokio::test]
+async fn intent_pass_with_a_delivery_during_evaluation_is_suppressed() {
+    Box::pin(intent_pass_overlapping_a_claim_is_suppressed(true)).await;
 }
 
 #[tokio::test]

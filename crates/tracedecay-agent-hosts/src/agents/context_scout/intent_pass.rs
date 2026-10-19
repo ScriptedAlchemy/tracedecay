@@ -59,9 +59,9 @@ use super::session_window::{
 };
 use super::{
     ContextScoutDeliverySelectionInputV1, ContextScoutDurableStoreOutcomeV1,
-    ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
-    ContextScoutSessionClaimInputV1, ContextScoutSessionEvidenceExt, ContextScoutSuppressionV1,
-    ContextScoutTriggerV1, select_context_scout_delivery_window,
+    ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1,
+    ContextScoutServiceStateV1, ContextScoutSessionClaimInputV1, ContextScoutSessionEvidenceExt,
+    ContextScoutSuppressionV1, ContextScoutTriggerV1, select_context_scout_delivery_window,
 };
 
 const INTENT_CANDIDATE_DEDUPE_DOMAIN: &str = "tracedecay.context-scout.intent-candidate.v1";
@@ -228,12 +228,11 @@ pub fn intent_hint_emitted_event(
     })
 }
 
-/// Recover only this boundary's original queue commit. The caller must still
-/// mount it through the current durable configuration and address authority.
-async fn pending_intent_entry(
+/// Read this exact address under the pass's current configuration and deadline.
+async fn recent_intent_state(
     pass: &ContextScoutIntentPassV1<'_>,
     address: ContextScoutAddressV1,
-) -> Result<Option<Box<ContextScoutDurableQueueEntryV1>>, ContextScoutIntentPassOutcomeV1> {
+) -> Result<ContextScoutRecentStateV1, ContextScoutIntentPassOutcomeV1> {
     let recent = tokio::select! {
         biased;
         () = pass.cancellation.cancelled() => return Err(ContextScoutIntentPassOutcomeV1::Cancelled),
@@ -248,18 +247,78 @@ async fn pending_intent_entry(
     if recent.configuration_revision != revision {
         return Err(ContextScoutIntentPassOutcomeV1::Unavailable);
     }
+    Ok(recent)
+}
+
+/// Recover only this boundary's original queue commit. The caller must still
+/// mount it through the current durable configuration and address authority.
+fn pending_intent_entry(
+    pass: &ContextScoutIntentPassV1<'_>,
+    address: ContextScoutAddressV1,
+    recent: &ContextScoutRecentStateV1,
+) -> Result<Option<Box<ContextScoutDurableQueueEntryV1>>, ContextScoutIntentPassOutcomeV1> {
+    let revision = pass.pin.configuration().control().configuration_revision;
     let envelope_id =
         intent_envelope_id(pass.hook).ok_or(ContextScoutIntentPassOutcomeV1::Unavailable)?;
     Ok(recent
         .pending
-        .into_iter()
+        .iter()
         .find(|entry| {
             entry.work.address == address
                 && entry.envelope.envelope_id == envelope_id
                 && entry.envelope.configuration_revision == revision
                 && entry.envelope.candidate.expires_at.0 > pass.observed_at.0
         })
+        .cloned()
         .map(Box::new))
+}
+
+/// A concurrent queue commit or host claim may precede the enqueue result.
+/// Preserve this boundary's owed entry; only a current matching commit can
+/// establish duplicate suppression. Unrelated supersession stays unavailable.
+async fn reconcile_intent_commit(
+    pass: &ContextScoutIntentPassV1<'_>,
+    address: ContextScoutAddressV1,
+    outcome: ContextScoutRuntimeOutcomeV1,
+) -> Result<ContextScoutRuntimeOutcomeV1, ContextScoutIntentPassOutcomeV1> {
+    match outcome {
+        ContextScoutRuntimeOutcomeV1::Enqueued {
+            entry: prepared_entry,
+            store_outcome:
+                store_outcome @ (ContextScoutDurableStoreOutcomeV1::Duplicate
+                | ContextScoutDurableStoreOutcomeV1::Superseded),
+        } => {
+            let recent = recent_intent_state(pass, address).await?;
+            if let Some(entry) = pending_intent_entry(pass, address, &recent)? {
+                return Ok(ContextScoutRuntimeOutcomeV1::Enqueued {
+                    entry,
+                    store_outcome,
+                });
+            }
+            let matching_commit = recent
+                .pending
+                .iter()
+                .chain(recent.deliveries.iter().map(|delivery| &delivery.entry))
+                .any(|entry| {
+                    entry.work.address == address
+                        && entry.envelope.configuration_revision
+                            == pass.pin.configuration().control().configuration_revision
+                        && entry.envelope.candidate.dedupe_key
+                            == prepared_entry.envelope.candidate.dedupe_key
+                });
+            if store_outcome == ContextScoutDurableStoreOutcomeV1::Duplicate && matching_commit {
+                pass.owner
+                    .record_intent_outcome(ContextScoutSuppressionV1::Duplicate)
+                    .await;
+                Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
+                    reason: ContextScoutSuppressionV1::Duplicate,
+                })
+            } else {
+                Err(ContextScoutIntentPassOutcomeV1::Unavailable)
+            }
+        }
+        outcome => Ok(outcome),
+    }
 }
 
 /// Runs one intent pass. The engine is asked at most once.
@@ -317,7 +376,11 @@ pub async fn run_context_scout_intent_pass(
             return ContextScoutIntentPassOutcomeV1::AddressUnavailable;
         }
     };
-    match pending_intent_entry(&pass, address).await {
+    let recent = match recent_intent_state(&pass, address).await {
+        Ok(recent) => recent,
+        Err(outcome) => return outcome,
+    };
+    match pending_intent_entry(&pass, address, &recent) {
         Ok(Some(entry)) => {
             return ContextScoutIntentPassOutcomeV1::Enqueued {
                 entry,
@@ -465,34 +528,29 @@ pub async fn run_context_scout_intent_pass(
         delivered_dedupe_keys: session.delivered_dedupe_keys,
         candidates: vec![candidate],
     };
-    let prepared = pass
+    let Ok(prepared) = pass
         .owner
         .prepare_intent(&input, pass.deadline, pass.cancellation.clone())
-        .await;
+        .await
+    else {
+        return ContextScoutIntentPassOutcomeV1::Unavailable;
+    };
+    let prepared = match reconcile_intent_commit(&pass, address, prepared).await {
+        Ok(prepared) => prepared,
+        Err(outcome) => return outcome,
+    };
     match prepared {
-        Ok(ContextScoutRuntimeOutcomeV1::Enqueued {
+        ContextScoutRuntimeOutcomeV1::Enqueued {
             entry,
-            store_outcome: ContextScoutDurableStoreOutcomeV1::Stored,
-        }) => ContextScoutIntentPassOutcomeV1::Enqueued {
+            store_outcome:
+                ContextScoutDurableStoreOutcomeV1::Stored
+                | ContextScoutDurableStoreOutcomeV1::Duplicate
+                | ContextScoutDurableStoreOutcomeV1::Superseded,
+        } => ContextScoutIntentPassOutcomeV1::Enqueued {
             entry,
             lifecycle: Box::new(intent_lifecycle),
         },
-        // A concurrent queue commit can land after the initial read. Store
-        // duplication alone does not prove delivery or a mounted claim.
-        Ok(ContextScoutRuntimeOutcomeV1::Enqueued {
-            store_outcome:
-                ContextScoutDurableStoreOutcomeV1::Duplicate
-                | ContextScoutDurableStoreOutcomeV1::Superseded,
-            ..
-        }) => match pending_intent_entry(&pass, address).await {
-            Ok(Some(entry)) => ContextScoutIntentPassOutcomeV1::Enqueued {
-                entry,
-                lifecycle: Box::new(intent_lifecycle),
-            },
-            Ok(None) => ContextScoutIntentPassOutcomeV1::Unavailable,
-            Err(outcome) => outcome,
-        },
-        Ok(ContextScoutRuntimeOutcomeV1::Suppressed { reason }) => {
+        ContextScoutRuntimeOutcomeV1::Suppressed { reason } => {
             let withheld = match reason {
                 ContextScoutSuppressionV1::Duplicate => Some("suppressed_duplicate"),
                 ContextScoutSuppressionV1::PendingSibling => Some("suppressed_budget"),
@@ -513,11 +571,8 @@ pub async fn run_context_scout_intent_pass(
                 model_outcome,
             }
         }
-        Ok(
-            ContextScoutRuntimeOutcomeV1::Enqueued { .. }
-            | ContextScoutRuntimeOutcomeV1::Unavailable,
-        )
-        | Err(_) => ContextScoutIntentPassOutcomeV1::Unavailable,
+        ContextScoutRuntimeOutcomeV1::Enqueued { .. }
+        | ContextScoutRuntimeOutcomeV1::Unavailable => ContextScoutIntentPassOutcomeV1::Unavailable,
     }
 }
 

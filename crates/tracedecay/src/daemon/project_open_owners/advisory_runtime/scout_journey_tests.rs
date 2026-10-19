@@ -782,6 +782,11 @@ async fn stock_disabled_configuration_produces_nothing() {
     );
 }
 
+type DecisionEngineRequestGate = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
 /// In-process decision engine: answers every configured question, recalling
 /// the earlier session with `recall` and everything else with 0.05, and
 /// records each request it receives.
@@ -789,6 +794,7 @@ struct RecordingDecisionEngine {
     recall: f64,
     requests: std::sync::atomic::AtomicUsize,
     states: std::sync::Mutex<Vec<String>>,
+    request_gate: std::sync::Mutex<Option<DecisionEngineRequestGate>>,
 }
 
 impl RecordingDecisionEngine {
@@ -797,11 +803,30 @@ impl RecordingDecisionEngine {
             recall,
             requests: std::sync::atomic::AtomicUsize::new(0),
             states: std::sync::Mutex::new(Vec::new()),
+            request_gate: std::sync::Mutex::new(None),
         })
     }
 
     fn requests(&self) -> usize {
         self.requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn hold_next_request(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        assert!(
+            self.request_gate
+                .lock()
+                .unwrap()
+                .replace((entered, held))
+                .is_none()
+        );
+        (started, release)
     }
 }
 
@@ -813,6 +838,10 @@ impl DecisionEnginePortV1 for RecordingDecisionEngine {
             .lock()
             .expect("recorded states")
             .push(request.state.clone());
+        if let Some((entered, release)) = self.request_gate.lock().unwrap().take() {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
         DecisionEngineOutcomeV1::Answered(DecisionAnswersV1 {
             answers: request
                 .questions
