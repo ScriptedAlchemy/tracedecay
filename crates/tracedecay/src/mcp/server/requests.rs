@@ -342,29 +342,9 @@ impl McpServer {
         // survives the envelope move into `tools/call` preparation below.
         let method_name = request.method();
         if matches!(method, McpMethod::HookEvent) {
-            let Some(id) = request.cloned_id() else {
-                Box::pin(self.handle_hook_event_notification(
-                    request.raw_notification_params(),
-                    &mut connection.route_cache,
-                ))
+            return self
+                .dispatch_hook_event(&request, &mut connection.route_cache)
                 .await;
-                return None;
-            };
-            let admitted = Box::pin(self.admit_hook_event_notification(
-                request.raw_notification_params(),
-                &mut connection.route_cache,
-                false,
-            ))
-            .await;
-            return Some(match admitted {
-                Ok(_) => JsonRpcResponse::success(id, json!({})),
-                Err(outcome) => JsonRpcResponse::error_with_data(
-                    id,
-                    ErrorCode::InternalError,
-                    "hook event was not durably admitted".to_owned(),
-                    Some(json!(outcome)),
-                ),
-            });
         }
         if matches!(method, McpMethod::Cancelled) {
             self.record_request_accounting(method_name, false);
@@ -452,6 +432,35 @@ impl McpServer {
         }
 
         result
+    }
+
+    async fn dispatch_hook_event(
+        &self,
+        request: &McpDispatchRequest<'_>,
+        route_cache: &mut HookProjectRouteCache,
+    ) -> Option<JsonRpcResponse> {
+        let Some(id) = request.cloned_id() else {
+            Box::pin(
+                self.handle_hook_event_notification(request.raw_notification_params(), route_cache),
+            )
+            .await;
+            return None;
+        };
+        let admitted = Box::pin(self.admit_hook_event_notification(
+            request.raw_notification_params(),
+            route_cache,
+            false,
+        ))
+        .await;
+        Some(match admitted {
+            Ok(_) => JsonRpcResponse::success(id, json!({})),
+            Err(outcome) => JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InternalError,
+                "hook event was not durably admitted".to_owned(),
+                Some(json!(outcome)),
+            ),
+        })
     }
 
     pub(crate) async fn handle_hook_event_notification(
