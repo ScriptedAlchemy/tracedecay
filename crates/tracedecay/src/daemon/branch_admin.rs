@@ -1252,6 +1252,8 @@ impl StoreAdministration {
     /// Bind source currency to the existing broker slot even when its local
     /// spool cannot open. Read/query composition can retain that typed
     /// unavailability without granting host admission or losing recovery.
+    /// Full host capability acquisition separately preserves reset refusals;
+    /// a broken optional spool must not prevent independent Core publication.
     pub(super) async fn host_admission_source_broker(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
