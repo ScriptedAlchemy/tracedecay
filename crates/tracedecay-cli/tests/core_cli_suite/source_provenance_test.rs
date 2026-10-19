@@ -410,23 +410,8 @@ impl CargoFixture {
         let watched_input = directory.path().join("release-sha.txt");
         std::fs::create_dir_all(&cargo_home).expect("fixture cargo home");
         std::fs::write(&watched_input, ENV_SHA).expect("write watched input");
-        std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
-        std::fs::create_dir_all(root.join("provenance/src"))
-            .expect("fixture build dependency source directory");
-
-        for relative in [
-            "Cargo.toml",
-            "Cargo.lock",
-            "build.rs",
-            "README.md",
-            "provenance/Cargo.toml",
-            "provenance/src/lib.rs",
-        ] {
-            std::fs::copy(fixture.join(relative), root.join(relative))
-                .unwrap_or_else(|error| panic!("copy checked-in fixture {relative}: {error}"));
-        }
-        std::fs::copy(fixture.join("src/main.rs"), root.join("src/main.rs"))
-            .expect("copy checked-in fixture src/main.rs");
+        crate::common::fixture::copy_fixture_tree(&fixture, &root)
+            .expect("copy writable provenance fixture");
 
         Self {
             _directory: directory,

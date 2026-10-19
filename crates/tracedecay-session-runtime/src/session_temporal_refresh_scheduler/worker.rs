@@ -1915,13 +1915,12 @@ mod tests {
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
-    /// Wide enough that one item's commit lands inside it on a loaded host.
-    const COMMIT_DEADLINE: Duration = Duration::from_secs(2);
-
-    /// Commits `item_count` items. A group of several items never commits
-    /// before the deadline, and neither does a `slow` item alone; every other
-    /// item alone commits at once. Returns how many commits the deadline cut
-    /// short.
+    /// Commits `item_count` items. A group of several items never commits, and
+    /// neither does a `slow` item alone: its transaction ends in the
+    /// `DeadlineExceeded` that storage reports when its own deadline passes.
+    /// Every other item alone commits. Real writes race no wall-clock deadline
+    /// (`Duration::MAX` starts no timer), so host load cannot cut an item that
+    /// the test means to commit. Returns how many commits were cut short.
     async fn timed_refresh_group_progress(item_count: usize, slow: &[usize]) -> usize {
         let harness = RegisteredGlobalDbHarness::open("refresh-group-progress").await;
         let database = &harness.registered;
@@ -1937,7 +1936,7 @@ mod tests {
 
         let cut_short = std::sync::atomic::AtomicUsize::new(0);
         let cut_short = &cut_short;
-        let outcomes = commit_refresh_groups(item_count, COMMIT_DEADLINE, |range| async move {
+        let outcomes = commit_refresh_groups(item_count, Duration::MAX, |range| async move {
             let transaction = database
                 .begin_write_transaction()
                 .await
@@ -1953,7 +1952,7 @@ mod tests {
             }
             if range.len() > 1 || slow.contains(&range.start) {
                 cut_short.fetch_add(1, Ordering::SeqCst);
-                std::future::pending::<()>().await;
+                return Err(SessionStoreError::DeadlineExceeded);
             }
             transaction
                 .commit()
@@ -2007,6 +2006,28 @@ mod tests {
             timed_refresh_group_progress(4, &[0, 1, 2, 3]).await,
             5,
             "a pass of slow items must wait for the group and then each item once"
+        );
+    }
+
+    /// The deadline itself ends a group that never commits. No I/O races it:
+    /// a commit that is ready at its first poll wins even past the deadline,
+    /// so only the pending group is ever cut, however loaded the host.
+    #[tokio::test]
+    async fn a_refresh_group_that_outlives_its_deadline_is_retried_item_by_item() {
+        let outcomes = commit_refresh_groups(3, Duration::from_millis(10), |range| async move {
+            if range.len() > 1 {
+                std::future::pending::<()>().await;
+            }
+            Ok(range.map(Ok).collect())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            outcomes
+                .into_iter()
+                .map(|outcome| outcome.unwrap())
+                .collect::<Vec<usize>>(),
+            [0, 1, 2]
         );
     }
 
