@@ -1489,3 +1489,50 @@ async fn absent_or_disabled_intent_configuration_never_asks_the_engine() {
 }
 
 mod replay;
+
+#[tokio::test]
+async fn intent_waits_for_its_transcript_before_evaluation_and_disabled_never_asks() {
+    let fixture = IntentJourneyFixture::open(Some(intent_settings())).await;
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "intent-window-recovery",
+    )
+    .await;
+    let sessions = harness.registered.as_ref();
+    let project_key = "/project/intent-window-recovery";
+    let engine = RecordingDecisionEngine::new(0.9);
+    let boundary = fixture.hook(75, completed_tool());
+    let outcome = fixture
+        .pass(&boundary, sessions, project_key, &engine)
+        .await;
+    assert_eq!(outcome, ContextScoutIntentPassOutcomeV1::WindowEmpty);
+    assert_eq!(
+        intent_pass_work_outcome(&outcome),
+        HookOrchestrationWorkOutcomeV1::RetryableFailure
+    );
+    assert_eq!(engine.requests(), 0);
+    seed_intent_session(sessions, project_key).await;
+    let outcome = fixture
+        .pass(&boundary, sessions, project_key, &engine)
+        .await;
+    assert!(matches!(
+        outcome,
+        ContextScoutIntentPassOutcomeV1::Enqueued { .. }
+    ));
+    assert_eq!(engine.requests(), 1);
+
+    let disabled = IntentJourneyFixture::open(None).await;
+    let outcome = disabled
+        .pass(
+            &disabled.hook(76, completed_tool()),
+            sessions,
+            project_key,
+            &engine,
+        )
+        .await;
+    assert_eq!(outcome, ContextScoutIntentPassOutcomeV1::Disabled);
+    assert_eq!(
+        intent_pass_work_outcome(&outcome),
+        HookOrchestrationWorkOutcomeV1::Completed
+    );
+    assert_eq!(engine.requests(), 1);
+}

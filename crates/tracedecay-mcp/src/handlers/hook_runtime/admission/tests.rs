@@ -7,6 +7,7 @@ use super::super::*;
 use super::*;
 
 mod legacy_continuity;
+mod tool_dispatch;
 
 #[test]
 fn daemon_admission_is_idempotent_per_identity_and_conflicts_on_different_bytes() {
@@ -127,11 +128,10 @@ fn envelope_is_prompt(event: &tracedecay_hooks::HookEventV2) -> bool {
     matches!(event, tracedecay_hooks::HookEventV2::PromptBoundary)
 }
 
-/// Prompt and completed-tool boundaries owe no durable producer work, yet
-/// each admission enqueues the session intent pass on the project's
-/// registered orchestrator; a started tool call is not a boundary.
+/// Prompt and completed-tool boundaries retain their own intent work until
+/// the registered orchestrator settles it; a started call is not a boundary.
 #[tokio::test]
-async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed_work() {
+async fn prompt_and_tool_admissions_settle_their_durable_intent_work() {
     let data_root = tempfile::tempdir().unwrap();
     let binding = admission_test_binding(7);
     // Kiro admits prompt boundaries natively today; Claude gains them when
@@ -183,17 +183,18 @@ async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed
         if prompt {
             envelope.producer = kiro;
         }
-        assert!(!hook_v2_requires_producer_work(&envelope));
+        assert!(hook_v2_requires_producer_work(&envelope));
         let staged = stage_hook_v2_admission(
             data_root.path(),
             &envelope,
-            None,
+            Some(&envelope),
             None,
             Some(0),
             UtcMicros(1_000),
         )
         .expect("ledger available");
         staged.commit.wait().unwrap();
+        let completion = hook_v2_work_completion(data_root.path(), &envelope);
         assert_eq!(
             tracedecay_daemon_service::admit_registered_hook_orchestration(
                 envelope,
@@ -205,8 +206,8 @@ async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed
                 None,
                 1,
                 false,
-                None,
-                None,
+                Some(staged.receipt.order),
+                Some(completion),
             ),
             tracedecay_contracts::HookOrchestrationAdmissionV1::Enqueued
         );
@@ -218,11 +219,23 @@ async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed
                 false
             ))
         );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while runtime.active_tasks() != 0
+                || !hook_v2_pending_work_envelopes(
+                    data_root.path(),
+                    if prompt { kiro } else { binding.host },
+                    UtcMicros(1_000),
+                )
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
-    assert!(
-        pending_work(data_root.path()).is_empty(),
-        "an intent pass is best-effort and owes no redriven producer work"
-    );
+    assert!(pending_work(data_root.path()).is_empty());
     let mut started = admission_test_envelope(44, 7);
     started.event = tool(tracedecay_hooks::HookLifecyclePhaseV1::Started);
     assert_eq!(

@@ -187,6 +187,22 @@ async fn registered_fixture() -> (
         observed_at: now_utc_micros(),
         event: completed_tool(),
     };
+    let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
+    let prior_producer =
+        BoundedHookOrchestratorV1::new(1, move |request: HookOrchestrationRequestV1, _| {
+            let ran = ran.clone();
+            async move {
+                assert_eq!(request.trigger, HookOrchestrationTriggerV1::IntentBoundary);
+                assert!(request.lifecycle.is_some());
+                ran.send(()).unwrap();
+            }
+        })
+        .unwrap();
+    assert!(register_hook_orchestration_runtime(
+        binding.project_id,
+        binding.worktree_id,
+        &prior_producer
+    ));
     assert!(matches!(
         admit_hook_v2_replayed_envelope_with_lifecycle(
             &graph,
@@ -200,6 +216,27 @@ async fn registered_fixture() -> (
         .await,
         HookV2AdmissionOutcomeV1::Admitted { .. }
     ));
+    tokio::time::timeout(Duration::from_secs(10), runs.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while prior_producer.active_tasks() != 0
+            || !hook_v2_pending_work_envelopes(
+                &graph.hook_store_layout().data_root,
+                binding.host,
+                now_utc_micros(),
+            )
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    unregister_hook_orchestration_runtime(binding.project_id, binding.worktree_id, &prior_producer);
+    assert!(prior_producer.shutdown().await);
     let lifecycle = lookup_registered_context_scout_lifecycle(
         binding.project_id,
         binding.worktree_id,
