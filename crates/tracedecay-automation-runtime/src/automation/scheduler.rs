@@ -247,8 +247,15 @@ pub async fn save_scheduler_control(
         message: format!("failed to encode automation scheduler control: {e}"),
     })?;
     let write_path = path.clone();
-    crate::automation::blocking_fs(move || std::fs::write(write_path, bytes))
-        .await
+    crate::automation::blocking_fs(move || {
+        tracedecay_private_fs::framed_log::atomic_write(
+            &write_path,
+            "scheduler-control",
+            &bytes,
+            tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
+        )
+    })
+    .await
         .map_err(|e| TraceDecayError::Config {
             message: format!(
                 "failed to write automation scheduler control '{}': {e}",
@@ -1562,6 +1569,25 @@ mod tests {
     use tracedecay_automation::evidence_budget::{
         SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
     };
+
+    #[tokio::test]
+    async fn scheduler_control_round_trips_atomically_and_keeps_corruption_typed() {
+        let dir = tempdir().unwrap();
+        assert!(!load_scheduler_control(dir.path()).await.unwrap().paused);
+        for paused in [true, false, true] {
+            save_scheduler_control(dir.path(), &AutomationSchedulerControl { paused })
+                .await
+                .unwrap();
+            assert_eq!(
+                load_scheduler_control(dir.path()).await.unwrap().paused,
+                paused
+            );
+        }
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 1, "staging files must be cleaned up");
+        std::fs::write(scheduler_control_path(dir.path()), b"{").unwrap();
+        assert!(load_scheduler_control(dir.path()).await.is_err());
+    }
 
     #[test]
     fn backoff_starts_at_one_tick_and_grows() {
