@@ -235,7 +235,7 @@ async fn prompt_and_tool_admissions_settle_their_durable_intent_work() {
         .await
         .unwrap();
     }
-    assert!(pending_work(data_root.path()).is_empty());
+    assert_eq!(pending_work(data_root.path()), Vec::new());
     let mut started = admission_test_envelope(44, 7);
     started.event = tool(tracedecay_hooks::HookLifecyclePhaseV1::Started);
     assert_eq!(

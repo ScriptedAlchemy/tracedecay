@@ -440,7 +440,7 @@ async fn enqueued_intent_replay_mounts_and_delivers_once_without_reopening_produ
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     assert_eq!(engine.requests(), 1);
     let recent = fixture.owner.recent_exact(address, 8).await.unwrap();
-    assert!(recent.pending.is_empty());
+    assert_eq!(recent.pending, Vec::new());
     assert_eq!(recent.deliveries.len(), 1);
     unregister_hook_orchestration_runtime(
         fixture.binding.project_id,
