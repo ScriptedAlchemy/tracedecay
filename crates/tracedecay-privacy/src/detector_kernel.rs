@@ -215,8 +215,8 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
 }
 
 // UUIDs contribute identity, not credential entropy. Adjacent dense components
-// form one token. Sparse pairs need half the minimum token width on each side
-// so a short directory name cannot turn an ordinary build label into a token.
+// form one token. Sparse pairs need independent information on each side;
+// mixing two ordinary directory alphabets is not itself credential evidence.
 // Inspect original, disjoint slices so ordinary prefixes cannot dilute secrets.
 fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<Range<usize>>) {
     let mut component_start = 0usize;
@@ -260,8 +260,8 @@ fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<R
             if !consumed
                 && eligible
                 && let Some(previous) = previous.take()
-                && previous.len() >= MIN_TOKEN_LENGTH.div_ceil(2)
-                && component.len() >= MIN_TOKEN_LENGTH.div_ceil(2)
+                && has_token_fragment_information(&text[previous.clone()])
+                && has_token_fragment_information(component)
                 && looks_high_entropy_token(&text[previous.start..component_end])
             {
                 ranges.push(offset + previous.start..offset + component_end);
@@ -271,6 +271,12 @@ fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<R
         }
         component_start = component_end + 1;
     }
+}
+
+fn has_token_fragment_information(component: &str) -> bool {
+    entropy_bits_per_mille(component).is_none_or(|score| {
+        u128::from(score) * component.len() as u128 >= MIN_TOKEN_FRAGMENT_INFORMATION_PER_MILLE
+    })
 }
 
 fn is_uuid_path_component(component: &str) -> bool {
@@ -348,6 +354,10 @@ pub fn looks_high_entropy_token(token: &str) -> bool {
 
 const MIN_TOKEN_LENGTH: usize = 36;
 const MIN_TOKEN_ENTROPY_PER_MILLE: u32 = 4_200;
+// Joining two alphabets contributes at most one bit per byte of mixing entropy.
+// Each sparse side must supply half the minimum token's remaining information.
+const MIN_TOKEN_FRAGMENT_INFORMATION_PER_MILLE: u128 =
+    MIN_TOKEN_LENGTH as u128 * (MIN_TOKEN_ENTROPY_PER_MILLE - 1_000) as u128 / 2;
 const ENTROPY_SCALE: u128 = 1 << 20;
 
 fn fixed_log2(value: usize) -> u128 {
@@ -550,6 +560,9 @@ mod tests {
                 "build_20261018_x86_64_linux",
                 "build_20261018_x86_64_linux/typescript",
                 "typescript/build_20261018_x86_64_linux",
+                "build_20261018_x86_64_linux/javascript",
+                "build_20261018_x86_64_linux/documentation",
+                "build_20261018_x86_64_linux/generated_sources",
             ] {
                 let path = format!("/workspace/{uuid}/dist/{artifact}");
                 assert_eq!(
@@ -645,6 +658,33 @@ mod tests {
             high_entropy_ranges(&compact_path),
             vec![prefix.len()..prefix.len() + compact_secret.len()]
         );
+    }
+
+    #[test]
+    fn uuid_paths_redact_minimum_width_tokens_at_every_slash_boundary() {
+        let material = "abcdefghijklmnopaQRSTUVWXYZ012345QR";
+        let prefix = format!(
+            "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
+            "a".repeat(512)
+        );
+        for split in 1..material.len() {
+            let secret = format!("{}/{}", &material[..split], &material[split..]);
+            assert!(looks_high_entropy_token(&secret), "split at {split}");
+            let path = format!("{prefix}{secret}/source");
+            assert!(!looks_high_entropy_token(&path));
+            assert_eq!(
+                high_entropy_ranges(&path),
+                vec![prefix.len()..prefix.len() + secret.len()],
+                "split at {split}"
+            );
+            let metadata = json!({"path": path});
+            let sanitized = crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+                .expect("structured split-token metadata");
+            let sanitized_path = sanitized["path"].as_str().unwrap();
+            assert!(sanitized_path.starts_with(&prefix));
+            assert!(sanitized_path.ends_with("/source"));
+            assert!(!sanitized_path.contains(&secret), "split at {split}");
+        }
     }
 
     #[test]
