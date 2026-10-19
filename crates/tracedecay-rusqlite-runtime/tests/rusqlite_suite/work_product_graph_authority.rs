@@ -492,6 +492,76 @@ fn current_reads_retain_exact_contents_across_published_history() {
 }
 
 #[test]
+fn appends_resume_from_a_checkpoint_and_survive_restart_across_checkpoint_boundaries() {
+    const EVENTS: i64 = 600;
+    let store = RegisteredWorkStore::start("work-product-checkpoints");
+    let mut latest = create(
+        &store,
+        "command.work-product.checkpoints.create",
+        UtcMicros(100),
+        vec![item("task.checkpoint.0", &[], 1)],
+    )
+    .expect("publish initial graph");
+    for index in 1..EVENTS {
+        let mut change = mutation(
+            &format!("command.work-product.checkpoints.add.{index}"),
+            UtcMicros(100 + index),
+        );
+        change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+            verified_version: latest.verified_graph_version().clone(),
+        };
+        latest = mutations(&store)
+            .add_task(
+                &context(),
+                &binding(),
+                AddWorkTaskRequestV1 {
+                    selection: repository_selection(),
+                    item: item(&format!("task.checkpoint.{index}"), &[], 1),
+                    mutation: change,
+                },
+            )
+            .expect("publish next graph");
+    }
+    assert_eq!(store.count("work_product_events_v1"), EVENTS);
+    assert_eq!(store.count("work_product_graph_versions_v1"), EVENTS);
+    assert_eq!(store.count("work_product_graph_checkpoints_v1"), 2);
+
+    let store = store.restart("work-product-checkpoints");
+    let current = read_current(&store).expect("read current after restart");
+    assert_eq!(
+        current.entries()[0].verified_version(),
+        latest.verified_graph_version()
+    );
+    assert_eq!(current.entries()[0].graph().items().len(), 600);
+
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_graph_checkpoints_v1 SET recovered_graph_digest = 'invalid'",
+                [],
+            )
+            .expect("corrupt every checkpoint");
+    });
+    let mut change = mutation("command.work-product.checkpoints.after", UtcMicros(2_000));
+    change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+        verified_version: latest.verified_graph_version().clone(),
+    };
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.checkpoint.after", &[], 1),
+                mutation: change,
+            },
+        )
+        .expect_err("a checkpoint that does not recompute is never a fold base");
+    assert_eq!(store.count("work_product_events_v1"), EVENTS);
+    assert_eq!(store.count("work_product_graph_versions_v1"), EVENTS);
+}
+
+#[test]
 fn an_owner_with_no_journal_has_an_absent_current_graph_and_an_explicitly_empty_timeline() {
     let store = RegisteredWorkStore::start("work-product-empty");
 

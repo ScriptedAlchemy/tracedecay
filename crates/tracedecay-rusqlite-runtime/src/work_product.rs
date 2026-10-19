@@ -328,6 +328,27 @@ pub(crate) fn load_covered_journal(
     })
 }
 
+/// Rows one journal query may return. Every history read pages by this bound so
+/// no single exact-SQL result approaches the global row or byte cap however
+/// long the journal grows.
+const JOURNAL_PAGE_ROWS: usize = 256;
+
+/// Rows one published-version query may return.
+const PUBLISHED_PAGE_ROWS: usize = 512;
+
+/// Events between graph checkpoints. A checkpoint is written when an append
+/// would otherwise fold at least this many events past its base.
+pub(crate) const CHECKPOINT_INTERVAL: u64 = 256;
+
+/// The largest sequence an exact-SQL integer parameter can carry.
+const MAX_BOUND_SEQUENCE: u64 = i64::MAX.unsigned_abs();
+
+fn cursor_value(cursor: u64, what: &'static str) -> Result<ExactSqlValue, StoreFault> {
+    i64::try_from(cursor)
+        .map(ExactSqlValue::Integer)
+        .map_err(|_| StoreFault::Corrupt(what))
+}
+
 /// Load the owner's whole journal in canonical sequence order.
 ///
 /// A [`StoreFault`] means the rows could not be read or decoded, which every
@@ -336,16 +357,37 @@ pub(crate) fn load_journal(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
 ) -> Result<Vec<WorkProductJournalEntryV1>, StoreFault> {
-    let rows = registered_work_query(
-        source,
-        "SELECT sequence, event_payload FROM work_product_events_v1
-         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-         ORDER BY sequence",
-        owner_params(scope),
-    )?;
-    rows.rows
-        .into_iter()
-        .map(|row| {
+    load_journal_between(source, scope, 0, MAX_BOUND_SEQUENCE)
+}
+
+/// Load the journal events with `after < sequence <= through` in canonical
+/// order, one bounded page at a time.
+pub(crate) fn load_journal_between(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+    after: u64,
+    through: u64,
+) -> Result<Vec<WorkProductJournalEntryV1>, StoreFault> {
+    let mut journal = Vec::new();
+    let mut cursor = after;
+    loop {
+        let rows = registered_work_query(
+            source,
+            "SELECT sequence, event_payload FROM work_product_events_v1
+             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
+               AND sequence > ?3 AND sequence <= ?4
+             ORDER BY sequence LIMIT ?5",
+            owner_params(scope)
+                .into_iter()
+                .chain([
+                    cursor_value(cursor, "journal cursor")?,
+                    cursor_value(through, "journal bound")?,
+                    cursor_value(JOURNAL_PAGE_ROWS as u64, "journal page")?,
+                ])
+                .collect(),
+        )?;
+        let page_len = rows.rows.len();
+        for row in rows.rows {
             let corrupt = || StoreFault::Corrupt("journal row");
             let sequence = exact_sql_integer(&row.values, 0)
                 .and_then(|value| u64::try_from(value).ok())
@@ -354,9 +396,79 @@ pub(crate) fn load_journal(
             let event: WorkProductEventV1 =
                 serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
                     .map_err(|_| corrupt())?;
-            Ok(WorkProductJournalEntryV1 { sequence, event })
-        })
-        .collect()
+            cursor = sequence.get();
+            journal.push(WorkProductJournalEntryV1 { sequence, event });
+        }
+        if page_len < JOURNAL_PAGE_ROWS {
+            return Ok(journal);
+        }
+    }
+}
+
+/// A graph folded through `last`, resumed from the nearest checkpoint.
+pub(crate) struct CheckpointedFoldV1 {
+    pub(crate) graph: WorkProductGraphV1,
+    /// The checkpoint sequence the fold resumed from; `0` means the journal
+    /// head.
+    pub(crate) base_sequence: u64,
+    /// The last event folded, `None` only when the checkpoint itself is the
+    /// requested sequence.
+    pub(crate) last: Option<WorkProductJournalEntryV1>,
+}
+
+/// Fold the owner's graph through `through_sequence` from the latest
+/// checkpoint at or before it, reading only the events after that checkpoint.
+///
+/// `Ok(None)` is a broken chain, exactly as for [`fold_graph`]. A checkpoint
+/// whose payload does not recompute to its recorded version and digest is a
+/// corrupt store, never a base to fold from.
+pub(crate) fn fold_graph_checkpointed(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+    through_sequence: WorkProductEventSequenceV1,
+) -> Result<Option<CheckpointedFoldV1>, StoreFault> {
+    let rows = registered_work_query(
+        source,
+        "SELECT event_sequence, graph_version, recovered_graph_digest, graph_payload
+         FROM work_product_graph_checkpoints_v1
+         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND event_sequence <= ?3
+         ORDER BY event_sequence DESC LIMIT 1",
+        owner_params(scope)
+            .into_iter()
+            .chain([cursor_value(through_sequence.get(), "checkpoint bound")?])
+            .collect(),
+    )?;
+    let (base_sequence, base_graph) = match rows.rows.first() {
+        None => (0, None),
+        Some(row) => {
+            let corrupt = || StoreFault::Corrupt("graph checkpoint row");
+            let sequence = exact_sql_integer(&row.values, 0)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(corrupt)?;
+            let version = exact_sql_integer(&row.values, 1)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(corrupt)?;
+            let digest = exact_sql_text(&row.values, 2).ok_or_else(corrupt)?;
+            let graph: WorkProductGraphV1 =
+                serde_json::from_str(exact_sql_text(&row.values, 3).ok_or_else(corrupt)?)
+                    .map_err(|_| corrupt())?;
+            let recomputed = recovered_graph_digest(&graph).ok_or_else(corrupt)?;
+            if graph.version().get() != version || recomputed.as_str() != digest {
+                return Err(corrupt());
+            }
+            (sequence, Some(graph))
+        }
+    };
+    let tail = load_journal_between(source, scope, base_sequence, through_sequence.get())?;
+    let mut fold = JournalFoldV1::resume(base_graph, &tail);
+    let Some(graph) = fold.advance_to(through_sequence).cloned() else {
+        return Ok(None);
+    };
+    Ok(Some(CheckpointedFoldV1 {
+        graph,
+        base_sequence,
+        last: tail.last().cloned(),
+    }))
 }
 
 /// The owner's journal tail: the sequence and result version a new append must
@@ -388,24 +500,35 @@ pub(crate) fn load_journal_tail(
     Ok(Some((sequence, version)))
 }
 
-/// Load every verified graph version this owner has published, oldest first.
+/// Load every verified graph version this owner has published, oldest first,
+/// one bounded page at a time.
 pub(crate) fn load_published_versions(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
 ) -> Result<Vec<WorkProductPublishedVersionV1>, StoreFault> {
-    let rows = registered_work_query(
-        source,
-        "SELECT graph_version, event_sequence, valid_at, observed_at, recovered_graph_digest
-         FROM work_product_graph_versions_v1
-         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
-         ORDER BY graph_version",
-        owner_params(scope),
-    )?;
-    rows.rows
-        .into_iter()
-        .map(|row| {
+    let mut versions: Vec<WorkProductPublishedVersionV1> = Vec::new();
+    loop {
+        let cursor = versions
+            .last()
+            .map_or(0, |version| version.graph_version.get());
+        let rows = registered_work_query(
+            source,
+            "SELECT graph_version, event_sequence, valid_at, observed_at, recovered_graph_digest
+             FROM work_product_graph_versions_v1
+             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND graph_version > ?3
+             ORDER BY graph_version LIMIT ?4",
+            owner_params(scope)
+                .into_iter()
+                .chain([
+                    cursor_value(cursor, "published version cursor")?,
+                    cursor_value(PUBLISHED_PAGE_ROWS as u64, "published version page")?,
+                ])
+                .collect(),
+        )?;
+        let page_len = rows.rows.len();
+        for row in rows.rows {
             let corrupt = || StoreFault::Corrupt("published version row");
-            Ok(WorkProductPublishedVersionV1 {
+            versions.push(WorkProductPublishedVersionV1 {
                 graph_version: exact_sql_integer(&row.values, 0)
                     .and_then(|value| u64::try_from(value).ok())
                     .and_then(|value| WorkGraphVersionV1::new(value).ok())
@@ -419,9 +542,12 @@ pub(crate) fn load_published_versions(
                 recovered_graph_digest: exact_sql_text(&row.values, 4)
                     .ok_or_else(corrupt)?
                     .to_owned(),
-            })
-        })
-        .collect()
+            });
+        }
+        if page_len < PUBLISHED_PAGE_ROWS {
+            return Ok(versions);
+        }
+    }
 }
 
 /// Fold the journal into the graph at `through_sequence`.
@@ -454,6 +580,18 @@ impl<'a> JournalFoldV1<'a> {
         Self {
             remaining: journal,
             graph: None,
+        }
+    }
+
+    /// A fold that continues from `graph`, the verified graph a checkpoint
+    /// recorded, over the events that follow it.
+    pub(crate) const fn resume(
+        graph: Option<WorkProductGraphV1>,
+        journal: &'a [WorkProductJournalEntryV1],
+    ) -> Self {
+        Self {
+            remaining: journal,
+            graph,
         }
     }
 

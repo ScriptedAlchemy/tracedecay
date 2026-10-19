@@ -10,8 +10,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::WorkProductEventV1;
 
 use super::{
-    FromStoreFault, StoreFault, fold_graph, insert_fault, load_journal, owner_params,
-    recovered_graph_digest, selection_covers,
+    CHECKPOINT_INTERVAL, FromStoreFault, StoreFault, fold_graph_checkpointed, insert_fault,
+    owner_params, recovered_graph_digest, selection_covers,
 };
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
@@ -34,21 +34,26 @@ pub(super) fn publish_in_transaction(
     if context.observed_at() < event.occurred_at() {
         return Err(PortError::Unavailable);
     }
-    let journal = load_journal(transaction, scope).map_err(PortError::from_fault)?;
-    let entry = journal
-        .iter()
-        .find(|entry| entry.event.event_id() == event.event_id())
+    // The fold resumes from the latest checkpoint, so publishing reads the
+    // events since that checkpoint rather than the lifetime journal.
+    let folded = fold_graph_checkpointed(transaction, scope, event.sequence())
+        .map_err(PortError::from_fault)?
+        .ok_or(PortError::Unavailable)?;
+    let entry = folded
+        .last
+        .as_ref()
+        .filter(|entry| entry.event.event_id() == event.event_id())
         .ok_or(PortError::Unavailable)?;
     // Publishing an event whose stored bytes differ from the caller's copy
     // would digest a graph nobody appended.
     if entry.event != *event {
         return Err(PortError::VersionConflict);
     }
-    let graph = fold_graph(&journal, entry.sequence).ok_or(PortError::Unavailable)?;
+    let graph = &folded.graph;
     if graph.version() != event.result_graph_version() {
         return Err(PortError::VersionConflict);
     }
-    let digest = recovered_graph_digest(&graph).ok_or(PortError::Unavailable)?;
+    let digest = recovered_graph_digest(graph).ok_or(PortError::Unavailable)?;
 
     let existing = registered_work_query(
         transaction,
@@ -111,6 +116,37 @@ pub(super) fn publish_in_transaction(
             .map_err(PortError::from_fault)?,
         )
         .map_err(|error| insert_fault(error, PortError::VersionConflict))?;
+
+    if entry.sequence.get().saturating_sub(folded.base_sequence) >= CHECKPOINT_INTERVAL {
+        transaction
+            .work_execute(
+                exact_sql_statement(
+                    "INSERT INTO work_product_graph_checkpoints_v1 (
+                        owner_brain_id, owner_profile_id, event_sequence, graph_version,
+                        recovered_graph_digest, graph_payload
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    owner_params(scope)
+                        .into_iter()
+                        .chain([
+                            ExactSqlValue::Integer(
+                                i64::try_from(entry.sequence.get())
+                                    .map_err(|_| PortError::Unavailable)?,
+                            ),
+                            ExactSqlValue::Integer(
+                                i64::try_from(graph.version().get())
+                                    .map_err(|_| PortError::Unavailable)?,
+                            ),
+                            ExactSqlValue::Text(digest.as_str().to_owned()),
+                            ExactSqlValue::Text(
+                                serde_json::to_string(graph).map_err(|_| PortError::Unavailable)?,
+                            ),
+                        ])
+                        .collect(),
+                )
+                .map_err(PortError::from_fault)?,
+            )
+            .map_err(|error| insert_fault(error, PortError::VersionConflict))?;
+    }
 
     VerifiedWorkGraphVersionV1::new(
         event.result_graph_version(),

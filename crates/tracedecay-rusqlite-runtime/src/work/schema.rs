@@ -326,6 +326,13 @@ ON work_duplicate_adjudications_v1 (
 /// row with a product item would invent a correspondence neither authority
 /// records.
 ///
+/// Checkpoints are a derived cache of the journal fold, written in the same
+/// transaction as the event that reaches a checkpoint boundary. An append
+/// resumes from the latest checkpoint and folds only the events after it, so
+/// its cost is bounded by the checkpoint interval instead of the lifetime
+/// journal. The journal stays the authority: a checkpoint is accepted only when
+/// its digest and version recompute from its own payload.
+///
 /// Every measurement the product projections expose, item effort, declared
 /// causal candidates, scheduled_at, deadline, lives inside `event_payload`
 /// exactly as the caller declared it in the event. Nothing in this schema
@@ -360,6 +367,16 @@ CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
     recovered_graph_digest TEXT NOT NULL,
     PRIMARY KEY (owner_brain_id, owner_profile_id, graph_version),
     UNIQUE (owner_brain_id, owner_profile_id, event_sequence)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS work_product_graph_checkpoints_v1 (
+    owner_brain_id TEXT NOT NULL,
+    owner_profile_id TEXT NOT NULL,
+    event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+    graph_version INTEGER NOT NULL CHECK (graph_version > 0),
+    recovered_graph_digest TEXT NOT NULL,
+    graph_payload TEXT NOT NULL,
+    PRIMARY KEY (owner_brain_id, owner_profile_id, event_sequence)
 ) STRICT;
 ";
 
