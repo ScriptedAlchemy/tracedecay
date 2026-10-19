@@ -214,9 +214,9 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
     ranges
 }
 
-// UUIDs contribute identity, not credential entropy. Adjacent dense components
-// form one token. Sparse pairs need half the minimum token width on each side
-// so a short directory name cannot turn an ordinary build label into a token.
+// UUIDs contribute identity, not credential entropy. Dense components and their
+// neighbors can form one token. Sparse pairs need a standard Base64-shaped
+// alphabet so filename punctuation cannot lend credential evidence.
 // Inspect original, disjoint slices so ordinary prefixes cannot dilute secrets.
 fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<Range<usize>>) {
     let mut component_start = 0usize;
@@ -260,8 +260,9 @@ fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<R
             if !consumed
                 && eligible
                 && let Some(previous) = previous.take()
-                && previous.len() >= MIN_TOKEN_LENGTH.div_ceil(2)
-                && component.len() >= MIN_TOKEN_LENGTH.div_ceil(2)
+                && text[previous.start..component_end]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
                 && looks_high_entropy_token(&text[previous.start..component_end])
             {
                 ranges.push(offset + previous.start..offset + component_end);
@@ -645,6 +646,34 @@ mod tests {
             high_entropy_ranges(&compact_path),
             vec![prefix.len()..prefix.len() + compact_secret.len()]
         );
+    }
+
+    #[test]
+    fn uuid_paths_redact_minimum_width_tokens_at_every_internal_slash_position() {
+        let payload = "abcdefghijklmnopaQRSTUVWXYZ012345QR";
+        assert_eq!(payload.len() + 1, MIN_TOKEN_LENGTH);
+        let prefix = format!(
+            "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
+            "a".repeat(512)
+        );
+        for split in 1..payload.len() {
+            let secret = format!("{}/{}", &payload[..split], &payload[split..]);
+            assert!(looks_high_entropy_token(&secret));
+            let path = format!("{prefix}{secret}/source");
+            assert!(!looks_high_entropy_token(&path));
+            assert_eq!(
+                high_entropy_ranges(&path),
+                vec![prefix.len()..prefix.len() + secret.len()],
+                "split at {split}"
+            );
+            let metadata = json!({"path": path});
+            let sanitized = crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+                .expect("structured path metadata");
+            let source = sanitized["path"].as_str().unwrap();
+            assert!(!source.contains(&secret), "split at {split}");
+            assert!(source.starts_with(&prefix));
+            assert!(source.ends_with("/source"));
+        }
     }
 
     #[test]
