@@ -109,7 +109,7 @@ impl McpServer {
                 Ok(resolved) => resolved,
                 Err(_) => return HostAdmissionOutcome::degraded("project_route_stale"),
             };
-        if root != effect_root || current_scope != scope {
+        if root != effect_root || !current_scope.identifies_same_checkout(&scope) {
             return HostAdmissionOutcome::degraded("project_route_stale");
         }
         let resolved = match crate::mcp::project_route::resolve_registered_project_route(
@@ -125,7 +125,7 @@ impl McpServer {
                 return HostAdmissionOutcome::retained_unavailable("project_route_unavailable");
             }
         };
-        if resolved.requested_root != root || resolved.scope != scope {
+        if resolved.requested_root != root || !resolved.scope.identifies_same_checkout(&scope) {
             return HostAdmissionOutcome::degraded("project_route_stale");
         }
         let event = hook_events::HookEvent {
