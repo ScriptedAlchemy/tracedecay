@@ -769,6 +769,7 @@ pub(in super::super) struct ProjectionStorageColumns {
     pub(in super::super) content_hash: String,
     pub(in super::super) snippet_text: String,
     pub(in super::super) index_text: String,
+    pub(in super::super) location_path: Option<String>,
 }
 
 pub(in super::super) struct ProjectionRowsBatch {
@@ -825,7 +826,8 @@ pub(in super::super) async fn read_projection_rows_batch(
         .map_err(|error| storage("encode projected message request", error))?;
         let sql = format!(
             "SELECT {}, message.storage_kind, COALESCE(message.content, ''),
-                    message.content_hash, message.snippet_text, message.index_text
+                    message.content_hash, message.snippet_text, message.index_text,
+                    message.location_path
              FROM json_each(?1) AS requested
              CROSS JOIN lcm_raw_messages AS message
              WHERE message.provider = json_extract(requested.value, '$.provider')
@@ -860,6 +862,9 @@ pub(in super::super) async fn read_projection_rows_batch(
                 content_hash: decode(21)?,
                 snippet_text: decode(22)?,
                 index_text: decode(23)?,
+                location_path: row
+                    .get(24)
+                    .map_err(|error| storage("decode projected message location", error))?,
             };
             let key = (message.provider.clone(), message.message_id.clone());
             storage_columns.insert(key.clone(), columns);
@@ -1082,6 +1087,23 @@ pub(in super::super) async fn resolve_output_projection(
     Ok(owner_projection)
 }
 
+/// Canonical location captured at the storage write boundary, outside the
+/// immutable provider rendering and its provenance digest.
+pub(in super::super) fn canonical_message_location(
+    message: &SessionMessageRecord,
+) -> ProjectionStoreResult<Option<String>> {
+    let Some(json) = message.metadata_json.as_deref() else {
+        return Ok(None);
+    };
+    let metadata: serde_json::Value = serde_json::from_str(json)
+        .map_err(|error| storage("decode projected message location", error))?;
+    Ok(metadata
+        .get(format!("{}_session_cwd", message.provider))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(durable_project_path_key))
+}
+
 /// Normalize projection rows through the same authority as runtime session writes
 /// and project-scoped reads. Host/display spellings are not durable identity.
 /// Reconciliation remains pure over the normalized stored strings.
@@ -1156,10 +1178,14 @@ pub(super) fn reconcile_session_rows_detailed(
         // A rebind whose paths are both project ids takes the current id.
         // A stored path-shaped key takes the incoming path.
         expected.project_path.clone()
-    } else if expected.project_path == expected.project_key {
-        actual.project_path.clone()
     } else {
-        return Err(SessionReconcileConflict("project_path"));
+        // Two concrete working directories name one session: it was read
+        // through another rollout, or a resumed rollout moved its cwd. The
+        // stored cwd stays, like the session's title and annotations, and each
+        // message row keeps its own source. Replaying the same records in the
+        // same order therefore reaches the same row, instead of dropping every
+        // later message of the session as a collision.
+        actual.project_path.clone()
     };
     Ok(SessionRecord {
         provider: actual.provider.clone(),
@@ -1569,20 +1595,23 @@ mod reconcile_tests {
             super::durable_project_path_key(&expected.project_path)
         );
 
+        // Another directory under the same project key is the same session
+        // seen from another cwd: the stored path stays and nothing collides.
         let other = tmp.path().join("other-project");
         std::fs::create_dir_all(&other).unwrap();
         expected.project_path = other.to_string_lossy().into_owned();
         let transaction = harness.registered.begin_write_transaction().await.unwrap();
-        assert!(matches!(
-            super::super::apply::apply_session(&transaction, &expected).await,
-            Err(
-                tracedecay_store::ProjectionStoreError::SessionOutputCollision {
-                    field: "project_path",
-                    ..
-                }
-            )
-        ));
-        transaction.rollback().await.unwrap();
+        super::super::apply::apply_session(&transaction, &expected)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let kept = harness
+            .registered
+            .get_session(&original.provider, &original.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.project_path, persisted.project_path);
     }
 
     #[cfg(target_os = "macos")]
