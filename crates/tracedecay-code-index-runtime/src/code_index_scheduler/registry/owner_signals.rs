@@ -11,7 +11,7 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexConvergenceParkedV1, CodeIndexFreshnessReadFailureV1, CodeIndexReadinessTargetV1,
-    CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
+    CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1, CodeIndexWorktreeFreshnessV1,
 };
 
 use tracedecay_contracts::ResolvedScope;
@@ -497,16 +497,20 @@ impl CodeIndexSchedulerRegistryV1 {
         budget: Duration,
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         let deadline = Instant::now() + budget;
+        let last = tokio::sync::Mutex::new(None);
         // Every probe, including its blocking source read, shares the caller's
-        // one deadline. A timed-out blocking task cannot publish readiness.
+        // one deadline. Retain only completed readings, so expiry needs no I/O
+        // and a timed-out blocking task cannot publish readiness.
         match native_runtime::timeout_at(
             deadline,
-            self.wait_for_readiness_until(project_root, target, deadline),
+            self.wait_for_readiness_until(project_root, target, deadline, &last),
         )
         .await
         {
             Ok(reading) => reading,
-            Err(_) => Ok(CodeIndexReadinessWaitReadV1::TimedOut { last: None }),
+            Err(_) => Ok(CodeIndexReadinessWaitReadV1::TimedOut {
+                last: last.into_inner(),
+            }),
         }
     }
 
@@ -515,6 +519,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         target: CodeIndexReadinessTargetV1,
         deadline: Instant,
+        last: &tokio::sync::Mutex<Option<Box<CodeIndexWorktreeFreshnessV1>>>,
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         if target != CodeIndexReadinessTargetV1::Fresh
             && let Some(reading) = self
@@ -523,16 +528,19 @@ impl CodeIndexSchedulerRegistryV1 {
                     target != CodeIndexReadinessTargetV1::GraphReady,
                 )
                 .await?
-                .filter(|freshness| freshness.readiness(target) == CodeIndexReadinessV1::Reached)
-            && (target == CodeIndexReadinessTargetV1::GraphReady
-                || self
-                    .subscribe_owner_activity(project_root)
-                    .await
-                    .is_some_and(|activity| activity.pass_finished()))
         {
-            return Ok(CodeIndexReadinessWaitReadV1::Reached {
-                reading: Box::new(reading),
-            });
+            *last.lock().await = Some(Box::new(reading.clone()));
+            if reading.readiness(target) == CodeIndexReadinessV1::Reached
+                && (target == CodeIndexReadinessTargetV1::GraphReady
+                    || self
+                        .subscribe_owner_activity(project_root)
+                        .await
+                        .is_some_and(|activity| activity.pass_finished()))
+            {
+                return Ok(CodeIndexReadinessWaitReadV1::Reached {
+                    reading: Box::new(reading),
+                });
+            }
         }
         // The caller's budget bounds the sweep, and an unproven source cannot
         // be reported as reached.
@@ -556,13 +564,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Ok(Ok(())) => {}
             Err(_) => {
                 return Ok(CodeIndexReadinessWaitReadV1::TimedOut {
-                    last: self
-                        .dashboard_freshness_read_with_source_admission(
-                            project_root,
-                            target != CodeIndexReadinessTargetV1::GraphReady,
-                        )
-                        .await?
-                        .map(Box::new),
+                    last: last.lock().await.take(),
                 });
             }
         }
@@ -577,6 +579,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 else {
                     return Ok(None);
                 };
+                *last.lock().await = Some(Box::new(freshness.clone()));
                 Ok(match freshness.readiness(target) {
                     CodeIndexReadinessV1::Reached
                         if owner_settled || target == CodeIndexReadinessTargetV1::GraphReady =>
@@ -606,13 +609,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 reason: "code_index_scheduler_registry_closed".to_owned(),
             },
             CodeIndexSeatWaitV1::Deadline => CodeIndexReadinessWaitReadV1::TimedOut {
-                last: self
-                    .dashboard_freshness_read_with_source_admission(
-                        project_root,
-                        target != CodeIndexReadinessTargetV1::GraphReady,
-                    )
-                    .await?
-                    .map(Box::new),
+                last: last.lock().await.take(),
             },
         })
     }
