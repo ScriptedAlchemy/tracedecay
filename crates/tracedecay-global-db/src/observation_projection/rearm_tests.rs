@@ -8,7 +8,9 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::params;
 
-use super::{RearmedProjectionRetries, rearm_queued_projection_retries};
+use super::{
+    RearmedProjectionRetries, rearm_project_path_collisions, rearm_queued_projection_retries,
+};
 use crate::tests::harness::RegisteredGlobalDbHarness;
 
 const FAR_FUTURE_MICROS: i64 = 9_000_000_000_000_000;
@@ -211,4 +213,72 @@ async fn daemon_admission_defers_rearm_to_background_convergence() {
         (5, 0, 5),
         "background convergence re-arms the fresh mount's queue"
     );
+}
+
+async fn parked_retry_deadlines(harness: &RegisteredGlobalDbHarness) -> Vec<i64> {
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT next_retry_at_micros FROM projection_queue ORDER BY observation_sequence",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut deadlines = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        deadlines.push(row.get(0).unwrap());
+    }
+    deadlines
+}
+
+#[asupersync::test]
+async fn project_path_collisions_rearm_once_and_genuine_collisions_stay_parked() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-project-path-collisions").await;
+    seed_queue(&harness, 4, 0).await;
+    let errors = [
+        "projection session output collided at codex/s-1: project_path differs",
+        "projection session output collided at codex/s-2: transcript_path differs",
+        "projection session output collided at codex/s-3: project_key differs",
+        "projection session output collided at claude/s-4: project_path differs",
+    ];
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    for (sequence, error) in (1_i64..).zip(errors) {
+        transaction
+            .execute(
+                "UPDATE projection_queue
+                 SET next_retry_at_micros = ?2, last_error = ?3
+                 WHERE observation_sequence = (
+                     SELECT sequence FROM observations ORDER BY sequence LIMIT 1 OFFSET ?1)",
+                params![sequence - 1, i64::MAX, error],
+            )
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    assert_eq!(parked_retry_deadlines(&harness).await, vec![i64::MAX; 4]);
+
+    let database = harness.registered.runtime_database();
+    assert_eq!(rearm_project_path_collisions(database).await.unwrap(), 1);
+    assert_eq!(
+        parked_retry_deadlines(&harness).await,
+        vec![0, i64::MAX, i64::MAX, i64::MAX],
+        "only the Codex project_path collision is re-armed"
+    );
+
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE projection_queue SET next_retry_at_micros = ?1, last_error = ?2
+             WHERE next_retry_at_micros = 0",
+            params![i64::MAX, errors[0]],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        rearm_project_path_collisions(database).await.unwrap(),
+        0,
+        "the re-arm is recorded and never repeats"
+    );
+    assert_eq!(parked_retry_deadlines(&harness).await, vec![i64::MAX; 4]);
 }
