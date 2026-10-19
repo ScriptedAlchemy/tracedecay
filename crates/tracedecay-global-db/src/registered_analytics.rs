@@ -19,6 +19,17 @@ const OBSERVABILITY_ROLLUP_RETENTION_SECONDS: i64 = 395 * 86_400;
 const MAX_OBSERVABILITY_OUTBOX_JSON_BYTES: usize = 1_048_576;
 const OBSERVABILITY_RETENTION_ROWS_PER_CLASS: usize = 512;
 pub(crate) const ANALYTICS_INSERT_ROWS_PER_STATEMENT: usize = 500;
+pub(crate) const HOOK_ROUTE_PERFORMANCE_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_hook_route_idempotency
+     ON analytics_events(project_id, hint_id)
+     WHERE provider = 'daemon_hook' AND event_kind = 'hook_route' AND hint_id IS NOT NULL";
+// Literal predicates make the partial index usable. Requiring the index keeps
+// best-effort telemetry from scanning history while an existing store upgrades.
+pub(crate) const HOOK_ROUTE_BY_IDEMPOTENCY_KEY_SQL: &str =
+    "SELECT id FROM analytics_events INDEXED BY idx_hook_route_idempotency
+     WHERE provider = 'daemon_hook' AND event_kind = 'hook_route'
+       AND project_id = ?1 AND hint_id = ?2
+     ORDER BY id ASC LIMIT 1";
 // The provider is a literal so `idx_observability_event_idempotency` stays
 // usable; the planner does not match a bound value against an index predicate.
 pub(crate) const OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL: &str =
@@ -142,6 +153,12 @@ impl RegisteredGlobalDb {
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
+        if event.provider == "daemon_hook"
+            && event.event_kind == "hook_route"
+            && let Some(hint_id) = event.hint_id.as_deref()
+        {
+            return self.append_hook_route_event(event, hint_id).await;
+        }
         let writer = self
             .runtime_database()
             .writer_connection("append analytics event")
@@ -188,6 +205,46 @@ impl RegisteredGlobalDb {
         {
             return Err("analytics append returned more than one id".to_owned());
         }
+        Ok(id)
+    }
+
+    async fn append_hook_route_event(
+        &self,
+        event: &AnalyticsEventInsert,
+        hint_id: &str,
+    ) -> Result<i64, String> {
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| format!("failed to begin hook route append: {error}"))?;
+        let existing = {
+            let mut rows = transaction
+                .query(
+                    HOOK_ROUTE_BY_IDEMPOTENCY_KEY_SQL,
+                    tracedecay_runtime_core::db::engine::params![
+                        event.project_id.as_str(),
+                        hint_id
+                    ],
+                )
+                .await
+                .map_err(|error| format!("failed to read hook route identity: {error}"))?;
+            rows.next()
+                .await
+                .map_err(|error| format!("failed to read hook route receipt: {error}"))?
+                .map(|row| row.get::<i64>(0))
+                .transpose()
+                .map_err(|error| format!("failed to decode hook route receipt: {error}"))?
+        };
+        // Retry observations may have a later timestamp or current branch.
+        // The first durable event and its ID remain authoritative.
+        let id = match existing {
+            Some(id) => id,
+            None => append_analytics_event_in_existing_tx(&transaction, event).await?,
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("failed to commit hook route append: {error}"))?;
         Ok(id)
     }
 
