@@ -192,7 +192,7 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
                 u64::try_from(order).unwrap() + 2,
             )
             .unwrap();
-            assert!(
+            assert_eq!(
                 admit_native_context_scout_lifecycle(
                     &sessions,
                     Some(&runtime.background_cpu()),
@@ -200,9 +200,10 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
                     &identity,
                     range,
                 )
-                .await
+                .await,
+                NativeLifecycleAdmissionV1::Ready,
             );
-            assert!(
+            assert_eq!(
                 admit_native_context_scout_lifecycle(
                     &sessions,
                     Some(&runtime.background_cpu()),
@@ -210,7 +211,8 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
                     &identity,
                     range,
                 )
-                .await
+                .await,
+                NativeLifecycleAdmissionV1::Ready,
             );
         }
         let lifecycle =
@@ -279,14 +281,23 @@ async fn lifecycle_positions_with_gaps_or_late_arrivals_settle() {
         }
     };
 
-    assert!(admit("call.kimi.first", 1).await);
-    assert!(admit("call.kimi.after-gap", 5).await, "a gap must commit");
-    assert!(
+    assert_eq!(
+        admit("call.kimi.first", 1).await,
+        NativeLifecycleAdmissionV1::Ready
+    );
+    assert_eq!(
         admit("call.kimi.after-gap", 5).await,
+        NativeLifecycleAdmissionV1::Ready,
+        "a gap must commit"
+    );
+    assert_eq!(
+        admit("call.kimi.after-gap", 5).await,
+        NativeLifecycleAdmissionV1::Ready,
         "a retry stays admitted"
     );
-    assert!(
+    assert_eq!(
         admit("call.kimi.late", 3).await,
+        NativeLifecycleAdmissionV1::Superseded,
         "an event older than the committed cursor is already covered"
     );
 

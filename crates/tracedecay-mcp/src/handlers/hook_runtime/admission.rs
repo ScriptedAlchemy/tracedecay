@@ -11,9 +11,10 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 use super::context_scout::{
-    admit_native_context_scout_lifecycle, hook_v2_context_scout_lifecycle_for_session,
-    hook_v2_native_context_scout_lifecycle, lookup_hook_v2_delivery_claim,
-    lookup_hook_v2_delivery_claim_for_event, remove_hook_v2_delivery_claim,
+    NativeLifecycleAdmissionV1, admit_native_context_scout_lifecycle,
+    hook_v2_context_scout_lifecycle_for_session, hook_v2_native_context_scout_lifecycle,
+    lookup_hook_v2_delivery_claim, lookup_hook_v2_delivery_claim_for_event, native_lifecycle_order,
+    native_lifecycle_order_floor, recovered_native_lifecycle_order, remove_hook_v2_delivery_claim,
     retain_hook_v2_delivery_claim,
 };
 use super::envelope::{
@@ -108,9 +109,10 @@ fn pre_ledger_hook_v2_pending_work_root(
         .join(host.hook_key())
 }
 
-fn complete_hook_v2_pending_work(
+fn settle_hook_v2_pending_work(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    settlement: tracedecay_hooks::HookAdmissionWorkSettlementV1,
 ) -> bool {
     let ledger_root = hook_v2_admission_ledger_root(data_root, envelope.producer);
     // A released ledger reopens from its log; a removed one owes nothing.
@@ -122,7 +124,7 @@ fn complete_hook_v2_pending_work(
         ledger_root,
         envelope.producer,
         hook_now(),
-        |ledger| ledger.stage_work_completion(envelope),
+        |ledger| ledger.stage_work_settlement(envelope, settlement),
     ) {
         Ok(Ok(Some(commit))) => commit.wait().is_ok(),
         Ok(Ok(None)) => true,
@@ -133,11 +135,19 @@ fn complete_hook_v2_pending_work(
 fn hook_v2_work_completion(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-) -> Arc<dyn Fn() + Send + Sync + 'static> {
+) -> Arc<dyn Fn(tracedecay_daemon_service::HookOrchestrationSettlementV1) + Send + Sync + 'static> {
     let data_root = data_root.to_path_buf();
     let envelope = envelope.clone();
-    Arc::new(move || {
-        if !complete_hook_v2_pending_work(&data_root, &envelope) {
+    Arc::new(move |settlement| {
+        let settlement = match settlement {
+            tracedecay_daemon_service::HookOrchestrationSettlementV1::Completed => {
+                tracedecay_hooks::HookAdmissionWorkSettlementV1::Completed
+            }
+            tracedecay_daemon_service::HookOrchestrationSettlementV1::Superseded => {
+                tracedecay_hooks::HookAdmissionWorkSettlementV1::Superseded
+            }
+        };
+        if !settle_hook_v2_pending_work(&data_root, &envelope, settlement) {
             tracing::warn!(
                 event = "hook_v2_work_completion_failed",
                 host = envelope.producer.hook_key(),
@@ -195,6 +205,8 @@ fn stage_hook_v2_admission(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     work: Option<&tracedecay_hooks::HookEventEnvelopeV2>,
+    lifecycle: Option<&tracedecay_hooks::NativeContextScoutLifecycleV1>,
+    minimum_order: Option<u64>,
     now: UtcMicros,
 ) -> Option<tracedecay_hooks::HookAdmissionStagedV1> {
     with_hook_v2_admission_ledger(
@@ -202,7 +214,11 @@ fn stage_hook_v2_admission(
         hook_v2_admission_ledger_root(data_root, envelope.producer),
         envelope.producer,
         now,
-        |ledger| ledger.stage_admission(envelope, work, now).ok(),
+        |ledger| {
+            ledger
+                .stage_admission(envelope, work, lifecycle, minimum_order, now)
+                .ok()
+        },
     )
     .ok()
     .flatten()
@@ -507,9 +523,9 @@ async fn admit_gated_native_lifecycle(
     range: tracedecay_domain::ObservationSourceRangeV1,
     producer: tracedecay_domain::NativeHostIdentityV1,
     intent_enabled: bool,
-) -> bool {
+) -> NativeLifecycleAdmissionV1 {
     if intent_gated_lifecycle(producer) && !intent_enabled {
-        return true;
+        return NativeLifecycleAdmissionV1::Ready;
     }
     admit_native_context_scout_lifecycle(
         mount.project_sessions,
@@ -597,8 +613,17 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
             return HookV2AdmissionOutcomeV1::CatchupRequired;
         }
     };
+    let incoming_lifecycle = mount.as_ref().and_then(|mount| mount.lifecycle.as_ref());
+    if incoming_lifecycle.is_some_and(|lifecycle| !lifecycle.matches_envelope(provider_envelope)) {
+        return HookV2AdmissionOutcomeV1::Conflict;
+    }
     let canonical_envelope = daemon_mint_hook_v2_envelope(envelope);
     let envelope = &canonical_envelope;
+    let incoming_lifecycle = incoming_lifecycle.map(|lifecycle| {
+        let mut lifecycle = lifecycle.clone();
+        lifecycle.event_id = envelope.event_id;
+        lifecycle
+    });
     let data_root = &cg.hook_store_layout().data_root;
     let requires_producer_work = hook_v2_requires_producer_work(envelope);
     // One ledger commit makes the admission and the producer work it owes
@@ -606,15 +631,55 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
     // stable daemon order when the provider has no native sequence.
     // Exact-duplicate retries reuse that order and retry only the lifecycle
     // prerequisite before suppressing downstream effects.
+    let native_lifecycle_enabled =
+        tracedecay_hooks::NativeContextScoutLifecycleV1::host_mounts_lifecycle(envelope.producer)
+            && hook_v2_native_lifecycle_enabled(cg, envelope.producer).await;
+    // Producer replay compares the existing native cursor even when policy
+    // suppresses new lifecycle writes (notably a Claude Stop). Its new daemon
+    // allocation must follow that same authority before ordering is compared.
+    let compares_native_order = mount.is_some()
+        && requires_producer_work
+        && incoming_lifecycle.is_none()
+        && native_session_id.is_some();
+    let minimum_order = if (native_lifecycle_enabled || compares_native_order)
+        && matches!(envelope.ordering, tracedecay_hooks::HookOrderingV1::Unknown)
+    {
+        match (
+            mount.as_ref(),
+            incoming_lifecycle
+                .as_ref()
+                .map(|lifecycle| &lifecycle.session_id)
+                .or(native_session_id.as_ref()),
+        ) {
+            (Some(mount), Some(session)) => {
+                if tracedecay_agent_hosts::hooks::protected_native_session_id(session.as_str())
+                    != envelope.protected_session_id
+                {
+                    return HookV2AdmissionOutcomeV1::Conflict;
+                }
+                let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
+                    return HookV2AdmissionOutcomeV1::Backpressured;
+                };
+                native_lifecycle_order_floor(mount.project_sessions, provider, session.clone())
+                    .await
+            }
+            _ => None,
+        }
+    } else {
+        Some(0)
+    };
     let Some(staged) = stage_hook_v2_admission(
         data_root,
         envelope,
         requires_producer_work.then_some(provider_envelope),
+        incoming_lifecycle.as_ref(),
+        minimum_order,
         now,
     ) else {
         return HookV2AdmissionOutcomeV1::Backpressured;
     };
     let receipt = staged.receipt;
+    let native_lifecycle = staged.native_lifecycle;
     let commit = staged.commit;
     if !matches!(
         tracedecay_runtime_core::native_runtime::spawn_blocking(move || commit.wait()).await,
@@ -629,8 +694,87 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
             return HookV2AdmissionOutcomeV1::Conflict;
         }
     }
+    let lifecycle_required = native_lifecycle_enabled
+        && matches!(
+            envelope.event,
+            tracedecay_hooks::HookEventV2::ToolLifecycle { .. }
+                | tracedecay_hooks::HookEventV2::SavedEdit { .. }
+        );
+    if lifecycle_required && (native_lifecycle.is_none() || mount.is_none()) {
+        return HookV2AdmissionOutcomeV1::Backpressured;
+    }
+    let native_session_id = native_lifecycle
+        .as_ref()
+        .map(|lifecycle| lifecycle.session_id.clone())
+        .or(native_session_id);
+    let lifecycle_admission = if let Some(mount) = mount.as_ref() {
+        let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
+        let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
+        if receipt.order_reconstructed
+            && matches!(envelope.ordering, tracedecay_hooks::HookOrderingV1::Unknown)
+        {
+            match native_lifecycle.as_ref() {
+                Some(lifecycle) => {
+                    recovered_native_lifecycle_order(
+                        mount.project_sessions,
+                        provider,
+                        lifecycle,
+                        range,
+                    )
+                    .await
+                }
+                None => NativeLifecycleAdmissionV1::Unavailable,
+            }
+        } else if let Some(native_lifecycle) = native_lifecycle.as_ref() {
+            admit_gated_native_lifecycle(
+                mount,
+                provider,
+                native_lifecycle,
+                range,
+                envelope.producer,
+                !intent_gated_lifecycle(envelope.producer) || lifecycle_required,
+            )
+            .await
+        } else if requires_producer_work && let Some(session) = native_session_id.as_ref() {
+            native_lifecycle_order(
+                mount.project_sessions,
+                mount.background_cpu,
+                provider,
+                session.clone(),
+                range,
+            )
+            .await
+        } else {
+            NativeLifecycleAdmissionV1::Ready
+        }
+    } else {
+        NativeLifecycleAdmissionV1::Ready
+    };
+    match lifecycle_admission {
+        NativeLifecycleAdmissionV1::Unavailable => return HookV2AdmissionOutcomeV1::Backpressured,
+        NativeLifecycleAdmissionV1::Superseded => {
+            if requires_producer_work
+                && !settle_hook_v2_pending_work(
+                    data_root,
+                    envelope,
+                    tracedecay_hooks::HookAdmissionWorkSettlementV1::Superseded,
+                )
+            {
+                return HookV2AdmissionOutcomeV1::Backpressured;
+            }
+            return HookV2AdmissionOutcomeV1::ExactDuplicate {
+                context_scout_address: None,
+                ready_guidance: Value::Null,
+            };
+        }
+        NativeLifecycleAdmissionV1::Ready => {}
+    }
     if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
-        && receipt.work_completed
+        && receipt.work_settlement.is_some()
     {
         let retained_claim = host_response_available
             .then(|| {
@@ -718,29 +862,6 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
             context_scout_address,
             ready_guidance,
         };
-    }
-    if let Some(mount) = mount.as_ref()
-        && let Some(native_lifecycle) = mount.lifecycle.as_ref()
-    {
-        let lifecycle_enabled = hook_v2_native_lifecycle_enabled(cg, envelope.producer).await;
-        let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        };
-        let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        };
-        if !admit_gated_native_lifecycle(
-            mount,
-            provider,
-            native_lifecycle,
-            range,
-            envelope.producer,
-            lifecycle_enabled,
-        )
-        .await
-        {
-            return HookV2AdmissionOutcomeV1::Backpressured;
-        }
     }
     if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
         && !requires_producer_work
@@ -858,6 +979,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
         lifecycle,
         snapshot.revision,
         false,
+        Some(receipt.order),
         completion,
     );
     let feedback_notice = if first_admission {
@@ -1003,7 +1125,7 @@ pub(super) fn hook_v2_profile_admit(
         .join(binding.host.hook_key());
     let now = hook_now();
     let outcome = with_hook_v2_admission_ledger(None, ledger_root, binding.host, now, |ledger| {
-        ledger.stage_admission(&envelope, None, now)
+        ledger.stage_admission(&envelope, None, None, Some(0), now)
     })
     .map(|staged| staged.and_then(|staged| staged.commit.wait().map(|()| staged.receipt.decision)));
     Ok(match outcome {

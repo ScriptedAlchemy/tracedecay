@@ -35,11 +35,13 @@ pub struct HookOrchestrationRequestV1 {
     pub lifecycle: Option<ContextScoutLifecycleAddressV1>,
     pub hook_configuration_revision: u64,
     pub trigger: HookOrchestrationTriggerV1,
+    /// Immutable order from the event's host admission ledger.
+    pub admission_order: Option<u64>,
     explicit_request_id: Option<ManifestDigest>,
     #[cfg(any(test, feature = "test-helpers"))]
-    pub completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    pub completion: Option<Arc<dyn Fn(HookOrchestrationSettlementV1) + Send + Sync + 'static>>,
     #[cfg(not(any(test, feature = "test-helpers")))]
-    completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    completion: Option<Arc<dyn Fn(HookOrchestrationSettlementV1) + Send + Sync + 'static>>,
 }
 
 impl HookOrchestrationRequestV1 {
@@ -74,6 +76,7 @@ impl HookOrchestrationRequestV1 {
             lifecycle,
             hook_configuration_revision: configuration_revision,
             trigger,
+            admission_order: None,
             explicit_request_id: None,
             completion: None,
         })
@@ -88,10 +91,18 @@ impl HookOrchestrationRequestV1 {
                 lifecycle: self.lifecycle.clone(),
                 hook_configuration_revision: self.hook_configuration_revision,
                 trigger: HookOrchestrationTriggerV1::IntentBoundary,
+                admission_order: self.admission_order,
                 explicit_request_id: None,
                 completion: None,
             })
     }
+}
+
+/// Why an admitted producer obligation reached its terminal state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookOrchestrationSettlementV1 {
+    Completed,
+    Superseded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,10 +139,13 @@ type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16], Option<Manifes
 /// Stable per-session work address of one lane. A newer boundary at the same
 /// address supersedes the running one instead of queueing behind it.
 type HookOrchestrationAddressV1 = String;
-type HookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
+type HookOrchestrationCompletionV1 =
+    Arc<dyn Fn(HookOrchestrationSettlementV1) + Send + Sync + 'static>;
 
 struct HookOrchestrationInFlightEntryV1 {
     event: HookOrchestrationEventKeyV1,
+    producer: tracedecay_domain::NativeHostIdentityV1,
+    admission_order: Option<u64>,
     lifecycle: Option<ContextScoutLifecycleAddressV1>,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     superseded: std::sync::atomic::AtomicBool,
@@ -288,7 +302,16 @@ impl BoundedHookOrchestratorV1 {
         };
         if emit_terminal {
             for completion in completions {
-                completion();
+                completion(
+                    if operation
+                        .superseded
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        HookOrchestrationSettlementV1::Superseded
+                    } else {
+                        HookOrchestrationSettlementV1::Completed
+                    },
+                );
             }
         }
     }
@@ -392,6 +415,15 @@ impl BoundedHookOrchestratorV1 {
             {
                 return Err(HookOrchestrationAdmissionV1::Backpressured);
             }
+            // The lock that chooses the incumbent also checks durable order.
+            // A delayed replay must never cancel a newer live boundary.
+            if in_flight.addresses.get(&address).is_some_and(|incumbent| {
+                incumbent.producer == request.hook.envelope().producer
+                    && matches!((request.admission_order, incumbent.admission_order),
+                        (Some(incoming), Some(active)) if incoming < active)
+            }) {
+                return Err(HookOrchestrationAdmissionV1::Backpressured);
+            }
             let permit = if let Some(incumbent) = in_flight.addresses.remove(&address) {
                 // A newer boundary at the same stable address supersedes the
                 // incumbent. A host boundary without its own call identity
@@ -414,6 +446,8 @@ impl BoundedHookOrchestratorV1 {
             let work_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
             let operation = Arc::new(HookOrchestrationInFlightEntryV1 {
                 event: event.clone(),
+                producer: request.hook.envelope().producer,
+                admission_order: request.admission_order,
                 lifecycle: request.lifecycle.clone(),
                 cancellation: work_cancellation,
                 superseded: std::sync::atomic::AtomicBool::new(false),
@@ -660,7 +694,8 @@ pub fn admit_registered_hook_orchestration(
     lifecycle: Option<ContextScoutLifecycleAddressV1>,
     configuration_revision: u64,
     explicit: bool,
-    completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    admission_order: Option<u64>,
+    completion: Option<Arc<dyn Fn(HookOrchestrationSettlementV1) + Send + Sync + 'static>>,
 ) -> HookOrchestrationAdmissionV1 {
     // Any other hook of a session that now carries a lifecycle is the event a
     // boundary parked for that session waits on.
@@ -686,6 +721,7 @@ pub fn admit_registered_hook_orchestration(
     {
         runtime.resume_parked(request.hook.envelope(), lifecycle);
     }
+    request.admission_order = admission_order;
     let intent_companion = request.intent_companion();
     request.completion = completion;
     let admission = runtime.admit(request);
@@ -741,8 +777,9 @@ pub(super) async fn run_registered_context_scout_request(
         lifecycle: Some(lifecycle),
         hook_configuration_revision,
         trigger: HookOrchestrationTriggerV1::Explicit,
+        admission_order: None,
         explicit_request_id: Some(effect_identity),
-        completion: Some(Arc::new(move || {
+        completion: Some(Arc::new(move |_settlement| {
             if let Ok(mut completed) = completed.lock()
                 && let Some(completed) = completed.take()
             {

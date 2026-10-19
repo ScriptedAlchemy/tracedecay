@@ -289,7 +289,7 @@ async fn settled_cycle_admits_the_sessions_next_boundary_from_its_terminal() {
     let (admitted, admission) = tokio::sync::oneshot::channel();
     let pending = StdMutex::new(Some((next, admitted)));
     let owner = Arc::downgrade(&runtime);
-    first.completion = Some(Arc::new(move || {
+    first.completion = Some(Arc::new(move |_| {
         if let Some((next, admitted)) = pending.lock().unwrap().take()
             && let Some(runtime) = owner.upgrade()
         {
@@ -361,7 +361,8 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
                 None,
                 1,
                 false,
-                Some(Arc::new(move || {
+                None,
+                Some(Arc::new(move |_| {
                     if let Some(completed) = completed.lock().unwrap().take() {
                         let _ = completed.send(());
                     }
@@ -384,6 +385,7 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
                 lifecycle,
                 1,
                 false,
+                None,
                 None
             ),
             HookOrchestrationAdmissionV1::UnsupportedTrigger
@@ -646,7 +648,8 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             None,
             1,
             false,
-            Some(Arc::new(move || {
+            None,
+            Some(Arc::new(move |_| {
                 if let Some(parked) = parked.lock().unwrap().take() {
                     let _ = parked.send(());
                 }
@@ -673,6 +676,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             Some(lifecycle.clone()),
             1,
             false,
+            None,
             None,
         ),
         HookOrchestrationAdmissionV1::Enqueued
@@ -702,6 +706,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             1,
             false,
             None,
+            None,
         ),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -723,6 +728,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             1,
             false,
             None,
+            None,
         ),
         HookOrchestrationAdmissionV1::Backpressured
     );
@@ -736,6 +742,7 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             None,
             1,
             false,
+            None,
             None,
         ),
         HookOrchestrationAdmissionV1::Enqueued
@@ -765,7 +772,8 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
             Some(lifecycle),
             1,
             false,
-            Some(Arc::new(move || {
+            None,
+            Some(Arc::new(move |_| {
                 if let Some(stopped) = stopped.lock().unwrap().take() {
                     let _ = stopped.send(());
                 }
@@ -796,4 +804,160 @@ async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work(
 
     unregister_hook_orchestration_runtime(envelope.project_id, envelope.worktree_id, &runtime);
     assert!(runtime.shutdown().await);
+}
+
+struct OrderedHookFixture {
+    runtime: Arc<BoundedHookOrchestratorV1>,
+    starts: tokio::sync::mpsc::UnboundedReceiver<(u64, CancellationToken)>,
+    terminals: tokio::sync::mpsc::UnboundedReceiver<(u64, HookOrchestrationSettlementV1)>,
+    settled: tokio::sync::mpsc::UnboundedSender<(u64, HookOrchestrationSettlementV1)>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl OrderedHookFixture {
+    fn new() -> Self {
+        let (started, starts) = tokio::sync::mpsc::unbounded_channel();
+        let (settled, terminals) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = BoundedHookOrchestratorV1::new(1, {
+            let release = Arc::clone(&release);
+            move |request: HookOrchestrationRequestV1, cancellation: CancellationToken| {
+                let started = started.clone();
+                let release = Arc::clone(&release);
+                async move {
+                    started.send((request.admission_order.unwrap(), cancellation.clone())).unwrap();
+                    tokio::select! {
+                        () = cancellation.cancelled() => HookOrchestrationWorkOutcomeV1::RetryableFailure,
+                        () = release.notified() => HookOrchestrationWorkOutcomeV1::Completed,
+                    }
+                }
+            }
+        }).unwrap();
+        Self {
+            runtime,
+            starts,
+            terminals,
+            settled,
+            release,
+        }
+    }
+
+    fn request(&self, order: u8) -> HookOrchestrationRequestV1 {
+        let template = native_request(111);
+        let mut envelope = template.hook.envelope().clone();
+        envelope.event_id = [order; 16];
+        let binding = HookScopeBindingV1 {
+            host: envelope.producer,
+            project_id: envelope.project_id,
+            repository_id: envelope.repository_id,
+            worktree_id: envelope.worktree_id,
+            worktree_epoch: envelope.worktree_epoch,
+            binding_token: envelope.binding_token,
+            capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
+                family: tracedecay_hooks::HookEventFamily::SavedEdit,
+                support: tracedecay_hooks::stock_event_support(
+                    envelope.producer,
+                    tracedecay_hooks::HookEventFamily::SavedEdit,
+                ),
+            }],
+        };
+        let mut request = HookOrchestrationRequestV1::from_envelope(
+            envelope,
+            &binding,
+            template.lifecycle,
+            1,
+            false,
+        )
+        .unwrap();
+        request.admission_order = Some(u64::from(order));
+        let settled = self.settled.clone();
+        request.completion = Some(Arc::new(move |terminal| {
+            settled.send((u64::from(order), terminal)).unwrap();
+        }));
+        request
+    }
+}
+
+#[tokio::test]
+async fn delayed_replay_preserves_newer_work_and_its_typed_terminal() {
+    let mut fixture = OrderedHookFixture::new();
+    assert_eq!(
+        fixture.runtime.admit(fixture.request(1)),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    let (_, old_cancellation) = fixture.starts.recv().await.unwrap();
+    assert_eq!(
+        fixture.runtime.admit(fixture.request(2)),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    assert_eq!(
+        fixture.terminals.recv().await.unwrap(),
+        (1, HookOrchestrationSettlementV1::Superseded)
+    );
+    assert!(old_cancellation.is_cancelled());
+    let (order, new_cancellation) = fixture.starts.recv().await.unwrap();
+    assert_eq!(order, 2);
+    assert_eq!(
+        fixture.runtime.admit(fixture.request(1)),
+        HookOrchestrationAdmissionV1::Backpressured
+    );
+    assert!(!new_cancellation.is_cancelled());
+    fixture.release.notify_one();
+    assert_eq!(
+        fixture.terminals.recv().await.unwrap(),
+        (2, HookOrchestrationSettlementV1::Completed)
+    );
+    assert!(fixture.starts.try_recv().is_err());
+    assert!(fixture.runtime.shutdown().await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_live_admission_and_delayed_replay_keep_newest_boundary() {
+    let mut fixture = OrderedHookFixture::new();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let live = tokio::task::spawn_blocking({
+        let runtime = Arc::clone(&fixture.runtime);
+        let barrier = Arc::clone(&barrier);
+        let request = fixture.request(2);
+        move || {
+            barrier.wait();
+            runtime.admit(request)
+        }
+    });
+    let replay = tokio::task::spawn_blocking({
+        let runtime = Arc::clone(&fixture.runtime);
+        let request = fixture.request(1);
+        move || {
+            barrier.wait();
+            runtime.admit(request)
+        }
+    });
+    assert_eq!(live.await.unwrap(), HookOrchestrationAdmissionV1::Enqueued);
+    let replay = replay.await.unwrap();
+    assert!(matches!(
+        replay,
+        HookOrchestrationAdmissionV1::Enqueued | HookOrchestrationAdmissionV1::Backpressured
+    ));
+    let cancellation = loop {
+        let (order, cancellation) = fixture.starts.recv().await.unwrap();
+        if order == 2 {
+            break cancellation;
+        }
+    };
+    assert!(!cancellation.is_cancelled());
+    fixture.release.notify_one();
+    let expected = if replay == HookOrchestrationAdmissionV1::Enqueued {
+        2
+    } else {
+        1
+    };
+    let mut terminals = Vec::new();
+    for _ in 0..expected {
+        terminals.push(fixture.terminals.recv().await.unwrap());
+    }
+    assert!(terminals.contains(&(2, HookOrchestrationSettlementV1::Completed)));
+    if replay == HookOrchestrationAdmissionV1::Enqueued {
+        assert!(terminals.contains(&(1, HookOrchestrationSettlementV1::Superseded)));
+    }
+    assert!(fixture.runtime.shutdown().await);
 }
