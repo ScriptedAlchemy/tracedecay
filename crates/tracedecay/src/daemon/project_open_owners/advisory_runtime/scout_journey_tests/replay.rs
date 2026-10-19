@@ -19,7 +19,8 @@ use tracedecay_daemon_service::context_scout_lifecycle::{
 };
 use tracedecay_daemon_service::{
     BoundedHookOrchestratorV1, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
-    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
+    HookOrchestrationWorkOutcomeV1, register_hook_orchestration_runtime,
+    unregister_hook_orchestration_runtime,
 };
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationLayerIdV1, ConfigurationRevisionId,
@@ -275,6 +276,23 @@ async fn mount_intent(
     else {
         panic!("the registered session intent is enqueued");
     };
+    // The queue commit survived, but no claim authority was mounted before
+    // this retry. Recovery must keep that exact suggestion and its evidence.
+    let recovered = fixture
+        .pass(&boundary, sessions, &project_key, &engine)
+        .await;
+    assert_eq!(
+        recovered,
+        ContextScoutIntentPassOutcomeV1::Enqueued {
+            entry: entry.clone(),
+            lifecycle: lifecycle.clone(),
+        }
+    );
+    assert_eq!(
+        engine.requests(),
+        1,
+        "recovery does not re-judge committed work"
+    );
     assert!(
         graph
             .mount_current_context_scout_claim_authority(
@@ -294,7 +312,7 @@ async fn mount_intent(
 }
 
 #[tokio::test]
-async fn completed_stop_replay_claims_the_mounted_intent_once_without_reopening_producer_work() {
+async fn enqueued_intent_replay_mounts_and_delivers_once_without_reopening_producer_work() {
     let (fixture, graph, runtime) = registered_fixture().await;
     let sessions = runtime
         .registered_database_arc(HostAdmissionScope::Project)
@@ -434,5 +452,82 @@ async fn completed_stop_replay_claims_the_mounted_intent_once_without_reopening_
         fixture.binding.project_id,
         fixture.binding.worktree_id,
         &sessions,
+    ));
+}
+
+#[tokio::test]
+async fn enqueued_intent_recovery_cannot_mount_past_durable_configuration_drift() {
+    let (fixture, graph, runtime) = registered_fixture().await;
+    let sessions = runtime
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    let project_key = RegisteredGlobalDb::canonical_project_key(graph.project_root());
+    seed_intent_session(&sessions, &project_key).await;
+    let engine = RecordingDecisionEngine::new(0.9);
+    let boundary = fixture.hook(71, completed_tool());
+    let original = fixture
+        .pass(&boundary, &sessions, &project_key, &engine)
+        .await;
+    let next = configuration::advance_configuration(&sessions).await;
+    let recovered = fixture
+        .pass(&boundary, &sessions, &project_key, &engine)
+        .await;
+    assert_eq!(
+        recovered, original,
+        "recovery preserves the original evidence"
+    );
+    assert_eq!(
+        super::intent_pass_work_outcome(&recovered),
+        HookOrchestrationWorkOutcomeV1::RetryableFailure
+    );
+    let ContextScoutIntentPassOutcomeV1::Enqueued { entry, lifecycle } = recovered else {
+        panic!("the queue commit remains pending before the owner observes configuration drift");
+    };
+    assert!(
+        !graph
+            .mount_current_context_scout_claim_authority(
+                Arc::clone(&fixture.registry),
+                &boundary,
+                1,
+                fixture.pin.clone(),
+                fixture.context.clone(),
+                *lifecycle,
+                entry.work.address,
+                entry.work.input_watermark,
+                now_utc_micros(),
+            )
+            .await,
+        "durable configuration must reject the stale pin before owner refresh"
+    );
+    fixture
+        .owner
+        .install_configuration(next, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .pass(&boundary, &sessions, &project_key, &engine)
+            .await,
+        ContextScoutIntentPassOutcomeV1::Unavailable
+    );
+    assert_eq!(
+        engine.requests(),
+        1,
+        "stale recovery never re-judges the event"
+    );
+    assert!(
+        graph
+            .resolve_current_context_scout_session_claim_authority(
+                &boundary,
+                &fixture.lifecycle,
+                now_utc_micros(),
+            )
+            .await
+            .is_none()
+    );
+    assert!(unregister_context_scout_lifecycle_authority(
+        fixture.binding.project_id,
+        fixture.binding.worktree_id,
+        &sessions
     ));
 }
