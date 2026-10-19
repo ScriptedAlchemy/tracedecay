@@ -356,6 +356,23 @@ pub fn cline_native_source_successor_id(
     CanonicalObservationIdV1::derive(&material).map(Some)
 }
 
+/// Two observations of one Codex native record read from two live rollout
+/// files of one thread: the thread rollout under the session's source and a
+/// `thread/revert` rollout under its own. Codex keeps both files, so both
+/// observations stay offered and share the one message the record projects.
+pub fn codex_rollout_siblings(left: &DurableObservationV1, right: &DurableObservationV1) -> bool {
+    let (left_source, right_source) = (left.source(), right.source());
+    left_source.provider().as_str() == "codex"
+        && right_source.provider().as_str() == "codex"
+        && left_source.session_id() == right_source.session_id()
+        && left_source.explicit_source_key().is_some()
+        && right_source.explicit_source_key().is_some()
+        && left_source != right_source
+        && left.scope() == right.scope()
+        && left.identity().native_record_id().is_some()
+        && left.identity().native_record_id() == right.identity().native_record_id()
+}
+
 /// Permits only the evidenced combined-file to native-file source transition.
 /// Authored facts, native identity, scope and sanitization remain exact; a UI
 /// record may lose only the API-array length formerly added to its position.

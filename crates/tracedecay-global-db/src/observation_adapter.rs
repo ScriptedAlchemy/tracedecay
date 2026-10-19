@@ -12,7 +12,7 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId,
     RetrievalAnchorId, RetrievalAnchorRecord, SanitizationReceiptV1, canonical_json_bytes,
     canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
-    cline_native_source_successor_id, cline_task_native_observation_id,
+    cline_native_source_successor_id, cline_task_native_observation_id, codex_rollout_siblings,
     is_canonical_payload_revision_replay, prove_cline_native_source_transition, sha256_hex_suffix,
 };
 use tracedecay_store::observation::{
@@ -574,7 +574,9 @@ impl GlobalDbObservationStore {
                         Box::new(write),
                     ));
                 }
-                if !preflight.accepts_pending_cline_alias(&write, &existing.anchor_id)? {
+                if !preflight.accepts_pending_cline_alias(&write, &existing.anchor_id)?
+                    && !preflight.accepts_codex_rollout_sibling_alias(&write, &existing.anchor_id)
+                {
                     return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
                         alias: Box::new(alias.clone()),
                         existing_anchor_id: Box::new(existing.anchor_id),
@@ -742,6 +744,7 @@ struct ObservationPreflightSnapshot {
     admission_refusals: HashMap<(String, String), PayloadDigestV1>,
     stored_observations: HashMap<String, StoredObservation>,
     retrieval_aliases: HashMap<(String, String, String), RetrievalAnchorId>,
+    alias_owners: HashMap<RetrievalAnchorId, CanonicalObservationIdV1>,
     cline_supersessions: HashMap<RetrievalAnchorId, RetrievalAnchorId>,
     source_cursors:
         HashMap<(ObservationSourceIdentityV1, ObservationScopeV1), ObservationSourceCursorV1>,
@@ -772,6 +775,23 @@ impl ObservationPreflightSnapshot {
         observation_id: &CanonicalObservationIdV1,
     ) -> Option<&StoredObservation> {
         self.stored_observations.get(observation_id.as_str())
+    }
+
+    fn accepts_codex_rollout_sibling_alias(
+        &self,
+        write: &AnchoredObservationWrite,
+        existing_anchor: &RetrievalAnchorId,
+    ) -> bool {
+        let Some(owner) = self
+            .alias_owners
+            .get(existing_anchor)
+            .and_then(|owner_id| self.stored_observation(owner_id))
+        else {
+            return false;
+        };
+        owner.retrieval_anchor_id() == existing_anchor
+            && anchors_share_access(owner.retrieval_anchor(), write.retrieval_anchor())
+            && codex_rollout_siblings(owner.observation(), write.observation())
     }
 
     fn accepts_pending_cline_alias(
@@ -805,19 +825,8 @@ impl ObservationPreflightSnapshot {
             return Ok(false);
         };
         let prior_anchor = predecessor.retrieval_anchor();
-        let next_anchor = write.retrieval_anchor();
-        let prior_auth = prior_anchor.authorization();
-        let next_auth = next_anchor.authorization();
         Ok(prior_anchor.anchor_id() == existing_anchor
-            && prior_anchor.owner() == next_anchor.owner()
-            && prior_anchor.aliases() == next_anchor.aliases()
-            && prior_anchor.payload_access() == next_anchor.payload_access()
-            && prior_anchor.retention_class() == next_anchor.retention_class()
-            && prior_anchor.durability() == next_anchor.durability()
-            && prior_auth.resolved_scope_id == next_auth.resolved_scope_id
-            && prior_auth.privacy_domain_id == next_auth.privacy_domain_id
-            && prior_auth.access_policy_digest == next_auth.access_policy_digest
-            && prior_auth.capability_id == next_auth.capability_id
+            && anchors_share_access(prior_anchor, write.retrieval_anchor())
             && prove_cline_native_source_transition(predecessor.observation(), write.observation())
                 .is_some())
     }
@@ -943,6 +952,7 @@ async fn load_observation_preflight(
     let admission_refusals =
         read_admission_refusals_from_snapshot(&snapshot, writes, OPERATION).await?;
     let mut seen_observation_ids = HashSet::new();
+    let mut refused_observation_ids = HashSet::new();
     let mut observation_ids = Vec::new();
     for write in writes {
         let observation = write.observation();
@@ -951,9 +961,9 @@ async fn load_observation_preflight(
             observation_id.to_owned(),
             observation.payload_reference().digest().as_str().to_owned(),
         );
-        if !admission_refusals.contains_key(&refusal_key)
-            && seen_observation_ids.insert(observation_id.to_owned())
-        {
+        if admission_refusals.contains_key(&refusal_key) {
+            refused_observation_ids.insert(observation_id.to_owned());
+        } else if seen_observation_ids.insert(observation_id.to_owned()) {
             observation_ids.push(observation.observation_id().clone());
         }
         for counterpart in [
@@ -972,10 +982,17 @@ async fn load_observation_preflight(
             }
         }
     }
+    let (retrieval_aliases, alias_owners) =
+        read_retrieval_aliases_from_snapshot(&snapshot, writes, OPERATION).await?;
+    for owner_id in alias_owners.values() {
+        if !refused_observation_ids.contains(owner_id.as_str())
+            && seen_observation_ids.insert(owner_id.as_str().to_owned())
+        {
+            observation_ids.push(owner_id.clone());
+        }
+    }
     let stored_observations =
         read_stored_observations_from_snapshot(&snapshot, &observation_ids, OPERATION).await?;
-    let retrieval_aliases =
-        read_retrieval_aliases_from_snapshot(&snapshot, writes, OPERATION).await?;
     let source_cursors = read_source_cursors_from_snapshot(&snapshot, writes, OPERATION).await?;
     let cline_supersessions =
         read_cline_supersessions_from_snapshot(&snapshot, &stored_observations, writes, OPERATION)
@@ -988,6 +1005,7 @@ async fn load_observation_preflight(
         admission_refusals,
         stored_observations,
         retrieval_aliases,
+        alias_owners,
         cline_supersessions,
         source_cursors,
     })
@@ -1190,6 +1208,20 @@ async fn read_source_cursors_from_snapshot(
     Ok(cursors)
 }
 
+fn anchors_share_access(prior: &RetrievalAnchorRecord, next: &RetrievalAnchorRecord) -> bool {
+    let prior_auth = prior.authorization();
+    let next_auth = next.authorization();
+    prior.owner() == next.owner()
+        && prior.aliases() == next.aliases()
+        && prior.payload_access() == next.payload_access()
+        && prior.retention_class() == next.retention_class()
+        && prior.durability() == next.durability()
+        && prior_auth.resolved_scope_id == next_auth.resolved_scope_id
+        && prior_auth.privacy_domain_id == next_auth.privacy_domain_id
+        && prior_auth.access_policy_digest == next_auth.access_policy_digest
+        && prior_auth.capability_id == next_auth.capability_id
+}
+
 fn retrieval_alias_key(
     scope: &ObservationScopeV1,
     alias: &tracedecay_domain::NativeAlias,
@@ -1208,7 +1240,10 @@ async fn read_retrieval_aliases_from_snapshot(
     snapshot: &DatabaseEngineReadSnapshot,
     writes: &[AnchoredObservationWrite],
     operation: &'static str,
-) -> ObservationStoreResult<HashMap<(String, String, String), RetrievalAnchorId>> {
+) -> ObservationStoreResult<(
+    HashMap<(String, String, String), RetrievalAnchorId>,
+    HashMap<RetrievalAnchorId, CanonicalObservationIdV1>,
+)> {
     let mut requested = HashSet::new();
     for write in writes {
         for alias in write.retrieval_anchor().aliases() {
@@ -1216,7 +1251,7 @@ async fn read_retrieval_aliases_from_snapshot(
         }
     }
     if requested.is_empty() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), HashMap::new()));
     }
     let requested = requested
         .into_iter()
@@ -1234,8 +1269,10 @@ async fn read_retrieval_aliases_from_snapshot(
     let mut rows = snapshot
         .query(
             "SELECT alias.owner_json, alias.alias_kind, alias.locator_digest,
-                    alias.anchor_id
+                    alias.anchor_id, binding.observation_id
              FROM retrieval_anchor_aliases AS alias
+             LEFT JOIN observation_retrieval_anchors AS binding
+               ON binding.anchor_id = alias.anchor_id
              JOIN json_each(?1) AS requested
                ON alias.owner_json =
                     json_extract(requested.value, '$.scope_json')
@@ -1248,6 +1285,7 @@ async fn read_retrieval_aliases_from_snapshot(
         .await
         .map_err(|error| runtime_storage_error(operation, error))?;
     let mut aliases = HashMap::new();
+    let mut owners = HashMap::new();
     while let Some(row) = rows
         .next()
         .await
@@ -1266,9 +1304,19 @@ async fn read_retrieval_aliases_from_snapshot(
                 .map_err(|error| runtime_storage_error(operation, error))?,
         )
         .map_err(|error| runtime_storage_error(operation, error))?;
+        if let Some(owner_id) = row
+            .get::<Option<String>>(4)
+            .map_err(|error| runtime_storage_error(operation, error))?
+        {
+            owners.insert(
+                anchor_id.clone(),
+                CanonicalObservationIdV1::new(owner_id)
+                    .map_err(|error| runtime_storage_error(operation, error))?,
+            );
+        }
         aliases.insert(key, anchor_id);
     }
-    Ok(aliases)
+    Ok((aliases, owners))
 }
 
 fn observation_batch_row_projection() -> String {
