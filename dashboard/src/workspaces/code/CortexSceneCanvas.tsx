@@ -53,7 +53,7 @@ function resolvePalette(element: HTMLElement): ScenePalette {
 
 type LayoutState<L> =
   | { status: 'pending' }
-  | { status: 'ready'; layout: L }
+  | { status: 'ready'; layout: L; scene: CortexScene; painter: CortexPainter<L> }
   | { status: 'failed'; reason: string };
 
 export function CortexSceneCanvas<L>({
@@ -93,6 +93,12 @@ export function CortexSceneCanvas<L>({
   const fitKRef = useRef(1);
   const paletteRef = useRef<ScenePalette | null>(null);
   const frameRequest = useRef<number | null>(null);
+  // Every queued frame dispatches the latest committed painter. A callback
+  // captured by scene A must never paint a layout produced for scene B.
+  const paintRef = useRef<() => void>(() => {});
+  const queueLatestFrame = useCallback(() => {
+    frameRequest.current = requestAnimationFrame(() => paintRef.current());
+  }, []);
   const layoutGeneration = useRef(0);
   const state = useRef({ selectedId, inspectedId, hovered, cursor, reduced, layoutState, box });
   state.current = { selectedId, inspectedId, hovered, cursor, reduced, layoutState, box };
@@ -104,7 +110,13 @@ export function CortexSceneCanvas<L>({
     const canvas = canvasRef.current;
     const host = hostRef.current;
     const current = state.current;
-    if (!canvas || !host || current.layoutState.status !== 'ready') return;
+    if (
+      !canvas ||
+      !host ||
+      current.layoutState.status !== 'ready' ||
+      current.layoutState.scene !== scene ||
+      current.layoutState.painter !== painter
+    ) return;
     const { width, height } = current.box;
     if (width === 0 || height === 0) return;
     const ctx = canvas.getContext('2d');
@@ -143,13 +155,15 @@ export function CortexSceneCanvas<L>({
     // Struck heat decays in real time; with motion reduced it is held.
     if (activation?.warm && !current.reduced) {
       activation.tick(performance.now());
-      frameRequest.current = requestAnimationFrame(paint);
+      queueLatestFrame();
     }
-  }, [activation, painter, scene]);
+  }, [activation, painter, scene, queueLatestFrame]);
+
+  paintRef.current = paint;
 
   const schedule = useCallback(() => {
-    if (frameRequest.current === null) frameRequest.current = requestAnimationFrame(paint);
-  }, [paint]);
+    if (frameRequest.current === null) queueLatestFrame();
+  }, [queueLatestFrame]);
 
   useEffect(
     () => () => {
@@ -216,7 +230,7 @@ export function CortexSceneCanvas<L>({
       .then(() => painter.layout(scene, state.current.box, controller.signal))
       .then(
         (layout) => {
-          if (current()) setLayoutState({ status: 'ready', layout });
+          if (current()) setLayoutState({ status: 'ready', layout, scene, painter });
         },
         (error: unknown) => {
           if (current()) {
@@ -235,7 +249,12 @@ export function CortexSceneCanvas<L>({
 
   // Fit on a fresh layout or a resized box; keep the reader's camera otherwise.
   useEffect(() => {
-    if (layoutState.status !== 'ready' || !hasBox) return;
+    if (
+      layoutState.status !== 'ready' ||
+      layoutState.scene !== scene ||
+      layoutState.painter !== painter ||
+      !hasBox
+    ) return;
     const fit = fitCamera(painter.bounds(layoutState.layout), box.width, box.height, painter.fitPad);
     const previousFit = fitKRef.current;
     fitKRef.current = fit.k;
@@ -252,7 +271,7 @@ export function CortexSceneCanvas<L>({
       });
     }
     schedule();
-  }, [layoutState, box.width, box.height, hasBox, painter, schedule]);
+  }, [layoutState, box.width, box.height, hasBox, painter, scene, schedule]);
 
   useEffect(() => {
     schedule();
@@ -286,7 +305,11 @@ export function CortexSceneCanvas<L>({
 
   const fit = useCallback(() => {
     const current = state.current;
-    if (current.layoutState.status !== 'ready') return;
+    if (
+      current.layoutState.status !== 'ready' ||
+      current.layoutState.scene !== scene ||
+      current.layoutState.painter !== painter
+    ) return;
     setCamera(
       fitCamera(
         painter.bounds(current.layoutState.layout),
@@ -295,7 +318,7 @@ export function CortexSceneCanvas<L>({
         painter.fitPad,
       ),
     );
-  }, [painter, setCamera]);
+  }, [painter, scene, setCamera]);
 
   // Wheel zoom must be able to cancel the page scroll, so it is non-passive.
   useEffect(() => {
@@ -315,7 +338,12 @@ export function CortexSceneCanvas<L>({
     (sx: number, sy: number): string | null => {
       const current = state.current;
       const camera = cameraRef.current;
-      if (current.layoutState.status !== 'ready' || !camera) return null;
+      if (
+        current.layoutState.status !== 'ready' ||
+        current.layoutState.scene !== scene ||
+        current.layoutState.painter !== painter ||
+        !camera
+      ) return null;
       const layout = current.layoutState.layout;
       const frame = { camera, fitK: fitKRef.current };
       let best: string | null = null;
@@ -392,7 +420,12 @@ export function CortexSceneCanvas<L>({
     (id: string) => {
       const current = state.current;
       const camera = cameraRef.current;
-      if (current.layoutState.status !== 'ready' || !camera) return;
+      if (
+        current.layoutState.status !== 'ready' ||
+        current.layoutState.scene !== scene ||
+        current.layoutState.painter !== painter ||
+        !camera
+      ) return;
       const world = painter.position(current.layoutState.layout, id);
       if (!world) return;
       const point = project(camera, world.x, world.y);
@@ -404,14 +437,18 @@ export function CortexSceneCanvas<L>({
         point.y < margin ? margin - point.y : point.y > height - margin ? height - margin - point.y : 0;
       if (dx !== 0 || dy !== 0) setCamera({ k: camera.k, tx: camera.tx + dx, ty: camera.ty + dy });
     },
-    [painter, setCamera],
+    [painter, scene, setCamera],
   );
 
   const reachable = useMemo(() => {
-    if (layoutState.status !== 'ready') return [];
+    if (
+      layoutState.status !== 'ready' ||
+      layoutState.scene !== scene ||
+      layoutState.painter !== painter
+    ) return [];
     const layout = layoutState.layout;
     return order.filter((id) => painter.position(layout, id) !== null);
-  }, [layoutState, order, painter]);
+  }, [layoutState, order, painter, scene]);
 
   const moveCursor = (step: number | 'first' | 'last') => {
     if (reachable.length === 0) return;
