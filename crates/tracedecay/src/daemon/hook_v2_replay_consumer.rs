@@ -297,10 +297,10 @@ async fn redrive_pending_work(
                 .await
             },
             |envelope, native_session_id| async move {
-                // A timed-out admission may have committed its ledger before its
-                // lifecycle. Only the richer host spool can finish that mount.
-                if native_session_id.is_none()
-                    && tracedecay_hooks::NativeContextScoutLifecycleV1::host_mounts_lifecycle(host)
+                // A registered session may belong to an earlier event. It does
+                // not prove that this event's native call/edit lifecycle was
+                // mounted. Only the matching host spool record can finish it.
+                if tracedecay_hooks::NativeContextScoutLifecycleV1::host_mounts_lifecycle(host)
                     && matches!(
                         envelope.event,
                         tracedecay_hooks::HookEventV2::ToolLifecycle { .. }
