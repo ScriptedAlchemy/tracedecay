@@ -1076,7 +1076,7 @@ mod tests {
     ) {
         let data_root = &graph.hook_store_layout().data_root;
         let mut older = template.clone();
-        older.event_id = [11; 16];
+        older.event_id = [13; 16];
         let older_lifecycle = tracedecay_hooks::NativeContextScoutLifecycleV1::new(
             session.session_id.as_str(),
             "call.replay.older",
@@ -1097,7 +1097,7 @@ mod tests {
             HookV2AdmissionOutcomeV1::Backpressured,
         ));
         let mut newer = template.clone();
-        newer.event_id = [12; 16];
+        newer.event_id = [14; 16];
         let newer_lifecycle = tracedecay_hooks::NativeContextScoutLifecycleV1::new(
             session.session_id.as_str(),
             "call.replay.newer",

@@ -223,7 +223,7 @@ pub(super) async fn recovered_native_lifecycle_order(
                 std::cmp::Ordering::Less => NativeLifecycleAdmissionV1::Unavailable,
             }
         }
-        Ok(None) | Ok(Some(_)) | Err(_) => NativeLifecycleAdmissionV1::Unavailable,
+        Ok(None | Some(_)) | Err(_) => NativeLifecycleAdmissionV1::Unavailable,
     }
 }
 
@@ -260,10 +260,6 @@ pub(super) async fn native_lifecycle_order(
 }
 
 #[tracing::instrument(name = "mcp.hook_runtime.scout_lifecycle", level = "trace", skip_all)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Context-scout admission is one native lifecycle bind for the scout claim."
-)]
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
     background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,

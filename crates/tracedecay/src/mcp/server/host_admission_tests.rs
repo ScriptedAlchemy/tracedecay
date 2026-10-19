@@ -184,7 +184,10 @@ async fn file_edit_commit_failure_queues_no_sync() {
     assert_eq!(outcome.reason_code, Some("spool_recovery_required"));
     assert_eq!(effects.load(Ordering::SeqCst), 0);
     assert_eq!(broker.pending_replay_count().await.unwrap(), 0);
-    assert!(code_index_activity(&server).await.is_empty());
+    assert_eq!(
+        code_index_activity(&server).await,
+        Vec::<event_lane::ActivityRecordV1>::new()
+    );
     server.shutdown().await;
 }
 
@@ -245,7 +248,10 @@ async fn file_edit_request_acks_durable_work_while_effect_is_held() {
     entered.notified().await;
     assert_eq!(broker.pending_count().await, 1);
     assert_eq!(effects.load(Ordering::SeqCst), 0);
-    assert!(code_index_activity(&server).await.is_empty());
+    assert_eq!(
+        code_index_activity(&server).await,
+        Vec::<event_lane::ActivityRecordV1>::new()
+    );
     release.notify_one();
     server.wait_project_host_admission_replay_idle().await;
     assert_eq!(broker.pending_count().await, 0);
@@ -373,7 +379,10 @@ async fn retained_file_edits_reconcile_branch_drift_without_blocking_the_source(
     );
     assert_eq!(broker.pending_replay_count().await.unwrap(), 2);
     assert_eq!(effects.load(Ordering::SeqCst), 0);
-    assert!(code_index_activity(&server).await.is_empty());
+    assert_eq!(
+        code_index_activity(&server).await,
+        Vec::<event_lane::ActivityRecordV1>::new()
+    );
     available.store(true, Ordering::SeqCst);
     assert_eq!(
         server.replay_host_admission(None).await,

@@ -1545,7 +1545,7 @@ mod tests {
         assert!(first_receipt.work_settlement.is_some());
         assert_eq!(
             ledger.pending_work_envelopes(UtcMicros(4)).unwrap(),
-            [second.clone()]
+            std::slice::from_ref(&second)
         );
         ledger.forget(&first.event_id);
         ledger.rewrite().unwrap();

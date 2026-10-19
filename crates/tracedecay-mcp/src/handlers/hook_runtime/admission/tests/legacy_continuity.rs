@@ -397,7 +397,7 @@ async fn retained_legacy_receipt_keeps_producer_work_owed_until_execution() {
         .commit_lifecycle(fixture.lifecycle.call_id.as_str(), 99)
         .await;
     fixture.write_shipped_ledger(true, true);
-    assert_eq!(fixture.pending(), [fixture.envelope.clone()]);
+    assert_eq!(fixture.pending(), std::slice::from_ref(&fixture.envelope));
     fixture.restart();
     let effects = Arc::new(AtomicUsize::new(0));
     let producer = fixture.producer(Arc::clone(&effects));
@@ -442,7 +442,7 @@ async fn missing_or_conflicting_legacy_receipt_stays_owed_through_rewrite_and_re
                 fixture.admit().await,
                 HookV2AdmissionOutcomeV1::Backpressured
             ));
-            assert_eq!(fixture.pending(), [fixture.envelope.clone()]);
+            assert_eq!(fixture.pending(), std::slice::from_ref(&fixture.envelope));
             fixture.restart();
         }
     }
@@ -462,7 +462,10 @@ async fn a_later_canonical_receipt_truthfully_supersedes_retained_legacy_work() 
         fixture.admit().await,
         HookV2AdmissionOutcomeV1::ExactDuplicate { .. }
     ));
-    assert!(fixture.pending().is_empty());
+    assert_eq!(
+        fixture.pending(),
+        Vec::<tracedecay_hooks::HookEventEnvelopeV2>::new()
+    );
     assert_eq!(effects.load(Ordering::SeqCst), 0);
     let canonical = daemon_mint_hook_v2_envelope(&fixture.envelope);
     let receipt = stage_hook_v2_admission(
