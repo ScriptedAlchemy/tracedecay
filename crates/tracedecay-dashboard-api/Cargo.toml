@@ -9,24 +9,24 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 asupersync.workspace = true
-axum = "0.8"
-base64 = "0.23"
+axum.workspace = true
+base64.workspace = true
 clru = "0.6"
-futures-util = "0.3.33"
-getrandom = "0.4"
+futures-util.workspace = true
+getrandom.workspace = true
 httpdate = "1.0.3"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["service"] }
 schemars.workspace = true
-semver = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
+semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
 tracedecay-tokenizer = { path = "../tracedecay-tokenizer", optional = true }
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tokio-util = "0.7"
-tower = { version = "0.5", features = ["util"] }
-tracing = "0.1"
+tower = { workspace = true, features = ["util"] }
+tracing.workspace = true
 tracedecay-api = { path = "../tracedecay-api" }
 tracedecay-automation = { path = "../tracedecay-automation" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime" }
@@ -56,9 +56,9 @@ test-transport = [
 ]
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["full", "test-util"] }
-tokio-stream = "0.1"
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-stream.workspace = true
 # The dashboard lib-test target owns registered-store and engine fixtures.
 # Dev-only feature unification keeps those helpers out of production builds.
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }

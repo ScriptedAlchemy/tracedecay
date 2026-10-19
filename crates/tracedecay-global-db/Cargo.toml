@@ -20,19 +20,19 @@ test-helpers = [
 
 [dependencies]
 asupersync.workspace = true
-base64 = "0.23"
-futures-util = "0.3.33"
-getrandom = "0.4"
-hex = "0.4"
-hmac = { version = "0.13.0", features = ["zeroize"] }
+base64.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+hmac = { workspace = true, features = ["zeroize"] }
 rusqlite = { version = "0.40.1", default-features = false, optional = true }
 schemars.workspace = true
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-thiserror = "2"
-tracing = "0.1"
-zeroize = "1.9.0"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
@@ -52,9 +52,9 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["async"] }
-rusqlite = { version = "0.40.1", default-features = false }
-tempfile = "3"
+criterion = { workspace = true, features = ["async"] }
+rusqlite.workspace = true
+tempfile.workspace = true
 # Test-only helper surfaces this crate's test targets reach across crate
 # boundaries: engine fixtures, session normalizers, and temporal page requests.
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }

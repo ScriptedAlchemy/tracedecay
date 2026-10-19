@@ -11,6 +11,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [dependencies]
-async-channel = "2.5.0"
+async-channel.workspace = true
 asupersync.workspace = true
-tracing = "0.1"
+tracing.workspace = true

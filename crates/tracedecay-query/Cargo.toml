@@ -11,22 +11,22 @@ include = ["/src/**", "/assets/**"]
 [dependencies]
 # Raw deflate for lexical row text; already in the tree through
 # `tracedecay-code-index`.
-flate2 = "1"
+flate2.workspace = true
 fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
 gix = { version = "=0.89.0", default-features = false, features = ["revision", "parallel", "sha1", "sha256"] }
-hex = "0.4"
-hmac = "0.13.0"
-rayon = "1"
+hex.workspace = true
+hmac.workspace = true
+rayon.workspace = true
 roaring = { version = "=0.11.5", default-features = false }
 # Lexical artifact finalization installs a SQLite progress_handler, and
 # receipt-verification tests install an authorizer. Both APIs live behind
 # rusqlite's `hooks` feature and must be selected by this storage owner.
-rusqlite = { version = "0.40.1", default-features = false, features = ["cache", "functions", "hooks"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-thiserror = "2"
-tracing = "0.1"
+rusqlite = { workspace = true, features = ["cache", "functions", "hooks"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain" }
@@ -36,7 +36,7 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 # this crate's tree through `tracedecay-code-index`, so the edge costs no build.
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
-zeroize = "1.9.0"
+zeroize.workspace = true
 
 [features]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
@@ -49,8 +49,8 @@ test-helpers = ["tracedecay-temporal-query/test-helpers"]
 production = ["tracedecay-code-index/lite", "tracedecay-code-index/full"]
 
 [dev-dependencies]
-static_assertions = "1.1.0"
-tempfile = "3"
+static_assertions.workspace = true
+tempfile.workspace = true
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 # Test-only: the relocated search-quality suites build lexical/exact fixtures
 # through the code-index intake and the extracted language registry, which

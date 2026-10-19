@@ -24,25 +24,25 @@ test-transport = [
 ]
 
 [dependencies]
-cap-std = "4.0.2"
-futures-util = "0.3.33"
-getrandom = "0.4"
+cap-std.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
 gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
-glob = "0.3"
-hex = "0.4"
-same-file = "1"
+glob.workspace = true
+hex.workspace = true
+same-file.workspace = true
 schemars.workspace = true
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tempfile = "3"
-thiserror = "2"
-ureq = { version = "3", features = ["json"] }
-tokio = { version = "1", features = ["macros", "sync"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-tracing = "0.1"
-url = "2"
-zeroize = "1.9.0"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+ureq = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["macros", "sync"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+url.workspace = true
+zeroize.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-automation = { path = "../tracedecay-automation" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
@@ -72,8 +72,8 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
-static_assertions = "1.1.0"
-tokio = { version = "1", features = ["full", "test-util"] }
+static_assertions.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
 # Test-only helper surfaces reached across crate boundaries by this crate's
 # test targets. Feature unification supplies them to the test build only.
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }

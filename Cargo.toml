@@ -95,6 +95,54 @@ grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = 
 # added for one is never missing for the other.
 gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 schemars = "1.2.1"
+async-channel = "2.5.0"
+axum = "0.8"
+base64 = "0.23"
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
+clap = "4.6"
+constant_time_eq = "0.6"
+criterion = "0.8"
+filetime = "0.2"
+flate2 = "1"
+futures-util = "0.3.33"
+getrandom = "0.4"
+glob = "0.3"
+globset = "0.4"
+hex = "0.4"
+hmac = "0.13.0"
+jsonc-parser = "0.34.0"
+libc = "0.2"
+notify = "8"
+rayon = "1"
+reqwest = { version = "0.13", default-features = false }
+rmcp = { version = "3.5.1", default-features = false }
+rusqlite = { version = "0.40.1", default-features = false }
+rustls = { version = "0.23", default-features = false }
+same-file = "1"
+semver = "1"
+serde = "1"
+serde_json = "1"
+sha2 = "0.11"
+shell-words = "1.1"
+socket2 = "0.6"
+static_assertions = "1.1.0"
+tempfile = "3"
+thiserror = "2"
+tokio = "1"
+tokio-stream = "0.1"
+toml = "1"
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false }
+tree-sitter = "0.27"
+tree-sitter-rust = "0.24"
+ureq = "3"
+url = "2"
+walkdir = "2"
+windows-sys = "0.61"
+xattr = "1"
+zeroize = "1.9.0"
 
 [profile.bench]
 opt-level = 3

@@ -7,8 +7,8 @@ license = "MIT"
 description = "Shared compressed vocabulary for TraceDecay token counting"
 
 [dependencies]
-base64 = "0.23"
-flate2 = "1"
+base64.workspace = true
+flate2.workspace = true
 rustc-hash = "2"
-thiserror = "2"
+thiserror.workspace = true
 tiktoken-rs = "0.12"

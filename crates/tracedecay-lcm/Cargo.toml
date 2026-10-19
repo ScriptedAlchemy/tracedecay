@@ -15,10 +15,10 @@ test-helpers = []
 
 [dependencies]
 regex = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tracing = "0.1"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
@@ -30,8 +30,8 @@ tracedecay-tokenizer = { path = "../tracedecay-tokenizer" }
 [dev-dependencies]
 asupersync.workspace = true
 # `test_support` seeds fixtures through a raw SQLite handle.
-rusqlite = { version = "0.40.1", default-features = false }
-tempfile = "3"
+rusqlite.workspace = true
+tempfile.workspace = true
 # This crate's own test target needs the kernel's `db::engine::TestConnection`.
 # Declaring the same path dependency with the feature keeps it out of the lib
 # build while feature unification supplies it to every test target here.

@@ -9,13 +9,13 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/assets/**", "/src/**"]
 
 [dependencies]
-clap = { version = "4.6", features = ["derive"] }
-hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tempfile = "3"
-thiserror = "2"
+clap = { workspace = true, features = ["derive"] }
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-capture = { path = "../tracedecay-capture" }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["eval-helpers"] }
@@ -24,7 +24,7 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-query = { path = "../tracedecay-query" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
-tracing = "0.1"
+tracing.workspace = true
 
 [features]
 # Language tiers forwarded to the code-index owner the evaluator mounts. Off by
@@ -50,10 +50,10 @@ name = "tracedecay-search-eval-direct"
 path = "src/bin/tracedecay-search-eval-direct.rs"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
