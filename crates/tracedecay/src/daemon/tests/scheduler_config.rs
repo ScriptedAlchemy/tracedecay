@@ -1,4 +1,7 @@
 #[cfg(unix)]
+use std::time::Duration;
+
+#[cfg(unix)]
 use super::*;
 
 #[cfg(unix)]
@@ -499,10 +502,55 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
         "unavailable-host-admission-test",
     );
 
-    engine
+    let server = engine
         .project_server(&handshake)
         .await
         .expect("read/query server must open when admission spool is unavailable");
+    let graph = server.cg_snapshot().await;
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        &project,
+        &graph
+            .store_layout()
+            .identity
+            .project_id
+            .as_ref()
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap();
+    let reader = super::super::project_composition::project_hook_source_pending(
+        &engine.store_administration,
+        &graph,
+        &project,
+        &scope,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reader.read_pending(),
+        Err(
+            tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::ReadFailed
+        ),
+        "an unreadable spool cannot prove current source currency"
+    );
+    let observed = reader.revision();
+    std::fs::remove_file(&spool_path).unwrap();
+    let database = engine
+        .store_administration
+        .registered_project_session_database(graph.project_root(), graph.store_layout())
+        .await
+        .unwrap();
+    engine
+        .store_administration
+        .host_admission_broker(&database)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), reader.changed(observed))
+        .await
+        .expect("the original reader must observe the recovered canonical broker");
+    assert_eq!(reader.read_pending(), Ok(false));
     engine.shutdown_all().await;
 }
 
