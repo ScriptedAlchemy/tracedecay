@@ -554,6 +554,8 @@ mod tests {
                 "build_20261018_x86_64_linux/javascript",
                 "build_20261018_x86_64_linux/documentation",
                 "build_20261018_x86_64_linux/generated_sources",
+                "build_20261018_x86_64_linux/typescript_v2_01",
+                "typescript_v2_01/build_20261018_x86_64_linux",
             ] {
                 let path = format!("/workspace/{uuid}/dist/{artifact}");
                 assert_eq!(
