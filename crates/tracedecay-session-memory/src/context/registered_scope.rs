@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{ProjectId, RefId, RepositoryId, WorktreeId};
+use tracedecay_runtime_core::git_repository::{
+    GitRepositoryError, GitTopologyProbeError, try_repository_topology,
+};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::RepositoryIdentityMarker;
 
@@ -84,10 +87,24 @@ fn resolve_authorized_root(
 ) -> Result<AuthorizedRoot, ApplicationScopeError> {
     let registered_root = canonical_root(registered_root, "registered root")?;
     let requested_root = canonical_root(requested_root, "requested root")?;
-    let scope_root = if requested_root.starts_with(&registered_root) {
-        registered_root.clone()
-    } else {
-        requested_root
+    // A checkout may be nested under the registered checkout. Resolve its
+    // actual Git root before ordinary subdirectories converge on their owner;
+    // lexical containment alone cannot authorize another repository.
+    let scope_root = match try_repository_topology(&requested_root) {
+        Ok(topology) => topology.worktree_root.clone().ok_or_else(|| {
+            ApplicationScopeError::Resolution(format!(
+                "requested root '{}' has no Git checkout",
+                requested_root.display()
+            ))
+        })?,
+        Err(GitTopologyProbeError::Repository(GitRepositoryError::NotARepository { .. })) => {
+            if requested_root.starts_with(&registered_root) {
+                registered_root.clone()
+            } else {
+                requested_root
+            }
+        }
+        Err(error) => return Err(ApplicationScopeError::Resolution(error.to_string())),
     };
     let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(&scope_root)
         .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))?;

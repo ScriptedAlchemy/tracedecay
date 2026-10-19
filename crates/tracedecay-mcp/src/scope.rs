@@ -243,7 +243,8 @@ mod tests {
         std::fs::create_dir_all(&subdir).unwrap();
         let owner = owner_for(&root, "project.mcp-scope-test");
 
-        let from_subdir = resolve_query_scope(&owner, &subdir).unwrap();
+        let (resolved_root, from_subdir) = resolve_query_scope_with_root(&owner, &subdir).unwrap();
+        assert_eq!(resolved_root, root);
         let from_root = resolve_query_scope(&owner, &root).unwrap();
 
         assert_eq!(
@@ -284,21 +285,24 @@ mod tests {
     fn sibling_root_of_another_repository_fails_closed() {
         let temp = TempDir::new().unwrap();
         let registered = temp.path().join("registered");
-        let sibling = temp.path().join("sibling");
         std::fs::create_dir_all(&registered).unwrap();
-        std::fs::create_dir_all(&sibling).unwrap();
         let registered = registered.canonicalize().unwrap();
         init_repo(&registered);
-        init_repo(&sibling);
-        let sibling = sibling.canonicalize().unwrap();
+        write_identity_marker(&registered, "project.mcp-scope-test");
         let owner = owner_for(&registered, "project.mcp-scope-test");
-
-        let error = resolve_query_scope(&owner, &sibling).unwrap_err();
-
-        assert!(
-            matches!(error, QueryScopeError::UnauthorizedSiblingRoot { .. }),
-            "a resolution naming a different repository must fail closed: {error}"
-        );
+        for foreign in [
+            temp.path().join("sibling"),
+            registered.join(".claude/foreign"),
+        ] {
+            std::fs::create_dir_all(&foreign).unwrap();
+            init_repo(&foreign);
+            write_identity_marker(&foreign, "project.foreign");
+            let error = resolve_query_scope(&owner, &foreign).unwrap_err();
+            assert!(
+                matches!(error, QueryScopeError::UnauthorizedSiblingRoot { .. }),
+                "a resolution naming a different repository must fail closed: {error}"
+            );
+        }
     }
 
     #[test]
@@ -309,7 +313,7 @@ mod tests {
         init_repo(&root);
         let root = root.canonicalize().unwrap();
         write_identity_marker(&root, "project.mcp-scope-test");
-        let linked = temp.path().join("linked-feature");
+        let linked = root.join(".claude/worktrees/linked-feature");
         git(
             &root,
             &[
@@ -324,7 +328,14 @@ mod tests {
         let owner = owner_for(&root, "project.mcp-scope-test");
 
         let main_scope = resolve_query_scope(&owner, &root).unwrap();
-        let linked_scope = resolve_query_scope(&owner, &linked).unwrap();
+        let (resolved_root, linked_scope) = resolve_query_scope_with_root(&owner, &linked).unwrap();
+        assert_eq!(resolved_root, linked);
+        let subdir = linked.join("src/deep");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(
+            resolve_query_scope_with_root(&owner, &subdir).unwrap(),
+            (linked.clone(), linked_scope.clone())
+        );
 
         assert_eq!(
             main_scope.repository_id, linked_scope.repository_id,
