@@ -29,6 +29,12 @@ pub(super) fn hook_v2_requires_producer_work(
     matches!(
         &envelope.event,
         tracedecay_hooks::HookEventV2::SavedEdit { .. }
+            | tracedecay_hooks::HookEventV2::PromptBoundary
+            | tracedecay_hooks::HookEventV2::ToolLifecycle {
+                phase: tracedecay_hooks::HookLifecyclePhaseV1::Completed
+                    | tracedecay_hooks::HookLifecyclePhaseV1::Failed,
+                ..
+            }
             | tracedecay_hooks::HookEventV2::SessionBoundary {
                 boundary: tracedecay_hooks::HookBoundaryV1::End
                     | tracedecay_hooks::HookBoundaryV1::TurnComplete

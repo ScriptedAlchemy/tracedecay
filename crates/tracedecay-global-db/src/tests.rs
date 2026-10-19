@@ -10,6 +10,8 @@ use super::{
 mod codex_response_echo;
 pub mod harness;
 #[cfg(test)]
+mod hook_route_analytics;
+#[cfg(test)]
 pub(crate) mod lcm_privacy_rescan;
 #[cfg(test)]
 mod lcm_schema;

@@ -89,11 +89,20 @@ pub struct CodeIndexOwnerSignalsV1 {
     publications: tokio::sync::broadcast::Receiver<CodeIndexGenerationPublishedV1>,
     serving: Option<tokio::sync::watch::Receiver<()>>,
     activity: Option<CodeIndexOwnerActivityV1>,
+    pending_source: Option<(Arc<dyn super::super::CodeIndexSourcePendingReaderV1>, u64)>,
 }
 
 impl CodeIndexOwnerSignalsV1 {
     pub async fn subscribe(registry: &CodeIndexSchedulerRegistryV1, path: &Path) -> Self {
+        let pending_source = registry
+            .pending_source_reader_for_root(path)
+            .await
+            .map(|reader| {
+                let observed = reader.revision();
+                (reader, observed)
+            });
         Self {
+            pending_source,
             registry: registry.clone(),
             path: canonical_existing_identity(path).unwrap_or_else(|_| path.to_path_buf()),
             seats: registry.subscribe_serving_seats(),
@@ -141,7 +150,31 @@ impl CodeIndexOwnerSignalsV1 {
                 return Ok(());
             }
         }
+        if self.pending_source.is_none() {
+            self.pending_source = self
+                .registry
+                .pending_source_reader_for_root(&self.path)
+                .await
+                .map(|reader| {
+                    let observed = reader.revision();
+                    (reader, observed)
+                });
+            if self.pending_source.is_some() {
+                return Ok(());
+            }
+        }
+        let pending_source = self.pending_source.clone();
         tokio::select! {
+            () = async move {
+                match pending_source {
+                    Some((reader, observed)) => reader.changed(observed).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some((reader, observed)) = self.pending_source.as_mut() {
+                    *observed = reader.revision();
+                }
+            }
             changed = self.seats.changed() => changed.map_err(|_| CodeIndexOwnerSignalsClosedV1)?,
             changed = self.root_mounted.changed() => {
                 changed.map_err(|_| CodeIndexOwnerSignalsClosedV1)?;
@@ -233,6 +266,19 @@ impl CodeIndexOwnerSignalsV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    async fn pending_source_reader_for_root(
+        &self,
+        root: &Path,
+    ) -> Option<Arc<dyn super::super::CodeIndexSourcePendingReaderV1>> {
+        let root = canonical_existing_identity(root).ok()?;
+        self.mounted
+            .lock()
+            .await
+            .get(&root)?
+            .source_freshness
+            .pending_source_reader()
+    }
+
     /// The one wait for a worktree's seat, whatever the seat is: a decoded
     /// generation, a current text owner, text serving under a query
     /// authority, or a readiness target.
@@ -451,9 +497,31 @@ impl CodeIndexSchedulerRegistryV1 {
         budget: Duration,
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         let deadline = Instant::now() + budget;
+        // Every probe, including its blocking source read, shares the caller's
+        // one deadline. A timed-out blocking task cannot publish readiness.
+        match native_runtime::timeout_at(
+            deadline,
+            self.wait_for_readiness_until(project_root, target, deadline),
+        )
+        .await
+        {
+            Ok(reading) => reading,
+            Err(_) => Ok(CodeIndexReadinessWaitReadV1::TimedOut { last: None }),
+        }
+    }
+
+    async fn wait_for_readiness_until(
+        &self,
+        project_root: &Path,
+        target: CodeIndexReadinessTargetV1,
+        deadline: Instant,
+    ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         if target != CodeIndexReadinessTargetV1::Fresh
             && let Some(reading) = self
-                .dashboard_freshness_read(project_root)
+                .dashboard_freshness_read_with_source_admission(
+                    project_root,
+                    target != CodeIndexReadinessTargetV1::GraphReady,
+                )
                 .await?
                 .filter(|freshness| freshness.readiness(target) == CodeIndexReadinessV1::Reached)
             && (target == CodeIndexReadinessTargetV1::GraphReady
@@ -489,7 +557,10 @@ impl CodeIndexSchedulerRegistryV1 {
             Err(_) => {
                 return Ok(CodeIndexReadinessWaitReadV1::TimedOut {
                     last: self
-                        .dashboard_freshness_read(project_root)
+                        .dashboard_freshness_read_with_source_admission(
+                            project_root,
+                            target != CodeIndexReadinessTargetV1::GraphReady,
+                        )
                         .await?
                         .map(Box::new),
                 });
@@ -497,7 +568,13 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         let waited = self
             .wait_for_seat(project_root, deadline, |owner_settled| async move {
-                let Some(freshness) = self.dashboard_freshness_read(project_root).await? else {
+                let Some(freshness) = self
+                    .dashboard_freshness_read_with_source_admission(
+                        project_root,
+                        target != CodeIndexReadinessTargetV1::GraphReady,
+                    )
+                    .await?
+                else {
                     return Ok(None);
                 };
                 Ok(match freshness.readiness(target) {
@@ -530,7 +607,10 @@ impl CodeIndexSchedulerRegistryV1 {
             },
             CodeIndexSeatWaitV1::Deadline => CodeIndexReadinessWaitReadV1::TimedOut {
                 last: self
-                    .dashboard_freshness_read(project_root)
+                    .dashboard_freshness_read_with_source_admission(
+                        project_root,
+                        target != CodeIndexReadinessTargetV1::GraphReady,
+                    )
                     .await?
                     .map(Box::new),
             },

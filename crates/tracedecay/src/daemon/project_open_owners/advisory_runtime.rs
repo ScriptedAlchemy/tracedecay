@@ -48,7 +48,9 @@ use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::operation_stream::OperationKind;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope;
-use tracedecay_contracts::context_scout::ContextScoutDeliveryOutcomeV1;
+use tracedecay_contracts::context_scout::{
+    ContextScoutDeliveryOutcomeV1, ContextScoutModelOutcomeV1,
+};
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
@@ -62,6 +64,7 @@ use tracedecay_contracts::{
     DisclosureClass, LegalAction, RequestContext, RetryDirective, SafeDiagnostic, now_micros,
 };
 use tracedecay_domain::GitHeadStateV1;
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::feedback::{
     CiFailureParserIdentityV1, FeedbackScopeV1, FeedbackTriggerV1, GitHubPullRequestIdV1,
     GitHubReviewReadOperationV1,
@@ -95,7 +98,7 @@ use tracedecay_agent_hosts::agents::context_scout::intent_pass::{
 use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
-    ContextScoutTriggerV1,
+    ContextScoutSuppressionV1, ContextScoutTriggerV1,
 };
 use tracedecay_daemon_service::RegisteredDeliveryReadAuthorityV1;
 use tracedecay_daemon_service::context_scout_lifecycle::{
@@ -1326,19 +1329,88 @@ const fn feedback_diagnostic_trigger(
     }
 }
 
-fn log_scout_intent_outcome(project_root: &Path, outcome: &str) {
+fn log_scout_intent_outcome(
+    project_root: &Path,
+    request: &HookOrchestrationRequestV1,
+    outcome: &str,
+) {
     tracedecay_runtime_core::logging::log_daemon_event(
         "context_scout_intent_work",
         &[
             ("project", project_root.display().to_string()),
             ("outcome", outcome.to_owned()),
+            (
+                "protected_session_id",
+                encode_lowercase_hex(&request.hook.envelope().protected_session_id),
+            ),
+            (
+                "event_id",
+                encode_lowercase_hex(&request.hook.envelope().event_id),
+            ),
+            (
+                "lifecycle_supplied",
+                request.lifecycle.is_some().to_string(),
+            ),
         ],
     );
 }
 
-/// One admitted boundary's session intent pass. Intent work is best-effort:
-/// it owes no durable producer work, so every end settles the boundary, and
-/// a newer boundary of the session supersedes it at its own work address.
+// Evidence that is not caught up or could not be evaluated is still owed.
+// Hard policy and token limits are terminal refusals, not produced suggestions.
+fn intent_pass_work_outcome(
+    outcome: &ContextScoutIntentPassOutcomeV1,
+) -> HookOrchestrationWorkOutcomeV1 {
+    let terminal = match outcome {
+        ContextScoutIntentPassOutcomeV1::Disabled
+        | ContextScoutIntentPassOutcomeV1::ProviderUnsupported => true,
+        ContextScoutIntentPassOutcomeV1::CodeGenerationUnavailable
+        | ContextScoutIntentPassOutcomeV1::AddressUnavailable
+        | ContextScoutIntentPassOutcomeV1::WindowUnavailable
+        | ContextScoutIntentPassOutcomeV1::WindowEmpty
+        | ContextScoutIntentPassOutcomeV1::WindowStale
+        | ContextScoutIntentPassOutcomeV1::Cancelled
+        | ContextScoutIntentPassOutcomeV1::Unavailable
+        // Enqueue alone is insufficient: the caller must mount its exact claim.
+        | ContextScoutIntentPassOutcomeV1::Enqueued { .. } => false,
+        ContextScoutIntentPassOutcomeV1::NoCandidate { model_outcome } => match model_outcome {
+            ContextScoutModelOutcomeV1::Succeeded
+            | ContextScoutModelOutcomeV1::NotRequested
+            | ContextScoutModelOutcomeV1::Disabled
+            | ContextScoutModelOutcomeV1::Denied
+            | ContextScoutModelOutcomeV1::TokenBudgetExceeded => true,
+            ContextScoutModelOutcomeV1::Unavailable
+            | ContextScoutModelOutcomeV1::Disconnected
+            | ContextScoutModelOutcomeV1::Cancelled
+            | ContextScoutModelOutcomeV1::DeadlineExceeded
+            | ContextScoutModelOutcomeV1::Backpressured
+            | ContextScoutModelOutcomeV1::InvalidOutput => false,
+        },
+        ContextScoutIntentPassOutcomeV1::Suppressed { reason, .. } => match reason {
+            ContextScoutSuppressionV1::Disabled
+            | ContextScoutSuppressionV1::Paused
+            | ContextScoutSuppressionV1::QuietOrUnreceptive
+            | ContextScoutSuppressionV1::Duplicate
+            | ContextScoutSuppressionV1::PendingSibling
+            | ContextScoutSuppressionV1::NoEligibleCandidate => true,
+            ContextScoutSuppressionV1::DirtyOverlay
+            | ContextScoutSuppressionV1::Expired
+            | ContextScoutSuppressionV1::EvidenceUnavailable
+            | ContextScoutSuppressionV1::EvidenceStale
+            | ContextScoutSuppressionV1::EvidencePartial
+            | ContextScoutSuppressionV1::Cancelled
+            | ContextScoutSuppressionV1::ModelOutputInvalid => false,
+        },
+    };
+    if terminal {
+        HookOrchestrationWorkOutcomeV1::Completed
+    } else {
+        HookOrchestrationWorkOutcomeV1::RetryableFailure
+    }
+}
+
+/// One admitted boundary's session intent pass. A Tool or Prompt boundary
+/// retains its durable debt until the pass evaluates or truthfully refuses it.
+/// Stop companions use this same pass without a durable completion callback.
 /// The pass pins the current configuration, mints the project's hook-runtime
 /// authority, reads the session window, asks the installed decision engine,
 /// and mounts the claim authority of the suggestion it enqueued.
@@ -1354,8 +1426,8 @@ async fn run_production_intent_cycle(
     let producer = Arc::clone(&cycle.producer);
     let project_root = producer.project_root.as_path();
     if work_cancellation.is_cancelled() {
-        log_scout_intent_outcome(project_root, "cancelled");
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, "cancelled");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let Ok(pinned_configuration) = producer
         .graph
@@ -1364,8 +1436,8 @@ async fn run_production_intent_cycle(
         .current()
         .await
     else {
-        log_scout_intent_outcome(project_root, "configuration_unavailable");
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, "configuration_unavailable");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let current_configuration = ConfigurationCurrentStateV1 {
         revision_id: pinned_configuration.revision_id().clone(),
@@ -1374,8 +1446,8 @@ async fn run_production_intent_cycle(
     let Some(scout_configuration) =
         ContextScoutConfigurationPinV1::from_current(&current_configuration)
     else {
-        log_scout_intent_outcome(project_root, "configuration_pin_unavailable");
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, "configuration_pin_unavailable");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     // Disabled or absent: no window read, no engine request, no authority.
     if !scout_configuration
@@ -1385,6 +1457,7 @@ async fn run_production_intent_cycle(
     {
         log_scout_intent_outcome(
             project_root,
+            &request,
             ContextScoutIntentPassOutcomeV1::Disabled.as_str(),
         );
         return HookOrchestrationWorkOutcomeV1::Completed;
@@ -1394,8 +1467,8 @@ async fn run_production_intent_cycle(
             pinned_configuration.snapshot(),
         )
     else {
-        log_scout_intent_outcome(project_root, "model_configuration_unavailable");
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, "model_configuration_unavailable");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     // Installing the pinned configuration also builds the decision engine
     // when its settings digest changed since the last install.
@@ -1410,8 +1483,8 @@ async fn run_production_intent_cycle(
     .await
     .is_err()
     {
-        log_scout_intent_outcome(project_root, "configuration_install_failed");
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, "configuration_install_failed");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let envelope = request.hook.envelope();
     let lifecycle = match request.lifecycle.clone() {
@@ -1435,8 +1508,8 @@ async fn run_production_intent_cycle(
         },
     };
     let Some(lifecycle) = lifecycle else {
-        log_scout_intent_outcome(project_root, "lifecycle_absent");
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, "lifecycle_absent");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let observed_at = now_micros();
     let Some(context) = daemon_owned_project_source_access_at(
@@ -1449,8 +1522,8 @@ async fn run_production_intent_cycle(
     .and_then(|access| {
         intent_authorization_context(&access, &cycle.feedback_scope, envelope, observed_at)
     }) else {
-        log_scout_intent_outcome(project_root, "authority_unavailable");
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, "authority_unavailable");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let Some(pin) = ContextScoutAuthorityPinV1::new(
         &context,
@@ -1458,8 +1531,8 @@ async fn run_production_intent_cycle(
         scout_configuration,
         observed_at,
     ) else {
-        log_scout_intent_outcome(project_root, "authority_pin_unavailable");
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, "authority_pin_unavailable");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let code_generation_id = producer
         .code_index_schedulers
@@ -1496,13 +1569,14 @@ async fn run_production_intent_cycle(
         cancellation: work_cancellation,
     })
     .await;
+    let settlement = intent_pass_work_outcome(&outcome);
     let ContextScoutIntentPassOutcomeV1::Enqueued {
         entry,
         lifecycle: intent_lifecycle,
     } = outcome
     else {
-        log_scout_intent_outcome(project_root, outcome.as_str());
-        return HookOrchestrationWorkOutcomeV1::Completed;
+        log_scout_intent_outcome(project_root, &request, outcome.as_str());
+        return settlement;
     };
     let mounted = producer
         .graph
@@ -1520,13 +1594,18 @@ async fn run_production_intent_cycle(
         .await;
     log_scout_intent_outcome(
         project_root,
+        &request,
         if mounted {
             "mounted"
         } else {
             "claim_mount_refused"
         },
     );
-    HookOrchestrationWorkOutcomeV1::Completed
+    if mounted {
+        HookOrchestrationWorkOutcomeV1::Completed
+    } else {
+        HookOrchestrationWorkOutcomeV1::RetryableFailure
+    }
 }
 
 /// Store reads and writes the intent pass performs around its freshen wait

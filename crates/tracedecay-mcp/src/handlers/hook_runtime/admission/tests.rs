@@ -6,6 +6,9 @@ use super::super::test_support::*;
 use super::super::*;
 use super::*;
 
+mod legacy_continuity;
+mod tool_dispatch;
+
 #[test]
 fn daemon_admission_is_idempotent_per_identity_and_conflicts_on_different_bytes() {
     let data_root = tempfile::tempdir().unwrap();
@@ -53,7 +56,7 @@ fn record_hook_v2_admission(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     now: UtcMicros,
 ) -> Option<tracedecay_hooks::HookAdmissionLedgerReceiptV1> {
-    let staged = stage_hook_v2_admission(data_root, envelope, None, now)?;
+    let staged = stage_hook_v2_admission(data_root, envelope, None, None, Some(0), now)?;
     staged.commit.wait().ok()?;
     Some(staged.receipt)
 }
@@ -79,14 +82,21 @@ fn producer_work_commits_with_its_admission_and_redrives_until_completed() {
     let data_root = tempfile::tempdir().unwrap();
     let now = UtcMicros(1_000);
     let envelope = admission_test_envelope(31, 7);
-    let staged = stage_hook_v2_admission(data_root.path(), &envelope, Some(&envelope), now)
-        .expect("ledger available");
+    let staged = stage_hook_v2_admission(
+        data_root.path(),
+        &envelope,
+        Some(&envelope),
+        None,
+        Some(0),
+        now,
+    )
+    .expect("ledger available");
     staged.commit.wait().unwrap();
     assert_eq!(
         staged.receipt.decision,
         tracedecay_hooks::HookAdmissionDecisionV1::Admitted
     );
-    assert!(!staged.receipt.work_completed);
+    assert!(staged.receipt.work_settlement.is_none());
 
     restart_ledger(data_root.path());
     assert_eq!(pending_work(data_root.path()), vec![envelope.clone()]);
@@ -95,16 +105,21 @@ fn producer_work_commits_with_its_admission_and_redrives_until_completed() {
         duplicate.decision,
         tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
     );
-    assert!(!duplicate.work_completed);
+    assert!(duplicate.work_settlement.is_none());
 
-    assert!(complete_hook_v2_pending_work(data_root.path(), &envelope));
+    assert!(settle_hook_v2_pending_work(
+        data_root.path(),
+        &envelope,
+        tracedecay_hooks::HookAdmissionWorkSettlementV1::Completed
+    ));
     assert_eq!(pending_work(data_root.path()).len(), 0);
     restart_ledger(data_root.path());
     assert_eq!(pending_work(data_root.path()).len(), 0);
     assert!(
         record_hook_v2_admission(data_root.path(), &envelope, now)
             .unwrap()
-            .work_completed,
+            .work_settlement
+            .is_some(),
         "producer-work completion must survive daemon restart"
     );
 }
@@ -113,11 +128,10 @@ fn envelope_is_prompt(event: &tracedecay_hooks::HookEventV2) -> bool {
     matches!(event, tracedecay_hooks::HookEventV2::PromptBoundary)
 }
 
-/// Prompt and completed-tool boundaries owe no durable producer work, yet
-/// each admission enqueues the session intent pass on the project's
-/// registered orchestrator; a started tool call is not a boundary.
+/// Prompt and completed-tool boundaries retain their own intent work until
+/// the registered orchestrator settles it; a started call is not a boundary.
 #[tokio::test]
-async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed_work() {
+async fn prompt_and_tool_admissions_settle_their_durable_intent_work() {
     let data_root = tempfile::tempdir().unwrap();
     let binding = admission_test_binding(7);
     // Kiro admits prompt boundaries natively today; Claude gains them when
@@ -169,10 +183,18 @@ async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed
         if prompt {
             envelope.producer = kiro;
         }
-        assert!(!hook_v2_requires_producer_work(&envelope));
-        let staged = stage_hook_v2_admission(data_root.path(), &envelope, None, UtcMicros(1_000))
-            .expect("ledger available");
+        assert!(hook_v2_requires_producer_work(&envelope));
+        let staged = stage_hook_v2_admission(
+            data_root.path(),
+            &envelope,
+            Some(&envelope),
+            None,
+            Some(0),
+            UtcMicros(1_000),
+        )
+        .expect("ledger available");
         staged.commit.wait().unwrap();
+        let completion = hook_v2_work_completion(data_root.path(), &envelope);
         assert_eq!(
             tracedecay_daemon_service::admit_registered_hook_orchestration(
                 envelope,
@@ -184,7 +206,8 @@ async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed
                 None,
                 1,
                 false,
-                None,
+                Some(staged.receipt.order),
+                Some(completion),
             ),
             tracedecay_contracts::HookOrchestrationAdmissionV1::Enqueued
         );
@@ -196,11 +219,23 @@ async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed
                 false
             ))
         );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while runtime.active_tasks() != 0
+                || !hook_v2_pending_work_envelopes(
+                    data_root.path(),
+                    if prompt { kiro } else { binding.host },
+                    UtcMicros(1_000),
+                )
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
-    assert!(
-        pending_work(data_root.path()).is_empty(),
-        "an intent pass is best-effort and owes no redriven producer work"
-    );
+    assert!(pending_work(data_root.path()).is_empty());
     let mut started = admission_test_envelope(44, 7);
     started.event = tool(tracedecay_hooks::HookLifecyclePhaseV1::Started);
     assert_eq!(
@@ -210,6 +245,7 @@ async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed
             None,
             1,
             false,
+            None,
             None,
         ),
         tracedecay_contracts::HookOrchestrationAdmissionV1::UnsupportedTrigger
@@ -231,6 +267,8 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
         data_root.path(),
         &envelope,
         Some(&envelope),
+        None,
+        Some(0),
         UtcMicros(1_000),
     )
     .unwrap();
@@ -240,6 +278,8 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
         data_root.path(),
         &redelivered,
         Some(&redelivered),
+        None,
+        Some(0),
         UtcMicros(2_000),
     )
     .expect("a redelivery is not backpressure");
@@ -250,9 +290,10 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
         tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
     );
     assert_eq!(pending_work(data_root.path()), vec![envelope.clone()]);
-    assert!(complete_hook_v2_pending_work(
+    assert!(settle_hook_v2_pending_work(
         data_root.path(),
-        &redelivered
+        &redelivered,
+        tracedecay_hooks::HookAdmissionWorkSettlementV1::Completed,
     ));
     assert_eq!(pending_work(data_root.path()).len(), 0);
 }
@@ -267,8 +308,9 @@ fn admission_ledgers_cycle_past_the_open_bound_without_restart() {
         .map(|_| tempfile::tempdir().unwrap())
         .collect::<Vec<_>>();
     for (pair, root) in roots.iter().enumerate() {
-        let staged = stage_hook_v2_admission(root.path(), &envelope, Some(&envelope), now)
-            .unwrap_or_else(|| panic!("project/host pair {pair} must admit without restart"));
+        let staged =
+            stage_hook_v2_admission(root.path(), &envelope, Some(&envelope), None, Some(0), now)
+                .unwrap_or_else(|| panic!("project/host pair {pair} must admit without restart"));
         staged.commit.wait().unwrap();
         assert_eq!(
             staged.receipt.decision,
@@ -293,7 +335,11 @@ fn admission_ledgers_cycle_past_the_open_bound_without_restart() {
     assert_eq!(pending_work(first), vec![envelope.clone()]);
     restart_ledger(first);
     assert!(
-        complete_hook_v2_pending_work(first, &envelope),
+        settle_hook_v2_pending_work(
+            first,
+            &envelope,
+            tracedecay_hooks::HookAdmissionWorkSettlementV1::Completed
+        ),
         "a released ledger reopens to record completion"
     );
     assert_eq!(pending_work(first).len(), 0);
@@ -315,7 +361,7 @@ fn a_ledger_with_a_commit_in_flight_keeps_its_writer_fence() {
                 hook_v2_admission_ledger_root(root, host),
                 host,
                 now,
-                |ledger| ledger.stage_admission(envelope, Some(envelope), now),
+                |ledger| ledger.stage_admission(envelope, Some(envelope), None, Some(0), now),
             )
             .map(|staged| staged.unwrap())
     };
@@ -353,7 +399,7 @@ fn a_ledger_with_a_commit_in_flight_keeps_its_writer_fence() {
         duplicate.receipt.decision,
         tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
     );
-    assert!(!duplicate.receipt.work_completed);
+    assert!(duplicate.receipt.work_settlement.is_none());
     let conflict = stage(a.path(), &admission_test_envelope(36, 8)).unwrap();
     conflict.commit.wait().unwrap();
     assert_eq!(
@@ -685,24 +731,31 @@ async fn claude_tool_calls_mint_a_lifecycle_only_while_the_intent_pass_is_enable
         }
     };
 
-    assert!(
+    assert_eq!(
         tool_call(
             NativeHostIdentityV1::ClaudeCode,
             "session.claude.off",
             false
         )
-        .await
+        .await,
+        NativeLifecycleAdmissionV1::Ready,
     );
     assert!(
         !minted("session.claude.off").await,
         "a Claude tool call with the intent pass disabled writes no lifecycle"
     );
-    assert!(tool_call(NativeHostIdentityV1::ClaudeCode, "session.claude.on", true).await);
+    assert_eq!(
+        tool_call(NativeHostIdentityV1::ClaudeCode, "session.claude.on", true).await,
+        NativeLifecycleAdmissionV1::Ready
+    );
     assert!(
         minted("session.claude.on").await,
         "a Claude tool call with the intent pass enabled mints its lifecycle"
     );
-    assert!(tool_call(NativeHostIdentityV1::KimiCode, "session.kimi.off", false).await);
+    assert_eq!(
+        tool_call(NativeHostIdentityV1::KimiCode, "session.kimi.off", false).await,
+        NativeLifecycleAdmissionV1::Ready
+    );
     assert!(
         minted("session.kimi.off").await,
         "Kimi keeps minting its lifecycle whatever the intent pass says"

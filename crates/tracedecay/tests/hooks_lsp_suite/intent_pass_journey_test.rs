@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_contracts::retrieval::StatusHookReplayV1;
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ContextScoutConfigurationStateV1, ContextScoutIntentKindV1,
@@ -212,6 +213,37 @@ fn run_tool(home: &Path, project: &Path, name: &str, args: &Value) -> Value {
     tool_json_structured_content(&output.stdout)
 }
 
+fn delivery_evidence(home: &Path, project: &Path, contexts: &[String]) -> Value {
+    let profile = home.join(".tracedecay");
+    let enrolled =
+        tracedecay_runtime_core::storage::default_profile_sharded_layout(project, &profile)
+            .unwrap()
+            .data_root;
+    let address = contexts
+        .iter()
+        .rev()
+        .flat_map(|context| context.lines())
+        .find_map(|line| {
+            line.strip_prefix("TraceDecay Context Scout address for authorized operations: ")
+                .and_then(|encoded| serde_json::from_str::<ContextScoutAddressV1>(encoded).ok())
+        });
+    let recent = address.map(|address| {
+        run_tool(
+            home,
+            project,
+            "tracedecay_context_scout_recent",
+            &json!({"address": address, "limit": 8}),
+        )
+    });
+    json!({
+        "enrolled_hook_receipts": std::fs::read_to_string(enrolled.join("hook_analytics.jsonl"))
+            .unwrap_or_default(),
+        "profile_hook_receipts": std::fs::read_to_string(profile.join("hook_analytics.jsonl"))
+            .unwrap_or_default(),
+        "recent": recent,
+    })
+}
+
 fn post_tool_use(project: &Path, session: &str, transcript: &Path) -> Value {
     json!({
         "session_id": session,
@@ -272,21 +304,31 @@ fn enabled_settings(engine_url: &str) -> ContextScoutSettingsV1 {
     }
 }
 
-/// Every `context_scout_intent_work` outcome the daemon logged, in order.
-fn intent_outcomes(log: &Path) -> Vec<String> {
+/// Intent outcomes for exactly one protected native session, in order.
+fn intent_outcomes(log: &Path, session: &str) -> Vec<String> {
+    let protected = tracedecay_domain::canonical_text::encode_lowercase_hex(
+        &tracedecay_agent_hosts::hooks::protected_native_session_id(session),
+    );
+    let session_field = format!(" protected_session_id={protected}");
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
-        .filter(|line| line.contains("event=context_scout_intent_work "))
+        .filter(|line| {
+            line.contains("event=context_scout_intent_work ") && line.contains(&session_field)
+        })
         .filter_map(|line| line.split(" outcome=").nth(1))
         .map(|outcome| outcome.split_whitespace().next().unwrap_or("").to_owned())
         .collect()
 }
 
-fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
+fn wait_for(what: &str, log: &Path, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + WAIT;
     while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}\ndaemon: {}",
+            std::fs::read_to_string(log).unwrap_or_default(),
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -301,7 +343,7 @@ fn wait_for_hints(home: &Path, project: &Path, log: &Path, ready: impl Fn((i64, 
         assert!(
             Instant::now() < deadline,
             "timed out at (emitted, suppressed) {counts:?} after intent outcomes {:?}",
-            intent_outcomes(log)
+            intent_outcomes(log, ENABLED_SESSION)
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -397,16 +439,20 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         "tracedecay_status",
         &json!({"wait_for": {"state": "ready", "timeout_ms": 90_000}}),
     );
-    wait_for("the advisory owner that runs hook work to mount", || {
-        std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .any(|line| {
-                line.contains("event=advisory_deferred_attempt ")
-                    && line.contains(" phase=mounted ")
-            })
-    });
-    wait_for("both Claude transcripts to be ingested", || {
+    wait_for(
+        "the advisory owner that runs hook work to mount",
+        &log,
+        || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .any(|line| {
+                    line.contains("event=advisory_deferred_attempt ")
+                        && line.contains(" phase=mounted ")
+                })
+        },
+    );
+    wait_for("both Claude transcripts to be ingested", &log, || {
         ingested_messages(home, &project, ABSENT_SESSION) == 3
             && ingested_messages(home, &project, ENABLED_SESSION) == 3
     });
@@ -417,8 +463,8 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         "hook-claude-post-tool-use",
         &post_tool_use(&project, ABSENT_SESSION, &absent_transcript),
     );
-    wait_for("the absent-block tool boundary's intent pass", || {
-        !intent_outcomes(&log).is_empty()
+    wait_for("the absent-block tool boundary's intent pass", &log, || {
+        !intent_outcomes(&log, ABSENT_SESSION).is_empty()
     });
     let absent_stop = hook_context(&run_hook(
         home,
@@ -426,15 +472,15 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         "hook-stop",
         &stop(&project, ABSENT_SESSION, &absent_transcript),
     ));
-    wait_for("the absent-block stop boundary's intent pass", || {
-        intent_outcomes(&log).len() >= 2
+    wait_for("the absent-block stop boundary's intent pass", &log, || {
+        intent_outcomes(&log, ABSENT_SESSION).len() >= 2
     });
     assert!(
-        intent_outcomes(&log)
+        intent_outcomes(&log, ABSENT_SESSION)
             .iter()
             .all(|outcome| outcome == "disabled"),
         "without an intent block every intent pass ends disabled: {:?}",
-        intent_outcomes(&log)
+        intent_outcomes(&log, ABSENT_SESSION)
     );
     assert_eq!(
         engine.requests(),
@@ -479,20 +525,23 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         "the enabled intent block commits through the configuration surface: {receipt}"
     );
 
-    let before = intent_outcomes(&log).len();
-    run_hook(
+    let before = intent_outcomes(&log, ENABLED_SESSION).len();
+    let enabled_tool = run_hook(
         home,
         &project,
         "hook-claude-post-tool-use",
         &post_tool_use(&project, ENABLED_SESSION, &enabled_transcript),
     );
-    wait_for("the enabled tool boundary's intent pass", || {
-        intent_outcomes(&log).len() > before
-    });
+    wait_for(
+        &format!("the enabled tool boundary's intent pass after {enabled_tool:?}"),
+        &log,
+        || intent_outcomes(&log, ENABLED_SESSION).len() > before,
+    );
     assert_eq!(
-        intent_outcomes(&log)[before..],
+        intent_outcomes(&log, ENABLED_SESSION)[before..],
         ["mounted"],
-        "the tool boundary's intent pass enqueues one suggestion and mounts its claim"
+        "the tool boundary's intent pass enqueues one suggestion and mounts its claim: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
     );
     assert_eq!(
         engine.requests(),
@@ -502,35 +551,51 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
 
     let stop_event = stop(&project, ENABLED_SESSION, &enabled_transcript);
     let delivers = |context: &String| context.contains(&suggestion_text(YES_INTENT));
-    let mut stop_contexts = vec![hook_context(&run_hook(
-        home,
-        &project,
-        "hook-stop",
-        &stop_event,
-    ))];
+    let first_stop = run_hook(home, &project, "hook-stop", &stop_event);
+    let mut stop_contexts = vec![hook_context(&first_stop)];
+    let mut stop_outputs = vec![first_stop];
     if !stop_contexts.last().is_some_and(delivers) {
-        wait_for("the timed-out stop callback's replay to drain", || {
-            let status = run_tool(home, &project, "tracedecay_status", &json!({}));
-            let replay: StatusHookReplayV1 = serde_json::from_value(status["hook_replay"].clone())
-                .unwrap_or_else(|error| panic!("hook replay status ({error}): {status}"));
-            replay == StatusHookReplayV1::Drained && intent_outcomes(&log).len() > before + 1
-        });
-        stop_contexts.push(hook_context(&run_hook(
-            home,
-            &project,
-            "hook-stop",
-            &stop_event,
-        )));
+        wait_for(
+            "the timed-out stop callback's replay to drain",
+            &log,
+            || {
+                let status = run_tool(home, &project, "tracedecay_status", &json!({}));
+                let replay: StatusHookReplayV1 =
+                    serde_json::from_value(status["hook_replay"].clone())
+                        .unwrap_or_else(|error| panic!("hook replay status ({error}): {status}"));
+                replay == StatusHookReplayV1::Drained
+                    && intent_outcomes(&log, ENABLED_SESSION).len() > before + 1
+            },
+        );
+        let next_stop = run_hook(home, &project, "hook-stop", &stop_event);
+        stop_contexts.push(hook_context(&next_stop));
+        stop_outputs.push(next_stop);
     }
     assert!(
         stop_contexts.last().is_some_and(delivers),
         "the stop boundary, or the host's retry of it past the admission ack budget, delivers \
-         the session-recall suggestion: {stop_contexts:?}"
+         the session-recall suggestion: {stop_contexts:?}\noutputs: {:?}\ndaemon: {}\nhook receipts: {}",
+        stop_outputs
+            .iter()
+            .map(|output| (
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ))
+            .collect::<Vec<_>>(),
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        delivery_evidence(home, &project, &stop_contexts),
+    );
+    assert_eq!(
+        stop_contexts
+            .iter()
+            .filter(|context| delivers(context))
+            .count(),
+        1
     );
     wait_for_hints(home, &project, &log, |(emitted, suppressed)| {
         emitted == 1 && suppressed >= 1
     });
-    let after_mount = intent_outcomes(&log)[before + 1..].to_vec();
+    let after_mount = intent_outcomes(&log, ENABLED_SESSION)[before + 1..].to_vec();
     assert!(
         !after_mount.is_empty() && after_mount.iter().all(|outcome| outcome == "suppressed"),
         "the stop boundary's own intent pass withholds the suggestion it just delivered: \
@@ -541,4 +606,18 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         1,
         "the session receives the suggestion exactly once"
     );
+    let decisions_before_duplicate = engine.requests();
+    let duplicate = run_hook(home, &project, "hook-stop", &stop_event);
+    assert!(
+        !delivers(&hook_context(&duplicate)),
+        "a completed retry delivers no second suggestion: {duplicate:?}"
+    );
+    assert_eq!(
+        engine.requests(),
+        decisions_before_duplicate,
+        "completed retries do not rerun the intent producer: {duplicate:?}\ndaemon: {}\nrecent: {}",
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        delivery_evidence(home, &project, &stop_contexts),
+    );
+    assert_eq!(hint_counts(home, &project, YES_INTENT).0, 1);
 }
