@@ -576,7 +576,6 @@ struct OpenedProjectGraph {
 /// Ports both of this route's MCP servers publish. Built once before the core
 /// server; the full server that replaces the core publishes the same ports.
 struct ProjectRoutePorts {
-    host_admission_broker: tracedecay_host_admission::SharedHostAdmissionBroker,
     code_index: ProjectCodeIndexAuthorities,
     dashboard_code_index_freshness_reader:
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
@@ -940,7 +939,7 @@ impl ProjectOpenInputs<'_> {
             &route_registered,
             *project_database_is_read_only,
         )?;
-        let (host_admission_broker, pending_source) = project_hook_source_pending(
+        let pending_source = project_hook_source_pending(
             self.store_administration,
             cg,
             self.canonical_project_path,
@@ -1034,7 +1033,6 @@ impl ProjectOpenInputs<'_> {
             transcript_source_profile,
             code_index_activation,
             ports: ProjectRoutePorts {
-                host_admission_broker,
                 code_index,
                 dashboard_code_index_freshness_reader,
                 code_index_readiness_waiter,
@@ -1383,7 +1381,11 @@ impl ProjectOpenInputs<'_> {
             &delivery_access,
         )
         .await?;
-        let host_admission_broker = Some(Arc::clone(&core.ports.host_admission_broker));
+        let host_admission_broker = Some(
+            self.store_administration
+                .host_admission_broker(&session_db)
+                .await?,
+        );
         let refresh_schedulers = self
             .store_administration
             .session_temporal_refresh_schedulers();

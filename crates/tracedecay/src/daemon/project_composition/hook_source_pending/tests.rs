@@ -1,18 +1,24 @@
 use tracedecay_domain::HostIntegrationIdV1;
-use tracedecay_host_admission::{HostAdmissionBroker, HostAdmissionRuntime, SpoolBounds};
+use tracedecay_host_admission::{
+    HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
+};
 use tracedecay_mcp::hook_events::{HookEventKind, encode_durable_hook_event_plan};
 
 use super::*;
 use crate::mcp::server::writer_test_support::init_indexed_repo;
 use crate::test_support::git::git;
 
-fn reader(
+async fn reader(
     broker: &SharedHostAdmissionBroker,
     root: &Path,
     scope: &ResolvedScope,
 ) -> HookSourcePending {
+    let slot = Arc::new(HostAdmissionBrokerSlot::default());
+    slot.get_or_try_init(|| async { Ok(Arc::clone(broker)) })
+        .await
+        .unwrap();
     HookSourcePending {
-        broker: Arc::clone(broker),
+        broker: slot,
         root: root.to_owned(),
         scope: scope.clone(),
     }
@@ -68,8 +74,8 @@ async fn pending_source_is_exactly_routed_across_linked_worktrees_and_branch_cha
         tracedecay_code_index_runtime::resolved_scope_for_project(&linked, &project_id).unwrap();
     let spool = tempfile::tempdir().unwrap();
     let broker = broker(spool.path());
-    let main = reader(&broker, project.path(), &main_scope);
-    let other = reader(&broker, &linked, &linked_scope);
+    let main = reader(&broker, project.path(), &main_scope).await;
+    let other = reader(&broker, &linked, &linked_scope).await;
     broker
         .admit("linked", &edit(&linked, linked_scope))
         .await
@@ -87,6 +93,7 @@ async fn pending_source_is_exactly_routed_across_linked_worktrees_and_branch_cha
         .unwrap();
     assert!(
         reader(&broker, project.path(), &current)
+            .await
             .read_pending()
             .unwrap()
     );
@@ -145,7 +152,7 @@ async fn unscoped_legacy_edits_remain_pending_and_invalid_plans_fail_closed() {
         let broker = broker(spool.path());
         broker.admit("source", &payload).await.unwrap();
         assert_eq!(
-            reader(&broker, project.path(), &scope).read_pending(),
+            reader(&broker, project.path(), &scope).await.read_pending(),
             expected
         );
     }
@@ -160,7 +167,7 @@ async fn unscoped_legacy_edits_remain_pending_and_invalid_plans_fail_closed() {
         .await
         .unwrap();
     assert_eq!(
-        reader(&broker, project.path(), &scope).read_pending(),
+        reader(&broker, project.path(), &scope).await.read_pending(),
         Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
     );
 }

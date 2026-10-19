@@ -8,7 +8,6 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_host_admission::SharedHostAdmissionBroker;
 use tracedecay_mcp::hook_events::{
     DurableHookEventDecodeError, HookEventPlan, decode_durable_hook_event_plan,
 };
@@ -16,13 +15,13 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::branch_admin::{HostAdmissionBrokerSlot, StoreAdministration};
 
 #[cfg(test)]
 mod tests;
 
 struct HookSourcePending {
-    broker: SharedHostAdmissionBroker,
+    broker: Arc<HostAdmissionBrokerSlot>,
     root: PathBuf,
     scope: ResolvedScope,
 }
@@ -30,6 +29,8 @@ struct HookSourcePending {
 impl CodeIndexSourcePendingReaderV1 for HookSourcePending {
     fn read_pending(&self) -> std::result::Result<bool, CodeIndexFreshnessReadFailureV1> {
         self.broker
+            .get()
+            .ok_or(CodeIndexFreshnessReadFailureV1::ReadFailed)?
             .pending_replay_matches(|payload| {
                 let plan = decode_durable_hook_event_plan(payload).map_err(|error| {
                     HostAdmissionOutcome::degraded(match error {
@@ -65,11 +66,16 @@ impl CodeIndexSourcePendingReaderV1 for HookSourcePending {
     }
 
     fn revision(&self) -> u64 {
-        self.broker.progress_revision()
+        self.broker
+            .get()
+            .map_or(0, |broker| broker.progress_revision())
     }
 
     fn changed(&self, observed: u64) -> CodeIndexSourcePendingChangedFutureV1<'_> {
-        Box::pin(self.broker.wait_for_progress(observed))
+        match self.broker.get() {
+            Some(broker) => Box::pin(broker.wait_for_progress(observed)),
+            None => Box::pin(self.broker.wait_initialized()),
+        }
     }
 }
 
@@ -81,10 +87,7 @@ pub(in crate::daemon) async fn project_hook_source_pending(
     graph: &TraceDecay,
     root: &Path,
     expected_scope: &ResolvedScope,
-) -> Result<(
-    SharedHostAdmissionBroker,
-    Arc<dyn CodeIndexSourcePendingReaderV1>,
-)> {
+) -> Result<Arc<dyn CodeIndexSourcePendingReaderV1>> {
     let registry = stores.registered_profile_database().await?;
     let owner = registry
         .project_registry_context_by_id(expected_scope.project_id.as_str())
@@ -122,11 +125,17 @@ pub(in crate::daemon) async fn project_hook_source_pending(
             "hook source writer belongs to a different project",
         ));
     }
-    let broker = stores.host_admission_broker(&database).await?;
+    let broker = stores.host_admission_broker_slot(&database).await?;
+    if let Err(error) = stores.host_admission_broker(&database).await {
+        if error.hook_runtime_context().is_none() {
+            return Err(error);
+        }
+        tracing::warn!(%error, "hook source currency unavailable until admission spool opens");
+    }
     let reader: Arc<dyn CodeIndexSourcePendingReaderV1> = Arc::new(HookSourcePending {
-        broker: Arc::clone(&broker),
+        broker,
         root,
         scope,
     });
-    Ok((broker, reader))
+    Ok(reader)
 }

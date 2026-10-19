@@ -50,9 +50,44 @@ mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
 
-type HostAdmissionBrokerSlot =
-    Arc<tokio::sync::OnceCell<tracedecay_host_admission::SharedHostAdmissionBroker>>;
-type HostAdmissionBrokers = Arc<tokio::sync::Mutex<HashMap<PathBuf, HostAdmissionBrokerSlot>>>;
+#[derive(Default)]
+pub(super) struct HostAdmissionBrokerSlot {
+    broker: tokio::sync::OnceCell<tracedecay_host_admission::SharedHostAdmissionBroker>,
+    initialized: tokio::sync::Notify,
+}
+
+impl HostAdmissionBrokerSlot {
+    pub(super) async fn get_or_try_init<F, Fut>(
+        &self,
+        initialize: F,
+    ) -> Result<&tracedecay_host_admission::SharedHostAdmissionBroker>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<tracedecay_host_admission::SharedHostAdmissionBroker>>,
+    {
+        let broker = self.broker.get_or_try_init(initialize).await?;
+        self.initialized.notify_waiters();
+        Ok(broker)
+    }
+
+    pub(super) fn get(&self) -> Option<&tracedecay_host_admission::SharedHostAdmissionBroker> {
+        self.broker.get()
+    }
+
+    pub(super) async fn wait_initialized(&self) {
+        loop {
+            let notified = self.initialized.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.get().is_some() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+type HostAdmissionBrokers = Arc<tokio::sync::Mutex<HashMap<PathBuf, Arc<HostAdmissionBrokerSlot>>>>;
 /// One profile session refresh service per profile session store. The service
 /// owns the opaque refresh handles it issued, so every route that reaches the
 /// same store (project MCP servers and the projectless client) must share the
@@ -1204,6 +1239,23 @@ impl StoreAdministration {
         self.refuse_remotely_deleted_profile(database).await?;
         self.host_admission_broker_for_path(database.db_path())
             .await
+    }
+
+    /// Borrow the canonical slot without making spool availability a prerequisite
+    /// for unrelated project reads. A later successful open fills this same slot.
+    pub(super) async fn host_admission_broker_slot(
+        &self,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    ) -> Result<Arc<HostAdmissionBrokerSlot>> {
+        self.refuse_remotely_deleted_profile(database).await?;
+        let path = authority::canonical_identity_path(database.db_path())?;
+        Ok(Arc::clone(
+            self.host_admission_brokers
+                .lock()
+                .await
+                .entry(path)
+                .or_default(),
+        ))
     }
 
     #[tracing::instrument(
