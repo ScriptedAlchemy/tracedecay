@@ -58,7 +58,7 @@ export function SettingsEditorPanel({
 }) {
   return (
     <section
-      aria-label={`Edit ${row.key}`}
+      aria-label={`Settings editor for ${row.key}`}
       data-settings-editor={row.key}
       className="relative m-2 border border-edge-strong bg-surface-1 td-raised"
     >
@@ -409,7 +409,11 @@ function Verdict({ state }: { state: SettingsEditorState }) {
       return (
         <VerdictLine kind={state.failure.kind === 'offline' ? 'offline' : 'error'}>
           {state.failure.kind === 'unsettled'
-            ? `${state.failure.detail} Load current values before trying again.`
+            ? state.failure.detail
+            : state.failure.kind === 'protocol_error'
+              ? state.failure.authority.startsWith('PATCH ')
+                ? 'The save response could not be verified, so the change may have been applied. Load current values before trying again.'
+                : 'Current settings could not be verified, so nothing was saved. Load current values before trying again.'
             : state.failure.detail}
         </VerdictLine>
       );

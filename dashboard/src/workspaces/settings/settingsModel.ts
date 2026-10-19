@@ -473,9 +473,8 @@ export function settingsRevisionId(current: SettingsEditor, scope: SettingsScope
 /**
  * The project change a draft represents against a known-current snapshot.
  *
- * Planning against a snapshot rather than a payload is what lets the state
- * machine replan without re-parsing: replanning is how a confirmation is
- * checked against the review it was given for.
+ * Planning against a snapshot keeps edits tied to the values and revision they
+ * were based on; the resulting patch carries that revision to the server check.
  */
 export function planProjectChangeAgainst(
   current: SettingsEditor | null,
@@ -1018,4 +1017,3 @@ function humanize(key: string): string {
   const spaced = key.replace(/[_-]+/g, ' ').trim();
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
-

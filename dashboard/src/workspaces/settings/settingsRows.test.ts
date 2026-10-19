@@ -99,12 +99,12 @@ describe('write bindings', () => {
     expect(writeCapability('project.config.include', unauthorized, true)).toMatchObject({
       kind: 'locked',
       gate: 'unauthorized',
-      reason: 'this dashboard is not authorized to apply project settings',
+      reason: 'This dashboard cannot change project settings. Ask an administrator for configuration-edit access.',
     });
     expect(writeCapability('user.code_index_workers', unauthorized, true)).toMatchObject({
       kind: 'locked',
       gate: 'unauthorized',
-      reason: 'this dashboard is not authorized to apply code-index worker settings',
+      reason: 'This dashboard cannot change code-index worker settings. Ask an administrator for configuration-edit access.',
     });
 
     const readOnly = writableScopes(

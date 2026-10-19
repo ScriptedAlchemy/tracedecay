@@ -400,8 +400,34 @@ describe('SettingsPage direct settings editing', () => {
     await user.clear(proposal(MAX_FILE_SIZE));
     await user.type(proposal(MAX_FILE_SIZE), '2097152');
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    expect(await screen.findByText(/Refresh current values before retrying/)).toBeTruthy();
+    expect(await screen.findByText(/The settings change may have been applied/)).toBeTruthy();
     expect(screen.queryByText('Project settings saved')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry project settings' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Load current values' }));
+    await waitFor(() => expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy());
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === 'PATCH')).toHaveLength(1);
+    expect(screen.queryByText('Project settings saved')).toBeNull();
+  });
+
+  it('requires readback after an incomplete PATCH response without repeating the write', async () => {
+    let applied = false;
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') {
+        applied = true;
+        return jsonResponse({});
+      }
+      return jsonResponse(applied ? updatedSettings('rev-43') : settings());
+    });
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    renderSettings();
+
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(/the change may have been applied/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Retry project settings' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Load current values' }));
     await waitFor(() => expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy());
@@ -646,6 +672,7 @@ describe('SettingsPage direct settings editing', () => {
     await screen.findByText(/Settings changed since you loaded them/);
 
     // Closing the editor does not hide the conflict from the inspector.
+    row(MAX_FILE_SIZE).focus();
     await user.keyboard('{Escape}');
     expect(document.querySelector('[data-settings-editor]')).toBeNull();
     expect(document.querySelector('[data-settings-save-status="conflicted"]')?.textContent).toContain(
@@ -1102,7 +1129,7 @@ describe('Settings response authority', () => {
     expect(row('storage.store_root').dataset['write']).toBe('no_write_path');
     const panel = await openEditor(user, MAX_FILE_SIZE);
     expect(panel.querySelector('[data-settings-gate="editor_unavailable"]')?.textContent).toContain(
-      'GET /api/settings named no configuration revision to hold a write against',
+      'Current settings are unavailable, so editing is paused. Reload settings before trying again.',
     );
     expect(screen.queryByLabelText(`Edit ${MAX_FILE_SIZE}`)).toBeNull();
     // The inspector prints the empty revision as a stated absence.
