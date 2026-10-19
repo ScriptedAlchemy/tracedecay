@@ -3,7 +3,7 @@
  * request write: a superseded result is dropped, an unmount aborts the request
  * and the selection a reader holds is untouched by a layout completing.
  */
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CortexSceneCanvas } from './CortexSceneCanvas.tsx';
@@ -133,4 +133,51 @@ describe('layout requests from the canvas', () => {
     await waitFor(() => expect(vi.mocked(painter.draw).mock.calls.at(-1)![2].selected).toBe('a'));
     expect(requests).toHaveLength(1);
   });
+  it('never mixes a queued old painter with a new scene and layout', async () => {
+    mockCanvas();
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = ++nextFrame;
+      frames.set(id, callback);
+      return id;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+
+    const first = fakePainter();
+    const second = fakePainter();
+    const firstScene = sceneOf('first');
+    const secondScene = sceneOf('second');
+    const view = render(renderCanvas({ scene: firstScene, painter: first.painter }));
+    await waitFor(() => expect(first.requests).toHaveLength(1));
+    await act(async () => {
+      first.requests[0]!.resolve({ tag: 'first' });
+    });
+    await waitFor(() => expect(frames.size).toBeGreaterThan(0));
+    const deferredOldFrame = [...frames.values()][0]!;
+
+    view.rerender(renderCanvas({ scene: secondScene, painter: second.painter }));
+    await waitFor(() => expect(second.requests).toHaveLength(1));
+    await act(async () => {
+      second.requests[0]!.resolve({ tag: 'second' });
+    });
+    expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready');
+
+    // Simulate a previously queued frame firing after scene B committed.
+    // The old frame may dispatch B or no-op, but must never draw A with B's layout.
+    act(() => deferredOldFrame(performance.now()));
+    expect(first.painter.draw).not.toHaveBeenCalled();
+    for (const [, frame] of [...frames]) {
+      act(() => frame(performance.now()));
+    }
+    expect(second.painter.draw).toHaveBeenCalled();
+    for (const [layout, scene] of vi.mocked(second.painter.draw).mock.calls) {
+      expect(layout.tag).toBe('second');
+      expect(scene).toBe(secondScene);
+    }
+    view.unmount();
+  });
+
 });
