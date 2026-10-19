@@ -215,7 +215,8 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
 }
 
 // UUIDs contribute identity, not credential entropy. Adjacent dense components
-// form one token; sparse neighbors can also form a high-entropy pair.
+// form one token. Sparse pairs need half the minimum token width on each side
+// so a short directory name cannot turn an ordinary build label into a token.
 // Inspect original, disjoint slices so ordinary prefixes cannot dilute secrets.
 fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<Range<usize>>) {
     let mut component_start = 0usize;
@@ -259,6 +260,8 @@ fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<R
             if !consumed
                 && eligible
                 && let Some(previous) = previous.take()
+                && previous.len() >= MIN_TOKEN_LENGTH.div_ceil(2)
+                && component.len() >= MIN_TOKEN_LENGTH.div_ceil(2)
                 && looks_high_entropy_token(&text[previous.start..component_end])
             {
                 ranges.push(offset + previous.start..offset + component_end);
@@ -317,7 +320,7 @@ pub(crate) fn entropy_bits_per_mille(token: &str) -> Option<u32> {
 }
 
 pub fn looks_high_entropy_token(token: &str) -> bool {
-    if token.len() < 36
+    if token.len() < MIN_TOKEN_LENGTH
         || !token.bytes().all(token_byte)
         || token.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -343,6 +346,7 @@ pub fn looks_high_entropy_token(token: &str) -> bool {
     entropy_sum * 1_000 >= len * u128::from(MIN_TOKEN_ENTROPY_PER_MILLE) * ENTROPY_SCALE
 }
 
+const MIN_TOKEN_LENGTH: usize = 36;
 const MIN_TOKEN_ENTROPY_PER_MILLE: u32 = 4_200;
 const ENTROPY_SCALE: u128 = 1 << 20;
 
@@ -542,12 +546,24 @@ mod tests {
             "00000000-0000-0000-0000-000000000000",
             "fe600511-e406-4142-b74a-cbf177c5f2cb",
         ] {
-            let path = format!("/workspace/{uuid}/dist/build_20261018_x86_64_linux");
-            assert_eq!(
-                high_entropy_ranges(&path),
-                Vec::<Range<usize>>::new(),
-                "{path}"
-            );
+            for artifact in [
+                "build_20261018_x86_64_linux",
+                "build_20261018_x86_64_linux/typescript",
+                "typescript/build_20261018_x86_64_linux",
+            ] {
+                let path = format!("/workspace/{uuid}/dist/{artifact}");
+                assert_eq!(
+                    high_entropy_ranges(&path),
+                    Vec::<Range<usize>>::new(),
+                    "{path}"
+                );
+                let metadata = json!({"path": path});
+                assert_eq!(
+                    crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+                        .expect("structured artifact metadata"),
+                    metadata
+                );
+            }
         }
     }
 
@@ -618,6 +634,16 @@ mod tests {
         assert!(
             high_entropy_ranges(&separated).is_empty(),
             "UUID identity must separate the candidate components"
+        );
+        let compact_secret = "abcdefghijklmnopab/QRSTUVWXYZ012345QR";
+        assert!(looks_high_entropy_token(compact_secret));
+        for component in compact_secret.split('/') {
+            assert!(entropy_bits_per_mille(component).unwrap() < MIN_TOKEN_ENTROPY_PER_MILLE);
+        }
+        let compact_path = format!("{prefix}{compact_secret}/source");
+        assert_eq!(
+            high_entropy_ranges(&compact_path),
+            vec![prefix.len()..prefix.len() + compact_secret.len()]
         );
     }
 
