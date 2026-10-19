@@ -26,17 +26,7 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: Default::default(),
             summarizer: LcmSummarizerMode::HermesAuxiliary,
         })
         .await

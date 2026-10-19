@@ -74,18 +74,15 @@ fn compression_request(session_id: &str) -> LcmCompressionRequest {
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: Some(1),
-        max_source_messages: Some(8),
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: Some(1),
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
-        summarizer: provided_summary("fixture summary preserving canonical historical context".to_string()),
+        overrides: tracedecay_lcm::LcmCompressionOverrides {
+            leaf_chunk_tokens: Some(1),
+            max_source_messages: Some(8),
+            fresh_tail_count: Some(1),
+            ..Default::default()
+        },
+        summarizer: provided_summary(
+            "fixture summary preserving canonical historical context".to_string(),
+        ),
     }
 }
 
@@ -414,17 +411,7 @@ async fn preflight_reads_canonical_state_without_creating_or_ingesting_a_session
             session_id: "missing-session".to_string(),
             messages: Vec::new(),
             current_tokens: Some(1_000),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: Default::default(),
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
         })
@@ -2598,8 +2585,8 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
                     .unwrap();
             drop(snapshot);
             let mut request = daemon_summary_request("cursor", session_id);
-            request.max_source_messages = Some(4);
-            request.fresh_tail_count = Some(0);
+            request.overrides.max_source_messages = Some(4);
+            request.overrides.fresh_tail_count = Some(0);
             request.summarizer = LcmSummarizerMode::Provided {
                 summary_text: summary_text.to_string(),
                 route: Some("test_disjoint_revision".to_string()),

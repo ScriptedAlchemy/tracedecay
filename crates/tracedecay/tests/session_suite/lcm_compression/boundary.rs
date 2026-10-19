@@ -33,7 +33,7 @@ async fn boundary_skip_starts_preflight_compression_cooldown() {
         vec![json!({"id": "fresh-user", "role": "user", "content": "fresh preflight payload"})],
         Some(120),
     );
-    request.threshold_tokens = Some(100);
+    request.overrides.threshold_tokens = Some(100);
 
     let response = db.lcm_preflight(request).await.unwrap();
 
@@ -103,7 +103,7 @@ async fn boundary_cooldown_expires_after_sixty_seconds() {
     assert!(recorded.recorded);
 
     let mut request = preflight_request("cursor", "session-b", Vec::new(), Some(120));
-    request.threshold_tokens = Some(100);
+    request.overrides.threshold_tokens = Some(100);
 
     let response = db.lcm_preflight(request).await.unwrap();
 
@@ -139,7 +139,7 @@ async fn boundary_continuation_with_matching_bound_session_records_no_cooldown()
     assert_eq!(boundary.reason, "compression_boundary_carried_over");
 
     let mut request = preflight_request("cursor", "session-b", Vec::new(), Some(120));
-    request.threshold_tokens = Some(100);
+    request.overrides.threshold_tokens = Some(100);
 
     let response = db.lcm_preflight(request).await.unwrap();
 

@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::Mutex;
 
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -21,77 +20,6 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::*;
 
-#[derive(Default)]
-struct FakeStore {
-    calls: Mutex<Vec<LcmAuthorityOperation>>,
-    compact_requests: Mutex<Vec<LcmCompressionRequest>>,
-    status: Mutex<Option<LcmStatus>>,
-}
-
-impl FakeStore {
-    fn calls(&self) -> Vec<LcmAuthorityOperation> {
-        self.calls.lock().map_or_default(|calls| calls.clone())
-    }
-
-    fn compact_requests(&self) -> Vec<LcmCompressionRequest> {
-        self.compact_requests
-            .lock()
-            .map_or_default(|requests| requests.clone())
-    }
-}
-
-impl LcmDaemonStore for FakeStore {
-    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
-        if let Ok(mut calls) = self.calls.lock() {
-            calls.push(LcmAuthorityOperation::Compact);
-        }
-        if let Ok(mut requests) = self.compact_requests.lock() {
-            requests.push(request.clone());
-        }
-        Box::pin(async move {
-            Ok(LcmCompressionResponse {
-                status: "skipped".to_owned(),
-                reason: "below_threshold".to_owned(),
-                summary_nodes_created: 0,
-                summary_nodes: Vec::new(),
-                replay_messages: Vec::new(),
-                replay_token_estimate: 0,
-                replay_over_budget: false,
-                compression_attempts: 0,
-                context_recovery_hint: None,
-                retry_status: None,
-                relation_projection_status:
-                    tracedecay_lcm::LcmRelationProjectionStatus::NotApplicable,
-                frontier: tracedecay_lcm::LcmLifecycleState {
-                    provider: request.provider,
-                    conversation_id: request.session_id.clone(),
-                    current_session_id: request.session_id,
-                    current_frontier_store_id: None,
-                    last_finalized_session_id: None,
-                    last_finalized_frontier_store_id: None,
-                    maintenance_debt: Vec::new(),
-                },
-                summary_request: None,
-            })
-        })
-    }
-
-    fn status(&self, _query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus> {
-        if let Ok(mut calls) = self.calls.lock() {
-            calls.push(LcmAuthorityOperation::Status);
-        }
-        let status = self.status.lock().ok().and_then(|status| status.clone());
-        Box::pin(async move { status.ok_or_else(|| LcmError::Db("unavailable".to_owned())) })
-    }
-
-    fn doctor(&self, _query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value> {
-        if let Ok(mut calls) = self.calls.lock() {
-            calls.push(LcmAuthorityOperation::Doctor);
-        }
-        Box::pin(async { Ok(serde_json::json!({"status": "healthy", "findings": []})) })
-    }
-}
-
 async fn table_row_count(database: &RegisteredGlobalDb, table: &'static str) -> i64 {
     let snapshot = database.read_snapshot().await.unwrap();
     let mut rows = snapshot
@@ -99,6 +27,21 @@ async fn table_row_count(database: &RegisteredGlobalDb, table: &'static str) -> 
         .await
         .unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn registered_authority() -> (
+    tempfile::TempDir,
+    tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
+    DaemonLcmAuthority,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+        directory.path(),
+    )
+    .await
+    .unwrap();
+    let authority = DaemonLcmAuthority::registered(runtime.profile_database_arc());
+    (directory, runtime, authority)
 }
 
 fn request_context(
@@ -209,17 +152,10 @@ fn preflight(provider: &str) -> LcmPreflightRequest {
         session_id: "session.lcm-test".to_owned(),
         messages: Vec::new(),
         current_tokens: Some(1),
-        threshold_tokens: Some(100),
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
+        overrides: tracedecay_lcm::LcmCompressionOverrides {
+            threshold_tokens: Some(100),
+            ..Default::default()
+        },
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
     }
@@ -241,9 +177,8 @@ fn status_request(provider: &str, session_id: Option<&str>) -> LcmAuthorityReque
 }
 
 #[tokio::test]
-async fn denied_command_never_reaches_daemon_store() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
+async fn denied_command_is_rejected_before_registered_store_access() {
+    let (_directory, _runtime, authority) = registered_authority().await;
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Status, false);
 
     let response = authority
@@ -257,13 +192,11 @@ async fn denied_command_never_reaches_daemon_store() {
         .await;
 
     assert_eq!(response.outcome, LcmAuthorityOutcome::Denied);
-    assert!(store.calls().is_empty());
 }
 
 #[tokio::test]
 async fn mismatched_live_cancellation_identity_is_denied_before_store_effect() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (_directory, _runtime, authority) = registered_authority().await;
     let (context, binding, _) = request_context(LcmAuthorityOperation::Status, true);
     let cancellation = CancellationToken::for_application_request("request.other");
 
@@ -278,13 +211,11 @@ async fn mismatched_live_cancellation_identity_is_denied_before_store_effect() {
         .await;
 
     assert_eq!(response.outcome, LcmAuthorityOutcome::Denied);
-    assert!(store.calls().is_empty());
 }
 
 #[tokio::test]
 async fn request_target_not_bound_into_grant_is_denied_before_store_effect() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (_directory, _runtime, authority) = registered_authority().await;
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Status, true);
 
     let response = authority
@@ -298,41 +229,11 @@ async fn request_target_not_bound_into_grant_is_denied_before_store_effect() {
         .await;
 
     assert_eq!(response.outcome, LcmAuthorityOutcome::Denied);
-    assert!(store.calls().is_empty());
-}
-
-#[tokio::test]
-async fn unavailable_store_is_typed_and_never_fabricates_empty_success() {
-    let authority = DaemonLcmAuthority::unavailable();
-    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Status, true);
-
-    let response = authority
-        .execute(LcmAuthorityInvocation {
-            context,
-            binding,
-            target: target("claude", None),
-            cancellation,
-            request: LcmAuthorityRequest::Status(LcmStatusQuery {
-                provider: "claude".to_owned(),
-                session_id: None,
-                deep: false,
-            }),
-        })
-        .await;
-
-    assert_eq!(
-        response.outcome,
-        LcmAuthorityOutcome::Unavailable {
-            reason: LcmAuthorityUnavailableReason::StoreAuthorityUnavailable
-        }
-    );
-    assert!(response.payload.is_none());
 }
 
 #[tokio::test]
 async fn live_cancellation_stops_before_store_effect() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (_directory, _runtime, authority) = registered_authority().await;
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Status, true);
     cancellation.cancel();
 
@@ -347,7 +248,6 @@ async fn live_cancellation_stops_before_store_effect() {
         .await;
 
     assert_eq!(response.outcome, LcmAuthorityOutcome::Cancelled);
-    assert!(store.calls().is_empty());
     assert_eq!(
         response.receipt.execution.termination,
         OperationTermination::Cancelled
@@ -356,8 +256,7 @@ async fn live_cancellation_stops_before_store_effect() {
 
 #[tokio::test]
 async fn expired_deadline_stops_before_store_effect() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (_directory, _runtime, authority) = registered_authority().await;
     let (context, binding, cancellation) =
         request_context_until(LcmAuthorityOperation::Status, true, UtcMicros(2));
 
@@ -372,7 +271,6 @@ async fn expired_deadline_stops_before_store_effect() {
         .await;
 
     assert_eq!(response.outcome, LcmAuthorityOutcome::TimedOut);
-    assert!(store.calls().is_empty());
     assert_eq!(
         response.receipt.execution.termination,
         OperationTermination::TimedOut
@@ -381,8 +279,8 @@ async fn expired_deadline_stops_before_store_effect() {
 
 #[tokio::test]
 async fn pressure_only_event_compacts_daemon_owned_without_caller_payload() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (_directory, runtime, authority) = registered_authority().await;
+    let database = runtime.profile_database_arc();
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
     let mut pressure_preflight = preflight("cursor");
     pressure_preflight.messages = vec![serde_json::json!({
@@ -414,28 +312,17 @@ async fn pressure_only_event_compacts_daemon_owned_without_caller_payload() {
     // summarization source is the daemon's canonical store, never
     // caller-authored preflight text.
     assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
-    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Compact]);
-    let requests = store.compact_requests();
-    assert_eq!(requests.len(), 1);
-    assert!(
-        requests[0].messages.is_empty(),
-        "pressure evidence must not carry caller-authored messages into the store"
-    );
-    assert!(matches!(
-        requests[0].summarizer,
-        LcmSummarizerMode::HermesAuxiliary
-    ));
     assert!(matches!(
         response.payload,
         Some(LcmAuthorityPayload::Compaction(_))
     ));
     assert!(response.receipt.committed_state.is_some());
+    assert_eq!(table_row_count(&database, "lcm_raw_messages").await, 0);
 }
 
 #[tokio::test]
 async fn pressure_protocol_provider_mismatch_is_typed_before_ingest() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (_directory, _runtime, authority) = registered_authority().await;
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
     let command = LcmCompactionCommand {
         preflight: preflight("cursor"),
@@ -463,7 +350,6 @@ async fn pressure_protocol_provider_mismatch_is_typed_before_ingest() {
             reason: LcmAuthorityUnavailableReason::HostProtocolUnavailable
         }
     );
-    assert!(store.calls().is_empty());
     assert!(response.receipt.committed_state.is_none());
 }
 

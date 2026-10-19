@@ -6,7 +6,10 @@ use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_lcm::{LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode};
+use tracedecay_lcm::{
+    LcmCompressionOutcome, LcmCompressionRequest, LcmCompressionResponse, LcmError,
+    LcmSummarizerMode,
+};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
@@ -127,18 +130,19 @@ impl DaemonLcmEffectService {
         // The message corpus is owned once by `request`; only `summarizer`
         // changes between the planning pass and the final commit.
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
-        let pending = self.commit_compression(&request).await?;
-        if pending.status != "needs_summary" {
-            return Ok(pending);
-        }
-        let Some(summary_request) = pending.summary_request.as_ref() else {
-            return Ok(pending);
+        let mut pending = self.commit_compression(&request).await?;
+        let summary_request = match pending.take_outcome()? {
+            LcmCompressionOutcome::Complete => return Ok(pending),
+            outcome @ LcmCompressionOutcome::Deferred { .. } => {
+                return Ok(outcome.into_response(pending));
+            }
+            LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
         };
         let summary = match super::lcm_summarization::resolve_authoritative_summary(
             &self.db,
             &request.provider,
             &request.session_id,
-            summary_request,
+            &summary_request,
             self.control.remaining()?,
             None,
         )
@@ -150,7 +154,11 @@ impl DaemonLcmEffectService {
             }
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
-                return Ok(summary_unavailable(pending, reason));
+                return Ok(LcmCompressionOutcome::Deferred {
+                    summary_request,
+                    reason: reason.to_string(),
+                }
+                .into_response(pending));
             }
         };
         self.control.checkpoint()?;
@@ -174,14 +182,17 @@ impl DaemonLcmEffectService {
         }
 
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
-        let pending = self
+        let mut pending = self
             .commit_retained_compression(&request, Some(convergence_candidate), None)
             .await?;
-        if pending.response.status != "needs_summary" {
-            return Ok(pending);
-        }
-        let Some(summary_request) = pending.response.summary_request.as_ref() else {
-            return Ok(pending);
+        let outcome = pending.response.take_outcome()?;
+        let summary_request = match outcome {
+            LcmCompressionOutcome::Complete => return Ok(pending),
+            outcome @ LcmCompressionOutcome::Deferred { .. } => {
+                pending.response = outcome.into_response(pending.response);
+                return Ok(pending);
+            }
+            LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
         };
         // Host-native compaction text is usable for retained convergence only
         // when its evidence binds the exact raw source range selected by this
@@ -191,7 +202,7 @@ impl DaemonLcmEffectService {
             &self.db,
             &request.provider,
             &request.session_id,
-            summary_request,
+            &summary_request,
             self.control.remaining()?,
             Some(&required_native_source_range),
         )
@@ -207,13 +218,15 @@ impl DaemonLcmEffectService {
                 let mut pending = pending;
                 // An absent interval is its own typed state; only a present
                 // interval that binds a different range is a mismatch.
-                pending.response = summary_unavailable(
-                    pending.response,
-                    summary
+                pending.response = LcmCompressionOutcome::Deferred {
+                    summary_request,
+                    reason: summary
                         .source_range
                         .absent_reason()
-                        .unwrap_or("authoritative_summary_source_mismatch"),
-                );
+                        .unwrap_or("authoritative_summary_source_mismatch")
+                        .to_string(),
+                }
+                .into_response(pending.response);
                 return Ok(pending);
             }
             Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {
@@ -222,7 +235,11 @@ impl DaemonLcmEffectService {
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
                 let mut pending = pending;
-                pending.response = summary_unavailable(pending.response, reason);
+                pending.response = LcmCompressionOutcome::Deferred {
+                    summary_request,
+                    reason: reason.to_string(),
+                }
+                .into_response(pending.response);
                 return Ok(pending);
             }
         };
@@ -383,15 +400,6 @@ pub async fn lcm_session_boundary_for_test(
     DaemonLcmEffectService::new(db, None, None)
         .session_boundary(request)
         .await
-}
-
-fn summary_unavailable(
-    mut response: LcmCompressionResponse,
-    reason: &'static str,
-) -> LcmCompressionResponse {
-    response.reason = reason.to_string();
-    response.retry_status = Some("needs_authoritative_summary".to_string());
-    response
 }
 
 #[cfg(test)]

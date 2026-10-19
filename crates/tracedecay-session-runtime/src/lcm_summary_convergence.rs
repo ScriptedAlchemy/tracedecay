@@ -438,35 +438,45 @@ async fn process_candidate(
                 return record_candidate_error(database, candidate, error, now_unix_ms).await;
             }
         };
+    let mut bounded = bounded;
+    let response_outcome = bounded.response.take_outcome()?;
+    let deferred_reason = match &response_outcome {
+        tracedecay_lcm::LcmCompressionOutcome::Complete => None,
+        tracedecay_lcm::LcmCompressionOutcome::Deferred { reason, .. } => Some(reason.as_str()),
+        tracedecay_lcm::LcmCompressionOutcome::NeedsSummary(_) => {
+            return Err(LcmError::Db(
+                "retained compression left an unresolved summary request".to_string(),
+            ));
+        }
+    };
     let response = &bounded.response;
-    let (state, disposition, failure_code) =
-        if response.retry_status.as_deref() == Some("needs_authoritative_summary") {
-            (
-                LcmSummaryConvergenceQueueState::Unavailable,
-                LcmSummaryConvergenceDisposition::Pending {
-                    reason: response.reason.clone(),
-                },
-                Some(response.reason.as_str()),
-            )
-        } else if bounded.has_more {
-            (
-                LcmSummaryConvergenceQueueState::Pending,
-                LcmSummaryConvergenceDisposition::Summarized,
-                None,
-            )
-        } else if response.summary_nodes_created > 0 {
-            (
-                LcmSummaryConvergenceQueueState::Current,
-                LcmSummaryConvergenceDisposition::Summarized,
-                None,
-            )
-        } else {
-            (
-                LcmSummaryConvergenceQueueState::Current,
-                LcmSummaryConvergenceDisposition::Current,
-                None,
-            )
-        };
+    let (state, disposition, failure_code) = if let Some(reason) = deferred_reason {
+        (
+            LcmSummaryConvergenceQueueState::Unavailable,
+            LcmSummaryConvergenceDisposition::Pending {
+                reason: reason.to_string(),
+            },
+            Some(reason),
+        )
+    } else if bounded.has_more {
+        (
+            LcmSummaryConvergenceQueueState::Pending,
+            LcmSummaryConvergenceDisposition::Summarized,
+            None,
+        )
+    } else if response.summary_nodes_created > 0 {
+        (
+            LcmSummaryConvergenceQueueState::Current,
+            LcmSummaryConvergenceDisposition::Summarized,
+            None,
+        )
+    } else {
+        (
+            LcmSummaryConvergenceQueueState::Current,
+            LcmSummaryConvergenceDisposition::Current,
+            None,
+        )
+    };
     if state == LcmSummaryConvergenceQueueState::Unavailable
         && !persist_outcome(database, &candidate, state, failure_code, 0, 0).await?
     {
@@ -639,17 +649,7 @@ fn compression_request(candidate: &LcmSummaryConvergenceCandidate) -> LcmCompres
         stateless_session_patterns: Vec::new(),
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
+        overrides: Default::default(),
         summarizer: LcmSummarizerMode::HermesAuxiliary,
     }
 }

@@ -23,8 +23,8 @@ async fn fresh_tail_boundary_keeps_multi_tool_transaction_atomic_and_shrinking()
     );
     request.messages = with_authoritative_timestamps(messages);
     request.current_tokens = Some(107);
-    request.threshold_tokens = Some(80);
-    request.fresh_tail_count = Some(3);
+    request.overrides.threshold_tokens = Some(80);
+    request.overrides.fresh_tail_count = Some(3);
 
     let response = db.lcm_compress(request).await.unwrap();
     let assistant = response
@@ -72,7 +72,7 @@ async fn bounded_leaf_chunk_backs_off_before_multi_tool_transaction() {
         None,
     );
     request.messages = with_authoritative_timestamps(messages);
-    request.fresh_tail_count = Some(1);
+    request.overrides.fresh_tail_count = Some(1);
 
     let response = db.lcm_compress(request).await.unwrap();
     assert_eq!(response.summary_nodes_created, 1);
@@ -109,7 +109,7 @@ async fn budget_and_overflow_replay_never_split_tool_transaction() {
     );
     request.messages = with_authoritative_timestamps(messages);
     request.current_tokens = Some(107);
-    request.fresh_tail_count = Some(3);
+    request.overrides.fresh_tail_count = Some(3);
 
     let response = db.lcm_compress(request).await.unwrap();
     let assistant_count = response
@@ -169,7 +169,7 @@ async fn legacy_partial_tool_transaction_drops_invalid_group_and_repairs_orphans
         provided_summary("unused".into()),
     );
     request.messages = transaction;
-    request.fresh_tail_count = Some(10);
+    request.overrides.fresh_tail_count = Some(10);
 
     let response = db.lcm_compress(request).await.unwrap();
     assert!(

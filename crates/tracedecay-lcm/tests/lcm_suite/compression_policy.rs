@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tracedecay_lcm::LcmCompressionOverrides;
 use tracedecay_lcm::compression_policy::{
     AssemblyCapInput, OverflowRecoveryCapInput, bounded_leaf_chunk_len,
     effective_assembly_token_cap, effective_leaf_chunk_tokens, overflow_recovery_assembly_cap,
@@ -57,17 +58,22 @@ fn complete_tool_transaction() -> Vec<LcmRawMessage> {
 fn assembly_cap_uses_the_smallest_positive_authority() {
     assert_eq!(
         effective_assembly_token_cap(AssemblyCapInput {
-            max_assembly_tokens: Some(200),
-            context_length: Some(80),
-            reserve_tokens_floor: Some(30),
+            overrides: &LcmCompressionOverrides {
+                max_assembly_tokens: Some(200),
+                context_length: Some(80),
+                reserve_tokens_floor: Some(30),
+                ..Default::default()
+            },
         }),
         Some(50)
     );
     assert_eq!(
         effective_assembly_token_cap(AssemblyCapInput {
-            max_assembly_tokens: None,
-            context_length: Some(30),
-            reserve_tokens_floor: Some(30),
+            overrides: &LcmCompressionOverrides {
+                context_length: Some(30),
+                reserve_tokens_floor: Some(30),
+                ..Default::default()
+            },
         }),
         None
     );
@@ -78,7 +84,10 @@ fn overflow_recovery_cap_reserves_non_message_overhead() {
     assert_eq!(
         overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
             current_tokens: Some(8),
-            max_assembly_tokens: Some(10),
+            overrides: &LcmCompressionOverrides {
+                max_assembly_tokens: Some(10),
+                ..Default::default()
+            },
             messages: &[json!({"content": "two tokens"})],
         }),
         Some(4)
@@ -86,7 +95,10 @@ fn overflow_recovery_cap_reserves_non_message_overhead() {
     assert_eq!(
         overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
             current_tokens: Some(18),
-            max_assembly_tokens: Some(10),
+            overrides: &LcmCompressionOverrides {
+                max_assembly_tokens: Some(10),
+                ..Default::default()
+            },
             messages: &[json!({"content": "tiny"})],
         }),
         Some(1)
@@ -96,11 +108,27 @@ fn overflow_recovery_cap_reserves_non_message_overhead() {
 #[test]
 fn dynamic_leaf_size_grows_by_powers_of_two_within_the_ceiling() {
     assert_eq!(
-        effective_leaf_chunk_tokens(Some(4), Some(true), Some(16), 20),
+        effective_leaf_chunk_tokens(
+            &LcmCompressionOverrides {
+                leaf_chunk_tokens: Some(4),
+                dynamic_leaf_chunk_enabled: Some(true),
+                dynamic_leaf_chunk_max: Some(16),
+                ..Default::default()
+            },
+            20,
+        ),
         Some(16)
     );
     assert_eq!(
-        effective_leaf_chunk_tokens(Some(4), Some(false), Some(16), 20),
+        effective_leaf_chunk_tokens(
+            &LcmCompressionOverrides {
+                leaf_chunk_tokens: Some(4),
+                dynamic_leaf_chunk_enabled: Some(false),
+                dynamic_leaf_chunk_max: Some(16),
+                ..Default::default()
+            },
+            20,
+        ),
         Some(4)
     );
 }

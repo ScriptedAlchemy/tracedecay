@@ -521,17 +521,12 @@ fn pressure_only_command(
             current_tokens,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length,
-            reserve_tokens_floor: None,
+            overrides: tracedecay_lcm::LcmCompressionOverrides {
+                max_source_messages: max_source_messages,
+                fresh_tail_count: fresh_tail_count,
+                context_length: context_length,
+                ..Default::default()
+            },
         },
         evidence: LcmCompressionEvidence::PressureOnly { protocol },
     }))
