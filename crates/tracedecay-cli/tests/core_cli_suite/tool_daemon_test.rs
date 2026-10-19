@@ -4040,21 +4040,10 @@ fn configuration_get_from(home: &Path, cwd: &Path, key: &str) -> (Option<i32>, V
     (output.status.code(), body)
 }
 
-fn run_upload_counter_command(home: &Path, cwd: &Path, command: &str) {
-    let output = tracedecay_command_with_home(home)
-        .current_dir(cwd)
-        .arg(command)
-        .stdin(Stdio::null())
-        .output()
-        .expect("upload counter command should run");
-    assert!(output.status.success(), "{command} failed: {output:?}");
-}
-
 /// A user-scoped setting belongs to the profile, so it resolves wherever the
-/// command runs: a value written inside a project is the one doctor and
-/// `configuration_get` report outside any project, and a write made outside a
-/// project is the one the project then reads. A project-scoped key still needs
-/// a project.
+/// command runs: the same value is reported inside and outside any project. A
+/// project-scoped key still needs a project, and the retired worldwide-counter
+/// upload setting is no longer a registered key.
 #[test]
 fn user_settings_resolve_from_the_profile_outside_any_project() {
     let home = TempDir::new().unwrap();
@@ -4066,40 +4055,22 @@ fn user_settings_resolve_from_the_profile_outside_any_project() {
     init_committed_git_project_with_cli(&home, &project);
     let _daemon = spawn_tracedecay_daemon(&home);
 
-    run_upload_counter_command(&home, &project, "enable-upload-counter");
+    for cwd in [&outside, &project] {
+        let (code, hints) = configuration_get_from(&home, cwd, "user.repeated_query_hints.v1");
+        assert_eq!(code, Some(0), "{hints}");
+        assert_eq!(
+            hints["structuredContent"]["outcome"]["value"]["payload"]["effective_value"],
+            json!({ "kind": "boolean", "value": false }),
+            "the profile setting must resolve from {}: {hints}",
+            cwd.display()
+        );
+    }
 
-    let doctor = tracedecay_command_with_home(&home)
-        .current_dir(&outside)
-        .arg("doctor")
-        .stdin(Stdio::null())
-        .output()
-        .expect("doctor should run");
-    let doctor_stderr = String::from_utf8_lossy(&doctor.stderr);
-    assert!(
-        doctor_stderr.contains("Worldwide counter upload enabled"),
-        "doctor outside a project must report the profile's upload setting:\n{doctor_stderr}"
-    );
-    assert!(
-        !doctor_stderr.contains("upload setting unavailable")
-            && !doctor_stderr.contains("canonical configuration is unavailable"),
-        "doctor outside a project reported the user setting unavailable:\n{doctor_stderr}"
-    );
-
-    let (code, enabled) = configuration_get_from(&home, &outside, "user.upload_enabled.v1");
-    assert_eq!(code, Some(0), "{enabled}");
-    assert_eq!(
-        enabled["structuredContent"]["outcome"]["value"]["payload"]["effective_value"],
-        json!({ "kind": "boolean", "value": true }),
-        "{enabled}"
-    );
-
-    run_upload_counter_command(&home, &outside, "disable-upload-counter");
-    let (code, disabled) = configuration_get_from(&home, &project, "user.upload_enabled.v1");
-    assert_eq!(code, Some(0), "{disabled}");
-    assert_eq!(
-        disabled["structuredContent"]["outcome"]["value"]["payload"]["effective_value"],
-        json!({ "kind": "boolean", "value": false }),
-        "a write made outside a project must be the value the project reads: {disabled}"
+    let (code, retired) = configuration_get_from(&home, &outside, "user.upload_enabled.v1");
+    assert_ne!(
+        code,
+        Some(0),
+        "the retired upload setting must be refused, not read: {retired}"
     );
 
     let (code, refused) = configuration_get_from(&home, &outside, "index.max_file_size.v1");

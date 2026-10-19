@@ -1155,13 +1155,13 @@ async fn dashboard_user_settings_replay_through_application_restart() {
     let request = serde_json::json!({
         "expected_revision_id": initial_revision.clone(),
         "idempotency_key": idempotency_key,
-        "upload_enabled": true,
+        "extraction_timeout_secs": 90,
         "watcher_debounce": "15s"
     });
     let (status, applied) = patch_dashboard_json(&agent, &user_url, &request);
     assert_eq!(status, 200, "profile mutation failed: {applied}");
     assert_eq!(applied["payload"]["restart_recommended"], true);
-    assert_eq!(applied["payload"]["user"]["upload_enabled"], true);
+    assert_eq!(applied["payload"]["user"]["extraction_timeout_secs"], 90);
     assert_eq!(applied["payload"]["user"]["watcher_debounce"], "15s");
     let applied_revision = applied["payload"]["user"]["configuration_revision_id"]
         .as_str()
@@ -1214,7 +1214,7 @@ async fn dashboard_user_settings_replay_through_application_restart() {
     let conflicting_request = serde_json::json!({
         "expected_revision_id": initial_revision.clone(),
         "idempotency_key": idempotency_key,
-        "upload_enabled": false,
+        "extraction_timeout_secs": 30,
         "watcher_debounce": "15s"
     });
     let (status, conflict) =

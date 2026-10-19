@@ -195,8 +195,6 @@ authorized, sanitized, classified records under their remote policy.
 
 Network-capable effects are separate from core retrieval:
 
-- Worldwide counter: when opted in, sends the pending aggregate token-savings
-  amount, and `tracedecay doctor` reads the public total to check reachability.
 - GitHub release checks and updates: contact GitHub release endpoints. An
   explicitly configured private GitHub review source can use a read-only
   credential from the operating-system keyring; missing, ambiguous,
@@ -212,19 +210,13 @@ Network-capable effects are separate from core retrieval:
   path fails closed with typed `unavailable`, `denied`, or `stale-peer` state.
 
 These services receive normal transport metadata, including the connection's
-source address, in addition to any request payload. The counter request is an
-aggregate amount, not repository content, but it is not an anonymity guarantee.
-Use a network policy or firewall if a command must make no outbound connection.
-An opt-out, denial, timeout, or unavailable remote service must remain visible
-as that state; it is not evidence of a zero counter, an up-to-date release, or
-current pricing. See [Security](SECURITY.md#network-access) for the complete
-outbound-access and credential boundary.
-
-Disable the worldwide counter with:
-
-```bash
-tracedecay disable-upload-counter
-```
+source address, in addition to any request payload. Use a network policy or
+firewall if a command must make no outbound connection. A denial, timeout, or
+unavailable remote service must remain visible as that state; it is not
+evidence of an up-to-date release or current pricing. TraceDecay no longer has
+a worldwide token counter: token savings and costs stay local. See
+[Security](SECURITY.md#network-access) for the complete outbound-access and
+credential boundary.
 
 ## Troubleshooting
 
