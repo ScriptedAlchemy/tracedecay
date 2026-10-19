@@ -494,26 +494,44 @@ const fn intent_gated_lifecycle(producer: tracedecay_domain::NativeHostIdentityV
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookV2NativeLifecyclePolicyV1 {
+    Required,
+    Disabled,
+    Unavailable,
+}
+
 /// Whether this host's lifecycle is enabled under the same policy used by
-/// admission and ledger replay. Claude omits lifecycle writes without intent.
-pub async fn hook_v2_native_lifecycle_enabled(
+/// admission and ledger replay. Claude omits lifecycle writes only when its
+/// configuration explicitly disables intent; an unavailable authority is not
+/// evidence that it is disabled.
+async fn hook_v2_native_lifecycle_policy(
     cg: &TraceDecay,
     producer: tracedecay_domain::NativeHostIdentityV1,
-) -> bool {
+) -> HookV2NativeLifecyclePolicyV1 {
     if !intent_gated_lifecycle(producer) {
-        return true;
+        return HookV2NativeLifecyclePolicyV1::Required;
     }
     let Ok(pinned) = cg.configuration_runtime().client().current().await else {
-        return false;
+        return HookV2NativeLifecyclePolicyV1::Unavailable;
     };
-    tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1::from_current(
-        &pinned.into_current_state(),
-    )
-    .is_some_and(|pin| {
-        pin.intent_settings().is_some_and(|settings| settings.enabled)
-            && pin.control().state
-                != tracedecay_agent_hosts::agents::context_scout::ContextScoutServiceStateV1::Disabled
-    })
+    let Some(pin) =
+        tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1::from_current(
+            &pinned.into_current_state(),
+        )
+    else {
+        return HookV2NativeLifecyclePolicyV1::Unavailable;
+    };
+    if pin
+        .intent_settings()
+        .is_some_and(|settings| settings.enabled)
+        && pin.control().state
+            != tracedecay_agent_hosts::agents::context_scout::ContextScoutServiceStateV1::Disabled
+    {
+        HookV2NativeLifecyclePolicyV1::Required
+    } else {
+        HookV2NativeLifecyclePolicyV1::Disabled
+    }
 }
 
 async fn admit_gated_native_lifecycle(
@@ -622,9 +640,17 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
     // stable daemon order when the provider has no native sequence.
     // Exact-duplicate retries reuse that order and retry only the lifecycle
     // prerequisite before suppressing downstream effects.
-    let native_lifecycle_enabled =
-        tracedecay_hooks::NativeContextScoutLifecycleV1::host_mounts_lifecycle(envelope.producer)
-            && hook_v2_native_lifecycle_enabled(cg, envelope.producer).await;
+    let native_lifecycle_enabled = match hook_v2_native_lifecycle_policy(cg, envelope.producer)
+        .await
+    {
+        HookV2NativeLifecyclePolicyV1::Required => {
+            tracedecay_hooks::NativeContextScoutLifecycleV1::host_mounts_lifecycle(
+                envelope.producer,
+            )
+        }
+        HookV2NativeLifecyclePolicyV1::Disabled => false,
+        HookV2NativeLifecyclePolicyV1::Unavailable => return HookV2AdmissionOutcomeV1::Unavailable,
+    };
     // Producer replay compares the existing native cursor even when policy
     // suppresses new lifecycle writes (notably a Claude Stop). Its new daemon
     // allocation must follow that same authority before ordering is compared.
