@@ -224,10 +224,28 @@ pub fn withdraw_verified_text_artifact_under_lock(
 /// builder names its staging database, in this scope's staging directory,
 /// with the sealed generation digest, so the active generation's staging is
 /// preserved rather than guessed dead by wall-clock age.
+#[cfg(test)]
 pub(super) fn plan_collectable_text_artifacts_cancellable(
     store_root: &Path,
     active_pointer: Option<&DurablePublicationPointerV1>,
     verification: GenerationDigestVerificationV1,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
+    let mut remaining_entries = usize::MAX;
+    plan_collectable_text_artifacts_budgeted_cancellable(
+        store_root,
+        active_pointer,
+        verification,
+        &mut remaining_entries,
+        is_cancelled,
+    )
+}
+
+pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
+    store_root: &Path,
+    active_pointer: Option<&DurablePublicationPointerV1>,
+    verification: GenerationDigestVerificationV1,
+    remaining_entries: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
@@ -285,6 +303,10 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
+        if *remaining_entries == 0 {
+            return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+        }
+        *remaining_entries -= 1;
         verify_completed_text_artifact(
             &root.join(&descriptor.artifact_file),
             descriptor,
@@ -303,6 +325,10 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
     });
     let mut active_text_replacement_in_flight = false;
     if let Some(active_staging_source) = active_staging_source {
+        if *remaining_entries == 0 {
+            return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+        }
+        *remaining_entries -= 1;
         let active_staging_file = format!(".text-artifact-{active_staging_source}.staging");
         let active_staging_path = staging_root.join(&active_staging_file);
         match std::fs::symlink_metadata(&active_staging_path) {
@@ -329,13 +355,17 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
         }
         let mut entries = std::fs::read_dir(directory).map_err(storage)?;
         while remaining > 0 && candidates.len() < MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
-            remaining -= 1;
             if is_cancelled() {
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
             let Some(entry) = entries.next() else {
                 break;
             };
+            if *remaining_entries == 0 {
+                return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+            }
+            *remaining_entries -= 1;
+            remaining -= 1;
             let entry = entry.map_err(storage)?;
             let file_name = entry.file_name().into_string().map_err(|_| {
                 CodeGenerationRetentionErrorV1::UnsafeState(

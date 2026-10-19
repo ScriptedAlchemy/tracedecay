@@ -93,14 +93,14 @@ use scope_roots::{
 };
 use text_artifacts::{
     TEXT_ARTIFACT_RECEIPT_STORE, execute_text_artifact_retention_under_store_lock,
-    plan_collectable_text_artifacts_cancellable,
+    plan_collectable_text_artifacts_budgeted_cancellable,
     recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
     total_text_artifact_bytes,
 };
 #[cfg(test)]
 use text_artifacts::{
     TEXT_ARTIFACT_TRANSACTION_JOURNAL, build_text_artifact_receipt,
-    stage_collectable_text_artifacts,
+    plan_collectable_text_artifacts_cancellable, stage_collectable_text_artifacts,
 };
 
 use generation_scan::{read_generation_format_revision, read_generation_metadata};
@@ -460,6 +460,8 @@ pub enum CodeGenerationRetentionErrorV1 {
     Conflict(String),
     #[error("code-generation retention cancelled")]
     Cancelled,
+    #[error("code-generation retention entry budget exceeded")]
+    EntryBudgetExceeded,
     #[error("code-generation retention deferred: graph replay pool is busy")]
     GraphReplayPoolBusy,
     #[error("code-generation retention deferred: generation store is busy")]
@@ -1007,12 +1009,33 @@ pub fn prepare_next_code_generation_retention_cancellable(
 
 /// Build a read-only retention plan while observing the caller's cancellation
 /// authority between directory entries and bounded digest reads.
-#[tracing::instrument(name = "usecases.retention.plan", level = "trace", skip_all)]
 pub fn plan_code_generation_retention_with_verification_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     verification: GenerationDigestVerificationV1,
     graph_replay_pool_root: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    let mut remaining_entries = usize::MAX;
+    plan_code_generation_retention_with_verification_budgeted_cancellable(
+        store_root,
+        vector_readable_sources,
+        verification,
+        graph_replay_pool_root,
+        &mut remaining_entries,
+        is_cancelled,
+    )
+}
+
+/// Build a read-only retention plan while sharing an entry budget with the
+/// caller's surrounding filesystem census.
+#[tracing::instrument(name = "usecases.retention.plan", level = "trace", skip_all)]
+pub fn plan_code_generation_retention_with_verification_budgeted_cancellable(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    verification: GenerationDigestVerificationV1,
+    graph_replay_pool_root: Option<&Path>,
+    remaining_entries: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
@@ -1057,6 +1080,10 @@ pub fn plan_code_generation_retention_with_verification_cancellable(
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
+        if *remaining_entries == 0 {
+            return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+        }
+        *remaining_entries -= 1;
         let entry = entry.map_err(storage)?;
         let path = entry.path();
         let Some(file_name) = generation_file_name(&path) else {
@@ -1213,10 +1240,11 @@ pub fn plan_code_generation_retention_with_verification_cancellable(
         .take(MAX_CODE_GENERATION_RETENTION_BATCH_V1)
         .cloned()
         .collect::<Vec<_>>();
-    let text_artifact_inventory = plan_collectable_text_artifacts_cancellable(
+    let text_artifact_inventory = plan_collectable_text_artifacts_budgeted_cancellable(
         store_root,
         active_pointer.as_ref(),
         verification,
+        remaining_entries,
         is_cancelled,
     )?;
     // The segment mark phase streams every retained manifest end to end and
@@ -1230,10 +1258,11 @@ pub fn plan_code_generation_retention_with_verification_cancellable(
     // without a second full-digest pass.
     let collectable_generation_segments = match verification {
         GenerationDigestVerificationV1::Full => {
-            if has_unreferenced_generation_segments(
+            if has_unreferenced_generation_segments_budgeted(
                 store_root,
                 graph_replay_pool_root,
                 is_cancelled,
+                remaining_entries,
             )? {
                 GenerationSegmentCensusV1::Present
             } else {
@@ -1241,7 +1270,7 @@ pub fn plan_code_generation_retention_with_verification_cancellable(
             }
         }
         GenerationDigestVerificationV1::MetadataOnly => {
-            if store_may_hold_generation_segments(store_root, is_cancelled)? {
+            if store_may_hold_generation_segments(store_root, is_cancelled, remaining_entries)? {
                 GenerationSegmentCensusV1::Unknown
             } else {
                 GenerationSegmentCensusV1::NoneFound
@@ -1317,13 +1346,17 @@ fn sweep_unreferenced_generation_segments(
     graph_replay_pool_root: Option<&Path>,
     apply: bool,
     is_cancelled: &dyn Fn() -> bool,
+    remaining_entries: Option<&mut usize>,
 ) -> Result<(bool, bool), CodeGenerationRetentionErrorV1> {
+    let mut remaining_entries = remaining_entries;
     let segments_root = code_generation_segments_root(store_root);
     let entries = match std::fs::read_dir(&segments_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((false, false)),
         Err(error) => return Err(storage(error)),
     };
+    let manifest_directories =
+        segment_manifest_directories(store_root, &mut remaining_entries, is_cancelled)?;
     let mut live_segments = BTreeSet::new();
     let mut retired_read_bundle_manifests = Vec::new();
     let mut mark_root = |root: &Path,
@@ -1338,6 +1371,7 @@ fn sweep_unreferenced_generation_segments(
             if is_cancelled() {
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
+            charge_entry_budget(&mut remaining_entries)?;
             let manifest = manifest.map_err(storage)?;
             let path = manifest.path();
             let expected_digest = if replay_pool {
@@ -1421,7 +1455,7 @@ fn sweep_unreferenced_generation_segments(
         }
         Ok(())
     };
-    for directory in segment_manifest_directories(store_root)? {
+    for directory in manifest_directories {
         mark_root(&directory, false)?;
     }
     if let Some(pool_root) = graph_replay_pool_root {
@@ -1447,6 +1481,7 @@ fn sweep_unreferenced_generation_segments(
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
+        charge_entry_budget(&mut remaining_entries)?;
         let entry = entry.map_err(storage)?;
         let path = entry.path();
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -1491,7 +1526,23 @@ fn sweep_unreferenced_generation_segments(
     ))
 }
 
-fn subdirectories(root: &Path) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
+fn charge_entry_budget(
+    remaining_entries: &mut Option<&mut usize>,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if let Some(remaining) = remaining_entries.as_deref_mut() {
+        if *remaining == 0 {
+            return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+        }
+        *remaining -= 1;
+    }
+    Ok(())
+}
+
+fn subdirectories(
+    root: &Path,
+    remaining_entries: &mut Option<&mut usize>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1499,6 +1550,10 @@ fn subdirectories(root: &Path) -> Result<Vec<PathBuf>, CodeGenerationRetentionEr
     };
     let mut directories = Vec::new();
     for entry in entries {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
+        charge_entry_budget(remaining_entries)?;
         let entry = entry.map_err(storage)?;
         if entry.file_type().map_err(storage)?.is_dir() {
             directories.push(entry.path());
@@ -1510,7 +1565,11 @@ fn subdirectories(root: &Path) -> Result<Vec<PathBuf>, CodeGenerationRetentionEr
 /// The scopes whose manifests can name the store's segments: the store alone,
 /// or in a shared project every worktree scope, including scopes quarantined
 /// by scope collection, which a recovery may still restore.
-fn segment_scope_roots(store_root: &Path) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
+fn segment_scope_roots(
+    store_root: &Path,
+    remaining_entries: &mut Option<&mut usize>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
     if !shares_project_generation_segments(store_root) {
         return Ok(vec![store_root.to_path_buf()]);
     }
@@ -1520,12 +1579,20 @@ fn segment_scope_roots(store_root: &Path) -> Result<Vec<PathBuf>, CodeGeneration
             .and_then(|name| name.to_str())
             .is_some_and(is_code_index_scope_hash)
     };
-    let mut scopes = subdirectories(project_root)?
+    let mut scopes = subdirectories(project_root, remaining_entries, is_cancelled)?
         .into_iter()
         .filter(is_scope)
         .collect::<Vec<_>>();
-    for stage in subdirectories(&project_root.join(SCOPE_RETENTION_QUARANTINE_DIRECTORY))? {
-        scopes.extend(subdirectories(&stage)?.into_iter().filter(is_scope));
+    for stage in subdirectories(
+        &project_root.join(SCOPE_RETENTION_QUARANTINE_DIRECTORY),
+        remaining_entries,
+        is_cancelled,
+    )? {
+        scopes.extend(
+            subdirectories(&stage, remaining_entries, is_cancelled)?
+                .into_iter()
+                .filter(is_scope),
+        );
     }
     Ok(scopes)
 }
@@ -1534,11 +1601,17 @@ fn segment_scope_roots(store_root: &Path) -> Result<Vec<PathBuf>, CodeGeneration
 /// scope's generations and the stages its retention quarantine may restore.
 fn segment_manifest_directories(
     store_root: &Path,
+    remaining_entries: &mut Option<&mut usize>,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
     let mut directories = Vec::new();
-    for scope in segment_scope_roots(store_root)? {
+    for scope in segment_scope_roots(store_root, remaining_entries, is_cancelled)? {
         directories.push(scope.join(GENERATIONS_DIRECTORY));
-        directories.extend(subdirectories(&scope.join(QUARANTINE_DIRECTORY))?);
+        directories.extend(subdirectories(
+            &scope.join(QUARANTINE_DIRECTORY),
+            remaining_entries,
+            is_cancelled,
+        )?);
     }
     Ok(directories)
 }
@@ -1563,6 +1636,7 @@ fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
 fn store_may_hold_generation_segments(
     store_root: &Path,
     is_cancelled: &dyn Fn() -> bool,
+    remaining_entries: &mut usize,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
     let mut entries = match std::fs::read_dir(code_generation_segments_root(store_root)) {
         Ok(entries) => entries,
@@ -1572,11 +1646,14 @@ fn store_may_hold_generation_segments(
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
-    entries
-        .next()
-        .transpose()
-        .map(|entry| entry.is_some())
-        .map_err(storage)
+    let Some(_entry) = entries.next().transpose().map_err(storage)? else {
+        return Ok(false);
+    };
+    if *remaining_entries == 0 {
+        return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+    }
+    *remaining_entries -= 1;
+    Ok(true)
 }
 
 fn has_unreferenced_generation_segments(
@@ -1584,8 +1661,29 @@ fn has_unreferenced_generation_segments(
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    sweep_unreferenced_generation_segments(store_root, graph_replay_pool_root, false, is_cancelled)
-        .map(|(found, _)| found)
+    let mut remaining_entries = usize::MAX;
+    has_unreferenced_generation_segments_budgeted(
+        store_root,
+        graph_replay_pool_root,
+        is_cancelled,
+        &mut remaining_entries,
+    )
+}
+
+fn has_unreferenced_generation_segments_budgeted(
+    store_root: &Path,
+    graph_replay_pool_root: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
+    remaining_entries: &mut usize,
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    sweep_unreferenced_generation_segments(
+        store_root,
+        graph_replay_pool_root,
+        false,
+        is_cancelled,
+        Some(remaining_entries),
+    )
+    .map(|(found, _)| found)
 }
 
 fn collect_unreferenced_generation_segments(
@@ -1593,8 +1691,14 @@ fn collect_unreferenced_generation_segments(
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    sweep_unreferenced_generation_segments(store_root, graph_replay_pool_root, true, is_cancelled)
-        .map(|(_, batch_exhausted)| batch_exhausted)
+    sweep_unreferenced_generation_segments(
+        store_root,
+        graph_replay_pool_root,
+        true,
+        is_cancelled,
+        None,
+    )
+    .map(|(_, batch_exhausted)| batch_exhausted)
 }
 
 /// `graph_replay_pool_root` is the project graph's replay pool. When present,

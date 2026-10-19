@@ -37,7 +37,8 @@ use tracedecay_domain::{
 use tracedecay_code_index_retention::code_index_generations::{
     CODE_TEXT_ARTIFACT_STAGING_DIRECTORY_V1, CODE_TEXT_ARTIFACTS_DIRECTORY_V1,
     CodeGenerationRetentionGenerationV1, GenerationDigestVerificationV1,
-    plan_code_generation_retention_with_verification_cancellable, scoped_code_index_store_root,
+    plan_code_generation_retention_with_verification_budgeted_cancellable,
+    scoped_code_index_store_root,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_contracts::{CancellationSignal, Deadline, now_micros};
@@ -896,11 +897,13 @@ async fn build_storage_report_page_with_walk_budget(
         }
     };
     let profile_root_buf = profile_root.to_path_buf();
+    let directory_walk_control = walk_control.clone();
     let directory_page = native_runtime::spawn_blocking(move || {
-        list_project_directories_page(
+        list_project_directories_page_controlled(
             &profile_root_buf,
             after_directory.as_deref().unwrap_or_default(),
             limit,
+            &directory_walk_control,
         )
     })
     .await
@@ -1040,9 +1043,23 @@ fn list_project_directories_page(
     cursor: &str,
     limit: usize,
 ) -> tracedecay_domain::errors::Result<ProjectDirectoryPage> {
+    list_project_directories_page_controlled(
+        profile_root,
+        cursor,
+        limit,
+        &StorageReportWalkControl::default(),
+    )
+}
+
+fn list_project_directories_page_controlled(
+    profile_root: &Path,
+    cursor: &str,
+    limit: usize,
+    walk_control: &StorageReportWalkControl,
+) -> tracedecay_domain::errors::Result<ProjectDirectoryPage> {
     let projects_dir = profile_root.join("projects");
     match std::fs::symlink_metadata(&projects_dir) {
-        Ok(_) => {}
+        Ok(metadata) if metadata.is_dir() => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ProjectDirectoryPage {
                 directories: Vec::new(),
@@ -1055,16 +1072,26 @@ fn list_project_directories_page(
                 message: format!("inspect storage report projects directory: {error}"),
             });
         }
+        Ok(_) => {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "storage report projects path is not a directory".to_owned(),
+            });
+        }
     }
     let page = super::orphan_stores::read_project_directory_page(
         profile_root,
         (!cursor.is_empty()).then_some(cursor),
         limit,
-        &|| false,
+        &|| walk_control.interruption().is_some(),
     )?;
     let Some(page) = page else {
+        let interruption = match walk_control.interruption() {
+            Some(WalkInterruptionV1::Cancelled) => "cancelled",
+            Some(WalkInterruptionV1::DeadlineExceeded) => "deadline exceeded",
+            None => "interrupted",
+        };
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "storage report directory page was unexpectedly interrupted".to_owned(),
+            message: format!("storage report directory page {interruption}"),
         });
     };
     let directories = page
@@ -1202,6 +1229,23 @@ fn build_project_storage_report_with_control(
     })
 }
 
+fn directory_chain_is_nofollow(root: &Path, directory: &Path) -> bool {
+    if !std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
+        return false;
+    }
+    let Ok(relative) = directory.strip_prefix(root) else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        if !std::fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.is_dir()) {
+            return false;
+        }
+    }
+    true
+}
+
 fn append_project_report(
     profile_root: &Path,
     project_id: &str,
@@ -1214,20 +1258,28 @@ fn append_project_report(
     walk_control: &StorageReportWalkControl,
 ) -> tracedecay_domain::errors::Result<()> {
     let data_root = profile_root.join("projects").join(project_id);
+    let code_index_root = data_root.join("code-index-v1");
     let code_index_store_root =
-        scoped_code_index_store_root(&data_root.join("code-index-v1"), Path::new(canonical_root));
+        scoped_code_index_store_root(&code_index_root, Path::new(canonical_root));
     let generation_directory = code_index_store_root.join(CODE_GENERATIONS_DIRECTORY);
-    let active_pointer_present = code_index_store_root
-        .join("active-code-generation-v1.json")
-        .is_file();
+    let active_pointer = code_index_store_root.join("active-code-generation-v1.json");
+    let project_chain_is_nofollow = directory_chain_is_nofollow(profile_root, &data_root);
+    let active_pointer_present = project_chain_is_nofollow
+        && directory_chain_is_nofollow(profile_root, &code_index_store_root)
+        && std::fs::symlink_metadata(&active_pointer).is_ok_and(|metadata| metadata.is_file());
     let measure_generation_bytes = active_pointer_present && vector_readable_sources.is_ok();
     let mut generation_bytes = 0u64;
     let mut generation_unavailable_entry_count = 0usize;
+    let mut code_index_unavailable_entry_count = 0usize;
     let mut termination = WalkTerminationV1::Complete;
     let mut kinds = StoreKindBytesV1::default();
     let mut unavailable_entry_count = 0usize;
-    match std::fs::symlink_metadata(&data_root) {
-        Ok(metadata) if metadata.is_dir() => {
+    match (
+        project_chain_is_nofollow,
+        std::fs::symlink_metadata(&data_root),
+    ) {
+        (false, _) => unavailable_entry_count = 1,
+        (true, Ok(metadata)) if metadata.is_dir() => {
             termination = walk_regular_files_with_budget(
                 &data_root,
                 remaining_entries,
@@ -1243,6 +1295,10 @@ fn append_project_report(
                     }
                     WalkedEntryV1::Unavailable => {
                         unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                        if path.starts_with(&code_index_root) {
+                            code_index_unavailable_entry_count =
+                                code_index_unavailable_entry_count.saturating_add(1);
+                        }
                         if measure_generation_bytes && path.starts_with(&generation_directory) {
                             generation_unavailable_entry_count =
                                 generation_unavailable_entry_count.saturating_add(1);
@@ -1251,18 +1307,21 @@ fn append_project_report(
                 },
             );
         }
-        Ok(_) => unavailable_entry_count = 1,
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+        (true, Ok(_)) => unavailable_entry_count = 1,
+        (true, Err(error)) if error.kind() != std::io::ErrorKind::NotFound => {
             unavailable_entry_count = 1;
         }
-        Err(_) => {}
+        (true, Err(_)) => {}
     }
     let total_bytes = kinds.total();
-    let (free_bytes, free_page_ratio) =
+    let (free_bytes, free_page_ratio) = if project_chain_is_nofollow {
         sample_free_pages(&data_root.join(tracedecay_runtime_core::config::DB_FILENAME))
             .map_or((None, None), |(free_bytes, ratio)| {
                 (Some(free_bytes), Some(ratio))
-            });
+            })
+    } else {
+        (None, None)
+    };
     stores.push(StoreSizeReportEntry {
         project_id: project_id.to_owned(),
         canonical_root: canonical_root.to_owned(),
@@ -1293,7 +1352,9 @@ fn append_project_report(
         }
     };
     let scan_reason = match termination {
-        WalkTerminationV1::Complete if generation_unavailable_entry_count > 0 => {
+        WalkTerminationV1::Complete
+            if code_index_unavailable_entry_count > 0 || generation_unavailable_entry_count > 0 =>
+        {
             Some("generation_retention_scan_unavailable")
         }
         WalkTerminationV1::Complete => match walk_control.interruption() {
@@ -1328,17 +1389,25 @@ fn append_project_report(
     } else {
         GenerationDigestVerificationV1::Full
     };
-    // The serving generation and live native-preview bindings are only
-    // provable from daemon authorities. Without them the dry run is reported
-    // unavailable rather than planned against an empty protection set.
-    let plan = match plan_code_generation_retention_with_verification_cancellable(
+    let plan = plan_code_generation_retention_with_verification_budgeted_cancellable(
         &code_index_store_root,
         &readable_sources,
         verification,
         None,
+        remaining_entries,
         &|| walk_control.interruption().is_some(),
-    ) {
+    );
+    let plan = match plan {
         Ok(plan) => plan,
+        Err(tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionErrorV1::EntryBudgetExceeded) => {
+            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
+                project_id: project_id.to_owned(),
+                store_root: code_index_store_root.display().to_string(),
+                state: StorageReportAvailabilityState::Unavailable,
+                reason: Some("generation_retention_scan_entry_budget_exceeded".to_owned()),
+            });
+            return Ok(());
+        }
         Err(_) => {
             let reason = match walk_control.interruption() {
                 Some(WalkInterruptionV1::Cancelled) => "generation_retention_scan_cancelled",
@@ -1454,6 +1523,11 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
 fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
     use std::io::Read as _;
 
+    if !std::fs::symlink_metadata(graph_db_path)
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+    {
+        return None;
+    }
     let mut header = [0_u8; 100];
     std::fs::File::open(graph_db_path)
         .ok()?
@@ -2017,6 +2091,24 @@ mod tests {
             (0, 0)
         );
         assert!(exhausted.coverage.next_cursor.is_none());
+    }
+
+    #[test]
+    fn cancelled_directory_inventory_stops_on_the_blocking_worker() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(profile_root.join("projects/proj_a")).unwrap();
+        let cancellation = CancellationSignal::active("storage-directory-test").unwrap();
+        cancellation.cancel(now_micros());
+        let control = StorageReportWalkControl {
+            cancellation: Some(cancellation),
+            deadline: None,
+        };
+
+        let error =
+            list_project_directories_page_controlled(&profile_root, "", 1, &control).unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
     }
 
     #[test]
@@ -2987,6 +3079,83 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_code_index_store_is_sized_as_unavailable_not_planned() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let data_root = profile_root.join("projects/proj_a");
+        std::fs::create_dir_all(&data_root).unwrap();
+        let outside_index = tmp.path().join("outside-code-index");
+        let canonical_root = Path::new("/repos/a");
+        let outside_store = scoped_code_index_store_root(&outside_index, canonical_root);
+        tracedecay_code_index_retention::code_index_generations::fixture::write_generation_store_fixture(
+            &outside_store,
+            1,
+        );
+        std::os::unix::fs::symlink(&outside_index, data_root.join("code-index-v1")).unwrap();
+        let mut stores = Vec::new();
+        let mut plans = Vec::new();
+        let mut availability = Vec::new();
+        let mut remaining = MAX_STORAGE_REPORT_WALK_ENTRIES;
+
+        append_project_report(
+            &profile_root,
+            "proj_a",
+            "/repos/a",
+            Ok(BTreeSet::new()),
+            &mut stores,
+            &mut plans,
+            &mut availability,
+            &mut remaining,
+            &StorageReportWalkControl::default(),
+        )
+        .unwrap();
+
+        assert_eq!(stores[0].total_bytes, 0);
+        assert_eq!(
+            stores[0].size_coverage.state,
+            StorageReportSizeStateV1::Unavailable
+        );
+        assert!(plans.is_empty());
+        assert!(availability.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_projects_ancestor_is_not_traversed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let outside_projects = tmp.path().join("outside-projects");
+        std::fs::create_dir_all(outside_projects.join("proj_a")).unwrap();
+        std::fs::write(outside_projects.join("proj_a/graph.db"), [7; 16]).unwrap();
+        std::os::unix::fs::symlink(&outside_projects, profile_root.join("projects")).unwrap();
+        let mut stores = Vec::new();
+        let mut remaining = MAX_STORAGE_REPORT_WALK_ENTRIES;
+
+        append_project_report(
+            &profile_root,
+            "proj_a",
+            "/repos/a",
+            Ok(BTreeSet::new()),
+            &mut stores,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut remaining,
+            &StorageReportWalkControl::default(),
+        )
+        .unwrap();
+
+        assert_eq!(stores[0].total_bytes, 0);
+        assert_eq!(
+            stores[0].size_coverage.state,
+            StorageReportSizeStateV1::Unavailable
+        );
+        assert_eq!(stores[0].unavailable_entry_count, 1);
+        assert_eq!(stores[0].free_bytes, None);
+    }
+
     #[test]
     fn zero_byte_generation_files_cannot_evade_the_shared_entry_budget() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -3026,6 +3195,52 @@ mod tests {
             stores[0].size_coverage.reason,
             Some(StorageReportSizeReasonV1::EntryBudgetExceeded)
         );
+        assert_eq!(
+            availability[0].reason.as_deref(),
+            Some("generation_retention_scan_entry_budget_exceeded")
+        );
+    }
+
+    #[test]
+    fn retention_inventory_uses_the_remaining_call_budget() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let data_root = profile_root.join("projects/proj_a");
+        let canonical_root = Path::new("/repos/a");
+        let store_root =
+            scoped_code_index_store_root(&data_root.join("code-index-v1"), canonical_root);
+        tracedecay_code_index_retention::code_index_generations::fixture::write_generation_store_fixture(
+            &store_root,
+            1,
+        );
+        let mut census_remaining = usize::MAX;
+        assert_eq!(
+            walk_regular_files_with_budget(
+                &data_root,
+                &mut census_remaining,
+                &|| None,
+                &mut |_, _| {},
+            ),
+            WalkTerminationV1::Complete
+        );
+        let size_walk_entries = usize::MAX - census_remaining;
+        let mut remaining = size_walk_entries + 1;
+        let mut availability = Vec::new();
+
+        append_project_report(
+            &profile_root,
+            "proj_a",
+            "/repos/a",
+            Ok(BTreeSet::new()),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut availability,
+            &mut remaining,
+            &StorageReportWalkControl::default(),
+        )
+        .unwrap();
+
+        assert_eq!(remaining, 0);
         assert_eq!(
             availability[0].reason.as_deref(),
             Some("generation_retention_scan_entry_budget_exceeded")
