@@ -41,6 +41,7 @@ import {
   type UserSettingsChangeSet,
   type UserSettingsValues,
 } from './settingsModel.ts';
+import type { ReconciliationState } from '../../contracts/generated.ts';
 import type { SettingsMutationRequest, SettingsMutationResult } from './settingsMutation.ts';
 
 /** The two drafts the editor holds, always for the same authority snapshot. */
@@ -78,6 +79,7 @@ interface SettingsAppliedRecord {
   readonly revisionId: string;
   readonly resyncRecommended: boolean;
   readonly restartRecommended: boolean;
+  readonly effectReconciliation: ReconciliationState | null;
 }
 
 /** Field-level refusals, kept with the authority that issued them. */
@@ -108,7 +110,7 @@ type SettingsResting =
 /** A write that did not reach a verdict. Distinct from a refusal, which did. */
 type SettingsSubmitFailure =
   | { readonly kind: 'offline'; readonly detail: string }
-  | { readonly kind: 'error'; readonly detail: string }
+  | { readonly kind: 'error' | 'unsettled'; readonly detail: string }
   | { readonly kind: 'protocol_error'; readonly authority: string; readonly detail: string };
 
 interface SettingsEditable {
@@ -418,6 +420,7 @@ function settleSubmit(
           revisionId: result.revisionId,
           resyncRecommended: result.resyncRecommended,
           restartRecommended: result.restartRecommended,
+          effectReconciliation: result.effectReconciliation,
         },
       });
     case 'validation':
@@ -453,6 +456,8 @@ function settleSubmit(
       return failed(state, { kind: 'offline', detail: result.detail });
     case 'error':
       return failed(state, { kind: 'error', detail: result.detail });
+    case 'unsettled':
+      return failed(state, { kind: 'unsettled', detail: result.detail });
     case 'protocol_error':
       return failed(state, {
         kind: 'protocol_error',

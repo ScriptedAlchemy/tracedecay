@@ -320,7 +320,25 @@ export type AnalyticsUsageSummaryV1 = {
 
 export type ApplicationExecutionFailureClassV1 = "denied" | "malformed_output" | "permanent";
 
-export type ApplicationProblemDetailV1 = 
+export type ApplicationOutcome =
+  | {
+    outcome: "effect";
+    value: EffectResult;
+  }
+  | {
+    outcome: "evidence";
+    value: EvidencePacket;
+  }
+  | {
+    outcome: "preview";
+    value: PreviewResult;
+  }
+  | {
+    outcome: "result";
+    value: unknown;
+  };
+
+export type ApplicationProblemDetailV1 =
   | {
     kind: "code_graph_rewarming";
     retry_after_millis: number;
@@ -420,6 +438,16 @@ export type ApplyWorkRelationReplanRequestV1 = {
 
 export type AttemptId = string;
 
+export type AuthorityReceipt = {
+  authorized_scope_digest: ManifestDigest;
+  disclosure: DisclosureClass;
+  grant_digest: ManifestDigest;
+  grant_id: string;
+  grant_revision: number;
+  policy: PolicyDecisionRef;
+  revalidated_at: UtcMicros;
+};
+
 export type AuthorizedRoot = {
   locator: RegisteredRootLocatorV1 | null;
   scope: ResolvedScope;
@@ -461,7 +489,7 @@ export type AutomaticFactReceiptsPayloadV1 = {
 
 export type AutomaticFactState = "applied" | "quarantined";
 
-export type AutomaticWorktreeGcV1 = 
+export type AutomaticWorktreeGcV1 =
   | {
     kind: "disabled";
   }
@@ -471,7 +499,7 @@ export type AutomaticWorktreeGcV1 =
     minimum_idle_seconds: number;
   };
 
-export type AutomationCommittedReceiptV1 = 
+export type AutomationCommittedReceiptV1 =
   | {
     kind: "automatic_fact";
     receipt: MemoryAutomationFactReceiptV1;
@@ -661,7 +689,7 @@ export type AutomationRunSummaryV1 = {
   skipped_count: number;
 };
 
-export type AutomationRunTerminalV1 = 
+export type AutomationRunTerminalV1 =
   | {
     status: "completed";
     summary: AutomationRunSummaryV1;
@@ -715,7 +743,7 @@ export type AutomationTrigger = "application" | "dashboard" | "host_receipt" | "
 
 export type BrainId = string;
 
-export type BranchCollisionPolicyV1 = 
+export type BranchCollisionPolicyV1 =
   | {
     kind: "append_monotonic_ordinal";
     maximum_attempts: number;
@@ -724,7 +752,7 @@ export type BranchCollisionPolicyV1 =
     kind: "reject";
   };
 
-export type BranchNameComponentV1 = 
+export type BranchNameComponentV1 =
   | {
     kind: "monotonic_collision_ordinal";
   }
@@ -755,6 +783,8 @@ export type BranchTopologyPolicyV1 = {
   allowed: Array<BranchTopologyKindV1>;
 };
 
+export type BudgetClass = "approaching_limit" | "exhausted" | "within_budget";
+
 export type CallChainMeasurementV1 = {
   complete: boolean;
   directed: boolean;
@@ -771,6 +801,11 @@ export type CallChainMeasurementV1 = {
 export type CallChainStepV1 = {
   incoming_edge: IncomingCallEdgeV1 | null;
   node: NodeRefV1;
+};
+
+export type CancellationObservation = {
+  observed_at: UtcMicros;
+  stage: CancellationStage;
 };
 
 export type CancellationStage = "after_commit" | "before_admission" | "before_effect" | "before_read" | "during_read" | "effect_in_flight" | "reconciling";
@@ -828,7 +863,7 @@ export type CodeCloneIndexResourcesV1 = {
   stale_invalidations: number | null;
 };
 
-export type CodeCloneIndexStatusV1 = 
+export type CodeCloneIndexStatusV1 =
   | {
     observation: CodeCloneIndexObservationV1;
     omission_reasons: Array<string>;
@@ -850,7 +885,17 @@ export type CodeCloneIndexStatusV1 =
 
 export type CodeGenerationId = string;
 
-export type CodeGraphServingReadinessV1 = 
+export type CodeGraphReadFreshnessV1 =
+  | {
+    state: "current";
+  }
+  | {
+    rebuild_in_flight: boolean;
+    sealed_at: UtcMicros;
+    state: "last_complete_stale";
+  };
+
+export type CodeGraphServingReadinessV1 =
   | {
     state: "pending";
   }
@@ -955,7 +1000,7 @@ export type CodeIndexRouteRefusalV1 = {
   remediation: string;
 };
 
-export type CodeIndexSourceOmissionReasonV1 = 
+export type CodeIndexSourceOmissionReasonV1 =
   | {
     detail: string;
     kind: "privacy_withheld";
@@ -968,7 +1013,7 @@ export type CodeIndexStalenessStateV1 = "fresh" | "indexing" | "parked" | "refre
 
 export type CodeIndexWorkerLimitingReasonV1 = "automatic_all_cores" | "automatic_half_cores" | "configured_exact" | "environment_override" | "resident_memory";
 
-export type CodeIndexWorkerSelectionV1 = 
+export type CodeIndexWorkerSelectionV1 =
   | {
     mode: "automatic";
   }
@@ -1022,6 +1067,22 @@ export type ComparisonDispositionV1 = "insufficient_evidence" | "promote" | "rej
 export type ComplexityAnalysisV1 = "complete" | "traversal_budget_exhausted";
 
 export type ComponentVersion = string;
+
+export type ConfigurationRefusalV1 =
+  | {
+    code: "application_contract_violation";
+    detail: string;
+  }
+  | {
+    code: "configuration_authority_unavailable";
+    detail: string;
+  }
+  | {
+    actual_revision_id: string;
+    code: "configuration_revision_conflict";
+    detail: string;
+    expected_revision_id: string;
+  };
 
 export type ConfigurationRevisionId = string;
 
@@ -1096,7 +1157,7 @@ export type CrossMergePolicyV1 = {
   default_mode: CrossMergeModeV1;
 };
 
-export type DaemonServiceUnitObservationV1 = 
+export type DaemonServiceUnitObservationV1 =
   | {
     path: string;
     serves: string;
@@ -1110,7 +1171,7 @@ export type DaemonServiceUnitObservationV1 =
     state: "unobservable";
   };
 
-export type DashboardAuthorizationV1 = 
+export type DashboardAuthorizationV1 =
   | {
     outcome: "authorized";
   }
@@ -1123,6 +1184,11 @@ export type DashboardAuthorizationV1 =
   | {
     outcome: "unauthorized";
   };
+
+export type DashboardConfigurationRefusalV1 = {
+  detail: string;
+  validation_errors: Array<SettingsValidationIssueV1>;
+} | ConfigurationRefusalV1 | ApplicationProblemEnvelope;
 
 export type DashboardCoverageCompletenessV1 = "complete" | "partial" | "unknown" | "unsupported";
 
@@ -1193,6 +1259,10 @@ export type DashboardWatermarkV1 = {
   watermark: string;
 };
 
+export type Deadline = {
+  expires_at: UtcMicros;
+};
+
 export type DecideWorkProposalRequestV1 = {
   disposition: WorkProposalDispositionV12;
   mutation: WorkProductMutationIdentityV1;
@@ -1233,7 +1303,7 @@ export type DeliveryAgentUsageV1 = {
   usage_coverage: ProviderUsageCoverageV1;
 };
 
-export type DeliveryAttentionEvidenceV1 = 
+export type DeliveryAttentionEvidenceV1 =
   | {
     failure_anchor: string;
     kind: "ci_failure";
@@ -1358,7 +1428,7 @@ export type DeliveryGenerationFreshnessV1 = {
   indexed_commit: string;
 };
 
-export type DeliveryGitHeadV1 = 
+export type DeliveryGitHeadV1 =
   | {
     branch: string;
     commit: string;
@@ -1449,7 +1519,7 @@ export type DeliveryInboxV1 = {
   registry_state: DeliveryRegistryStateV1;
 };
 
-export type DeliveryMembershipBasisV1 = 
+export type DeliveryMembershipBasisV1 =
   | {
     branch_ref: string;
     head_commit_id: string;
@@ -1492,7 +1562,7 @@ export type DeliveryOverviewV1 = {
   review_comments: DeliveryProjectionV14;
 };
 
-export type DeliveryProjectionV1 = 
+export type DeliveryProjectionV1 =
   | {
     state: "denied";
     value: DeliveryGitStatusV1 | null;
@@ -1535,7 +1605,7 @@ export type DeliveryProjectionV1 =
     value: DeliveryGitStatusV1 | null;
   };
 
-export type DeliveryProjectionV12 = 
+export type DeliveryProjectionV12 =
   | {
     state: "denied";
     value: DeliveryCommitTimelineV1 | null;
@@ -1578,7 +1648,7 @@ export type DeliveryProjectionV12 =
     value: DeliveryCommitTimelineV1 | null;
   };
 
-export type DeliveryProjectionV13 = 
+export type DeliveryProjectionV13 =
   | {
     state: "denied";
     value: DeliveryPullRequestTimelineV1 | null;
@@ -1621,7 +1691,7 @@ export type DeliveryProjectionV13 =
     value: DeliveryPullRequestTimelineV1 | null;
   };
 
-export type DeliveryProjectionV14 = 
+export type DeliveryProjectionV14 =
   | {
     state: "denied";
     value: DeliveryReviewTimelineV1 | null;
@@ -1664,7 +1734,7 @@ export type DeliveryProjectionV14 =
     value: DeliveryReviewTimelineV1 | null;
   };
 
-export type DeliveryProjectionV15 = 
+export type DeliveryProjectionV15 =
   | {
     state: "denied";
     value: DeliveryCiTimelineV1 | null;
@@ -1707,7 +1777,7 @@ export type DeliveryProjectionV15 =
     value: DeliveryCiTimelineV1 | null;
   };
 
-export type DeliveryProjectionV16 = 
+export type DeliveryProjectionV16 =
   | {
     state: "denied";
     value: DeliveryFailureLocalizationTimelineV1 | null;
@@ -1750,7 +1820,7 @@ export type DeliveryProjectionV16 =
     value: DeliveryFailureLocalizationTimelineV1 | null;
   };
 
-export type DeliveryProjectionV17 = 
+export type DeliveryProjectionV17 =
   | {
     state: "denied";
     value: DeliveryReleaseTimelineV1 | null;
@@ -1793,7 +1863,7 @@ export type DeliveryProjectionV17 =
     value: DeliveryReleaseTimelineV1 | null;
   };
 
-export type DeliveryProjectionV18 = 
+export type DeliveryProjectionV18 =
   | {
     state: "denied";
     value: DeliveryGenerationFreshnessV1 | null;
@@ -1836,7 +1906,7 @@ export type DeliveryProjectionV18 =
     value: DeliveryGenerationFreshnessV1 | null;
   };
 
-export type DeliveryProjectionV19 = 
+export type DeliveryProjectionV19 =
   | {
     state: "denied";
     value: DeliveryAgentUsageV1 | null;
@@ -2024,6 +2094,8 @@ export type DiagnosticsSearchedTsconfigV1 = {
   present: boolean;
 };
 
+export type DisclosureClass = "evidence" | "metadata" | "sensitive";
+
 export type DoctorCoverageCompletenessV1 = "complete" | "partial" | "unknown";
 
 export type DoctorCoverageStatementV1 = {
@@ -2040,7 +2112,7 @@ export type DoctorEvidenceRefV1 = {
 
 export type DoctorEvidenceStateV1 = "unsupported" | "absent" | "stale" | "degraded" | "partial" | "unknown" | "denied" | "healthy_complete_coverage";
 
-export type DoctorFamilyConsultationV1 = 
+export type DoctorFamilyConsultationV1 =
   | {
     status: "consulted";
   }
@@ -2112,6 +2184,18 @@ export type EffectReceipt = {
   scope: ResolvedScope;
 };
 
+export type EffectResult = {
+  authority: AuthorityReceipt;
+  effect_class: EffectClass;
+  effect_id: string;
+  execution: OperationReceipt;
+  expected_state: ManifestDigest;
+  idempotency_key: string;
+  payload: unknown;
+  receipt: EffectReceipt;
+  reconciliation: ReconciliationState;
+};
+
 export type EffectTermination = "cancelled" | "completed" | "effect_unknown" | "failed" | "partial" | "timed_out";
 
 export type EnvironmentSettingsPayloadV1 = {
@@ -2128,6 +2212,15 @@ export type EnvironmentVariableV1 = {
   value: string | null;
 };
 
+export type EvidenceAuthority = {
+  evidence_id: string;
+  horizon: UtcMicros | null;
+  producer: string;
+  revision: ComponentVersion;
+  scope: ResolvedScope;
+  source_kind: string;
+};
+
 export type EvidenceCoverage = {
   completeness: CoverageCompleteness;
   domains: Array<CoverageDomainState>;
@@ -2138,6 +2231,45 @@ export type EvidenceCoverage = {
 };
 
 export type EvidenceDomain = "anchor" | "diagnostic" | "graph" | "operational" | "source" | "symbol" | "temporal" | "test";
+
+export type EvidencePacket = {
+  authority: AuthorityReceipt;
+  contributions: Array<RetrieverContribution>;
+  coverage: EvidenceCoverage;
+  evidence_authorities: Array<EvidenceAuthority>;
+  execution: OperationReceipt;
+  omissions: Array<Omission>;
+  page: PageState;
+  payload: unknown;
+  scores: Array<EvidenceScore>;
+  temporal: TemporalState;
+};
+
+export type EvidenceScore = {
+  calibration_revision: ComponentVersion | null;
+  calibration_valid: boolean | null;
+  deterministic_components: Array<string>;
+  kind: EvidenceScoreKind;
+  score_id: string;
+  value: EvidenceScoreValue;
+};
+
+export type EvidenceScoreKind = "calibrated_interval" | "calibrated_probability" | "heuristic_score" | "ordinal_rank";
+
+export type EvidenceScoreValue =
+  | {
+    kind: "fixed_point";
+    micros: number;
+  }
+  | {
+    kind: "interval";
+    lower_micros: number;
+    upper_micros: number;
+  }
+  | {
+    kind: "ordinal";
+    rank: number;
+  };
 
 export type ExecutionBlockedCauseV1 = "backpressure" | "capability" | "ci" | "conflict" | "dependency" | "effect_unknown" | "lease" | "needs_input" | "other" | "policy" | "review" | "scope" | "test" | "unknown";
 
@@ -2189,7 +2321,7 @@ export type ExecutionStackDriftKindV1 = "base_advanced" | "head_advanced" | "mer
 
 export type ExecutionSurfaceFamilyV1 = "cli" | "dashboard" | "hook" | "lsp" | "mcp" | "other";
 
-export type ExecutionTopologyDimensionV1 = 
+export type ExecutionTopologyDimensionV1 =
   | {
     dimension: "blocked_cause";
     value: ExecutionBlockedCauseV1;
@@ -2306,7 +2438,7 @@ export type ExecutionTopologyMetricsV1 = {
   watermark: string;
 };
 
-export type ExecutionTopologyViewV1 = 
+export type ExecutionTopologyViewV1 =
   | {
     state: "absent";
   }
@@ -2421,7 +2553,7 @@ export type FactCategoryV1 = "code_area" | "decision" | "general" | "project" | 
 
 export type FactCommitDispositionV1 = "committed" | "idempotent_replay";
 
-export type FactCommitOwnerV1 = 
+export type FactCommitOwnerV1 =
   | {
     kind: "profile";
   }
@@ -2482,7 +2614,7 @@ export type FactOutcomeRecord = {
 
 export type FactOutcomeVerdict = "deleted" | "never_recalled" | "quarantined" | "recalled" | "recalled_and_helpful" | "unavailable";
 
-export type FactSearchGraphCoverageV1 = 
+export type FactSearchGraphCoverageV1 =
   | {
     expanded_fact_count: number;
     kind: "complete";
@@ -2613,7 +2745,7 @@ export type FeedbackProximityReadRequestV1 = {
   observed_at: UtcMicros;
 };
 
-export type FeedbackProximityReadResultV1 = 
+export type FeedbackProximityReadResultV1 =
   | {
     page: FeedbackProximityReadPageV1;
     state: "complete";
@@ -2641,7 +2773,7 @@ export type FeedbackProximityReadResultV1 =
     state: "unavailable";
   };
 
-export type FeedbackProximityRelationV1 = 
+export type FeedbackProximityRelationV1 =
   | {
     relation_kind: "code_neighborhood_candidate";
     warning_class: ProximityWarningClassV1;
@@ -2701,6 +2833,8 @@ export type FeedbackSystemQualityReadModelV1 = {
 };
 
 export type FileOccurrenceId = string;
+
+export type FreshnessState = "current" | "stale" | "unknown";
 
 export type GeneratedWorkProposal = {
   calibration: WorkCalibrationEvidenceV1;
@@ -2855,7 +2989,7 @@ export type GraphTotalsV1 = {
 
 export type HandoffOpenKindV1 = "investigation" | "task";
 
-export type HandoffOpenTargetV1 = 
+export type HandoffOpenTargetV1 =
   | {
     finding_id: FeedbackFindingId;
     kind: "investigation";
@@ -2892,7 +3026,7 @@ export type IntentWindowSettingsV1 = {
   max_user_turns: number;
 };
 
-export type JobDelivery = 
+export type JobDelivery =
   | {
     mode: "file";
     path?: string | null | undefined;
@@ -3174,7 +3308,7 @@ export type LoomEditedFileV1 = {
   session_id: string;
 };
 
-export type LoomEventV1 = 
+export type LoomEventV1 =
   | {
     kind: "pull_request";
     label?: string | null | undefined;
@@ -3346,7 +3480,7 @@ export type MemoryAutomationCurationMergeV1 = {
   winner_fact_id: FactId;
 };
 
-export type MemoryAutomationCurationOperationEffectV1 = 
+export type MemoryAutomationCurationOperationEffectV1 =
   | {
     closest_fact_id: FactId | null;
     commit: FactCommitReceiptV1 | null;
@@ -3439,7 +3573,7 @@ export type MemoryAutomationFactDedupeValidationV1 = {
 
 export type MemoryAutomationFactDispositionV1 = "already_applied" | "applied" | "quarantined";
 
-export type MemoryAutomationFactEffectV1 = 
+export type MemoryAutomationFactEffectV1 =
   | {
     assertion_id: FactAssertionId;
     event_id: FactEventId;
@@ -3602,7 +3736,7 @@ export type MemoryGraphEdgeV1 = {
   target: string;
 };
 
-export type MemoryGraphNodeV1 = 
+export type MemoryGraphNodeV1 =
   | {
     assertion_id: FactAssertionId;
     fact_id: FactId;
@@ -3909,7 +4043,7 @@ export type MetricValueV1 = {
   value: number | null;
 };
 
-export type MultiRootCapabilityV1 = 
+export type MultiRootCapabilityV1 =
   | {
     revision: ScopeSetRevision;
     root_count: number;
@@ -3941,7 +4075,7 @@ export type MultiRootExecuteRequestV1 = {
   scope_set_revision: ScopeSetRevision;
 };
 
-export type MultiRootOperationV1 = 
+export type MultiRootOperationV1 =
   | {
     kind: "feedback";
     request: unknown;
@@ -4031,6 +4165,46 @@ export type ObservatoryReadModelV1 = {
   watermark: string;
 };
 
+export type Omission = {
+  count: number;
+  domain: EvidenceDomain;
+  reason: OmissionReason;
+};
+
+export type OmissionReason = "budget" | "cancelled" | "conflict" | "failed" | "redacted" | "stale" | "timed_out" | "unavailable" | "unsupported" | "macro_body_unparsed" | "import_unmodeled" | "cursor_expired" | "cursor_foreign";
+
+export type OperationBudgetUsage = {
+  bytes_consumed: number;
+  elapsed_micros: number;
+  units_consumed: number;
+};
+
+export type OperationReceipt = {
+  budget: OperationBudgetUsage;
+  cancellation: CancellationObservation | null;
+  effective_deadline: Deadline;
+  ended_at: UtcMicros;
+  started_at: UtcMicros;
+  termination: OperationTermination;
+};
+
+export type OperationTermination = "cancelled" | "completed" | "effect_unknown" | "failed" | "partial" | "timed_out" | "unavailable";
+
+export type PageCursor =
+  | {
+    cursor: string;
+    kind: "opaque";
+  };
+
+export type PageState = {
+  cursor: PageCursor | null;
+  expires_at: UtcMicros | null;
+  returned: number;
+  sort_contract_id: SortContractId;
+  sort_revision: number;
+  total: number | null;
+};
+
 export type PauseWorkRunCommand = {
   expected_authority_version: number | null;
   occurred_at: UtcMicros;
@@ -4066,6 +4240,13 @@ export type PerformanceComparisonReadModelV1 = {
   workload: string | null;
 };
 
+export type PolicyDecisionRef = {
+  decision_id: string;
+  digest: ManifestDigest;
+  evaluator_revision: ComponentVersion;
+  revision: number;
+};
+
 export type PolicyIdentifierV1 = string;
 
 export type PrAutoTrackEntryV1 = {
@@ -4091,6 +4272,16 @@ export type PrepareWorkProductMutationRequestV1 = {
   change: WorkProductChangeDraftV1;
   evidence: Array<WorkProductEventEvidenceV1>;
   selection: WorkProductSelectionScopeV1;
+};
+
+export type PreviewResult = {
+  authority: AuthorityReceipt;
+  effect_class: EffectClass;
+  execution: OperationReceipt;
+  expected_state: ManifestDigest;
+  payload: unknown;
+  preview_digest: ManifestDigest;
+  preview_id: string;
 };
 
 export type PrimitiveFreshnessStateV1 = "fresh" | "possibly_stale";
@@ -4202,6 +4393,11 @@ export type ProjectSettingsPatch = {
   track_call_sites?: boolean | null | undefined;
 };
 
+export type ProjectSettingsPatchResponseV1 = {
+  application_outcome: ApplicationOutcome | null;
+  current: DashboardEnvelopeV1<SettingsPayloadV1>;
+};
+
 export type ProjectSettingsPayloadV1 = {
   config: ProjectEditableSettingsV1;
   configuration_revision_id: string;
@@ -4230,7 +4426,7 @@ export type ProtectedRefRuleV1 = {
   selector: ProtectedRefSelectorV1;
 };
 
-export type ProtectedRefSelectorV1 = 
+export type ProtectedRefSelectorV1 =
   | {
     kind: "exact";
     value: CanonicalGitRefNameV1;
@@ -4304,6 +4500,8 @@ export type PublicCodeProject = {
 
 export type QuantityEvidenceClassV1 = "estimated" | "locally_measured" | "owner_receipt" | "unknown";
 
+export type ReconciliationState = "failed" | "pending" | "reconciled";
+
 export type RecordWorkHandoffRequestV1 = {
   handoff: WorkHandoffV1;
   mutation: WorkProductMutationIdentityV1;
@@ -4359,7 +4557,7 @@ export type ReleaseWorkPlacementCommand = {
 
 export type RemoteAuthorityMissingReasonV1 = "authority_authentication_failed" | "authority_unreachable" | "caller_authentication_failed" | "enrollment_expired" | "enrollment_revoked" | "fence_unverified" | "insufficient_capability" | "placement_unknown" | "protocol_incompatible" | "registry_unavailable" | "scope_mismatch" | "writer_authority_unpublished";
 
-export type RemoteAuthoritySummaryV1 = 
+export type RemoteAuthoritySummaryV1 =
   | {
     fence: RemoteFenceSummaryV1;
     state: "available";
@@ -4385,7 +4583,7 @@ export type RemoteFenceSummaryV1 = {
 
 export type RemoteListenerKindV1 = "degraded" | "disabled" | "serving";
 
-export type RemoteOperationalStatusPayloadV1 = 
+export type RemoteOperationalStatusPayloadV1 =
   | {
     authority: RemoteAuthoritySummaryV1;
     coverage: DoctorCoverageCompletenessV1;
@@ -4417,7 +4615,7 @@ export type RemoteSpoolSummaryV1 = {
 
 export type RepositoryId = string;
 
-export type RepositoryPlacementScopeV1 = 
+export type RepositoryPlacementScopeV1 =
   | {
     kind: "all_authorized";
   }
@@ -4480,6 +4678,25 @@ export type ResumeWorkRunCommand = {
 
 export type RetrievalAnchorId = string;
 
+export type RetrieverContribution = {
+  contract: ResultContractRef;
+  coverage: EvidenceCoverage;
+  domain: EvidenceDomain;
+  elapsed_budget_class: BudgetClass;
+  evidence_authorities: Array<string>;
+  omitted_count: number;
+  producer_revision: ComponentVersion;
+  provenance_anchors: Array<RetrievalAnchorId>;
+  retriever_id: RetrieverId;
+  returned_count: number;
+  score_ids: Array<string>;
+  state: RetrieverContributionState;
+};
+
+export type RetrieverContributionState = "cancelled" | "completed" | "failed" | "partial" | "stale" | "timed_out" | "unavailable" | "unsupported";
+
+export type RetrieverId = string;
+
 export type RetryDirective = "after_delay" | "after_reconcile" | "after_revalidate" | "never" | "same_request";
 
 export type RetryScope = "fresh_request" | "same_operation" | "same_request";
@@ -4491,7 +4708,7 @@ export type RetryWorkAttemptCommandV1 = {
   original_attempt: WorkAttemptIdentityV1;
 };
 
-export type ReviewRequirementV1 = 
+export type ReviewRequirementV1 =
   | {
     kind: "code_owner_and_independent_review";
   }
@@ -4777,7 +4994,7 @@ export type SchemaConvergenceFindingV1 = {
   store: string;
 };
 
-export type SchemaConvergenceProgressV1 = 
+export type SchemaConvergenceProgressV1 =
   | {
     done: number;
     remaining: number;
@@ -4795,7 +5012,7 @@ export type SchemaConvergenceStateV1 = "completed" | "degraded" | "pending_schem
 
 export type SchemaId = string;
 
-export type ScopeOutcome_for_Array_of_AnyValue = 
+export type ScopeOutcome_for_Array_of_AnyValue =
   | {
     outcome: "denied";
   }
@@ -4817,7 +5034,7 @@ export type ScopeOutcome_for_Array_of_AnyValue =
   };
   };
 
-export type ScopeOutcome_for_Nullable_RootGenerationV1 = 
+export type ScopeOutcome_for_Nullable_RootGenerationV1 =
   | {
     outcome: "denied";
   }
@@ -4839,7 +5056,7 @@ export type ScopeOutcome_for_Nullable_RootGenerationV1 =
   };
   };
 
-export type ScopeOutcome_for_Nullable_string = 
+export type ScopeOutcome_for_Nullable_string =
   | {
     outcome: "denied";
   }
@@ -4883,7 +5100,7 @@ export type SessionRetrievalBudgetAccountingV1 = {
   observed: SessionRetrievalBudgetObservationV1;
 };
 
-export type SessionRetrievalBudgetObservationV1 = 
+export type SessionRetrievalBudgetObservationV1 =
   | {
     observation: "consumed_with_more_available";
     units: number;
@@ -4895,7 +5112,7 @@ export type SessionRetrievalBudgetObservationV1 =
 
 export type SessionRetrievalBudgetStageV1 = "candidate_read_exhausted" | "context_bytes" | "context_tokens" | "cursor_manifest_limit" | "estimator_version_mismatch" | "execution_work_exhausted" | "hydration_bytes" | "kernel_result_limit" | "participant_manifest_canonical_bytes" | "participant_manifest_participants" | "record_read_exhausted" | "request_candidate_bytes" | "request_context_bytes" | "request_hydration_bytes" | "request_hydration_limit" | "request_record_bytes" | "request_result_limit";
 
-export type SessionRetrievalStructuralRefusalV1 = 
+export type SessionRetrievalStructuralRefusalV1 =
   | {
     accounting: SessionRetrievalBudgetAccountingV1 | null;
     refusal: "budget_exhausted";
@@ -4925,6 +5142,11 @@ export type SettingsPayloadV1 = {
   version: VersionSettingsPayloadV1;
 };
 
+export type SettingsValidationIssueV1 = {
+  field: string;
+  message: string;
+};
+
 export type SharedProfileStoreLocatorV1 = {
   brain_id: BrainId;
   profile_id: UserProfileId;
@@ -4940,7 +5162,7 @@ export type SignificantTableGrowthSampleV1 = {
   table: string;
 };
 
-export type SimilarCoverageV1 = 
+export type SimilarCoverageV1 =
   | {
     status: "complete";
   }
@@ -5006,6 +5228,8 @@ export type SkillOutcomeRecord = {
 
 export type SkillOutcomeVerdict = "adopted" | "too_early" | "unknown";
 
+export type SortContractId = string;
+
 export type SourceSpan = {
   end_byte: number;
   start_byte: number;
@@ -5059,7 +5283,7 @@ export type StorageTelemetryPayloadV1 = {
   table_growth_threshold: TableGrowthThresholdV1;
 };
 
-export type StorageTelemetryReadV1 = 
+export type StorageTelemetryReadV1 =
   | {
     kind: "denied";
     store: StoreKeyV1;
@@ -5083,7 +5307,7 @@ export type StorageTelemetryReadV1 =
     store: StoreKeyV1;
   };
 
-export type StoreBudgetDimensionV1 = 
+export type StoreBudgetDimensionV1 =
   | {
     evaluation: StoreBudgetEvaluationV1;
     reason: string;
@@ -5100,7 +5324,7 @@ export type StoreBudgetDimensionV1 =
     state: "unset";
   };
 
-export type StoreBudgetEvaluationV1 = 
+export type StoreBudgetEvaluationV1 =
   | {
     observed: StorageByteSizeV1;
     overage: StorageByteSizeV1;
@@ -5113,7 +5337,7 @@ export type StoreBudgetEvaluationV1 =
     state: "within_budget";
   };
 
-export type StoreGrowthDimensionV1 = 
+export type StoreGrowthDimensionV1 =
   | {
     reason: string;
     state: "unknown";
@@ -5184,7 +5408,7 @@ export type StrataScanV1 = {
   files_examined: number;
 };
 
-export type StructureReadV1 = 
+export type StructureReadV1 =
   | {
     code: string;
     detail: string;
@@ -5201,7 +5425,7 @@ export type StructureReadV1 =
     status: "unmeasured";
   };
 
-export type StructureReadV12 = 
+export type StructureReadV12 =
   | {
     code: string;
     detail: string;
@@ -5218,7 +5442,7 @@ export type StructureReadV12 =
     status: "unmeasured";
   };
 
-export type StructureReadV13 = 
+export type StructureReadV13 =
   | {
     code: string;
     detail: string;
@@ -5235,7 +5459,7 @@ export type StructureReadV13 =
     status: "unmeasured";
   };
 
-export type StructureReadV14 = 
+export type StructureReadV14 =
   | {
     code: string;
     detail: string;
@@ -5252,7 +5476,7 @@ export type StructureReadV14 =
     status: "unmeasured";
   };
 
-export type StructureReadV15 = 
+export type StructureReadV15 =
   | {
     code: string;
     detail: string;
@@ -5281,7 +5505,7 @@ export type SyncSettingsV1 = {
   auto_track_pr_poll_secs: number;
 };
 
-export type TableGrowthDimensionV1 = 
+export type TableGrowthDimensionV1 =
   | {
     coverage: DashboardCoverageV1;
     observed_at: number;
@@ -5312,7 +5536,7 @@ export type TableGrowthDimensionV1 =
     state: "unsupported";
   };
 
-export type TableGrowthOmissionV1 = 
+export type TableGrowthOmissionV1 =
   | {
     current_bytes: number;
     kind: "baseline_pending";
@@ -5358,7 +5582,7 @@ export type TelemetrySettingsV1 = {
   timings: boolean;
 };
 
-export type TemporalModeV1 = 
+export type TemporalModeV1 =
   | {
     cutoff: UtcMicros;
     kind: "as_of";
@@ -5372,6 +5596,16 @@ export type TemporalModeV1 =
   | {
     kind: "forensic";
   };
+
+export type TemporalState = {
+  code_graph_freshness?: CodeGraphReadFreshnessV1 | null | undefined;
+  freshness: FreshnessState;
+  requested_at: UtcMicros;
+  requested_mode: TemporalModeV1;
+  resolved_at: UtcMicros;
+  source_generation: CodeGenerationId | null;
+  watermark_digest: ManifestDigest | null;
+};
 
 export type TestMapMeasurementV1 = {
   algorithm: string;
@@ -5503,7 +5737,7 @@ export type WorkArtifactHydrationRequestV1 = {
   page_size: number;
 };
 
-export type WorkArtifactHydrationV1 = 
+export type WorkArtifactHydrationV1 =
   | {
     state: "absent";
   }
@@ -5540,7 +5774,7 @@ export type WorkAttemptEvidenceRecordV1 = {
   stdout: WorkAttemptStreamSummaryV1 | null;
 };
 
-export type WorkAttemptEvidenceStateV1 = 
+export type WorkAttemptEvidenceStateV1 =
   | {
     state: "pending";
   }
@@ -5555,7 +5789,7 @@ export type WorkAttemptIdentityV1 = {
   task_id: TaskId;
 };
 
-export type WorkAttemptListCoverageV1 = 
+export type WorkAttemptListCoverageV1 =
   | {
     coverage: "capped";
     remaining: number;
@@ -5574,7 +5808,7 @@ export type WorkAttemptListRequestV1 = {
   page_size: number;
 };
 
-export type WorkAttemptListV1 = 
+export type WorkAttemptListV1 =
   | {
     state: "absent";
   }
@@ -5598,7 +5832,7 @@ export type WorkAttemptProjectionBindingV1 = {
   source_watermark: Record<string, number>;
 };
 
-export type WorkAttemptProviderOutcomeV1 = 
+export type WorkAttemptProviderOutcomeV1 =
   | {
     outcome: "cancelled";
   }
@@ -5733,7 +5967,7 @@ export type WorkCancellationRequestV1 = {
   requested_at: UtcMicros;
 };
 
-export type WorkCancellationStateV1 = 
+export type WorkCancellationStateV1 =
   | {
     state: "acknowledged";
     value: WorkCancellationAcknowledgementV1;
@@ -5779,7 +6013,7 @@ export type WorkDecompositionProposalV1 = {
   rationale: Array<WorkProposalReasonV1>;
 };
 
-export type WorkDuplicateAdjudicationAppendOutcomeV1 = 
+export type WorkDuplicateAdjudicationAppendOutcomeV1 =
   | {
     outcome: "appended";
     receipt: WorkDuplicateAdjudicationReceiptV1;
@@ -5829,7 +6063,7 @@ export type WorkEffectStateV1 = "compound_non_repeatable" | "intercepted" | "obs
 
 export type WorkEgressPolicy = "allowlisted" | "deny";
 
-export type WorkEvidenceContinuationV1 = 
+export type WorkEvidenceContinuationV1 =
   | {
     cursor: string;
     kind: "anchor";
@@ -5849,7 +6083,7 @@ export type WorkEvidenceCoverageV1 = {
   state: WorkEvidenceCoverageStateV1;
 };
 
-export type WorkEvidenceExpansionSelectorV1 = 
+export type WorkEvidenceExpansionSelectorV1 =
   | {
     kind: "anchor";
     link_id: string;
@@ -5901,7 +6135,7 @@ export type WorkEvidenceRetrieveRequestV1 = {
   verified_version: VerifiedWorkGraphVersionV1;
 };
 
-export type WorkEvidenceSourceV1 = 
+export type WorkEvidenceSourceV1 =
   | {
     hydration: WorkAnchorHydrationV1;
     kind: "anchor";
@@ -5938,7 +6172,7 @@ export type WorkExecutionEnvelopeV1 = {
   worktree_root: string;
 };
 
-export type WorkExecutionHistoryV1 = 
+export type WorkExecutionHistoryV1 =
   | {
     state: "absent";
   }
@@ -5997,7 +6231,7 @@ export type WorkExecutionSpanV1 = {
   wall_micros: number | null;
 };
 
-export type WorkExecutionTimingCoverageV1 = 
+export type WorkExecutionTimingCoverageV1 =
   | {
     coverage: "complete";
   }
@@ -6016,7 +6250,7 @@ export type WorkExperienceCandidateV1 = {
   item: WorkItemV1;
 };
 
-export type WorkExperienceCoverageV1 = 
+export type WorkExperienceCoverageV1 =
   | {
     applicable: number;
     coverage: "complete";
@@ -6054,7 +6288,7 @@ export type WorkExperienceV1 = {
   verified_version: VerifiedWorkGraphVersionV1;
 };
 
-export type WorkExpertiseAuthorizationV1 = 
+export type WorkExpertiseAuthorizationV1 =
   | {
     availability: "available";
     categories: Array<WorkExpertiseCategoryV1>;
@@ -6084,7 +6318,7 @@ export type WorkExpertiseLegalActionV1 = "allow_requested_categories" | "grant_p
 
 export type WorkExpertiseUnavailableReasonV1 = "project_consent_disabled" | "project_consent_expired" | "project_consent_not_yet_effective" | "requested_category_not_allowed" | "user_consent_disabled" | "user_consent_expired" | "user_consent_not_yet_effective";
 
-export type WorkFallbackTopology = 
+export type WorkFallbackTopology =
   | {
     executable: WorkExecutableReference;
     kind: "codex_cli";
@@ -6167,7 +6401,7 @@ export type WorkflowFanOutChildPlanV1 = {
   task_id: TaskId;
 };
 
-export type WorkflowFanOutFailurePolicyV1 = 
+export type WorkflowFanOutFailurePolicyV1 =
   | {
     policy: "collect";
   }
@@ -6230,7 +6464,7 @@ export type WorkflowRunEvent = {
   sequence: number;
 };
 
-export type WorkflowRunEventKind = 
+export type WorkflowRunEventKind =
   | {
     definition: WorkflowDefinition;
     fan_out_plans: Array<WorkflowFanOutPlanV1>;
@@ -6351,7 +6585,7 @@ export type WorkflowSynthesisDraft = {
 
 export type WorkFrontierComparisonV1 = "agree" | "disagree" | "incomparable";
 
-export type WorkGraphChangeV1 = 
+export type WorkGraphChangeV1 =
   | {
     based_on_version: number;
     identity: WorkAttemptIdentityV1;
@@ -6414,7 +6648,7 @@ export type WorkGraphChangeV1 =
     proposal_id: ProposalId;
   };
 
-export type WorkGraphReadModeV1 = 
+export type WorkGraphReadModeV1 =
   | {
     mode: "as_of";
     valid_at: UtcMicros;
@@ -6440,7 +6674,7 @@ export type WorkGraphReadRequestV1 = {
   selection: WorkProductSelectionScopeV1;
 };
 
-export type WorkGraphReadV1 = 
+export type WorkGraphReadV1 =
   | {
     authorized_scope: AuthorizedWorkProductScopeV1;
     mode: "absent";
@@ -6471,7 +6705,7 @@ export type WorkGraphReadV1 =
     timeline: WorkGraphTimelineV1;
   };
 
-export type WorkGraphSelectionCoverageV1 = 
+export type WorkGraphSelectionCoverageV1 =
   | {
     coverage: "complete";
     covered_events: number;
@@ -6483,7 +6717,7 @@ export type WorkGraphSelectionCoverageV1 =
     first_excluded_sequence: number;
   };
 
-export type WorkGraphTimelineCoverageV1 = 
+export type WorkGraphTimelineCoverageV1 =
   | {
     coverage: "complete";
     returned: number;
@@ -6571,7 +6805,7 @@ export type WorkKanbanProjectionV1 = {
   graph_version: number;
 };
 
-export type WorkLeakAdjudicationOutcomeV1 = 
+export type WorkLeakAdjudicationOutcomeV1 =
   | {
     outcome: "appended";
     receipt: WorkLeakAdjudicationReceiptV1;
@@ -6651,7 +6885,7 @@ export type WorkPlacementPreflightV1 = {
   target: WorkPlacementTargetV1;
 };
 
-export type WorkPlacementReadingV1 = 
+export type WorkPlacementReadingV1 =
   | {
     state: "absent";
   }
@@ -6702,7 +6936,7 @@ export type WorkPriorOutcomeV1 = {
 
 export type WorkPriorTerminalV1 = "cancelled" | "failed" | "succeeded" | "timed_out";
 
-export type WorkProductAuthorizedRelationScopeV1 = 
+export type WorkProductAuthorizedRelationScopeV1 =
   | {
     kind: "project";
     project_id: ProjectId;
@@ -6713,7 +6947,7 @@ export type WorkProductAuthorizedRelationScopeV1 =
     repository_id: RepositoryId;
   };
 
-export type WorkProductChangeDraftV1 = 
+export type WorkProductChangeDraftV1 =
   | {
     change: "accept_task";
     evidence_by_criterion: Record<string, string>;
@@ -6764,7 +6998,7 @@ export type WorkProductEventEvidenceV1 = {
   source_store_id: SourceStoreId;
 };
 
-export type WorkProductEventPayloadV1 = 
+export type WorkProductEventPayloadV1 =
   | {
     change: WorkGraphChangeV1;
     kind: "changed";
@@ -6794,7 +7028,7 @@ export type WorkProductEventV1 = {
   source_watermark: Record<string, number>;
 };
 
-export type WorkProductExpectedAuthorityV1 = 
+export type WorkProductExpectedAuthorityV1 =
   | {
     authority: "no_prior_graph";
   }
@@ -6829,7 +7063,7 @@ export type WorkProductMutationReceiptV1 = {
   verified_graph_version: VerifiedWorkGraphVersionV1;
 };
 
-export type WorkProductMutationRequestV1 = 
+export type WorkProductMutationRequestV1 =
   | {
     mutation: "accept_task";
     request: AcceptWorkTaskRequestV1;
@@ -6887,7 +7121,7 @@ export type WorkProductProjectionBundleV1 = {
   workload: WorkWorkloadProjectionV1;
 };
 
-export type WorkProductRelationV1 = 
+export type WorkProductRelationV1 =
   | {
     identity: WorkAttemptIdentityV1;
     kind: "accepted_attempt";
@@ -6945,7 +7179,7 @@ export type WorkProductRevisionPinsV1 = {
   policy_revision_id: string;
 };
 
-export type WorkProductSelectionScopeV1 = 
+export type WorkProductSelectionScopeV1 =
   | {
     selection: "profile_owned_no_git";
   }
@@ -7068,7 +7302,7 @@ export type WorkRankedRouteV1 = {
   sensitive_data_fitness: WorkOrdinalBandV1;
 };
 
-export type WorkRecoveryStateV1 = 
+export type WorkRecoveryStateV1 =
   | {
     state: "fresh";
   }
@@ -7107,7 +7341,7 @@ export type WorkRelationReplanProposalV1 = {
 
 export type WorkRestartReasonV1 = "failure_observed" | "lease_lost" | "process_lost" | "provider_unavailable";
 
-export type WorkRetryAttemptOutcomeV1 = 
+export type WorkRetryAttemptOutcomeV1 =
   | {
     attempt: WorkAttemptV1;
     outcome: "created";
@@ -7139,7 +7373,7 @@ export type WorkRetryReceiptV1 = {
 
 export type WorkRetrySourceV1 = "runtime";
 
-export type WorkRouteDecisionV1 = 
+export type WorkRouteDecisionV1 =
   | {
     decision: "abstained";
     reason: string;
@@ -7168,7 +7402,7 @@ export type WorkRoutePlanV1 = {
 
 export type WorkRunControlAuthorityV1 = number;
 
-export type WorkRunControlReadingV1 = 
+export type WorkRunControlReadingV1 =
   | {
     control: WorkRunControlV1;
     live_attempts: Array<AttemptId>;
@@ -7213,7 +7447,7 @@ export type WorkRuntimeAttemptProjectionV1 = {
   state: WorkAttemptStateV1;
 };
 
-export type WorkRuntimeProjectionCoverageV1 = 
+export type WorkRuntimeProjectionCoverageV1 =
   | {
     coverage: "complete";
   }
@@ -7260,7 +7494,7 @@ export type WorkSubtaskSketchV1 = {
   summary: string;
 };
 
-export type WorkSynthesisAttemptV1 = 
+export type WorkSynthesisAttemptV1 =
   | {
     attempt: WorkAttemptV1;
     draft: WorkflowSynthesisDraft;
@@ -7287,7 +7521,7 @@ export type WorkSynthesisSourceEnvelopeV1 = {
   source: WorkAttemptIdentityV1;
 };
 
-export type WorkSynthesisSourceOutcomeV1 = 
+export type WorkSynthesisSourceOutcomeV1 =
   | {
     evidence: ManifestDigest;
     outcome: "cancelled";
@@ -7382,7 +7616,7 @@ export type WorkTaskShapeV1 = {
   kind: WorkTaskShapeKindV1;
 };
 
-export type WorkTerminalEvidenceV1 = 
+export type WorkTerminalEvidenceV1 =
   | {
     evidence_digest: ManifestDigest;
     observed_at: UtcMicros;
@@ -7465,7 +7699,7 @@ export type WorktreeCleanlinessRequirementV1 = "allow_untracked_only_for_preflig
 
 export type WorktreeId = string;
 
-export type WorktreePlacementModeV1 = 
+export type WorktreePlacementModeV1 =
   | {
     kind: "configured_root";
     root_id: string;
