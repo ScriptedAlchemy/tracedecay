@@ -215,7 +215,7 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
 }
 
 // UUIDs contribute identity, not credential entropy. Adjacent dense components
-// form one token; one sparse neighbor can supply the other half of a token.
+// form one token; sparse neighbors can also form a high-entropy pair.
 // Inspect original, disjoint slices so ordinary prefixes cannot dilute secrets.
 fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<Range<usize>>) {
     let mut component_start = 0usize;
@@ -255,6 +255,14 @@ fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<R
                     ranges.push(offset + matched.start..offset + matched.end);
                 }
                 run_prefix = None;
+            }
+            if !consumed
+                && eligible
+                && let Some(previous) = previous.take()
+                && looks_high_entropy_token(&text[previous.start..component_end])
+            {
+                ranges.push(offset + previous.start..offset + component_end);
+                consumed = true;
             }
             previous = (eligible && !consumed).then_some(component_start..component_end);
         }
@@ -574,6 +582,43 @@ mod tests {
                 vec![prefix.len()..prefix.len() + secret.len()]
             );
         }
+    }
+
+    #[test]
+    fn uuid_paths_redact_slash_bearing_secrets_with_two_sparse_components() {
+        let secret = "abcdefghijklmnopabcdefghijklmnop/QRSTUVWXYZ012345QRSTUVWXYZ012345";
+        for component in secret.split('/') {
+            assert!(entropy_bits_per_mille(component).unwrap() < MIN_TOKEN_ENTROPY_PER_MILLE);
+        }
+        assert!(looks_high_entropy_token(secret));
+        let prefix = format!(
+            "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
+            "a".repeat(512)
+        );
+        let path = format!("{prefix}{secret}/source");
+        assert!(!looks_high_entropy_token(&path));
+        assert_eq!(
+            high_entropy_ranges(&path),
+            vec![prefix.len()..prefix.len() + secret.len()]
+        );
+        let metadata = json!({"path": path});
+        let sanitized = crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+            .expect("structured path metadata");
+        let sanitized_path = sanitized["path"].as_str().unwrap();
+        assert!(sanitized_path.starts_with(&prefix));
+        assert!(sanitized_path.ends_with("/source"));
+        assert!(!sanitized_path.contains(secret));
+        assert!(
+            secret
+                .split('/')
+                .all(|component| !sanitized_path.contains(component))
+        );
+        let (first, second) = secret.split_once('/').unwrap();
+        let separated = format!("/{first}/fe600511-e406-4142-b74a-cbf177c5f2cb/{second}");
+        assert!(
+            high_entropy_ranges(&separated).is_empty(),
+            "UUID identity must separate the candidate components"
+        );
     }
 
     #[test]
