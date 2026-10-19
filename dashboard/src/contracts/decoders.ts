@@ -54,6 +54,7 @@ import type {
   AnalyticsUsageCategoryV1,
   AnalyticsUsageSummaryV1,
   ApplicationExecutionFailureClassV1,
+  ApplicationOutcome,
   ApplicationProblemDetailV1,
   ApplicationProblemEnvelope,
   ApplicationProblemKind,
@@ -61,6 +62,7 @@ import type {
   ApplicationUnavailableClassV1,
   ApplyWorkRelationReplanRequestV1,
   AttemptId,
+  AuthorityReceipt,
   AuthorizedRoot,
   AuthorizedScopeSet,
   AuthorizedWorkProductScopeV1,
@@ -104,8 +106,10 @@ import type {
   BranchNamingPolicyV1,
   BranchTopologyKindV1,
   BranchTopologyPolicyV1,
+  BudgetClass,
   CallChainMeasurementV1,
   CallChainStepV1,
+  CancellationObservation,
   CancellationStage,
   CancelWorkAttemptCommand,
   CanonicalGitRefNameV1,
@@ -118,6 +122,7 @@ import type {
   CodeCloneIndexResourcesV1,
   CodeCloneIndexStatusV1,
   CodeGenerationId,
+  CodeGraphReadFreshnessV1,
   CodeGraphServingReadinessV1,
   CodeIndexBuildBlockedReasonV1,
   CodeIndexBuildPhaseV1,
@@ -143,6 +148,7 @@ import type {
   ComparisonDispositionV1,
   ComplexityAnalysisV1,
   ComponentVersion,
+  ConfigurationRefusalV1,
   ConfigurationRevisionId,
   ConfigurationSnapshotId,
   ContentDigest,
@@ -160,6 +166,7 @@ import type {
   CrossMergePolicyV1,
   DaemonServiceUnitObservationV1,
   DashboardAuthorizationV1,
+  DashboardConfigurationRefusalV1,
   DashboardCoverageCompletenessV1,
   DashboardCoverageV1,
   DashboardDomainStateV1,
@@ -172,6 +179,7 @@ import type {
   DashboardTimeV1,
   DashboardVersionV1,
   DashboardWatermarkV1,
+  Deadline,
   DecideWorkProposalRequestV1,
   DecideWorkRelationReplanRequestV1,
   DecisionEngineSettingsV1,
@@ -244,6 +252,7 @@ import type {
   DeliverySharedCodeRefStateV1,
   DeliverySharedCodeRefV1,
   DiagnosticsSearchedTsconfigV1,
+  DisclosureClass,
   DoctorCoverageCompletenessV1,
   DoctorCoverageStatementV1,
   DoctorEvidenceReferenceV1,
@@ -262,11 +271,17 @@ import type {
   DuplicateEffortKindV1,
   EffectClass,
   EffectReceipt,
+  EffectResult,
   EffectTermination,
   EnvironmentSettingsPayloadV1,
   EnvironmentVariableV1,
+  EvidenceAuthority,
   EvidenceCoverage,
   EvidenceDomain,
+  EvidencePacket,
+  EvidenceScore,
+  EvidenceScoreKind,
+  EvidenceScoreValue,
   ExecutionBlockedCauseV1,
   ExecutionConcurrencyPhaseV1,
   ExecutionConflictKindV1,
@@ -352,6 +367,7 @@ import type {
   FeedbackSystemMetricV1,
   FeedbackSystemQualityReadModelV1,
   FileOccurrenceId,
+  FreshnessState,
   GeneratedWorkProposal,
   GenerateProposalRequest,
   GitHubStackedPullRequestPolicyV1,
@@ -516,16 +532,25 @@ import type {
   ObservabilityHorizonV1,
   ObservationSourceIdentityV1,
   ObservatoryReadModelV1,
+  Omission,
+  OmissionReason,
+  OperationBudgetUsage,
+  OperationReceipt,
+  OperationTermination,
+  PageCursor,
+  PageState,
   PauseWorkRunCommand,
   PayloadAccessState,
   PayloadDigestV1,
   PayloadReferenceV1,
   PerformanceComparisonReadModelV1,
+  PolicyDecisionRef,
   PolicyIdentifierV1,
   PrAutoTrackEntryV1,
   PrAutoTrackPayloadV1,
   PrepareWorkDuplicateAdjudicationRequestV1,
   PrepareWorkProductMutationRequestV1,
+  PreviewResult,
   PrimitiveFreshnessStateV1,
   PrimitiveIndexingStateV1,
   PrimitiveSearchFreshnessV1,
@@ -543,6 +568,7 @@ import type {
   ProjectRegistrySummary,
   ProjectRepoGroup,
   ProjectSettingsPatch,
+  ProjectSettingsPatchResponseV1,
   ProjectSettingsPayloadV1,
   ProjectsPayloadV1,
   ProposalId,
@@ -560,6 +586,7 @@ import type {
   ProximityWarningClassV1,
   PublicCodeProject,
   QuantityEvidenceClassV1,
+  ReconciliationState,
   RecordWorkHandoffRequestV1,
   RefId,
   RegisteredRootLocatorV1,
@@ -592,6 +619,9 @@ import type {
   ResumeWorkAttemptsCommand,
   ResumeWorkRunCommand,
   RetrievalAnchorId,
+  RetrieverContribution,
+  RetrieverContributionState,
+  RetrieverId,
   RetryDirective,
   RetryScope,
   RetryWorkAttemptCommandV1,
@@ -654,6 +684,7 @@ import type {
   SessionRetrievalStructuralRefusalV1,
   SettingsAvailabilityV1,
   SettingsPayloadV1,
+  SettingsValidationIssueV1,
   SharedProfileStoreLocatorV1,
   SignificantTableGrowthSampleV1,
   SimilarCoverageV1,
@@ -664,6 +695,7 @@ import type {
   SkillInstallTarget,
   SkillOutcomeRecord,
   SkillOutcomeVerdict,
+  SortContractId,
   SourceSpan,
   SourceStoreId,
   StartWorkAttemptCommand,
@@ -701,6 +733,7 @@ import type {
   TelemetrySettingsPatch,
   TelemetrySettingsV1,
   TemporalModeV1,
+  TemporalState,
   TestMapMeasurementV1,
   TokenActualV1,
   TokenPairV1,
@@ -1506,6 +1539,21 @@ export const AnalyticsUsageSummaryV1Schema: z.ZodObject<{
 /** Stable non-retryable class for an admitted execution failure. */
 export const ApplicationExecutionFailureClassV1Schema: z.ZodEnum<{ "denied": "denied"; "malformed_output": "malformed_output"; "permanent": "permanent" }> = z.enum(["denied", "malformed_output", "permanent"]);
 
+/** Canonical outcome family for an admitted application operation. */
+export const ApplicationOutcomeSchema: z.ZodType<ApplicationOutcome, unknown> = z.discriminatedUnion("outcome", [z.object({
+  outcome: z.literal("effect"),
+  value: z.lazy(() => EffectResultSchema),
+}), z.object({
+  outcome: z.literal("evidence"),
+  value: z.lazy(() => EvidencePacketSchema),
+}), z.object({
+  outcome: z.literal("preview"),
+  value: z.lazy(() => PreviewResultSchema),
+}), z.object({
+  outcome: z.literal("result"),
+  value: z.unknown(),
+})]);
+
 /** The structured facts behind a problem. Adapters read these fields; the
 problem's `message` is only their one human rendering. */
 export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetailV1, unknown> = z.discriminatedUnion("kind", [z.object({
@@ -1634,6 +1682,25 @@ export const ApplyWorkRelationReplanRequestV1Schema: z.ZodObject<{
 
 /** Strongly typed canonical identity: `AttemptId`. */
 export const AttemptIdSchema: z.ZodType<string, unknown> = z.string();
+
+/** Proof that this request crossed the current authorization boundary. */
+export const AuthorityReceiptSchema: z.ZodObject<{
+  authorized_scope_digest: z.ZodType<ManifestDigest, unknown>;
+  disclosure: z.ZodType<DisclosureClass, unknown>;
+  grant_digest: z.ZodType<ManifestDigest, unknown>;
+  grant_id: z.ZodType<string, unknown>;
+  grant_revision: z.ZodType<number, unknown>;
+  policy: z.ZodType<PolicyDecisionRef, unknown>;
+  revalidated_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
+  authorized_scope_digest: z.lazy(() => ManifestDigestSchema),
+  disclosure: z.lazy(() => DisclosureClassSchema),
+  grant_digest: z.lazy(() => ManifestDigestSchema),
+  grant_id: z.string(),
+  grant_revision: z.number().int().min(0),
+  policy: z.lazy(() => PolicyDecisionRefSchema),
+  revalidated_at: z.lazy(() => UtcMicrosSchema),
+}).strict();
 
 /** One exact application scope paired with its registered physical locator.
 
@@ -2201,6 +2268,9 @@ export const BranchTopologyPolicyV1Schema: z.ZodObject<{
   allowed: z.array(z.lazy(() => BranchTopologyKindV1Schema)),
 }).strict();
 
+/** Bounded elapsed-work classification supplied by a retriever. */
+export const BudgetClassSchema: z.ZodEnum<{ "approaching_limit": "approaching_limit"; "exhausted": "exhausted"; "within_budget": "within_budget" }> = z.enum(["approaching_limit", "exhausted", "within_budget"]);
+
 export const CallChainMeasurementV1Schema: z.ZodObject<{
   complete: z.ZodType<boolean, unknown>;
   directed: z.ZodType<boolean, unknown>;
@@ -2232,6 +2302,14 @@ export const CallChainStepV1Schema: z.ZodObject<{
   incoming_edge: z.union([z.lazy(() => IncomingCallEdgeV1Schema), z.null()]),
   node: z.lazy(() => NodeRefV1Schema),
 });
+
+export const CancellationObservationSchema: z.ZodObject<{
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  stage: z.ZodType<CancellationStage, unknown>;
+}, z.core.$strict> = z.object({
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  stage: z.lazy(() => CancellationStageSchema),
+}).strict();
 
 /** Exact stage at which cancellation or deadline state was observed. */
 export const CancellationStageSchema: z.ZodEnum<{ "after_commit": "after_commit"; "before_admission": "before_admission"; "before_effect": "before_effect"; "before_read": "before_read"; "during_read": "during_read"; "effect_in_flight": "effect_in_flight"; "reconciling": "reconciling" }> = z.enum(["after_commit", "before_admission", "before_effect", "before_read", "during_read", "effect_in_flight", "reconciling"]);
@@ -2357,6 +2435,15 @@ export const CodeCloneIndexStatusV1Schema: z.ZodType<CodeCloneIndexStatusV1, unk
 
 /** Strongly typed canonical identity: `CodeGenerationId`. */
 export const CodeGenerationIdSchema: z.ZodType<string, unknown> = z.string();
+
+/** Freshness of the generation a verified graph read serves. */
+export const CodeGraphReadFreshnessV1Schema: z.ZodType<CodeGraphReadFreshnessV1, unknown> = z.discriminatedUnion("state", [z.object({
+  state: z.literal("current"),
+}), z.object({
+  rebuild_in_flight: z.boolean(),
+  sealed_at: z.lazy(() => UtcMicrosSchema),
+  state: z.literal("last_complete_stale"),
+})]);
 
 /** Interactive graph-serving state for the latest sealed generation.
 
@@ -2677,6 +2764,20 @@ export const ComplexityAnalysisV1Schema: z.ZodUnion<[z.ZodLiteral<"complete">, z
 /** Strongly typed canonical identity: `ComponentVersion`. */
 export const ComponentVersionSchema: z.ZodType<string, unknown> = z.string();
 
+/** Configuration refusals carrying the same stable codes as the HTTP routes. */
+export const ConfigurationRefusalV1Schema: z.ZodType<ConfigurationRefusalV1, unknown> = z.discriminatedUnion("code", [z.object({
+  code: z.literal("application_contract_violation"),
+  detail: z.string(),
+}).strict(), z.object({
+  code: z.literal("configuration_authority_unavailable"),
+  detail: z.string(),
+}).strict(), z.object({
+  actual_revision_id: z.string(),
+  code: z.literal("configuration_revision_conflict"),
+  detail: z.string(),
+  expected_revision_id: z.string(),
+}).strict()]);
+
 /** Strongly typed canonical identity: `ConfigurationRevisionId`. */
 export const ConfigurationRevisionIdSchema: z.ZodType<string, unknown> = z.string();
 
@@ -2830,6 +2931,17 @@ export const DashboardAuthorizationV1Schema: z.ZodType<DashboardAuthorizationV1,
   outcome: z.literal("unauthorized"),
 })]);
 
+/** Every refusal body produced by the dashboard configuration adapter. The
+untagged wrapper preserves the existing validation, CAS, and application
+problem wire formats while giving producers and consumers one authority. */
+export const DashboardConfigurationRefusalV1Schema: z.ZodType<{
+  detail: string;
+  validation_errors: Array<SettingsValidationIssueV1>;
+} | ConfigurationRefusalV1 | ApplicationProblemEnvelope, unknown> = z.union([z.object({
+  detail: z.string(),
+  validation_errors: z.array(z.lazy(() => SettingsValidationIssueV1Schema)),
+}).strict(), z.lazy(() => ConfigurationRefusalV1Schema), z.lazy(() => ApplicationProblemEnvelopeSchema)]);
+
 /** Coverage completeness axis. `Unsupported` distinguishes "the source that
 would establish coverage is not wired" from `Unknown` ("coverage could not
 be determined"). */
@@ -2967,6 +3079,13 @@ export const DashboardWatermarkV1Schema: z.ZodObject<{
   source: z.string(),
   watermark: z.string(),
 });
+
+/** One immutable deadline supplied by the caller or upstream admission layer. */
+export const DeadlineSchema: z.ZodObject<{
+  expires_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
+  expires_at: z.lazy(() => UtcMicrosSchema),
+}).strict();
 
 export const DecideWorkProposalRequestV1Schema: z.ZodObject<{
   disposition: z.ZodType<WorkProposalDispositionV12, unknown>;
@@ -3969,6 +4088,9 @@ export const DiagnosticsSearchedTsconfigV1Schema: z.ZodObject<{
   present: z.boolean(),
 }).strict();
 
+/** Disclosure ceiling carried by an immutable grant and revalidated at sinks. */
+export const DisclosureClassSchema: z.ZodEnum<{ "evidence": "evidence"; "metadata": "metadata"; "sensitive": "sensitive" }> = z.enum(["evidence", "metadata", "sensitive"]);
+
 /** Whether Doctor observed all of a family's evidence sources. */
 export const DoctorCoverageCompletenessV1Schema: z.ZodUnion<[z.ZodLiteral<"complete">, z.ZodLiteral<"partial">, z.ZodLiteral<"unknown">]> = z.union([z.literal("complete"), z.literal("partial"), z.literal("unknown")]);
 
@@ -4153,6 +4275,30 @@ export const EffectReceiptSchema: z.ZodObject<{
   scope: z.lazy(() => ResolvedScopeSchema),
 }).strict();
 
+/** Result of an admitted effect. `EffectUnknown` remains a receipt state and
+cannot be remapped into a pre-admission problem. */
+export const EffectResultSchema: z.ZodObject<{
+  authority: z.ZodType<AuthorityReceipt, unknown>;
+  effect_class: z.ZodType<EffectClass, unknown>;
+  effect_id: z.ZodType<string, unknown>;
+  execution: z.ZodType<OperationReceipt, unknown>;
+  expected_state: z.ZodType<ManifestDigest, unknown>;
+  idempotency_key: z.ZodType<string, unknown>;
+  payload: z.ZodType<unknown, unknown>;
+  receipt: z.ZodType<EffectReceipt, unknown>;
+  reconciliation: z.ZodType<ReconciliationState, unknown>;
+}, z.core.$strict> = z.object({
+  authority: z.lazy(() => AuthorityReceiptSchema),
+  effect_class: z.lazy(() => EffectClassSchema),
+  effect_id: z.string(),
+  execution: z.lazy(() => OperationReceiptSchema),
+  expected_state: z.lazy(() => ManifestDigestSchema),
+  idempotency_key: z.string(),
+  payload: z.unknown(),
+  receipt: z.lazy(() => EffectReceiptSchema),
+  reconciliation: z.lazy(() => ReconciliationStateSchema),
+}).strict();
+
 /** Durable effect receipt terminal state. */
 export const EffectTerminationSchema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "effect_unknown": "effect_unknown"; "failed": "failed"; "partial": "partial"; "timed_out": "timed_out" }> = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
 
@@ -4180,6 +4326,23 @@ export const EnvironmentVariableV1Schema: z.ZodObject<{
   value: z.string().nullable(),
 });
 
+/** Evidence authority is separate from caller authority and cannot grant access. */
+export const EvidenceAuthoritySchema: z.ZodObject<{
+  evidence_id: z.ZodType<string, unknown>;
+  horizon: z.ZodType<UtcMicros | null, unknown>;
+  producer: z.ZodType<string, unknown>;
+  revision: z.ZodType<ComponentVersion, unknown>;
+  scope: z.ZodType<ResolvedScope, unknown>;
+  source_kind: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
+  evidence_id: z.string(),
+  horizon: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  producer: z.string(),
+  revision: z.lazy(() => ComponentVersionSchema),
+  scope: z.lazy(() => ResolvedScopeSchema),
+  source_kind: z.string(),
+}).strict();
+
 /** Deterministic coverage fold input for an evidence packet. */
 export const EvidenceCoverageSchema: z.ZodObject<{
   completeness: z.ZodType<CoverageCompleteness, unknown>;
@@ -4199,6 +4362,62 @@ export const EvidenceCoverageSchema: z.ZodObject<{
 
 /** Requested evidence domain for bounded coverage and omissions. */
 export const EvidenceDomainSchema: z.ZodEnum<{ "anchor": "anchor"; "diagnostic": "diagnostic"; "graph": "graph"; "operational": "operational"; "source": "source"; "symbol": "symbol"; "temporal": "temporal"; "test": "test" }> = z.enum(["anchor", "diagnostic", "graph", "operational", "source", "symbol", "temporal", "test"]);
+
+/** Immutable evidence packet consumed by adapters and later planner work. */
+export const EvidencePacketSchema: z.ZodObject<{
+  authority: z.ZodType<AuthorityReceipt, unknown>;
+  contributions: z.ZodType<Array<RetrieverContribution>, unknown>;
+  coverage: z.ZodType<EvidenceCoverage, unknown>;
+  evidence_authorities: z.ZodType<Array<EvidenceAuthority>, unknown>;
+  execution: z.ZodType<OperationReceipt, unknown>;
+  omissions: z.ZodType<Array<Omission>, unknown>;
+  page: z.ZodType<PageState, unknown>;
+  payload: z.ZodType<unknown, unknown>;
+  scores: z.ZodType<Array<EvidenceScore>, unknown>;
+  temporal: z.ZodType<TemporalState, unknown>;
+}, z.core.$strict> = z.object({
+  authority: z.lazy(() => AuthorityReceiptSchema),
+  contributions: z.array(z.lazy(() => RetrieverContributionSchema)),
+  coverage: z.lazy(() => EvidenceCoverageSchema),
+  evidence_authorities: z.array(z.lazy(() => EvidenceAuthoritySchema)),
+  execution: z.lazy(() => OperationReceiptSchema),
+  omissions: z.array(z.lazy(() => OmissionSchema)),
+  page: z.lazy(() => PageStateSchema),
+  payload: z.unknown(),
+  scores: z.array(z.lazy(() => EvidenceScoreSchema)),
+  temporal: z.lazy(() => TemporalStateSchema),
+}).strict();
+
+export const EvidenceScoreSchema: z.ZodObject<{
+  calibration_revision: z.ZodType<ComponentVersion | null, unknown>;
+  calibration_valid: z.ZodType<boolean | null, unknown>;
+  deterministic_components: z.ZodType<Array<string>, unknown>;
+  kind: z.ZodType<EvidenceScoreKind, unknown>;
+  score_id: z.ZodType<string, unknown>;
+  value: z.ZodType<EvidenceScoreValue, unknown>;
+}, z.core.$strict> = z.object({
+  calibration_revision: z.union([z.lazy(() => ComponentVersionSchema), z.null()]),
+  calibration_valid: z.boolean().nullable(),
+  deterministic_components: z.array(z.string()),
+  kind: z.lazy(() => EvidenceScoreKindSchema),
+  score_id: z.string(),
+  value: z.lazy(() => EvidenceScoreValueSchema),
+}).strict();
+
+/** Evidence score semantics. Scores are metadata, never authority. */
+export const EvidenceScoreKindSchema: z.ZodEnum<{ "calibrated_interval": "calibrated_interval"; "calibrated_probability": "calibrated_probability"; "heuristic_score": "heuristic_score"; "ordinal_rank": "ordinal_rank" }> = z.enum(["calibrated_interval", "calibrated_probability", "heuristic_score", "ordinal_rank"]);
+
+export const EvidenceScoreValueSchema: z.ZodType<EvidenceScoreValue, unknown> = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("fixed_point"),
+  micros: z.number().int().min(0),
+}), z.object({
+  kind: z.literal("interval"),
+  lower_micros: z.number().int().min(0),
+  upper_micros: z.number().int().min(0),
+}), z.object({
+  kind: z.literal("ordinal"),
+  rank: z.number().int().min(0),
+})]);
 
 /** Cause a work item was blocked for. */
 export const ExecutionBlockedCauseV1Schema: z.ZodEnum<{ "backpressure": "backpressure"; "capability": "capability"; "ci": "ci"; "conflict": "conflict"; "dependency": "dependency"; "effect_unknown": "effect_unknown"; "lease": "lease"; "needs_input": "needs_input"; "other": "other"; "policy": "policy"; "review": "review"; "scope": "scope"; "test": "test"; "unknown": "unknown" }> = z.enum(["backpressure", "capability", "ci", "conflict", "dependency", "effect_unknown", "lease", "needs_input", "other", "policy", "review", "scope", "test", "unknown"]);
@@ -5052,6 +5271,9 @@ export const FeedbackSystemQualityReadModelV1Schema: z.ZodObject<{
 
 /** Strongly typed canonical identity: `FileOccurrenceId`. */
 export const FileOccurrenceIdSchema: z.ZodType<string, unknown> = z.string();
+
+/** Application-level freshness. Missing or partial truth never becomes current. */
+export const FreshnessStateSchema: z.ZodEnum<{ "current": "current"; "stale": "stale"; "unknown": "unknown" }> = z.enum(["current", "stale", "unknown"]);
 
 /** A canonical product proposal and the exact verified graph that licensed it.
 
@@ -7273,6 +7495,76 @@ export const ObservatoryReadModelV1Schema: z.ZodObject<{
   watermark: z.string(),
 });
 
+export const OmissionSchema: z.ZodObject<{
+  count: z.ZodType<number, unknown>;
+  domain: z.ZodType<EvidenceDomain, unknown>;
+  reason: z.ZodType<OmissionReason, unknown>;
+}, z.core.$strict> = z.object({
+  count: z.number().int().min(0),
+  domain: z.lazy(() => EvidenceDomainSchema),
+  reason: z.lazy(() => OmissionReasonSchema),
+}).strict();
+
+/** Safe reason why authorized requested evidence was omitted. */
+export const OmissionReasonSchema: z.ZodType<"budget" | "cancelled" | "conflict" | "failed" | "redacted" | "stale" | "timed_out" | "unavailable" | "unsupported" | "macro_body_unparsed" | "import_unmodeled" | "cursor_expired" | "cursor_foreign", unknown> = z.union([z.enum(["budget", "cancelled", "conflict", "failed", "redacted", "stale", "timed_out", "unavailable", "unsupported"]), z.literal("macro_body_unparsed"), z.literal("import_unmodeled"), z.literal("cursor_expired"), z.literal("cursor_foreign")]);
+
+/** Bounded work accounting supplied by an owning port or transaction. */
+export const OperationBudgetUsageSchema: z.ZodObject<{
+  bytes_consumed: z.ZodType<number, unknown>;
+  elapsed_micros: z.ZodType<number, unknown>;
+  units_consumed: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
+  bytes_consumed: z.number().int().min(0),
+  elapsed_micros: z.number().int().min(0),
+  units_consumed: z.number().int().min(0),
+}).strict();
+
+/** Canonical operation evidence. An admitted failure remains represented here
+rather than being replaced by a transport exception. */
+export const OperationReceiptSchema: z.ZodObject<{
+  budget: z.ZodType<OperationBudgetUsage, unknown>;
+  cancellation: z.ZodType<CancellationObservation | null, unknown>;
+  effective_deadline: z.ZodType<Deadline, unknown>;
+  ended_at: z.ZodType<UtcMicros, unknown>;
+  started_at: z.ZodType<UtcMicros, unknown>;
+  termination: z.ZodType<OperationTermination, unknown>;
+}, z.core.$strict> = z.object({
+  budget: z.lazy(() => OperationBudgetUsageSchema),
+  cancellation: z.union([z.lazy(() => CancellationObservationSchema), z.null()]),
+  effective_deadline: z.lazy(() => DeadlineSchema),
+  ended_at: z.lazy(() => UtcMicrosSchema),
+  started_at: z.lazy(() => UtcMicrosSchema),
+  termination: z.lazy(() => OperationTerminationSchema),
+}).strict();
+
+/** Terminal state after an operation has been admitted. */
+export const OperationTerminationSchema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "effect_unknown": "effect_unknown"; "failed": "failed"; "partial": "partial"; "timed_out": "timed_out"; "unavailable": "unavailable" }> = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out", "unavailable"]);
+
+/** Exact continuation authority for the enclosing evidence page: an opaque
+cursor bound to the operation and request that minted it. */
+export const PageCursorSchema: z.ZodType<PageCursor, unknown> = z.discriminatedUnion("kind", [z.object({
+  cursor: z.string(),
+  kind: z.literal("opaque"),
+}).strict()]);
+
+/** Stable page state. General cursor bytes stay opaque until authorization is
+revalidated; structural fact cursors retain their canonical ordering type. */
+export const PageStateSchema: z.ZodObject<{
+  cursor: z.ZodType<PageCursor | null, unknown>;
+  expires_at: z.ZodType<UtcMicros | null, unknown>;
+  returned: z.ZodType<number, unknown>;
+  sort_contract_id: z.ZodType<SortContractId, unknown>;
+  sort_revision: z.ZodType<number, unknown>;
+  total: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
+  cursor: z.union([z.lazy(() => PageCursorSchema), z.null()]),
+  expires_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  returned: z.number().int().min(0),
+  sort_contract_id: z.lazy(() => SortContractIdSchema),
+  sort_revision: z.number().refine(Number.isInteger).min(0),
+  total: z.number().int().min(0).nullable(),
+}).strict();
+
 export const PauseWorkRunCommandSchema: z.ZodObject<{
   expected_authority_version: z.ZodType<number | null, unknown>;
   occurred_at: z.ZodType<UtcMicros, unknown>;
@@ -7334,6 +7626,19 @@ export const PerformanceComparisonReadModelV1Schema: z.ZodObject<{
   workload: z.string().nullable(),
 });
 
+/** A policy decision pinned into a receipt or provider identity. */
+export const PolicyDecisionRefSchema: z.ZodObject<{
+  decision_id: z.ZodType<string, unknown>;
+  digest: z.ZodType<ManifestDigest, unknown>;
+  evaluator_revision: z.ZodType<ComponentVersion, unknown>;
+  revision: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
+  decision_id: z.string(),
+  digest: z.lazy(() => ManifestDigestSchema),
+  evaluator_revision: z.lazy(() => ComponentVersionSchema),
+  revision: z.number().int().min(0),
+}).strict();
+
 /** A bounded, canonical identifier owned by the policy input schema.
 
 It represents immutable references only; it is never a path, display
@@ -7384,6 +7689,25 @@ export const PrepareWorkProductMutationRequestV1Schema: z.ZodObject<{
   change: z.lazy(() => WorkProductChangeDraftV1Schema),
   evidence: z.array(z.lazy(() => WorkProductEventEvidenceV1Schema)),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+}).strict();
+
+/** Read-only preview of a future typed effect. */
+export const PreviewResultSchema: z.ZodObject<{
+  authority: z.ZodType<AuthorityReceipt, unknown>;
+  effect_class: z.ZodType<EffectClass, unknown>;
+  execution: z.ZodType<OperationReceipt, unknown>;
+  expected_state: z.ZodType<ManifestDigest, unknown>;
+  payload: z.ZodType<unknown, unknown>;
+  preview_digest: z.ZodType<ManifestDigest, unknown>;
+  preview_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
+  authority: z.lazy(() => AuthorityReceiptSchema),
+  effect_class: z.lazy(() => EffectClassSchema),
+  execution: z.lazy(() => OperationReceiptSchema),
+  expected_state: z.lazy(() => ManifestDigestSchema),
+  payload: z.unknown(),
+  preview_digest: z.lazy(() => ManifestDigestSchema),
+  preview_id: z.string(),
 }).strict();
 
 /** Whether the served code generation is known current at serve time. */
@@ -7591,6 +7915,14 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
   track_call_sites: z.boolean().nullable().optional(),
 }).strict();
 
+export const ProjectSettingsPatchResponseV1Schema: z.ZodObject<{
+  application_outcome: z.ZodType<ApplicationOutcome | null, unknown>;
+  current: z.ZodType<DashboardEnvelopeV1<SettingsPayloadV1>, unknown>;
+}> = z.object({
+  application_outcome: z.union([z.lazy(() => ApplicationOutcomeSchema), z.null()]),
+  current: z.lazy(() => DashboardEnvelopeV1Schema(z.lazy(() => SettingsPayloadV1Schema))),
+});
+
 export const ProjectSettingsPayloadV1Schema: z.ZodObject<{
   config: z.ZodType<ProjectEditableSettingsV1, unknown>;
   configuration_revision_id: z.ZodType<string, unknown>;
@@ -7760,6 +8092,9 @@ export const PublicCodeProjectSchema: z.ZodObject<{
 });
 
 export const QuantityEvidenceClassV1Schema: z.ZodEnum<{ "estimated": "estimated"; "locally_measured": "locally_measured"; "owner_receipt": "owner_receipt"; "unknown": "unknown" }> = z.enum(["estimated", "locally_measured", "owner_receipt", "unknown"]);
+
+/** Reconciliation state retained after an admitted effect. */
+export const ReconciliationStateSchema: z.ZodEnum<{ "failed": "failed"; "pending": "pending"; "reconciled": "reconciled" }> = z.enum(["failed", "pending", "reconciled"]);
 
 export const RecordWorkHandoffRequestV1Schema: z.ZodObject<{
   handoff: z.ZodType<WorkHandoffV1, unknown>;
@@ -8040,6 +8375,41 @@ export const ResumeWorkRunCommandSchema: z.ZodObject<{
 
 /** Strongly typed canonical identity: `RetrievalAnchorId`. */
 export const RetrievalAnchorIdSchema: z.ZodType<string, unknown> = z.string();
+
+/** One source-owned contribution to the packet fold. */
+export const RetrieverContributionSchema: z.ZodObject<{
+  contract: z.ZodType<ResultContractRef, unknown>;
+  coverage: z.ZodType<EvidenceCoverage, unknown>;
+  domain: z.ZodType<EvidenceDomain, unknown>;
+  elapsed_budget_class: z.ZodType<BudgetClass, unknown>;
+  evidence_authorities: z.ZodType<Array<string>, unknown>;
+  omitted_count: z.ZodType<number, unknown>;
+  producer_revision: z.ZodType<ComponentVersion, unknown>;
+  provenance_anchors: z.ZodType<Array<RetrievalAnchorId>, unknown>;
+  retriever_id: z.ZodType<RetrieverId, unknown>;
+  returned_count: z.ZodType<number, unknown>;
+  score_ids: z.ZodType<Array<string>, unknown>;
+  state: z.ZodType<RetrieverContributionState, unknown>;
+}, z.core.$strict> = z.object({
+  contract: z.lazy(() => ResultContractRefSchema),
+  coverage: z.lazy(() => EvidenceCoverageSchema),
+  domain: z.lazy(() => EvidenceDomainSchema),
+  elapsed_budget_class: z.lazy(() => BudgetClassSchema),
+  evidence_authorities: z.array(z.string()),
+  omitted_count: z.number().int().min(0),
+  producer_revision: z.lazy(() => ComponentVersionSchema),
+  provenance_anchors: z.array(z.lazy(() => RetrievalAnchorIdSchema)),
+  retriever_id: z.lazy(() => RetrieverIdSchema),
+  returned_count: z.number().int().min(0),
+  score_ids: z.array(z.string()),
+  state: z.lazy(() => RetrieverContributionStateSchema),
+}).strict();
+
+/** Terminal state reported by one retriever contribution. */
+export const RetrieverContributionStateSchema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "failed": "failed"; "partial": "partial"; "stale": "stale"; "timed_out": "timed_out"; "unavailable": "unavailable"; "unsupported": "unsupported" }> = z.enum(["cancelled", "completed", "failed", "partial", "stale", "timed_out", "unavailable", "unsupported"]);
+
+/** Stable, canonical catalog identity for `RetrieverId`. */
+export const RetrieverIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Safe adapter-independent retry instruction. Adapters preserve it verbatim. */
 export const RetryDirectiveSchema: z.ZodEnum<{ "after_delay": "after_delay"; "after_reconcile": "after_reconcile"; "after_revalidate": "after_revalidate"; "never": "never"; "same_request": "same_request" }> = z.enum(["after_delay", "after_reconcile", "after_revalidate", "never", "same_request"]);
@@ -8761,6 +9131,15 @@ export const SettingsPayloadV1Schema: z.ZodObject<{
   version: z.lazy(() => VersionSettingsPayloadV1Schema),
 });
 
+/** One field-level settings validation failure. */
+export const SettingsValidationIssueV1Schema: z.ZodObject<{
+  field: z.ZodType<string, unknown>;
+  message: z.ZodType<string, unknown>;
+}> = z.object({
+  field: z.string(),
+  message: z.string(),
+});
+
 /** Logical and verified physical identity of the shared Profile shard.
 
 Brain and profile IDs select the shard; the verified store locator binds its
@@ -8889,6 +9268,9 @@ recorded and neither task opportunity nor reliable host use telemetry
 exists, so it is never a failure. Snapshots written before that
 distinction stored `unknown` as `ignored`. */
 export const SkillOutcomeVerdictSchema: z.ZodEnum<{ "adopted": "adopted"; "too_early": "too_early"; "unknown": "unknown" }> = z.enum(["adopted", "too_early", "unknown"]);
+
+/** Stable, canonical catalog identity for `SortContractId`. */
+export const SortContractIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Byte range inside one sanitized source file. Mutable line numbers are
 never part of identity. */
@@ -9373,6 +9755,25 @@ export const TemporalModeV1Schema: z.ZodType<TemporalModeV1, unknown> = z.discri
 }).strict(), z.object({
   kind: z.literal("forensic"),
 }).strict()]);
+
+/** Temporal provenance for a packet. */
+export const TemporalStateSchema: z.ZodObject<{
+  code_graph_freshness: z.ZodOptional<z.ZodType<CodeGraphReadFreshnessV1 | null, unknown>>;
+  freshness: z.ZodType<FreshnessState, unknown>;
+  requested_at: z.ZodType<UtcMicros, unknown>;
+  requested_mode: z.ZodType<TemporalModeV1, unknown>;
+  resolved_at: z.ZodType<UtcMicros, unknown>;
+  source_generation: z.ZodType<CodeGenerationId | null, unknown>;
+  watermark_digest: z.ZodType<ManifestDigest | null, unknown>;
+}, z.core.$strict> = z.object({
+  code_graph_freshness: z.union([z.lazy(() => CodeGraphReadFreshnessV1Schema), z.null()]).optional(),
+  freshness: z.lazy(() => FreshnessStateSchema),
+  requested_at: z.lazy(() => UtcMicrosSchema),
+  requested_mode: z.lazy(() => TemporalModeV1Schema),
+  resolved_at: z.lazy(() => UtcMicrosSchema),
+  source_generation: z.union([z.lazy(() => CodeGenerationIdSchema), z.null()]),
+  watermark_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
+}).strict();
 
 export const TestMapMeasurementV1Schema: z.ZodObject<{
   algorithm: z.ZodType<string, unknown>;

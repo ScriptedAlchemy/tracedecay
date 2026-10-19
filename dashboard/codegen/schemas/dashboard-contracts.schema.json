@@ -1343,6 +1343,74 @@
       ],
       "type": "string"
     },
+    "ApplicationOutcome": {
+      "description": "Canonical outcome family for an admitted application operation.",
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "evidence",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/EvidencePacket"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "preview",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/PreviewResult"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "effect",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/EffectResult"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An operation-owned typed result that carries its own receipts, such as\na source-edit result with its durable effect, or a rendered document.",
+          "properties": {
+            "outcome": {
+              "const": "result",
+              "type": "string"
+            },
+            "value": true
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ApplicationProblemDetailV1": {
       "description": "The structured facts behind a problem. Adapters read these fields; the\nproblem's `message` is only their one human rendering.",
       "oneOf": [
@@ -1827,6 +1895,45 @@
     "AttemptId": {
       "description": "Strongly typed canonical identity: `AttemptId`.",
       "type": "string"
+    },
+    "AuthorityReceipt": {
+      "additionalProperties": false,
+      "description": "Proof that this request crossed the current authorization boundary.",
+      "properties": {
+        "authorized_scope_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "disclosure": {
+          "$ref": "#/$defs/DisclosureClass"
+        },
+        "grant_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "grant_id": {
+          "type": "string"
+        },
+        "grant_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy": {
+          "$ref": "#/$defs/PolicyDecisionRef"
+        },
+        "revalidated_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "grant_id",
+        "grant_revision",
+        "grant_digest",
+        "authorized_scope_digest",
+        "disclosure",
+        "policy",
+        "revalidated_at"
+      ],
+      "type": "object"
     },
     "AuthorizedRoot": {
       "additionalProperties": false,
@@ -3345,6 +3452,15 @@
       ],
       "type": "object"
     },
+    "BudgetClass": {
+      "description": "Bounded elapsed-work classification supplied by a retriever.",
+      "enum": [
+        "within_budget",
+        "approaching_limit",
+        "exhausted"
+      ],
+      "type": "string"
+    },
     "CallChainMeasurementV1": {
       "properties": {
         "complete": {
@@ -3449,6 +3565,22 @@
         "attempt_id",
         "request_id",
         "occurred_at"
+      ],
+      "type": "object"
+    },
+    "CancellationObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "stage": {
+          "$ref": "#/$defs/CancellationStage"
+        }
+      },
+      "required": [
+        "stage",
+        "observed_at"
       ],
       "type": "object"
     },
@@ -3812,6 +3944,43 @@
     "CodeGenerationId": {
       "description": "Strongly typed canonical identity: `CodeGenerationId`.",
       "type": "string"
+    },
+    "CodeGraphReadFreshnessV1": {
+      "description": "Freshness of the generation a verified graph read serves.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "current",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "rebuild_in_flight": {
+              "type": "boolean"
+            },
+            "sealed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "state": {
+              "const": "last_complete_stale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "sealed_at",
+            "rebuild_in_flight"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "CodeGraphServingReadinessV1": {
       "description": "Interactive graph-serving state for the latest sealed generation.\n\nA sealed generation can expose truthful census statistics before its graph\nprojection is ready to serve queries, so readiness is reported separately.",
@@ -4752,6 +4921,70 @@
       "description": "Strongly typed canonical identity: `ComponentVersion`.",
       "type": "string"
     },
+    "ConfigurationRefusalV1": {
+      "description": "Configuration refusals carrying the same stable codes as the HTTP routes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actual_revision_id": {
+              "type": "string"
+            },
+            "code": {
+              "const": "configuration_revision_conflict",
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "expected_revision_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "detail",
+            "expected_revision_id",
+            "actual_revision_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "const": "configuration_authority_unavailable",
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "detail"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "const": "application_contract_violation",
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "detail"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ConfigurationRevisionId": {
       "description": "Strongly typed canonical identity: `ConfigurationRevisionId`.",
       "type": "string"
@@ -5166,6 +5399,36 @@
           "type": "object"
         }
       ]
+    },
+    "DashboardConfigurationRefusalV1": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "validation_errors": {
+              "items": {
+                "$ref": "#/$defs/SettingsValidationIssueV1"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "detail",
+            "validation_errors"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ConfigurationRefusalV1"
+        },
+        {
+          "$ref": "#/$defs/ApplicationProblemEnvelope"
+        }
+      ],
+      "description": "Every refusal body produced by the dashboard configuration adapter. The\nuntagged wrapper preserves the existing validation, CAS, and application\nproblem wire formats while giving producers and consumers one authority."
     },
     "DashboardCoverageCompletenessV1": {
       "description": "Coverage completeness axis. `Unsupported` distinguishes \"the source that\nwould establish coverage is not wired\" from `Unknown` (\"coverage could not\nbe determined\").",
@@ -6917,6 +7180,70 @@
       ],
       "type": "object"
     },
+    "DashboardEnvelopeV130": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "$ref": "#/$defs/SettingsPayloadV1"
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
     "DashboardEnvelopeV14": {
       "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
       "properties": {
@@ -7484,6 +7811,19 @@
       "required": [
         "source",
         "watermark"
+      ],
+      "type": "object"
+    },
+    "Deadline": {
+      "additionalProperties": false,
+      "description": "One immutable deadline supplied by the caller or upstream admission layer.",
+      "properties": {
+        "expires_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "expires_at"
       ],
       "type": "object"
     },
@@ -11160,6 +11500,15 @@
       ],
       "type": "object"
     },
+    "DisclosureClass": {
+      "description": "Disclosure ceiling carried by an immutable grant and revalidated at sinks.",
+      "enum": [
+        "metadata",
+        "evidence",
+        "sensitive"
+      ],
+      "type": "string"
+    },
     "DoctorCoverageCompletenessV1": {
       "description": "Whether Doctor observed all of a family's evidence sources.",
       "oneOf": [
@@ -11729,6 +12078,49 @@
       ],
       "type": "object"
     },
+    "EffectResult": {
+      "additionalProperties": false,
+      "description": "Result of an admitted effect. `EffectUnknown` remains a receipt state and\ncannot be remapped into a pre-admission problem.",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityReceipt"
+        },
+        "effect_class": {
+          "$ref": "#/$defs/EffectClass"
+        },
+        "effect_id": {
+          "type": "string"
+        },
+        "execution": {
+          "$ref": "#/$defs/OperationReceipt"
+        },
+        "expected_state": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "payload": true,
+        "receipt": {
+          "$ref": "#/$defs/EffectReceipt"
+        },
+        "reconciliation": {
+          "$ref": "#/$defs/ReconciliationState"
+        }
+      },
+      "required": [
+        "effect_id",
+        "effect_class",
+        "idempotency_key",
+        "authority",
+        "expected_state",
+        "execution",
+        "reconciliation",
+        "receipt",
+        "payload"
+      ],
+      "type": "object"
+    },
     "EffectTermination": {
       "description": "Durable effect receipt terminal state.",
       "enum": [
@@ -11790,6 +12182,46 @@
         "active",
         "value",
         "description"
+      ],
+      "type": "object"
+    },
+    "EvidenceAuthority": {
+      "additionalProperties": false,
+      "description": "Evidence authority is separate from caller authority and cannot grant access.",
+      "properties": {
+        "evidence_id": {
+          "type": "string"
+        },
+        "horizon": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "producer": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/ComponentVersion"
+        },
+        "scope": {
+          "$ref": "#/$defs/ResolvedScope"
+        },
+        "source_kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "source_kind",
+        "producer",
+        "scope",
+        "revision",
+        "horizon"
       ],
       "type": "object"
     },
@@ -11857,6 +12289,184 @@
         "diagnostic"
       ],
       "type": "string"
+    },
+    "EvidencePacket": {
+      "additionalProperties": false,
+      "description": "Immutable evidence packet consumed by adapters and later planner work.",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityReceipt"
+        },
+        "contributions": {
+          "items": {
+            "$ref": "#/$defs/RetrieverContribution"
+          },
+          "type": "array"
+        },
+        "coverage": {
+          "$ref": "#/$defs/EvidenceCoverage"
+        },
+        "evidence_authorities": {
+          "items": {
+            "$ref": "#/$defs/EvidenceAuthority"
+          },
+          "type": "array"
+        },
+        "execution": {
+          "$ref": "#/$defs/OperationReceipt"
+        },
+        "omissions": {
+          "items": {
+            "$ref": "#/$defs/Omission"
+          },
+          "type": "array"
+        },
+        "page": {
+          "$ref": "#/$defs/PageState"
+        },
+        "payload": true,
+        "scores": {
+          "items": {
+            "$ref": "#/$defs/EvidenceScore"
+          },
+          "type": "array"
+        },
+        "temporal": {
+          "$ref": "#/$defs/TemporalState"
+        }
+      },
+      "required": [
+        "temporal",
+        "authority",
+        "evidence_authorities",
+        "coverage",
+        "omissions",
+        "scores",
+        "contributions",
+        "page",
+        "execution",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "EvidenceScore": {
+      "additionalProperties": false,
+      "properties": {
+        "calibration_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "calibration_valid": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "deterministic_components": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/EvidenceScoreKind"
+        },
+        "score_id": {
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/EvidenceScoreValue"
+        }
+      },
+      "required": [
+        "score_id",
+        "kind",
+        "value",
+        "calibration_revision",
+        "calibration_valid",
+        "deterministic_components"
+      ],
+      "type": "object"
+    },
+    "EvidenceScoreKind": {
+      "description": "Evidence score semantics. Scores are metadata, never authority.",
+      "enum": [
+        "ordinal_rank",
+        "heuristic_score",
+        "calibrated_probability",
+        "calibrated_interval"
+      ],
+      "type": "string"
+    },
+    "EvidenceScoreValue": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "ordinal",
+              "type": "string"
+            },
+            "rank": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "rank"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "fixed_point",
+              "type": "string"
+            },
+            "micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "interval",
+              "type": "string"
+            },
+            "lower_micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "upper_micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "lower_micros",
+            "upper_micros"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ExecutionBlockedCauseV1": {
       "description": "Cause a work item was blocked for.",
@@ -14459,6 +15069,15 @@
     },
     "FileOccurrenceId": {
       "description": "Strongly typed canonical identity: `FileOccurrenceId`.",
+      "type": "string"
+    },
+    "FreshnessState": {
+      "description": "Application-level freshness. Missing or partial truth never becomes current.",
+      "enum": [
+        "current",
+        "stale",
+        "unknown"
+      ],
       "type": "string"
     },
     "GenerateProposalRequest": {
@@ -20495,6 +21114,225 @@
       ],
       "type": "object"
     },
+    "Omission": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "domain": {
+          "$ref": "#/$defs/EvidenceDomain"
+        },
+        "reason": {
+          "$ref": "#/$defs/OmissionReason"
+        }
+      },
+      "required": [
+        "domain",
+        "count",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "OmissionReason": {
+      "description": "Safe reason why authorized requested evidence was omitted.",
+      "oneOf": [
+        {
+          "enum": [
+            "budget",
+            "redacted",
+            "unavailable",
+            "unsupported",
+            "stale",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "conflict"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "macro_body_unparsed",
+          "description": "Evidence came from a macro body that was not expanded, so what the\nexpansion defines or calls is not covered.",
+          "type": "string"
+        },
+        {
+          "const": "import_unmodeled",
+          "description": "A caller sits under a `use` whose binding the index could not model\n(a glob in a block or inline module), so whether it calls the target\nis not covered.",
+          "type": "string"
+        },
+        {
+          "const": "cursor_expired",
+          "description": "The continuation cursor can no longer be redeemed (its lifetime ended\nor the snapshot it pages is gone); restart the request without it.",
+          "type": "string"
+        },
+        {
+          "const": "cursor_foreign",
+          "description": "The continuation cursor was issued for another project, worktree, or\nref; redeem it where it was issued.",
+          "type": "string"
+        }
+      ]
+    },
+    "OperationBudgetUsage": {
+      "additionalProperties": false,
+      "description": "Bounded work accounting supplied by an owning port or transaction.",
+      "properties": {
+        "bytes_consumed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "elapsed_micros": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "units_consumed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "units_consumed",
+        "bytes_consumed",
+        "elapsed_micros"
+      ],
+      "type": "object"
+    },
+    "OperationReceipt": {
+      "additionalProperties": false,
+      "description": "Canonical operation evidence. An admitted failure remains represented here\nrather than being replaced by a transport exception.",
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/OperationBudgetUsage"
+        },
+        "cancellation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CancellationObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_deadline": {
+          "$ref": "#/$defs/Deadline"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "started_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "termination": {
+          "$ref": "#/$defs/OperationTermination"
+        }
+      },
+      "required": [
+        "started_at",
+        "ended_at",
+        "effective_deadline",
+        "cancellation",
+        "budget",
+        "termination"
+      ],
+      "type": "object"
+    },
+    "OperationTermination": {
+      "description": "Terminal state after an operation has been admitted.",
+      "enum": [
+        "completed",
+        "cancelled",
+        "timed_out",
+        "failed",
+        "unavailable",
+        "partial",
+        "effect_unknown"
+      ],
+      "type": "string"
+    },
+    "PageCursor": {
+      "description": "Exact continuation authority for the enclosing evidence page: an opaque\ncursor bound to the operation and request that minted it.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "opaque",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "cursor"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PageState": {
+      "additionalProperties": false,
+      "description": "Stable page state. General cursor bytes stay opaque until authorization is\nrevalidated; structural fact cursors retain their canonical ordering type.",
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PageCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "returned": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sort_contract_id": {
+          "$ref": "#/$defs/SortContractId"
+        },
+        "sort_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sort_contract_id",
+        "sort_revision",
+        "total",
+        "returned",
+        "cursor",
+        "expires_at"
+      ],
+      "type": "object"
+    },
     "PauseWorkRunCommand": {
       "additionalProperties": false,
       "properties": {
@@ -20675,6 +21513,33 @@
       ],
       "type": "object"
     },
+    "PolicyDecisionRef": {
+      "additionalProperties": false,
+      "description": "A policy decision pinned into a receipt or provider identity.",
+      "properties": {
+        "decision_id": {
+          "type": "string"
+        },
+        "digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "evaluator_revision": {
+          "$ref": "#/$defs/ComponentVersion"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "decision_id",
+        "revision",
+        "digest",
+        "evaluator_revision"
+      ],
+      "type": "object"
+    },
     "PolicyIdentifierV1": {
       "description": "A bounded, canonical identifier owned by the policy input schema.\n\nIt represents immutable references only; it is never a path, display\nlabel, provider account, branch name, or native object identifier.",
       "type": "string"
@@ -20771,6 +21636,41 @@
         "change",
         "causation_event_id",
         "evidence"
+      ],
+      "type": "object"
+    },
+    "PreviewResult": {
+      "additionalProperties": false,
+      "description": "Read-only preview of a future typed effect.",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityReceipt"
+        },
+        "effect_class": {
+          "$ref": "#/$defs/EffectClass"
+        },
+        "execution": {
+          "$ref": "#/$defs/OperationReceipt"
+        },
+        "expected_state": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "payload": true,
+        "preview_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "preview_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "preview_id",
+        "preview_digest",
+        "effect_class",
+        "authority",
+        "expected_state",
+        "execution",
+        "payload"
       ],
       "type": "object"
     },
@@ -21300,6 +22200,29 @@
       ],
       "type": "object"
     },
+    "ProjectSettingsPatchResponseV1": {
+      "properties": {
+        "application_outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApplicationOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact application settlement returned by the configuration binding.\n`None` means the submitted patch was already the current state."
+        },
+        "current": {
+          "$ref": "#/$defs/DashboardEnvelopeV130"
+        }
+      },
+      "required": [
+        "application_outcome",
+        "current"
+      ],
+      "type": "object"
+    },
     "ProjectSettingsPayloadV1": {
       "properties": {
         "config": {
@@ -21765,6 +22688,15 @@
         "locally_measured",
         "estimated",
         "unknown"
+      ],
+      "type": "string"
+    },
+    "ReconciliationState": {
+      "description": "Reconciliation state retained after an admitted effect.",
+      "enum": [
+        "pending",
+        "reconciled",
+        "failed"
       ],
       "type": "string"
     },
@@ -22512,6 +23444,94 @@
     },
     "RetrievalAnchorId": {
       "description": "Strongly typed canonical identity: `RetrievalAnchorId`.",
+      "type": "string"
+    },
+    "RetrieverContribution": {
+      "additionalProperties": false,
+      "description": "One source-owned contribution to the packet fold.",
+      "properties": {
+        "contract": {
+          "$ref": "#/$defs/ResultContractRef"
+        },
+        "coverage": {
+          "$ref": "#/$defs/EvidenceCoverage"
+        },
+        "domain": {
+          "$ref": "#/$defs/EvidenceDomain"
+        },
+        "elapsed_budget_class": {
+          "$ref": "#/$defs/BudgetClass"
+        },
+        "evidence_authorities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "omitted_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "producer_revision": {
+          "$ref": "#/$defs/ComponentVersion"
+        },
+        "provenance_anchors": {
+          "items": {
+            "$ref": "#/$defs/RetrievalAnchorId"
+          },
+          "type": "array"
+        },
+        "retriever_id": {
+          "$ref": "#/$defs/RetrieverId"
+        },
+        "returned_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "score_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/RetrieverContributionState"
+        }
+      },
+      "required": [
+        "retriever_id",
+        "contract",
+        "producer_revision",
+        "domain",
+        "state",
+        "coverage",
+        "returned_count",
+        "omitted_count",
+        "score_ids",
+        "provenance_anchors",
+        "evidence_authorities",
+        "elapsed_budget_class"
+      ],
+      "type": "object"
+    },
+    "RetrieverContributionState": {
+      "description": "Terminal state reported by one retriever contribution.",
+      "enum": [
+        "completed",
+        "partial",
+        "unavailable",
+        "unsupported",
+        "stale",
+        "failed",
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "RetrieverId": {
+      "description": "Stable, canonical catalog identity for `RetrieverId`.",
       "type": "string"
     },
     "RetryDirective": {
@@ -24500,6 +25520,22 @@
       ],
       "type": "object"
     },
+    "SettingsValidationIssueV1": {
+      "description": "One field-level settings validation failure.",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "message"
+      ],
+      "type": "object"
+    },
     "SharedProfileStoreLocatorV1": {
       "additionalProperties": false,
       "description": "Logical and verified physical identity of the shared Profile shard.\n\nBrain and profile IDs select the shard; the verified store locator binds its\nphysical store. Lease incarnations and authority epochs remain runtime fences.",
@@ -24854,6 +25890,10 @@
         "too_early",
         "unknown"
       ],
+      "type": "string"
+    },
+    "SortContractId": {
+      "description": "Stable, canonical catalog identity for `SortContractId`.",
       "type": "string"
     },
     "SourceSpan": {
@@ -26363,6 +27403,63 @@
           "type": "object"
         }
       ]
+    },
+    "TemporalState": {
+      "additionalProperties": false,
+      "description": "Temporal provenance for a packet.",
+      "properties": {
+        "code_graph_freshness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeGraphReadFreshnessV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "freshness": {
+          "$ref": "#/$defs/FreshnessState"
+        },
+        "requested_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "requested_mode": {
+          "$ref": "#/$defs/TemporalModeV1"
+        },
+        "resolved_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "source_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeGenerationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "watermark_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "requested_mode",
+        "requested_at",
+        "resolved_at",
+        "source_generation",
+        "watermark_digest",
+        "freshness"
+      ],
+      "type": "object"
     },
     "TestMapMeasurementV1": {
       "properties": {
@@ -35946,6 +37043,12 @@
     "settings_project_patch": {
       "$ref": "#/$defs/ProjectSettingsPatch"
     },
+    "settings_project_patch_response": {
+      "$ref": "#/$defs/ProjectSettingsPatchResponseV1"
+    },
+    "settings_refusal": {
+      "$ref": "#/$defs/DashboardConfigurationRefusalV1"
+    },
     "settings_user_patch": {
       "$ref": "#/$defs/UserSettingsPatch"
     },
@@ -36198,6 +37301,8 @@
     "code_index_freshness",
     "settings",
     "settings_project_patch",
+    "settings_project_patch_response",
+    "settings_refusal",
     "settings_user_patch",
     "settings_code_index_worker_patch",
     "observatory",
