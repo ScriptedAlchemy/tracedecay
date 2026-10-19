@@ -27,6 +27,7 @@
 #   HOSTS                space-separated: "claude", "codex", or "claude codex" (default: claude)
 #   SCENARIOS            space-separated scenario ids to run (default: all active)
 #   EVAL_INCLUDE_DEFERRED=1   also run scenarios with status="deferred"
+#   EVAL_INCLUDE_BASELINE=1   also run the held-out product-effectiveness cohort
 #   CLAUDE_MODELS        space-separated Claude matrix (default: opus sonnet)
 #   CODEX_MODELS         space-separated Codex matrix (default: gpt-5.6-sol)
 #   CODEX_REASONING_EFFORT Codex reasoning effort (default: medium)
@@ -76,9 +77,9 @@ REPEATED_QUERY_HINTS="${REPEATED_QUERY_HINTS:-off}"
 
 # Ablation matrix. Default is "full" only (all discovery channels on) to keep
 # cost bounded, each extra condition multiplies the number of live agent runs.
-# Opt in with e.g. CHANNELS="full no-hints no-skills bare cli-only". See the README.
+# Opt in with e.g. CHANNELS="native bare" or "full no-hints". See the README.
 CHANNELS="${CHANNELS:-full}"
-KNOWN_CONDITIONS="full no-hints no-skills bare cli-only"
+KNOWN_CONDITIONS="native bare full no-hints no-skills cli-only"
 for c in $CHANNELS; do
   case " $KNOWN_CONDITIONS " in
     *" $c "*) : ;;
@@ -399,6 +400,7 @@ build_fixture() {
 
 fixture_main="$work/fixture-main"
 fixture_broken="$work/fixture-broken"
+setup_started_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
 echo "indexing fixture-main (with seeded git history)..."
 build_fixture "$fixture_main" clean history
 if [[ -n "${LEARNED_SKILL_GENERATE:-}" ]]; then
@@ -476,11 +478,53 @@ if [[ "$REPEATED_QUERY_HINTS" == on ]]; then
   fi
 fi
 
-git_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+setup_elapsed_ms=$(( ($(python3 -c 'import time; print(time.monotonic_ns())') - setup_started_ns) / 1000000 ))
+git_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo unknown)"
+binary_path_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$TD")"
+binary_sha256="$(python3 - "$TD" <<'PY'
+import hashlib, sys
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as binary:
+    for chunk in iter(lambda: binary.read(1 << 20), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+)"
+binary_version="$("$TD" --version 2>/dev/null | head -1 | tr -d '\n')"
+fixture_digest() {
+  python3 - "$1" <<'PY'
+import hashlib, os, sys
+root = sys.argv[1]
+digest = hashlib.sha256()
+for base, dirs, files in os.walk(root):
+    dirs[:] = sorted(d for d in dirs if d != ".git")
+    for name in sorted(files):
+        path = os.path.join(base, name)
+        relative = os.path.relpath(path, root).replace(os.sep, "/")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        with open(path, "rb") as contents:
+            for chunk in iter(lambda: contents.read(1 << 20), b""):
+                digest.update(chunk)
+print(digest.hexdigest())
+PY
+}
+fixture_main_sha256="$(fixture_digest "$fixture_main")"
+fixture_broken_sha256="$(fixture_digest "$fixture_broken")"
 cat > "$run_dir/meta.json" <<JSON
 {
   "git_sha": "$git_sha",
+  "binary_path": $binary_path_json,
+  "binary_sha256": "$binary_sha256",
+  "binary_version": "$binary_version",
+  "fixture_sha256": "$fixture_main_sha256",
+  "fixture_hashes": {"main": "$fixture_main_sha256", "broken": "$fixture_broken_sha256"},
+  "fixture_setup_elapsed_ms": $setup_elapsed_ms,
   "hosts": {"claude": {"models": "$CLAUDE_MODELS"}, "codex": {"models": "$CODEX_MODELS"}},
+  "channels": "$CHANNELS",
+  "selected_scenarios": "${SCENARIOS:-all-active}",
+  "repetitions": $REPS,
+  "codex_reasoning_effort": "$CODEX_REASONING_EFFORT",
   "scenario_timeout_s": $SCENARIO_TIMEOUT,
   "repeated_query_hints": "$REPEATED_QUERY_HINTS",
   "work_dir": "$work"
@@ -495,6 +539,8 @@ JSON
 # fixed --mcp-config + --strict-mcp-config.
 #
 # Condition -> channels:
+#   native    no MCP, plugin, hooks, skills, or TraceDecay CLI access
+#   bare      MCP descriptions only; no hooks, skills, or steering
 #   full      hooks ON  | skills ON  | steering=plugin    (candidate plugin, hermetic profile)
 #   no-hints  hooks OFF | skills ON  | steering=fixed     (isolates skill/description efficacy)
 #   no-skills hooks ON  | skills OFF | steering=fixed     (isolates hint/description efficacy)
@@ -515,6 +561,7 @@ fi
 provision_variant() {
   # $1 = condition; provisions $work/plugins/<cond> (hermetic plugin copy).
   local cond="$1" d="$work/plugins/$1"
+  [[ "$cond" == "native" ]] && return 0
   [[ -d "$d" ]] && return 0
   mkdir -p "$work/plugins"
   cp -R "$plugin_src" "$d"
@@ -539,6 +586,12 @@ CLAUDE_EXTRA=()
 claude_extra_for() {
   CLAUDE_EXTRA=()
   local cond="$1" fdir="$2"
+  if [[ "$cond" == "native" ]]; then
+    CLAUDE_EXTRA=(--setting-sources user,project,local
+                  --strict-mcp-config --mcp-config "$empty_mcp_cfg"
+                  --add-dir "$fdir")
+    return 0
+  fi
   if [[ "$have_plugin" != "1" ]]; then
     echo "error: candidate plugin dir missing; cannot run '$cond' hermetically" >&2
     return 2
@@ -560,9 +613,9 @@ claude_extra_for() {
 }
 
 # ---- select scenarios ------------------------------------------------------ #
-python3 - "$EVAL_SCENARIOS_DIR" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" "$LEARNED_SKILL_WORKFLOW" > "$work/selected.tsv" <<'PY'
+python3 - "$EVAL_SCENARIOS_DIR" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" "$LEARNED_SKILL_WORKFLOW" "${EVAL_INCLUDE_BASELINE:-0}" > "$work/selected.tsv" <<'PY'
 import json, os, sys
-sdir, filt, incl_def, workflow = sys.argv[1], sys.argv[2].split(), sys.argv[3] == "1", sys.argv[4]
+sdir, filt, incl_def, workflow, incl_baseline = sys.argv[1], sys.argv[2].split(), sys.argv[3] == "1", sys.argv[4], sys.argv[5] == "1"
 for fn in sorted(os.listdir(sdir)):
     if not fn.endswith(".json"):
         continue
@@ -570,7 +623,9 @@ for fn in sorted(os.listdir(sdir)):
     if workflow:
         if (s.get("learned_skill") or {}).get("workflow") != workflow:
             continue
-    elif s.get("status") == "learned" or (s.get("status") == "deferred" and not incl_def):
+    elif (s.get("status") == "learned"
+          or (s.get("status") == "deferred" and not incl_def)
+          or (s.get("status") == "baseline" and not incl_baseline)):
         continue
     if filt and s["id"] not in filt:
         continue
@@ -583,8 +638,11 @@ PY
 # ---- run each scenario x host x condition ---------------------------------- #
 run_claude() {
   # Uses the global CLAUDE_EXTRA array set by claude_extra_for.
-  local prompt="$1" fixture="$2" out="$3" err="$4" model="$5" home="$6"
+  local prompt="$1" fixture="$2" out="$3" err="$4" model="$5" home="$6" condition="$7"
   local allowed="Read,Glob,Grep,Task,Agent,Skill,mcp__tracedecay__*,mcp__plugin_tracedecay_graph__*,Bash(tracedecay tool *),Bash($TD tool *)"
+  if [[ "$condition" == "native" ]]; then
+    allowed="Read,Write,Edit,Glob,Grep,Task,Agent,Skill"
+  fi
   ( cd "$fixture" && HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" PATH="$EVAL_PATH" \
       timeout "$SCENARIO_TIMEOUT" claude -p "$prompt" \
       --output-format stream-json --verbose --include-hook-events \
@@ -635,35 +693,48 @@ PY
 # One live scenario x host x model x condition x repetition. Runs in a
 # background subshell when PARALLEL > 1, so it must not mutate shared state.
 run_one() {
-  local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7" variant="$8" effect="${9:-0}"
-  local fdir out err start end rc=0 timed_out=false home="$CLAUDE_EVAL_HOME" learned=""
+  local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7" variant="$8" effect="${9:-0}" rep="${10:-1}"
+  local fdir out err start end duration_ms scenario_sha256 fixture_sha model_settings_json="{}" rc=0 timed_out=false home="$CLAUDE_EVAL_HOME" learned=""
   if [[ -n "$variant" ]]; then
     home="${VARIANT_HOME[$variant]}"
     learned=",\"learned_skill_variant\":\"$variant\",\"learned_skill_id\":\"${VARIANT_SKILL[$variant]}\""
   fi
+  [[ "$host" == "codex" ]] && model_settings_json="{\"reasoning_effort\":\"$CODEX_REASONING_EFFORT\"}"
   fdir="$(fixture_dir_for "$fixture")"
+  scenario_sha256="$(python3 - "$EVAL_SCENARIOS_DIR/$sid.json" <<'PY'
+import hashlib, sys
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as scenario:
+    for chunk in iter(lambda: scenario.read(1 << 20), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+)"
+  fixture_sha="$fixture_main_sha256"
+  [[ "$fixture" == "broken" ]] && fixture_sha="$fixture_broken_sha256"
   out="$run_dir/${base}.stdout.jsonl"
   err="$run_dir/${base}.stderr.log"
   echo "RUN  $sid [$host/$model/$cond${variant:+/v-$variant}] ..."
-  start=$(date +%s)
+  start="$(python3 -c 'import time; print(time.monotonic_ns())')"
   if [[ "$host" == "claude" ]]; then
     claude_extra_for "$cond" "$fdir"
-    run_claude "$prompt" "$fdir" "$out" "$err" "$model" "$home" || rc=$?
+    run_claude "$prompt" "$fdir" "$out" "$err" "$model" "$home" "$cond" || rc=$?
   else
     run_codex "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
   fi
-  end=$(date +%s)
+  end="$(python3 -c 'import time; print(time.monotonic_ns())')"
+  duration_ms=$(( (end - start) / 1000000 ))
   [[ $rc -eq 124 ]] && timed_out=true
   [[ "$effect" == 1 ]] && snapshot_effects "$fdir" "$run_dir/${base}.effects.json"
   cat > "$run_dir/${base}.meta.json" <<JSON
-{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","repeated_query_hints":"$REPEATED_QUERY_HINTS","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out$learned}
+{"scenario_id":"$sid","scenario_sha256":"$scenario_sha256","host":"$host","model":"$model","model_settings":$model_settings_json,"rep":$rep,"fixture":"$fixture","fixture_sha256":"$fixture_sha","binary_sha256":"$binary_sha256","channel_condition":"$cond","repeated_query_hints":"$REPEATED_QUERY_HINTS","exit_code":$rc,"duration_ms":$duration_ms,"timed_out":$timed_out$learned}
 JSON
-  echo "     $sid [$host/$model/$cond${variant:+/v-$variant}] rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
+  echo "     $sid [$host/$model/$cond${variant:+/v-$variant}] rc=$rc dur=$((duration_ms / 1000)).$((duration_ms % 1000))s bytes=$(wc -c <"$out")"
 }
 
 for cond in $CHANNELS; do
 # Provision each condition once, before any concurrent run could race on it.
-[[ "$have_plugin" == "1" ]] && provision_variant "$cond"
+[[ "$have_plugin" == "1" && "$cond" != "native" ]] && provision_variant "$cond"
 while IFS=$'\t' read -r sid host fixture effect prompt; do
   [[ -z "$sid" ]] && continue
   case " $HOSTS " in *" $host "*) : ;; *) continue ;; esac
@@ -698,12 +769,12 @@ while IFS=$'\t' read -r sid host fixture effect prompt; do
   fi
   if [[ "$effect" == 1 ]]; then
     wait  # nothing else may touch the shared fixture while it is mutated
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 1
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 1 "$rep"
   elif [[ "$PARALLEL" -gt 1 ]]; then
     while (( $(jobs -rp | wc -l) >= PARALLEL )); do wait -n || true; done
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0 &
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0 "$rep" &
   else
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0 "$rep"
   fi
   done
   done
@@ -715,7 +786,13 @@ wait
 # ---- grade ----------------------------------------------------------------- #
 if [[ "$live" == "1" ]]; then
   echo "grading..."
-  python3 "$here/grade.py" --run-dir "$run_dir" --scenarios "$EVAL_SCENARIOS_DIR" || true
+  grade_args=(--run-dir "$run_dir" --scenarios "$EVAL_SCENARIOS_DIR")
+  [[ -n "${EFFICIENCY_SCORECARD:-}" ]] && grade_args+=(--efficiency-scorecard "$EFFICIENCY_SCORECARD")
+  if [[ -n "${EFFICIENCY_SCORECARD:-}" ]]; then
+    python3 "$here/grade.py" "${grade_args[@]}" || exit 1
+  else
+    python3 "$here/grade.py" "${grade_args[@]}" || true
+  fi
   if [[ -n "${EVAL_OUT:-}" ]]; then
     mkdir -p "$EVAL_OUT"
     cp "$run_dir/scoreboard.json" "$run_dir/report.md" "$EVAL_OUT/" 2>/dev/null || true

@@ -1,0 +1,31 @@
+{
+  "id": "baseline_currency_decision",
+  "category": "product_effectiveness",
+  "hosts": [
+    "claude"
+  ],
+  "fixture": "main",
+  "status": "baseline",
+  "prompt": "Was multi-currency support accepted or rejected, and what units are order totals stored in?",
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "identifies the rejection",
+          "pattern": "\\brejected\\b"
+        },
+        {
+          "id": "identifies the 2026-05 review",
+          "pattern": "\\b2026\\-05\\b"
+        },
+        {
+          "id": "states USD cents",
+          "pattern": "\\bUSD cents\\b"
+        }
+      ]
+    }
+  },
+  "seeded_fact": "currency_fact_id",
+  "notes": "New held-out session-memory task with structured answer checks; this decision is seeded in memory but is not present in the fixture source."
+}

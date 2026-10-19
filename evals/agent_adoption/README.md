@@ -77,21 +77,104 @@ paths, so do **not** commit run artifacts.
 |-----|---------|---------|
 | `TRACEDECAY_AGENT_EVALS` | unset | must be `1` to launch agents (else dry run) |
 | `HOSTS` | `claude` | `claude`, `codex`, or `claude codex` |
-| `CHANNELS` | `full` | ablation conditions: any of `full no-hints no-skills bare cli-only` |
+| `CHANNELS` | `full` | conditions: `native bare full no-hints no-skills cli-only` |
 | `SCENARIOS` | all active | space-separated scenario ids to run |
 | `EVAL_INCLUDE_DEFERRED` | `0` | also run `status:"deferred"` scenarios |
+| `EVAL_INCLUDE_BASELINE` | `0` | include held-out product-effectiveness scenarios |
 | `CLAUDE_MODELS` | `opus sonnet` | space-separated `claude --model` matrix |
 | `CODEX_MODELS` | `gpt-5.6-sol` | space-separated `codex exec -m` matrix |
 | `CODEX_REASONING_EFFORT` | `medium` | Codex reasoning effort passed through `model_reasoning_effort` |
 | `SCENARIO_TIMEOUT` | `240` | per scenario wall-clock seconds |
-| `REPS` | `1` | repetitions per scenario x host x model x condition cell; `>1` suffixes transcripts with `__r<N>` and the grader pools the repetitions, so a cell of n=15 gives a usable exact-binomial interval instead of a single draw |
+| `REPS` | `1` | repetitions per scenario x host x model x condition cell; repeated outcomes are reported with Wilson intervals and observed cost/latency ranges |
 | `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
 | `REPEATED_QUERY_HINTS` | `off` | `on` turns on the profile setting `user.repeated_query_hints.v1` for the eval's isolated profile before any agent launches, and suffixes transcripts with `__qhints`; see "Repeated-query hints on vs off" |
 | `REAL_CLAUDE_DIR` | `$CLAUDE_CONFIG_DIR` or `~/.claude` | where the Claude credential comes from: its `.claude_code_oauth_token` and `settings.json` `env`/`model` keys; see "Store isolation & auth" |
 | `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
+| `EFFICIENCY_SCORECARD` | unset | optional no-model scorecard path, joined only when its binary digest matches |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
 | `LEARNED_SKILL_WORKFLOW` | unset | run only that workflow's held-out scenarios, once per variant, on `full` |
 | `LEARNED_SKILL_VARIANTS` | `none generated manual` | learned-skill variants to compare |
+
+## Product-effectiveness baseline
+
+The opt-in `baseline_*` cohort adds three neutral, independently graded tasks:
+code-path explanation, a behavior-preserving source edit (including a check
+against a harmful boundary change), and recall of a seeded prior decision.
+They are excluded from ordinary adoption runs. Run them with one host/model,
+one artifact, identical prompts, and repeated trials:
+
+```sh
+TRACEDECAY_AGENT_EVALS=1 EVAL_INCLUDE_BASELINE=1 HOSTS=claude \
+  CLAUDE_MODELS=sonnet \
+  SCENARIOS="baseline_order_stock_failure baseline_stock_check_rename baseline_currency_decision" \
+  CHANNELS="native bare no-hints no-skills full" REPS=3 \
+  evals/agent_adoption/run.sh
+```
+
+This is 45 live agent turns; the existing explicit `TRACEDECAY_AGENT_EVALS=1`
+opt-in remains required. Native runs receive only Claude's standard file tools
+and no TraceDecay MCP/plugin/CLI surface; the native condition is Claude-only.
+`bare` exposes MCP tool descriptions without hooks or skills. `no-hints` and
+`no-skills` are the existing channel ablations; `full` is the ordinary bundled
+experience. Read per-task results rather than adoption averages: the same
+successful answer or edit counts regardless of whether a product surface was
+invoked. Channel ablations retain their documented steering differences, so
+they are descriptive unless prompt steering is also controlled.
+
+The report includes per-task pass rates with Wilson intervals, observed
+run-to-run cost/latency ranges, tool attempts/failures, and deltas against the
+same task/model's native run. Token and USD values remain unknown when the host
+does not report usage. One-time fixture initialization/indexing time is shown
+separately and is not silently spread across tasks. For cold startup, indexing,
+restart, incremental-sync, storage, and RSS measurements, run the existing
+no-model scorecard against the same binary and join it when grading:
+
+```sh
+TRACEDECAY_BIN="$(python3 - "$RUN_DIR/meta.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["binary_path"])
+PY
+)"
+scripts/efficiency-scorecard.py --binary "$TRACEDECAY_BIN" --runs 3 \
+  --output target/efficiency-scorecard
+evals/agent_adoption/grade.py --run-dir "$RUN_DIR" \
+  --efficiency-scorecard target/efficiency-scorecard/scorecard.json
+```
+
+The scorecard is rejected unless its binary SHA-256 equals the agent run's
+recorded artifact digest. Its wall times and resource measurements remain a
+separate cost dimension rather than being converted to model tokens or dollars.
+No live-model task outcomes or usage values are checked into the repository.
+
+### Related product-surface dispositions
+
+The task cohort and runtime scorecard do not measure dashboard navigation
+interactions, Work/Remote Brain resident-state footprint, or language-specific
+quality and demand. Therefore they do not authorize removing those surfaces.
+
+| proposal | disposition from available evidence |
+|---|---|
+| #4220 dashboard navigation and Work projections | Defer removals. #3653 preserves distinct discovery semantics and shared Work query plumbing; this baseline has no dashboard interaction evidence. Keep deep links and all current projections. |
+| #4223 Work/Workflow default footprint | Defer default or ownership changes. #3656 qualifies Work and Remote Brain jobs; this baseline does not measure their initialization, resident state, or operator steps. Preserve histories and mounted journeys. |
+| #4229 additional grammar defaults | Defer profile changes. This baseline has no language-quality, demand, or matched core-versus-extras build measurement. Preserve advertised language support rather than inferring non-use. |
+
+These are explicit deferrals, not keep/remove verdicts. The related empirical
+acceptance remains open until the corresponding task, resource, and quality
+measurements exist.
+
+No paid-model runs were launched for this change, so there are no new observed
+effectiveness or usage values and no capability keep/remove verdict. The
+executable cohort can compare native tools with the MCP core and existing
+channel variants. The prior learned-skill and optional repeated-query/Scout
+evaluations (#3654/#3655) remain prior work; they were not rerun or replaced.
+Hook/skill ablations retain the runner's existing steering differences and
+must not be read as isolated causal effects until those are controlled.
+
+| capability | current disposition |
+|---|---|
+| MCP core versus native tools | Defer a product-value verdict until the held-out tasks are run; this checkout contains no model outcomes. |
+| Hook guidance and skills | Defer individual keep/simplify/remove decisions; existing comparisons are executable, but this change has no run evidence and their steering conditions differ. |
+| Learned skills and repeated-query/Scout guidance | Preserve the prior #3654/#3655 qualification; no new outcome result or default change is claimed here. |
 
 ### Cost expectations
 

@@ -125,6 +125,8 @@ def test_channels():
     # unprompted: bare condition, adoption with nothing to credit.
     tr = transcript([claude_tool(TD, {}), claude_result("done")])
     check("channel: unprompted under bare", grade.attribute_channel(tr, "bare") == grade.CH_UNPROMPTED)
+    check("channel: native run has no TraceDecay adoption",
+          grade.attribute_channel(transcript([claude_result("done")]), "native") == grade.CH_NONE)
 
     # CLI-only: the plugin has agents/skills but no MCP registration. A Bash
     # call to the TraceDecay CLI is still adoption and must retain tool identity.
@@ -383,6 +385,14 @@ def test_end_to_end():
         os.makedirs(rdir)
         with open(os.path.join(sdir, "explore_reserve_stock.json"), "w") as f:
             json.dump(scn, f)
+        with open(os.path.join(rdir, "meta.json"), "w") as f:
+            json.dump({
+                "git_sha": "source-revision",
+                "binary_sha256": "artifact-digest",
+                "binary_version": "tracedecay test",
+                "fixture_sha256": "fixture-digest",
+                "fixture_setup_elapsed_ms": 1250,
+            }, f)
 
         # full condition, steering-driven, correct answer.
         answer = "The reserve_stock function decrements on-hand stock."
@@ -430,8 +440,17 @@ def test_end_to_end():
         agg = sb["aggregate"]["claude"]
         check("e2e: adoption_rate 1.0", agg["adoption_rate"] == 1.0)
         check("e2e: per-condition present", set(agg["conditions"]) == {"full", "bare"})
+        check("e2e: no native baseline is reported as missing",
+              all(cell["comparison_to_native"]["status"] == "missing_native_baseline"
+                  for cell in sb["effectiveness"].values()))
+        check("e2e: artifact and one-time setup identity preserved",
+              sb["meta"]["binary_sha256"] == "artifact-digest"
+              and sb["meta"]["fixture_setup_elapsed_ms"] == 1250)
         report = open(os.path.join(rdir, "report.md")).read()
         check("e2e: report has channel table", "Channel efficacy" in report)
+        check("e2e: report includes effectiveness and unknown setup attribution",
+              "Matched task effectiveness and observed cost" in report
+              and "1250 ms" in report)
         check("e2e: run meta hint setting reaches the scoreboard",
               by_cond["bare"].get("repeated_query_hints") == "on"
               and by_cond["full"].get("repeated_query_hints") == "off")
@@ -667,6 +686,152 @@ def test_cost_and_corrections():
           (d["tool_errors"], d["repeated_calls"], d["corrections"]) == (1, 1, 2), str(d))
     check("corrections: review words counted", d["review_words"] == 3)
     check("cost: scored result carries cost", scored["cost"] == tr.cost)
+
+
+def test_product_effectiveness_comparisons():
+    scenario = {
+        "id": "baseline_sample",
+        "category": "product_effectiveness",
+        "outcome": answer_outcome("correct"),
+    }
+
+    def scored(condition, answer, usage, elapsed):
+        event = {"type": "result", "result": answer}
+        if usage is not None:
+            event["usage"] = usage
+        return grade.score_scenario(
+            scenario,
+            transcript([json.dumps(event)]),
+            {},
+            {
+                "model": "sonnet",
+                "channel_condition": condition,
+                "duration_ms": elapsed,
+                "repeated_query_hints": "off",
+            },
+        )
+
+    rows = [
+        scored("native", "correct answer", {
+            "input_tokens": 100, "output_tokens": 20,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        }, 1000),
+        scored("native", "wrong answer", {
+            "input_tokens": 120, "output_tokens": 30,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        }, 1100),
+        scored("bare", "correct answer", None, 900),
+        scored("full", "correct answer", {"input_tokens": 80, "output_tokens": 10}, 800),
+    ]
+    for row in rows:
+        row["tool_success"] = {"attempted": 0, "failed": 0}
+    invalid = [{
+        "id": "baseline_sample",
+        "host": "claude",
+        "model": "sonnet",
+        "condition": "native",
+        "repeated_query_hints": "off",
+        "runner_elapsed_ms": 1200,
+        "outcome_kind": "answer",
+    }]
+    cells = grade.effectiveness_comparisons(rows, invalid)
+    native = cells["baseline_sample / claude/sonnet / native / hints-off"]
+    bare = cells["baseline_sample / claude/sonnet / bare / hints-off"]
+    full = cells["baseline_sample / claude/sonnet / full / hints-off"]
+    check("effectiveness: task success is grouped independently of adoption",
+          native["correctness"]["pass_rate"] == 0.5 and native["correctness"]["wilson_95"] is not None)
+    check("effectiveness: condition effect is compared on the same task/model",
+          full["comparison_to_native"]["success_rate_delta"] == round(2 / 3, 4)
+          and bare["comparison_to_native"]["success_rate_delta"] == round(2 / 3, 4))
+    check("effectiveness: invalid launches count as unsuccessful attempts",
+          native["task_success"]["attempts"] == 3
+          and native["task_success"]["invalid_runs"] == 1
+          and native["task_success"]["pass_rate"] == round(1 / 3, 4))
+    check("effectiveness: missing usage remains unknown",
+          bare["observed"]["total_tokens"]["unknown"] == 1
+          and bare["observed"]["total_tokens"]["mean"] is None)
+    check("effectiveness: repeated-run variability is reported",
+          native["observed"]["elapsed_ms"]["range"] == [1000, 1200]
+          and native["observed"]["prompt_tokens"]["range"] == [100, 120])
+    check("effectiveness: cache usage remains separately observable",
+          native["observed"]["cache_read_tokens"]["unknown"] == 1
+          and native["observed"]["cache_creation_tokens"]["unknown"] == 1
+          and grade._prompt_tokens({"input_tokens": 100}, "claude") is None
+          and grade._prompt_tokens(
+              {"input_tokens": 1000, "cache_read_input_tokens": 800}, "codex"
+          ) == 1000)
+    ungraded_scenario = {
+        "id": "baseline_ungraded",
+        "category": "product_effectiveness",
+        "outcome": {"kind": "ungraded", "reason": "no independent checker"},
+    }
+    ungraded = grade.score_scenario(
+        ungraded_scenario,
+        transcript([claude_result("an answer")]),
+        {},
+        {"channel_condition": "native"},
+    )
+    ungraded["tool_success"] = {"attempted": 0, "failed": 0}
+    ungraded_cell = grade.effectiveness_comparisons([ungraded])[
+        "baseline_ungraded / claude / native / hints-off"
+    ]
+    check("effectiveness: ungraded outcomes remain unknown, not failures",
+          ungraded_cell["task_success"]["pass_rate"] is None
+          and ungraded_cell["task_success"]["unknown_outcomes"] == 1)
+
+    with tempfile.TemporaryDirectory() as work:
+        path = Path(work) / "scorecard.json"
+        path.write_text(json.dumps({
+            "schema": "tracedecay.efficiency-scorecard/v1",
+            "binary": {"sha256": "abc", "version": "tracedecay 1"},
+            "source": {"git_commit": "commit"},
+            "fixture": {"tree_sha256": "fixture"},
+            "verdict": "ok",
+            "runs": [{"status": "ok"}, {"status": "ok"}],
+            "median": {"cold_index.wall_seconds": 12.5},
+        }))
+        attached = grade.load_efficiency_scorecard(str(path), {"binary_sha256": "abc"})
+        check("effectiveness: cold-index baseline requires matching artifact identity",
+              attached["median"]["cold_index.wall_seconds"] == 12.5
+              and attached["runs"] == 2)
+        try:
+            grade.load_efficiency_scorecard(str(path), {"binary_sha256": "other"})
+            matched_only = False
+        except ValueError:
+            matched_only = True
+        check("effectiveness: scorecard from another artifact is rejected", matched_only)
+        value = json.loads(path.read_text())
+        value["runs"][0]["status"] = "failed"
+        path.write_text(json.dumps(value))
+        failed_scorecard_rejected = False
+        try:
+            grade.load_efficiency_scorecard(str(path), {"binary_sha256": "abc"})
+        except ValueError:
+            failed_scorecard_rejected = True
+        check("effectiveness: incomplete efficiency scorecard is rejected",
+              failed_scorecard_rejected)
+
+    baseline = {}
+    for name in (
+        "baseline_order_stock_failure.json",
+        "baseline_stock_check_rename.json",
+        "baseline_currency_decision.json",
+    ):
+        scenario = json.loads((Path(HERE) / "scenarios" / name).read_text())
+        baseline[scenario["id"]] = scenario
+    check("effectiveness: baseline tasks are neutral and independently graded",
+          not grade.lint_scenarios(baseline) and not grade.lint_outcomes(baseline))
+    edit = baseline["baseline_stock_check_rename"]
+    good = {
+        "src/inventory.rs": "pub fn has_sufficient_stock(&self, sku: &str, qty: u32) -> bool { self.on_hand.get(sku).copied().unwrap_or(0) >= qty }",
+        "src/orders.rs": "has_sufficient_stock",
+    }
+    harmful = {**good, "src/inventory.rs": good["src/inventory.rs"].replace(">= qty", "> qty")}
+    edit_result = grade.score_scenario(edit, transcript([claude_result("done")]), {}, {}, good)
+    harmful_result = grade.score_scenario(edit, transcript([claude_result("done")]), {}, {}, harmful)
+    check("effectiveness: mutation outcome rejects harmful stock boundary edits",
+          edit_result["correctness"]["status"] == "pass"
+          and harmful_result["correctness"]["status"] == "fail")
 
 
 LEARNED_SKILL = "pricing-change-review"
@@ -1023,6 +1188,7 @@ def main() -> int:
     test_repeated_query_hints_and_usage()
     test_skill_routing()
     test_cost_and_corrections()
+    test_product_effectiveness_comparisons()
     test_learned_skill_routing()
     test_learned_skill_lint()
     test_learned_skill_end_to_end()
