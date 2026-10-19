@@ -336,6 +336,8 @@ function WritableBody({
           </span>
           {applied.resyncRecommended ? <span>Resync recommended</span> : null}
           {applied.restartRecommended ? <span>Restart recommended</span> : null}
+          {applied.effectReconciliation === 'pending' ? <span>Receipt reconciliation pending</span> : null}
+          {applied.effectReconciliation === 'failed' ? <span>Receipt reconciliation failed</span> : null}
         </p>
       ) : null}
 
@@ -397,7 +399,10 @@ function FrozenReview({
 }) {
   const confirmed = settingsConfirmationHeld(state);
   const applying = state.status === 'submitting';
-  const resolvable = state.status === 'conflicted' || state.status === 'review_superseded';
+  const resolvable = state.status === 'conflicted'
+    || state.status === 'review_superseded'
+    || (state.status === 'submit_failed'
+      && (state.failure.kind === 'protocol_error' || state.failure.kind === 'unsettled'));
   const retryable = state.status === 'authority_withdrawn' || state.status === 'submit_failed';
   return (
     <div className="grid gap-2" data-settings-stage={state.status}>

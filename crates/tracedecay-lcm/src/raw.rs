@@ -504,6 +504,7 @@ async fn upsert_inline_raw_message(
     message: &SessionMessageRecord,
     text: &str,
     metadata_json: Option<&str>,
+    location_path: Option<&str>,
 ) -> Result<(), LcmError> {
     let content_hash = projected_content_hash(text);
     if text.len() >= INLINE_BODY_BYTES {
@@ -519,6 +520,7 @@ async fn upsert_inline_raw_message(
                 payload_ref: None,
                 placeholder: Some(placeholder.as_str()),
                 metadata_json,
+                location_path,
             },
         )
         .await;
@@ -533,6 +535,7 @@ async fn upsert_inline_raw_message(
             payload_ref: None,
             placeholder: None,
             metadata_json,
+            location_path,
         },
     )
     .await
@@ -547,6 +550,8 @@ struct OwnedRawMessageWrite<'a> {
     /// index columns derive from it in place of `content`.
     placeholder: Option<&'a str>,
     metadata_json: Option<&'a str>,
+    /// The first captured canonical origin survives rendering and privacy rewrites.
+    location_path: Option<&'a str>,
 }
 
 async fn upsert_owned_raw_message(
@@ -559,9 +564,9 @@ async fn upsert_owned_raw_message(
             "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref, placeholder_text,
-            metadata_json, kind, model, tool_names, source_path, source_offset
+            metadata_json, kind, model, tool_names, source_path, source_offset, location_path
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(provider, message_id) DO UPDATE SET
             session_id = excluded.session_id,
             role = excluded.role,
@@ -577,7 +582,8 @@ async fn upsert_owned_raw_message(
             model = excluded.model,
             tool_names = excluded.tool_names,
             source_path = excluded.source_path,
-            source_offset = excluded.source_offset
+            source_offset = excluded.source_offset,
+            location_path = COALESCE(lcm_raw_messages.location_path, excluded.location_path)
          WHERE lcm_raw_messages.session_id = excluded.session_id",
             params![
                 message.provider.as_str(),
@@ -597,6 +603,7 @@ async fn upsert_owned_raw_message(
                 message.tool_names.as_deref(),
                 message.source_path.as_deref(),
                 message.source_offset,
+                write.location_path,
             ],
         )
         .await?;
@@ -854,13 +861,22 @@ fn externalized_payload_metadata(
 /// before it became durable, so the projected row stays inline; this binds a
 /// fresh content receipt to the stored text so the canonical raw-read
 /// authority (`load_raw_message`) can hydrate observation-projected
-/// messages instead of refusing them as receipt-less rows.
+/// messages instead of refusing them as receipt-less rows. The canonical
+/// location is captured once; replay and missing cwd evidence retain it.
 pub async fn upsert_projection_raw_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
+    location_path: Option<&str>,
 ) -> Result<(), LcmError> {
     let stored = projection_stored_message(message)?;
-    upsert_inline_raw_message(conn, message, &stored.text, stored.metadata_json.as_deref()).await
+    upsert_inline_raw_message(
+        conn,
+        message,
+        &stored.text,
+        stored.metadata_json.as_deref(),
+        location_path,
+    )
+    .await
 }
 
 /// The message row exactly as [`upsert_projection_raw_message`] stores it and
@@ -956,6 +972,7 @@ pub async fn commit_staged_raw_message(
             message,
             &staged.prepared.text,
             staged.prepared.metadata_json.as_deref(),
+            None,
         )
         .await?;
         persist_raw_predecessor_range(conn, message).await?;
@@ -975,6 +992,7 @@ pub async fn commit_staged_raw_message(
             payload_ref: Some(whole_message.payload_ref.payload_ref.as_str()),
             placeholder: Some(whole_message.placeholder.as_str()),
             metadata_json: Some(whole_message.metadata_json.as_str()),
+            location_path: None,
         },
     )
     .await?;

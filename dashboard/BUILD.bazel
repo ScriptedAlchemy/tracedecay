@@ -1,3 +1,4 @@
+load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 load("@npm//dashboard:@rsbuild/core/package_json.bzl", rsbuild_bin = "bin")
 load("@npm//dashboard:vitest/package_json.bzl", vitest_bin = "bin")
@@ -6,7 +7,8 @@ package(default_visibility = ["//visibility:public"])
 
 npm_link_all_packages(name = "node_modules")
 
-filegroup(
+# Share source copies across the bundle and tests with different CPU allocations.
+copy_to_bin(
     name = "dashboard_sources",
     srcs = glob(
         [
@@ -28,8 +30,11 @@ vitest_bin.vitest_test(
         "e2e/**",
         "stories/**",
     ]),
-    args = ["run"],
+    # Leave CPU capacity for transforms and the coordinator beside the workers.
+    args = ["run", "--maxWorkers=2"],
     chdir = package_name(),
+    exec_properties = {"cpu_count": "4"},
+    tags = ["cpu:4"],
 )
 
 rsbuild_bin.rsbuild(

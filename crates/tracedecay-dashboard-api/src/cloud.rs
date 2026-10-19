@@ -164,25 +164,15 @@ fn http_date(unix_seconds: u64) -> String {
     httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_secs(unix_seconds))
 }
 
-type FlushPending = fn(u64) -> Option<u64>;
 type FetchLatestVersion = fn() -> Result<String, ReleaseLookupError>;
 
-static FLUSH_PENDING: OnceLock<FlushPending> = OnceLock::new();
 static FETCH_LATEST_VERSION: OnceLock<FetchLatestVersion> = OnceLock::new();
 
-/// Admits the CLI binary's sync ureq implementations. A second admission is
-/// ignored so tests that re-enter process start stay idempotent. Unregistered
-/// lookups return `None`.
-pub fn admit_sync_cloud_probes(
-    flush_pending: FlushPending,
-    fetch_latest_version: FetchLatestVersion,
-) {
-    let _ = FLUSH_PENDING.set(flush_pending);
+/// Admits the CLI binary's sync ureq release lookup. A second admission is
+/// ignored so tests that re-enter process start stay idempotent. An
+/// unregistered lookup returns `None`.
+pub fn admit_sync_cloud_probes(fetch_latest_version: FetchLatestVersion) {
     let _ = FETCH_LATEST_VERSION.set(fetch_latest_version);
-}
-
-pub fn flush_pending(amount: u64) -> Option<u64> {
-    FLUSH_PENDING.get().and_then(|flush| flush(amount))
 }
 
 /// Set by test harnesses so no spawned CLI or daemon asks GitHub for the

@@ -17,7 +17,6 @@ use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, SettingKey, USER_REPEATED_QUERY_HINTS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
 };
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -41,25 +40,6 @@ fn cli_configuration_idempotency_key(
         .ok_or_else(|| config_error("configuration mutation digest is malformed"))?;
     ConfigurationIdempotencyKey::new(format!("configuration.idempotency.cli.{suffix}"))
         .map_err(|error| config_error(format!("invalid configuration request key: {error}")))
-}
-
-fn cli_user_configuration_idempotency_key(
-    profile_id: &UserProfileId,
-    expected_revision: &ConfigurationRevisionId,
-    mutations: &[ConfigurationDirectMutationRequestV1],
-) -> tracedecay_domain::errors::Result<ConfigurationIdempotencyKey> {
-    let digest = canonical_sha256(&(
-        "tracedecay.cli.user-configuration-mutation.v1",
-        profile_id,
-        expected_revision,
-        mutations,
-    ))
-    .map_err(|error| config_error(format!("invalid user configuration mutation: {error}")))?;
-    let suffix = digest
-        .hex_suffix()
-        .ok_or_else(|| config_error("user configuration mutation digest is malformed"))?;
-    ConfigurationIdempotencyKey::new(format!("configuration.idempotency.cli.user.{suffix}"))
-        .map_err(|error| config_error(format!("invalid user configuration request key: {error}")))
 }
 
 fn configuration_deadline(
@@ -210,13 +190,6 @@ async fn resolved_setting(
     .map_err(|error| config_error(format!("invalid configuration setting: {error}")))
 }
 
-/// The profile's worldwide-counter upload setting, wherever the command runs.
-pub(crate) async fn canonical_upload_enabled(
-    profile: &ProfileRoot,
-) -> tracedecay_domain::errors::Result<bool> {
-    boolean_setting(&resolved_setting(profile, None, USER_UPLOAD_ENABLED_SETTING_KEY).await?)
-}
-
 /// The profile's experimental repeated-query hint setting for `serve`.
 pub(crate) async fn repeated_query_hints_enabled(
     profile: &ProfileRoot,
@@ -280,31 +253,6 @@ pub(crate) async fn mutate_project_configuration(
     configuration_effect_receipt(envelope, &idempotency_key).map(Some)
 }
 
-async fn mutate_user_configuration(
-    profile: &ProfileRoot,
-    profile_id: &UserProfileId,
-    expected_revision: ConfigurationRevisionId,
-    mutations: Vec<ConfigurationDirectMutationRequestV1>,
-) -> tracedecay_domain::errors::Result<Option<EffectReceipt>> {
-    if mutations.is_empty() {
-        return Ok(None);
-    }
-    let idempotency_key =
-        cli_user_configuration_idempotency_key(profile_id, &expected_revision, &mutations)?;
-    let envelope = invoke_configuration_surface(
-        profile,
-        None,
-        ApplicationSurfaceOperation::ConfigurationBatch,
-        ConfigurationWireRequestV1::Batch(ConfigurationBatchRequestV1 {
-            mutations,
-            expected_revision,
-            idempotency_key: idempotency_key.clone(),
-        }),
-    )
-    .await?;
-    configuration_effect_receipt(envelope, &idempotency_key).map(Some)
-}
-
 fn configuration_effect_receipt(
     envelope: ApplicationEnvelope<serde_json::Value>,
     idempotency_key: &ConfigurationIdempotencyKey,
@@ -346,38 +294,4 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
     if let Some(receipt) = receipt {
         eprintln!("Receipt: {}", receipt.request_id.as_str());
     }
-}
-
-#[tracing::instrument(name = "cli.settings.upload_counter", level = "trace", skip_all)]
-pub(crate) async fn handle_upload_counter(
-    profile: &ProfileRoot,
-    enable: bool,
-) -> tracedecay_domain::errors::Result<()> {
-    let current = resolved_setting(profile, None, USER_UPLOAD_ENABLED_SETTING_KEY).await?;
-    let profile_id =
-        tracedecay_daemon_identity::profile_identity::load_existing(profile.data_dir())?
-            .profile_id()
-            .clone();
-    let mutations = if boolean_setting(&current)? != enable {
-        vec![ConfigurationDirectMutationRequestV1::Set {
-            layer: ConfigurationLayerIdV1::UserProfile {
-                profile_id: profile_id.clone(),
-            },
-            key: current.key,
-            value: Box::new(ConfigurationValueV1::Boolean(enable)),
-        }]
-    } else {
-        Vec::new()
-    };
-    let receipt =
-        mutate_user_configuration(profile, &profile_id, current.revision_id, mutations).await?;
-    if enable {
-        eprintln!("Worldwide counter upload enabled.");
-    } else {
-        eprintln!(
-            "Worldwide counter upload disabled. You can re-enable with `tracedecay enable-upload-counter`."
-        );
-    }
-    report_configuration_receipt(receipt.as_ref());
-    Ok(())
 }

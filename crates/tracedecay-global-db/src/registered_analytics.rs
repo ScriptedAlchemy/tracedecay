@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 
-use tracedecay_runtime_core::db::engine::{Value, opt_text};
+use tracedecay_runtime_core::db::engine::{Executor, Value, opt_text};
 
 use super::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
@@ -19,6 +19,17 @@ const OBSERVABILITY_ROLLUP_RETENTION_SECONDS: i64 = 395 * 86_400;
 const MAX_OBSERVABILITY_OUTBOX_JSON_BYTES: usize = 1_048_576;
 const OBSERVABILITY_RETENTION_ROWS_PER_CLASS: usize = 512;
 pub(crate) const ANALYTICS_INSERT_ROWS_PER_STATEMENT: usize = 500;
+pub(crate) const HOOK_ROUTE_PERFORMANCE_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_hook_route_idempotency
+     ON analytics_events(project_id, hint_id)
+     WHERE provider = 'daemon_hook' AND event_kind = 'hook_route' AND hint_id IS NOT NULL";
+// Literal predicates make the partial index usable. Requiring the index keeps
+// best-effort telemetry from scanning history while an existing store upgrades.
+pub(crate) const HOOK_ROUTE_BY_IDEMPOTENCY_KEY_SQL: &str =
+    "SELECT id FROM analytics_events INDEXED BY idx_hook_route_idempotency
+     WHERE provider = 'daemon_hook' AND event_kind = 'hook_route'
+       AND project_id = ?1 AND hint_id = ?2
+     ORDER BY id ASC LIMIT 1";
 // The provider is a literal so `idx_observability_event_idempotency` stays
 // usable; the planner does not match a bound value against an index predicate.
 pub(crate) const OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL: &str =
@@ -142,6 +153,12 @@ impl RegisteredGlobalDb {
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
+        if event.provider == "daemon_hook"
+            && event.event_kind == "hook_route"
+            && let Some(hint_id) = event.hint_id.as_deref()
+        {
+            return self.append_hook_route_event(event, hint_id).await;
+        }
         let writer = self
             .runtime_database()
             .writer_connection("append analytics event")
@@ -191,6 +208,46 @@ impl RegisteredGlobalDb {
         Ok(id)
     }
 
+    async fn append_hook_route_event(
+        &self,
+        event: &AnalyticsEventInsert,
+        hint_id: &str,
+    ) -> Result<i64, String> {
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| format!("failed to begin hook route append: {error}"))?;
+        let existing = {
+            let mut rows = transaction
+                .query(
+                    HOOK_ROUTE_BY_IDEMPOTENCY_KEY_SQL,
+                    tracedecay_runtime_core::db::engine::params![
+                        event.project_id.as_str(),
+                        hint_id
+                    ],
+                )
+                .await
+                .map_err(|error| format!("failed to read hook route identity: {error}"))?;
+            rows.next()
+                .await
+                .map_err(|error| format!("failed to read hook route receipt: {error}"))?
+                .map(|row| row.get::<i64>(0))
+                .transpose()
+                .map_err(|error| format!("failed to decode hook route receipt: {error}"))?
+        };
+        // Retry observations may have a later timestamp or current branch.
+        // The first durable event and its ID remain authoritative.
+        let id = match existing {
+            Some(id) => id,
+            None => append_analytics_event_in_existing_tx(&transaction, event).await?,
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("failed to commit hook route append: {error}"))?;
+        Ok(id)
+    }
+
     /// Canonical observability append with replay-safe idempotency.
     ///
     /// The registered writer serializes the lookup and insert; the partial
@@ -236,23 +293,19 @@ impl RegisteredGlobalDb {
         if events.is_empty() {
             return Ok(Vec::new());
         }
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin analytics append transaction: {error}"))?;
-        let ids = match kind {
-            AnalyticsAppendKind::General => {
-                append_analytics_events_in_existing_tx(&transaction, events).await?
-            }
-            AnalyticsAppendKind::Observability => {
-                append_observability_events_in_existing_tx(&transaction, events).await?
-            }
-        };
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit analytics append transaction: {error}"))?;
-        Ok(ids)
+        let events = events.to_vec();
+        self.transact_or(
+            |error| format!("failed to run analytics append transaction: {error}"),
+            async move |transaction| match kind {
+                AnalyticsAppendKind::General => {
+                    append_analytics_events_in_existing_tx(&transaction, &events).await
+                }
+                AnalyticsAppendKind::Observability => {
+                    append_observability_events_in_existing_tx(&transaction, &events).await
+                }
+            },
+        )
+        .await
     }
 
     #[tracing::instrument(
@@ -323,52 +376,55 @@ impl RegisteredGlobalDb {
             owner_fact_json,
             delivery_envelope_json,
         )?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin observability outbox claim: {error}"))?;
-        if let Some(stored) = read_outbox_record(&transaction, project_id, owner_event_id).await? {
-            if stored.owner_fact_json != owner_fact_json {
-                return Err("observability owner fact conflict".to_owned());
-            }
-            let outcome = if let Some(analytics_event_id) = stored.analytics_event_id {
-                ObservabilityEmissionClaimV1::Settled {
-                    delivery_envelope_json: stored.delivery_envelope_json,
-                    analytics_event_id,
+        let project_id = project_id.to_owned();
+        let owner_event_id = owner_event_id.to_owned();
+        let owner_fact_json = owner_fact_json.to_owned();
+        let delivery_envelope_json = delivery_envelope_json.to_owned();
+        self.transact_or(
+            |error| format!("failed to run observability outbox claim: {error}"),
+            async move |transaction| {
+                if let Some(stored) =
+                    read_outbox_record(&transaction, &project_id, &owner_event_id).await?
+                {
+                    if stored.owner_fact_json != owner_fact_json {
+                        return Err("observability owner fact conflict".to_owned());
+                    }
+                    return Ok(
+                        if let Some(analytics_event_id) = stored.analytics_event_id {
+                            ObservabilityEmissionClaimV1::Settled {
+                                delivery_envelope_json: stored.delivery_envelope_json,
+                                analytics_event_id,
+                            }
+                        } else {
+                            ObservabilityEmissionClaimV1::Pending {
+                                delivery_envelope_json: stored.delivery_envelope_json,
+                            }
+                        },
+                    );
                 }
-            } else {
-                ObservabilityEmissionClaimV1::Pending {
-                    delivery_envelope_json: stored.delivery_envelope_json,
-                }
-            };
-            transaction
-                .commit()
-                .await
-                .map_err(|error| format!("failed to close observability outbox replay: {error}"))?;
-            return Ok(outcome);
-        }
-        transaction
-            .execute(
-                "INSERT INTO observability_emission_outbox
-                     (project_id, owner_event_id, owner_fact_json,
-                      delivery_envelope_json, state, analytics_event_id)
-                 VALUES (?1, ?2, ?3, ?4, 'pending', NULL)",
-                tracedecay_runtime_core::db::engine::params![
-                    project_id,
-                    owner_event_id,
-                    owner_fact_json,
-                    delivery_envelope_json
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to claim observability outbox event: {error}"))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit observability outbox claim: {error}"))?;
-        Ok(ObservabilityEmissionClaimV1::Claimed {
-            delivery_envelope_json: delivery_envelope_json.to_owned(),
-        })
+                transaction
+                    .execute(
+                        "INSERT INTO observability_emission_outbox
+                             (project_id, owner_event_id, owner_fact_json,
+                              delivery_envelope_json, state, analytics_event_id)
+                         VALUES (?1, ?2, ?3, ?4, 'pending', NULL)",
+                        tracedecay_runtime_core::db::engine::params![
+                            project_id.as_str(),
+                            owner_event_id.as_str(),
+                            owner_fact_json.as_str(),
+                            delivery_envelope_json.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("failed to claim observability outbox event: {error}")
+                    })?;
+                Ok(ObservabilityEmissionClaimV1::Claimed {
+                    delivery_envelope_json: delivery_envelope_json.clone(),
+                })
+            },
+        )
+        .await
     }
 
     /// CAS a pending delivery to its delayed-coverage representation.
@@ -391,59 +447,56 @@ impl RegisteredGlobalDb {
             owner_fact_json,
             delayed_delivery_envelope_json,
         )?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin observability outbox delay: {error}"))?;
-        let stored = read_outbox_record(&transaction, project_id, owner_event_id)
-            .await?
-            .ok_or_else(|| "observability outbox event is unavailable".to_owned())?;
-        if stored.owner_fact_json != owner_fact_json {
-            return Err("observability owner fact conflict".to_owned());
-        }
-        if let Some(analytics_event_id) = stored.analytics_event_id {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| format!("failed to close settled outbox delay: {error}"))?;
-            return Ok(ObservabilityEmissionClaimV1::Settled {
-                delivery_envelope_json: stored.delivery_envelope_json,
-                analytics_event_id,
-            });
-        }
-        if stored.delivery_envelope_json != expected_delivery_envelope_json {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| format!("failed to close replayed outbox delay: {error}"))?;
-            return Ok(ObservabilityEmissionClaimV1::Pending {
-                delivery_envelope_json: stored.delivery_envelope_json,
-            });
-        }
-        transaction
-            .execute(
-                "UPDATE observability_emission_outbox
-                 SET delivery_envelope_json = ?4
-                 WHERE project_id = ?1 AND owner_event_id = ?2
-                   AND owner_fact_json = ?3 AND state = 'pending'
-                   AND delivery_envelope_json = ?5",
-                tracedecay_runtime_core::db::engine::params![
-                    project_id,
-                    owner_event_id,
-                    owner_fact_json,
-                    delayed_delivery_envelope_json,
-                    expected_delivery_envelope_json
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to mark observability delivery delayed: {error}"))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit observability outbox delay: {error}"))?;
-        Ok(ObservabilityEmissionClaimV1::Pending {
-            delivery_envelope_json: delayed_delivery_envelope_json.to_owned(),
-        })
+        let project_id = project_id.to_owned();
+        let owner_event_id = owner_event_id.to_owned();
+        let owner_fact_json = owner_fact_json.to_owned();
+        let expected_delivery_envelope_json = expected_delivery_envelope_json.to_owned();
+        let delayed_delivery_envelope_json = delayed_delivery_envelope_json.to_owned();
+        self.transact_or(
+            |error| format!("failed to run observability outbox delay: {error}"),
+            async move |transaction| {
+                let stored = read_outbox_record(&transaction, &project_id, &owner_event_id)
+                    .await?
+                    .ok_or_else(|| "observability outbox event is unavailable".to_owned())?;
+                if stored.owner_fact_json != owner_fact_json {
+                    return Err("observability owner fact conflict".to_owned());
+                }
+                if let Some(analytics_event_id) = stored.analytics_event_id {
+                    return Ok(ObservabilityEmissionClaimV1::Settled {
+                        delivery_envelope_json: stored.delivery_envelope_json,
+                        analytics_event_id,
+                    });
+                }
+                if stored.delivery_envelope_json != expected_delivery_envelope_json {
+                    return Ok(ObservabilityEmissionClaimV1::Pending {
+                        delivery_envelope_json: stored.delivery_envelope_json,
+                    });
+                }
+                transaction
+                    .execute(
+                        "UPDATE observability_emission_outbox
+                         SET delivery_envelope_json = ?4
+                         WHERE project_id = ?1 AND owner_event_id = ?2
+                           AND owner_fact_json = ?3 AND state = 'pending'
+                           AND delivery_envelope_json = ?5",
+                        tracedecay_runtime_core::db::engine::params![
+                            project_id.as_str(),
+                            owner_event_id.as_str(),
+                            owner_fact_json.as_str(),
+                            delayed_delivery_envelope_json.as_str(),
+                            expected_delivery_envelope_json.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("failed to mark observability delivery delayed: {error}")
+                    })?;
+                Ok(ObservabilityEmissionClaimV1::Pending {
+                    delivery_envelope_json: delayed_delivery_envelope_json.clone(),
+                })
+            },
+        )
+        .await
     }
 
     /// Append the exact delivery and settle its outbox row in one transaction.
@@ -472,48 +525,54 @@ impl RegisteredGlobalDb {
         {
             return Err("observability outbox delivery binding conflict".to_owned());
         }
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin observability outbox settlement: {error}"))?;
-        let stored = read_outbox_record(&transaction, project_id, owner_event_id)
-            .await?
-            .ok_or_else(|| "observability outbox event is unavailable".to_owned())?;
-        if stored.owner_fact_json != owner_fact_json
-            || stored.delivery_envelope_json != delivery_envelope_json
-        {
-            return Err("observability outbox settlement conflict".to_owned());
-        }
-        let id = append_observability_event_in_existing_tx(&transaction, event)
-            .await
-            .map_err(|error| error.to_string())?;
-        if let Some(settled_id) = stored.analytics_event_id {
-            if settled_id != id {
-                return Err("observability outbox receipt conflict".to_owned());
-            }
-        } else {
-            transaction
-                .execute(
-                    "UPDATE observability_emission_outbox
-                     SET state = 'settled', analytics_event_id = ?5
-                     WHERE project_id = ?1 AND owner_event_id = ?2
-                       AND owner_fact_json = ?3 AND delivery_envelope_json = ?4
-                       AND state = 'pending'",
-                    tracedecay_runtime_core::db::engine::params![
-                        project_id,
-                        owner_event_id,
-                        owner_fact_json,
-                        delivery_envelope_json,
-                        id
-                    ],
-                )
-                .await
-                .map_err(|error| format!("failed to settle observability outbox event: {error}"))?;
-        }
-        transaction.commit().await.map_err(|error| {
-            format!("failed to commit observability outbox settlement: {error}")
-        })?;
-        Ok(id)
+        let project_id = project_id.to_owned();
+        let owner_event_id = owner_event_id.to_owned();
+        let owner_fact_json = owner_fact_json.to_owned();
+        let delivery_envelope_json = delivery_envelope_json.to_owned();
+        let event = event.clone();
+        self.transact_or(
+            |error| format!("failed to run observability outbox settlement: {error}"),
+            async move |transaction| {
+                let stored = read_outbox_record(&transaction, &project_id, &owner_event_id)
+                    .await?
+                    .ok_or_else(|| "observability outbox event is unavailable".to_owned())?;
+                if stored.owner_fact_json != owner_fact_json
+                    || stored.delivery_envelope_json != delivery_envelope_json
+                {
+                    return Err("observability outbox settlement conflict".to_owned());
+                }
+                let id = append_observability_event_in_existing_tx(&transaction, &event)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if let Some(settled_id) = stored.analytics_event_id {
+                    if settled_id != id {
+                        return Err("observability outbox receipt conflict".to_owned());
+                    }
+                } else {
+                    transaction
+                        .execute(
+                            "UPDATE observability_emission_outbox
+                             SET state = 'settled', analytics_event_id = ?5
+                             WHERE project_id = ?1 AND owner_event_id = ?2
+                               AND owner_fact_json = ?3 AND delivery_envelope_json = ?4
+                               AND state = 'pending'",
+                            tracedecay_runtime_core::db::engine::params![
+                                project_id.as_str(),
+                                owner_event_id.as_str(),
+                                owner_fact_json.as_str(),
+                                delivery_envelope_json.as_str(),
+                                id
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("failed to settle observability outbox event: {error}")
+                        })?;
+                }
+                Ok(id)
+            },
+        )
+        .await
     }
 
     /// Claim and settle one run of worker-owned owner facts in a single write.
@@ -630,43 +689,43 @@ impl RegisteredGlobalDb {
         if now_seconds < 0 {
             return Err("invalid observability retention time".to_owned());
         }
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin observability retention: {error}"))?;
-        // Expired dirty-day markers go first: they protect their source rows
-        // from the analytics pass below, and a day past the horizon has no
-        // generation left to rebuild.
-        let expired_rollups = expire_observability_rollups(&transaction, now_seconds).await?;
-        let (expired_detail_outbox, expired_detail) = prune_observability_retention_class(
-            &transaction,
-            now_seconds.saturating_sub(OBSERVABILITY_DETAIL_RETENTION_SECONDS),
-            "optional_local_detail30d",
+        self.transact_or(
+            |error| format!("failed to run observability retention: {error}"),
+            async move |transaction| {
+                // Expired dirty-day markers go first: they protect their source rows
+                // from the analytics pass below, and a day past the horizon has no
+                // generation left to rebuild.
+                let expired_rollups =
+                    expire_observability_rollups(&transaction, now_seconds).await?;
+                let (expired_detail_outbox, expired_detail) = prune_observability_retention_class(
+                    &transaction,
+                    now_seconds.saturating_sub(OBSERVABILITY_DETAIL_RETENTION_SECONDS),
+                    "optional_local_detail30d",
+                )
+                .await?;
+                let (expired_rollup_outbox, expired_rollup) = prune_observability_retention_class(
+                    &transaction,
+                    now_seconds.saturating_sub(OBSERVABILITY_ROLLUP_RETENTION_SECONDS),
+                    "local_rollup395d",
+                )
+                .await?;
+                let has_more = observability_retention_has_more(
+                    &transaction,
+                    now_seconds.saturating_sub(OBSERVABILITY_DETAIL_RETENTION_SECONDS),
+                    now_seconds.saturating_sub(OBSERVABILITY_ROLLUP_RETENTION_SECONDS),
+                )
+                .await?;
+                Ok(ObservabilityRetentionReceiptV1 {
+                    expired_detail,
+                    expired_rollup,
+                    expired_settled_outbox: expired_detail_outbox
+                        .saturating_add(expired_rollup_outbox),
+                    expired_rollups,
+                    has_more,
+                })
+            },
         )
-        .await?;
-        let (expired_rollup_outbox, expired_rollup) = prune_observability_retention_class(
-            &transaction,
-            now_seconds.saturating_sub(OBSERVABILITY_ROLLUP_RETENTION_SECONDS),
-            "local_rollup395d",
-        )
-        .await?;
-        let has_more = observability_retention_has_more(
-            &transaction,
-            now_seconds.saturating_sub(OBSERVABILITY_DETAIL_RETENTION_SECONDS),
-            now_seconds.saturating_sub(OBSERVABILITY_ROLLUP_RETENTION_SECONDS),
-        )
-        .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit observability retention: {error}"))?;
-        Ok(ObservabilityRetentionReceiptV1 {
-            expired_detail,
-            expired_rollup,
-            expired_settled_outbox: expired_detail_outbox.saturating_add(expired_rollup_outbox),
-            expired_rollups,
-            has_more,
-        })
+        .await
     }
 
     #[tracing::instrument(
@@ -701,22 +760,28 @@ impl RegisteredGlobalDb {
         expected_cursor: super::ParseOffset,
         cursor: super::ParseOffset,
     ) -> Result<Vec<i64>, String> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin analytics import transaction: {error}"))?;
-        super::transcript::require_expected_offset(&transaction, cursor_path, expected_cursor)
-            .await
-            .map_err(|error| format!("failed to claim analytics import cursor: {error}"))?;
-        let ids = append_analytics_events_in_existing_tx(&transaction, events).await?;
-        super::transcript::set_parse_offset(&transaction, cursor_path, cursor)
-            .await
-            .map_err(|error| format!("failed to persist analytics import cursor: {error}"))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit analytics import transaction: {error}"))?;
-        Ok(ids)
+        let events = events.to_vec();
+        let cursor_path = cursor_path.to_owned();
+        self.transact_or(
+            |error| format!("failed to run analytics import transaction: {error}"),
+            async move |transaction| {
+                super::transcript::require_expected_offset(
+                    &transaction,
+                    &cursor_path,
+                    expected_cursor,
+                )
+                .await
+                .map_err(|error| format!("failed to claim analytics import cursor: {error}"))?;
+                let ids = append_analytics_events_in_existing_tx(&transaction, &events).await?;
+                super::transcript::set_parse_offset(&transaction, &cursor_path, cursor)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to persist analytics import cursor: {error}")
+                    })?;
+                Ok(ids)
+            },
+        )
+        .await
     }
 
     #[tracing::instrument(
@@ -950,7 +1015,7 @@ impl RegisteredGlobalDb {
 }
 
 async fn append_analytics_events_in_existing_tx(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     events: &[AnalyticsEventInsert],
 ) -> Result<Vec<i64>, String> {
     let mut ids = Vec::with_capacity(events.len());
@@ -1016,7 +1081,7 @@ async fn append_analytics_events_in_existing_tx(
 }
 
 async fn append_analytics_event_in_existing_tx(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     event: &AnalyticsEventInsert,
 ) -> Result<i64, String> {
     let mut rows = transaction
@@ -1098,7 +1163,7 @@ fn validate_prepared_owner_emission(
 }
 
 async fn claim_and_settle_owner_facts_in_tx<F>(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     emissions: &[ObservabilityOwnerEmissionWriteV1],
     prepare_new: F,
 ) -> Result<Vec<ObservabilityOwnerEmissionWriteOutcomeV1>, String>
@@ -1131,7 +1196,7 @@ where
 /// Resolves every still-open fact against the outbox and prepares a delivery
 /// only for a fact no row owns yet.
 async fn prepare_unclaimed_owner_facts<F>(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     emissions: &[ObservabilityOwnerEmissionWriteV1],
     outcomes: &mut [Option<ObservabilityOwnerEmissionWriteOutcomeV1>],
     mut prepare_new: F,
@@ -1183,7 +1248,7 @@ where
 /// Adopts an exact stored event, appends the rest in one statement, and
 /// settles their outbox rows in one statement.
 async fn settle_prepared_owner_facts(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     emissions: &[ObservabilityOwnerEmissionWriteV1],
     outcomes: &mut [Option<ObservabilityOwnerEmissionWriteOutcomeV1>],
     prepared: Vec<(usize, PreparedObservabilityEmissionV1)>,
@@ -1263,7 +1328,7 @@ fn bind_key_pairs(mut sql: String, keys: Vec<(String, String)>) -> (String, Vec<
 
 /// Stored owner facts for `keys`, by `(project_id, owner_event_id)`.
 async fn stored_owner_facts(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     keys: Vec<(String, String)>,
 ) -> Result<BTreeMap<(String, String), String>, String> {
     let mut stored = BTreeMap::new();
@@ -1298,7 +1363,7 @@ async fn stored_owner_facts(
 /// Stored canonical observability events for `keys`, by
 /// `(project_id, hint_id)`.
 async fn stored_observability_events(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     keys: Vec<(String, String)>,
 ) -> Result<BTreeMap<(String, String), AnalyticsEventRecord>, String> {
     let mut stored = BTreeMap::new();
@@ -1336,7 +1401,7 @@ async fn stored_observability_events(
 }
 
 async fn insert_settled_outbox_rows(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     rows: &[(&ObservabilityOwnerEmissionWriteV1, String, i64)],
 ) -> Result<(), String> {
     for chunk in rows.chunks(ANALYTICS_INSERT_ROWS_PER_STATEMENT) {
@@ -1407,7 +1472,7 @@ fn validate_outbox_input(
 }
 
 async fn read_outbox_record(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     project_id: &str,
     owner_event_id: &str,
 ) -> Result<Option<StoredObservabilityOutboxRecord>, String> {
@@ -1454,7 +1519,7 @@ enum ObservabilityAppendError {
 /// All runs share the caller's transaction, so a later conflict rolls back
 /// earlier appends just as the single-event path does.
 async fn append_observability_events_in_existing_tx(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     events: &[AnalyticsEventInsert],
 ) -> Result<Vec<i64>, String> {
     let mut ids = Vec::with_capacity(events.len());
@@ -1514,7 +1579,7 @@ async fn append_observability_events_in_existing_tx(
 }
 
 async fn append_observability_event_in_existing_tx(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     event: &AnalyticsEventInsert,
 ) -> Result<i64, ObservabilityAppendError> {
     validate_observability_event(event).map_err(ObservabilityAppendError::Failed)?;
@@ -1583,7 +1648,7 @@ fn analytics_record_matches_insert(
 }
 
 async fn prune_observability_retention_class(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     cutoff_seconds: i64,
     retention_class: &str,
 ) -> Result<(u64, u64), String> {
@@ -1625,7 +1690,7 @@ async fn prune_observability_retention_class(
 }
 
 async fn observability_retention_has_more(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     detail_cutoff_seconds: i64,
     rollup_cutoff_seconds: i64,
 ) -> Result<bool, String> {

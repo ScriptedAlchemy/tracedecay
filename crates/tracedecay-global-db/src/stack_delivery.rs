@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params, params_from_iter};
 
-use crate::RegisteredGlobalDb;
+use crate::{RegisteredGlobalDb, registered::JobExit};
 
 /// Maximum number of rows in the `pending` state for one project.
 pub const MAX_GITHUB_STACK_ACTIVE_PENDING_V1: usize = 256;
@@ -540,93 +540,88 @@ impl RegisteredGlobalDb {
                 MAX_GITHUB_STACK_DELIVERY_BATCH_V1
             ));
         }
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("begin GitHub stack signal append: {error}"))?;
-        if let Some(existing) =
-            lookup_signal(&transaction, &record.project_id, &record.signal_id).await?
-        {
-            if existing != record {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(|error| format!("close conflicting GitHub stack append: {error}"))?;
-                return Err("GitHub stack signal identity conflict".to_owned());
-            }
-            let (pending_count, deferred_count) = counts(&transaction, &record.project_id).await?;
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| format!("close replayed GitHub stack append: {error}"))?;
-            return Ok(GitHubStackSignalAppendOutcomeV1::Replayed {
-                pending_count,
-                deferred_count,
-            });
-        }
+        self.transact_or_rollback(
+            |error| format!("GitHub stack signal append: {error}"),
+            async move |transaction| {
+                if let Some(existing) =
+                    lookup_signal(&transaction, &record.project_id, &record.signal_id).await?
+                {
+                    if existing != record {
+                        return Err("GitHub stack signal identity conflict".to_owned().into());
+                    }
+                    let (pending_count, deferred_count) =
+                        counts(&transaction, &record.project_id).await?;
+                    return Err(JobExit::Rollback(
+                        GitHubStackSignalAppendOutcomeV1::Replayed {
+                            pending_count,
+                            deferred_count,
+                        },
+                    ));
+                }
 
-        transaction
-            .execute(
-                "INSERT INTO github_stack_delivery_signals
-                 (project_id, signal_id, scope_digest, repository_id,
-                  watermark_id, observed_at_micros, signal_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    record.project_id.as_str(),
-                    record.signal_id.as_str(),
-                    record.scope_digest.as_str(),
-                    record.repository_id.as_str(),
-                    record.watermark_id.as_str(),
-                    record.observed_at_micros,
-                    record.signal_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| format!("append GitHub stack signal: {error}"))?;
-        // Repair a deferred queue left by an interrupted older writer before
-        // assigning this append's capacity.  All callers hold the immediate
-        // write transaction, so the quota decision is serialized.
-        promote_deferred(&transaction, &record.project_id).await?;
-        let (pending_before, _) = counts(&transaction, &record.project_id).await?;
-        let capacity = MAX_GITHUB_STACK_ACTIVE_PENDING_V1.saturating_sub(pending_before);
-        for (index, recipient) in recipient_set.into_iter().enumerate() {
-            let state = if index < capacity {
-                GitHubStackDeliveryStateV1::Pending
-            } else {
-                GitHubStackDeliveryStateV1::Deferred
-            };
-            transaction
-                .execute(
-                    "INSERT INTO github_stack_delivery_recipients
-                     (project_id, signal_id, recipient, state)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        record.project_id.as_str(),
-                        record.signal_id.as_str(),
-                        recipient,
-                        state.as_str()
-                    ],
-                )
-                .await
-                .map_err(|error| format!("append GitHub stack delivery recipient: {error}"))?;
-        }
-        let (pending_count, deferred_count) = counts(&transaction, &record.project_id).await?;
-        let saturated = deferred_count > 0;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("commit GitHub stack signal append: {error}"))?;
-        Ok(if saturated {
-            GitHubStackSignalAppendOutcomeV1::Saturated {
-                pending_count,
-                deferred_count,
-            }
-        } else {
-            GitHubStackSignalAppendOutcomeV1::Appended {
-                pending_count,
-                deferred_count,
-            }
-        })
+                transaction
+                    .execute(
+                        "INSERT INTO github_stack_delivery_signals
+                     (project_id, signal_id, scope_digest, repository_id,
+                      watermark_id, observed_at_micros, signal_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            record.project_id.as_str(),
+                            record.signal_id.as_str(),
+                            record.scope_digest.as_str(),
+                            record.repository_id.as_str(),
+                            record.watermark_id.as_str(),
+                            record.observed_at_micros,
+                            record.signal_json.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|error| format!("append GitHub stack signal: {error}"))?;
+                // Repair a deferred queue left by an interrupted older writer before
+                // assigning this append's capacity.  The write job is serialized, so
+                // the quota decision is too.
+                promote_deferred(&transaction, &record.project_id).await?;
+                let (pending_before, _) = counts(&transaction, &record.project_id).await?;
+                let capacity = MAX_GITHUB_STACK_ACTIVE_PENDING_V1.saturating_sub(pending_before);
+                for (index, recipient) in recipient_set.iter().enumerate() {
+                    let state = if index < capacity {
+                        GitHubStackDeliveryStateV1::Pending
+                    } else {
+                        GitHubStackDeliveryStateV1::Deferred
+                    };
+                    transaction
+                        .execute(
+                            "INSERT INTO github_stack_delivery_recipients
+                         (project_id, signal_id, recipient, state)
+                         VALUES (?1, ?2, ?3, ?4)",
+                            params![
+                                record.project_id.as_str(),
+                                record.signal_id.as_str(),
+                                recipient.as_str(),
+                                state.as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("append GitHub stack delivery recipient: {error}")
+                        })?;
+                }
+                let (pending_count, deferred_count) =
+                    counts(&transaction, &record.project_id).await?;
+                Ok(if deferred_count > 0 {
+                    GitHubStackSignalAppendOutcomeV1::Saturated {
+                        pending_count,
+                        deferred_count,
+                    }
+                } else {
+                    GitHubStackSignalAppendOutcomeV1::Appended {
+                        pending_count,
+                        deferred_count,
+                    }
+                })
+            },
+        )
+        .await
     }
 
     /// Returns a deterministic page of coordinator-pending deliveries.
@@ -742,46 +737,47 @@ impl RegisteredGlobalDb {
             validate_text(&key.signal_id, "signal id")?;
             validate_recipient(&key.recipient)?;
         }
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("begin GitHub stack host publication: {error}"))?;
-        let batch = read_delivery_batch(&transaction, project_id, &keys).await?;
-        let mut pending = Vec::with_capacity(keys.len());
-        for key in &keys {
-            let row = batch
-                .get(key)
-                .ok_or_else(|| "GitHub stack delivery batch is incomplete".to_owned())?;
-            let signal_watermark = row
-                .watermark_id
-                .as_deref()
-                .ok_or_else(|| "GitHub stack delivery signal is unavailable".to_owned())?;
-            if signal_watermark != watermark_id {
-                return Err("GitHub stack delivery watermark mismatch".to_owned());
-            }
-            let state = row
-                .state
-                .ok_or_else(|| "GitHub stack recipient binding is unavailable".to_owned())?;
-            match state {
-                GitHubStackDeliveryStateV1::Pending => {
-                    pending.push(key.clone());
+        let project_id = project_id.to_owned();
+        let watermark_id = watermark_id.to_owned();
+        self.transact_or(
+            |error| format!("GitHub stack host publication: {error}"),
+            async move |transaction| {
+                let batch = read_delivery_batch(&transaction, &project_id, &keys).await?;
+                let mut pending = Vec::with_capacity(keys.len());
+                for key in &keys {
+                    let row = batch
+                        .get(key)
+                        .ok_or_else(|| "GitHub stack delivery batch is incomplete".to_owned())?;
+                    let signal_watermark = row
+                        .watermark_id
+                        .as_deref()
+                        .ok_or_else(|| "GitHub stack delivery signal is unavailable".to_owned())?;
+                    if signal_watermark != watermark_id {
+                        return Err("GitHub stack delivery watermark mismatch".to_owned());
+                    }
+                    let state = row.state.ok_or_else(|| {
+                        "GitHub stack recipient binding is unavailable".to_owned()
+                    })?;
+                    match state {
+                        GitHubStackDeliveryStateV1::Pending => {
+                            pending.push(key.clone());
+                        }
+                        GitHubStackDeliveryStateV1::HostPending => {}
+                        GitHubStackDeliveryStateV1::Deferred => {
+                            return Err("GitHub stack delivery is deferred".to_owned());
+                        }
+                        GitHubStackDeliveryStateV1::Settled => {}
+                        GitHubStackDeliveryStateV1::AuthorizationLost => {
+                            return Err("GitHub stack delivery authorization was lost".to_owned());
+                        }
+                    }
                 }
-                GitHubStackDeliveryStateV1::HostPending => {}
-                GitHubStackDeliveryStateV1::Deferred => {
-                    return Err("GitHub stack delivery is deferred".to_owned());
-                }
-                GitHubStackDeliveryStateV1::Settled => {}
-                GitHubStackDeliveryStateV1::AuthorizationLost => {
-                    return Err("GitHub stack delivery authorization was lost".to_owned());
-                }
-            }
-        }
-        transition_pending_batch(&transaction, project_id, &pending).await?;
-        promote_deferred(&transaction, project_id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("commit GitHub stack host publication: {error}"))
+                transition_pending_batch(&transaction, &project_id, &pending).await?;
+                promote_deferred(&transaction, &project_id).await?;
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Final host receipt.  Replaying a receipt after settlement is harmless;
@@ -800,58 +796,70 @@ impl RegisteredGlobalDb {
         validate_text(project_id, "project id")?;
         validate_text(signal_id, "signal id")?;
         validate_recipient(recipient)?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("begin GitHub stack host acknowledgement: {error}"))?;
-        let mut rows = transaction
-            .query(
-                "SELECT state FROM github_stack_delivery_recipients
-                 WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3",
-                params![project_id, signal_id, recipient],
-            )
-            .await
-            .map_err(|error| format!("query GitHub stack host acknowledgement: {error}"))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| format!("read GitHub stack host acknowledgement: {error}"))?
-        else {
-            return Err("GitHub stack recipient binding is unavailable".to_owned());
-        };
-        let state = GitHubStackDeliveryStateV1::parse(
-            row.get::<String>(0)
-                .map_err(|error| format!("decode GitHub stack host state: {error}"))?,
-        )?;
-        match state {
-            GitHubStackDeliveryStateV1::HostPending => {
-                transaction
-                    .execute(
-                        "UPDATE github_stack_delivery_recipients
-                         SET state = 'settled'
-                         WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3
-                           AND state = 'host_pending'",
-                        params![project_id, signal_id, recipient],
+        let (project_id, signal_id, recipient) = (
+            project_id.to_owned(),
+            signal_id.to_owned(),
+            recipient.to_owned(),
+        );
+        self.transact_or(
+            |error| format!("GitHub stack host acknowledgement: {error}"),
+            async move |transaction| {
+                let mut rows = transaction
+                    .query(
+                        "SELECT state FROM github_stack_delivery_recipients
+                         WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3",
+                        params![project_id.as_str(), signal_id.as_str(), recipient.as_str()],
                     )
                     .await
-                    .map_err(|error| format!("settle GitHub stack host delivery: {error}"))?;
-            }
-            GitHubStackDeliveryStateV1::Settled => {}
-            GitHubStackDeliveryStateV1::Pending => {
-                return Err("GitHub stack delivery is still pending host publication".to_owned());
-            }
-            GitHubStackDeliveryStateV1::Deferred => {
-                return Err("GitHub stack delivery is deferred".to_owned());
-            }
-            GitHubStackDeliveryStateV1::AuthorizationLost => {
-                return Err("GitHub stack delivery authorization was lost".to_owned());
-            }
-        }
-        promote_deferred(&transaction, project_id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("commit GitHub stack host acknowledgement: {error}"))
+                    .map_err(|error| format!("query GitHub stack host acknowledgement: {error}"))?;
+                let Some(row) = rows
+                    .next()
+                    .await
+                    .map_err(|error| format!("read GitHub stack host acknowledgement: {error}"))?
+                else {
+                    return Err("GitHub stack recipient binding is unavailable".to_owned());
+                };
+                let state = GitHubStackDeliveryStateV1::parse(
+                    row.get::<String>(0)
+                        .map_err(|error| format!("decode GitHub stack host state: {error}"))?,
+                )?;
+                match state {
+                    GitHubStackDeliveryStateV1::HostPending => {
+                        transaction
+                            .execute(
+                                "UPDATE github_stack_delivery_recipients
+                                 SET state = 'settled'
+                                 WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3
+                                   AND state = 'host_pending'",
+                                params![
+                                    project_id.as_str(),
+                                    signal_id.as_str(),
+                                    recipient.as_str()
+                                ],
+                            )
+                            .await
+                            .map_err(|error| {
+                                format!("settle GitHub stack host delivery: {error}")
+                            })?;
+                    }
+                    GitHubStackDeliveryStateV1::Settled => {}
+                    GitHubStackDeliveryStateV1::Pending => {
+                        return Err(
+                            "GitHub stack delivery is still pending host publication".to_owned()
+                        );
+                    }
+                    GitHubStackDeliveryStateV1::Deferred => {
+                        return Err("GitHub stack delivery is deferred".to_owned());
+                    }
+                    GitHubStackDeliveryStateV1::AuthorizationLost => {
+                        return Err("GitHub stack delivery authorization was lost".to_owned());
+                    }
+                }
+                promote_deferred(&transaction, &project_id).await?;
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Marks a pending/deferred recipient as permanently unauthorized.  The
@@ -866,49 +874,53 @@ impl RegisteredGlobalDb {
         validate_text(project_id, "project id")?;
         validate_text(signal_id, "signal id")?;
         validate_recipient(recipient)?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("begin GitHub stack authorization loss: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE github_stack_delivery_recipients
-                 SET state = 'authorization_lost'
-                 WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3
-                   AND state IN ('pending', 'deferred')",
-                params![project_id, signal_id, recipient],
-            )
-            .await
-            .map_err(|error| format!("record GitHub stack authorization loss: {error}"))?;
-        if changed == 0 {
-            let mut rows = transaction
-                .query(
-                    "SELECT state FROM github_stack_delivery_recipients
-                     WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3",
-                    params![project_id, signal_id, recipient],
-                )
-                .await
-                .map_err(|error| format!("query GitHub stack authorization state: {error}"))?;
-            let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| format!("read GitHub stack authorization state: {error}"))?
-            else {
-                return Err("GitHub stack recipient binding is unavailable".to_owned());
-            };
-            let state =
-                GitHubStackDeliveryStateV1::parse(row.get::<String>(0).map_err(|error| {
-                    format!("decode GitHub stack authorization state: {error}")
-                })?)?;
-            if state != GitHubStackDeliveryStateV1::AuthorizationLost {
-                return Err("GitHub stack delivery is no longer authorizable".to_owned());
-            }
-        }
-        promote_deferred(&transaction, project_id).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("commit GitHub stack authorization loss: {error}"))
+        let (project_id, signal_id, recipient) = (
+            project_id.to_owned(),
+            signal_id.to_owned(),
+            recipient.to_owned(),
+        );
+        self.transact_or(
+            |error| format!("GitHub stack authorization loss: {error}"),
+            async move |transaction| {
+                let changed = transaction
+                    .execute(
+                        "UPDATE github_stack_delivery_recipients
+                         SET state = 'authorization_lost'
+                         WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3
+                           AND state IN ('pending', 'deferred')",
+                        params![project_id.as_str(), signal_id.as_str(), recipient.as_str()],
+                    )
+                    .await
+                    .map_err(|error| format!("record GitHub stack authorization loss: {error}"))?;
+                if changed == 0 {
+                    let mut rows = transaction
+                        .query(
+                            "SELECT state FROM github_stack_delivery_recipients
+                             WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3",
+                            params![project_id.as_str(), signal_id.as_str(), recipient.as_str()],
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("query GitHub stack authorization state: {error}")
+                        })?;
+                    let Some(row) = rows.next().await.map_err(|error| {
+                        format!("read GitHub stack authorization state: {error}")
+                    })?
+                    else {
+                        return Err("GitHub stack recipient binding is unavailable".to_owned());
+                    };
+                    let state = GitHubStackDeliveryStateV1::parse(row.get::<String>(0).map_err(
+                        |error| format!("decode GitHub stack authorization state: {error}"),
+                    )?)?;
+                    if state != GitHubStackDeliveryStateV1::AuthorizationLost {
+                        return Err("GitHub stack delivery is no longer authorizable".to_owned());
+                    }
+                }
+                promote_deferred(&transaction, &project_id).await?;
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Looks up the immutable signal payload by its exact registered-project
