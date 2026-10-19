@@ -314,6 +314,7 @@ pub async fn collect_document_diagnostics_with_timeouts(
 
 pub struct StdioLspClient {
     command: String,
+    workspace_root: PathBuf,
     upstream_capabilities: UpstreamCapabilities,
     document_versions: BTreeMap<String, i32>,
     next_request_id: ConnectionLocalRequestSequence,
@@ -416,6 +417,7 @@ impl StdioLspClient {
                     Instant::now() + timeouts.initialize_response,
                     command,
                     timeouts.initialize_response,
+                    project_root,
                 )
                 .await
             }
@@ -441,6 +443,7 @@ impl StdioLspClient {
 
         Ok(Self {
             command: command.to_string(),
+            workspace_root: project_root.to_path_buf(),
             upstream_capabilities: UpstreamCapabilities::from_initialize_response(
                 &initialize_response,
             ),
@@ -798,36 +801,53 @@ impl StdioLspClient {
                     let _ = self.cancel_request(request_id, timeouts).await;
                     return Err(LspSemanticRequestError::Cancelled);
                 }
-                message = read_message_until(&self.process, deadline, timeouts) => {
+                message = read_message_until(&self.process, deadline) => {
                     match message {
                         Ok(message) => message,
-                        Err(_error) if Instant::now() >= deadline => {
+                        Err(LspSemanticRequestError::TimedOut) => {
                             let _ = self.cancel_request(request_id, timeouts).await;
                             return Err(LspSemanticRequestError::TimedOut);
                         }
-                        Err(error) => return Err(semantic_transport_error(error)),
+                        Err(error) => return Err(error),
                     }
                 }
             };
-            let Some(message) = message else {
-                let _ = self.cancel_request(request_id, timeouts).await;
-                return Err(LspSemanticRequestError::TimedOut);
-            };
-            if message.id != Some(json!(request_id)) {
-                continue;
-            }
-            if let Some(error) = message.error {
-                return Err(LspSemanticRequestError::Remote {
-                    code: error.code,
-                    message: error.message,
-                });
-            }
-            let result = message.result.unwrap_or(Value::Null);
-            return serde_json::from_value(result).map_err(|error| {
-                LspSemanticRequestError::InvalidResponse {
-                    class: error.to_string(),
+            let message = match message {
+                SemanticMessagePoll::Message(message) => message,
+                SemanticMessagePoll::Pending => {
+                    let _ = self.cancel_request(request_id, timeouts).await;
+                    return Err(LspSemanticRequestError::TimedOut);
                 }
-            });
+            };
+            match message {
+                JsonRpcMessage::Request { id, method, params } => {
+                    dispatch_server_request(
+                        &self.process,
+                        id,
+                        &method,
+                        params.as_ref(),
+                        &self.workspace_root,
+                        timeouts,
+                    )
+                    .await
+                    .map_err(semantic_transport_error)?;
+                }
+                JsonRpcMessage::Notification { .. } => {}
+                JsonRpcMessage::Success { id, result } if id == json!(request_id) => {
+                    return serde_json::from_value(result).map_err(|error| {
+                        LspSemanticRequestError::InvalidResponse {
+                            class: error.to_string(),
+                        }
+                    });
+                }
+                JsonRpcMessage::Error { id, error } if id == json!(request_id) => {
+                    return Err(LspSemanticRequestError::Remote {
+                        code: Some(error.code),
+                        message: error.message,
+                    });
+                }
+                JsonRpcMessage::Success { .. } | JsonRpcMessage::Error { .. } => {}
+            }
         }
     }
 
@@ -924,14 +944,31 @@ impl StdioLspClient {
                     RefreshMessagePoll::Quiet => break,
                     RefreshMessagePoll::Closed => return Err(self.closed_refresh_error().await),
                 };
-            if message.method.as_deref() != Some("textDocument/publishDiagnostics") {
-                continue;
-            }
-            let params = message
-                .params
-                .ok_or_else(|| LspRefreshError::InvalidResponse {
-                    message: "LSP publishDiagnostics notification omitted params".to_owned(),
-                })?;
+            let params = match message {
+                JsonRpcMessage::Request { id, method, params } => {
+                    dispatch_server_request(
+                        &self.process,
+                        id,
+                        &method,
+                        params.as_ref(),
+                        &self.workspace_root,
+                        timeouts,
+                    )
+                    .await
+                    .map_err(refresh_transport_error)?;
+                    continue;
+                }
+                JsonRpcMessage::Notification { method, params }
+                    if method == "textDocument/publishDiagnostics" =>
+                {
+                    params.ok_or_else(|| LspRefreshError::InvalidResponse {
+                        message: "LSP publishDiagnostics notification omitted params".to_owned(),
+                    })?
+                }
+                JsonRpcMessage::Notification { .. }
+                | JsonRpcMessage::Success { .. }
+                | JsonRpcMessage::Error { .. } => continue,
+            };
             let published =
                 serde_json::from_value::<PublishDiagnosticsParams>(params).map_err(|error| {
                     LspRefreshError::InvalidResponse {
@@ -1035,6 +1072,7 @@ async fn wait_for_initialize(
     deadline: Instant,
     command: &str,
     timeout: Duration,
+    workspace_root: &Path,
 ) -> Result<Value> {
     loop {
         let frame = match process.read_frame_until(deadline).await {
@@ -1055,19 +1093,30 @@ async fn wait_for_initialize(
             Err(error) => return Err(frame_read_error(error)),
         };
         let message = decode_message(&frame)?;
-        if message.id == Some(json!(1)) {
-            if let Some(error) = message.error {
+        match message {
+            JsonRpcMessage::Request { id, method, params } => {
+                dispatch_server_request(
+                    process,
+                    id,
+                    &method,
+                    params.as_ref(),
+                    workspace_root,
+                    LspRefreshTimeouts::new(timeout, timeout, timeout, timeout),
+                )
+                .await?;
+            }
+            JsonRpcMessage::Notification { .. } => {}
+            JsonRpcMessage::Success { id, result } if id == json!(1) => return Ok(result),
+            JsonRpcMessage::Error { id, error } if id == json!(1) => {
                 let error = LspSemanticRequestError::Remote {
-                    code: error.code,
+                    code: Some(error.code),
                     message: error.message,
                 };
                 return Err(TraceDecayError::Config {
                     message: format!("LSP server '{command}' rejected initialize: {error}"),
                 });
             }
-            return message.result.ok_or_else(|| TraceDecayError::Config {
-                message: format!("LSP server '{command}' initialize response omitted result"),
-            });
+            JsonRpcMessage::Success { .. } | JsonRpcMessage::Error { .. } => {}
         }
     }
 }
@@ -1091,15 +1140,6 @@ async fn write_message_with_timeout(
             ),
         }),
         written => written.map_err(frame_write_error),
-    }
-}
-
-fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
-            "LSP diagnostics collection timed out after {} ms",
-            timeouts.refresh.as_millis()
-        ),
     }
 }
 
@@ -1164,21 +1204,99 @@ fn cancel_request_message(request_id: u64) -> Value {
 async fn read_message_until(
     process: &AnalyzerProcess,
     deadline: Instant,
-    timeouts: LspRefreshTimeouts,
-) -> Result<Option<JsonRpcMessage>> {
+) -> std::result::Result<SemanticMessagePoll, LspSemanticRequestError> {
     match process.read_frame_until(deadline).await {
-        Ok(FramePoll::Frame(frame)) => decode_message(&frame).map(Some),
-        Ok(FramePoll::Pending | FramePoll::Closed) => Ok(None),
-        Err(AsyncContentLengthError::DeadlineElapsed) => Err(refresh_timed_out(timeouts)),
-        Err(error) => Err(frame_read_error(error)),
+        Ok(FramePoll::Frame(frame)) => decode_message(&frame)
+            .map(SemanticMessagePoll::Message)
+            .map_err(|error| LspSemanticRequestError::InvalidResponse {
+                class: error.to_string(),
+            }),
+        Ok(FramePoll::Pending) => Ok(SemanticMessagePoll::Pending),
+        Ok(FramePoll::Closed) => Ok(SemanticMessagePoll::Pending),
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(LspSemanticRequestError::TimedOut),
+        Err(AsyncContentLengthError::Io(error)) => Err(LspSemanticRequestError::Transport {
+            class: format!("failed to read LSP frame: {error}"),
+        }),
+        Err(AsyncContentLengthError::Codec(error)) => {
+            Err(LspSemanticRequestError::InvalidResponse {
+                class: format!("failed to decode LSP Content-Length frame: {error:?}"),
+            })
+        }
     }
+}
+
+enum SemanticMessagePoll {
+    Message(JsonRpcMessage),
+    Pending,
 }
 
 #[tracing::instrument(name = "lsp.analyzer.response_parse", level = "trace", skip_all)]
 fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
-    serde_json::from_slice(body).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to parse LSP message: {e}"),
-    })
+    let value: Value = serde_json::from_slice(body).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to parse LSP message: {error}"),
+    })?;
+    let object = value.as_object().ok_or_else(|| invalid_json_rpc_envelope())?;
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(invalid_json_rpc_envelope());
+    }
+    let id = object.get("id").cloned();
+    let method = object.get("method");
+    let has_result = object.contains_key("result");
+    let has_error = object.contains_key("error");
+    if let Some(method) = method {
+        if has_result || has_error {
+            return Err(invalid_json_rpc_envelope());
+        }
+        let method = method
+            .as_str()
+            .filter(|method| !method.is_empty())
+            .ok_or_else(invalid_json_rpc_envelope)?
+            .to_owned();
+        let params = object.get("params").cloned();
+        if params.as_ref().is_some_and(|params| {
+            !(params.is_object() || params.is_array())
+        }) {
+            return Err(invalid_json_rpc_envelope());
+        }
+        return match id {
+            Some(id) if valid_json_rpc_id(&id) => {
+                Ok(JsonRpcMessage::Request { id, method, params })
+            }
+            None => Ok(JsonRpcMessage::Notification { method, params }),
+            Some(_) => Err(invalid_json_rpc_envelope()),
+        };
+    }
+    if object.contains_key("params") {
+        return Err(invalid_json_rpc_envelope());
+    }
+    let id = id
+        .filter(valid_json_rpc_id)
+        .ok_or_else(invalid_json_rpc_envelope)?;
+    match (has_result, has_error) {
+        (true, false) => Ok(JsonRpcMessage::Success {
+            id,
+            result: object["result"].clone(),
+        }),
+        (false, true) => {
+            let error = serde_json::from_value(object["error"].clone()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("invalid JSON-RPC error response: {error}"),
+                }
+            })?;
+            Ok(JsonRpcMessage::Error { id, error })
+        }
+        _ => Err(invalid_json_rpc_envelope()),
+    }
+}
+
+fn valid_json_rpc_id(id: &Value) -> bool {
+    id.is_string() || id.is_number()
+}
+
+fn invalid_json_rpc_envelope() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: "invalid JSON-RPC 2.0 message envelope".to_owned(),
+    }
 }
 
 fn frame_read_error(error: AsyncContentLengthError) -> TraceDecayError {
@@ -1201,6 +1319,68 @@ fn frame_write_error(error: AsyncContentLengthError) -> TraceDecayError {
         AsyncContentLengthError::DeadlineElapsed => "LSP message write timed out".to_owned(),
     };
     TraceDecayError::Config { message }
+}
+
+async fn dispatch_server_request(
+    process: &AnalyzerProcess,
+    id: Value,
+    method: &str,
+    params: Option<&Value>,
+    workspace_root: &Path,
+    timeouts: LspRefreshTimeouts,
+) -> Result<()> {
+    let response = match method {
+        "workspace/configuration" => {
+            let item_count = params
+                .and_then(|params| params.get("items"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": vec![Value::Null; item_count],
+            })
+        }
+        "workspace/workspaceFolders" => {
+            let name = workspace_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("workspace");
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [{
+                    "uri": file_uri(workspace_root),
+                    "name": name,
+                }],
+            })
+        }
+        "client/registerCapability"
+        | "client/unregisterCapability"
+        | "window/workDoneProgress/create"
+        | "window/showMessageRequest" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": null,
+        }),
+        "workspace/applyEdit" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "applied": false,
+                "failureReason": "workspace edits are not applied by this adapter",
+            },
+        }),
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": format!("unsupported server request: {method}"),
+            },
+        }),
+    };
+    write_message_with_timeout(process, response, timeouts.message_io).await
 }
 
 pub(crate) fn file_uri(path: &Path) -> String {
@@ -1265,23 +1445,30 @@ fn percent_encode_file_uri_path(path: &str) -> String {
     encoded
 }
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcMessage {
-    #[serde(default)]
-    id: Option<Value>,
-    #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    params: Option<Value>,
-    #[serde(default)]
-    result: Option<Value>,
-    #[serde(default)]
-    error: Option<JsonRpcError>,
+#[derive(Debug)]
+enum JsonRpcMessage {
+    Request {
+        id: Value,
+        method: String,
+        params: Option<Value>,
+    },
+    Notification {
+        method: String,
+        params: Option<Value>,
+    },
+    Success {
+        id: Value,
+        result: Value,
+    },
+    Error {
+        id: Value,
+        error: JsonRpcError,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcError {
-    code: Option<i64>,
+    code: i64,
     message: String,
 }
 
@@ -1424,6 +1611,39 @@ mod tests {
                 "params": { "id": 42 },
             })
         );
+    }
+
+    #[test]
+    fn json_rpc_response_classification_preserves_direction_and_null_results() {
+        assert!(matches!(
+            decode_message(
+                br#"{"jsonrpc":"2.0","id":2,"method":"window/showMessageRequest","params":{"message":"hello"}}"#
+            )
+            .expect("inbound request"),
+            JsonRpcMessage::Request { id, .. } if id == json!(2)
+        ));
+        assert!(matches!(
+            decode_message(br#"{"jsonrpc":"2.0","id":"2","result":null}"#)
+                .expect("explicit null result"),
+            JsonRpcMessage::Success { id, result } if id == json!("2") && result.is_null()
+        ));
+    }
+
+    #[test]
+    fn json_rpc_response_classification_rejects_invalid_envelopes() {
+        for body in [
+            br#"{"jsonrpc":"1.0","id":2,"result":null}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":2}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":2,"result":null,"error":{"code":-1,"message":"bad"}}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":null,"result":null}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":2,"method":"request","result":null}"#.as_slice(),
+        ] {
+            assert!(
+                decode_message(body).is_err(),
+                "invalid envelope was accepted: {}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
