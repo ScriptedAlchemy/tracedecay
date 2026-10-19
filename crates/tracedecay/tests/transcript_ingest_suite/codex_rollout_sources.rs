@@ -1,7 +1,3 @@
-//! A Codex `thread/revert` keeps the thread id and starts a new immutable
-//! rollout, `rollout-<ts>-<thread>_<rollout>.jsonl`, beside the original
-//! `rollout-<ts>-<thread>.jsonl`. Both files stay live.
-
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
@@ -54,7 +50,7 @@ async fn replies(db: &ProjectSessionTestRuntime) -> Vec<String> {
 async fn reverted_codex_thread_projects_both_live_rollouts() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    rollout(
+    let thread_rollout = rollout(
         &home,
         "01",
         THREAD,
@@ -82,6 +78,17 @@ async fn reverted_codex_thread_projects_both_live_rollouts() {
             "each rollout of the thread keeps its own messages on every pass"
         );
     }
+    let session = db
+        .get_session("codex", THREAD)
+        .await
+        .expect("codex session should be stored");
+    crate::support::assert_path_text_eq(
+        session
+            .transcript_path
+            .as_deref()
+            .expect("session transcript path"),
+        &thread_rollout,
+    );
 }
 
 #[tokio::test]
