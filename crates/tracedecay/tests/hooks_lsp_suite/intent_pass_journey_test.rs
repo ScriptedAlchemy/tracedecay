@@ -215,10 +215,10 @@ fn run_tool(home: &Path, project: &Path, name: &str, args: &Value) -> Value {
 
 fn delivery_evidence(home: &Path, project: &Path, contexts: &[String]) -> Value {
     let profile = home.join(".tracedecay");
-    let enrolled =
-        tracedecay_runtime_core::storage::default_profile_sharded_layout(project, &profile)
-            .unwrap()
-            .data_root;
+    let enrolled = tracedecay_runtime_core::storage::resolve_persisted_layout(project, &profile)
+        .unwrap()
+        .expect("enrolled hook store")
+        .data_root;
     let address = contexts
         .iter()
         .rev()
@@ -333,7 +333,13 @@ fn wait_for(what: &str, log: &Path, mut ready: impl FnMut() -> bool) {
     }
 }
 
-fn wait_for_hints(home: &Path, project: &Path, log: &Path, ready: impl Fn((i64, i64)) -> bool) {
+fn wait_for_hints(
+    home: &Path,
+    project: &Path,
+    log: &Path,
+    contexts: &[String],
+    ready: impl Fn((i64, i64)) -> bool,
+) {
     let deadline = Instant::now() + WAIT;
     loop {
         let counts = hint_counts(home, project, YES_INTENT);
@@ -342,8 +348,10 @@ fn wait_for_hints(home: &Path, project: &Path, log: &Path, ready: impl Fn((i64, 
         }
         assert!(
             Instant::now() < deadline,
-            "timed out at (emitted, suppressed) {counts:?} after intent outcomes {:?}",
-            intent_outcomes(log, ENABLED_SESSION)
+            "timed out at (emitted, suppressed) {counts:?} after intent outcomes {:?}\ndaemon: {}\nhook receipts: {}",
+            intent_outcomes(log, ENABLED_SESSION),
+            std::fs::read_to_string(log).unwrap_or_default(),
+            delivery_evidence(home, project, contexts),
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -592,9 +600,13 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
             .count(),
         1
     );
-    wait_for_hints(home, &project, &log, |(emitted, suppressed)| {
-        emitted == 1 && suppressed >= 1
-    });
+    wait_for_hints(
+        home,
+        &project,
+        &log,
+        &stop_contexts,
+        |(emitted, suppressed)| emitted == 1 && suppressed >= 1,
+    );
     let after_mount = intent_outcomes(&log, ENABLED_SESSION)[before + 1..].to_vec();
     assert!(
         !after_mount.is_empty() && after_mount.iter().all(|outcome| outcome == "suppressed"),
