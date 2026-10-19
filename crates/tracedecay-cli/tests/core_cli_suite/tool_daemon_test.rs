@@ -434,8 +434,8 @@ fn assert_scope_set_probe_answered(output: &Output, context: &str) {
 /// project server, then reads
 /// that server's tool-call counter from its typed status. Until the full
 /// project server takes over from the core, the call and the status can land
-/// on different servers, so the pair is re-sent until the status server has
-/// counted a call.
+/// on different servers with independent counters. Wait for the status
+/// server's project session authority and a counted call after that handoff.
 fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
     let project_arg = project.to_string_lossy().to_string();
     let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
@@ -478,12 +478,18 @@ fn wait_for_tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
         let tool_calls = payload["server"]["tool_calls"]
             .as_u64()
             .unwrap_or_else(|| panic!("typed status must carry its server counters: {payload}"));
-        if tool_calls >= 1 {
+        let project_sessions_mounted =
+            payload["server"]["retained_state_proxy"]["database_authorities"]["project_sessions"]
+                .as_bool()
+                .unwrap_or_else(|| {
+                    panic!("typed status must carry its mounted authorities: {payload}")
+                });
+        if project_sessions_mounted && tool_calls >= 1 {
             return tool_calls;
         }
         assert!(
             Instant::now() < deadline,
-            "the status server never counted a tool call before the CLI roundtrip deadline: {payload}"
+            "the full status server never mounted project sessions and counted a tool call before the CLI roundtrip deadline: {payload}"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -2148,7 +2154,7 @@ fn daemon_reuses_project_engine_across_tool_clients() {
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
+    init_committed_git_project_with_cli(&home_path, &project_path);
     let _daemon = spawn_tracedecay_daemon(&home_path);
 
     let first_tool_calls = wait_for_tool_status_server_tool_calls(&home_path, &project_path);
