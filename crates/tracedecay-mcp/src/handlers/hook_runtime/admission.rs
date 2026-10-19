@@ -647,8 +647,22 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
                 hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
             match lifecycle.as_ref() {
                 Some(lifecycle) => {
-                    cg.resolve_mounted_context_scout_claim_authority(lifecycle)
+                    match cg
+                        .resolve_mounted_context_scout_claim_authority(lifecycle)
                         .await
+                    {
+                        Some(authority) => Some(authority),
+                        // A replay can complete producer work without a host
+                        // response. Its next callback still owns delivery of
+                        // the session's separately mounted intent suggestion.
+                        None => match lifecycle.intent_scoped() {
+                            Some(intent_lifecycle) => {
+                                cg.resolve_mounted_context_scout_claim_authority(&intent_lifecycle)
+                                    .await
+                            }
+                            None => None,
+                        },
+                    }
                 }
                 None => None,
             }

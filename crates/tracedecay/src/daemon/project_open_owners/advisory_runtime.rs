@@ -62,6 +62,7 @@ use tracedecay_contracts::{
     DisclosureClass, LegalAction, RequestContext, RetryDirective, SafeDiagnostic, now_micros,
 };
 use tracedecay_domain::GitHeadStateV1;
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::feedback::{
     CiFailureParserIdentityV1, FeedbackScopeV1, FeedbackTriggerV1, GitHubPullRequestIdV1,
     GitHubReviewReadOperationV1,
@@ -1326,12 +1327,28 @@ const fn feedback_diagnostic_trigger(
     }
 }
 
-fn log_scout_intent_outcome(project_root: &Path, outcome: &str) {
+fn log_scout_intent_outcome(
+    project_root: &Path,
+    request: &HookOrchestrationRequestV1,
+    outcome: &str,
+) {
     tracedecay_runtime_core::logging::log_daemon_event(
         "context_scout_intent_work",
         &[
             ("project", project_root.display().to_string()),
             ("outcome", outcome.to_owned()),
+            (
+                "protected_session_id",
+                encode_lowercase_hex(&request.hook.envelope().protected_session_id),
+            ),
+            (
+                "event_id",
+                encode_lowercase_hex(&request.hook.envelope().event_id),
+            ),
+            (
+                "lifecycle_supplied",
+                request.lifecycle.is_some().to_string(),
+            ),
         ],
     );
 }
@@ -1354,7 +1371,7 @@ async fn run_production_intent_cycle(
     let producer = Arc::clone(&cycle.producer);
     let project_root = producer.project_root.as_path();
     if work_cancellation.is_cancelled() {
-        log_scout_intent_outcome(project_root, "cancelled");
+        log_scout_intent_outcome(project_root, &request, "cancelled");
         return HookOrchestrationWorkOutcomeV1::Completed;
     }
     let Ok(pinned_configuration) = producer
@@ -1364,7 +1381,7 @@ async fn run_production_intent_cycle(
         .current()
         .await
     else {
-        log_scout_intent_outcome(project_root, "configuration_unavailable");
+        log_scout_intent_outcome(project_root, &request, "configuration_unavailable");
         return HookOrchestrationWorkOutcomeV1::Completed;
     };
     let current_configuration = ConfigurationCurrentStateV1 {
@@ -1374,7 +1391,7 @@ async fn run_production_intent_cycle(
     let Some(scout_configuration) =
         ContextScoutConfigurationPinV1::from_current(&current_configuration)
     else {
-        log_scout_intent_outcome(project_root, "configuration_pin_unavailable");
+        log_scout_intent_outcome(project_root, &request, "configuration_pin_unavailable");
         return HookOrchestrationWorkOutcomeV1::Completed;
     };
     // Disabled or absent: no window read, no engine request, no authority.
@@ -1385,6 +1402,7 @@ async fn run_production_intent_cycle(
     {
         log_scout_intent_outcome(
             project_root,
+            &request,
             ContextScoutIntentPassOutcomeV1::Disabled.as_str(),
         );
         return HookOrchestrationWorkOutcomeV1::Completed;
@@ -1394,7 +1412,7 @@ async fn run_production_intent_cycle(
             pinned_configuration.snapshot(),
         )
     else {
-        log_scout_intent_outcome(project_root, "model_configuration_unavailable");
+        log_scout_intent_outcome(project_root, &request, "model_configuration_unavailable");
         return HookOrchestrationWorkOutcomeV1::Completed;
     };
     // Installing the pinned configuration also builds the decision engine
@@ -1410,7 +1428,7 @@ async fn run_production_intent_cycle(
     .await
     .is_err()
     {
-        log_scout_intent_outcome(project_root, "configuration_install_failed");
+        log_scout_intent_outcome(project_root, &request, "configuration_install_failed");
         return HookOrchestrationWorkOutcomeV1::Completed;
     }
     let envelope = request.hook.envelope();
@@ -1435,7 +1453,7 @@ async fn run_production_intent_cycle(
         },
     };
     let Some(lifecycle) = lifecycle else {
-        log_scout_intent_outcome(project_root, "lifecycle_absent");
+        log_scout_intent_outcome(project_root, &request, "lifecycle_absent");
         return HookOrchestrationWorkOutcomeV1::Completed;
     };
     let observed_at = now_micros();
@@ -1449,7 +1467,7 @@ async fn run_production_intent_cycle(
     .and_then(|access| {
         intent_authorization_context(&access, &cycle.feedback_scope, envelope, observed_at)
     }) else {
-        log_scout_intent_outcome(project_root, "authority_unavailable");
+        log_scout_intent_outcome(project_root, &request, "authority_unavailable");
         return HookOrchestrationWorkOutcomeV1::Completed;
     };
     let Some(pin) = ContextScoutAuthorityPinV1::new(
@@ -1458,7 +1476,7 @@ async fn run_production_intent_cycle(
         scout_configuration,
         observed_at,
     ) else {
-        log_scout_intent_outcome(project_root, "authority_pin_unavailable");
+        log_scout_intent_outcome(project_root, &request, "authority_pin_unavailable");
         return HookOrchestrationWorkOutcomeV1::Completed;
     };
     let code_generation_id = producer
@@ -1501,7 +1519,7 @@ async fn run_production_intent_cycle(
         lifecycle: intent_lifecycle,
     } = outcome
     else {
-        log_scout_intent_outcome(project_root, outcome.as_str());
+        log_scout_intent_outcome(project_root, &request, outcome.as_str());
         return HookOrchestrationWorkOutcomeV1::Completed;
     };
     let mounted = producer
@@ -1520,6 +1538,7 @@ async fn run_production_intent_cycle(
         .await;
     log_scout_intent_outcome(
         project_root,
+        &request,
         if mounted {
             "mounted"
         } else {
