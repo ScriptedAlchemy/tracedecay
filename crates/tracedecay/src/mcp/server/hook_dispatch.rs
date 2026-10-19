@@ -109,11 +109,7 @@ impl McpServer {
             };
         // Ref is mutable checkout state. Fixed route identity must still match
         // exactly; indexing reconciles the canonical current branch below.
-        if root.as_path() != effect_root
-            || current_scope.project_id != scope.project_id
-            || current_scope.repository_id != scope.repository_id
-            || current_scope.worktree_id != scope.worktree_id
-        {
+        if root.as_path() != effect_root || !current_scope.identifies_same_checkout(scope) {
             return Err(HostAdmissionOutcome::degraded("project_route_stale"));
         }
         let resolved = match crate::mcp::project_route::resolve_registered_project_route(
@@ -131,7 +127,7 @@ impl McpServer {
                 ));
             }
         };
-        if resolved.requested_root != root || resolved.scope != current_scope {
+        if resolved.requested_root != root || !resolved.scope.identifies_same_checkout(scope) {
             return Err(HostAdmissionOutcome::degraded("project_route_stale"));
         }
         Ok(resolved)

@@ -858,6 +858,115 @@ mod tests {
             runs.try_recv().is_err(),
             "the mounted edit executes exactly once"
         );
+        // A known session is NOT proof that another edit's native lifecycle
+        // reached the spool. This is the ledger-only redrive regression.
+        assert_eq!(
+            tracedecay_daemon_service::context_scout_lifecycle::lookup_registered_context_scout_native_session(
+                project_id,
+                binding.worktree_id,
+                envelope.protected_session_id,
+            )
+            .await,
+            Some(lifecycle.session_id.clone())
+        );
+        tracedecay_daemon_service::unregister_hook_orchestration_runtime(
+            project_id,
+            binding.worktree_id,
+            &runtime,
+        );
+        let second_lifecycle = tracedecay_hooks::NativeContextScoutLifecycleV1::new(
+            "session.replay.edit",
+            "call.replay.second",
+            [11; 16],
+        )
+        .unwrap();
+        let second_edit = tracedecay_hooks::HookEventEnvelopeV2 {
+            event_id: second_lifecycle.event_id,
+            observed_at: hook_replay_now(),
+            event: tracedecay_hooks::HookEventV2::SavedEdit {
+                file_id: [11; 16],
+                changed_range_count: 1,
+            },
+            ..envelope.clone()
+        };
+        assert!(matches!(
+            admit_hook_v2_replayed_envelope_with_lifecycle(
+                &graph,
+                &second_edit,
+                Some(second_lifecycle.session_id.clone()),
+                None,
+                &project_sessions,
+                &background_cpu,
+                hook_replay_now(),
+            )
+            .await,
+            HookV2AdmissionOutcomeV1::Backpressured
+        ));
+        assert_eq!(pending(), vec![second_edit.clone()]);
+        assert!(
+            runs.try_recv().is_err(),
+            "second edit remains owed before its lifecycle"
+        );
+        assert!(
+            tracedecay_daemon_service::register_hook_orchestration_runtime(
+                project_id,
+                binding.worktree_id,
+                &runtime,
+            )
+        );
+        drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        assert_eq!(pending(), vec![second_edit.clone()]);
+        assert!(
+            runs.try_recv().is_err(),
+            "a known session must not settle an edit without its call evidence"
+        );
+        let (mut second_spool, _) =
+            HookSpoolV1::open(&root, HookSpoolConfigV1::stock(host), hook_replay_now()).unwrap();
+        second_spool
+            .append_with_native_lifecycle(
+                second_edit,
+                Some(second_lifecycle.clone()),
+                &binding,
+                hook_replay_now(),
+            )
+            .unwrap();
+        drop(second_spool);
+        drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        let second_mounted = tokio::time::timeout(Duration::from_secs(10), runs.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("second spool record must mount its own lifecycle");
+        assert_eq!(second_mounted.session_id, second_lifecycle.session_id);
+        assert_eq!(
+            second_mounted.logical_message_id.as_str(),
+            second_lifecycle.call_id.as_str()
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !pending().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second mounted edit must settle its ledger debt");
+        assert!(
+            runs.try_recv().is_err(),
+            "second edit executes exactly once"
+        );
         superseded_edit_settles_after_newer_completion(
             &graph,
             &envelope,
