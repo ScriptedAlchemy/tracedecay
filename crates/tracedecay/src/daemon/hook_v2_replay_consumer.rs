@@ -644,7 +644,6 @@ async fn stop_replay_consumer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_mcp::handlers::hook_runtime::admit_hook_v2_envelope;
 
     #[test]
     fn only_an_admitted_redrive_settles_pending_work() {
@@ -1002,7 +1001,16 @@ mod tests {
             ..envelope
         };
         assert!(matches!(
-            admit_hook_v2_envelope(&graph, &disabled_edit, None, hook_replay_now()).await,
+            admit_hook_v2_replayed_envelope_with_lifecycle(
+                &graph,
+                &disabled_edit,
+                None,
+                None,
+                &project_sessions,
+                &background_cpu,
+                hook_replay_now(),
+            )
+            .await,
             HookV2AdmissionOutcomeV1::Admitted { .. }
         ));
         let disabled_pending =

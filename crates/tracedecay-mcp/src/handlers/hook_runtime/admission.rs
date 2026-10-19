@@ -537,15 +537,6 @@ async fn admit_gated_native_lifecycle(
     .await
 }
 
-pub async fn admit_hook_v2_envelope(
-    cg: &TraceDecay,
-    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    native_session_id: Option<SessionId>,
-    now: UtcMicros,
-) -> HookV2AdmissionOutcomeV1 {
-    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, false, now).await
-}
-
 pub async fn admit_hook_v2_replayed_envelope_with_lifecycle(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
