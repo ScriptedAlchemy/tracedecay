@@ -43,8 +43,11 @@ pub(super) fn is_module_import_language(language: &str) -> bool {
     matches!(language, "python" | "go" | "java" | "ruby")
 }
 
-pub(super) fn binds_through_caller_scope(language: &str) -> bool {
-    language == "ruby"
+pub(super) fn caller_scope<'r>(
+    language: &str,
+    reference: &'r CodeIndexUnresolvedReferenceV1,
+) -> Option<&'r SymbolOccurrenceId> {
+    (language == "ruby").then_some(&reference.from_occurrence)
 }
 
 type SymbolRef<'a> = (usize, &'a LineageSymbolRecordV1);
@@ -280,7 +283,8 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
         }
         let file = self.files[index].as_ref();
         let name = reference.reference_name.as_str();
-        let target = match file.extraction.language.as_str() {
+        let language = file.extraction.language.as_str();
+        let target = match language {
             "python" => self.python_call(file, &identifier_path(name, &["."])?),
             "go" => self.go_call(index, file, &identifier_path(name, &["."])?),
             "java" => self.java_call(
@@ -295,7 +299,12 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                     None => (false, name),
                 };
                 let segments = identifier_path(name, &[".", "::"])?;
-                self.ruby_call(index, &reference.from_occurrence, absolute, &segments)
+                self.ruby_call(
+                    index,
+                    caller_scope(language, reference)?,
+                    absolute,
+                    &segments,
+                )
             }
             _ => None,
         }?;

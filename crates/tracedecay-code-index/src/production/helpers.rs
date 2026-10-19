@@ -17,7 +17,7 @@ use crate::chunks::{
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::go_satisfaction::go_satisfaction;
 use crate::production::module_resolution::{
-    ModuleImportIndexV1, binds_through_caller_scope, is_module_import_language,
+    ModuleImportIndexV1, caller_scope, is_module_import_language,
 };
 use crate::production::resolution_view::{FileSymbolsByNameV1, ResolutionFileV1, SymbolsByNameV1};
 use crate::production::typescript_resolution::{
@@ -708,7 +708,6 @@ where
     // A module-rule binding may land in the referencing file itself
     // (`Util.normalize` inside `Util`); the per-file pass never saw it.
     let same_file_binds = is_module_import_language(files[index].language());
-    let caller_scoped = binds_through_caller_scope(files[index].language());
     let mut resolved_references = ResolvedReferenceCacheV1::new();
     let mut edges = Vec::new();
     let mut gaps = Vec::new();
@@ -723,7 +722,7 @@ where
             reference.kind,
             reference.argument_count,
             reference.ambiguous_local,
-            caller_scoped.then_some(&reference.from_occurrence),
+            caller_scope(files[index].language(), reference),
         );
         let (resolved, ambiguous) = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
