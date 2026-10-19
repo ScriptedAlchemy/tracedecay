@@ -1,12 +1,9 @@
 /**
- * The review state for one selected key, drawn inline under its row.
+ * The editor for one selected key, drawn inline under its row.
  *
- * It renders one state of the editor machine and reports intent back. It never
- * decides whether a change may be applied, the machine does, so a stage that
- * cannot submit simply offers no way to try. What it always shows is the
- * ladder the brief names: the effective value stays authoritative; a proposal
- * is a proposal until the write authority validates it, persists it against
- * the held revision, reports its apply requirement, and is read back.
+ * It renders the current draft and reports edits and Save intent to the
+ * controller. The effective value remains authoritative until the write is
+ * applied and read back.
  */
 
 import { Lock, X } from 'lucide-react';
@@ -18,17 +15,12 @@ import { secondarySettingsButtonClass, settingsButtonClass } from './settingsChr
 import type { SettingsEditorHandle } from './SettingsEditorController.tsx';
 import {
   settingsApplied,
-  settingsConfirmationHeld,
   settingsRejection,
-  settingsReviewOf,
   settingsScopePlan,
+  settingsSubmissionOf,
   type SettingsEditorState,
 } from './settingsEditorMachine.ts';
-import {
-  settingsRevisionId,
-  type SettingsScope,
-  type SettingsValidationError,
-} from './settingsModel.ts';
+import type { SettingsScope, SettingsValidationError } from './settingsModel.ts';
 import { SettingsRowEditor } from './SettingsRowEditor.tsx';
 import {
   applyRequirement,
@@ -43,10 +35,10 @@ import {
   ApplyRequirementText,
   ORIGIN_WORD,
   ValueCell,
-  reviewStatusWord,
+  saveStatusWord,
 } from './SettingsValues.tsx';
 
-export function SettingsReviewPanel({
+export function SettingsEditorPanel({
   row,
   capability,
   editor,
@@ -60,20 +52,20 @@ export function SettingsReviewPanel({
   editor: SettingsEditorHandle;
   workerStatus: CodeIndexWorkerStatusV1 | null;
   query: string;
-  /** False while a write is in flight: the panel stays until the verdict lands. */
+  /** False while a write is in flight so its outcome stays visible. */
   closable: boolean;
   onClose: () => void;
 }) {
   return (
     <section
-      aria-label={`Review ${row.key}`}
-      data-settings-review={row.key}
+      aria-label={`Edit ${row.key}`}
+      data-settings-editor={row.key}
       className="relative m-2 border border-edge-strong bg-surface-1 td-raised"
     >
       <Corners tone={capability.kind === 'writable' ? 'signal' : 'edge'} />
       <header className="flex min-h-9 items-center gap-2.5 border-b border-edge-subtle px-3">
         <h3 className="td-title truncate">
-          {capability.kind === 'writable' ? 'Review' : 'Inspect'}
+          {capability.kind === 'writable' ? 'Edit' : 'Inspect'}
           <span className="ml-2 font-mono normal-case tracking-normal text-text-primary">
             {row.key}
           </span>
@@ -83,7 +75,7 @@ export function SettingsReviewPanel({
           type="button"
           onClick={onClose}
           disabled={!closable}
-          aria-label="Close review"
+          aria-label="Close editor"
           className="td-hit group -my-2 -mr-2 shrink-0 disabled:cursor-wait disabled:opacity-50"
         >
           <span className="inline-flex size-6 items-center justify-center text-text-muted group-hover:text-text-primary">
@@ -133,9 +125,8 @@ function PanelBody({
             </Readout>
           </Readouts>
           <p className="text-body leading-relaxed text-text-muted" data-settings-gate="no_write_path">
-            <span className="text-text-secondary">Read-only.</span> GET /api/settings reports this
-            key as effective configuration, and no settings PATCH route addresses it. Nothing on
-            this surface can propose a change to it.
+            <span className="text-text-secondary">Not editable here.</span> Change this value in
+            the configuration source that owns it.
           </p>
         </>
       );
@@ -165,7 +156,7 @@ function PanelBody({
             <span className="text-text-secondary">Read-only · </span>
             {capability.reason}
           </p>
-          <HeldReviewUnderLock scope={capability.binding.scope} editor={editor} />
+          <HeldSubmissionUnderLock scope={capability.binding.scope} editor={editor} />
         </>
       );
     case 'writable':
@@ -187,34 +178,31 @@ function PanelBody({
 }
 
 /**
- * A frozen review that outlived its gate: the scope moved, or the authority
- * withdrew, after a change was staged. The locked branch cannot apply it, but
- * it must still be able to let go of it, otherwise `review_dismissed` is
- * unreachable and the machine sits in a verdict no control can leave.
+ * A save that outlived its gate remains visible, but a locked scope can only
+ * discard the old draft and reload current values.
  */
-function HeldReviewUnderLock({
+function HeldSubmissionUnderLock({
   scope,
   editor,
 }: {
   scope: SettingsScope;
   editor: SettingsEditorHandle;
 }) {
-  const review = settingsReviewOf(editor.state);
-  if (review === null || review.scope !== scope) return null;
+  const submission = settingsSubmissionOf(editor.state);
+  if (submission === null || submission.scope !== scope) return null;
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2" data-settings-stage={editor.state.status}>
+    <div className="flex flex-wrap items-center justify-between gap-2" data-settings-save={editor.state.status}>
       <span className="text-body text-text-muted">
-        A {scopeNoun(scope)} review is {reviewStatusWord(editor.state.status)} against revision{' '}
-        <span className="td-value">{review.expectedRevisionId}</span>; this scope can no longer
-        apply it.
+        This {scopeNoun(scope)} save is {saveStatusWord(editor.state.status)}. This setting is now
+        read-only here; reload current values before editing it elsewhere.
       </span>
       <button
         type="button"
         className={secondarySettingsButtonClass}
         disabled={editor.state.status === 'submitting'}
-        onClick={editor.dismiss}
+        onClick={editor.reload}
       >
-        Cancel review
+        Load current values
       </button>
     </div>
   );
@@ -241,21 +229,20 @@ function WritableBody({
   if (state.status === 'editor_unavailable') {
     return (
       <p className="text-xs text-state-error" data-settings-gate="editor_unavailable">
-        Settings editing requires project configuration values and configuration_revision_id
-        from GET /api/settings, plus user settings and configuration_revision_id from the same
-        authority. The response omitted at least one required field.
+        Settings cannot be edited until the current configuration and its revision are available.
+        Reload settings and try again.
       </p>
     );
   }
   const scope = binding.scope;
-  const review = settingsReviewOf(state);
-  const scopeReview = review?.scope === scope ? review : null;
+  const submission = settingsSubmissionOf(state);
+  const scopeSubmission = submission?.scope === scope ? submission : null;
   const plan = settingsScopePlan(state, scope);
   const rejection = settingsRejection(state);
   const scopeErrors = rejection?.scope === scope ? rejection.errors : [];
   // The input wears whichever refusal names its field: a verdict the editor is
   // resting on first, else the live plan's, so `aria-invalid` is true the
-  // moment the value would be refused rather than only after a review attempt.
+  // moment the value would be refused rather than only after Save.
   // (An edit clears a resting refusal in the machine, so the two never
   // describe different drafts.)
   const liveErrors = plan?.outcome === 'invalid' ? plan.errors : [];
@@ -263,13 +250,11 @@ function WritableBody({
     (error) => error.field === binding.field,
   )?.message;
   const applied = settingsApplied(state);
-  const revision = settingsRevisionId(state.authority, scope);
   const proposed = draftValue(state.draft, binding);
   const edited = fieldEdited(state.draft, state.authority, binding);
   const requirement = applyRequirement(binding);
-  const staged = scopeReview !== null;
-  const applying = state.status === 'submitting';
-  const otherReview = review !== null && scopeReview === null ? review.scope : null;
+  const savePending = state.status !== 'editing';
+  const otherSubmission = submission !== null && scopeSubmission === null ? submission.scope : null;
 
   return (
     <>
@@ -278,29 +263,19 @@ function WritableBody({
           <ValueCell row={row.row} query={query} />
           <span className="mt-0.5 block text-sm text-text-muted">authoritative</span>
         </Readout>
-        <Readout label="proposed value">
+        <Readout label="value">
           <SettingsRowEditor
             binding={binding}
             value={proposed}
-            label={`Proposed value for ${row.key}`}
+            label={`Edit ${row.key}`}
             error={fieldError}
-            disabled={staged || applying}
+            disabled={savePending}
             workerStatus={workerStatus}
             onChange={(value) => editor.edit(binding, value)}
           />
         </Readout>
         <Readout label="validation">
           <Validation plan={plan} errors={scopeErrors} edited={edited} rejection={rejection?.scope === scope ? rejection : null} />
-        </Readout>
-        <Readout label="current revision (cas)">
-          <span className="td-value break-all text-sm text-text-primary">{revision}</span>
-          <span className="mt-0.5 block text-sm text-text-muted">
-            {scopeReview
-              ? scopeReview.expectedRevisionId === revision
-                ? 'held by this review'
-                : `review held ${scopeReview.expectedRevisionId}`
-              : 'checked again immediately before apply'}
-          </span>
         </Readout>
         <Readout label="target layer">
           <span className="td-value text-sm text-text-primary">{scopeNoun(scope)}</span>
@@ -313,10 +288,10 @@ function WritableBody({
         </Readout>
       </Readouts>
 
-      {otherReview ? (
-        <p className="text-body text-text-muted" data-settings-other-review={state.status}>
-          A {scopeNoun(otherReview)} review is {reviewStatusWord(state.status)}. Editing this
-          value withdraws it.
+      {otherSubmission ? (
+        <p className="text-body text-text-muted" data-settings-other-save={state.status}>
+          A {scopeNoun(otherSubmission)} save is {saveStatusWord(state.status)}. This draft is
+          unchanged.
         </p>
       ) : null}
 
@@ -347,31 +322,25 @@ function WritableBody({
         </p>
       ) : null}
 
-      {scopeReview ? (
-        <FrozenReview
-          state={state}
-          patch={scopeReview.patch}
-          expectedRevisionId={scopeReview.expectedRevisionId}
-          scope={scope}
-          editor={editor}
-        />
+      {scopeSubmission ? (
+        <SubmissionStatus state={state} scope={scope} editor={editor} />
       ) : (
         <div className="flex flex-wrap justify-end gap-2">
           <button
             type="button"
             className={secondarySettingsButtonClass}
-            disabled={!edited || applying}
+            disabled={!edited || savePending}
             onClick={() => editor.revert(binding)}
           >
-            Discard proposal
+            Discard changes
           </button>
           <button
             type="button"
             className={settingsButtonClass}
-            disabled={plan?.outcome !== 'ready' || applying}
-            onClick={() => editor.review(scope)}
+            disabled={plan?.outcome !== 'ready' || savePending}
+            onClick={() => editor.save(scope)}
           >
-            Review {scopeNoun(scope)} change
+            Save
           </button>
         </div>
       )}
@@ -379,82 +348,41 @@ function WritableBody({
   );
 }
 
-/**
- * Once the change is frozen against a revision the panel shows exactly what
- * will be sent, asks for confirmation against that revision, and then renders
- * whatever verdict came back, each as its own state, none as "the save failed".
- */
-function FrozenReview({
+/** Keep the submitted intent visible until it has a truthful outcome. */
+function SubmissionStatus({
   state,
-  patch,
-  expectedRevisionId,
   scope,
   editor,
 }: {
   state: SettingsEditorState;
-  patch: unknown;
-  expectedRevisionId: string;
   scope: SettingsScope;
   editor: SettingsEditorHandle;
 }) {
-  const confirmed = settingsConfirmationHeld(state);
-  const applying = state.status === 'submitting';
-  const resolvable = state.status === 'conflicted'
-    || state.status === 'review_superseded'
-    || (state.status === 'submit_failed'
-      && (state.failure.kind === 'protocol_error' || state.failure.kind === 'unsettled'));
-  const retryable = state.status === 'authority_withdrawn' || state.status === 'submit_failed';
+  const requiresReload =
+    state.status === 'conflicted' ||
+    (state.status === 'submit_failed' &&
+      (state.failure.kind === 'protocol_error' || state.failure.kind === 'unsettled'));
+  const retryable =
+    state.status === 'authority_withdrawn' ||
+    (state.status === 'submit_failed' &&
+      (state.failure.kind === 'offline' || state.failure.kind === 'error'));
   return (
-    <div className="grid gap-2" data-settings-stage={state.status}>
-      <div className="grid gap-1">
-        <span className="td-legend">validated patch</span>
-        <pre className="max-h-40 overflow-auto border border-edge-subtle bg-surface-0 p-2 text-body text-text-secondary">
-          {JSON.stringify(patch, null, 2)}
-        </pre>
-        <span className="td-value text-xs text-text-muted">
-          only the validated changed fields above are sent · expected revision {expectedRevisionId}
-        </span>
-      </div>
-      <label className="flex cursor-pointer items-center gap-1 border border-edge-subtle py-1 pr-3 text-xs text-text-secondary">
-        <input
-          type="checkbox"
-          className="td-check"
-          checked={confirmed}
-          disabled={applying || resolvable}
-          onChange={(event) => editor.setConfirmed(event.target.checked)}
-        />
-        <span className="min-w-0">
-          I confirm this change against configuration revision {expectedRevisionId}.
-        </span>
-      </label>
+    <div className="grid gap-2" data-settings-save={state.status}>
       <Verdict state={state} />
       <div className="flex flex-wrap justify-end gap-2">
-        <button
-          type="button"
-          className={secondarySettingsButtonClass}
-          disabled={applying}
-          onClick={editor.dismiss}
-        >
-          Cancel review
-        </button>
-        {resolvable ? (
+        {requiresReload ? (
           <button type="button" className={settingsButtonClass} onClick={editor.reload}>
             Load current values
           </button>
-        ) : (
+        ) : retryable ? (
           <button
             type="button"
             className={settingsButtonClass}
-            disabled={!confirmed || applying}
-            onClick={editor.apply}
+            onClick={editor.retry}
           >
-            {applying
-              ? `Applying ${scopeLabel(scope)}`
-              : retryable
-                ? `Retry ${scopeLabel(scope)}`
-                : `Apply ${scopeLabel(scope)}`}
+            Retry {scopeLabel(scope)}
           </button>
-        )}
+        ) : null}
       </div>
     </div>
   );
@@ -471,17 +399,8 @@ function Verdict({ state }: { state: SettingsEditorState }) {
     case 'conflicted':
       return (
         <VerdictLine kind="conflicting">
-          Another writer saved {state.review.scope} settings after this form loaded. Your draft
-          was based on {state.conflict.expectedRevisionId}; the current authority is{' '}
-          {state.conflict.actualRevisionId ?? 'unknown'}. Nothing was applied.
-        </VerdictLine>
-      );
-    case 'review_superseded':
-      return (
-        <VerdictLine kind="conflicting">
-          The {state.review.scope} settings authority moved from {state.review.expectedRevisionId}{' '}
-          to {state.currentRevisionId} while this change was under review, so this change no
-          longer describes it. Nothing was sent.
+          Settings changed since you loaded them. Your save was not applied. Load the current
+          values, review your changes, and save again.
         </VerdictLine>
       );
     case 'authority_withdrawn':
@@ -489,15 +408,15 @@ function Verdict({ state }: { state: SettingsEditorState }) {
     case 'submit_failed':
       return (
         <VerdictLine kind={state.failure.kind === 'offline' ? 'offline' : 'error'}>
-          {state.failure.detail}
+          {state.failure.kind === 'unsettled'
+            ? `${state.failure.detail} Load current values before trying again.`
+            : state.failure.detail}
         </VerdictLine>
       );
     case 'submitting':
-      return <VerdictLine kind="loading">Applying against the held revision…</VerdictLine>;
+      return <VerdictLine kind="loading">Saving settings…</VerdictLine>;
     case 'editor_unavailable':
     case 'editing':
-    case 'reviewing':
-    case 'confirmed':
       return null;
     default: {
       const exhaustive: never = state;
