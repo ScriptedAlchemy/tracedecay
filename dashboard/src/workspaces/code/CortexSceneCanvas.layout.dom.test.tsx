@@ -83,6 +83,25 @@ function mockCanvas() {
   } as DOMRect);
 }
 
+function controlFrames() {
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    const id = ++nextFrame;
+    frames.set(id, callback);
+    return id;
+  });
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+    frames.delete(id);
+  });
+  const flush = () => {
+    const batch = [...frames.values()];
+    frames.clear();
+    for (const callback of batch) act(() => callback(performance.now()));
+  };
+  return { frames, flush };
+}
+
 describe('layout requests from the canvas', () => {
   it('drops a superseded layout that finishes after its replacement', async () => {
     mockCanvas();
@@ -153,18 +172,65 @@ describe('layout requests from the canvas', () => {
     await waitFor(() => expect(vi.mocked(painter.draw).mock.calls.at(-1)![2].selected).toBe('a'));
     expect(requests).toHaveLength(1);
   });
+
+  it('drops three out-of-order completions without letting older layouts replace the winner', async () => {
+    mockCanvas();
+    const { flush } = controlFrames();
+    const { painter, requests } = fakePainter();
+    const first = sceneOf('a');
+    const second = sceneOf('a', 'b');
+    const third = sceneOf('a', 'b', 'c');
+    const view = render(renderCanvas({ scene: first, painter }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    view.rerender(renderCanvas({ scene: second, painter }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    view.rerender(renderCanvas({ scene: third, painter }));
+    await waitFor(() => expect(requests).toHaveLength(3));
+
+    expect(requests[0]!.signal!.aborted).toBe(true);
+    expect(requests[1]!.signal!.aborted).toBe(true);
+    await act(async () => {
+      requests[2]!.resolve({ tag: 'third' });
+      await requests[2]!.settled;
+    });
+    flush();
+    expect(painter.draw).toHaveBeenCalled();
+    await act(async () => {
+      requests[1]!.resolve({ tag: 'obsolete' });
+      await requests[1]!.settled;
+      requests[0]!.reject(new Error('older layout failed'));
+      await requests[0]!.settled.catch(() => {});
+    });
+    flush();
+    expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready');
+    for (const [layout, scene] of vi.mocked(painter.draw).mock.calls) {
+      expect(layout.tag).toBe('third');
+      expect(scene).toBe(third);
+    }
+    view.unmount();
+  });
+
+  it('cancels queued frames on unmount and does not requeue a late layout', async () => {
+    mockCanvas();
+    const { frames, flush } = controlFrames();
+    const { painter, requests } = fakePainter();
+    const view = render(renderCanvas({ scene: sceneOf('a'), painter }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(frames.size).toBeGreaterThan(0);
+    view.unmount();
+    expect(requests[0]!.signal!.aborted).toBe(true);
+    expect(frames.size).toBe(0);
+    await act(async () => {
+      requests[0]!.resolve({ tag: 'too late' });
+      await requests[0]!.settled;
+    });
+    flush();
+    expect(frames.size).toBe(0);
+    expect(painter.draw).not.toHaveBeenCalled();
+  });
   it('never mixes a queued old painter with a new scene and layout', async () => {
     mockCanvas();
-    const frames = new Map<number, FrameRequestCallback>();
-    let nextFrame = 0;
-    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
-      const id = ++nextFrame;
-      frames.set(id, callback);
-      return id;
-    });
-    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
-      frames.delete(id);
-    });
+    const { frames, flush } = controlFrames();
 
     const first = fakePainter();
     const second = fakePainter();
@@ -191,9 +257,7 @@ describe('layout requests from the canvas', () => {
     // The old frame may dispatch B or no-op, but must never draw A with B's layout.
     act(() => deferredOldFrame(performance.now()));
     expect(first.painter.draw).not.toHaveBeenCalled();
-    for (const [, frame] of [...frames]) {
-      act(() => frame(performance.now()));
-    }
+    flush();
     expect(second.painter.draw).toHaveBeenCalled();
     for (const [layout, scene] of vi.mocked(second.painter.draw).mock.calls) {
       expect(layout.tag).toBe('second');
