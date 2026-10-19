@@ -619,8 +619,14 @@ jobs:
 
       - name: Install the Windows C cross-compiler
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+          # This compiler comes from Ubuntu, independently of third-party feeds
+          # preconfigured on the hosted image.
+          ubuntu_sources=(
+            -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources
+            -o Dir::Etc::sourceparts=-
+          )
+          sudo apt-get "${ubuntu_sources[@]}" update
+          sudo apt-get "${ubuntu_sources[@]}" install -y --no-install-recommends gcc-mingw-w64-x86-64
 
       - name: Check the Windows target
         run: >-
