@@ -1351,6 +1351,38 @@ mod tests {
     }
 
     #[test]
+    fn pending_work_order_survives_compaction_and_restart() {
+        let root = TestDir::new("ordered-pending-work");
+        let older = envelope(21, 5);
+        let mut newer = envelope(22, 5);
+        newer.event = HookEventV2::SavedEdit {
+            file_id: [22; 16],
+            changed_range_count: 1,
+        };
+        {
+            let mut ledger = open(root.path(), UtcMicros(1));
+            for (envelope, at) in [(&older, 2), (&newer, 3)] {
+                let staged = ledger
+                    .stage_admission(envelope, Some(envelope), UtcMicros(at))
+                    .unwrap();
+                staged.commit.wait().unwrap();
+            }
+            assert_eq!(
+                ledger.pending_work_envelopes(UtcMicros(4)).unwrap(),
+                vec![older.clone(), newer.clone()]
+            );
+            ledger.rewrite().unwrap();
+        }
+
+        let mut reopened = open(root.path(), UtcMicros(5));
+        assert_eq!(
+            reopened.pending_work_envelopes(UtcMicros(6)).unwrap(),
+            vec![older, newer],
+            "compaction and replay preserve producer admission order"
+        );
+    }
+
+    #[test]
     fn pending_producer_work_redrives_until_completion_survives_reopen() {
         let root = TestDir::new("ledger-work-completion");
         let admitted = envelope(9, 5);

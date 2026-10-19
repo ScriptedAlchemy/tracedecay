@@ -67,6 +67,7 @@ pub enum HookReplayAdmissionOutcomeV1 {
     ExactDuplicate,
     Conflict,
     CatchupRequired,
+    Deferred,
     Backpressured,
     Unavailable,
 }
@@ -263,6 +264,9 @@ where
                         record_count.saturating_sub(index as u16),
                     )));
                     break;
+                }
+                HookReplayAdmissionOutcomeV1::Deferred => {
+                    completions.push(ReplayCompletion::Retained(1));
                 }
             }
         }

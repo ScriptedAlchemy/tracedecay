@@ -25,8 +25,8 @@ use tracedecay_hooks::{
 };
 
 use tracedecay_mcp::handlers::hook_runtime::{
-    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
-    admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_native_lifecycle_enabled,
+    HookV2AdmissionOutcomeV1, HookV2NativeLifecyclePolicyV1, admit_hook_v2_envelope,
+    admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_native_lifecycle_policy,
     hook_v2_pending_work_envelopes,
 };
 
@@ -210,6 +210,14 @@ async fn drain_all_hosts(
             Ok(more) => sweep.more_pending |= more,
             Err(cause) => sweep.fail(*host, StatusHookReplaySpoolV1::DeliveryReceipts, cause),
         }
+        let replay_fences = match Box::pin(redrive_pending_work(
+            graph, data_root, *host, project_id, now, &mut sweep,
+        ))
+        .await
+        {
+            Ok(fences) => fences,
+            Err(()) => continue,
+        };
         let report = match Box::pin(drain_admitted_host_spool(
             *host,
             project_id,
@@ -217,6 +225,7 @@ async fn drain_all_hosts(
             graph,
             project_sessions,
             background_cpu,
+            &replay_fences,
         ))
         .await
         {
@@ -226,11 +235,6 @@ async fn drain_all_hosts(
                 None
             }
         };
-        // The host spool retains native lifecycle evidence the ledger cannot carry.
-        Box::pin(redrive_pending_work(
-            graph, data_root, *host, project_id, now, &mut sweep,
-        ))
-        .await;
         if let Some(report) = report
             && (report.committed > 0 || report.duplicates > 0 || report.tombstoned > 0)
         {
@@ -245,10 +249,12 @@ async fn drain_all_hosts(
             );
             // A pass settles a bounded batch; records behind it replay now,
             // not a full interval later.
-            match HookSpoolV1::has_records(&hook_v2_spool_root(data_root, *host)) {
-                Ok(more) => sweep.more_pending |= more,
-                Err(error) => {
-                    sweep.fail(*host, StatusHookReplaySpoolV1::Records, error.to_string());
+            if replay_fences.is_empty() {
+                match HookSpoolV1::has_records(&hook_v2_spool_root(data_root, *host)) {
+                    Ok(more) => sweep.more_pending |= more,
+                    Err(error) => {
+                        sweep.fail(*host, StatusHookReplaySpoolV1::Records, error.to_string());
+                    }
                 }
             }
         }
@@ -265,7 +271,7 @@ async fn redrive_pending_work(
     project_id: Option<[u8; 16]>,
     now: UtcMicros,
     sweep: &mut HookReplaySweepV1,
-) {
+) -> std::result::Result<BTreeMap<[u8; 32], [u8; 16]>, ()> {
     let pending_work = match hook_v2_pending_work_envelopes(data_root, host, now) {
         Ok(pending_work) => pending_work,
         Err(error) => {
@@ -274,17 +280,29 @@ async fn redrive_pending_work(
                 StatusHookReplaySpoolV1::PendingWork,
                 error.to_string(),
             );
-            Vec::new()
+            return Err(());
         }
     };
+    let mut replay_fences = BTreeMap::new();
+    for envelope in &pending_work {
+        if project_id.is_none_or(|project_id| envelope.project_id == project_id) {
+            replay_fences
+                .entry(envelope.protected_session_id)
+                .or_insert(envelope.event_id);
+        }
+    }
     let mut owed = 0_usize;
     let mut owed_cause = None;
     for envelope in pending_work {
         if project_id.is_some_and(|project_id| envelope.project_id != project_id) {
             continue;
         }
+        if replay_fences.get(&envelope.protected_session_id) != Some(&envelope.event_id) {
+            continue;
+        }
         // Owed work the daemon cannot admit now stays in the ledger and
-        // is redriven by the next sweep.
+        // is redriven by the next sweep. The oldest event for a session fences
+        // later spooled events until its own producer work settles.
         let outcome = admit_replayed_envelope_with_authoritative_session(
             envelope,
             None,
@@ -306,9 +324,16 @@ async fn redrive_pending_work(
                         tracedecay_hooks::HookEventV2::ToolLifecycle { .. }
                             | tracedecay_hooks::HookEventV2::SavedEdit { .. }
                     )
-                    && hook_v2_native_lifecycle_enabled(graph, host).await
                 {
-                    return HookV2AdmissionOutcomeV1::Backpressured;
+                    match hook_v2_native_lifecycle_policy(graph, host).await {
+                        HookV2NativeLifecyclePolicyV1::Required => {
+                            return HookV2AdmissionOutcomeV1::Backpressured;
+                        }
+                        HookV2NativeLifecyclePolicyV1::Unavailable => {
+                            return HookV2AdmissionOutcomeV1::Unavailable;
+                        }
+                        HookV2NativeLifecyclePolicyV1::Disabled => {}
+                    }
                 }
                 admit_hook_v2_envelope(graph, &envelope, native_session_id, hook_replay_now())
                     .await
@@ -327,6 +352,7 @@ async fn redrive_pending_work(
             format!("{owed} pending producer work redrive(s) stayed owed; the first {cause}"),
         );
     }
+    Ok(replay_fences)
 }
 
 /// Replays one host's spooled records, or `None` when it holds none.
@@ -337,6 +363,7 @@ async fn drain_admitted_host_spool(
     graph: &tracedecay_project::project::TraceDecay,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+    replay_fences: &BTreeMap<[u8; 32], [u8; 16]>,
 ) -> Result<Option<HookReplayPassReportV1>, String> {
     let data_root = &graph.hook_store_layout().data_root;
     let root = hook_v2_spool_root(data_root, host);
@@ -370,6 +397,12 @@ async fn drain_admitted_host_spool(
             &mut resolve_binding,
             now,
             |envelope, native_lifecycle| async move {
+                if replay_fences
+                    .get(&envelope.protected_session_id)
+                    .is_some_and(|event_id| *event_id != envelope.event_id)
+                {
+                    return tracedecay_hooks::HookReplayAdmissionOutcomeV1::Deferred;
+                }
                 let lifecycle_for_admission = native_lifecycle.clone();
                 replay_admission_outcome(
                     admit_replayed_envelope_with_authoritative_session(
