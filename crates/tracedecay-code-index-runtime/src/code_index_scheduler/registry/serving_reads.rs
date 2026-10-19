@@ -315,7 +315,7 @@ impl CodeIndexSchedulerRegistryV1 {
         native_runtime::spawn_blocking(move || {
             // Sample the broker before any generation/fence value. A record
             // disappears only after the scheduler accepted the source hint.
-            let admission_pending = include_source_admission && source_freshness.read_pending_source()?;
+            let admission_pending = include_source_admission && source_freshness.read_pending_source_blocking()?;
             let mut progress = {
                 let _span = tracing::trace_span!("daemon.code_index.dashboard.progress").entered();
                 build_progress

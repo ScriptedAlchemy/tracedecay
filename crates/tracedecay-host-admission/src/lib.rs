@@ -240,6 +240,18 @@ impl HostAdmissionBroker {
             .pending_matches(predicate)
     }
 
+    /// Inspect the same canonical records from an existing blocking worker.
+    /// Synchronous serving probes use the nonblocking variant instead.
+    pub fn pending_replay_matches_blocking(
+        &self,
+        predicate: impl FnMut(&[u8]) -> Result<bool, HostAdmissionOutcome>,
+    ) -> Result<bool, HostAdmissionOutcome> {
+        self.runtime
+            .lock()
+            .map_err(|_| spool_runtime_unavailable())?
+            .pending_matches(predicate)
+    }
+
     pub async fn pending_replay_count(&self) -> Result<usize, HostAdmissionOutcome> {
         self.with_runtime(|runtime| Ok(runtime.pending_count()))
             .await

@@ -8,7 +8,6 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_host_admission::SharedHostAdmissionBroker;
 use tracedecay_mcp::hook_events::{
     DurableHookEventDecodeError, HookEventPlan, decode_durable_hook_event_plan,
 };
@@ -16,51 +15,63 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::branch_admin::{HostAdmissionBrokerSlot, StoreAdministration};
 
 #[cfg(test)]
 mod tests;
 
 struct HookSourcePending {
-    broker: SharedHostAdmissionBroker,
+    broker: Arc<HostAdmissionBrokerSlot>,
     root: PathBuf,
     scope: ResolvedScope,
+}
+
+impl HookSourcePending {
+    fn matches_pending(&self, payload: &[u8]) -> std::result::Result<bool, HostAdmissionOutcome> {
+        let plan = decode_durable_hook_event_plan(payload).map_err(|error| {
+            HostAdmissionOutcome::degraded(match error {
+                DurableHookEventDecodeError::Malformed => "malformed_host_event_plan",
+                DurableHookEventDecodeError::UnsupportedVersion => "unsupported_host_event_plan",
+            })
+        })?;
+        match plan {
+            HookEventPlan::SyncFilesAt { root, scope, .. } => {
+                // Reference is mutable attribution. The canonical route's
+                // project, repository, worktree and byte-exact locator own
+                // the event through checkout changes.
+                Ok(root.as_os_str() == self.root.as_os_str()
+                    && scope.project_id == self.scope.project_id
+                    && scope.repository_id == self.scope.repository_id
+                    && scope.worktree_id == self.scope.worktree_id)
+            }
+            // Shipped unscoped file edits cannot prove a different route.
+            // Keep their source currency unresolved until replay settles.
+            HookEventPlan::SyncFiles(_) => Ok(true),
+            HookEventPlan::AddBranch(_)
+            | HookEventPlan::AddBranchAt { .. }
+            | HookEventPlan::SyncCurrentBranch { .. }
+            | HookEventPlan::DebouncedIncrementalSync(_)
+            | HookEventPlan::RecordTerminalReceipt { .. }
+            | HookEventPlan::MarkTurnIngested { .. }
+            | HookEventPlan::Noop => Ok(false),
+        }
+    }
 }
 
 impl CodeIndexSourcePendingReaderV1 for HookSourcePending {
     fn read_pending(&self) -> std::result::Result<bool, CodeIndexFreshnessReadFailureV1> {
         self.broker
-            .pending_replay_matches(|payload| {
-                let plan = decode_durable_hook_event_plan(payload).map_err(|error| {
-                    HostAdmissionOutcome::degraded(match error {
-                        DurableHookEventDecodeError::Malformed => "malformed_host_event_plan",
-                        DurableHookEventDecodeError::UnsupportedVersion => {
-                            "unsupported_host_event_plan"
-                        }
-                    })
-                })?;
-                match plan {
-                    HookEventPlan::SyncFilesAt { root, scope, .. } => {
-                        // Reference is mutable attribution. The canonical route's
-                        // project, repository, worktree and byte-exact locator own
-                        // the event through checkout changes.
-                        Ok(root.as_os_str() == self.root.as_os_str()
-                            && scope.project_id == self.scope.project_id
-                            && scope.repository_id == self.scope.repository_id
-                            && scope.worktree_id == self.scope.worktree_id)
-                    }
-                    // Shipped unscoped file edits cannot prove a different route.
-                    // Keep their source currency unresolved until replay settles.
-                    HookEventPlan::SyncFiles(_) => Ok(true),
-                    HookEventPlan::AddBranch(_)
-                    | HookEventPlan::AddBranchAt { .. }
-                    | HookEventPlan::SyncCurrentBranch { .. }
-                    | HookEventPlan::DebouncedIncrementalSync(_)
-                    | HookEventPlan::RecordTerminalReceipt { .. }
-                    | HookEventPlan::MarkTurnIngested { .. }
-                    | HookEventPlan::Noop => Ok(false),
-                }
-            })
+            .get()
+            .ok_or(CodeIndexFreshnessReadFailureV1::ReadFailed)?
+            .pending_replay_matches(|payload| self.matches_pending(payload))
+            .map_err(|_| CodeIndexFreshnessReadFailureV1::ReadFailed)
+    }
+
+    fn read_pending_blocking(&self) -> std::result::Result<bool, CodeIndexFreshnessReadFailureV1> {
+        self.broker
+            .get()
+            .ok_or(CodeIndexFreshnessReadFailureV1::ReadFailed)?
+            .pending_replay_matches_blocking(|payload| self.matches_pending(payload))
             .map_err(|_| CodeIndexFreshnessReadFailureV1::ReadFailed)
     }
 
@@ -81,10 +92,7 @@ pub(in crate::daemon) async fn project_hook_source_pending(
     graph: &TraceDecay,
     root: &Path,
     expected_scope: &ResolvedScope,
-) -> Result<(
-    SharedHostAdmissionBroker,
-    Arc<dyn CodeIndexSourcePendingReaderV1>,
-)> {
+) -> Result<Arc<dyn CodeIndexSourcePendingReaderV1>> {
     let registry = stores.registered_profile_database().await?;
     let owner = registry
         .project_registry_context_by_id(expected_scope.project_id.as_str())
@@ -112,7 +120,7 @@ pub(in crate::daemon) async fn project_hook_source_pending(
         ));
     }
     let database = stores
-        .registered_project_session_database(graph.project_root(), graph.store_layout())
+        .registered_project_configuration_database(graph.project_root(), graph.store_layout())
         .await?;
     if !matches!(&database.binding().shard_id.scope, StoreShardScopeV1::ProjectSessions { project_id } if project_id == &scope.project_id)
     {
@@ -122,11 +130,11 @@ pub(in crate::daemon) async fn project_hook_source_pending(
             "hook source writer belongs to a different project",
         ));
     }
-    let broker = stores.host_admission_broker(&database).await?;
+    let broker = stores.host_admission_source_broker(&database).await?;
     let reader: Arc<dyn CodeIndexSourcePendingReaderV1> = Arc::new(HookSourcePending {
-        broker: Arc::clone(&broker),
+        broker,
         root,
         scope,
     });
-    Ok((broker, reader))
+    Ok(reader)
 }

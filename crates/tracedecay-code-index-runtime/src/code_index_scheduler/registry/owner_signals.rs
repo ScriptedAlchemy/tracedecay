@@ -497,6 +497,25 @@ impl CodeIndexSchedulerRegistryV1 {
         budget: Duration,
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         let deadline = Instant::now() + budget;
+        // Every probe, including its blocking source read, shares the caller's
+        // one deadline. A timed-out blocking task cannot publish readiness.
+        match native_runtime::timeout_at(
+            deadline,
+            self.wait_for_readiness_until(project_root, target, deadline),
+        )
+        .await
+        {
+            Ok(reading) => reading,
+            Err(_) => Ok(CodeIndexReadinessWaitReadV1::TimedOut { last: None }),
+        }
+    }
+
+    async fn wait_for_readiness_until(
+        &self,
+        project_root: &Path,
+        target: CodeIndexReadinessTargetV1,
+        deadline: Instant,
+    ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
         if target != CodeIndexReadinessTargetV1::Fresh
             && let Some(reading) = self
                 .dashboard_freshness_read_with_source_admission(

@@ -1,5 +1,7 @@
 use tracedecay_domain::HostIntegrationIdV1;
-use tracedecay_host_admission::{HostAdmissionBroker, HostAdmissionRuntime, SpoolBounds};
+use tracedecay_host_admission::{
+    HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
+};
 use tracedecay_mcp::hook_events::{HookEventKind, encode_durable_hook_event_plan};
 
 use super::*;
@@ -12,7 +14,7 @@ fn reader(
     scope: &ResolvedScope,
 ) -> HookSourcePending {
     HookSourcePending {
-        broker: Arc::clone(broker),
+        broker: Arc::new(HostAdmissionBrokerSlot::from(Arc::clone(broker))),
         root: root.to_owned(),
         scope: scope.clone(),
     }
@@ -144,10 +146,9 @@ async fn unscoped_legacy_edits_remain_pending_and_invalid_plans_fail_closed() {
         let spool = tempfile::tempdir().unwrap();
         let broker = broker(spool.path());
         broker.admit("source", &payload).await.unwrap();
-        assert_eq!(
-            reader(&broker, project.path(), &scope).read_pending(),
-            expected
-        );
+        let reader = reader(&broker, project.path(), &scope);
+        assert_eq!(reader.read_pending(), expected);
+        assert_eq!(reader.read_pending_blocking(), expected);
     }
     let mut corrupt: serde_json::Value =
         serde_json::from_slice(&edit(project.path(), scope.clone())).unwrap();
@@ -159,8 +160,53 @@ async fn unscoped_legacy_edits_remain_pending_and_invalid_plans_fail_closed() {
         .admit("source", &serde_json::to_vec(&corrupt).unwrap())
         .await
         .unwrap();
+    let reader = reader(&broker, project.path(), &scope);
     assert_eq!(
-        reader(&broker, project.path(), &scope).read_pending(),
+        reader.read_pending(),
+        Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
+    );
+    assert_eq!(
+        reader.read_pending_blocking(),
+        Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
+    );
+}
+
+#[tokio::test]
+async fn poisoned_pending_source_remains_a_typed_read_failure() {
+    let (graph, project, _authority) = init_indexed_repo().await;
+    let project_id = graph
+        .store_layout()
+        .identity
+        .project_id
+        .as_ref()
+        .unwrap()
+        .clone()
+        .try_into()
+        .unwrap();
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(project.path(), &project_id)
+            .unwrap();
+    let spool = tempfile::tempdir().unwrap();
+    let broker = broker(spool.path());
+    broker
+        .admit(
+            "source",
+            &encode_durable_hook_event_plan(&HookEventPlan::Noop).unwrap(),
+        )
+        .await
+        .unwrap();
+    let poison = std::thread::spawn({
+        let broker = Arc::clone(&broker);
+        move || broker.pending_replay_matches(|_| panic!("poison the owned test broker runtime"))
+    });
+    assert!(poison.join().is_err());
+    let reader = reader(&broker, project.path(), &scope);
+    assert_eq!(
+        reader.read_pending(),
+        Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
+    );
+    assert_eq!(
+        reader.read_pending_blocking(),
         Err(CodeIndexFreshnessReadFailureV1::ReadFailed)
     );
 }

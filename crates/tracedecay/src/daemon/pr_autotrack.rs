@@ -909,7 +909,7 @@ async fn activate_linked_worktree(
             let scope =
                 tracedecay_code_index_runtime::resolved_scope_for_project(worktree, &project_id)
                     .map_err(|error| scheduler_unavailable(&error.to_string()))?;
-            let (_, reader) = super::project_composition::project_hook_source_pending(
+            let reader = super::project_composition::project_hook_source_pending(
                 stores, graph, worktree, &scope,
             )
             .await
