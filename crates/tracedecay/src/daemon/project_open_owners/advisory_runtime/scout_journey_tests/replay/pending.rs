@@ -226,7 +226,7 @@ async fn pending_stop_delivers_once(
             .recent_exact(entry.work.address, 8)
             .await
             .unwrap();
-        assert!(recent.deliveries.is_empty());
+        assert_eq!(recent.deliveries, Vec::new());
         unregister_hook_orchestration_runtime(
             fixture.binding.project_id,
             fixture.binding.worktree_id,
@@ -330,7 +330,7 @@ async fn pending_stop_delivers_once(
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     assert_eq!(engine.requests(), 1);
     let recent = fixture.owner.recent_exact(address, 8).await.unwrap();
-    assert!(recent.pending.is_empty());
+    assert_eq!(recent.pending, Vec::new());
     assert_eq!(recent.deliveries.len(), 1);
     unregister_hook_orchestration_runtime(
         fixture.binding.project_id,

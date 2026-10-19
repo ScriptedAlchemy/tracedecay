@@ -1575,6 +1575,13 @@ async fn run_production_intent_cycle(
         lifecycle: intent_lifecycle,
     } = outcome
     else {
+        if let ContextScoutIntentPassOutcomeV1::NoCandidate { model_outcome } = &outcome {
+            tracing::debug!(
+                event = "context_scout_intent_evaluation",
+                ?model_outcome,
+                "intent evaluation returned no candidate"
+            );
+        }
         log_scout_intent_outcome(project_root, &request, outcome.as_str());
         return settlement;
     };
