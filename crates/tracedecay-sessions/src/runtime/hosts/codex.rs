@@ -95,6 +95,8 @@ pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
 pub use observation::codex_observation_source_v2;
 pub(crate) use observation::try_admit_codex_jsonl_observations_for_project_window;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use observation::try_admit_codex_rollout_under_shipped_v2_source_for_test;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
     try_admit_codex_jsonl_observations_for_profile_with_admission,
