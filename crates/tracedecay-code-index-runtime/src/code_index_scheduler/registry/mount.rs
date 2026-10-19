@@ -1,5 +1,8 @@
 //! Worktree mount: cold-mount admission through the first serving generation.
 
+#[cfg(test)]
+mod pending_source_tests;
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
