@@ -33,16 +33,36 @@ struct StdioLspSemanticAuthorityInner {
     root_uri: String,
     timeouts: LspRefreshTimeouts,
     shared: Arc<SharedAnalyzerClient>,
-    operations: Mutex<BTreeMap<SemanticOperationKey, CancellationToken>>,
+    operations: Mutex<BTreeMap<SemanticOperationKey, Arc<CancellationToken>>>,
 }
 
 impl StdioLspSemanticAuthorityInner {
     /// Held only for one map operation and never across an await, so start
     /// and cancel wait for a peer instead of refusing or dropping the request.
-    fn operations(&self) -> MutexGuard<'_, BTreeMap<SemanticOperationKey, CancellationToken>> {
+    fn operations(
+        &self,
+    ) -> MutexGuard<'_, BTreeMap<SemanticOperationKey, Arc<CancellationToken>>> {
         self.operations
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+struct SemanticOperationRegistration {
+    inner: Arc<StdioLspSemanticAuthorityInner>,
+    key: SemanticOperationKey,
+    cancellation: Arc<CancellationToken>,
+}
+
+impl Drop for SemanticOperationRegistration {
+    fn drop(&mut self) {
+        let mut operations = self.inner.operations();
+        if operations
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.cancellation))
+        {
+            operations.remove(&self.key);
+        }
     }
 }
 
@@ -184,7 +204,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             root_uri: root.uri().to_owned(),
             request_id,
         };
-        let cancellation = CancellationToken::new();
+        let cancellation = Arc::new(CancellationToken::new());
         let inserted = {
             let mut operations = self.inner.operations();
             if operations.contains_key(&key) {
@@ -204,8 +224,14 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             });
         }
 
+        let registration = SemanticOperationRegistration {
+            inner: Arc::clone(&self.inner),
+            key,
+            cancellation: Arc::clone(&cancellation),
+        };
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
+            let _registration = registration;
             let outcome = tokio::select! {
                 () = cancellation.cancelled() => {
                     LspSemanticOperationOutcome::Partial {
@@ -217,10 +243,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                 slot = inner.shared.client() => {
                     let mut slot = match slot {
                         Ok(slot) => slot,
-                        Err(error) => {
-                            inner.operations().remove(&key);
-                            return analyzer_start_failure(&error);
-                        }
+                        Err(error) => return analyzer_start_failure(&error),
                     };
                     if slot.as_ref().is_none()
                         && let Some(outcome) = inner
@@ -228,7 +251,6 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             .is_terminal()
                             .then_some(LspSemanticOperationOutcome::Unavailable)
                     {
-                        inner.operations().remove(&key);
                         return outcome;
                     }
                     // Holding the client lock is what makes a start single
@@ -251,7 +273,6 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                         };
                         (attempt, started)
                     } else {
-                        inner.operations().remove(&key);
                         return LspSemanticOperationOutcome::Unavailable;
                     };
                     match client {
@@ -262,7 +283,6 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 // analyzer. Drop it rather than installing it
                                 // over the replacement's.
                                 slot.retire(client);
-                                inner.operations().remove(&key);
                                 return analyzer_event_outcome(AnalyzerEvent::Cancelled);
                             };
                             // The analyzer answers only for documents in its
@@ -335,7 +355,6 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     }
                 }
             };
-            inner.operations().remove(&key);
             outcome
         })
     }
@@ -664,6 +683,68 @@ mod tests {
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
         )
+    }
+
+    #[tokio::test]
+    async fn dropping_an_unpolled_semantic_future_releases_its_registration() {
+        let authority = unspawnable_authority();
+        let root = AdmittedRoot::new("file:///project");
+        let request_id = LspRequestId::Number(5);
+        let future = authority.start(
+            root.clone(),
+            request_id.clone(),
+            document_symbol_request(),
+        );
+        assert_eq!(authority.inner.operations().len(), 1);
+
+        drop(future);
+
+        assert!(authority.inner.operations().is_empty());
+        assert_ne!(
+            authority
+                .start(root, request_id, document_symbol_request())
+                .await,
+            LspSemanticOperationOutcome::Partial {
+                value: serde_json::Value::Null,
+                coverage: "semantic-duplicate-operation".to_owned(),
+                detail: None,
+            },
+            "the abandoned request ID is reusable"
+        );
+    }
+
+    #[test]
+    fn stale_registration_cannot_remove_its_replacement() {
+        let authority = unspawnable_authority();
+        let key = SemanticOperationKey {
+            root_uri: "file:///project".to_owned(),
+            request_id: LspRequestId::Number(6),
+        };
+        let original = Arc::new(CancellationToken::new());
+        authority
+            .inner
+            .operations()
+            .insert(key.clone(), Arc::clone(&original));
+        let guard = SemanticOperationRegistration {
+            inner: Arc::clone(&authority.inner),
+            key: key.clone(),
+            cancellation: original,
+        };
+        let replacement = Arc::new(CancellationToken::new());
+        authority
+            .inner
+            .operations()
+            .insert(key.clone(), Arc::clone(&replacement));
+
+        drop(guard);
+
+        let operations = authority.inner.operations();
+        assert!(
+            operations
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &replacement)),
+            "the stale guard leaves the current registration intact"
+        );
     }
 
     /// Another request registering or retiring its operation holds the map
