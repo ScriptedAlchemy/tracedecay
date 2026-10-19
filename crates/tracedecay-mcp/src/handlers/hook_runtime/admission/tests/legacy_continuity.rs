@@ -490,7 +490,10 @@ async fn disabled_claude_stop_follows_the_prior_session_cursor_without_minting_l
     let mut fixture =
         LegacyLifecycleFixture::open_for_host(tracedecay_domain::NativeHostIdentityV1::ClaudeCode)
             .await;
-    assert!(!hook_v2_native_lifecycle_enabled(&fixture.graph, fixture.envelope.producer).await);
+    assert_eq!(
+        hook_v2_native_lifecycle_policy(&fixture.graph, fixture.envelope.producer).await,
+        HookV2NativeLifecyclePolicyV1::Disabled,
+    );
     fixture
         .commit_lifecycle("call.prior-real-session", 99)
         .await;
@@ -553,5 +556,93 @@ async fn disabled_claude_stop_follows_the_prior_session_cursor_without_minting_l
         Some(99),
         "disabled policy must not mint another lifecycle or advance the source cursor",
     );
+    assert!(producer.shutdown().await);
+}
+
+#[tokio::test]
+async fn unavailable_claude_policy_preserves_owed_work_without_lifecycle_or_producer_effects() {
+    let fixture =
+        LegacyLifecycleFixture::open_for_host(tracedecay_domain::NativeHostIdentityV1::ClaudeCode)
+            .await;
+    fixture
+        .commit_lifecycle("call.prior-real-session", 99)
+        .await;
+    let canonical = daemon_mint_hook_v2_envelope(&fixture.envelope);
+    let mut native_lifecycle = fixture.lifecycle.clone();
+    native_lifecycle.event_id = canonical.event_id;
+    let staged = stage_hook_v2_admission(
+        &fixture.graph.hook_store_layout().data_root,
+        &canonical,
+        Some(&fixture.envelope),
+        Some(&native_lifecycle),
+        Some(99),
+        hook_now(),
+    )
+    .unwrap();
+    staged.commit.wait().unwrap();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let producer = fixture.producer(Arc::clone(&effects));
+    // The registered configuration reader refuses an ambiguous revision head.
+    // Existing immutable revisions remain untouched by this fault injection.
+    let database = fixture.graph.configuration_runtime().registered_database();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "INSERT INTO configuration_revisions
+                 (revision_id, parent_revision_id, snapshot_id, effective_behavior_digest,
+                  resolution_provenance_digest, actor_id, operation_kind, created_at)
+                 VALUES ('configuration.fault.ambiguous', NULL, 'unavailable', 'unavailable',
+                         'unavailable', 'actor.fixture', 'fault-injection', 0)",
+                (),
+            )
+            .await
+            .unwrap(),
+        1,
+    );
+    transaction.commit().await.unwrap();
+    assert!(
+        fixture
+            .graph
+            .configuration_runtime()
+            .client()
+            .current()
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        hook_v2_native_lifecycle_policy(&fixture.graph, fixture.envelope.producer).await,
+        HookV2NativeLifecyclePolicyV1::Unavailable,
+    );
+    assert!(matches!(
+        fixture.admit().await,
+        HookV2AdmissionOutcomeV1::Unavailable
+    ));
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.pending(), std::slice::from_ref(&fixture.envelope));
+    let staged = stage_hook_v2_admission(
+        &fixture.graph.hook_store_layout().data_root,
+        &canonical,
+        None,
+        None,
+        None,
+        hook_now(),
+    )
+    .unwrap();
+    assert_eq!(staged.receipt.order, 99);
+    assert_eq!(staged.receipt.work_settlement, None);
+    staged.commit.wait().unwrap();
+    assert_eq!(
+        super::super::super::context_scout::native_lifecycle_order_floor(
+            &fixture.sessions,
+            ProviderId::new(fixture.envelope.producer.hook_key()).unwrap(),
+            fixture.lifecycle.session_id.clone(),
+        )
+        .await,
+        Some(99),
+        "unavailable policy creates no lifecycle or cursor advance",
+    );
+    fixture.restart();
+    assert_eq!(fixture.pending(), std::slice::from_ref(&fixture.envelope));
     assert!(producer.shutdown().await);
 }
