@@ -314,6 +314,10 @@ fn merge_storage_report_page(
     report: &mut tracedecay_maintenance::retention::storage_report::StorageReport,
     page: tracedecay_maintenance::retention::storage_report::StorageReport,
 ) {
+    let unregistered_size = report
+        .coverage
+        .unregistered_size
+        .merge(page.coverage.unregistered_size);
     if report.profile_root.is_empty() {
         report.profile_root = page.profile_root;
     }
@@ -335,6 +339,7 @@ fn merge_storage_report_page(
         .user_sessions_db_bytes
         .max(page.user_sessions_db_bytes);
     report.coverage = page.coverage;
+    report.coverage.unregistered_size = unregistered_size;
 }
 
 /// Read-only per-store size / free-page-ratio / unregistered-directory report
@@ -455,11 +460,12 @@ async fn handle_storage_report(
         let root_state = store
             .root_state
             .map_or("root not probed", |state| state.label());
+        let size_coverage = effective_store_size_coverage(store);
         println!(
-            "    {} ({}, {root_state}): {} total, {free}",
+            "    {} ({}, {root_state}): {}, {free}",
             store.project_id,
             store.canonical_root,
-            format_bytes(store.total_bytes),
+            storage_size_label(store.total_bytes, size_coverage),
         );
         let kinds = &store.kinds;
         for (family, bytes) in [
@@ -478,6 +484,17 @@ async fn handle_storage_report(
             println!(
                 "      not sized: {} unreadable or non-regular entries",
                 store.unavailable_entry_count
+            );
+        }
+        if size_coverage.state
+            != tracedecay_maintenance::retention::storage_report::StorageReportSizeStateV1::Complete
+        {
+            println!(
+                "      sizing: {} ({})",
+                storage_coverage_state_label(size_coverage.state),
+                size_coverage
+                    .reason
+                    .map_or("unspecified", storage_coverage_reason_label)
             );
         }
     }
@@ -536,11 +553,31 @@ async fn handle_storage_report(
     println!(
         "  unregistered directories: {} ({})",
         report.unregistered_dir_count,
-        format_bytes(report.unregistered_bytes)
+        storage_size_label(report.unregistered_bytes, report.coverage.unregistered_size)
     );
+    if report.coverage.unregistered_size.state
+        != tracedecay_maintenance::retention::storage_report::StorageReportSizeStateV1::Complete
+    {
+        println!(
+            "    sizing: {} ({})",
+            storage_coverage_state_label(report.coverage.unregistered_size.state),
+            report
+                .coverage
+                .unregistered_size
+                .reason
+                .map_or("unspecified", storage_coverage_reason_label)
+        );
+    }
+    if report.coverage.unregistered_size.unavailable_entry_count > 0 {
+        println!(
+            "    not sized: {} unreadable or non-regular entries",
+            report.coverage.unregistered_size.unavailable_entry_count
+        );
+    }
     if report.unregistered_dir_count > 0 {
         println!("  run the daemon's automatic sweep to reclaim unregistered directories");
     }
+
     if let Some(footprint) = &report.footprint {
         for line in footprint_lines(footprint) {
             println!("{line}");
@@ -559,6 +596,69 @@ async fn handle_storage_report(
         );
     }
     Ok(())
+}
+
+fn storage_size_label(
+    bytes: u64,
+    coverage: tracedecay_maintenance::retention::storage_report::StorageReportSizeCoverageV1,
+) -> String {
+    use tracedecay_maintenance::retention::storage_report::StorageReportSizeStateV1 as State;
+
+    match coverage.state {
+        State::Complete => format!("{} total", format_bytes(bytes)),
+        State::Partial => format!("at least {} (partial)", format_bytes(bytes)),
+        State::Unavailable => format!("size unavailable ({} measured)", format_bytes(bytes)),
+    }
+}
+
+fn effective_store_size_coverage(
+    store: &tracedecay_maintenance::retention::storage_report::StoreSizeReportEntry,
+) -> tracedecay_maintenance::retention::storage_report::StorageReportSizeCoverageV1 {
+    use tracedecay_maintenance::retention::storage_report::{
+        StorageReportSizeCoverageV1, StorageReportSizeReasonV1, StorageReportSizeStateV1 as State,
+    };
+
+    let mut coverage = store.size_coverage;
+    coverage.unavailable_entry_count = coverage
+        .unavailable_entry_count
+        .max(store.unavailable_entry_count);
+    if coverage.state == State::Complete && store.unavailable_entry_count > 0 {
+        coverage.state = if store.total_bytes == 0 {
+            State::Unavailable
+        } else {
+            State::Partial
+        };
+        coverage.reason = Some(StorageReportSizeReasonV1::UnreadableEntries);
+    }
+    if coverage.state == State::Complete && coverage.unavailable_entry_count == 0 {
+        return StorageReportSizeCoverageV1::default();
+    }
+    coverage
+}
+
+fn storage_coverage_state_label(
+    state: tracedecay_maintenance::retention::storage_report::StorageReportSizeStateV1,
+) -> &'static str {
+    use tracedecay_maintenance::retention::storage_report::StorageReportSizeStateV1 as State;
+
+    match state {
+        State::Complete => "complete",
+        State::Partial => "partial lower bound",
+        State::Unavailable => "unavailable",
+    }
+}
+
+fn storage_coverage_reason_label(
+    reason: tracedecay_maintenance::retention::storage_report::StorageReportSizeReasonV1,
+) -> &'static str {
+    use tracedecay_maintenance::retention::storage_report::StorageReportSizeReasonV1 as Reason;
+
+    match reason {
+        Reason::UnreadableEntries => "unreadable entries",
+        Reason::EntryBudgetExceeded => "entry budget exceeded",
+        Reason::Cancelled => "cancelled",
+        Reason::DeadlineExceeded => "deadline exceeded",
+    }
 }
 
 /// The footprint section: every entry against its bound, largest first, then
@@ -638,6 +738,51 @@ mod footprint_output_tests {
                 "    profile total: 2.0 KB of 4.0 KB",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod storage_coverage_output_tests {
+    use tracedecay_maintenance::retention::storage_report::{
+        StorageReportSizeCoverageV1, StorageReportSizeReasonV1, StorageReportSizeStateV1,
+    };
+
+    use super::storage_size_label;
+
+    #[test]
+    fn partial_sizes_render_as_lower_bounds_not_exact_totals() {
+        let label = storage_size_label(
+            0,
+            StorageReportSizeCoverageV1 {
+                state: StorageReportSizeStateV1::Partial,
+                reason: Some(StorageReportSizeReasonV1::EntryBudgetExceeded),
+                unavailable_entry_count: 0,
+            },
+        );
+
+        assert!(label.starts_with("at least "));
+        assert!(label.ends_with("(partial)"));
+        assert!(!label.contains("total"));
+    }
+
+    #[test]
+    fn page_aggregation_preserves_a_budget_reason_and_unavailable_count() {
+        let merged = StorageReportSizeCoverageV1 {
+            state: StorageReportSizeStateV1::Partial,
+            reason: Some(StorageReportSizeReasonV1::UnreadableEntries),
+            unavailable_entry_count: 1,
+        }
+        .merge(StorageReportSizeCoverageV1 {
+            state: StorageReportSizeStateV1::Partial,
+            reason: Some(StorageReportSizeReasonV1::EntryBudgetExceeded),
+            unavailable_entry_count: 0,
+        });
+
+        assert_eq!(
+            merged.reason,
+            Some(StorageReportSizeReasonV1::EntryBudgetExceeded)
+        );
+        assert_eq!(merged.unavailable_entry_count, 1);
     }
 }
 

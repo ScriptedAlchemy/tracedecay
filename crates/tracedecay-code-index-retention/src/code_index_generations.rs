@@ -1005,8 +1005,10 @@ pub fn prepare_next_code_generation_retention_cancellable(
     )
 }
 
+/// Build a read-only retention plan while observing the caller's cancellation
+/// authority between directory entries and bounded digest reads.
 #[tracing::instrument(name = "usecases.retention.plan", level = "trace", skip_all)]
-fn plan_code_generation_retention_with_verification_cancellable(
+pub fn plan_code_generation_retention_with_verification_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     verification: GenerationDigestVerificationV1,
