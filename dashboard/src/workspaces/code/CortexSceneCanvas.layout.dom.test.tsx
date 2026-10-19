@@ -91,8 +91,9 @@ describe('layout requests from the canvas', () => {
       expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready'),
     );
     await waitFor(() => expect(painter.draw).toHaveBeenCalled());
-    requests[0]!.resolve({ tag: 'first' });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await act(async () => {
+      requests[0]!.resolve({ tag: 'first' });
+    });
 
     const drawn = vi.mocked(painter.draw).mock.calls.map((call) => call[0].tag);
     expect(new Set(drawn)).toEqual(new Set(['second']));
@@ -106,8 +107,9 @@ describe('layout requests from the canvas', () => {
     expect(requests[0]!.signal!.aborted).toBe(false);
     view.unmount();
     expect(requests[0]!.signal!.aborted).toBe(true);
-    requests[0]!.resolve({ tag: 'late' });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await act(async () => {
+      requests[0]!.resolve({ tag: 'late' });
+    });
     expect(painter.draw).not.toHaveBeenCalled();
   });
 
