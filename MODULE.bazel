@@ -54,7 +54,7 @@ rust.toolchain(
 use_repo(
     rust,
     "rust_toolchains",
-    rust_analyzer_tools = "rust_analyzer_nightly-2026-10-18_tools",
+    rust_analyzer_tools = "rust_analyzer_nightly-2026-10-19_tools",
 )
 register_toolchains("@rust_toolchains//:all")
 
