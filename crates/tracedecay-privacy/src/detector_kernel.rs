@@ -551,6 +551,9 @@ mod tests {
                 "build_20261018_x86_64_linux",
                 "build_20261018_x86_64_linux/typescript",
                 "typescript/build_20261018_x86_64_linux",
+                "build_20261018_x86_64_linux/javascript",
+                "build_20261018_x86_64_linux/documentation",
+                "build_20261018_x86_64_linux/generated_sources",
             ] {
                 let path = format!("/workspace/{uuid}/dist/{artifact}");
                 assert_eq!(
@@ -650,29 +653,33 @@ mod tests {
 
     #[test]
     fn uuid_paths_redact_minimum_width_tokens_at_every_internal_slash_position() {
-        let payload = "abcdefghijklmnopaQRSTUVWXYZ012345QR";
-        assert_eq!(payload.len() + 1, MIN_TOKEN_LENGTH);
         let prefix = format!(
             "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
             "a".repeat(512)
         );
-        for split in 1..payload.len() {
-            let secret = format!("{}/{}", &payload[..split], &payload[split..]);
-            assert!(looks_high_entropy_token(&secret));
-            let path = format!("{prefix}{secret}/source");
-            assert!(!looks_high_entropy_token(&path));
-            assert_eq!(
-                high_entropy_ranges(&path),
-                vec![prefix.len()..prefix.len() + secret.len()],
-                "split at {split}"
-            );
-            let metadata = json!({"path": path});
-            let sanitized = crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
-                .expect("structured path metadata");
-            let source = sanitized["path"].as_str().unwrap();
-            assert!(!source.contains(&secret), "split at {split}");
-            assert!(source.starts_with(&prefix));
-            assert!(source.ends_with("/source"));
+        for payload in [
+            "abcdefghijklmnopaQRSTUVWXYZ012345QR",
+            "abcdefghijklmnOPQRSTUVWXYZ012345OPQ",
+        ] {
+            assert_eq!(payload.len() + 1, MIN_TOKEN_LENGTH);
+            for split in 1..payload.len() {
+                let secret = format!("{}/{}", &payload[..split], &payload[split..]);
+                assert!(looks_high_entropy_token(&secret));
+                let path = format!("{prefix}{secret}/source");
+                assert!(!looks_high_entropy_token(&path));
+                assert_eq!(
+                    high_entropy_ranges(&path),
+                    vec![prefix.len()..prefix.len() + secret.len()],
+                    "{payload} split at {split}"
+                );
+                let metadata = json!({"path": path});
+                let sanitized = crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+                    .expect("structured path metadata");
+                let source = sanitized["path"].as_str().unwrap();
+                assert!(!source.contains(&secret), "{payload} split at {split}");
+                assert!(source.starts_with(&prefix));
+                assert!(source.ends_with("/source"));
+            }
         }
     }
 
