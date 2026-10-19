@@ -195,21 +195,9 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
         let uuid_path = !macos_temp_path
             && candidate.starts_with('/')
             && candidate.split('/').any(is_uuid_path_component);
-        let uuid_path_residual = uuid_path.then(|| {
-            candidate
-                .split('/')
-                .filter(|component| !is_uuid_path_component(component))
-                .collect::<Vec<_>>()
-                .join("/")
-        });
-        // UUID directory names are path identity, but the remaining path must
-        // still be scored together so slash-bearing credentials stay visible.
-        if uuid_path_residual
-            .as_deref()
-            .is_some_and(looks_high_entropy_token)
-        {
-            ranges.push(start..end);
-        } else if uuid_path || macos_temp_path {
+        if uuid_path {
+            extend_uuid_path_entropy_ranges(candidate, start, &mut ranges);
+        } else if macos_temp_path {
             let mut component_start = 0usize;
             for component in candidate.split('/') {
                 let component_end = component_start + component.len();
@@ -224,6 +212,54 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
         start = end;
     }
     ranges
+}
+
+// UUIDs contribute identity, not credential entropy. Adjacent dense components
+// form one token; one sparse neighbor can supply the other half of a token.
+// Inspect original, disjoint slices so ordinary prefixes cannot dilute secrets.
+fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<Range<usize>>) {
+    let mut component_start = 0usize;
+    let mut previous: Option<Range<usize>> = None;
+    let mut run: Option<Range<usize>> = None;
+    let mut run_prefix = None;
+    for component in text.split('/').chain(std::iter::once("")) {
+        let component_end = component_start + component.len();
+        let eligible = !component.is_empty() && !is_uuid_path_component(component);
+        if eligible
+            && entropy_bits_per_mille(component)
+                .is_none_or(|score| score >= MIN_TOKEN_ENTROPY_PER_MILLE)
+        {
+            match &mut run {
+                Some(run) => run.end = component_end,
+                None => {
+                    run_prefix = previous.take().map(|range| range.start);
+                    run = Some(component_start..component_end);
+                }
+            }
+        } else {
+            let mut consumed = false;
+            if let Some(run) = run.take() {
+                let matched = if looks_high_entropy_token(&text[run.clone()]) {
+                    Some(run.clone())
+                } else if let Some(prefix) = run_prefix
+                    && looks_high_entropy_token(&text[prefix..run.end])
+                {
+                    Some(prefix..run.end)
+                } else if eligible && looks_high_entropy_token(&text[run.start..component_end]) {
+                    consumed = true;
+                    Some(run.start..component_end)
+                } else {
+                    None
+                };
+                if let Some(matched) = matched {
+                    ranges.push(offset + matched.start..offset + matched.end);
+                }
+                run_prefix = None;
+            }
+            previous = (eligible && !consumed).then_some(component_start..component_end);
+        }
+        component_start = component_end + 1;
+    }
 }
 
 fn is_uuid_path_component(component: &str) -> bool {
@@ -296,9 +332,10 @@ pub fn looks_high_entropy_token(token: &str) -> bool {
             .filter(|count| *count != 0)
             .map(|count| count as u128 * fixed_log2(count))
             .sum::<u128>();
-    entropy_sum * 10 >= len * 42 * ENTROPY_SCALE
+    entropy_sum * 1_000 >= len * u128::from(MIN_TOKEN_ENTROPY_PER_MILLE) * ENTROPY_SCALE
 }
 
+const MIN_TOKEN_ENTROPY_PER_MILLE: u32 = 4_200;
 const ENTROPY_SCALE: u128 = 1 << 20;
 
 fn fixed_log2(value: usize) -> u128 {
@@ -484,7 +521,58 @@ mod tests {
             "AbCdEfGhIjKlMnOpQrStUvWxYz01234/56789aBcDeFgHiJkLmNoPqRsTuVwXy",
         ] {
             let path = format!("{prefix}{secret}");
-            assert_eq!(high_entropy_ranges(&path), vec![0..path.len()]);
+            assert_eq!(
+                high_entropy_ranges(&path),
+                vec![prefix.len()..prefix.len() + secret.len()]
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_paths_preserve_dated_build_artifact_locations() {
+        for uuid in [
+            "00000000-0000-0000-0000-000000000000",
+            "fe600511-e406-4142-b74a-cbf177c5f2cb",
+        ] {
+            let path = format!("/workspace/{uuid}/dist/build_20261018_x86_64_linux");
+            assert_eq!(
+                high_entropy_ranges(&path),
+                Vec::<Range<usize>>::new(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_paths_do_not_dilute_adjacent_short_secret_components() {
+        let prefix = format!(
+            "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
+            "a".repeat(512)
+        );
+        let secret = "AbCdEfGhIjKlMnOpQrStUvWxYz01234/56789aBcDeFgHiJkLmNoPqRsTuVwXy";
+        assert!(secret.split('/').all(|component| component.len() < 36));
+        assert!(looks_high_entropy_token(secret));
+        let path = format!("{prefix}{secret}/source");
+        assert!(!looks_high_entropy_token(&path));
+        assert_eq!(
+            high_entropy_ranges(&path),
+            vec![prefix.len()..prefix.len() + secret.len()]
+        );
+    }
+
+    #[test]
+    fn uuid_paths_detect_tokens_with_a_sparse_neighbor_component() {
+        let prefix = "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/";
+        let letters = "AbCdEfGhIjKlMnOpQrStUvWxYzABCD";
+        let digits = "012345678901234567890123456789";
+        for secret in [format!("{letters}/{digits}"), format!("{digits}/{letters}")] {
+            assert!(secret.split('/').all(|component| component.len() < 36));
+            assert!(looks_high_entropy_token(&secret));
+            let path = format!("{prefix}{secret}/source");
+            assert_eq!(
+                high_entropy_ranges(&path),
+                vec![prefix.len()..prefix.len() + secret.len()]
+            );
         }
     }
 
