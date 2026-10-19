@@ -1541,7 +1541,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.shutting_down),
             )
         };
-        let admission_pending = source_freshness.read_pending_source().ok()?;
+        // Pending or unreadable admission evidence withdraws currency, not
+        // the immutable owner. Graph and text reads can still name the last
+        // complete generation while the freshness surface reports its error.
+        let admission_clear = source_freshness
+            .read_pending_source()
+            .is_ok_and(|pending| !pending);
         let scope = scope.clone();
         let latest = text_generation
             .read()
@@ -1551,7 +1556,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 (!require_serving_ready || latest.query_owners_are_ready())
                     && text_matches_scope_identity(latest, &scope)
             })?;
-        let current = !admission_pending
+        let current = admission_clear
             && source_freshness.serves_verified_source(
                 &latest.metadata().snapshot().content_identity,
                 &root,
