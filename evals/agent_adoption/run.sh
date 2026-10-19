@@ -111,6 +111,10 @@ STEER_TEXT="This repository has indexed code-relationship evidence available. Ch
 
 live=0
 if [[ "${TRACEDECAY_AGENT_EVALS:-}" == "1" ]]; then live=1; fi
+if [[ "${EVAL_INCLUDE_BASELINE:-0}" == "1" && -z "${TRACEDECAY_BIN:-}" ]]; then
+  echo "error: product-effectiveness evals require an explicit shipping TRACEDECAY_BIN" >&2
+  exit 2
+fi
 
 # Live runs default to the candidate branch binary. TRACEDECAY_BIN remains an
 # explicit override for release-binary comparisons; dry runs reuse a built

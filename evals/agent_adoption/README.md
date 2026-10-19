@@ -89,7 +89,7 @@ paths, so do **not** commit run artifacts.
 | `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
 | `REPEATED_QUERY_HINTS` | `off` | `on` turns on the profile setting `user.repeated_query_hints.v1` for the eval's isolated profile before any agent launches, and suffixes transcripts with `__qhints`; see "Repeated-query hints on vs off" |
 | `REAL_CLAUDE_DIR` | `$CLAUDE_CONFIG_DIR` or `~/.claude` | where the Claude credential comes from: its `.claude_code_oauth_token` and `settings.json` `env`/`model` keys; see "Store isolation & auth" |
-| `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
+| `TRACEDECAY_BIN` | candidate branch (live) | explicit binary override; required for the product-effectiveness cohort |
 | `EFFICIENCY_SCORECARD` | unset | optional no-model scorecard path, joined only when its binary digest matches |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
 | `LEARNED_SKILL_WORKFLOW` | unset | run only that workflow's held-out scenarios, once per variant, on `full` |
@@ -104,7 +104,10 @@ They are excluded from ordinary adoption runs. Run them with one host/model,
 one artifact, identical prompts, and repeated trials:
 
 ```sh
+bazel build --config=release //crates/tracedecay-cli:tracedecay
+TRACEDECAY_BIN="$(bazel info --config=release bazel-bin)/crates/tracedecay-cli/tracedecay"
 TRACEDECAY_AGENT_EVALS=1 EVAL_INCLUDE_BASELINE=1 HOSTS=claude \
+  TRACEDECAY_BIN="$TRACEDECAY_BIN" \
   CLAUDE_MODELS=sonnet \
   SCENARIOS="baseline_order_stock_failure baseline_stock_check_rename baseline_currency_decision" \
   CHANNELS="native bare no-hints no-skills full" REPS=3 \
