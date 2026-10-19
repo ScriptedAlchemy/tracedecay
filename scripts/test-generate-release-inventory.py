@@ -43,12 +43,32 @@ def main() -> None:
         (dashboard / "index.js").write_bytes(b"bundled npm")
         (dashboard / "archivo-latin.woff2").write_bytes(b"font bytes")
         (source / "crates/tracedecay-cli").mkdir(parents=True)
-        (source / "crates/tracedecay").mkdir(parents=True)
+        (source / "crates/tracedecay/vendor/sample-vendor").mkdir(parents=True)
+        (source / "crates/tracedecay-session-memory/src/memory").mkdir(parents=True)
         (source / "patches/tokensave-medium-treesitters").mkdir(parents=True)
         (source / "scripts/bazel/patches").mkdir(parents=True)
-        (source / "scripts/bazel/patches/rust.patch").write_text("adaptation\n")
+        (source / "LICENSE").write_text("MIT License\n", encoding="utf-8")
+        (source / "NOTICE").write_text(
+            "mnemon (https://github.com/mnemon-dev/mnemon)\n"
+            "Licensed under the Apache License, Version 2.0\n"
+            "Adapted from crates/tracedecay-session-memory/src/memory/diff.rs\n",
+            encoding="utf-8",
+        )
+        (source / "crates/tracedecay-session-memory/src/memory/diff.rs").write_text(
+            "adapted cues\n", encoding="utf-8"
+        )
+        (source / "crates/tracedecay/vendor/sample-vendor/PROVENANCE.md").write_text(
+            "| upstream repository | <https://github.com/vendor/sample-vendor> |\n"
+            "| licence | MIT — see LICENSE |\n"
+            "| upstream release current at retrieval | `v2.3.4` |\n",
+            encoding="utf-8",
+        )
+        (source / "crates/tracedecay/vendor/sample-vendor/LICENSE").write_text(
+            "MIT License\n", encoding="utf-8"
+        )
+        (source / "scripts/bazel/patches/asupersync-test.patch").write_text("adaptation\n")
         (source / "MODULE.bazel").write_text(
-            'patches = ["//scripts:bazel/patches/rust.patch"]\n', encoding="utf-8"
+            'patches = ["//scripts:bazel/patches/asupersync-test.patch"]\n', encoding="utf-8"
         )
         write_package(
             source / "crates/tracedecay-cli/Cargo.toml",
@@ -57,6 +77,12 @@ def main() -> None:
             "MIT",
         )
         write_package(source / "crates/tracedecay/Cargo.toml", "tracedecay", "1.2.3", "MIT")
+        write_package(
+            source / "crates/tracedecay-session-memory/Cargo.toml",
+            "tracedecay-session-memory",
+            "1.2.3",
+            "MIT",
+        )
         write_package(
             source / "patches/tokensave-medium-treesitters/Cargo.toml",
             "tokensave-medium-treesitters",
@@ -74,7 +100,11 @@ dependencies = ["tracedecay"]
 [[package]]
 name = "tracedecay"
 version = "1.2.3"
-dependencies = ["asupersync 0.6.0 (git+https://github.com/vendor/asupersync?rev=abc#abc)", "serde 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)"]
+dependencies = ["asupersync 0.6.0 (git+https://github.com/vendor/asupersync?rev=abc#abc)", "serde 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)", "tracedecay-session-memory"]
+
+[[package]]
+name = "tracedecay-session-memory"
+version = "1.2.3"
 
 [[package]]
 name = "asupersync"
@@ -114,6 +144,7 @@ version = "0.1.0"
                     '"//crates/tracedecay-cli:tracedecay" -> "//crates/tracedecay:tracedecay";',
                     '"//crates/tracedecay:tracedecay" -> "@@c__serde-1.0.0//:serde";',
                     '"//crates/tracedecay:tracedecay" -> "@@c__asupersync-0.6.0//:asupersync";',
+                    '"//crates/tracedecay:tracedecay" -> "//crates/tracedecay-session-memory:tracedecay-session-memory";',
                     '"//crates/tracedecay:tracedecay" -> "//patches/tokensave-medium-treesitters:tokensave-medium-treesitters";',
                     '"//crates/tracedecay:tracedecay" -> "//scripts:build_script_build";',
                     '"//scripts:build_script_build" -> "@@c__build-tool-1.0.0//:build_tool";',
@@ -125,6 +156,7 @@ version = "0.1.0"
         kinds.write_text(
             """rust_binary rule //crates/tracedecay-cli:tracedecay
 rust_library rule //crates/tracedecay:tracedecay
+rust_library rule //crates/tracedecay-session-memory:tracedecay-session-memory
 rust_library rule @@c__serde-1.0.0//:serde
 rust_library rule @@c__asupersync-0.6.0//:asupersync
 rust_library rule //patches/tokensave-medium-treesitters:tokensave-medium-treesitters
@@ -151,37 +183,54 @@ rust_library rule @@c__build-tool-1.0.0//:build_tool
         assert {"tracedecay", "serde", "asupersync", "tokensave-medium-treesitters"} <= set(rust)
         assert "build-tool" not in rust
         assert "https://github.com/vendor/asupersync" in rust["asupersync"]["downloadLocation"]
-        assert scoped["adapted_sources"][0]["path"] == "scripts/bazel/patches/rust.patch"
-
-        (source / "pnpm-lock.yaml").write_text(
-            """lockfileVersion: '9.0'
-importers:
-  dashboard:
-    dependencies:
-      '@fontsource-variable/archivo':
-        version: 5.3.0
-      react:
-        version: 19.0.0
-    devDependencies:
-      playwright:
-        version: 1.0.0
-packages:
-  '@fontsource-variable/archivo@5.3.0':
-    resolution:
-      integrity: sha512-YWJj
-  react@19.0.0:
-    resolution:
-      integrity: sha512-cmVhY3Q=
-  playwright@1.0.0:
-    resolution:
-      integrity: sha512-cGxheXdyaWdodA==
-snapshots:
-  '@fontsource-variable/archivo@5.3.0': {}
-  react@19.0.0: {}
-  playwright@1.0.0: {}
-""",
-            encoding="utf-8",
+        embedded = {component["name"]: component for component in scoped["embedded_sources"]}
+        assert embedded["sample-vendor"]["version"] == "v2.3.4"
+        assert embedded["sample-vendor"]["license"] == "MIT"
+        assert embedded["mnemon adapted content cues"]["license"] == "Apache-2.0"
+        assert embedded["mnemon adapted content cues"]["version"] == "NOASSERTION"
+        assert scoped["adapted_sources"][0]["path"] == (
+            "scripts/bazel/patches/asupersync-test.patch"
         )
+
+        npm_lock = {
+            "importers": {
+                "dashboard": {
+                    "dependencies": {
+                        "@fontsource-variable/archivo": {"version": "5.3.0"},
+                        "react": {"version": "19.0.0"},
+                        "react-dom": {"version": "19.0.0(react@19.0.0)"},
+                    },
+                    "devDependencies": {"playwright": {"version": "1.0.0"}},
+                }
+            },
+            "packages": {
+                "@fontsource-variable/archivo@5.3.0": {
+                    "resolution": {"integrity": "sha512-YWJj"}
+                },
+                "react@19.0.0": {
+                    "resolution": {"integrity": "sha512-cmVhY3Q="}
+                },
+                "react-dom@19.0.0": {
+                    "resolution": {"integrity": "sha512-cmVhY3Qy"
+                    }
+                },
+                "scheduler@0.23.2": {
+                    "resolution": {"integrity": "sha512-c2NoZWR1bGVy"}
+                },
+                "playwright@1.0.0": {
+                    "resolution": {"integrity": "sha512-cGxheXdyaWdodA=="}
+                },
+            },
+            "snapshots": {
+                "@fontsource-variable/archivo@5.3.0": {},
+                "react@19.0.0": {"dependencies": {"scheduler": "0.23.2"}},
+                "react-dom@19.0.0(react@19.0.0)": {
+                    "dependencies": {"react": "19.0.0"}
+                },
+                "scheduler@0.23.2": {},
+                "playwright@1.0.0": {},
+            },
+        }
         binary = b"release-binary"
         archive = root / "tracedecay-v1.2.3-x86_64-linux.tar.gz"
         make_archive(archive, binary)
@@ -201,6 +250,22 @@ snapshots:
             "ScriptedAlchemy/tracedecay",
             inventory,
         )
+        npm_components = INVENTORY.npm_components
+        INVENTORY.npm_components = lambda _source_root, platform: (
+            INVENTORY.npm_components_from_lock(npm_lock, platform)
+        )
+        npm_roots = INVENTORY.npm_components_from_lock(npm_lock, "x86_64-linux")
+        npm_lock["importers"]["dashboard"]["devDependencies"]["playwright"] = {
+            "version": "1.0.0"
+        }
+        npm_lock["packages"]["dev-only@2.0.0"] = {
+            "resolution": {"integrity": "sha512-ZGV2"}
+        }
+        npm_lock["snapshots"]["dev-only@2.0.0"] = {}
+        npm_lock["importers"]["dashboard"]["devDependencies"]["dev-only"] = {
+            "version": "2.0.0"
+        }
+        assert INVENTORY.npm_components_from_lock(npm_lock, "x86_64-linux") == npm_roots
         INVENTORY.release_inventory(*arguments)
         first = inventory.read_bytes()
         INVENTORY.release_inventory(*arguments)
@@ -210,12 +275,20 @@ snapshots:
         assert document["spdxVersion"] == "SPDX-2.3"
         packages = {package["name"]: package for package in document["packages"]}
         assert "react" in packages
+        assert "react-dom" in packages
+        assert "scheduler" in packages
         assert "@fontsource-variable/archivo" in packages
         assert "playwright" not in packages
         assert packages["asupersync"]["sourceInfo"].startswith("git+https://github.com/vendor/")
         assert packages["tokensave-medium-treesitters"]["licenseDeclared"] == "NOASSERTION"
+        assert packages["sample-vendor"]["licenseDeclared"] == "MIT"
+        assert packages["mnemon adapted content cues"]["licenseDeclared"] == "Apache-2.0"
         assert any("tokensave-medium-treesitters" in item["comment"] for item in document["annotations"])
         assert any(item["fileName"].endswith("archivo-latin.woff2") for item in document["files"])
+        assert any(
+            "dashboard/app-dist/index.js" in item["comment"]
+            for item in document["annotations"]
+        )
         artifact_checksums = {
             package["name"]: package["checksums"][0]["checksumValue"]
             for package in document["packages"]
@@ -223,8 +296,30 @@ snapshots:
         }
         assert artifact_checksums[archive.name] == INVENTORY.sha256(archive)
         assert artifact_checksums[mcpb.name] == INVENTORY.sha256(mcpb)
+        INVENTORY.verify_inventory(inventory, archive, mcpb)
+        npm_lock["packages"]["react@19.0.0"]["resolution"]["integrity"] = (
+            "sha512-cmVhY3Qx"
+        )
+        INVENTORY.release_inventory(*arguments)
+        INVENTORY.npm_components = npm_components
+        assert inventory.read_bytes() != first
+        with tempfile.TemporaryDirectory() as tampered_dir:
+            tampered_archive = Path(tampered_dir) / archive.name
+            tampered_archive.write_bytes(archive.read_bytes() + b"changed")
+            try:
+                INVENTORY.verify_inventory(inventory, tampered_archive, mcpb)
+            except ValueError as error:
+                assert "digest does not match" in str(error)
+            else:
+                raise AssertionError("inventory accepted a different package digest")
 
         (dashboard / "index.js").write_bytes(b"changed bundled npm")
+        (source / "Cargo.lock").write_text(
+            (source / "Cargo.lock").read_text(encoding="utf-8").replace(
+                "rev=abc#abc", "rev=def#def"
+            ),
+            encoding="utf-8",
+        )
         INVENTORY.scope_inventory(
             source,
             scope,

@@ -38,12 +38,24 @@ jobs:
       source_epoch: ${{ steps.source.outputs.source_epoch }}
       matrix: ${{ steps.source.outputs.matrix }}
       build_required: ${{ steps.source.outputs.build_required }}
+      package_build_required: ${{ steps.source.outputs.package_build_required }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Checkout release recovery planner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-automation
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            scripts/plan-release-recovery.py
+            scripts/verify-retained-release-assets.sh
 
       - name: Validate prerelease
         env:
@@ -75,7 +87,7 @@ jobs:
           echo "source_epoch=${source_epoch}" >> "$GITHUB_OUTPUT"
           gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
             --jq '.assets[].name' > remote-asset-names
-          python3 scripts/plan-release-recovery.py \
+          python3 .release-automation/scripts/plan-release-recovery.py \
             --manifest .github/release-targets.json \
             --tag "$RELEASE_TAG" \
             --profile beta \
@@ -83,7 +95,7 @@ jobs:
             --retained-output retained-asset-names \
             --github-output "$GITHUB_OUTPUT"
           mkdir retained-assets
-          scripts/verify-retained-release-assets.sh \
+          .release-automation/scripts/verify-retained-release-assets.sh \
             --tag "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
@@ -126,8 +138,22 @@ jobs:
         with:
           python-version: "3.15.0"
 
+      - name: Install the locked-inventory YAML reader
+        run: python3 -m pip install pyyaml==6.0.2
+
+      - name: Set up Bazel for inventory-only recovery
+        if: matrix.inventory_only == 'true'
+        uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: release-${{ matrix.target }}
+
+      - name: Build dashboard bundle for inventory-only recovery
+        if: matrix.inventory_only == 'true'
+        run: bazel build --config=dist --config=ci //dashboard:app_dist
+
       # Bazel builds the dashboard bundle the binary embeds (//dashboard:app_dist).
       - name: Build release binary for packaging
+        if: matrix.inventory_only != 'true'
         id: cli
         uses: ./.github/actions/build-cli
         with:
@@ -144,9 +170,12 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: .release-automation
           persist-credentials: false
-          sparse-checkout: .github/actions/package-release
+          sparse-checkout: |
+            .github/actions/package-release
+            scripts/generate-release-inventory.py
 
       - name: Package and verify native archive and MCPB
+        if: matrix.inventory_only != 'true'
         uses: ./.release-automation/.github/actions/package-release
         with:
           binary: ${{ steps.cli.outputs.path }}
@@ -156,7 +185,29 @@ jobs:
           archive: ${{ matrix.archive }}
           epoch: ${{ needs.validate.outputs.source_epoch }}
 
+      - name: Record shipping component scope
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.name }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          python3 .release-automation/scripts/generate-release-inventory.py scope \
+            --source-root . \
+            --platform "$PLATFORM" \
+            --source-sha "$SOURCE_SHA" \
+            --dashboard-dist "$(bazel info --config=dist --config=ci bazel-bin)/dashboard/app-dist" \
+            --output "inventory-scope-${PLATFORM}.json"
+
+      - name: Upload component scope
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: inventory-scope-${{ matrix.name }}
+          path: inventory-scope-${{ matrix.name }}.json
+          if-no-files-found: error
+
       - name: Upload MCPB artifact
+        if: matrix.inventory_only != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mcpb-beta-${{ matrix.name }}
@@ -164,6 +215,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload binary archive artifact
+        if: matrix.inventory_only != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beta-${{ matrix.name }}
@@ -193,16 +245,22 @@ jobs:
           ref: ${{ needs.validate.outputs.source_sha }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: needs.validate.outputs.build_required == 'true'
+        if: needs.validate.outputs.package_build_required == 'true'
         with:
           pattern: beta-*
           path: new-binaries
           merge-multiple: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        if: needs.validate.outputs.build_required == 'true'
+        if: needs.validate.outputs.package_build_required == 'true'
         with:
           pattern: mcpb-beta-*
           path: new-mcpbs
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.validate.outputs.build_required == 'true'
+        with:
+          pattern: inventory-scope-*
+          path: new-inventory-scopes
           merge-multiple: true
 
       # Use the helpers from the running workflow revision for older-tag recovery.
@@ -215,7 +273,20 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             scripts/assemble-release-artifacts.sh
+            scripts/check-release-artifacts.py
+            scripts/generate-release-inventory.py
+            scripts/plan-release-recovery.py
             scripts/update-release-checksums.py
+            scripts/verify-retained-release-assets.sh
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: needs.validate.outputs.build_required == 'true'
+        with:
+          python-version: "3.15.0"
+
+      - name: Install the locked-inventory YAML reader
+        if: needs.validate.outputs.build_required == 'true'
+        run: python3 -m pip install pyyaml==6.0.2
 
       - name: Assemble retained and newly built prerelease assets
         env:
@@ -239,8 +310,10 @@ jobs:
           shopt -s nullglob
           archives=(new-binaries/tracedecay-beta-*)
           bundles=(new-mcpbs/*.mcpb)
+          inventories=(new-inventories/*.spdx.json)
           echo "archives=${#archives[@]}" >>"$GITHUB_OUTPUT"
           echo "bundles=${#bundles[@]}" >>"$GITHUB_OUTPUT"
+          echo "inventories=${#inventories[@]}" >>"$GITHUB_OUTPUT"
 
       - name: Attest newly built prerelease archives
         if: steps.built.outputs.archives != '0'
@@ -253,6 +326,12 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: new-mcpbs/*.mcpb
+
+      - name: Attest newly generated component inventories
+        if: steps.built.outputs.inventories != '0'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: new-inventories/*.spdx.json
 
       - name: Upload missing prerelease assets
         env:
@@ -267,16 +346,22 @@ jobs:
             cd mcpbs
             sha256sum -- *.mcpb
           ) >> SHA256SUMS
+          (
+            cd inventories
+            sha256sum -- *.spdx.json
+          ) >> SHA256SUMS
           mapfile -t archives < <(find binaries -maxdepth 1 -type f -name 'tracedecay-beta-*' -print | sort)
           test "${#archives[@]}" -gt 0
           mapfile -t bundles < <(find mcpbs -maxdepth 1 -type f -name '*.mcpb' -print | sort)
           test "${#bundles[@]}" -gt 0
+          mapfile -t inventories < <(find inventories -maxdepth 1 -type f -name '*.spdx.json' -print | sort)
+          test "${#inventories[@]}" -gt 0
           # `install.sh` ships with the prerelease as it does with a stable
           # release. README tells users to curl the installer from a release,
           # and only release.yml published one, so the hardened script on
           # master reached nobody following the beta line. The checkout is
           # pinned to the tag's source sha, so this is that tag's installer.
-          release_assets=("${archives[@]}" "${bundles[@]}" SHA256SUMS install.sh)
+          release_assets=("${archives[@]}" "${bundles[@]}" "${inventories[@]}" SHA256SUMS install.sh)
           gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
             --jq '.assets[].name' > remote-asset-names
           for release_asset in "${release_assets[@]}"; do
@@ -294,7 +379,7 @@ jobs:
           # Verify by name, not by glob: a partial publish may have no .zip
           # (Windows) or no .tar.gz yet, and `gh release download --pattern`
           # fails on an empty match.
-          mkdir verified-binaries verified-mcpbs
+          mkdir verified-binaries verified-mcpbs verified-inventories
           gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
             --jq '.assets[].name' > remote-asset-names
           while IFS= read -r name; do
@@ -302,22 +387,36 @@ jobs:
               tracedecay-beta-"${RELEASE_TAG}"-*.mcpb)
                 gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
                   --pattern "$name" --dir verified-mcpbs ;;
+              tracedecay-beta-"${RELEASE_TAG}"-*.spdx.json)
+                gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir verified-inventories ;;
               tracedecay-beta-"${RELEASE_TAG}"-*.tar.gz | tracedecay-beta-"${RELEASE_TAG}"-*.zip)
                 gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
                   --pattern "$name" --dir verified-binaries ;;
             esac
           done < remote-asset-names
-          python3 scripts/check-release-artifacts.py \
+          python3 .release-automation/scripts/check-release-artifacts.py \
             --manifest .github/release-targets.json \
             --profile beta \
             --tag "$RELEASE_TAG" \
             --binaries verified-binaries \
-            --mcpbs verified-mcpbs
-          scripts/verify-retained-release-assets.sh \
+            --mcpbs verified-mcpbs \
+            --inventories verified-inventories
+          for inventory in verified-inventories/*.spdx.json; do
+            platform="${inventory#verified-inventories/tracedecay-beta-${RELEASE_TAG}-}"
+            platform="${platform%.spdx.json}"
+            archive_format="$(jq -r --arg platform "$platform" \
+              '.include[] | select(.name == $platform) | .archive' .github/release-targets.json)"
+            python3 .release-automation/scripts/generate-release-inventory.py verify \
+              --inventory "$inventory" \
+              --archive "verified-binaries/tracedecay-beta-${RELEASE_TAG}-${platform}.${archive_format}" \
+              --mcpb "verified-mcpbs/tracedecay-beta-${RELEASE_TAG}-${platform}.mcpb"
+          done
+          .release-automation/scripts/verify-retained-release-assets.sh \
             --tag "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release-beta.yml" \
             --source-digest "${{ needs.validate.outputs.source_sha }}" \
             --signer-ref "refs/tags/${RELEASE_TAG}" \
             --signer-ref "refs/heads/master" \
-            --files verified-binaries/* verified-mcpbs/*
+            --files verified-binaries/* verified-mcpbs/* verified-inventories/*

@@ -37,6 +37,125 @@ def canonical_json(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
 
 
+def source_tree_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
+        relative = file_path.relative_to(path).as_posix().encode()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(bytes.fromhex(sha256(file_path)))
+    return digest.hexdigest()
+
+
+def embedded_source_components(
+    source_root: Path, rust_components: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    local_owners = {
+        str(component["local_path"])
+        for component in rust_components
+        if str(component.get("local_path", "")).startswith("crates/")
+    }
+    runtime_names = {str(component["name"]) for component in rust_components}
+    components: list[dict[str, object]] = []
+    for owner in sorted(local_owners):
+        for provenance in sorted((source_root / owner).rglob("vendor/**/PROVENANCE.md")):
+            vendored = provenance.parent
+            text = provenance.read_text(encoding="utf-8")
+            repository = re.search(
+                r"(?im)^\|\s*upstream (?:repository|URL)\s*\|\s*<([^>]+)>",
+                text,
+            )
+            license_match = re.search(
+                r"(?im)^\|\s*licen[cs]e\s*\|\s*([^|]+)\|", text
+            )
+            license_value = (
+                license_match.group(1).split("—", 1)[0].strip()
+                if license_match
+                else "NOASSERTION"
+            )
+            version_match = re.search(
+                r"(?im)^\|\s*upstream release current at retrieval\s*\|\s*`?([^|`]+)",
+                text,
+            )
+            if version_match is None:
+                version_match = re.search(
+                    r"(?i)crates\.io package `[^`]+`\s+([0-9][^ )|]*)", text
+                )
+            version = version_match.group(1).strip() if version_match else "NOASSERTION"
+            package_checksum = re.search(
+                r"(?im)^\|\s*package sha256\s*\|\s*`?([0-9a-f]{64})", text
+            )
+            source_digest = source_tree_digest(vendored)
+            name = vendored.name
+            purl = f"pkg:generic/{quote(name, safe='')}"
+            if version != "NOASSERTION":
+                purl += f"@{quote(version, safe='')}"
+            components.append(
+                {
+                    "name": name,
+                    "version": version,
+                    "source": repository.group(1) if repository else "NOASSERTION",
+                    "downloadLocation": repository.group(1) if repository else "NOASSERTION",
+                    "sourceInfo": (
+                        f"Vendored at {vendored.relative_to(source_root).as_posix()}; "
+                        f"provenance {provenance.relative_to(source_root).as_posix()}; "
+                        f"source tree SHA256 {source_digest}"
+                    ),
+                    "license": license_value,
+                    "license_evidence": provenance.relative_to(source_root).as_posix(),
+                    "checksum": (
+                        {
+                            "algorithm": "SHA256",
+                            "checksumValue": package_checksum.group(1),
+                        }
+                        if package_checksum
+                        else {
+                            "algorithm": "SHA256",
+                            "checksumValue": source_digest,
+                        }
+                    ),
+                    "purl": purl,
+                }
+            )
+
+    notice_path = source_root / "NOTICE"
+    memory_path = source_root / "crates/tracedecay-session-memory/src/memory/diff.rs"
+    if (
+        "tracedecay-session-memory" in runtime_names
+        and notice_path.is_file()
+        and memory_path.is_file()
+    ):
+        notice = notice_path.read_text(encoding="utf-8")
+        source_url = re.search(r"(?im)^mnemon\s+\((https?://[^)]+)\)", notice)
+        license_name = (
+            "Apache-2.0"
+            if re.search(r"(?i)Apache License, Version 2\.0", notice)
+            else "NOASSERTION"
+        )
+        purl = "pkg:generic/mnemon-adapted-content-cues"
+        components.append(
+            {
+                "name": "mnemon adapted content cues",
+                "version": "NOASSERTION",
+                "source": source_url.group(1) if source_url else "NOASSERTION",
+                "downloadLocation": source_url.group(1) if source_url else "NOASSERTION",
+                "sourceInfo": (
+                    "Adaptation identified in NOTICE at "
+                    "crates/tracedecay-session-memory/src/memory/diff.rs; "
+                    "the upstream revision is not recorded."
+                ),
+                "license": license_name,
+                "license_evidence": "NOTICE",
+                "checksum": {
+                    "algorithm": "SHA256",
+                    "checksumValue": sha256(memory_path),
+                },
+                "purl": purl,
+            }
+        )
+    return components
+
+
 def label_name(label: str) -> str:
     label = label.split(" (", 1)[0]
     return label.strip('"')
@@ -105,12 +224,14 @@ def parse_graph(graph: str, kinds: str) -> list[dict[str, str]]:
         if kind in {"cargo_build_script", "rust_proc_macro", "rust_test"}:
             continue
         if kind == "rust_library":
-            if current.startswith("@@") or current.startswith("@"):
+            if current.startswith("@"):
                 included.add(current)
             elif current.startswith("//crates/") or current.startswith("//patches/"):
                 included.add(current)
         pending.extend(adjacency.get(current, ()))
 
+    if root not in visited or not included:
+        raise ValueError("Bazel query did not expose the configured CLI Rust dependency graph")
     return [{"label": label, "kind": target_kinds.get(label, "")} for label in sorted(included)]
 
 
@@ -135,28 +256,33 @@ def cargo_package(
     by_repo, by_name = lock_packages
     if label.startswith("@"):
         repository = label.split("//", 1)[0].lstrip("@")
-        repository = repository.split("+", 1)[0] if repository.startswith("c+") else repository
         package = by_repo.get(repository)
+        matched_repository = repository if package is not None else ""
         if package is None:
             # Canonical repository labels may include a module-version suffix.
-            package = next(
-                (
-                    value
-                    for key, value in by_repo.items()
-                    if repository.endswith(key.removeprefix("c__"))
-                ),
-                None,
-            )
+            matches = [
+                (key, value)
+                for key, value in by_repo.items()
+                if repository.endswith(key)
+                or repository.endswith(key.removeprefix("c__"))
+            ]
+            if matches:
+                matched_repository, package = max(matches, key=lambda item: len(item[0]))
         if package is None:
+            unknown_name = repository.split("+")[-1].removeprefix("c__")
             return {
-                "name": repository,
+                "name": unknown_name,
                 "version": "NOASSERTION",
                 "source": "NOASSERTION",
+                "downloadLocation": "NOASSERTION",
                 "license": "NOASSERTION",
                 "checksum": None,
                 "local_path": None,
+                "purl": f"pkg:cargo/{quote(unknown_name, safe='')}@NOASSERTION",
             }
         manifest = output_base / "external" / repository / "Cargo.toml"
+        if not manifest.is_file():
+            manifest = output_base / "external" / matched_repository / "Cargo.toml"
         source = str(package.get("source", "NOASSERTION"))
         return package_record(package, manifest, source_root, source)
 
@@ -216,11 +342,13 @@ def package_record(
         record["local_path"] = local_path
         record["source"] = f"{local_path} at the release source revision"
         record["downloadLocation"] = "NOASSERTION"
+        record["source_digest"] = source_tree_digest(source_root / local_path)
     return record
 
 
-def component_id(purl: str) -> str:
-    return "SPDXRef-" + hashlib.sha256(purl.encode()).hexdigest()[:24]
+def component_id(purl: str, source: object) -> str:
+    identity = f"{purl}\0{source or ''}"
+    return "SPDXRef-" + hashlib.sha256(identity.encode()).hexdigest()[:24]
 
 
 def checksum_from_sri(integrity: str) -> dict[str, str] | None:
@@ -239,15 +367,28 @@ def checksum_from_sri(integrity: str) -> dict[str, str] | None:
 
 
 def npm_component_key(name: str, version: str, package_keys: set[str]) -> str | None:
+    exact = f"{name}@{version.split('(', 1)[0]}"
+    return exact if exact in package_keys else None
+
+
+def npm_snapshot_key(name: str, version: str, snapshot_keys: set[str]) -> str | None:
     exact = f"{name}@{version}"
-    if exact in package_keys:
+    if exact in snapshot_keys:
         return exact
-    candidates = sorted(
-        key
-        for key in package_keys
-        if key.startswith(exact + "(")
-    )
-    return candidates[0] if candidates else None
+    base = f"{name}@{version.split('(', 1)[0]}"
+    candidates = sorted(key for key in snapshot_keys if key.startswith(base + "("))
+    return candidates[0] if candidates else (base if base in snapshot_keys else None)
+
+
+def npm_package_identity(key: str) -> tuple[str, str]:
+    delimiter = key.find("@", 1 if key.startswith("@") else 0)
+    if delimiter < 0:
+        raise ValueError(f"invalid pnpm package key: {key}")
+    name = key[:delimiter]
+    version = key[delimiter + 1 :].split("(", 1)[0]
+    if not name or not version:
+        raise ValueError(f"invalid pnpm package key: {key}")
+    return name, version
 
 
 def npm_components(source_root: Path, platform: str) -> list[dict[str, object]]:
@@ -256,12 +397,29 @@ def npm_components(source_root: Path, platform: str) -> list[dict[str, object]]:
     except ImportError as error:
         raise RuntimeError("PyYAML is required to read the locked dashboard package graph") from error
 
-    lock = yaml.safe_load((source_root / "pnpm-lock.yaml").read_text(encoding="utf-8"))
+    documents = yaml.safe_load_all(
+        (source_root / "pnpm-lock.yaml").read_text(encoding="utf-8")
+    )
+    lock = next(
+        (
+            document
+            for document in reversed(list(documents))
+            if "dashboard" in document.get("importers", {})
+        ),
+        None,
+    )
+    if lock is None:
+        raise ValueError("pnpm lockfile has no dashboard importer")
+    return npm_components_from_lock(lock, platform)
+
+
+def npm_components_from_lock(lock: dict[str, object], platform: str) -> list[dict[str, object]]:
     dashboard = lock.get("importers", {}).get("dashboard", {})
     roots = dashboard.get("dependencies", {})
     packages = lock.get("packages", {})
     snapshots = lock.get("snapshots", {})
     package_keys = set(packages)
+    snapshot_keys = set(snapshots)
     os_name, arch = {
         "aarch64-macos": ("darwin", "arm64"),
         "x86_64-linux": ("linux", "x64"),
@@ -269,50 +427,80 @@ def npm_components(source_root: Path, platform: str) -> list[dict[str, object]]:
         "x86_64-windows": ("win32", "x64"),
     }[platform]
 
-    pending: list[str] = []
+    pending: list[tuple[str, str]] = []
     for name, record in roots.items():
         version = record.get("version")
         if version:
-            key = npm_component_key(name, str(version), package_keys)
-            if key:
-                pending.append(key)
+            package_key = npm_component_key(name, str(version), package_keys)
+            snapshot_key = npm_snapshot_key(name, str(version), snapshot_keys)
+            if package_key and snapshot_key:
+                pending.append((package_key, snapshot_key))
 
-    visited: set[str] = set()
+    visited_packages: set[str] = set()
+    visited_snapshots: set[str] = set()
     result: list[dict[str, object]] = []
     while pending:
-        key = pending.pop()
-        if key in visited:
+        package_key, snapshot_key = pending.pop()
+        if snapshot_key in visited_snapshots:
             continue
-        visited.add(key)
-        metadata = packages.get(key, {})
-        version = key.rsplit("@", 1)[-1].split("(", 1)[0]
-        name = key[: -(len(key.rsplit("@", 1)[-1]) + 1)]
-        if not name:
-            continue
+        visited_snapshots.add(snapshot_key)
+        metadata = packages.get(package_key, {})
+        name, version = npm_package_identity(package_key)
+        resolution = metadata.get("resolution", {})
+        source = resolution.get("tarball") or "NOASSERTION"
         package = {
             "name": name,
             "version": version,
-            "source": metadata.get("resolution", {}).get("tarball")
-            or f"https://registry.npmjs.org/{quote(name, safe='@/')}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz",
-            "license": FONT_LICENSES.get(name, "NOASSERTION"),
-            "checksum": checksum_from_sri(
-                str(metadata.get("resolution", {}).get("integrity", ""))
+            "source": source,
+            "downloadLocation": source,
+            "sourceInfo": (
+                f"pnpm-lock.yaml package {package_key}; "
+                f"integrity {resolution.get('integrity', 'NOASSERTION')}; "
+                "source URL is not recorded in the lockfile"
             ),
-            "purl": f"pkg:npm/{quote(name, safe='@/') }@{quote(version, safe='')}",
+            "license": FONT_LICENSES.get(name, "NOASSERTION"),
+            "license_evidence": (
+                "dashboard/src/theme/fonts.css" if name in FONT_LICENSES else None
+            ),
+            "checksum": checksum_from_sri(
+                str(resolution.get("integrity", ""))
+            ),
+            "purl": f"pkg:npm/{quote(name, safe='@/')}@{quote(version, safe='')}",
         }
-        result.append(package)
-        node = snapshots.get(key, {})
+        if package_key not in visited_packages:
+            result.append(package)
+            visited_packages.add(package_key)
+        node = snapshots.get(snapshot_key, {})
         for group in ("dependencies", "optionalDependencies"):
             for dependency, child_version in node.get(group, {}).items():
-                child = npm_component_key(dependency, str(child_version), package_keys)
-                if child is None:
+                child_package = npm_component_key(
+                    dependency, str(child_version), package_keys
+                )
+                child_snapshot = npm_snapshot_key(
+                    dependency, str(child_version), snapshot_keys
+                )
+                if child_package is None or child_snapshot is None:
                     continue
-                constraints = packages.get(child, {})
-                if constraints.get("os") and os_name not in constraints["os"] and "!" + os_name not in constraints["os"]:
+                constraints = packages.get(child_package, {})
+                allowed_os = constraints.get("os", [])
+                if allowed_os and (
+                    os_name in {item[1:] for item in allowed_os if item.startswith("!")}
+                    or (
+                        any(not item.startswith("!") for item in allowed_os)
+                        and os_name not in allowed_os
+                    )
+                ):
                     continue
-                if constraints.get("cpu") and arch not in constraints["cpu"] and "!" + arch not in constraints["cpu"]:
+                allowed_cpu = constraints.get("cpu", [])
+                if allowed_cpu and (
+                    arch in {item[1:] for item in allowed_cpu if item.startswith("!")}
+                    or (
+                        any(not item.startswith("!") for item in allowed_cpu)
+                        and arch not in allowed_cpu
+                    )
+                ):
                     continue
-                pending.append(child)
+                pending.append((child_package, child_snapshot))
     return sorted(result, key=lambda component: str(component["purl"]))
 
 
@@ -375,7 +563,14 @@ def scope_inventory(
     if module_file.is_file():
         module_text = module_file.read_text(encoding="utf-8")
         patch_paths = sorted(set(re.findall(r'"//scripts:([^"]+\.patch)"', module_text)))
+        git_packages = {
+            str(component["name"])
+            for component in rust_components.values()
+            if str(component.get("source", "")).startswith("git+")
+        }
         for relative in patch_paths:
+            if not any(Path(relative).name.startswith(f"{name}-") for name in git_packages):
+                continue
             path = source_root / "scripts" / relative
             if path.is_file():
                 adapted_sources.append(
@@ -390,6 +585,9 @@ def scope_inventory(
         "bazel_target": TARGET,
         "source_sha": source_sha,
         "rust_components": [rust_components[key] for key in sorted(rust_components)],
+        "embedded_sources": embedded_source_components(
+            source_root, list(rust_components.values())
+        ),
         "dashboard_assets": assets,
         "adapted_sources": adapted_sources,
     }
@@ -409,12 +607,22 @@ def artifact_binary(archive: Path, platform: str) -> bytes:
         return content.read()
 
 
+def mcpb_contents(bundle: Path, platform: str) -> tuple[bytes, bytes]:
+    member = "tracedecay.exe" if platform == "x86_64-windows" else "tracedecay"
+    with zipfile.ZipFile(bundle) as packaged:
+        expected = {"manifest.json", f"server/{member}"}
+        if set(packaged.namelist()) != expected:
+            raise ValueError(f"MCPB does not contain the expected entries: {bundle.name}")
+        return packaged.read("manifest.json"), packaged.read(f"server/{member}")
+
+
 def spdx_package(record: dict[str, object]) -> dict[str, object]:
     purl = str(record["purl"])
+    source = record.get("source")
     license_value = str(record.get("license") or "NOASSERTION")
     package: dict[str, object] = {
         "name": record["name"],
-        "SPDXID": component_id(purl),
+        "SPDXID": component_id(purl, source),
         "versionInfo": str(record.get("version") or "NOASSERTION"),
         "downloadLocation": str(record.get("downloadLocation") or record.get("source") or "NOASSERTION"),
         "filesAnalyzed": False,
@@ -434,9 +642,19 @@ def spdx_package(record: dict[str, object]) -> dict[str, object]:
         package["checksums"] = [checksum]
     elif isinstance(checksum, str) and checksum:
         package["checksums"] = [{"algorithm": "SHA256", "checksumValue": checksum}]
-    source_info = record.get("source")
+    source_info = record.get("sourceInfo") or record.get("source")
     if source_info and source_info != package["downloadLocation"]:
         package["sourceInfo"] = str(source_info)
+    if record.get("source_digest"):
+        package["sourceInfo"] = (
+            str(package.get("sourceInfo", ""))
+            + f"; local source tree SHA256 {record['source_digest']}"
+        ).lstrip("; ")
+    if record.get("license_evidence"):
+        package["sourceInfo"] = (
+            str(package.get("sourceInfo", ""))
+            + f"; license metadata recorded in {record['license_evidence']}"
+        ).lstrip("; ")
     return package
 
 
@@ -453,13 +671,25 @@ def release_inventory(
 ) -> None:
     scope = json.loads(scope_path.read_text(encoding="utf-8"))
     platform = str(scope["platform"])
+    if scope.get("format") != "tracedecay-release-component-scope-v1":
+        raise ValueError("component scope has an unsupported format")
+    if scope.get("source_sha") != source_sha:
+        raise ValueError("component scope does not match the immutable release source")
+    if not archive.is_file() or not mcpb.is_file():
+        raise FileNotFoundError("final archive and MCPB are required to generate an inventory")
+    binary_bytes = artifact_binary(archive, platform)
+    manifest_bytes, bundled_binary = mcpb_contents(mcpb, platform)
+    if binary_bytes != bundled_binary:
+        raise ValueError("native archive and MCPB do not contain identical CLI binaries")
     npm = npm_components(source_root, platform)
-    components = [*scope["rust_components"], *npm]
+    components = [*scope["rust_components"], *scope.get("embedded_sources", []), *npm]
     packages = [spdx_package(item) for item in components]
     package_ids = {str(package["SPDXID"]) for package in packages}
     archive_package_id = "SPDXRef-Archive"
     mcpb_package_id = "SPDXRef-MCPB"
     binary_id = "SPDXRef-CLI-Binary"
+    with (source_root / "crates/tracedecay-cli/Cargo.toml").open("rb") as source_file:
+        product_manifest = tomllib.load(source_file).get("package", {})
     asset_package = lambda name, path, identifier: {
         "name": name,
         "SPDXID": identifier,
@@ -467,8 +697,15 @@ def release_inventory(
         "downloadLocation": f"https://github.com/{repository}/releases/download/{quote(tag, safe='')}/{quote(path.name, safe='.-_')}",
         "filesAnalyzed": False,
         "licenseConcluded": "NOASSERTION",
-        "licenseDeclared": "NOASSERTION",
+        "licenseDeclared": product_manifest.get("license") or "NOASSERTION",
         "copyrightText": "NOASSERTION",
+        "sourceInfo": (
+            f"Root LICENSE SHA256 {sha256(source_root / 'LICENSE')}; "
+            f"root NOTICE SHA256 {sha256(source_root / 'NOTICE')}"
+            if (source_root / "LICENSE").is_file()
+            and (source_root / "NOTICE").is_file()
+            else "Root LICENSE or NOTICE file is unavailable"
+        ),
         "checksums": [{"algorithm": "SHA256", "checksumValue": sha256(path)}],
     }
     packages.extend(
@@ -482,14 +719,12 @@ def release_inventory(
                 "downloadLocation": f"https://github.com/{repository}",
                 "filesAnalyzed": False,
                 "licenseConcluded": "NOASSERTION",
-                "licenseDeclared": "MIT",
+                "licenseDeclared": product_manifest.get("license") or "NOASSERTION",
                 "copyrightText": "NOASSERTION",
                 "checksums": [
                     {
                         "algorithm": "SHA256",
-                        "checksumValue": hashlib.sha256(
-                            artifact_binary(archive, platform)
-                        ).hexdigest(),
+                        "checksumValue": hashlib.sha256(binary_bytes).hexdigest(),
                     }
                 ],
             },
@@ -519,6 +754,33 @@ def release_inventory(
             }
         )
 
+    manifest_file_id = "SPDXRef-MCPB-Manifest"
+    manifest_entry = {
+        "fileName": "mcpb/manifest.json",
+        "SPDXID": manifest_file_id,
+        "checksums": [
+            {
+                "algorithm": "SHA256",
+                "checksumValue": hashlib.sha256(manifest_bytes).hexdigest(),
+            }
+        ],
+        "licenseConcluded": "NOASSERTION",
+        "licenseInfoInFiles": ["NOASSERTION"],
+        "copyrightText": "NOASSERTION",
+    }
+    file_entries.append(manifest_entry)
+    patch_file_entries = [
+        {
+            "fileName": str(item["path"]),
+            "SPDXID": "SPDXRef-Adapted-" + hashlib.sha256(str(item["path"]).encode()).hexdigest()[:20],
+            "checksums": [{"algorithm": "SHA256", "checksumValue": item["sha256"]}],
+            "licenseConcluded": "NOASSERTION",
+            "licenseInfoInFiles": ["NOASSERTION"],
+            "copyrightText": "NOASSERTION",
+        }
+        for item in scope.get("adapted_sources", [])
+    ]
+    file_entries.extend(patch_file_entries)
     relationships = [
         {"spdxElementId": archive_package_id, "relationshipType": "CONTAINS", "relatedSpdxElement": binary_id},
         {"spdxElementId": mcpb_package_id, "relationshipType": "CONTAINS", "relatedSpdxElement": binary_id},
@@ -532,7 +794,21 @@ def release_inventory(
             ]
         )
     for item in file_entries:
-        for parent in (binary_id, archive_package_id, mcpb_package_id):
+        if item in patch_file_entries:
+            relationships.append(
+                {
+                    "spdxElementId": binary_id,
+                    "relationshipType": "GENERATED_FROM",
+                    "relatedSpdxElement": item["SPDXID"],
+                }
+            )
+            continue
+        parents = (
+            (mcpb_package_id,)
+            if item["SPDXID"] == manifest_file_id
+            else (binary_id, archive_package_id, mcpb_package_id)
+        )
+        for parent in parents:
             relationships.append(
                 {
                     "spdxElementId": parent,
@@ -546,6 +822,12 @@ def release_inventory(
         if package.get("licenseDeclared") == "NOASSERTION"
         or package.get("downloadLocation") == "NOASSERTION"
     )
+    review_items.extend(
+        str(item["fileName"])
+        for item in file_entries
+        if "NOASSERTION" in item.get("licenseInfoInFiles", [])
+    )
+    review_items.sort()
     annotations = [
         {
             "annotationDate": datetime.fromtimestamp(
@@ -557,17 +839,6 @@ def release_inventory(
         }
         for item in review_items
     ]
-    file_entries.extend(
-        {
-            "fileName": str(item["path"]),
-            "SPDXID": "SPDXRef-Adapted-" + hashlib.sha256(str(item["path"]).encode()).hexdigest()[:20],
-            "checksums": [{"algorithm": "SHA256", "checksumValue": item["sha256"]}],
-            "licenseConcluded": "NOASSERTION",
-            "licenseInfoInFiles": ["NOASSERTION"],
-            "copyrightText": "NOASSERTION",
-        }
-        for item in scope.get("adapted_sources", [])
-    )
     document_name = f"TraceDecay {tag} {platform} component inventory"
     namespace = (
         "https://spdx.org/spdxdocs/"
@@ -604,6 +875,28 @@ def release_inventory(
     output.write_bytes(canonical_json(document))
 
 
+def verify_inventory(inventory: Path, archive: Path, mcpb: Path) -> None:
+    document = json.loads(inventory.read_text(encoding="utf-8"))
+    by_id = {package["SPDXID"]: package for package in document.get("packages", [])}
+    expected = {
+        "SPDXRef-Archive": archive,
+        "SPDXRef-MCPB": mcpb,
+    }
+    for identifier, path in expected.items():
+        package = by_id.get(identifier)
+        if package is None or package.get("name") != path.name:
+            raise ValueError(f"inventory does not identify the expected artifact: {path.name}")
+        checksums = {
+            checksum.get("algorithm"): checksum.get("checksumValue")
+            for checksum in package.get("checksums", [])
+        }
+        if checksums.get("SHA256") != sha256(path):
+            raise ValueError(f"inventory digest does not match the final artifact: {path.name}")
+    platform = "x86_64-windows" if archive.name.endswith(".zip") else "x86_64-linux"
+    if artifact_binary(archive, platform) != mcpb_contents(mcpb, platform)[1]:
+        raise ValueError("native archive and MCPB do not contain identical CLI binaries")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -626,6 +919,10 @@ def main() -> None:
     document.add_argument("--source-epoch", type=int, required=True)
     document.add_argument("--repository", required=True)
     document.add_argument("--output", type=Path, required=True)
+    verify = commands.add_parser("verify")
+    verify.add_argument("--inventory", type=Path, required=True)
+    verify.add_argument("--archive", type=Path, required=True)
+    verify.add_argument("--mcpb", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "scope":
         scope_inventory(
@@ -638,7 +935,7 @@ def main() -> None:
             args.kinds,
             args.output_base,
         )
-    else:
+    elif args.command == "document":
         release_inventory(
             args.source_root,
             args.scope,
@@ -650,6 +947,8 @@ def main() -> None:
             args.repository,
             args.output,
         )
+    else:
+        verify_inventory(args.inventory, args.archive, args.mcpb)
 
 
 if __name__ == "__main__":

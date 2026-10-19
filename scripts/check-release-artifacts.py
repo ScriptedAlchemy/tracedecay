@@ -57,6 +57,7 @@ def main() -> int:
     parser.add_argument("--binaries", type=Path, required=True)
     parser.add_argument("--profile", choices=("stable", "beta"), default="stable")
     parser.add_argument("--mcpbs", type=Path)
+    parser.add_argument("--inventories", type=Path)
     arguments = parser.parse_args()
     targets = target_matrix(arguments.manifest)
     prefix = "tracedecay-beta" if arguments.profile == "beta" else "tracedecay"
@@ -68,6 +69,10 @@ def main() -> int:
         target["name"]: f"{prefix}-{arguments.tag}-{target['name']}.mcpb"
         for target in targets
     }
+    inventory_name = {
+        target["name"]: f"{prefix}-{arguments.tag}-{target['name']}.spdx.json"
+        for target in targets
+    }
     if arguments.mcpbs is None:
         raise SystemExit("release validation requires an MCPB directory")
     binaries = files(arguments.binaries)
@@ -75,6 +80,9 @@ def main() -> int:
 
     require_exact("binary", binaries, set(binary_name.values()))
     require_exact("MCPB", mcpbs, set(mcpb_name.values()))
+    if arguments.inventories is not None:
+        inventories = files(arguments.inventories)
+        require_exact("component inventory", inventories, set(inventory_name.values()))
     print("release artifact coverage matches target manifest")
     return 0
 
