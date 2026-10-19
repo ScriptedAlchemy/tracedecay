@@ -4,6 +4,7 @@
 //! admission. Host-spool replay itself lives in `tracedecay-hooks` and is
 //! invoked with an already-admitted spool plus the project's wire identity.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError, Weak};
@@ -210,8 +211,21 @@ async fn drain_all_hosts(
             Ok(more) => sweep.more_pending |= more,
             Err(cause) => sweep.fail(*host, StatusHookReplaySpoolV1::DeliveryReceipts, cause),
         }
+        let spool_records = match pending_host_spool_records(data_root, *host, now) {
+            Ok(records) => records,
+            Err(cause) => {
+                sweep.fail(*host, StatusHookReplaySpoolV1::Records, cause);
+                continue;
+            }
+        };
         let replay_fences = match Box::pin(redrive_pending_work(
-            graph, data_root, *host, project_id, now, &mut sweep,
+            graph,
+            data_root,
+            *host,
+            project_id,
+            now,
+            &spool_records,
+            &mut sweep,
         ))
         .await
         {
@@ -262,6 +276,69 @@ async fn drain_all_hosts(
     sweep
 }
 
+fn pending_host_spool_records(
+    data_root: &Path,
+    host: NativeHostIdentityV1,
+    now: UtcMicros,
+) -> Result<Vec<tracedecay_hooks::HookSpoolRecordV1>, String> {
+    let root = hook_v2_spool_root(data_root, host);
+    if spool_root_absent(&root)?
+        || !HookSpoolV1::has_records(&root).map_err(|error| error.to_string())?
+    {
+        return Ok(Vec::new());
+    }
+    let (mut spool, _) = HookSpoolV1::open(&root, HookSpoolConfigV1::stock(host), now)
+        .map_err(|error| error.to_string())?;
+    spool.import_staged(now).map_err(|error| error.to_string())?;
+    spool.pending_records().map_err(|error| error.to_string())
+}
+
+fn replay_event_order(
+    left: &tracedecay_hooks::HookEventEnvelopeV2,
+    right: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> Ordering {
+    match (left.ordering, right.ordering) {
+        (
+            tracedecay_hooks::HookOrderingV1::ProviderSequence(left),
+            tracedecay_hooks::HookOrderingV1::ProviderSequence(right),
+        ) => left.cmp(&right),
+        _ => left.observed_at.cmp(&right.observed_at),
+    }
+}
+
+fn replay_fences(
+    pending_work: &[tracedecay_hooks::HookEventEnvelopeV2],
+    spool_records: &[tracedecay_hooks::HookSpoolRecordV1],
+    project_id: Option<[u8; 16]>,
+    now: UtcMicros,
+) -> BTreeMap<[u8; 32], [u8; 16]> {
+    let mut oldest = BTreeMap::<[u8; 32], tracedecay_hooks::HookEventEnvelopeV2>::new();
+    for envelope in pending_work {
+        if project_id.is_none_or(|project_id| envelope.project_id == project_id) {
+            oldest
+                .entry(envelope.protected_session_id)
+                .or_insert_with(|| envelope.clone());
+        }
+    }
+    for record in spool_records.iter().filter(|record| {
+        project_id.is_none_or(|project_id| record.envelope.project_id == project_id)
+            && now.0.saturating_sub(record.queued_at.0)
+                <= tracedecay_hooks::MAX_SPOOL_AGE_MICROS
+    }) {
+        let session = record.protected_session_id;
+        if oldest
+            .get(&session)
+            .is_none_or(|current| replay_event_order(&record.envelope, current).is_lt())
+        {
+            oldest.insert(session, record.envelope.clone());
+        }
+    }
+    oldest
+        .into_iter()
+        .map(|(session, envelope)| (session, envelope.event_id))
+        .collect()
+}
+
 /// Redrives the producer work `host`'s admission ledger still owes. Work a
 /// redrive cannot admit stays owed, and the sweep names it.
 async fn redrive_pending_work(
@@ -270,6 +347,7 @@ async fn redrive_pending_work(
     host: NativeHostIdentityV1,
     project_id: Option<[u8; 16]>,
     now: UtcMicros,
+    spool_records: &[tracedecay_hooks::HookSpoolRecordV1],
     sweep: &mut HookReplaySweepV1,
 ) -> std::result::Result<BTreeMap<[u8; 32], [u8; 16]>, ()> {
     let pending_work = match hook_v2_pending_work_envelopes(data_root, host, now) {
@@ -283,14 +361,7 @@ async fn redrive_pending_work(
             return Err(());
         }
     };
-    let mut replay_fences = BTreeMap::new();
-    for envelope in &pending_work {
-        if project_id.is_none_or(|project_id| envelope.project_id == project_id) {
-            replay_fences
-                .entry(envelope.protected_session_id)
-                .or_insert(envelope.event_id);
-        }
-    }
+    let replay_fences = replay_fences(&pending_work, spool_records, project_id, now);
     let mut owed = 0_usize;
     let mut owed_cause = None;
     for envelope in pending_work {
@@ -785,7 +856,10 @@ mod tests {
             1,
             move |request: tracedecay_daemon_service::HookOrchestrationRequestV1, _| {
                 let ran = ran.clone();
-                async move { ran.send(request.lifecycle).unwrap() }
+                async move {
+                    ran.send((request.hook.envelope().event_id, request.lifecycle))
+                        .unwrap()
+                }
             },
         )
         .unwrap();
@@ -828,11 +902,13 @@ mod tests {
             &background_cpu,
         )
         .await;
-        let mounted = tokio::time::timeout(Duration::from_secs(10), runs.recv())
+        let (mounted_event_id, mounted) = tokio::time::timeout(Duration::from_secs(10), runs.recv())
             .await
             .unwrap()
             .unwrap()
-            .expect("spool replay must mount lifecycle");
+            ;
+        assert_eq!(mounted_event_id, envelope.event_id);
+        let mounted = mounted.expect("spool replay must mount lifecycle");
         assert_eq!(mounted.session_id, lifecycle.session_id);
         tokio::time::timeout(Duration::from_secs(10), async {
             while !pending().is_empty() {
@@ -919,11 +995,12 @@ mod tests {
             &background_cpu,
         )
         .await;
-        let second_mounted = tokio::time::timeout(Duration::from_secs(10), runs.recv())
+        let (second_event_id, second_mounted) = tokio::time::timeout(Duration::from_secs(10), runs.recv())
             .await
             .unwrap()
-            .unwrap()
-            .expect("second spool record must mount its own lifecycle");
+            .unwrap();
+        assert_eq!(second_event_id, second_edit.event_id);
+        let second_mounted = second_mounted.expect("second spool record must mount its own lifecycle");
         assert_eq!(second_mounted.session_id, second_lifecycle.session_id);
         tokio::time::timeout(Duration::from_secs(10), async {
             while !pending().is_empty() {
@@ -936,6 +1013,136 @@ mod tests {
             runs.try_recv().is_err(),
             "second edit executes exactly once"
         );
+
+        tracedecay_daemon_service::unregister_hook_orchestration_runtime(
+            project_id,
+            binding.worktree_id,
+            &runtime,
+        );
+        let stop = tracedecay_hooks::HookEventEnvelopeV2 {
+            event_id: [12; 16],
+            observed_at: UtcMicros(now.0.saturating_add(10)),
+            event: tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: tracedecay_hooks::HookBoundaryV1::TurnComplete,
+            },
+            ..envelope.clone()
+        };
+        let later_lifecycle = tracedecay_hooks::NativeContextScoutLifecycleV1::new(
+            "session.replay.edit",
+            "call.replay.after-stop",
+            [13; 16],
+        )
+        .unwrap();
+        let later_edit = tracedecay_hooks::HookEventEnvelopeV2 {
+            event_id: later_lifecycle.event_id,
+            observed_at: UtcMicros(now.0.saturating_add(20)),
+            event: tracedecay_hooks::HookEventV2::SavedEdit {
+                file_id: [13; 16],
+                changed_range_count: 1,
+            },
+            ..envelope.clone()
+        };
+        assert!(matches!(
+            admit_hook_v2_envelope(&graph, &stop, None, hook_replay_now()).await,
+            HookV2AdmissionOutcomeV1::Admitted { .. }
+        ));
+        assert!(matches!(
+            admit_hook_v2_envelope(&graph, &later_edit, None, hook_replay_now()).await,
+            HookV2AdmissionOutcomeV1::Admitted { .. }
+        ));
+        let (mut stop_spool, _) =
+            HookSpoolV1::open(&root, HookSpoolConfigV1::stock(host), hook_replay_now()).unwrap();
+        stop_spool
+            .append_with_native_lifecycle(
+                later_edit.clone(),
+                Some(later_lifecycle.clone()),
+                &binding,
+                hook_replay_now(),
+            )
+            .unwrap();
+        drop(stop_spool);
+        assert_eq!(pending(), vec![stop.clone(), later_edit.clone()]);
+        assert!(
+            tracedecay_daemon_service::register_hook_orchestration_runtime(
+                project_id,
+                binding.worktree_id,
+                &runtime,
+            )
+        );
+        drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        let (stop_id, stop_lifecycle) = tokio::time::timeout(Duration::from_secs(10), runs.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stop_id, stop.event_id);
+        assert!(stop_lifecycle.is_some());
+        assert!(
+            runs.try_recv().is_err(),
+            "the newer edit stays behind the ledger-only stop"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while pending().contains(&stop) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the older stop settles before the later edit");
+        drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        let (later_event_id, later_mounted) =
+            tokio::time::timeout(Duration::from_secs(10), runs.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(later_event_id, later_edit.event_id);
+        assert_eq!(
+            later_mounted.expect("the newer edit mounts its own lifecycle").session_id,
+            later_lifecycle.session_id
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while pending().contains(&later_edit) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("later edit settles after the stop");
+        let (mut duplicate_spool, _) =
+            HookSpoolV1::open(&root, HookSpoolConfigV1::stock(host), hook_replay_now()).unwrap();
+        duplicate_spool
+            .append_with_native_lifecycle(
+                later_edit.clone(),
+                Some(later_lifecycle),
+                &binding,
+                hook_replay_now(),
+            )
+            .unwrap();
+        drop(duplicate_spool);
+        drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        assert!(
+            runs.try_recv().is_err(),
+            "a late exact duplicate does not remount completed lifecycle work"
+        );
+
         // Claude deliberately omits lifecycle writes while intent is disabled;
         // an acknowledged edit can therefore need ledger-only recovery.
         tracedecay_daemon_service::unregister_hook_orchestration_runtime(
@@ -982,12 +1189,14 @@ mod tests {
             &background_cpu,
         )
         .await;
-        assert!(
+        let (disabled_event_id, disabled_lifecycle) =
             tokio::time::timeout(Duration::from_secs(10), runs.recv())
                 .await
                 .unwrap()
-                .unwrap()
-                .is_none(),
+                .unwrap();
+        assert_eq!(disabled_event_id, disabled_edit.event_id);
+        assert!(
+            disabled_lifecycle.is_none(),
             "disabled Claude edits settle without mounting a lifecycle"
         );
         tokio::time::timeout(Duration::from_secs(10), async {

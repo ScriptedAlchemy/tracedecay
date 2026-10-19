@@ -267,6 +267,7 @@ where
                 }
                 HookReplayAdmissionOutcomeV1::Deferred => {
                     completions.push(ReplayCompletion::Retained(1));
+                    break;
                 }
             }
         }
