@@ -44,6 +44,24 @@ py_test(
 )
 
 py_test(
+    name = "build_eval_binary_test",
+    size = "small",
+    srcs = ["test-build-eval-binary.py"],
+    data = ["build-eval-binary.sh"],
+    main = "test-build-eval-binary.py",
+)
+
+py_test(
+    name = "bazel_dependency_patches_test",
+    size = "small",
+    srcs = ["test-bazel-dependency-patches.py"],
+    data = [
+        "//:MODULE.bazel",
+    ] + glob(["bazel/patches/*.patch"]),
+    main = "test-bazel-dependency-patches.py",
+)
+
+py_test(
     name = "ambient_tokio_check_test",
     size = "small",
     srcs = [
@@ -82,6 +100,7 @@ py_test(
 exports_files(
     [
         "bazel/rust_test.bzl",
+        "build-eval-binary.sh",
         "test-rust-cache-lineage.py",
         "test-check-packaged-lsp-bridge.py",
         "test-check-sdk-publish-workflow.py",
