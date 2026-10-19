@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{Executor as _, QueryExecutor as _, params};
 
 use crate::RegisteredGlobalDb;
 
@@ -133,78 +133,77 @@ impl RegisteredGlobalDb {
         let Some(last_path) = paths.last().cloned() else {
             return Ok(None);
         };
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("begin host discovery queue transaction: {error}"))?;
         let (range_start, range_end) = exclusive_prefix_range(&prefix)?;
-        let mut sequence_rows = transaction
-            .query(
-                "SELECT COALESCE(MAX(byte_offset), 0)
-                 FROM parse_offsets
-                 WHERE file_path >= ?1 AND file_path < ?2 AND file_id = 1",
-                params![range_start, range_end],
-            )
-            .await
-            .map_err(|error| format!("read host discovery queue tail: {error}"))?;
-        let sequence_row = sequence_rows
-            .next()
-            .await
-            .map_err(|error| format!("read host discovery queue tail: {error}"))?
-            .ok_or_else(|| "host discovery queue tail is unavailable".to_owned())?;
-        let mut sequence = sequence_row
-            .get::<i64>(0)
-            .map_err(|error| format!("decode host discovery queue tail: {error}"))?;
-        if sequence < 0 {
-            return Err("host discovery queue tail is negative".to_owned());
-        }
-        drop(sequence_rows);
-        for path in paths {
-            let key = queue_key(&prefix, &path);
-            let proposed = sequence
-                .checked_add(1)
-                .ok_or_else(|| "host discovery queue sequence is exhausted".to_owned())?;
-            let inserted = transaction
-                .execute(
-                    "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
-                     VALUES (?1, ?2, 0, 1)
-                     ON CONFLICT(file_path) DO NOTHING",
-                    params![key, proposed],
-                )
-                .await
-                .map_err(|error| format!("enqueue host discovery path: {error}"))?;
-            if inserted > 0 {
-                sequence = proposed;
-            }
-        }
-        let last_key = queue_key(&prefix, &last_path);
-        let mut rows = transaction
-            .query(
-                "SELECT byte_offset, file_path
-                 FROM parse_offsets
-                 WHERE file_path = ?1 AND file_id = 1",
-                params![last_key],
-            )
-            .await
-            .map_err(|error| format!("resolve host discovery queue identity: {error}"))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| format!("read host discovery queue identity: {error}"))?
-            .ok_or_else(|| "enqueued host discovery path is unavailable".to_owned())?;
-        let entry = decode_entry(
-            &prefix,
-            row.get::<i64>(0)
-                .map_err(|error| format!("decode host discovery queue sequence: {error}"))?,
-            row.get::<String>(1)
-                .map_err(|error| format!("decode host discovery queue key: {error}"))?,
-        )?;
-        drop(rows);
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("commit host discovery queue: {error}"))?;
-        Ok(Some(entry))
+        self.transact_or(
+            |error| format!("run host discovery queue transaction: {error}"),
+            async move |transaction| {
+                let mut sequence_rows = transaction
+                    .query(
+                        "SELECT COALESCE(MAX(byte_offset), 0)
+                         FROM parse_offsets
+                         WHERE file_path >= ?1 AND file_path < ?2 AND file_id = 1",
+                        params![range_start.as_str(), range_end.as_str()],
+                    )
+                    .await
+                    .map_err(|error| format!("read host discovery queue tail: {error}"))?;
+                let sequence_row = sequence_rows
+                    .next()
+                    .await
+                    .map_err(|error| format!("read host discovery queue tail: {error}"))?
+                    .ok_or_else(|| "host discovery queue tail is unavailable".to_owned())?;
+                let mut sequence = sequence_row
+                    .get::<i64>(0)
+                    .map_err(|error| format!("decode host discovery queue tail: {error}"))?;
+                if sequence < 0 {
+                    return Err("host discovery queue tail is negative".to_owned());
+                }
+                drop(sequence_rows);
+                for path in &paths {
+                    let key = queue_key(&prefix, path);
+                    let proposed = sequence
+                        .checked_add(1)
+                        .ok_or_else(|| "host discovery queue sequence is exhausted".to_owned())?;
+                    let inserted = transaction
+                        .execute(
+                            "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
+                             VALUES (?1, ?2, 0, 1)
+                             ON CONFLICT(file_path) DO NOTHING",
+                            params![key, proposed],
+                        )
+                        .await
+                        .map_err(|error| format!("enqueue host discovery path: {error}"))?;
+                    if inserted > 0 {
+                        sequence = proposed;
+                    }
+                }
+                let last_key = queue_key(&prefix, &last_path);
+                let mut rows = transaction
+                    .query(
+                        "SELECT byte_offset, file_path
+                         FROM parse_offsets
+                         WHERE file_path = ?1 AND file_id = 1",
+                        params![last_key],
+                    )
+                    .await
+                    .map_err(|error| format!("resolve host discovery queue identity: {error}"))?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(|error| format!("read host discovery queue identity: {error}"))?
+                    .ok_or_else(|| "enqueued host discovery path is unavailable".to_owned())?;
+                let entry = decode_entry(
+                    &prefix,
+                    row.get::<i64>(0).map_err(|error| {
+                        format!("decode host discovery queue sequence: {error}")
+                    })?,
+                    row.get::<String>(1)
+                        .map_err(|error| format!("decode host discovery queue key: {error}"))?,
+                )?;
+                drop(rows);
+                Ok(Some(entry))
+            },
+        )
+        .await
     }
 
     #[tracing::instrument(name = "global_db.discovery_queue.query", level = "trace", skip_all)]

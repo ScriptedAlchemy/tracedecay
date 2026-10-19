@@ -75,7 +75,7 @@ where
     R: Send + 'static,
     E: Send + 'static,
 {
-    db.transact(body).await.map_err(unavailable)?
+    db.transact_or(unavailable, body).await
 }
 
 /// Concrete control-plane adapter over one already-open owned session store.
