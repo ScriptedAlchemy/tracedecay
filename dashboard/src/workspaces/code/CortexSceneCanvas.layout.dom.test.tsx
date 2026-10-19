@@ -18,6 +18,8 @@ interface Request {
   scene: unknown;
   signal: AbortSignal | undefined;
   resolve: (layout: FakeLayout) => void;
+  reject: (reason: Error) => void;
+  settled: Promise<FakeLayout>;
 }
 
 function fakePainter() {
@@ -25,8 +27,16 @@ function fakePainter() {
   const painter: CortexPainter<FakeLayout> = {
     name: 'fake',
     fitPad: 0,
-    layout: (scene, _box, signal) =>
-      new Promise<FakeLayout>((resolve) => requests.push({ scene, signal, resolve })),
+    layout: (scene, _box, signal) => {
+      let resolve!: (layout: FakeLayout) => void;
+      let reject!: (reason: Error) => void;
+      const settled = new Promise<FakeLayout>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      requests.push({ scene, signal, resolve, reject, settled });
+      return settled;
+    },
     bounds: () => ({ x0: 0, y0: 0, x1: 100, y1: 100 }),
     position: () => ({ x: 50, y: 50 }),
     hitRadius: () => 5,
@@ -86,13 +96,17 @@ describe('layout requests from the canvas', () => {
     expect(requests[0]!.signal!.aborted).toBe(true);
     expect(requests[1]!.signal!.aborted).toBe(false);
 
-    requests[1]!.resolve({ tag: 'second' });
+    await act(async () => {
+      requests[1]!.resolve({ tag: 'second' });
+      await requests[1]!.settled;
+    });
     await waitFor(() =>
       expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready'),
     );
     await waitFor(() => expect(painter.draw).toHaveBeenCalled());
     await act(async () => {
       requests[0]!.resolve({ tag: 'first' });
+      await requests[0]!.settled;
     });
 
     const drawn = vi.mocked(painter.draw).mock.calls.map((call) => call[0].tag);
@@ -109,6 +123,7 @@ describe('layout requests from the canvas', () => {
     expect(requests[0]!.signal!.aborted).toBe(true);
     await act(async () => {
       requests[0]!.resolve({ tag: 'late' });
+      await requests[0]!.settled;
     });
     expect(painter.draw).not.toHaveBeenCalled();
   });
@@ -122,7 +137,10 @@ describe('layout requests from the canvas', () => {
     expect(screen.getByRole('status').textContent).toMatch(/symbol list remains available/);
     expect(painter.draw).not.toHaveBeenCalled();
 
-    requests[0]!.resolve({ tag: 'only' });
+    await act(async () => {
+      requests[0]!.resolve({ tag: 'only' });
+      await requests[0]!.settled;
+    });
     await waitFor(() => expect(painter.draw).toHaveBeenCalled());
     const [layout, drawnScene, frame] = vi.mocked(painter.draw).mock.calls.at(-1)!;
     expect(layout.tag).toBe('only');
@@ -156,6 +174,7 @@ describe('layout requests from the canvas', () => {
     await waitFor(() => expect(first.requests).toHaveLength(1));
     await act(async () => {
       first.requests[0]!.resolve({ tag: 'first' });
+      await first.requests[0]!.settled;
     });
     await waitFor(() => expect(frames.size).toBeGreaterThan(0));
     const deferredOldFrame = [...frames.values()][0]!;
@@ -164,6 +183,7 @@ describe('layout requests from the canvas', () => {
     await waitFor(() => expect(second.requests).toHaveLength(1));
     await act(async () => {
       second.requests[0]!.resolve({ tag: 'second' });
+      await second.requests[0]!.settled;
     });
     expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready');
 
