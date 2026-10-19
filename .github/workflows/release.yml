@@ -142,11 +142,25 @@ jobs:
       - name: Install the locked-inventory YAML reader
         run: python3 -m pip install pyyaml==6.0.2
 
+      # Recovery automation is pinned to this workflow revision, not the release
+      # source being inventoried.
+      - name: Checkout release packaging helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-automation
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions/package-release
+            .github/actions/setup-bazel
+            scripts/generate-release-inventory.py
+
       - name: Set up Bazel for inventory-only recovery
         if: matrix.inventory_only == 'true'
-        uses: ./.github/actions/setup-bazel
+        uses: ./.release-automation/.github/actions/setup-bazel
         with:
           cache-key: release-${{ matrix.target }}
+          cache-save: "false"
 
       - name: Build dashboard bundle for inventory-only recovery
         if: matrix.inventory_only == 'true'
@@ -181,19 +195,6 @@ jobs:
           name: dashboard-sha256-${{ matrix.name }}
           path: dashboard-sha256-${{ matrix.name }}.txt
           if-no-files-found: error
-
-      # Packaging orchestration comes from this immutable workflow revision,
-      # so recovery also works for tags predating the shared helper. The CLI
-      # and its packager inputs still come from the validated release source.
-      - name: Checkout release packaging helpers
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: .release-automation
-          persist-credentials: false
-          sparse-checkout: |
-            .github/actions/package-release
-            scripts/generate-release-inventory.py
 
       - name: Package and verify native archive and MCPB
         if: matrix.inventory_only != 'true'
