@@ -253,6 +253,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn enrolled_monorepo_package_retains_its_path_local_scope() {
+        let temp = TempDir::new().unwrap();
+        let repository = temp.path().canonicalize().unwrap();
+        init_repo(&repository);
+        write_identity_marker(&repository, "project.enclosing-repository");
+        let package = repository.join("packages/app");
+        let subdirectory = package.join("src/deep");
+        std::fs::create_dir_all(&subdirectory).unwrap();
+        let project_id = tracedecay_runtime_core::storage::default_profile_project_id(&package);
+        assert_ne!(project_id, "project.enclosing-repository");
+        let profile = TempDir::new().unwrap();
+        let (registry, _registry_owner) =
+            tracedecay_global_db::tests::harness::open_registered_test_database_fixture(
+                &profile.path().join("profile.db"),
+                tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+            )
+            .await
+            .unwrap();
+        registry
+            .upsert_code_project(&project_id, &package, None, None, Some("main"))
+            .await
+            .unwrap();
+        let owner = registry
+            .project_registry_context_by_id(&project_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (root, scope) = resolve_query_scope_with_root(&owner, &subdirectory).unwrap();
+        assert_eq!(root, package);
+        assert_eq!(scope.project_id.as_str(), project_id);
+        assert_eq!(scope, resolve_query_scope(&owner, &package).unwrap());
+        assert_ne!(
+            scope,
+            resolve_query_scope(
+                &owner_for(&repository, "project.enclosing-repository"),
+                &repository
+            )
+            .unwrap()
+        );
+    }
+
     #[test]
     fn relative_requested_root_fails_closed_without_cwd_fallback() {
         let temp = TempDir::new().unwrap();

@@ -91,12 +91,28 @@ fn resolve_authorized_root(
     // actual Git root before ordinary subdirectories converge on their owner;
     // lexical containment alone cannot authorize another repository.
     let scope_root = match try_repository_topology(&requested_root) {
-        Ok(topology) => topology.worktree_root.clone().ok_or_else(|| {
-            ApplicationScopeError::Resolution(format!(
-                "requested root '{}' has no Git checkout",
-                requested_root.display()
-            ))
-        })?,
+        Ok(topology) => {
+            let checkout = topology.worktree_root.clone().ok_or_else(|| {
+                ApplicationScopeError::Resolution(format!(
+                    "requested root '{}' has no Git checkout",
+                    requested_root.display()
+                ))
+            })?;
+            // An independently enrolled package owns its path-local identity;
+            // discovery of the enclosing repository cannot widen that scope.
+            if requested_root.starts_with(&registered_root)
+                && !checkout.starts_with(&registered_root)
+            {
+                validate_non_git_project_identity(&registered_root, project_id)?;
+                return Ok(AuthorizedRoot {
+                    scope_root: registered_root.clone(),
+                    registered_root,
+                    marker: None,
+                });
+            } else {
+                checkout
+            }
+        }
         Err(GitTopologyProbeError::Repository(GitRepositoryError::NotARepository { .. })) => {
             if requested_root.starts_with(&registered_root) {
                 registered_root.clone()
