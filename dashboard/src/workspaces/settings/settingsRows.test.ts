@@ -162,7 +162,7 @@ describe('write bindings', () => {
     expect(applyRequirement(bindingFor('project.config.track_call_sites')!)).toEqual({
       kind: 'reported_on_apply',
     });
-    expect(applyRequirement(bindingFor('user.upload_enabled')!)).toEqual({
+    expect(applyRequirement(bindingFor('user.watcher_debounce')!)).toEqual({
       kind: 'reported_on_apply',
     });
   });

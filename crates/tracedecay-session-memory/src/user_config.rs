@@ -15,11 +15,16 @@ use tracedecay_domain::canonical_text::default_true;
 use tracedecay_automation::config::AutomationConfig;
 use tracedecay_runtime_core::storage::{append_lock_path, retry_transient_file_op};
 
-/// Keys canonical `user.*` configuration settings own, and caches of the
-/// retired status worldwide/flag decoration. They are never read from this
-/// file.
-const RETIRED_KEYS: [&str; 7] = [
+/// Keys canonical `user.*` configuration settings own, and state of the
+/// retired worldwide counter (its upload opt-in, pending amount and flush
+/// timestamps) and status worldwide/flag decoration. They are never read from
+/// this file; an older profile that still carries them loads normally and the
+/// next write erases them. The pending amount is dropped without an upload.
+const RETIRED_KEYS: [&str; 10] = [
     "upload_enabled",
+    "pending_upload",
+    "last_upload_at",
+    "last_flush_attempt_at",
     "watcher_debounce",
     "extraction_timeout_secs",
     "last_worldwide_total",
@@ -31,18 +36,6 @@ const RETIRED_KEYS: [&str; 7] = [
 /// User-level tracedecay configuration.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserConfig {
-    /// Tokens accumulated locally, not yet uploaded.
-    #[serde(default)]
-    pub pending_upload: u64,
-
-    /// UNIX timestamp of last successful upload.
-    #[serde(default)]
-    pub last_upload_at: i64,
-
-    /// UNIX timestamp of last flush attempt (success or failure).
-    #[serde(default)]
-    pub last_flush_attempt_at: i64,
-
     /// Cached latest version from GitHub releases.
     #[serde(default)]
     pub cached_latest_version: String,
@@ -102,9 +95,6 @@ pub struct UserConfig {
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
-            pending_upload: 0,
-            last_upload_at: 0,
-            last_flush_attempt_at: 0,
             cached_latest_version: String::new(),
             last_version_check_at: 0,
             last_version_warning_at: 0,
@@ -275,7 +265,7 @@ impl UserConfig {
     ///
     /// An unreadable or malformed file is an error, not defaults: those would
     /// silently turn a stored opt-out (dashboard, memory injection) back on
-    /// and drop the tracked hosts and pending counts.
+    /// and drop the tracked hosts.
     pub fn load(profile_root: &Path) -> std::result::Result<Self, ConfigSaveError> {
         read_profile_config::<Self>(profile_root).map(Self::without_retired_keys)
     }
@@ -441,7 +431,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // The torn write seen in the wild: a valid line followed by a bare
         // " true" orphan with no key.
-        let torn = "pending_upload = 0\n true";
+        let torn = "last_version_check_at = 0\n true";
         std::fs::write(&path, torn).unwrap();
         let entries = || {
             let mut names = std::fs::read_dir(path.parent().unwrap())
@@ -452,7 +442,7 @@ mod tests {
             names
         };
         let config = UserConfig {
-            pending_upload: 7,
+            last_version_check_at: 7,
             ..UserConfig::default()
         };
 
@@ -471,9 +461,9 @@ mod tests {
         assert_eq!(load_error.to_string(), expected);
         assert_eq!(entries(), vec!["config.toml".to_owned()]);
 
-        std::fs::write(&path, "pending_upload = 0\n").unwrap();
+        std::fs::write(&path, "last_version_check_at = 0\n").unwrap();
         config.save(profile).expect("a parseable config saves");
-        assert_eq!(UserConfig::load(profile).unwrap().pending_upload, 7);
+        assert_eq!(UserConfig::load(profile).unwrap().last_version_check_at, 7);
     }
 
     #[test]
@@ -529,13 +519,13 @@ mod tests {
         let path = config_path(profile);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        let handles: Vec<_> = (0..8u64)
+        let handles: Vec<_> = (0..8i64)
             .map(|thread_idx| {
                 let profile = profile.to_path_buf();
                 std::thread::spawn(move || {
-                    for i in 0..20u64 {
+                    for i in 0..20i64 {
                         let config = UserConfig {
-                            pending_upload: thread_idx * 100 + i,
+                            last_version_check_at: thread_idx * 100 + i,
                             ..UserConfig::default()
                         };
                         // Every write must succeed and leave a parseable file.
@@ -554,10 +544,10 @@ mod tests {
         let parsed = toml::from_str::<UserConfig>(&saved)
             .expect("file must be parseable after concurrent saves");
         assert_eq!(
-            parsed.pending_upload % 100,
+            parsed.last_version_check_at % 100,
             19,
             "the surviving file is one writer's final save, got {}",
-            parsed.pending_upload
+            parsed.last_version_check_at
         );
     }
 
@@ -583,9 +573,9 @@ mod tests {
             }
         });
 
-        for i in 0..150u64 {
+        for i in 0..150i64 {
             let config = UserConfig {
-                pending_upload: i,
+                last_version_check_at: i,
                 ..UserConfig::default()
             };
             config.save(profile).expect("writer save should succeed");
@@ -595,7 +585,7 @@ mod tests {
         assert_eq!(
             toml::from_str::<UserConfig>(&saved)
                 .expect("final config parses")
-                .pending_upload,
+                .last_version_check_at,
             149
         );
     }
@@ -608,7 +598,9 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "upload_enabled = true\nwatcher_debounce = \"9s\"\nextraction_timeout_secs = 5\n\
+            "upload_enabled = true\npending_upload = 4200\nlast_upload_at = 1711375100\n\
+             last_flush_attempt_at = 1711375150\n\
+             watcher_debounce = \"9s\"\nextraction_timeout_secs = 5\n\
              last_worldwide_total = 1000000\nlast_worldwide_fetch_at = 1711375200\n\
              cached_country_flags = [\"🇺🇸\", \"🇩🇪\"]\nlast_flags_fetch_at = 1711375200\n\
              future_key = \"keep-me\"\n[future_table]\nflag = true\n",
@@ -616,7 +608,7 @@ mod tests {
         .unwrap();
 
         let mut config = UserConfig::load(profile).unwrap();
-        config.pending_upload = 3;
+        config.last_version_check_at = 3;
 
         config
             .save(profile)
@@ -625,9 +617,12 @@ mod tests {
         assert!(saved.contains("future_key = \"keep-me\""));
         assert!(saved.contains("[future_table]"));
         assert!(saved.contains("flag = true"));
-        assert!(saved.contains("pending_upload = 3"));
+        assert!(saved.contains("last_version_check_at = 3"));
         for retired in [
             "upload_enabled",
+            "pending_upload",
+            "last_upload_at",
+            "last_flush_attempt_at",
             "watcher_debounce",
             "extraction_timeout_secs",
             "last_worldwide_total",

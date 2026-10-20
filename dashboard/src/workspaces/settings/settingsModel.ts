@@ -12,7 +12,7 @@
  *     The daemon really does merge two layers there, and then ships only the
  *     result. The winning layer is not on the wire.
  *   - `user` and `project.config` do not even address the same keys
- *     (`upload_enabled`/`watcher_debounce` vs `include`/`exclude`/…), so they
+ *     (`watcher_debounce`/`extraction_timeout_secs` vs `include`/`exclude`/…), so they
  *     are not competing layers over a shared namespace.
  *
  * Therefore this model does NOT rank groups into a resolution stack and does
@@ -150,7 +150,6 @@ export interface ProjectSettingsValues {
 }
 
 export interface UserSettingsValues {
-  readonly upload_enabled: boolean;
   readonly watcher_debounce: string;
   readonly extraction_timeout_secs: string;
 }
@@ -205,7 +204,6 @@ export interface ProjectSettingsChangeSet {
 
 /** The user-scope counterpart of `ProjectSettingsChangeSet`. */
 export interface UserSettingsChangeSet {
-  upload_enabled?: boolean;
   watcher_debounce?: string;
   extraction_timeout_secs?: number;
 }
@@ -443,7 +441,6 @@ export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor 
       auto_track_pr_poll_secs: pollSecs,
     },
     user: {
-      upload_enabled: payload.user.upload_enabled,
       watcher_debounce: payload.user.watcher_debounce,
       extraction_timeout_secs: extractionTimeout,
     },
@@ -550,9 +547,6 @@ export function planUserChangeAgainst(
   if (errors.length > 0) return { outcome: 'invalid', errors };
 
   const patch: UserSettingsChangeSet = {};
-  if (values.upload_enabled !== current.user.upload_enabled) {
-    patch.upload_enabled = values.upload_enabled;
-  }
   if (values.watcher_debounce !== current.user.watcher_debounce) {
     patch.watcher_debounce = values.watcher_debounce;
   }

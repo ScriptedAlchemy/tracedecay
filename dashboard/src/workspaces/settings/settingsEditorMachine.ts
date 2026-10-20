@@ -562,7 +562,6 @@ function sameProjectValues(
 
 function sameUserValues(left: UserSettingsValues, right: UserSettingsValues): boolean {
   return (
-    left.upload_enabled === right.upload_enabled &&
     left.watcher_debounce === right.watcher_debounce &&
     left.extraction_timeout_secs === right.extraction_timeout_secs
   );

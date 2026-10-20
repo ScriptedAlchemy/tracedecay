@@ -27678,12 +27678,6 @@
         "idempotency_key": {
           "type": "string"
         },
-        "upload_enabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
         "watcher_debounce": {
           "type": [
             "string",
@@ -27737,9 +27731,6 @@
           },
           "type": "array"
         },
-        "upload_enabled": {
-          "type": "boolean"
-        },
         "watcher_debounce": {
           "type": "string"
         }
@@ -27749,7 +27740,6 @@
         "configuration_revision_id",
         "code_index_worker_configuration_snapshot_id",
         "code_index_worker_configuration_revision_id",
-        "upload_enabled",
         "code_index_workers",
         "code_index_worker_status",
         "watcher_debounce",

@@ -5657,7 +5657,6 @@ export type UserSettingsPatch = {
   expected_revision_id: string;
   extraction_timeout_secs?: number | null | undefined;
   idempotency_key: string;
-  upload_enabled?: boolean | null | undefined;
   watcher_debounce?: string | null | undefined;
 };
 
@@ -5670,7 +5669,6 @@ export type UserSettingsPayloadV1 = {
   configuration_snapshot_id: string;
   extraction_timeout_secs: number;
   installed_agents: Array<string>;
-  upload_enabled: boolean;
   watcher_debounce: string;
 };
 

@@ -61,8 +61,8 @@ pub fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| env_value_truthy(&value))
 }
 
-/// Whether user-level global accounting (the cross-project `savings_ledger`
-/// plus worldwide-counter flushes in the MCP server) is enabled.
+/// Whether user-level global accounting (the cross-project `savings_ledger`)
+/// is enabled.
 ///
 /// Enabled **by default**: every other writer of the user-level `global.db`
 /// (CLI sync, hooks, `tracedecay cost`, the dashboard) is ungated, and the

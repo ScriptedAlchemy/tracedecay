@@ -3,10 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_contracts::ResolvedScope;
-use tracedecay_domain::canonical_text::sha256_hex;
-use tracedecay_domain::{ProjectId, RefId, RepositoryId, WorktreeId};
+use tracedecay_domain::{ProjectId, RefId};
+use tracedecay_runtime_core::git_repository::{
+    GitRepositoryError, GitTopologyProbeError, try_repository_topology,
+};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
-use tracedecay_runtime_core::storage::RepositoryIdentityMarker;
+use tracedecay_runtime_core::scope_identity::{repository_id_for, worktree_id_for};
 
 use super::ApplicationScopeError;
 
@@ -33,7 +35,6 @@ impl RegisteredScopeResolver {
         project_id: &ProjectId,
     ) -> Result<PathBuf, ApplicationScopeError> {
         resolve_authorized_root(registered_root, requested_root, project_id)
-            .map(|resolved| resolved.scope_root)
     }
 
     #[tracing::instrument(name = "usecases.context.registered_scope", level = "trace", skip_all)]
@@ -42,28 +43,15 @@ impl RegisteredScopeResolver {
         requested_root: &Path,
         project_id: &ProjectId,
     ) -> Result<ResolvedScope, ApplicationScopeError> {
-        let resolved = resolve_authorized_root(registered_root, requested_root, project_id)?;
-        let scope = if let Some(marker) = resolved.marker {
-            let identity = tracedecay_sessions::repository_provenance::
-                RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
-                    &resolved.scope_root,
-                    project_id,
-                    &marker,
-                )
-                .and_then(|authority| authority.admitted_identity())
-                .ok_or_else(|| {
-                    ApplicationScopeError::Resolution(format!(
-                        "registered identity authority rejected '{}'",
-                        resolved.scope_root.display()
-                    ))
-                })?;
-            let reference = tracedecay_runtime_core::branch::current_branch(&resolved.scope_root)
-                .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
-            ResolvedScope::new(identity.0, identity.1, identity.2, reference)
-                .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?
-        } else {
-            resolve_non_git_scope(&resolved.registered_root, &resolved.scope_root, project_id)?
-        };
+        let scope_root = resolve_authorized_root(registered_root, requested_root, project_id)?;
+        let repository_id = repository_id_for(&scope_root)
+            .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))?;
+        let worktree_id = worktree_id_for(&scope_root)
+            .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))?;
+        let reference = tracedecay_runtime_core::branch::current_branch(&scope_root)
+            .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
+        let scope = ResolvedScope::new(project_id.clone(), repository_id, worktree_id, reference)
+            .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
         scope
             .validate()
             .map_err(|error| ApplicationScopeError::InconsistentScope(error.to_string()))?;
@@ -71,23 +59,43 @@ impl RegisteredScopeResolver {
     }
 }
 
-struct AuthorizedRoot {
-    registered_root: PathBuf,
-    scope_root: PathBuf,
-    marker: Option<RepositoryIdentityMarker>,
-}
-
 fn resolve_authorized_root(
     registered_root: &Path,
     requested_root: &Path,
     project_id: &ProjectId,
-) -> Result<AuthorizedRoot, ApplicationScopeError> {
+) -> Result<PathBuf, ApplicationScopeError> {
     let registered_root = canonical_root(registered_root, "registered root")?;
     let requested_root = canonical_root(requested_root, "requested root")?;
-    let scope_root = if requested_root.starts_with(&registered_root) {
-        registered_root.clone()
-    } else {
-        requested_root
+    // A checkout may be nested under the registered checkout. Resolve its
+    // actual Git root before ordinary subdirectories converge on their owner;
+    // lexical containment alone cannot authorize another repository.
+    let scope_root = match try_repository_topology(&requested_root) {
+        Ok(topology) => {
+            let checkout = topology.worktree_root.clone().ok_or_else(|| {
+                ApplicationScopeError::Resolution(format!(
+                    "requested root '{}' has no Git checkout",
+                    requested_root.display()
+                ))
+            })?;
+            // An independently enrolled package owns its path-local identity;
+            // discovery of the enclosing repository cannot widen that scope.
+            if requested_root.starts_with(&registered_root)
+                && !checkout.starts_with(&registered_root)
+            {
+                validate_non_git_project_identity(&registered_root, project_id)?;
+                return Ok(registered_root);
+            } else {
+                checkout
+            }
+        }
+        Err(GitTopologyProbeError::Repository(GitRepositoryError::NotARepository { .. })) => {
+            if requested_root.starts_with(&registered_root) {
+                registered_root.clone()
+            } else {
+                requested_root
+            }
+        }
+        Err(error) => return Err(ApplicationScopeError::Resolution(error.to_string())),
     };
     let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(&scope_root)
         .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))?;
@@ -115,33 +123,7 @@ fn resolve_authorized_root(
         }
         None => validate_non_git_project_identity(&registered_root, project_id)?,
     }
-    Ok(AuthorizedRoot {
-        registered_root,
-        scope_root,
-        marker,
-    })
-}
-
-/// Resolve an enrolled project that has no Git repository identity. A non-Git
-/// project persists nothing in its working tree: its identity is
-/// deterministic from the canonical project path, with the home-profile
-/// registry as the durable authority. Requiring the supplied project id to
-/// equal that deterministic identity keeps an arbitrary directory from
-/// becoming an application scope merely because a caller supplies a
-/// project id.
-fn resolve_non_git_scope(
-    registered_root: &Path,
-    scope_root: &Path,
-    project_id: &ProjectId,
-) -> Result<ResolvedScope, ApplicationScopeError> {
-    let repository_id = RepositoryId::new(path_identity("repository.daemon", registered_root))
-        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
-    let worktree_id = WorktreeId::new(path_identity("worktree.daemon", scope_root))
-        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
-    let reference = tracedecay_runtime_core::branch::current_branch(scope_root)
-        .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
-    ResolvedScope::new(project_id.clone(), repository_id, worktree_id, reference)
-        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
+    Ok(scope_root)
 }
 
 fn validate_non_git_project_identity(
@@ -157,11 +139,6 @@ fn validate_non_git_project_identity(
         )));
     }
     Ok(())
-}
-
-fn path_identity(prefix: &str, root: &Path) -> String {
-    let digest = sha256_hex(root.to_string_lossy().as_bytes());
-    format!("{prefix}.{digest}")
 }
 
 fn canonical_root(root: &Path, label: &str) -> Result<PathBuf, ApplicationScopeError> {

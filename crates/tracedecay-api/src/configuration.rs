@@ -74,8 +74,6 @@ pub struct UserSettingsPatch {
     pub expected_revision_id: String,
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upload_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_debounce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_timeout_secs: Option<u64>,
@@ -154,7 +152,6 @@ pub fn parse_code_index_worker_settings_patch(
 /// write that unsigned value and do not parse the wire string again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedUserSettingsPatch {
-    pub upload_enabled: Option<bool>,
     pub watcher_debounce_ms: Option<u64>,
     pub extraction_timeout_secs: Option<u64>,
 }
@@ -187,7 +184,6 @@ pub fn admit_user_settings_patch(
     }
     if errors.is_empty() {
         Ok(AdmittedUserSettingsPatch {
-            upload_enabled: patch.upload_enabled,
             watcher_debounce_ms,
             extraction_timeout_secs: patch.extraction_timeout_secs,
         })
@@ -380,7 +376,7 @@ mod tests {
         let result = parse_user_settings_patch(json!({
             "expected_revision_id": "configuration.revision.project",
             "idempotency_key": "configuration.idempotency.fixture",
-            "upload_enabled": true,
+            "watcher_debounce": "2s",
             "code_index_workers": { "mode": "automatic" }
         }));
 
@@ -389,6 +385,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(body).unwrap()["validation_errors"][0]["field"],
             "code_index_workers"
+        );
+    }
+
+    #[test]
+    fn user_patch_refuses_the_retired_worldwide_counter_upload_field() {
+        let result = parse_user_settings_patch(json!({
+            "expected_revision_id": "configuration.revision.profile",
+            "idempotency_key": "configuration.idempotency.fixture",
+            "upload_enabled": true
+        }));
+
+        let (status, Json(body)) = result.expect_err("a retired field must be refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::to_value(body).unwrap()["validation_errors"][0]["field"],
+            "upload_enabled"
         );
     }
 }

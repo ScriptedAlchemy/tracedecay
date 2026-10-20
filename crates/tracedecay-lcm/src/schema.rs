@@ -433,6 +433,7 @@ fn schema_stamp_error(error: store_schema::SchemaVersionError) -> LcmError {
 }
 
 async fn ensure_raw_identity_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
+    ensure_raw_message_location_schema(conn).await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS lcm_raw_predecessor_ranges (
             provider TEXT NOT NULL,
@@ -451,6 +452,74 @@ async fn ensure_raw_identity_schema(conn: &(impl Executor + ?Sized)) -> Result<(
         ",
     )
     .await?;
+    Ok(())
+}
+
+/// Add the storage-only location to the exact shipped v15 raw-row shape.
+/// Bodies, metadata and their immutable provenance receipts are unchanged.
+async fn ensure_raw_message_location_schema(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
+    // name, declared type, not-null, primary-key position, generated-column kind
+    const RELEASED_COLUMNS: &[(&str, &str, i64, i64, i64)] = &[
+        ("provider", "TEXT", 1, 0, 0),
+        ("message_id", "TEXT", 1, 0, 0),
+        ("session_id", "TEXT", 1, 0, 0),
+        ("store_id", "INTEGER", 0, 1, 0),
+        ("role", "TEXT", 1, 0, 0),
+        ("ordinal", "INTEGER", 1, 0, 0),
+        ("timestamp", "INTEGER", 0, 0, 0),
+        ("content", "TEXT", 0, 0, 0),
+        ("content_hash", "TEXT", 1, 0, 0),
+        ("storage_kind", "TEXT", 1, 0, 0),
+        ("payload_ref", "TEXT", 0, 0, 0),
+        ("placeholder_text", "TEXT", 0, 0, 0),
+        ("snippet_text", "TEXT", 1, 0, 2),
+        ("index_text", "TEXT", 1, 0, 2),
+        ("metadata_json", "TEXT", 0, 0, 0),
+        ("kind", "TEXT", 0, 0, 0),
+        ("model", "TEXT", 0, 0, 0),
+        ("tool_names", "TEXT", 0, 0, 0),
+        ("source_path", "TEXT", 0, 0, 0),
+        ("source_offset", "INTEGER", 0, 0, 0),
+    ];
+    let mut rows = conn
+        .query(
+            "SELECT name, type, [notnull], pk, hidden, dflt_value
+         FROM pragma_table_xinfo('lcm_raw_messages') ORDER BY cid",
+            (),
+        )
+        .await?;
+    let mut count = 0;
+    while let Some(row) = rows.next().await? {
+        let name = row.get::<String>(0)?;
+        let declared_type = row.get::<String>(1)?;
+        let actual = (
+            name.as_str(),
+            declared_type.as_str(),
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        );
+        let expected = RELEASED_COLUMNS.get(count).copied().or_else(|| {
+            (count == RELEASED_COLUMNS.len()).then_some(("location_path", "TEXT", 0, 0, 0))
+        });
+        if expected != Some(actual) || row.get::<Option<String>>(5)?.is_some() {
+            return Err(LcmError::Db(
+                "unsupported LCM raw message column shape".to_owned(),
+            ));
+        }
+        count += 1;
+    }
+    drop(rows);
+    if count == RELEASED_COLUMNS.len() {
+        conn.execute_batch("ALTER TABLE lcm_raw_messages ADD COLUMN location_path TEXT;")
+            .await?;
+    } else if count != RELEASED_COLUMNS.len() + 1 {
+        return Err(LcmError::Db(
+            "incomplete LCM raw message column shape".to_owned(),
+        ));
+    }
     Ok(())
 }
 

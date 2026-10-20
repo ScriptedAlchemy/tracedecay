@@ -3241,7 +3241,6 @@ const settingsPayload: Record<string, unknown> = {
     configuration_revision_id: 'user-rev-7',
     code_index_worker_configuration_snapshot_id: 'profile-worker-snap-7',
     code_index_worker_configuration_revision_id: 'profile-worker-rev-7',
-    upload_enabled: false,
     code_index_workers: { mode: 'automatic' },
     code_index_worker_status: {
       configured: { mode: 'automatic' },

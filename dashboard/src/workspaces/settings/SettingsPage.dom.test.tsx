@@ -52,7 +52,6 @@ const FIXTURE_SETTINGS: ReadonlyArray<readonly [string, readonly string[]]> = [
       'user.configuration_snapshot_id',
       'user.extraction_timeout_secs',
       'user.installed_agents',
-      'user.upload_enabled',
       'user.watcher_debounce',
     ],
   ],

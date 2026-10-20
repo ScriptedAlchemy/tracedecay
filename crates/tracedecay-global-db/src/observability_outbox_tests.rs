@@ -1,4 +1,6 @@
-use crate::registered_analytics::OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL;
+use crate::registered_analytics::{
+    HOOK_ROUTE_BY_IDEMPOTENCY_KEY_SQL, OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL,
+};
 use crate::tests::harness::RegisteredGlobalDbHarness;
 use crate::{
     AnalyticsEventInsert, CoverageStateV1, ObservabilityEmissionClaimV1,
@@ -10,22 +12,36 @@ use crate::{
 async fn idempotency_lookup_searches_its_partial_index() {
     let harness = RegisteredGlobalDbHarness::open("observability-idempotency-plan").await;
     let snapshot = harness.registered.read_snapshot().await.unwrap();
-    let mut rows = snapshot
-        .query(
-            &format!("EXPLAIN QUERY PLAN {OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL}"),
-            ["scope:fixture", "idempotency:fixture"],
-        )
-        .await
-        .unwrap();
-    let mut plan = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        plan.push(row.get::<String>(3).unwrap());
+    for (query, index) in [
+        (
+            OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL,
+            "idx_observability_event_idempotency",
+        ),
+        (
+            HOOK_ROUTE_BY_IDEMPOTENCY_KEY_SQL,
+            "idx_hook_route_idempotency",
+        ),
+    ] {
+        let mut rows = snapshot
+            .query(
+                &format!("EXPLAIN QUERY PLAN {query}"),
+                ["scope:fixture", "idempotency:fixture"],
+            )
+            .await
+            .unwrap();
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            plan.push(row.get::<String>(3).unwrap());
+        }
+        assert!(
+            plan.iter()
+                .any(|detail| detail.starts_with("SEARCH analytics_events")
+                    && detail.contains(index)
+                    && detail.contains("project_id=?")
+                    && detail.contains("hint_id=?")),
+            "the idempotency lookup must seek project and hint in {index}: {plan:?}"
+        );
     }
-    assert!(
-        plan.iter()
-            .any(|detail| detail.contains("idx_observability_event_idempotency")),
-        "the idempotency lookup must search its partial index: {plan:?}"
-    );
 }
 
 #[asupersync::test]

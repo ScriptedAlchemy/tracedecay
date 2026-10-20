@@ -6,7 +6,6 @@ edition.workspace = true
 license = "MIT"
 description = "TraceDecay user-level global database: project registry, observations, session temporal store"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-include = ["/src/**"]
 
 [features]
 # Explicit opt-in (same policy as the query kernel): exposes the registered
