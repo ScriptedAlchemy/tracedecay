@@ -9,7 +9,7 @@
 # See ./README.md for the design, isolation guarantees, and limitations.
 #
 # Subcommands:
-#   build      Build (or reuse) the dev binary and stage it at a stable path.
+#   build      Build the shipping Bazel binary and stage it at a stable path.
 #   setup      Build + create an isolated env dir + install the dev plugin into it.
 #   index      Index a target project with the dev binary (into the isolated home).
 #   run        Execute a corpus JSONL against the isolated env and score it.
@@ -51,42 +51,11 @@ die()  { printf '[hermetic] ERROR: %s\n' "$*" >&2; exit 1; }
 #   * current_exe (the staged copy) is baked into hook commands, and
 #   * the MCP server command "tracedecay" resolves to the staged copy via PATH.
 
-# Build the dev binary from THIS worktree. Echoes the built artifact path.
+# Resolve the dev binary: the shipping Bazel target built from THIS worktree,
+# or an explicit TRACEDECAY_BIN. A failed build aborts; an older artifact is
+# never staged in its place. Echoes the binary path.
 build_binary() {
-  local profile_dir="release"
-  local -a cargo_args=(build --release --package tracedecay-cli --bin tracedecay)
-  if [[ "${BUILD_DEBUG:-0}" == "1" ]]; then
-    profile_dir="debug"
-    cargo_args=(build --package tracedecay-cli --bin tracedecay)
-  fi
-
-  # Isolate build artifacts from the user's normal target dir so a concurrent
-  # `cargo` in this worktree is not disturbed and so is_cargo_target_binary can
-  # recognise the location deterministically.
-  local target_dir="${WORKTREE_ROOT}/target"
-  log "building dev binary (${profile_dir}) from ${WORKTREE_ROOT}"
-  # CRITICAL: a cargo failure must abort the whole run. Otherwise a stale
-  # artifact from a previous build would be silently staged and the eval would
-  # run against the WRONG binary -- exactly the failure this harness prevents.
-  # We check cargo's exit status explicitly (a bare subshell in a command-sub
-  # is not always fatal under set -e), and unless HERMETIC_ALLOW_STALE=1 we
-  # refuse to proceed on a build failure even if an old artifact exists.
-  local rc=0
-  (
-    cd "${WORKTREE_ROOT}"
-    CARGO_TARGET_DIR="${target_dir}" cargo "${cargo_args[@]}" >&2
-  ) || rc=$?
-  if [[ "${rc}" -ne 0 ]]; then
-    if [[ "${HERMETIC_ALLOW_STALE:-0}" == "1" ]]; then
-      log "WARNING: cargo build failed (rc=${rc}); HERMETIC_ALLOW_STALE=1 set, reusing prior artifact"
-    else
-      die "cargo build failed (rc=${rc}); refusing to run against a possibly stale binary. Set HERMETIC_ALLOW_STALE=1 only if you understand the artifact may be old."
-    fi
-  fi
-
-  local built="${target_dir}/${profile_dir}/tracedecay"
-  [[ -x "${built}" ]] || die "expected built binary not found at ${built}"
-  printf '%s\n' "${built}"
+  "${WORKTREE_ROOT}/scripts/build-eval-binary.sh"
 }
 
 # Copy the built binary to <env>/bin/tracedecay (a stable non-cargo path).
@@ -594,11 +563,10 @@ Common options:
   --corpus <path.jsonl> Corpus file for `run`.
   --model <name>        Model override (default: sonnet for claude; gpt-5.6-sol for codex).
   --reps <N>            Re-run the corpus N times (default: 1; `run` only).
-  --debug               Reuse/produce a debug build instead of release (faster).
 
 Examples:
-  run.sh smoke --agent claude --debug
-  run.sh setup --agent codex --debug
+  run.sh smoke --agent claude
+  run.sh setup --agent codex
   run.sh run --agent claude --env-dir /tmp/eval-env-... --corpus my-corpus.jsonl --model sonnet
 EOF
 }
@@ -617,7 +585,6 @@ main() {
       --corpus)  corpus="$2"; shift 2 ;;
       --model)   model="$2"; shift 2 ;;
       --reps)    reps="$2"; shift 2 ;;
-      --debug)   export BUILD_DEBUG=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown option: $1" ;;
     esac

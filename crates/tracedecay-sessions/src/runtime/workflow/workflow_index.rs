@@ -698,7 +698,7 @@ async fn runs_for_git_scope(
 }
 
 mod port;
-pub use port::{WorkflowIngestSink, WorkflowIngestWriteTxn};
+pub use port::WorkflowIngestSink;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

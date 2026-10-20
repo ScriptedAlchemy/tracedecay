@@ -268,7 +268,7 @@ mod tests {
                     resident_bytes: bytes,
                     unreclaimable_bytes: bytes,
                     swapped_bytes: 0,
-                    cgroup_committed_bytes: None,
+                    cgroup_headroom_bytes: None,
                 })
             }),
         ));

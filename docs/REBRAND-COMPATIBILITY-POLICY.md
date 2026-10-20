@@ -71,11 +71,12 @@ benchmark reports, and daemon-removal instructions should remain unless it is
 factually wrong. These references should be labeled as historical when helpful, not
 mechanically rewritten.
 
-### A5. Worldwide counter endpoint
+### A5. Worldwide counter endpoint (retired)
 
-The existing counter endpoint name may remain `tracedecay-counter` while the service
-continues to be best-effort and documented. A future endpoint rename is allowed only
-when the replacement worker is deployed and continuity/failure behavior is preserved.
+The worldwide counter was removed from the client (issue #3619); no TraceDecay
+binary calls the `tracedecay-counter` Cloudflare Worker anymore. Shutting the
+hosted Worker and its Upstash Redis store down is a maintainer action outside
+this repository, see the worldwide token counter note in `docs/USER-GUIDE.md`.
 
 ## Category B, automatically migrated or cleaned up
 
@@ -285,7 +286,7 @@ Every audited surface maps to exactly one policy category below.
 | Antigravity legacy CLI plugin path | B | Remove generated `tracedecay.json` on uninstall/reconcile. |
 | Claude legacy hook/config migration | B | Repair/remove known generated legacy hook and config shapes. |
 | `tracedecay-large-treesitters` package/dependency name | E | Keep exact upstream name until upstream rename or explicit maintained-fork policy. |
-| Worldwide counter endpoint `tracedecay-counter` | A | Retain until replacement endpoint is deployed with preserved behavior. |
+| Worldwide counter endpoint `tracedecay-counter` | A | Retired from the client; the hosted Worker is decommissioned by a maintainer. |
 | Legacy release asset names for explicit requested versions | B | Probe after current asset names for explicit old-version installs/upgrades. |
 | Latest-version filtering of legacy-only releases | D | Reject legacy-only/pre-reset releases as automatic latest candidates. |
 | Extracted binary name `tracedecay` in old archives | B | Accept only as fallback while extracting explicit old archives. |

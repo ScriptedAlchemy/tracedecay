@@ -215,6 +215,14 @@ fn anchored_write(
     observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
+    anchored_write_under(observation, expected_cursor, "observation-batch-test")
+}
+
+fn anchored_write_under(
+    observation: DurableObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    authority: &str,
+) -> AnchoredObservationWrite {
     let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
         observation.scope().clone(),
@@ -228,7 +236,7 @@ fn anchored_write(
         ProjectionGenerationId::new("projection.observation-batch.v1").unwrap();
     let authorization = tracedecay_store::build_observation_resolution_authorization_v1(
         write.observation(),
-        "observation-batch-test",
+        authority,
     )
     .unwrap();
     let anchor = tracedecay_store::build_observation_retrieval_anchor(
@@ -625,6 +633,208 @@ async fn intra_batch_alias_collision_settles_like_sequential_writes() {
         Err(ObservationStoreError::RetrievalAnchorAliasCollision { .. })
     ));
     assert_eq!(effect.retained, vec![true, false]);
+}
+
+#[derive(Clone, Copy)]
+struct SharedRecordSource<'a> {
+    provider: &'a str,
+    source_key: Option<&'a str>,
+    retention_class: &'a str,
+    authority: &'a str,
+}
+
+const THREAD_ROLLOUT: SharedRecordSource<'static> = SharedRecordSource {
+    provider: "codex",
+    source_key: Some("rollout.thread"),
+    retention_class: "retention.observation-batch",
+    authority: "observation-batch-test",
+};
+
+const REVERT_ROLLOUT: SharedRecordSource<'static> = SharedRecordSource {
+    source_key: Some("rollout.revert"),
+    ..THREAD_ROLLOUT
+};
+
+impl SharedRecordSource<'_> {
+    fn write(self) -> AnchoredObservationWrite {
+        let session_id = SessionId::new("session.observation-batch.shared-record").unwrap();
+        let provider = ProviderId::new(self.provider).unwrap();
+        let source = match self.source_key {
+            Some(key) => ObservationSourceIdentityV1::for_provider_source(
+                provider.clone(),
+                session_id.clone(),
+                SessionId::new(key).unwrap(),
+            ),
+            None => ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()),
+        }
+        .unwrap();
+        let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+        let record = ObservationId::new("record.batch.shared").unwrap();
+        let relations = CanonicalObservationRelationsV1::new(session_id)
+            .with_message_id(ObservationId::new("message.batch.shared").unwrap());
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider,
+            "message",
+            record.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "shared record"}),
+                model: None,
+                timestamp: Some(1_750_000_000),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+        )
+        .unwrap();
+        let payload = serde_json::to_value(envelope).unwrap();
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            record,
+        )
+        .unwrap();
+        let receipt_id = format!(
+            "receipt.batch.shared.{}.{}",
+            self.provider,
+            self.source_key.unwrap_or("session")
+        );
+        let observation = DurableObservationV1::new(
+            identity,
+            fixture_receipt(&receipt_id, &payload),
+            RetentionClass::new(self.retention_class).unwrap(),
+            payload,
+        )
+        .unwrap();
+        anchored_write_under(observation, None, self.authority)
+    }
+}
+
+async fn assert_shared_alias_is_refused(
+    first: SharedRecordSource<'_>,
+    second: SharedRecordSource<'_>,
+) {
+    let (batch, effect) =
+        assert_batch_settles_like_sequential_writes(vec![first.write(), second.write()]).await;
+
+    assert!(
+        matches!(
+            batch,
+            Err(ObservationStoreError::RetrievalAnchorAliasCollision { .. })
+        ),
+        "expected an alias collision, got {batch:?}"
+    );
+    assert_eq!(effect.retained, vec![true, false]);
+}
+
+#[asupersync::test]
+async fn codex_revert_rollout_shares_the_thread_rollout_alias() {
+    let (batch, effect) = assert_batch_settles_like_sequential_writes(vec![
+        THREAD_ROLLOUT.write(),
+        REVERT_ROLLOUT.write(),
+    ])
+    .await;
+
+    let outcomes = batch.expect("both rollouts of one thread commit");
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome.outcome(), ObservationPersistOutcome::Committed(_)))
+    );
+    assert_eq!(effect.retained, vec![true, true]);
+}
+
+#[asupersync::test]
+async fn keyed_sources_of_another_provider_do_not_share_an_alias() {
+    let thread = SharedRecordSource {
+        provider: BATCH_PROVIDER,
+        ..THREAD_ROLLOUT
+    };
+    let revert = SharedRecordSource {
+        provider: BATCH_PROVIDER,
+        ..REVERT_ROLLOUT
+    };
+
+    assert_shared_alias_is_refused(thread, revert).await;
+}
+
+#[asupersync::test]
+async fn unkeyed_codex_source_does_not_share_an_alias() {
+    let unkeyed = SharedRecordSource {
+        source_key: None,
+        ..THREAD_ROLLOUT
+    };
+
+    assert_shared_alias_is_refused(THREAD_ROLLOUT, unkeyed).await;
+    assert_shared_alias_is_refused(unkeyed, REVERT_ROLLOUT).await;
+}
+
+#[asupersync::test]
+async fn codex_rollouts_with_different_retention_do_not_share_an_alias() {
+    let revert = SharedRecordSource {
+        retention_class: "retention.observation-batch.other",
+        ..REVERT_ROLLOUT
+    };
+
+    assert_shared_alias_is_refused(THREAD_ROLLOUT, revert).await;
+}
+
+#[asupersync::test]
+async fn codex_rollouts_under_different_authorities_do_not_share_an_alias() {
+    let revert = SharedRecordSource {
+        authority: "observation-batch-other",
+        ..REVERT_ROLLOUT
+    };
+    let thread_auth = THREAD_ROLLOUT
+        .write()
+        .retrieval_anchor()
+        .authorization()
+        .clone();
+    let revert_auth = revert.write().retrieval_anchor().authorization().clone();
+    assert_ne!(thread_auth.resolved_scope_id, revert_auth.resolved_scope_id);
+    assert_ne!(
+        thread_auth.access_policy_digest,
+        revert_auth.access_policy_digest
+    );
+
+    assert_shared_alias_is_refused(THREAD_ROLLOUT, revert).await;
+}
+
+#[asupersync::test]
+async fn non_codex_alias_collision_stays_typed_over_a_corrupt_alias_owner() {
+    let (_tmp, runtime, store) = open_profile_store().await;
+    let owner = SharedRecordSource {
+        provider: BATCH_PROVIDER,
+        source_key: None,
+        ..THREAD_ROLLOUT
+    }
+    .write();
+    let claimant = SharedRecordSource {
+        provider: BATCH_PROVIDER,
+        ..REVERT_ROLLOUT
+    }
+    .write();
+    assert!(matches!(
+        store.persist_observation(owner.clone()).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+    crate::observation_collision_tests::corrupt_stored_observation_row(
+        &runtime,
+        owner.observation().observation_id().as_str(),
+    )
+    .await;
+
+    let error = store.persist_observation(claimant).await.unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ObservationStoreError::RetrievalAnchorAliasCollision { .. }
+        ),
+        "a non-codex write must not decode the alias owner, got {error:?}"
+    );
 }
 
 #[asupersync::test]

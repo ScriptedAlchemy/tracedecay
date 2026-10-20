@@ -218,13 +218,30 @@ pub(super) async fn ingest_user_provider(
     provider: SessionProvider,
     registered_roots: Vec<PathBuf>,
 ) -> IngestPassOutcome {
+    let outcome = run_user_provider_pass(runtime, home, provider, registered_roots).await;
+    assert!(
+        outcome.failures.is_empty(),
+        "user {provider:?} pass failed: {:?}",
+        outcome.failures
+    );
+    outcome
+}
+
+/// One production user-scope pass, whatever it reports. A bounded pass may
+/// report backpressure while discovery still has ground to cover.
+pub(super) async fn run_user_provider_pass(
+    runtime: &HostAdmissionTestRuntimeV1,
+    home: &Path,
+    provider: SessionProvider,
+    registered_roots: Vec<PathBuf>,
+) -> IngestPassOutcome {
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("fixture mounts its profile session store");
     let authority =
         GlobalDbSessionIngestAuthority::new(database).with_background_cpu(runtime.background_cpu());
     let shard = &database.binding().shard_id;
-    let outcome = with_transcript_source_profile(
+    with_transcript_source_profile(
         ProfileRoot::new(runtime.profile_root_for_test()).with_home(home),
         ingest_user_global_sources_for_provider_with_roots_bounded(
             (&shard.brain_id, &shard.profile_id, &authority),
@@ -235,13 +252,7 @@ pub(super) async fn ingest_user_provider(
             &ObservationCancellation::default(),
         ),
     )
-    .await;
-    assert!(
-        outcome.failures.is_empty(),
-        "user {provider:?} pass failed: {:?}",
-        outcome.failures
-    );
-    outcome
+    .await
 }
 
 /// Runs one Claude source through the production observation pipeline against

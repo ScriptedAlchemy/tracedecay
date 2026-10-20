@@ -634,6 +634,42 @@ impl RegisteredGlobalDb {
             .await
     }
 
+    /// [`Self::transact`] for a body whose error type is the caller's own: a
+    /// refused or failed job becomes `wrap(cause)`, and the body's error is
+    /// returned as is.
+    pub(crate) async fn transact_or<R, E>(
+        &self,
+        wrap: impl FnOnce(TraceDecayError) -> E,
+        body: impl AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> Result<R, E> + Send + Sync + 'static,
+    ) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.transact(body).await.map_err(wrap)?
+    }
+
+    /// [`Self::transact_or`] for a body that can also end early with a value
+    /// the caller wants as success. The job rolls back either way, so an
+    /// early exit leaves no commit behind.
+    pub(crate) async fn transact_or_rollback<R, E>(
+        &self,
+        wrap: impl FnOnce(TraceDecayError) -> E,
+        body: impl AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> Result<R, JobExit<R, E>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        match self.transact(body).await.map_err(wrap)? {
+            Ok(value) | Err(JobExit::Rollback(value)) => Ok(value),
+            Err(JobExit::Fail(error)) => Err(error),
+        }
+    }
+
     pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
         self.database.registered_binding()
     }
@@ -866,27 +902,6 @@ impl tracedecay_sessions::runtime::git_correlation::GitCorrelationWriteTxn
     }
 }
 
-impl tracedecay_sessions::runtime::workflow_index::WorkflowIngestWriteTxn
-    for RegisteredGlobalDbWriteTransaction<'_>
-{
-    #[allow(clippy::manual_async_fn)]
-    fn commit(
-        self,
-    ) -> impl Future<
-        Output = Result<(), tracedecay_sessions::runtime::workflow_index::WorkflowIndexError>,
-    > + Send {
-        async move {
-            RegisteredGlobalDbWriteTransaction::commit(self)
-                .await
-                .map_err(|error| {
-                    tracedecay_sessions::runtime::workflow_index::WorkflowIndexError::Db(
-                        error.to_string(),
-                    )
-                })
-        }
-    }
-}
-
 impl RegisteredGlobalDbWriteTransaction<'_> {
     pub async fn execute<P>(
         &self,
@@ -952,6 +967,20 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
     #[tracing::instrument(name = "global_db.registered.txn.rollback", level = "trace", skip_all)]
     pub async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.transaction.rollback().await.map_err(engine_error)
+    }
+}
+
+/// The error side of a job body that can end without committing. `Rollback`
+/// carries a value for the caller, so a replay can be reported as a success
+/// without leaving a commit behind; `Fail` is an ordinary failure.
+pub(crate) enum JobExit<R, E> {
+    Rollback(R),
+    Fail(E),
+}
+
+impl<R, E> From<E> for JobExit<R, E> {
+    fn from(error: E) -> Self {
+        Self::Fail(error)
     }
 }
 
