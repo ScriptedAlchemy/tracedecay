@@ -367,6 +367,7 @@ impl DaemonInvocationState {
         index_paths: tracedecay_domain::IndexPathPolicyV1,
         graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
+        pending_source: Arc<dyn code_index_scheduler::CodeIndexSourcePendingReaderV1>,
     ) -> Result<()> {
         // Code-index identity is anchored on the project root's own git
         // repository (`IndexingIdentityV1::resolve` uses `git_open::open` on the
@@ -396,7 +397,10 @@ impl DaemonInvocationState {
                 code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                     native_graph_activation,
                 ),
-                index_paths,
+                code_index_scheduler::CodeIndexSourceInputsV1 {
+                    path_policy: index_paths,
+                    pending_admission: Some(pending_source),
+                },
             )
             .await
             .map_err(|error| TraceDecayError::Config {

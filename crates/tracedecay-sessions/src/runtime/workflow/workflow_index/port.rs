@@ -6,14 +6,8 @@
 
 use std::future::Future;
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
-
 use super::WorkflowIndexError;
 use crate::{WorkflowAgent, WorkflowRun};
-
-pub trait WorkflowIngestWriteTxn: QueryExecutor + Executor + Sized + Send {
-    fn commit(self) -> impl Future<Output = Result<(), WorkflowIndexError>> + Send;
-}
 
 /// Authoritative sink one workflow-ingest sweep upserts through.
 ///

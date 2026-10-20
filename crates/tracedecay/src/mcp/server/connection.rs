@@ -224,8 +224,8 @@ impl McpServer {
 }
 
 impl McpServer {
-    /// Persists the tokens-saved counter, flushes pending tokens to the
-    /// worldwide counter, checkpoints the WAL, and logs a session summary.
+    /// Persists the tokens-saved counter, checkpoints the WAL, and logs a
+    /// session summary.
     ///
     /// Idempotent, safe to call multiple times. `run` invokes it once when
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
@@ -278,46 +278,6 @@ impl McpServer {
                     failures.push(format!("flush global ledger tokens saved: {error}"));
                 }
                 gdb.checkpoint().await;
-            }
-
-            // Flush remaining delta to worldwide counter (what periodic flushes missed).
-            if let Some(last_flushed_tokens) = self.last_flushed_tokens.as_ref() {
-                let last_flushed = last_flushed_tokens.load(Ordering::Relaxed);
-                if (self.accounting_db.is_some() || self.global_db.is_some())
-                    && tokens_saved > last_flushed
-                {
-                    let delta = tokens_saved - last_flushed;
-                    match (self.canonical_upload_enabled().await, self.owner_profile()) {
-                        (Err(error), _) => failures.push(format!(
-                            "worldwide counter upload configuration unavailable: {error}"
-                        )),
-                        (Ok(_), None) => failures.push(
-                            "worldwide counter upload skipped: server has no owning profile"
-                                .to_owned(),
-                        ),
-                        (Ok(upload_enabled), Some(profile)) => {
-                            // The upload is a blocking HTTP call; it stays off
-                            // the native worker that runs shutdown.
-                            let profile_root = profile.data_dir().to_path_buf();
-                            let saved = tracedecay_runtime_core::native_runtime::spawn_blocking(
-                                move || {
-                                    super::ledger::persist_worldwide_delta(
-                                        &profile_root,
-                                        delta,
-                                        upload_enabled,
-                                    )
-                                    .map_err(|error| error.to_string())
-                                },
-                            )
-                            .await
-                            .and_then(std::convert::identity);
-                            if let Err(error) = saved {
-                                failures
-                                    .push(format!("worldwide counter delta not saved: {error}"));
-                            }
-                        }
-                    }
-                }
             }
         }
 
@@ -459,7 +419,8 @@ impl McpServer {
             };
             let cg = self.reopen_if_branch_drifted().await;
             let root = cg.project_root().to_path_buf();
-            let canonical_outcome = Box::pin(self.run_hook_event_plan(cg, &root, plan)).await;
+            let canonical_outcome =
+                Box::pin(self.run_hook_event_plan(cg, &root, plan, Some(record.seq))).await;
             let outcome = if canonical_outcome.reason_code == Some("stale_branch_authorization")
                 && !canonical_outcome.retryable
             {

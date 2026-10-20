@@ -41,9 +41,11 @@ where
     R: Send + 'static,
     E: From<String> + Send + 'static,
 {
-    db.transact(body)
-        .await
-        .map_err(|error| E::from(format!("failed to {context}: {error}")))?
+    db.transact_or(
+        |error| E::from(format!("failed to {context}: {error}")),
+        body,
+    )
+    .await
 }
 
 /// A rebuild job that ends without publishing. A replayed receipt rolls the

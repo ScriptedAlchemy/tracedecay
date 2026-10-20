@@ -195,8 +195,6 @@ authorized, sanitized, classified records under their remote policy.
 
 Network-capable effects are separate from core retrieval:
 
-- Worldwide counter: when opted in, sends the pending aggregate token-savings
-  amount, and `tracedecay doctor` reads the public total to check reachability.
 - GitHub release checks and updates: contact GitHub release endpoints. An
   explicitly configured private GitHub review source can use a read-only
   credential from the operating-system keyring; missing, ambiguous,
@@ -212,19 +210,13 @@ Network-capable effects are separate from core retrieval:
   path fails closed with typed `unavailable`, `denied`, or `stale-peer` state.
 
 These services receive normal transport metadata, including the connection's
-source address, in addition to any request payload. The counter request is an
-aggregate amount, not repository content, but it is not an anonymity guarantee.
-Use a network policy or firewall if a command must make no outbound connection.
-An opt-out, denial, timeout, or unavailable remote service must remain visible
-as that state; it is not evidence of a zero counter, an up-to-date release, or
-current pricing. See [Security](SECURITY.md#network-access) for the complete
-outbound-access and credential boundary.
-
-Disable the worldwide counter with:
-
-```bash
-tracedecay disable-upload-counter
-```
+source address, in addition to any request payload. Use a network policy or
+firewall if a command must make no outbound connection. A denial, timeout, or
+unavailable remote service must remain visible as that state; it is not
+evidence of an up-to-date release or current pricing. TraceDecay no longer has
+a worldwide token counter: token savings and costs stay local. See
+[Security](SECURITY.md#network-access) for the complete outbound-access and
+credential boundary.
 
 ## Troubleshooting
 
@@ -269,9 +261,9 @@ bazel build //...
 bazel test //... --test_output=errors
 ```
 
-Use Cargo when you need to validate Cargo packaging, a feature combination that
-has no Bazel target, or a platform-specific workflow. The release workflows
-continue to build the published Cargo artifact.
+Bazel owns workspace builds, tests, checks, and code generation. Release
+workflows package its production CLI as binary archives and MCP bundles;
+Rust workspace crates are private and are not published to crates.io.
 
 On macOS `tracedecay` is ad-hoc signed as `dev.tracedecay.cli` with
 designated requirement `identifier "dev.tracedecay.cli"`. macOS TCC keys
@@ -280,14 +272,9 @@ requirement is the binary's cdhash, so an Allow does not survive the next
 rebuild; the linker default identifier (`tracedecay-<hash>`) changes every
 build as well, and the daemon blocks in `open()` until the prompt is
 answered. A release build strips after linking, which mints that identifier
-again from the deps filename. Export
-`CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="$PWD/scripts/macos-rustc-wrapper.sh"`
-from the checkout root (the macOS CI and release jobs do) and the wrapper
-signs the product once rustc has finished, so `cargo build --release` and
-`cargo install --path crates/tracedecay-cli` keep the stable identity on
-the binary cargo copies into place. The committed Cargo config cannot set
-it, because Cargo has no per-target wrapper and Windows cannot run the
-script. `install.sh` and `tracedecay update`
+again from the deps filename. The shared release build action applies
+`scripts/macos-stable-codesign.sh` to the Bazel-built binary before packaging.
+`install.sh` and `tracedecay update`
 apply the same identity to the installed file after the archive checksum
 check when the binary is unsigned or ad-hoc signed, including an ad-hoc
 signature whose identifier already matches but whose requirement is still

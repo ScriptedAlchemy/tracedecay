@@ -129,38 +129,20 @@ async fn predecessor_range_skips_policy_anchor_roles() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
     conn.execute_batch(
-        "CREATE TABLE lcm_raw_messages (
-            store_id INTEGER PRIMARY KEY,
+        "CREATE TABLE sessions (
             provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            ordinal INTEGER NOT NULL,
-            timestamp INTEGER,
-            content TEXT,
-            content_hash TEXT NOT NULL,
-            storage_kind TEXT NOT NULL,
-            payload_ref TEXT,
-            placeholder_text TEXT,
-            metadata_json TEXT,
-            kind TEXT,
-            model TEXT,
-            tool_names TEXT,
-            source_path TEXT,
-            source_offset INTEGER,
-            UNIQUE(provider, message_id)
-        );
-        CREATE TABLE lcm_raw_predecessor_ranges (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            from_store_id INTEGER NOT NULL,
-            to_store_id INTEGER NOT NULL,
-            PRIMARY KEY(provider, message_id)
-        );",
+            project_key TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );
+         INSERT INTO sessions VALUES ('claude', 'session-1', 'project', '/project');",
     )
     .await
-    .expect("predecessor schema");
+    .expect("session authority fixture");
+    crate::schema::ensure_lcm_schema(&conn)
+        .await
+        .expect("canonical raw-message schema");
     let storage_root = temp.path().join("storage");
     let mut rollback = super::payload::PayloadFileRollback::begin_cancellation_safe(&storage_root);
     for (message_id, role, ordinal, text) in [
@@ -270,4 +252,91 @@ async fn message_record_readers_restore_compacted_bodies_and_reject_missing_byte
         super::message_body_from_record_row(&row, 0),
         Err(super::LcmError::PayloadIntegrityMismatch)
     );
+}
+
+#[asupersync::test]
+async fn privacy_rewrites_preserve_projection_location_authority() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+            provider TEXT NOT NULL, session_id TEXT NOT NULL,
+            project_key TEXT NOT NULL, project_path TEXT NOT NULL,
+            PRIMARY KEY(provider, session_id)
+         );
+         INSERT INTO sessions VALUES ('claude', 'session-1', 'project', '/first');",
+    )
+    .await
+    .unwrap();
+    crate::schema::ensure_lcm_schema(&conn).await.unwrap();
+    let storage_root = temp.path().join("storage");
+    std::fs::create_dir_all(&storage_root).unwrap();
+    let mut rollback = super::payload::PayloadFileRollback::begin_cancellation_safe(&storage_root);
+    for (id, text, expected_storage) in [
+        ("inline", "ordinary body".to_owned(), "inline"),
+        ("external", "repeated word ".repeat(10_000), "external"),
+    ] {
+        let message = SessionMessageRecord {
+            provider: "claude".to_owned(),
+            message_id: id.to_owned(),
+            session_id: "session-1".to_owned(),
+            role: "assistant".to_owned(),
+            timestamp: Some(1),
+            ordinal: 1,
+            text,
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        super::upsert_projection_raw_message(&*conn, &message, Some("/second"))
+            .await
+            .unwrap();
+        // Replaying the same native message through a moved alias cannot
+        // replace its already materialized canonical origin.
+        super::upsert_projection_raw_message(&*conn, &message, Some("/retargeted"))
+            .await
+            .unwrap();
+        super::upsert_raw_message_with_payload_tracked(
+            &*conn,
+            &storage_root,
+            &message,
+            &mut rollback,
+        )
+        .await
+        .unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT location_path, storage_kind FROM lcm_raw_messages WHERE message_id = ?1",
+                tracedecay_runtime_core::db::engine::params![id],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "/second");
+        assert_eq!(row.get::<String>(1).unwrap(), expected_storage);
+        drop(rows);
+        super::upsert_projection_raw_message(&*conn, &message, None)
+            .await
+            .unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT location_path FROM lcm_raw_messages WHERE message_id = ?1",
+                tracedecay_runtime_core::db::engine::params![id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<Option<String>>(0)
+                .unwrap(),
+            Some("/second".to_owned()),
+            "missing cwd evidence cannot erase a captured historical origin"
+        );
+    }
 }

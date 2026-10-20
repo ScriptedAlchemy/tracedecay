@@ -321,9 +321,13 @@ async fn hermes_state_db_populates_projection_for_session_cwd_project() {
             .expect("session transcript path"),
         &state_db,
     );
-    let project_path = normalize_path_text(&project.to_string_lossy());
     let results = db
-        .search_session_messages("hermes", Some(&project_path), "billing pipeline", 10)
+        .search_session_messages(
+            "hermes",
+            Some(db.project_id().as_str()),
+            "billing pipeline",
+            10,
+        )
         .await;
     assert!(
         results.iter().any(|hit| hit.message.role == "user"),
@@ -344,6 +348,29 @@ async fn hermes_state_db_populates_projection_for_session_cwd_project() {
         results
             .iter()
             .any(|hit| hit.message.timestamp == Some(1_780_629_300))
+    );
+    // Project identity includes its linked worktrees; path selectors retain
+    // the canonical directory recorded on each message.
+    let linked_path = normalize_path_text(&linked_worktree.to_string_lossy());
+    let linked_results = db
+        .search_session_messages("hermes", Some(&linked_path), "billing pipeline", 10)
+        .await;
+    assert_eq!(
+        linked_results
+            .iter()
+            .map(|hit| &hit.message.message_id)
+            .collect::<Vec<_>>(),
+        results
+            .iter()
+            .map(|hit| &hit.message.message_id)
+            .collect::<Vec<_>>()
+    );
+    let project_path = normalize_path_text(&project.to_string_lossy());
+    assert!(
+        db.search_session_messages("hermes", Some(&project_path), "billing pipeline", 10)
+            .await
+            .is_empty(),
+        "the main checkout must not alias the messages' linked-worktree directory"
     );
 
     assert_eq!(session.title.as_deref(), Some("Billing pipeline fix"));

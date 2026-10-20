@@ -825,11 +825,10 @@ It verifies:
   exact worktree/ref/commit/generation, freshness, coverage, and typed authority
   state
 - **Global registry**, daemon-owned project/profile enrollment and availability
-- **User config**, `~/.tracedecay/config.toml` and upload settings
+- **User config**, `~/.tracedecay/config.toml` and the GitHub review sources it names
 - **Agent integrations**. MCP server registration, hook installation, tool permissions, prompt rules
-- **Network**, the configured worldwide counter and GitHub releases API; each
-  reports its own available or unavailable state, and a failed release lookup
-  names its outcome (see [Updating TraceDecay](#updating-tracedecay))
+- **Network**, the GitHub releases API; it reports its own available or
+  unavailable state, and a failed release lookup names its outcome (see [Updating TraceDecay](#updating-tracedecay))
 
 If any tool permissions are missing after an upgrade, Doctor reports the missing
 capability and the supported install/update operation. Doctor only reports
@@ -1123,33 +1122,25 @@ Network effects are separate from local indexing and retrieval. They can be
 disabled, unavailable, or denied without turning those states into successful
 local results. The available effects are described below.
 
-### Worldwide token counter
+### Worldwide token counter (retired)
 
-TraceDecay tracks how many tokens it has saved locally. If you opt in, the
-daemon's token-savings status path uploads that aggregate count to the worldwide
-counter. Repository content, file names, and project names are not part of the
-counter payload. The counter service still receives ordinary transport metadata
-such as the source IP and may derive aggregate geography from it; submitting an
-aggregate count is not an anonymity guarantee.
+TraceDecay no longer has a worldwide token counter and makes no counter network
+call. Token savings, costs, and usage stay local: `tracedecay current-counter`,
+`tracedecay reset-counter`, `tracedecay gain`, `tracedecay cost`, and the
+dashboard are unchanged.
 
-`tracedecay status` does not display the counter. When you opt in, `tracedecay doctor`
-reads the public total only to report whether the counter service is reachable.
+`tracedecay enable-upload-counter` and `tracedecay disable-upload-counter` no
+longer exist and fail as unknown subcommands. The `user.upload_enabled.v1`
+setting and the dashboard's `upload_enabled` field are gone, so a configuration
+read or patch that names them is refused. An older profile that still stores the
+opt-in, a pending upload amount, or flush timestamps loads normally: the next
+write erases them, and the pending amount is never uploaded.
 
-**To opt in:**
-
-```bash
-tracedecay enable-upload-counter
-```
-
-Disable it again at any time:
-
-```bash
-tracedecay disable-upload-counter
-```
-
-The setting belongs to your profile, not to a project: it applies everywhere
-and can be changed or read (`tracedecay tool configuration_get --args
-'{"key":"user.upload_enabled.v1"}'`) from any directory.
+The hosted counter service was a Cloudflare Worker named `tracedecay-counter`,
+backed by Upstash Redis. Nothing in this repository deploys or operates it, so
+removing the client does not shut it down. Decommissioning it is a separate
+maintainer action: delete the Worker and its Redis store from the Cloudflare
+and Upstash accounts that host them. Its status is tracked on issue #3619.
 
 ### Version check
 
@@ -1370,7 +1361,7 @@ tracedecay memory status --path /path/to/project --json
 
 Created in your home directory. Contains:
 
-- `config.toml`, user preferences (cached version info, pending upload count)
+- `config.toml`, user preferences (cached version info, installed agents)
 - `global.db`, daemon-owned registry/usage metadata for enrolled projects; it is
   not a fact authority and clients never open it directly
 - `projects/<project_id>/`, daemon-owned project authority data when profile storage is enabled
@@ -1378,12 +1369,10 @@ Created in your home directory. Contains:
 The `config.toml` is plain TOML and fully transparent:
 
 ```toml
-pending_upload = 4823       # tokens waiting to be uploaded
-last_upload_at = 1711375200 # last successful upload timestamp
+cached_latest_version = "1.2.3"   # latest release seen by the version check
+last_version_check_at = 1711375200 # last version check timestamp
+installed_agents = ["claude"]      # hosts TraceDecay has integrated
 ```
-
-The upload opt-in is the `user.upload_enabled.v1` setting, not a key in this
-file.
 
 #### Mandatory structured sanitization of ingested transcripts
 

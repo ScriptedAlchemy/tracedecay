@@ -31,7 +31,7 @@ CXXFLAGS_aarch64_pc_windows_msvc = { value = "-DNDEBUG /utf-8", force = false }
 # connections. Nothing reads those statistics or sets a heap limit.
 LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15 -DSQLITE_DEFAULT_MEMSTATUS=0", force = true }
 
-# Global accounting (savings ledger, worldwide-counter flushes) is ON by
+# Global accounting (the savings ledger) is ON by
 # default for installed binaries, but `cargo test` / `cargo run` would then
 # write temp-project rows into the developer's real ~/.tracedecay/global.db.
 # Keep cargo-launched processes hermetic; tests that exercise the ledger

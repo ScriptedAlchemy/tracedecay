@@ -163,3 +163,84 @@ fn stop_boundary_runs_over_the_first_analyzable_document() {
     assert_eq!(stop_boundary_document(&files), Some("src/lib.rs"));
     assert_eq!(stop_boundary_document(&files[1..3]), None);
 }
+
+#[test]
+fn intent_work_distinguishes_evaluation_refusal_from_unavailable_evidence() {
+    use ContextScoutIntentPassOutcomeV1 as Pass;
+    use ContextScoutModelOutcomeV1 as Model;
+    use ContextScoutSuppressionV1 as Suppression;
+    use HookOrchestrationWorkOutcomeV1::{Completed, RetryableFailure};
+
+    for outcome in [Pass::Disabled, Pass::ProviderUnsupported] {
+        assert_eq!(intent_pass_work_outcome(&outcome), Completed);
+    }
+    for outcome in [
+        Pass::CodeGenerationUnavailable,
+        Pass::AddressUnavailable,
+        Pass::WindowUnavailable,
+        Pass::WindowEmpty,
+        Pass::WindowStale,
+        Pass::Cancelled,
+        Pass::Unavailable,
+    ] {
+        assert_eq!(intent_pass_work_outcome(&outcome), RetryableFailure);
+    }
+    for model_outcome in [
+        Model::Succeeded,
+        Model::NotRequested,
+        Model::Disabled,
+        Model::Denied,
+        Model::TokenBudgetExceeded,
+    ] {
+        assert_eq!(
+            intent_pass_work_outcome(&Pass::NoCandidate { model_outcome }),
+            Completed
+        );
+    }
+    for model_outcome in [
+        Model::Unavailable,
+        Model::Disconnected,
+        Model::Cancelled,
+        Model::DeadlineExceeded,
+        Model::Backpressured,
+        Model::InvalidOutput,
+    ] {
+        assert_eq!(
+            intent_pass_work_outcome(&Pass::NoCandidate { model_outcome }),
+            RetryableFailure
+        );
+    }
+    for reason in [
+        Suppression::Disabled,
+        Suppression::Paused,
+        Suppression::QuietOrUnreceptive,
+        Suppression::Duplicate,
+        Suppression::PendingSibling,
+        Suppression::NoEligibleCandidate,
+    ] {
+        assert_eq!(
+            intent_pass_work_outcome(&Pass::Suppressed {
+                reason,
+                model_outcome: Model::NotRequested
+            }),
+            Completed
+        );
+    }
+    for reason in [
+        Suppression::DirtyOverlay,
+        Suppression::Expired,
+        Suppression::EvidenceUnavailable,
+        Suppression::EvidenceStale,
+        Suppression::EvidencePartial,
+        Suppression::Cancelled,
+        Suppression::ModelOutputInvalid,
+    ] {
+        assert_eq!(
+            intent_pass_work_outcome(&Pass::Suppressed {
+                reason,
+                model_outcome: Model::NotRequested
+            }),
+            RetryableFailure
+        );
+    }
+}

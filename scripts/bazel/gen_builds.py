@@ -1427,6 +1427,11 @@ def main():
                 '    srcs = glob(["fixtures/**"]),\n'
                 '    visibility = ["//visibility:public"],\n)'
             )
+        if pkg_dir == "benchmark_data":
+            rules.append(
+                'exports_files(["run_benchmarks.py"],\n'
+                '    visibility = ["//evals/memory:__pkg__"],\n)'
+            )
         return rules
 
     def generated_block(pkg_dir, exports):
