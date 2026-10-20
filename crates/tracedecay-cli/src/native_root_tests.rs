@@ -31,7 +31,7 @@ fn run_on_native_root(profile: &ProfileRoot, args: &[&str]) -> Result<CommandOut
             tokio::runtime::Handle::try_current().is_err(),
             "the native root must run without Tokio"
         );
-        run_startup_preamble(profile, &command).await;
+        run_startup_preamble(profile, &command);
         dispatch_command(profile, command, host_bundle).await
     }))
     .expect("native root")
@@ -82,7 +82,6 @@ fn client_families_complete_on_the_native_root_without_tokio() {
     let doctor = native_runtime::block_on(Box::pin(tracedecay::doctor::run_doctor(
         &profile,
         tracedecay::doctor::AdmittedDoctorNetworkProbes {
-            fetch_worldwide_total: || None,
             fetch_latest_version: || {
                 Err(ReleaseLookupError::NetworkUnreachable {
                     detail: "offline test".to_owned(),

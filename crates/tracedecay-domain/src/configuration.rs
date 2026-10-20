@@ -61,13 +61,18 @@ pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
     "index.git_ignore.v1",
     "semantic.runtime.v1",
     "sync.orphan_db_gc_days.v1",
-    USER_UPLOAD_ENABLED_SETTING_KEY,
+    "user.upload_enabled.v1",
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
 ];
 
+/// Profile setting keys that shipped and were then retired. A profile store
+/// carrying one converges by dropping it on the next read; the value has no
+/// registered owner anymore. `user.upload_enabled.v1` was the opt-in of the
+/// worldwide token counter, removed without a final upload.
+pub const RETIRED_PROFILE_SETTING_KEYS_V1: &[&str] = &["user.upload_enabled.v1"];
+
 /// Canonical user-profile settings.
-pub const USER_UPLOAD_ENABLED_SETTING_KEY: &str = "user.upload_enabled.v1";
 pub const USER_REPEATED_QUERY_HINTS_SETTING_KEY: &str = "user.repeated_query_hints.v1";
 pub const USER_CODE_INDEX_WORKERS_SETTING_KEY: &str = "user.code_index_workers.v1";
 pub const USER_WATCHER_DEBOUNCE_MS_SETTING_KEY: &str = "user.watcher_debounce_ms.v1";
@@ -80,7 +85,6 @@ pub const USER_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "user.work_expertise_c
 /// Work read pins it together with the project's consent in one revision.
 pub const PROFILE_SETTING_KEYS_V1: &[&str] = &[
     USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY,
     USER_REPEATED_QUERY_HINTS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
@@ -129,7 +133,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     AUTOMATION_SETTINGS_SETTING_KEY,
     LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     crate::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
-    USER_UPLOAD_ENABLED_SETTING_KEY,
     USER_REPEATED_QUERY_HINTS_SETTING_KEY,
     USER_CODE_INDEX_WORKERS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,

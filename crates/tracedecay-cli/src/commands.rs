@@ -25,12 +25,11 @@ pub(crate) use index::{handle_init, handle_no_command, handle_sync};
 pub(crate) use profile_storage::handle_profile_storage_action;
 pub(crate) use scope::resolve_project_scope;
 pub(crate) use settings::{
-    canonical_upload_enabled, current_configuration_revision, current_project_setting,
-    handle_upload_counter, mutate_project_configuration, project_configuration_set,
-    repeated_query_hints_enabled, report_configuration_receipt,
+    current_configuration_revision, current_project_setting, mutate_project_configuration,
+    project_configuration_set, repeated_query_hints_enabled, report_configuration_receipt,
 };
 pub(crate) use stale_store_reset::handle_wipe_stale;
 pub(crate) use storage::{
-    ProfileOfflineAuthority, RestoreWording, annotate_reset_required, handle_list, handle_wipe,
-    join_outcome_and_restore, process_error_text, take_profile_offline, try_admit_profile_registry,
+    ProfileOfflineAuthority, RestoreWording, handle_list, handle_wipe, join_outcome_and_restore,
+    process_error_text, take_profile_offline, try_admit_profile_registry,
 };

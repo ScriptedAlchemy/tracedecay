@@ -589,10 +589,26 @@ async fn rename_preview_deadline_stops_the_worker_before_the_next_file() {
             .unwrap()
     };
     let response = serde_json::to_value(response).unwrap();
-    assert_eq!(
-        response["error"]["data"]["reason_code"], "tool_dispatch_deadline_exceeded",
-        "{response}"
-    );
+    // The outer dispatch and admitted read carry the same deadline. Either
+    // timer can settle first; both must stop this worker before its next file.
+    match (response.get("error"), response.get("result")) {
+        (Some(error), None) => {
+            assert_eq!(error["code"], -32603, "{response}");
+            let problem = &error["data"];
+            assert_eq!(problem["reason_code"], "tool_dispatch_deadline_exceeded");
+            assert_eq!(problem["kind"], "deadline_exceeded");
+            assert_eq!(problem["tool"], "tracedecay_rename_preview");
+            assert_eq!(problem["retryable"], true);
+        }
+        (None, Some(result)) => {
+            let problem = refusal_problem(result);
+            assert_eq!(problem["kind"], "timed_out", "{response}");
+            assert_eq!(problem["code"], "timed_out", "{response}");
+            assert_eq!(problem["cancellation_stage"], "during_read", "{response}");
+            assert_eq!(problem["terminality"], "admitted_terminal", "{response}");
+        }
+        _ => panic!("expected one canonical deadline terminal: {response}"),
+    }
     resume.send(()).unwrap();
     reads.wait_closed().await;
     assert_eq!(reads.count.load(Ordering::Acquire), 1);

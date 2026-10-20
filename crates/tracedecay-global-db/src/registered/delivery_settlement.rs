@@ -1,9 +1,10 @@
-use super::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
+use super::RegisteredGlobalDb;
 use tracedecay_domain::{
     CoverageStateV1, DeliveryDropReasonV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
     DeliverySettlementCensusV1, DeliverySettlementOutcomeV1, DeliverySettlementV1,
     DeliverySurfaceFamilyV1, UtcMicros, WorkAttemptIdentityV1, canonical_sha256,
 };
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
 /// One Work attempt can have at most this many separately addressed delivery
 /// fan-outs. The recipient bound is enforced per fan-out by the domain; this
@@ -151,59 +152,62 @@ impl RegisteredGlobalDb {
         source_receipt_ref: Option<&str>,
     ) -> Result<DeliveryAttemptClaimV1, String> {
         validate_project_and_attempt(project_id, attempt)?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin delivery attempt transaction: {error}"))?;
-        ensure_fanout_identity(&transaction, project_id, attempt).await?;
+        let project_id = project_id.to_owned();
+        let attempt = attempt.clone();
+        let source_receipt_ref = source_receipt_ref.map(str::to_owned);
+        self.transact_or(
+            |error| format!("failed to run delivery attempt transaction: {error}"),
+            async move |transaction| {
+                let project_id = project_id.as_str();
+                let attempt = &attempt;
+                ensure_fanout_identity(&transaction, project_id, attempt).await?;
 
-        if let Some(stored) = read_delivery_attempt(&transaction, project_id, attempt).await? {
-            if stored.attempt != *attempt {
-                return Err("delivery attempt identity conflict".to_owned());
-            }
-            let outcome = if stored.outcome.is_some() {
-                DeliveryAttemptClaimV1::AlreadySettled(stored.into_settlement()?)
-            } else {
-                DeliveryAttemptClaimV1::ReplayedAttempt
-            };
-            if let Some(source_receipt_ref) = source_receipt_ref {
-                bind_source_receipt(&transaction, project_id, attempt, source_receipt_ref).await?;
-            }
-            transaction
-                .commit()
-                .await
-                .map_err(|error| format!("failed to close delivery attempt replay: {error}"))?;
-            return Ok(outcome);
-        }
+                if let Some(stored) =
+                    read_delivery_attempt(&transaction, project_id, attempt).await?
+                {
+                    if stored.attempt != *attempt {
+                        return Err("delivery attempt identity conflict".to_owned());
+                    }
+                    let outcome = if stored.outcome.is_some() {
+                        DeliveryAttemptClaimV1::AlreadySettled(stored.into_settlement()?)
+                    } else {
+                        DeliveryAttemptClaimV1::ReplayedAttempt
+                    };
+                    if let Some(source_receipt_ref) = source_receipt_ref.as_deref() {
+                        bind_source_receipt(&transaction, project_id, attempt, source_receipt_ref)
+                            .await?;
+                    }
+                    return Ok(outcome);
+                }
 
-        let existing = count_attempts(&transaction, project_id, attempt).await?;
-        if existing >= u64::from(attempt.eligible) {
-            return Err("delivery attempt exceeds eligible recipients".to_owned());
-        }
-        transaction
-            .execute(
-                "INSERT INTO delivery_settlements
-                    (project_id, owner_event_id, surface, channel_ref, attempted_at_micros,
-                     outcome, settled_at_micros, drop_reason, census_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL)",
-                tracedecay_runtime_core::db::engine::params![
-                    project_id,
-                    attempt.owner_event_id.as_str(),
-                    surface_name(attempt.channel.surface),
-                    attempt.channel.channel_ref.as_str(),
-                    attempt.attempted_at.0,
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to record delivery attempt: {error}"))?;
-        if let Some(source_receipt_ref) = source_receipt_ref {
-            bind_source_receipt(&transaction, project_id, attempt, source_receipt_ref).await?;
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit delivery attempt: {error}"))?;
-        Ok(DeliveryAttemptClaimV1::Claimed)
+                let existing = count_attempts(&transaction, project_id, attempt).await?;
+                if existing >= u64::from(attempt.eligible) {
+                    return Err("delivery attempt exceeds eligible recipients".to_owned());
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO delivery_settlements
+                            (project_id, owner_event_id, surface, channel_ref, attempted_at_micros,
+                             outcome, settled_at_micros, drop_reason, census_json)
+                         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL)",
+                        tracedecay_runtime_core::db::engine::params![
+                            project_id,
+                            attempt.owner_event_id.as_str(),
+                            surface_name(attempt.channel.surface),
+                            attempt.channel.channel_ref.as_str(),
+                            attempt.attempted_at.0,
+                        ],
+                    )
+                    .await
+                    .map_err(|error| format!("failed to record delivery attempt: {error}"))?;
+                if let Some(source_receipt_ref) = source_receipt_ref.as_deref() {
+                    bind_source_receipt(&transaction, project_id, attempt, source_receipt_ref)
+                        .await?;
+                }
+                Ok(DeliveryAttemptClaimV1::Claimed)
+            },
+        )
+        .await
     }
 
     /// Resolves a project-scoped source acknowledgement token to the exact
@@ -359,67 +363,68 @@ impl RegisteredGlobalDb {
         settlement
             .validate()
             .map_err(|error| format!("invalid delivery settlement: {error}"))?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin delivery settlement transaction: {error}"))?;
-        ensure_fanout_identity(&transaction, project_id, &settlement.attempt).await?;
-        let stored = read_delivery_attempt(&transaction, project_id, &settlement.attempt)
-            .await?
-            .ok_or_else(|| "delivery attempt is unavailable".to_owned())?;
-        if stored.attempt != settlement.attempt {
-            return Err("delivery attempt identity conflict".to_owned());
-        }
-        let (replayed, census) = if stored.outcome.is_some() {
-            let census = stored
-                .census
-                .clone()
-                .ok_or_else(|| "delivery settlement census is missing".to_owned())?;
-            if stored.into_settlement()? != *settlement {
-                return Err("delivery settlement conflict".to_owned());
-            }
-            (true, census)
-        } else {
-            let census = read_pending_delivery_census(
-                &transaction,
-                project_id,
-                &settlement.attempt,
-                settlement,
-            )
-            .await?;
-            let census_json = serde_json::to_string(&census)
-                .map_err(|error| format!("failed to serialize delivery census: {error}"))?;
-            transaction
-                .execute(
-                    "UPDATE delivery_settlements
-                     SET outcome = ?5, settled_at_micros = ?6,
-                         drop_reason = ?7, census_json = ?8
-                     WHERE project_id = ?1 AND owner_event_id = ?2 AND surface = ?3
-                       AND channel_ref = ?4 AND outcome IS NULL",
-                    tracedecay_runtime_core::db::engine::params![
+        let project_id = project_id.to_owned();
+        let settlement = settlement.clone();
+        self.transact_or(
+            |error| format!("failed to run delivery settlement transaction: {error}"),
+            async move |transaction| {
+                let project_id = project_id.as_str();
+                ensure_fanout_identity(&transaction, project_id, &settlement.attempt).await?;
+                let stored = read_delivery_attempt(&transaction, project_id, &settlement.attempt)
+                    .await?
+                    .ok_or_else(|| "delivery attempt is unavailable".to_owned())?;
+                if stored.attempt != settlement.attempt {
+                    return Err("delivery attempt identity conflict".to_owned());
+                }
+                let (replayed, census) = if stored.outcome.is_some() {
+                    let census = stored
+                        .census
+                        .clone()
+                        .ok_or_else(|| "delivery settlement census is missing".to_owned())?;
+                    if stored.into_settlement()? != settlement {
+                        return Err("delivery settlement conflict".to_owned());
+                    }
+                    (true, census)
+                } else {
+                    let census = read_pending_delivery_census(
+                        &transaction,
                         project_id,
-                        settlement.attempt.owner_event_id.as_str(),
-                        surface_name(settlement.attempt.channel.surface),
-                        settlement.attempt.channel.channel_ref.as_str(),
-                        outcome_name(settlement.outcome),
-                        settlement.settled_at.0,
-                        settlement.drop_reason.map(drop_reason_name),
-                        census_json,
-                    ],
-                )
-                .await
-                .map_err(|error| format!("failed to settle delivery attempt: {error}"))?;
-            (false, census)
-        };
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit delivery settlement: {error}"))?;
-        Ok(DurableDeliverySettlementReceiptV1 {
-            settlement: settlement.clone(),
-            census,
-            replayed,
-        })
+                        &settlement.attempt,
+                        &settlement,
+                    )
+                    .await?;
+                    let census_json = serde_json::to_string(&census)
+                        .map_err(|error| format!("failed to serialize delivery census: {error}"))?;
+                    transaction
+                        .execute(
+                            "UPDATE delivery_settlements
+                             SET outcome = ?5, settled_at_micros = ?6,
+                                 drop_reason = ?7, census_json = ?8
+                             WHERE project_id = ?1 AND owner_event_id = ?2 AND surface = ?3
+                               AND channel_ref = ?4 AND outcome IS NULL",
+                            tracedecay_runtime_core::db::engine::params![
+                                project_id,
+                                settlement.attempt.owner_event_id.as_str(),
+                                surface_name(settlement.attempt.channel.surface),
+                                settlement.attempt.channel.channel_ref.as_str(),
+                                outcome_name(settlement.outcome),
+                                settlement.settled_at.0,
+                                settlement.drop_reason.map(drop_reason_name),
+                                census_json,
+                            ],
+                        )
+                        .await
+                        .map_err(|error| format!("failed to settle delivery attempt: {error}"))?;
+                    (false, census)
+                };
+                Ok(DurableDeliverySettlementReceiptV1 {
+                    settlement: settlement.clone(),
+                    census,
+                    replayed,
+                })
+            },
+        )
+        .await
     }
 }
 
@@ -497,7 +502,7 @@ fn validate_source_receipt_ref(source_receipt_ref: &str) -> Result<(), String> {
 }
 
 async fn bind_source_receipt(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     project_id: &str,
     attempt: &DeliverySettlementAttemptV1,
     source_receipt_ref: &str,
@@ -587,7 +592,7 @@ async fn bind_source_receipt(
 }
 
 async fn ensure_fanout_identity(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     project_id: &str,
     attempt: &DeliverySettlementAttemptV1,
 ) -> Result<(), String> {
@@ -697,7 +702,7 @@ impl StoredDeliveryAttempt {
 }
 
 async fn read_delivery_attempt(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl QueryExecutor,
     project_id: &str,
     attempt: &DeliverySettlementAttemptV1,
 ) -> Result<Option<StoredDeliveryAttempt>, String> {
@@ -756,7 +761,7 @@ async fn read_delivery_attempt(
 }
 
 async fn count_attempts(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl QueryExecutor,
     project_id: &str,
     attempt: &DeliverySettlementAttemptV1,
 ) -> Result<u64, String> {
@@ -785,7 +790,7 @@ async fn count_attempts(
 }
 
 async fn read_pending_delivery_census(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl QueryExecutor,
     project_id: &str,
     attempt: &DeliverySettlementAttemptV1,
     settlement: &DeliverySettlementV1,

@@ -5,7 +5,7 @@
 //! capture path, and depends on remaining usecases for those edges.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use tracedecay_domain::{
@@ -71,6 +71,8 @@ pub struct HostAdmissionBroker {
     /// Coalesced wake for daemon-owned profile/project replay workers: at most
     /// one request is pending however many admissions raise it.
     replay_requested: AtomicBool,
+    progress_revision: Arc<AtomicU64>,
+    progress_changed: Arc<asupersync::sync::Notify>,
     replay_wake: asupersync::sync::Notify,
 }
 
@@ -90,20 +92,22 @@ fn spool_runtime_unavailable() -> HostAdmissionOutcome {
 }
 
 /// Append every queued admission as one batch and answer each admitter.
-fn commit_queued_appends(runtime: &mut HostAdmissionRuntime, queued: Vec<QueuedAppend>) {
+fn commit_queued_appends(runtime: &mut HostAdmissionRuntime, queued: Vec<QueuedAppend>) -> bool {
     if queued.is_empty() {
-        return;
+        return false;
     }
     let items = queued
         .iter()
         .map(|append| (append.source.as_str(), append.payload.as_slice()))
         .collect::<Vec<_>>();
     let admitted = runtime.admit_batch(&items);
+    let changed = admitted.iter().any(Result::is_ok);
     for (append, admitted) in queued.into_iter().zip(admitted) {
         // A dropped receiver is a cancelled admitter; its durable record
         // still replays through the worker.
         let _ = append.admitted.send(admitted);
     }
+    changed
 }
 
 impl HostAdmissionBroker {
@@ -113,6 +117,8 @@ impl HostAdmissionBroker {
             appends: Arc::new(Mutex::new(Vec::new())),
             replay: futures_util::lock::Mutex::new(()),
             replay_requested: AtomicBool::new(false),
+            progress_revision: Arc::new(AtomicU64::new(0)),
+            progress_changed: Arc::new(asupersync::sync::Notify::new()),
             replay_wake: asupersync::sync::Notify::new(),
         }
     }
@@ -123,10 +129,32 @@ impl HostAdmissionBroker {
         T: Send + 'static,
         F: FnOnce(&mut HostAdmissionRuntime) -> Result<T, HostAdmissionOutcome> + Send + 'static,
     {
+        self.with_runtime_change(move |runtime| operation(runtime).map(|value| (value, false)))
+            .await
+    }
+
+    async fn with_runtime_change<T, F>(&self, operation: F) -> Result<T, HostAdmissionOutcome>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut HostAdmissionRuntime) -> Result<(T, bool), HostAdmissionOutcome>
+            + Send
+            + 'static,
+    {
         let runtime = Arc::clone(&self.runtime);
+        let revision = Arc::clone(&self.progress_revision);
+        let changed = Arc::clone(&self.progress_changed);
         tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
-            operation(&mut runtime)
+            let (value, progressed) = {
+                let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
+                operation(&mut runtime)?
+            };
+            // The canonical state is readable before waiters are woken. This
+            // runs even when the admitting/replaying future has been dropped.
+            if progressed {
+                revision.fetch_add(1, Ordering::Release);
+                changed.notify_waiters();
+            }
+            Ok(value)
         })
         .await
         .unwrap_or_else(|_| Err(spool_runtime_unavailable()))
@@ -150,11 +178,11 @@ impl HostAdmissionBroker {
                 admitted,
             });
         let appends = Arc::clone(&self.appends);
-        self.with_runtime(move |runtime| {
+        self.with_runtime_change(move |runtime| {
             let queued =
                 std::mem::take(&mut *appends.lock().map_err(|_| spool_runtime_unavailable())?);
-            commit_queued_appends(runtime, queued);
-            Ok(())
+            let changed = commit_queued_appends(runtime, queued);
+            Ok(((), changed))
         })
         .await?;
         // This admission was queued before its own runtime turn, so that turn
@@ -188,6 +216,42 @@ impl HostAdmissionBroker {
             .await;
     }
 
+    /// Capture before reading pending state. Each waiter owns its revision;
+    /// neither this subscription nor its wake consumes the replay worker's flag.
+    pub fn progress_revision(&self) -> u64 {
+        self.progress_revision.load(Ordering::Acquire)
+    }
+
+    pub async fn wait_for_progress(&self, observed: u64) {
+        self.progress_changed
+            .wait_until(|| self.progress_revision() != observed)
+            .await;
+    }
+
+    /// Inspect bounded canonical payloads without the replay lease or copies.
+    /// Contention and poison remain unavailable rather than empty pending work.
+    pub fn pending_replay_matches(
+        &self,
+        predicate: impl FnMut(&[u8]) -> Result<bool, HostAdmissionOutcome>,
+    ) -> Result<bool, HostAdmissionOutcome> {
+        self.runtime
+            .try_lock()
+            .map_err(|_| spool_runtime_unavailable())?
+            .pending_matches(predicate)
+    }
+
+    /// Inspect the same canonical records from an existing blocking worker.
+    /// Synchronous serving probes use the nonblocking variant instead.
+    pub fn pending_replay_matches_blocking(
+        &self,
+        predicate: impl FnMut(&[u8]) -> Result<bool, HostAdmissionOutcome>,
+    ) -> Result<bool, HostAdmissionOutcome> {
+        self.runtime
+            .lock()
+            .map_err(|_| spool_runtime_unavailable())?
+            .pending_matches(predicate)
+    }
+
     pub async fn pending_replay_count(&self) -> Result<usize, HostAdmissionOutcome> {
         self.with_runtime(|runtime| Ok(runtime.pending_count()))
             .await
@@ -202,8 +266,10 @@ impl HostAdmissionBroker {
     #[tracing::instrument(name = "usecases.admission.begin_replay", level = "trace", skip_all)]
     pub async fn begin_replay(&self) -> Result<HostAdmissionReplay<'_>, HostAdmissionOutcome> {
         let guard = self.replay.lock().await;
-        self.with_runtime(HostAdmissionRuntime::recover_leases)
-            .await?;
+        self.with_runtime_change(|runtime| {
+            runtime.recover_leases().map(|count| (count, count > 0))
+        })
+        .await?;
         Ok(HostAdmissionReplay {
             broker: self,
             _guard: guard,
@@ -241,7 +307,7 @@ impl HostAdmissionReplay<'_> {
     #[tracing::instrument(name = "usecases.admission.replay.commit", level = "trace", skip_all)]
     pub async fn commit(&self, seq: u64) -> Result<usize, HostAdmissionOutcome> {
         self.broker
-            .with_runtime(move |runtime| runtime.commit(seq))
+            .with_runtime_change(move |runtime| runtime.commit(seq).map(|count| (count, true)))
             .await
     }
 
@@ -256,7 +322,9 @@ impl HostAdmissionReplay<'_> {
         reason: TerminalReason,
     ) -> Result<usize, HostAdmissionOutcome> {
         self.broker
-            .with_runtime(move |runtime| runtime.quarantine(seq, reason))
+            .with_runtime_change(move |runtime| {
+                runtime.quarantine(seq, reason).map(|count| (count, true))
+            })
             .await
     }
 }

@@ -44,7 +44,8 @@ fn lifecycle_range_prefers_native_sequence_and_reuses_unknown_ledger_order() {
     let receipt = tracedecay_hooks::HookAdmissionLedgerReceiptV1 {
         decision: tracedecay_hooks::HookAdmissionDecisionV1::Admitted,
         order: 7,
-        work_completed: false,
+        order_reconstructed: false,
+        work_settlement: None,
     };
     let unknown = admission_test_envelope(21, 7);
     assert_eq!(
