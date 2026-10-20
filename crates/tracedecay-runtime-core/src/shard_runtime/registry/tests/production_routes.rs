@@ -649,3 +649,193 @@ async fn existing_store_at_an_older_schema_is_refused_even_with_write_authority(
         "a refused open must leave the stamp alone"
     );
 }
+
+struct SubmitProbe {
+    cancellation: RuntimeCancellationIdentityV1,
+    deadline: RuntimeDeadlineV1,
+}
+
+impl RuntimeRequestProbeV1 for SubmitProbe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        &self.cancellation
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        &self.deadline
+    }
+
+    fn interruption(&self) -> Option<tracedecay_store::RuntimeInterruptionV1> {
+        None
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        true
+    }
+}
+
+fn diagnostics_submit(
+    binding: &tracedecay_store::StoreRuntimeBindingV1,
+    name: &str,
+) -> (tracedecay_store::RuntimeSubmitRequestV1, SubmitProbe) {
+    let metadata: tracedecay_store::StoreOperationMetadataV1 =
+        serde_json::from_value(serde_json::json!({
+            "operation_id": format!("operation.{name}"),
+            "client_id": "client.reopen",
+            "shard_id": binding.shard_id,
+            "incarnation": binding.incarnation.get(),
+            "authority_epoch": binding.authority_epoch.get(),
+            "idempotency": {
+                "key": format!("key.{name}"),
+                "command_digest": format!("sha256:{}", "e".repeat(64)),
+            },
+            "durability": "full",
+            "priority": "foreground",
+            "admission_bytes": 128,
+            "admitted_at": 1
+        }))
+        .unwrap();
+    let scope = tracedecay_store::RuntimeTransactionScopeV1 {
+        transaction_id: tracedecay_store::RuntimeTransactionIdV1::new(format!(
+            "transaction.{name}"
+        ))
+        .unwrap(),
+        compatibility: tracedecay_store::RuntimeBatchCompatibilityV1::from_operation(&metadata)
+            .unwrap(),
+        opened_at: metadata.admitted_at,
+    };
+    let cancellation = RuntimeCancellationIdentityV1 {
+        cancellation_id: RuntimeCancellationIdV1::new(format!("cancel.{name}")).unwrap(),
+        generation: 1,
+    };
+    let deadline = RuntimeDeadlineV1 {
+        deadline_id: RuntimeDeadlineIdV1::new(format!("deadline.{name}")).unwrap(),
+    };
+    let control = RuntimeRequestControlV1 {
+        requested_at: UtcMicros(1),
+        deadline: deadline.clone(),
+        cancellation: cancellation.clone(),
+    };
+    let request = tracedecay_store::RuntimeSubmitRequestV1::new(
+        tracedecay_store::RepositoryOperationEnvelopeV1 {
+            metadata,
+            payload: tracedecay_store::RepositoryWritePayloadV1::Diagnostics(Box::new(
+                tracedecay_store::SanitizedCleanDiagnosticSnapshotV1::new(
+                    tracedecay_domain::CodeGenerationId::new(format!("generation.{name}")).unwrap(),
+                    Vec::new(),
+                )
+                .unwrap(),
+            )),
+        },
+        scope,
+        control,
+    )
+    .unwrap();
+    (
+        request,
+        SubmitProbe {
+            cancellation,
+            deadline,
+        },
+    )
+}
+
+/// A store this incarnation already wrote under a newer authority (a previous
+/// daemon of the same incarnation, or a sibling runtime on the file) fences
+/// every writer below that authority. The reopen converges above it instead of
+/// publishing a runtime whose every submit would be fenced.
+#[asupersync::test]
+async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above_it() {
+    let root = TempDir::new().unwrap();
+    let resolver = Arc::new(FileResolver::default());
+    resolver.push(seed_db(&root, "profile.db"));
+    let sessions_path = seed_db(&root, "sessions.db");
+    Connection::open(&sessions_path)
+        .unwrap()
+        .execute_batch(tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL)
+        .unwrap();
+    resolver.push(sessions_path.clone());
+    resolver.push(sessions_path.clone());
+    let shard = StoreShardIdV1::project_sessions(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<ProjectId>("project.reopen"),
+    );
+    let ahead = tracedecay_store::StoreRuntimeBindingV1::new(
+        shard.clone(),
+        incarnation(),
+        tracedecay_store::StoreAuthorityEpochV1::new(1 << 40).unwrap(),
+    );
+    let runtime = asupersync::runtime::Runtime::current_handle().unwrap();
+    let previous = tracedecay_rusqlite_runtime::PersistentWriter::start(
+        &runtime,
+        tracedecay_rusqlite_runtime::ExistingWriterLocator::new(
+            ahead.clone(),
+            VerifiedStoreLocatorV1::new(
+                shard.clone(),
+                incarnation(),
+                LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+            ),
+            sessions_path.clone(),
+        )
+        .unwrap(),
+        tracedecay_store::AdmissionConfigV1::default(),
+        tracedecay_rusqlite_runtime::repository::ConcreteRepositoryWriteExecutor::default(),
+    )
+    .unwrap();
+    let (request, probe) = diagnostics_submit(&ahead, "previous-authority");
+    let outcome = previous
+        .submit(
+            &crate::native_runtime::cx().unwrap(),
+            request,
+            Arc::new(probe),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+        ),
+        "the previous authority commits: {outcome:?}"
+    );
+    previous.shutdown_and_join().unwrap();
+
+    let registry =
+        StoreRuntimeRegistry::new(runtime, resolver, Arc::new(LifecycleShardRuntimePublisher))
+            .unwrap();
+    let _profile = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    let pin = match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    };
+    let authority = crate::db::DatabaseAuthority::for_runtime(&sessions_path, "reopen sessions")
+        .expect("sessions database authority");
+    let sessions = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new_authorized(shard, incarnation(), Some(pin), authority.clone()),
+    )
+    .await;
+
+    assert!(
+        sessions.binding().authority_epoch > ahead.authority_epoch,
+        "the reopened runtime publishes above the persisted authority: {:?} vs {:?}",
+        sessions.binding().authority_epoch,
+        ahead.authority_epoch
+    );
+    let (request, probe) = diagnostics_submit(sessions.binding(), "converged-authority");
+    let outcome = sessions
+        .dispatch_submit_authorized(request, Arc::new(probe), authority)
+        .await
+        .expect("converged runtime accepts writes");
+    assert!(
+        matches!(
+            outcome,
+            tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+        ),
+        "a write through the converged runtime commits: {outcome:?}"
+    );
+}

@@ -800,9 +800,12 @@ fn is_deterministic_refusal(error: &SessionStoreError) -> bool {
         SessionStoreError::Cancelled
         | SessionStoreError::DeadlineExceeded
         | SessionStoreError::BudgetExceeded { .. } => false,
-        SessionStoreError::Storage { source, .. } => source
-            .downcast_ref::<EngineError>()
-            .is_some_and(EngineError::is_deterministic_refusal),
+        SessionStoreError::Storage { source, .. } => {
+            source
+                .downcast_ref::<EngineError>()
+                .is_some_and(EngineError::is_deterministic_refusal)
+                || tracedecay_store::error_chain_writer_fence(source.as_ref()).is_some()
+        }
         _ => true,
     }
 }
@@ -1914,6 +1917,25 @@ mod tests {
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+
+    /// A lease the store has fenced resubmits the identical request on every
+    /// pass and can never commit through it, so the pass retires the refresh
+    /// instead of backing off forever.
+    #[test]
+    fn a_fenced_writer_is_a_deterministic_refusal_not_a_retry() {
+        let fence = tracedecay_store::StoreWriterFencedV1 {
+            requested: tracedecay_store::StoreAuthorityEpochV1::new(2).unwrap(),
+            current: tracedecay_store::StoreAuthorityEpochV1::new(3).unwrap(),
+        };
+        let wrapped = tracedecay_store::ObservationStoreError::Storage {
+            operation: "submit anchored observation",
+            source: Box::new(fence),
+        };
+        let error = SessionStoreError::storage("persist session history batch", wrapped);
+
+        assert!(is_deterministic_refusal(&error));
+        assert!(!is_retryable_storage(&error));
+    }
 
     /// Commits `item_count` items. A group of several items never commits, and
     /// neither does a `slow` item alone: its transaction ends in the

@@ -415,6 +415,7 @@ impl StoreRuntimeRegistry {
                 },
             );
         };
+        let mut converged_on_persisted_authority = false;
         loop {
             if let Some(path) = request
                 .database_authority
@@ -443,7 +444,31 @@ impl StoreRuntimeRegistry {
                 StoreRuntimeOpenBegin::Rejected(
                     StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress { .. },
                 ) => {}
-                begin => return begin.wait().await,
+                begin => match begin.wait().await {
+                    // A store the same incarnation already wrote under a newer
+                    // authority fences every writer below it. Allocating above
+                    // the persisted epoch converges this process on the store's
+                    // authority; a second fence means the store moved again
+                    // while this open ran, which the caller must see.
+                    StoreRuntimeOpenResult::Failed(
+                        StoreRuntimeRegistryFailure::WriterAuthorityBehindPersisted {
+                            binding,
+                            persisted,
+                        },
+                    ) if !converged_on_persisted_authority => {
+                        converged_on_persisted_authority = true;
+                        retain_authority_epoch_floor(persisted);
+                        tracing::warn!(
+                            event = "store_writer_authority_converged",
+                            shard = ?binding.shard_id,
+                            incarnation = binding.incarnation.get(),
+                            requested_epoch = binding.authority_epoch.get(),
+                            persisted_epoch = persisted.get(),
+                            "store ledger holds a newer writer authority; reopening above it"
+                        );
+                    }
+                    result => return result,
+                },
             }
         }
     }

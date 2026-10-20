@@ -2505,6 +2505,13 @@ fn rejected_submit_error(
         RuntimeSubmitOutcomeV1::Saturated { .. } => {
             ObservationStoreError::WriterSaturated { operation }
         }
+        RuntimeSubmitOutcomeV1::Fenced { expected, actual } => ObservationStoreError::Storage {
+            operation,
+            source: Box::new(tracedecay_store::StoreWriterFencedV1 {
+                requested: *expected,
+                current: *actual,
+            }),
+        },
         outcome => runtime_storage_error(operation, format!("{rejection}: {outcome:?}")),
     }
 }
@@ -2596,6 +2603,24 @@ mod tests {
     use tracedecay_store::SaturationScopeV1;
 
     use super::*;
+
+    #[test]
+    fn writer_fence_survives_observation_and_projection_error_wrapping() {
+        let requested = tracedecay_store::StoreAuthorityEpochV1::new(2).unwrap();
+        let current = tracedecay_store::StoreAuthorityEpochV1::new(3).unwrap();
+        let error = rejected_submit_error(
+            "submit anchored observation",
+            "runtime rejected observation write",
+            &RuntimeSubmitOutcomeV1::Fenced {
+                expected: requested,
+                actual: current,
+            },
+        );
+        assert_eq!(
+            projection_runtime_error(error).writer_fence(),
+            Some(tracedecay_store::StoreWriterFencedV1 { requested, current }),
+        );
+    }
 
     #[test]
     fn writer_saturation_is_backpressure_not_a_storage_failure() {

@@ -174,6 +174,14 @@ async fn publish_lifecycle_runtime(
         attachment.abort(request.locator.is_prospective());
         return Err(error);
     }
+    if request.mode == StoreRuntimeOpenMode::Existing
+        && request.access == StoreRuntimeAccessMode::ReadWrite
+        && let Err(error) =
+            verify_writer_authority_before_existing_publication(&request, attachment.as_physical())
+    {
+        attachment.abort(request.locator.is_prospective());
+        return Err(error);
+    }
     if let Err(error) = runtime.transition(RuntimeMaintenanceStateV1::Ready) {
         attachment.abort(request.locator.is_prospective());
         return Err(runtime_lifecycle_failure(error));
@@ -188,6 +196,41 @@ async fn publish_lifecycle_runtime(
         });
     }
     Ok(PublishedShardRuntime::new(runtime, attachment.into_box()))
+}
+
+/// A shard whose ledger already holds a newer writer authority for this
+/// incarnation must not be published at the stale binding: every submit
+/// through it would be fenced. The registry raises its epoch floor past the
+/// persisted authority and opens again.
+fn verify_writer_authority_before_existing_publication(
+    request: &ShardRuntimeBuildRequest,
+    attachment: &dyn PhysicalRuntimeAttachment,
+) -> Result<(), StoreRuntimeRegistryFailure> {
+    const OPERATION: &str = "read persisted writer authority for existing-runtime admission";
+    let handle = attachment.exact_sql_handle().map_err(|message| {
+        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: OPERATION,
+            message,
+        }
+    })?;
+    let persisted = tracedecay_rusqlite_runtime::runtime_ledger::persisted_writer_authority_epoch(
+        &handle.read_only_clone(),
+        &request.binding,
+        Duration::ZERO,
+    )
+    .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+        operation: OPERATION,
+        message: error.to_string(),
+    })?;
+    match persisted {
+        Some(persisted) if persisted > request.binding.authority_epoch => Err(
+            StoreRuntimeRegistryFailure::WriterAuthorityBehindPersisted {
+                binding: Box::new(request.binding.clone()),
+                persisted,
+            },
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn runtime_core_final_schema_applies(scope: &StoreShardScopeV1) -> bool {

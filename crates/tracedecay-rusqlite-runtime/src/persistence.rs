@@ -4,7 +4,7 @@
 use rusqlite::{Savepoint, Transaction};
 use tracedecay_store::{
     CorruptionClassV1, IdempotencyIdentityV1, RuntimeSubmitRequestV1, StorageRuntimeErrorV1,
-    StoreCommitReceiptV1, StoreRuntimeBindingV1,
+    StoreAuthorityEpochV1, StoreCommitReceiptV1, StoreRuntimeBindingV1,
 };
 
 use crate::{
@@ -64,30 +64,62 @@ impl<E: StorageOperationExecutor> RuntimeWriterPersistence<E> {
         savepoint: &mut Savepoint<'_>,
         binding: &StoreRuntimeBindingV1,
         request: &RuntimeSubmitRequestV1,
-    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
+    ) -> Result<StoreCommitReceiptV1, ApplyRecordError> {
         if binding != request.binding() {
-            return Err(infrastructure("apply-and-record binding mismatch"));
+            return Err(infrastructure("apply-and-record binding mismatch").into());
         }
         operation::execute(savepoint, request, &mut self.executor).map_err(map_operation_error)?;
-        match ledger::record_runtime_commit(
+        let disposition = match ledger::record_runtime_commit(
             savepoint,
             &request.envelope().metadata,
             request.transaction_scope(),
             &request.envelope().payload,
-        )
-        .map_err(map_ledger_error)?
-        {
+        ) {
+            Ok(disposition) => disposition,
+            Err(LedgerError::StaleAuthority {
+                persisted,
+                requested,
+            }) => {
+                return Err(ApplyRecordError::Fenced {
+                    requested,
+                    persisted,
+                });
+            }
+            Err(error) => return Err(map_ledger_error(error).into()),
+        };
+        match disposition {
             LedgerDisposition::Committed(receipt) => Ok(receipt),
             LedgerDisposition::Replay(receipt) | LedgerDisposition::Conflict(receipt) => {
                 drop(receipt);
-                Err(infrastructure(
-                    "idempotency disposition changed after the writer lookup",
-                ))
+                Err(
+                    infrastructure("idempotency disposition changed after the writer lookup")
+                        .into(),
+                )
             }
-            LedgerDisposition::New => Err(infrastructure(
-                "runtime ledger did not record the applied operation",
-            )),
+            LedgerDisposition::New => {
+                Err(infrastructure("runtime ledger did not record the applied operation").into())
+            }
         }
+    }
+}
+
+/// Why one request could not be applied and recorded in its savepoint.
+///
+/// A fence is a submit decision, not a storage failure: the ledger already
+/// holds a newer writer authority for this shard and incarnation, so the same
+/// request can never commit through this writer.
+#[derive(Debug)]
+pub(crate) enum ApplyRecordError {
+    Fenced {
+        requested: StoreAuthorityEpochV1,
+        persisted: StoreAuthorityEpochV1,
+    },
+    Storage(StorageRuntimeErrorV1),
+}
+
+impl From<StorageRuntimeErrorV1> for ApplyRecordError {
+    fn from(error: StorageRuntimeErrorV1) -> Self {
+        Self::Storage(error)
     }
 }
 
@@ -291,5 +323,49 @@ mod tests {
                 .is_none()
         );
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn a_writer_behind_the_persisted_authority_is_fenced_not_failed() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let newer = request(metadata("operation.newer", "key.newer", 'a'));
+        let mut stale_metadata = metadata("operation.stale", "key.stale", 'b');
+        stale_metadata.authority_epoch = StoreAuthorityEpochV1::new(2).unwrap();
+        let stale = request(stale_metadata);
+        let mut persistence = RuntimeWriterPersistence::new(MarkerExecutor);
+        let mut transaction = connection.transaction().unwrap();
+        assert!(
+            persistence
+                .lookup_idempotency(
+                    &transaction,
+                    newer.binding(),
+                    &newer.envelope().metadata.idempotency,
+                )
+                .unwrap()
+                .is_none()
+        );
+        {
+            let mut savepoint = transaction.savepoint().unwrap();
+            persistence
+                .apply_and_record(&mut savepoint, newer.binding(), &newer)
+                .unwrap();
+            savepoint.commit().unwrap();
+        }
+
+        let mut savepoint = transaction.savepoint().unwrap();
+        let fenced = persistence
+            .apply_and_record(&mut savepoint, stale.binding(), &stale)
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                fenced,
+                ApplyRecordError::Fenced {
+                    requested,
+                    persisted,
+                } if requested.get() == 2 && persisted.get() == 7
+            ),
+            "a stale writer is fenced, not failed: {fenced:?}"
+        );
     }
 }
