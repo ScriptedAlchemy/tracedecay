@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,11 +7,10 @@ use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::execution::ExecutionControl;
 
-use super::history::SessionHistoricalIngestOutcome;
+use super::history::{SessionHistoricalIngestOutcome, SessionHistoricalPass};
 use tracedecay_session_temporal_store::{
     SessionRefreshRecoveryV1, SessionTemporalRefreshDiscoveryCursor,
 };
-use tracedecay_sessions::ProviderPassUnits;
 use tracedecay_sessions::serving::{
     RefreshWorkerMissing, SessionConvergenceState, SessionConvergenceStatus,
     SessionHistoryCatchUpProgress, SessionProjectionServingState, SessionProjectionServingStatus,
@@ -492,12 +491,8 @@ impl SessionTemporalRefreshWakeState {
     /// Folds a pass the historical ingestor ran into the catch-up progress
     /// status reports. Cancelled passes did not finish, so they are not
     /// counted.
-    pub fn record_history_pass(
-        &self,
-        outcome: &SessionHistoricalIngestOutcome,
-        provider_units: &BTreeMap<&'static str, ProviderPassUnits>,
-    ) {
-        if matches!(outcome, SessionHistoricalIngestOutcome::Cancelled) {
+    pub fn record_history_pass(&self, pass: &SessionHistoricalPass) {
+        if matches!(pass.outcome, SessionHistoricalIngestOutcome::Cancelled) {
             return;
         }
         let now = tracedecay_runtime_core::tracedecay::saturating_utc_now().0;
@@ -506,9 +501,9 @@ impl SessionTemporalRefreshWakeState {
             .unwrap_or_else(PoisonError::into_inner)
             .history_progress
             .record_pass(
-                matches!(outcome, SessionHistoricalIngestOutcome::Complete),
-                outcome.made_progress(),
-                provider_units,
+                matches!(pass.outcome, SessionHistoricalIngestOutcome::Complete),
+                pass.made_progress,
+                &pass.provider_units,
                 now,
             );
     }

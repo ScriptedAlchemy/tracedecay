@@ -281,10 +281,12 @@ async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
                     outcome: SessionHistoricalIngestOutcome::Pending {
                         made_progress: true,
                     },
+                    made_progress: true,
                     provider_units: [("codex", units(1, 0, 3)), ("cursor", units(0, 1, 0))].into(),
                 },
                 SessionHistoricalPass {
                     outcome: SessionHistoricalIngestOutcome::Complete,
+                    made_progress: true,
                     provider_units: [("cursor", units(1, 0, 2))].into(),
                 },
             ]
