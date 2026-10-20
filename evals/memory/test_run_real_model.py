@@ -221,6 +221,45 @@ class IsolatedLifecycleTest(unittest.TestCase):
             },
         }
 
+    def test_profile_allocation_failure_writes_error_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp)),
+                mock.patch.object(
+                    run_real_model, "load_scenarios", return_value=[self.scenario()]
+                ),
+                mock.patch.object(
+                    run_real_model, "resolve_tracedecay_bin", return_value="/unused/tracedecay"
+                ),
+                mock.patch.object(
+                    run_real_model.tempfile, "TemporaryDirectory",
+                    side_effect=OSError("No space left on device"),
+                ),
+                mock.patch.object(run_real_model.EvalEnvironment, "start_daemon") as daemon,
+                mock.patch.object(run_real_model, "drive_hermes") as hermes,
+                mock.patch.object(run_real_model, "drive_cursor_agent") as cursor,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(
+                    run_real_model.main(["--agent-turn", "--i-understand-model-cost"]), 1
+                )
+            daemon.assert_not_called()
+            hermes.assert_not_called()
+            cursor.assert_not_called()
+            reports = list(Path(tmp).glob("*/report.json"))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text())
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["scenarios"], [{
+                "id": "lifecycle",
+                "contract": "stable",
+                "status": "error (setup or agent failure)",
+                "error": "No space left on device",
+                "assertions": [],
+                "transcripts": [],
+            }])
+
     def test_fresh_environment_inits_and_seeds_against_isolated_daemon(self):
         binary = self.make_bin()
         eval_env = run_real_model.create_eval_environment("lifecycle")

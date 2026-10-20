@@ -230,7 +230,8 @@ def cleanup_eval_artifacts(fixture, eval_env):
         if fixture is not None:
             shutil.rmtree(fixture, ignore_errors=True)
     finally:
-        eval_env.cleanup()
+        if eval_env is not None:
+            eval_env.cleanup()
 
 
 def create_eval_environment(scenario_id):
@@ -819,9 +820,10 @@ def run_scenario(args, scenario, run_dir, report):
     Returns (ok, cancelled). Operational failures and cancellation are recorded
     in the report; the daemon, fixture, and profile are removed on every path.
     """
-    eval_env = create_eval_environment(scenario["id"])
+    eval_env = None
     fixture = None
     try:
+        eval_env = create_eval_environment(scenario["id"])
         eval_env.start_daemon(args.tracedecay_bin)
         fixture = build_fixture(
             scenario, args.tracedecay_bin, eval_env.env, parent=eval_env.root
