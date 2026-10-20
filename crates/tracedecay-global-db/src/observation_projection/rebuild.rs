@@ -33,7 +33,9 @@ use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
     message_transition, write_workflow_fact_transition,
 };
-use tracedecay_session_temporal_store::record_canonical_observation_effect;
+use tracedecay_session_temporal_store::{
+    record_canonical_observation_effect, request_session_temporal_reset,
+};
 
 pub(super) const REBUILD_PAGE_SIZE: i64 = 128;
 const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
@@ -667,6 +669,171 @@ async fn project_observation_in_transaction_with_session(
         }
     };
     Ok((outcome, session_id))
+}
+
+/// A record re-offered by its source is no longer retired.
+pub(in super::super) async fn revive_source_record(
+    transaction: &DatabaseWriteTransaction<'_>,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<bool> {
+    let mut rows = transaction
+        .query(
+            "SELECT reason FROM observation_projection_dispositions
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("read re-offered source record disposition", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read re-offered source record disposition", error))?
+    else {
+        return Ok(false);
+    };
+    let reason = row
+        .get::<String>(0)
+        .map_err(|error| storage("read re-offered source record disposition", error))?;
+    drop(rows);
+    if reason != ProjectionSkipReason::SourceRecordRetired.as_str() {
+        return Ok(false);
+    }
+
+    let Some((sequence, observation)) = read_observation(transaction, observation_id).await? else {
+        return Ok(false);
+    };
+    let deleted = transaction
+        .execute(
+            "DELETE FROM observation_projection_dispositions
+             WHERE projector_version = ?1 AND observation_id = ?2
+               AND reason = ?3",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+                ProjectionSkipReason::SourceRecordRetired.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("remove re-offered source record disposition", error))?;
+    if deleted != 1 {
+        return Err(storage_message(
+            "remove re-offered source record disposition",
+            "retired disposition changed during revival",
+        ));
+    }
+
+    let mut effect = derive_projection_with_alias(transaction, &observation).await?;
+    Box::pin(write_effect_converging_collisions(
+        transaction,
+        &CollisionGuardedWrite::Drain,
+        sequence,
+        &observation,
+        &mut effect,
+    ))
+    .await?;
+    if !matches!(
+        effect,
+        ObservationProjection::Skipped(
+            ProjectionSkipReason::InvalidContract
+                | ProjectionSkipReason::NativeSourceSuperseded
+                | ProjectionSkipReason::SourceRecordRetired
+        )
+    ) {
+        record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
+    }
+    request_session_temporal_reset(transaction, observation_id.as_str()).await?;
+
+    if let Some(job) = read_optional_rebuild_job(transaction).await?
+        && job.staged_through >= sequence_i64(sequence)?
+    {
+        let deleted = transaction
+            .execute(
+                "DELETE FROM observation_projection_rebuild_dispositions
+                 WHERE projector_version = ?1 AND generation = ?2
+                   AND observation_id = ?3 AND reason = ?4",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    job.generation.as_str(),
+                    observation_id.as_str(),
+                    ProjectionSkipReason::SourceRecordRetired.as_str(),
+                ],
+            )
+            .await
+            .map_err(|error| storage("remove staged retired source record disposition", error))?;
+        match deleted {
+            0 => {}
+            1 => {
+                let mut staged_effect =
+                    derive_projection_for_rebuild(transaction, &observation, &job.generation)
+                        .await?;
+                write_effect_converging_collisions(
+                    transaction,
+                    &CollisionGuardedWrite::Stage {
+                        generation: &job.generation,
+                    },
+                    sequence,
+                    &observation,
+                    &mut staged_effect,
+                )
+                .await?;
+                if !matches!(
+                    staged_effect,
+                    ObservationProjection::Skipped(
+                        ProjectionSkipReason::InvalidContract
+                            | ProjectionSkipReason::NativeSourceSuperseded
+                            | ProjectionSkipReason::SourceRecordRetired
+                    )
+                ) {
+                    record_canonical_observation_effect(
+                        transaction,
+                        sequence,
+                        &observation,
+                        &staged_effect,
+                    )
+                    .await?;
+                }
+                let (projected_rows, skipped_observations) = match &staged_effect {
+                    ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
+                        (
+                            job.projected_rows
+                                .saturating_add(staged_effect.output_count()),
+                            job.skipped_observations.checked_sub(1).ok_or_else(|| {
+                                storage_message(
+                                    "advance revived projection rebuild counts",
+                                    "staged retired observation was not counted as skipped",
+                                )
+                            })?,
+                        )
+                    }
+                    ObservationProjection::Skipped(_) => {
+                        (job.projected_rows, job.skipped_observations)
+                    }
+                };
+                transaction
+                    .execute(
+                        "UPDATE observation_projection_rebuilds
+                         SET projected_rows = ?3, skipped_observations = ?4
+                         WHERE projector_version = ?1 AND generation = ?2",
+                        params![
+                            SESSION_MESSAGE_PROJECTOR_VERSION,
+                            job.generation.as_str(),
+                            usize_i64(projected_rows)?,
+                            usize_i64(skipped_observations)?,
+                        ],
+                    )
+                    .await
+                    .map_err(|error| storage("advance revived projection rebuild counts", error))?;
+            }
+            _ => {
+                return Err(storage_message(
+                    "remove staged retired source record disposition",
+                    "multiple staged retired dispositions were removed",
+                ));
+            }
+        }
+    }
+
+    Ok(true)
 }
 
 async fn start_or_resume_projection_rebuild_transaction(

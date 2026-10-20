@@ -320,3 +320,185 @@ async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_at
         "retired records must request their session's temporal rebuild"
     );
 }
+
+#[asupersync::test]
+async fn reoffered_retired_record_projects_again() {
+    let directory = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .unwrap();
+    let registered = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let seeded = seed_projected_messages(&runtime, 0..2).await;
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("codex").unwrap(),
+        SessionId::new("session.audit-batch").unwrap(),
+    )
+    .unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let previous = ObservationSourceGenerationV1::new(1).unwrap();
+    let generation = ObservationSourceGenerationV1::new(2).unwrap();
+    let writer = registered.writer_connection().unwrap();
+    let offered: Vec<ObservationSourcePresenceV1> = seeded
+        .iter()
+        .map(|(observation, _)| ObservationSourcePresenceV1 {
+            observation_id: observation.observation_id().clone(),
+            generation: previous,
+            start_offset: observation.identity().position().start(),
+        })
+        .collect();
+
+    let mut rows = writer
+        .query(
+            "SELECT content FROM lcm_raw_messages
+             WHERE provider = 'codex' AND message_id = 'message.record.audit-batch-1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let original_text = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("seeded message row")
+        .get::<String>(0)
+        .unwrap();
+    drop(rows);
+
+    registered
+        .record_observation_source_presence(&source, &scope, &offered)
+        .await
+        .unwrap();
+    registered
+        .begin_observation_source_rewrite(&source, &scope, previous, generation, 0)
+        .await
+        .unwrap();
+    registered
+        .record_observation_source_presence(
+            &source,
+            &scope,
+            &[ObservationSourcePresenceV1 {
+                observation_id: seeded[0].0.observation_id().clone(),
+                generation,
+                start_offset: seeded[0].0.identity().position().start(),
+            }],
+        )
+        .await
+        .unwrap();
+    let retired = registered
+        .complete_observation_source_rewrite(&source, &scope, generation)
+        .await
+        .unwrap();
+    assert_eq!(retired, 1);
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM lcm_raw_messages").await,
+        1
+    );
+
+    registered
+        .record_observation_source_presence(
+            &source,
+            &scope,
+            &[ObservationSourcePresenceV1 {
+                observation_id: seeded[1].0.observation_id().clone(),
+                generation,
+                start_offset: seeded[1].0.identity().position().start(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_projection_dispositions"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_projection_provenance"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM lcm_raw_messages").await,
+        2
+    );
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM observation_source_presence").await,
+        2
+    );
+    let mut rows = writer
+        .query(
+            "SELECT content FROM lcm_raw_messages
+             WHERE provider = 'codex' AND message_id = 'message.record.audit-batch-1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let revived_text = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("revived message row")
+        .get::<String>(0)
+        .unwrap();
+    assert_eq!(revived_text, original_text);
+    drop(rows);
+
+    registered
+        .record_observation_source_presence(
+            &source,
+            &scope,
+            &[ObservationSourcePresenceV1 {
+                observation_id: seeded[1].0.observation_id().clone(),
+                generation,
+                start_offset: seeded[1].0.identity().position().start(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_projection_dispositions"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_projection_provenance"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM lcm_raw_messages").await,
+        2
+    );
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM observation_source_presence").await,
+        2
+    );
+
+    let rebuild = registered.rebuild_observation_projection(2).await.unwrap();
+    assert!(rebuild.is_complete());
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM lcm_raw_messages").await,
+        2
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_projection_dispositions"
+        )
+        .await,
+        0
+    );
+}

@@ -1403,6 +1403,158 @@ async fn claude_atomic_replacement_retires_superseded_messages_and_settles() {
     }
 }
 
+/// A later layout that re-offers a retired record at its original position makes it searchable again.
+#[tokio::test]
+async fn claude_restored_transcript_revives_retired_messages() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let session = "11111111-1111-4111-8111-111111111111";
+    let row = |uuid: &str, parent: Option<&str>, role: &str, second: u32, text: &str| {
+        serde_json::json!({
+            "type": role,
+            "cwd": project,
+            "sessionId": session,
+            "uuid": uuid,
+            "parentUuid": parent,
+            "timestamp": format!("2026-01-01T00:00:{second:02}.000Z"),
+            "message": {"role": role, "content": [{"type": "text", "text": text}]}
+        })
+    };
+    let alpha = row(
+        "c-u1",
+        None,
+        "user",
+        0,
+        "claudeprobe alpha: where is square_area called?",
+    );
+    let beta = row(
+        "c-a1",
+        Some("c-u1"),
+        "assistant",
+        5,
+        "claudeprobe beta: square_area is called twice.",
+    );
+    let gamma = row("c-u2", Some("c-a1"), "user", 9, "claudeprobe gamma: thanks");
+    let epsilon = row(
+        "c-u3",
+        Some("c-a1"),
+        "user",
+        11,
+        "claudeprobe epsilon: and cube_volume?",
+    );
+    let original_rows = [alpha.clone(), beta, gamma];
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let write = |target: &std::path::Path, rows: &[serde_json::Value]| {
+        let body: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        std::fs::write(target, body).unwrap();
+    };
+    write(&path, &original_rows);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    let ingest = || async {
+        ingest_source_with_observations_with_admission(
+            &source,
+            &project,
+            ObservationScopeV1::Project {
+                project_id: db.project_id().clone(),
+            },
+            &db.runtime().facade(),
+            None,
+            ObservationCancellation::default(),
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(ingest().await.transcript.messages_upserted, 3);
+
+    let replacement = dir.join(".tmp-replace.jsonl");
+    write(
+        &replacement,
+        &[
+            alpha,
+            row(
+                "c-a1b",
+                Some("c-u1"),
+                "assistant",
+                7,
+                "claudeprobe delta: rewritten answer mentions cube_volume.",
+            ),
+        ],
+    );
+    std::fs::rename(&replacement, &path).unwrap();
+    ingest().await;
+
+    let mut texts: Vec<String> = db
+        .search_session_messages("claude", None, "claudeprobe", 10)
+        .await
+        .into_iter()
+        .map(|hit| hit.message.text)
+        .collect();
+    texts.sort();
+    assert_eq!(
+        texts,
+        [
+            "claudeprobe alpha: where is square_area called?",
+            "claudeprobe delta: rewritten answer mentions cube_volume.",
+        ],
+        "superseded messages must not stay searchable"
+    );
+
+    write(
+        &replacement,
+        &[
+            original_rows[0].clone(),
+            original_rows[1].clone(),
+            epsilon,
+        ],
+    );
+    std::fs::rename(&replacement, &path).unwrap();
+    let restored = ingest().await;
+    assert_eq!(
+        restored.observations_committed, 1,
+        "the newly offered record must be committed: {restored:#?}"
+    );
+    assert!(
+        restored.observation_duplicates >= 1,
+        "the restored transcript must re-offer the retired record at its original position: {restored:#?}"
+    );
+
+    let mut texts: Vec<String> = db
+        .search_session_messages("claude", None, "claudeprobe", 10)
+        .await
+        .into_iter()
+        .map(|hit| hit.message.text)
+        .collect();
+    texts.sort();
+    assert_eq!(
+        texts,
+        [
+            "claudeprobe alpha: where is square_area called?",
+            "claudeprobe beta: square_area is called twice.",
+            "claudeprobe epsilon: and cube_volume?",
+        ],
+        "restored messages must become searchable and absent records must be retired"
+    );
+
+    for repoll in 0..3 {
+        let idle = ingest().await;
+        assert_eq!(
+            (
+                idle.source_bytes_scanned,
+                idle.transcript.messages_upserted,
+                idle.observations_committed
+            ),
+            (0, 0, 0),
+            "idle repoll {repoll} of the restored transcript must read nothing"
+        );
+    }
+}
+
 /// Production journal on #3393: Claude catch-up fails
 /// `projection_storage_retry_scheduled` for `source=journal.jsonl` while
 /// session transcripts sit beside it. A fresh profile plus three real Claude
