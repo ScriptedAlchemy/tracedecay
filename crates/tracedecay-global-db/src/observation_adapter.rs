@@ -984,7 +984,8 @@ async fn load_observation_preflight(
         }
     }
     let (retrieval_aliases, alias_owners) =
-        read_retrieval_aliases_from_snapshot(&snapshot, writes, OPERATION).await?;
+        read_retrieval_aliases_from_snapshot(&snapshot, writes, &admission_refusals, OPERATION)
+            .await?;
     let mut sibling_candidate_anchors = HashSet::new();
     for write in writes {
         let observation = write.observation();
@@ -1255,6 +1256,7 @@ fn retrieval_alias_key(
 async fn read_retrieval_aliases_from_snapshot(
     snapshot: &DatabaseEngineReadSnapshot,
     writes: &[AnchoredObservationWrite],
+    admission_refusals: &HashMap<(String, String), PayloadDigestV1>,
     operation: &'static str,
 ) -> ObservationStoreResult<(
     HashMap<(String, String, String), RetrievalAnchorId>,
@@ -1262,6 +1264,13 @@ async fn read_retrieval_aliases_from_snapshot(
 )> {
     let mut requested = HashSet::new();
     for write in writes {
+        let observation = write.observation();
+        if admission_refusals.contains_key(&(
+            observation.observation_id().as_str().to_owned(),
+            observation.payload_reference().digest().as_str().to_owned(),
+        )) {
+            continue;
+        }
         for alias in write.retrieval_anchor().aliases() {
             requested.insert(retrieval_alias_key(write.observation().scope(), alias)?);
         }
