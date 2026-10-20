@@ -120,8 +120,8 @@ Also redact credential-bearing git remotes, database overrides such as `TRACEDEC
 The edit tools target a single file with a unique anchor and re-index in place.
 They never run shell commands you did not supply. Outbound operations are
 limited to the documented GitHub release/update and review reads, explicitly
-enabled semantic-model downloads, aggregate counter telemetry, and configured
-remote sources and authorities above. Bundled pricing and native usage reads
+enabled semantic-model downloads, and configured remote sources and authorities
+above. Bundled pricing and native usage reads
 are local-only and do not make an outbound request. Every editing and state-mutating tool is
 single-file or single-record scoped. There is no bulk-delete or
 recursive-write primitive.
