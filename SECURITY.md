@@ -142,7 +142,7 @@ consistency, not independent publisher authenticity. Other distribution/update
 paths have their own verification; do not assume installer checks apply to all
 paths.
 
-**Windows:** Authenticode code signing via the [SignPath.io Foundation](https://signpath.io/foundation) program is being rolled out so Windows binaries are signed as part of the release workflow (addresses the Smart App Control block reported in #79). Until that lands in a published release, Windows binaries remain unsigned.
+**Windows:** Release executables are unsigned. Archive checksums and build-provenance attestations do not provide an executable code signature.
 
 ### Opt-in background daemon
 
