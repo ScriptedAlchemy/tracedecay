@@ -579,9 +579,17 @@ impl CodexDiscoveryHub {
                                 detail: "Codex replay index disappeared before delivery",
                             },
                         )?;
-                        let effective_position = (consumer_generation == index.generation)
-                            .then_some(consumer_position)
-                            .flatten();
+                        // A complete durable frontier at the index's epoch already
+                        // covers every indexed path (a restarted daemon's later
+                        // consumers land here), so its replay starts past the end.
+                        let effective_position =
+                            if frontier.is_complete() && frontier == index.frontier {
+                                index.paths.last().cloned()
+                            } else {
+                                (consumer_generation == index.generation)
+                                    .then_some(consumer_position)
+                                    .flatten()
+                            };
                         let index_generation = index.generation;
                         let lower = effective_position
                             .as_ref()
