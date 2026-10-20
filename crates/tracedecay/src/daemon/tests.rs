@@ -301,7 +301,7 @@ fn enter_test_daemon_database_scope(
         .unwrap_or_else(|error| panic!("enter test daemon database scope ({label}): {error}"))
 }
 
-async fn initialize_test_project(
+pub(super) async fn initialize_test_project(
     project_root: &std::path::Path,
     client_identity: &DaemonClientIdentity,
 ) -> tracedecay_runtime_core::storage::StoreLayout {

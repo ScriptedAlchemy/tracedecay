@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::db::engine::{Executor as _, Value};
 
 use super::{
     RegisteredGlobalDb, SavingsDay, SavingsTotal, global_db_operation_error,
@@ -19,20 +19,22 @@ impl RegisteredGlobalDb {
         tokens_saved: u64,
     ) -> tracedecay_domain::errors::Result<()> {
         let path = super::project_path_alias_key(project_path);
-        let transaction = self.begin_write_transaction().await?;
-        transaction
-            .execute(
-                "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
-                 ON CONFLICT(path) DO UPDATE SET
-                    tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
-                tracedecay_runtime_core::db::engine::params![path, tokens_saved as i64],
-            )
-            .await
-            .map_err(|error| global_db_operation_error("update project token total", error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error("commit project token total", error))
+        self.transact(async move |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
+                     ON CONFLICT(path) DO UPDATE SET
+                        tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
+                    tracedecay_runtime_core::db::engine::params![
+                        path.as_str(),
+                        tokens_saved as i64
+                    ],
+                )
+                .await
+                .map_err(|error| global_db_operation_error("update project token total", error))?;
+            Ok(())
+        })
+        .await?
     }
 
     /// A project with no registry row has genuinely saved nothing, so an
@@ -87,26 +89,26 @@ impl RegisteredGlobalDb {
         timestamp: i64,
     ) -> tracedecay_domain::errors::Result<()> {
         let project_path = RegisteredGlobalDb::canonical_project_key(Path::new(project_path));
-        let transaction = self.begin_write_transaction().await?;
-        transaction
-            .execute(
-                "INSERT INTO savings_ledger
-                     (ts, project_path, tool_name, before_tokens, after_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                tracedecay_runtime_core::db::engine::params![
-                    timestamp,
-                    project_path,
-                    tool_name,
-                    before_tokens as i64,
-                    after_tokens as i64
-                ],
-            )
-            .await
-            .map_err(|error| global_db_operation_error("append savings ledger entry", error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error("commit savings ledger entry", error))
+        let tool_name = tool_name.to_owned();
+        self.transact(async move |transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO savings_ledger
+                         (ts, project_path, tool_name, before_tokens, after_tokens)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    tracedecay_runtime_core::db::engine::params![
+                        timestamp,
+                        project_path.as_str(),
+                        tool_name.as_str(),
+                        before_tokens as i64,
+                        after_tokens as i64
+                    ],
+                )
+                .await
+                .map_err(|error| global_db_operation_error("append savings ledger entry", error))?;
+            Ok(())
+        })
+        .await?
     }
 
     /// Sums settled savings-ledger rows for an optional project path.

@@ -80,11 +80,13 @@ use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
 use super::remote_status_api::RemoteOperationalStatusPayloadV1;
 use super::savings_api::{SavingsModelsPayloadV1, SavingsOverviewPayloadV1};
 use super::settings_api::{
-    CodeIndexWorkerSettingsPatch, ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch,
+    CodeIndexWorkerSettingsPatch, ProjectSettingsPatch, ProjectSettingsPatchResponseV1,
+    SettingsPayloadV1, UserSettingsPatch,
 };
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
 use super::work_api::registered_route_contracts as registered_work_route_contracts;
 use crate::application::feedback::observations::FeedbackObservationReadModelV1;
+use tracedecay_api::configuration::DashboardConfigurationRefusalV1;
 use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1;
 
 #[derive(JsonSchema)]
@@ -142,6 +144,8 @@ struct DashboardContractCatalogV1 {
     code_index_freshness: CodeIndexFreshnessPayloadV1,
     settings: SettingsPayloadV1,
     settings_project_patch: ProjectSettingsPatch,
+    settings_project_patch_response: ProjectSettingsPatchResponseV1,
+    settings_refusal: DashboardConfigurationRefusalV1,
     settings_user_patch: UserSettingsPatch,
     settings_code_index_worker_patch: CodeIndexWorkerSettingsPatch,
     observatory: ObservatoryReadModelV1,

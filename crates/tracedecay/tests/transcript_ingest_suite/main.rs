@@ -18,6 +18,7 @@ mod codex_compaction;
 mod codex_goals;
 mod codex_ingest;
 mod codex_response_items;
+mod codex_rollout_sources;
 mod codex_usage;
 mod cursor;
 mod cursor_composer;

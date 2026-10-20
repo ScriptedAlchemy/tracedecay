@@ -28,3 +28,5 @@ py_test(
     imports = ["."],
     legacy_create_init = 0,
 )
+
+exports_files(["score.py"], visibility = ["//evals/memory:__pkg__"])
