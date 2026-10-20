@@ -14,7 +14,7 @@ use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, configuration_authority_unavailable_error,
     configuration_revision_conflict_error, settings_validation_error,
 };
-use tracedecay_contracts::ApplicationOutcome;
+use tracedecay_contracts::{ApplicationOutcome, SettingsValidationIssueV1};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
@@ -70,24 +70,26 @@ pub async fn patch_config(
     request: std::result::Result<Json<AutomationConfigMutationRequest>, JsonRejection>,
 ) -> ApiResult {
     let Json(request) = request.map_err(|error| {
-        settings_validation_error(json!([{
-            "field": "request",
-            "message": error.body_text(),
-        }]))
+        settings_validation_error([SettingsValidationIssueV1 {
+            field: "request".to_owned(),
+            message: error.body_text(),
+        }])
     })?;
     let expected_revision =
         ConfigurationRevisionId::new(request.expected_revision_id).map_err(|_| {
-            settings_validation_error(json!([{
-                "field": "expected_revision_id",
-                "message": "expected_revision_id must name one canonical configuration revision"
-            }]))
+            settings_validation_error([SettingsValidationIssueV1 {
+                field: "expected_revision_id".to_owned(),
+                message: "expected_revision_id must name one canonical configuration revision"
+                    .to_owned(),
+            }])
         })?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(request.idempotency_key).map_err(|_| {
-            settings_validation_error(json!([{
-                "field": "idempotency_key",
-                "message": "idempotency_key must be one non-empty canonical caller-stable value"
-            }]))
+            settings_validation_error([SettingsValidationIssueV1 {
+                field: "idempotency_key".to_owned(),
+                message: "idempotency_key must be one non-empty canonical caller-stable value"
+                    .to_owned(),
+            }])
         })?;
     let (current_revision, current, _) = effective_automation_config(&state)
         .map_err(|_| configuration_authority_unavailable_error())?;
@@ -99,10 +101,10 @@ pub async fn patch_config(
         ));
     }
     let candidate = effective_config(&current, Some(&request.patch)).map_err(|error| {
-        settings_validation_error(json!([{
-            "field": "automation",
-            "message": error.to_string(),
-        }]))
+        settings_validation_error([SettingsValidationIssueV1 {
+            field: "automation".to_owned(),
+            message: error.to_string(),
+        }])
     })?;
 
     let application_outcome = if candidate == current {

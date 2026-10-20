@@ -9,7 +9,7 @@ use axum::Router;
 use axum::extract::Json;
 use axum::http::StatusCode;
 use serde_json::Value;
-use serde_json::json;
+use tracedecay_api::configuration::{ConfigurationRefusalV1, DashboardConfigurationRefusalV1};
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, AuthorizedScopeSet,
     NativeIntegrationSurfaceResultV1, RequestId,
@@ -68,10 +68,11 @@ pub(crate) fn configuration_apply_error(
         }
         DashboardConfigurationApplyError::ApplicationContractViolation(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "code": "application_contract_violation",
-                "detail": "the configuration application result violated its contract",
-            })),
+            Json(DashboardConfigurationRefusalV1::Configuration(
+                ConfigurationRefusalV1::ApplicationContractViolation {
+                    detail: "the configuration application result violated its contract".to_owned(),
+                },
+            )),
         ),
     }
 }

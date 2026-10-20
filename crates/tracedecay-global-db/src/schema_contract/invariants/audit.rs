@@ -9,6 +9,7 @@ use tracedecay_store::{
     stored_message_is_shipped_release_rendering,
 };
 
+use crate::observation_projection::state::canonical_message_location;
 use crate::observation_projection::{ProjectionOutputAuthority, ProjectionRowsBatch};
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
@@ -20,7 +21,8 @@ use super::rows::{audit_read_error, authority_violation, decode_authority_observ
 use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, projection_checkpoint};
 const AUDIT_NAME: &str = "observation-authority";
 
-const AUDIT_VERSION: i64 = 2;
+// Storage locations were added without changing immutable output digests.
+const AUDIT_VERSION: i64 = 3;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
 const DETAILED_AUDIT_CONCURRENCY: usize = 32;
 // Amortize the page query across several bounded validation chunks.
@@ -729,8 +731,8 @@ async fn validate_message_projection_row(
                 // Message equality is not the whole output. The row's hash and
                 // storage kind are not compared by the message record, so a
                 // matching message can still sit on stale storage columns.
-                // Protected rows are not this arm: they differ from the
-                // projected row, and that compatibility already checked them.
+                // A compatible protected body retains its own rendering;
+                // backfill only its missing storage location below.
                 let stored_matches = match resolved
                     .projection_rows
                     .message(&owner_message.provider, &owner_message.message_id)
@@ -746,6 +748,23 @@ async fn validate_message_projection_row(
                     }
                     None => false,
                 };
+                // Once normalized, a location remains historical identity even
+                // when the provider's original symlink is moved or removed.
+                if resolved
+                    .projection_rows
+                    .storage_columns(&owner_message.provider, &owner_message.message_id)
+                    .is_some_and(|raw| raw.location_path.is_none())
+                    && let Some(location) =
+                        canonical_message_location(owner_message).map_err(|error| {
+                            authority_violation(format!(
+                                "invalid projected message location: {error}"
+                            ))
+                        })?
+                {
+                    resolved
+                        .released
+                        .record_location(&owner_projection, location);
+                }
                 if stored_matches
                     && owned_storage_columns_need_rewrite(
                         &owner_projection,

@@ -1,26 +1,167 @@
 //! Host hook events: one stateless daemon request over the broker connection.
 //!
 //! The wire metadata and event constructors are pure data and live in
-//! [`tracedecay_hooks::core_events`]. Only delivery, which needs the daemon
-//! connection, handshake, and preamble, remains root-coupled.
+//! [`tracedecay_hooks::core_events`]. Broker admission and delivery use the
+//! daemon's canonical store, connection, handshake, and preamble authorities.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use asupersync::io::{AsyncWriteExt, BufReader};
+use rmcp::model::{ProtocolVersion, RequestMetaObject};
 use tracedecay_framing::BoundedLineReader;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1};
 
+use crate::mcp::project_route::HookProjectRouteCache;
 use tracedecay_daemon_identity::{
     ResolvedDaemonConnection, client_connection, current_daemon_connection,
 };
 use tracedecay_daemon_protocol::{DaemonClientStream, SOCKET_ENV};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::hook_events::{self, HookEventKind, HookEventPlan};
 use tracedecay_mcp::server::attach_stateless_request_context;
 
 use super::{JsonRpcRequest, write_daemon_preamble};
 
-/// Delivers `event` and resolves once the daemon acknowledges it, however
-/// long admission takes. A host hook that must not block its agent bounds
-/// this call itself.
+/// An unopened worktree needs only its registered session store to retain a
+/// file edit. Graph admission and full owner publication happen after the
+/// durable receipt; the existing broker replay resolves the exact route.
+#[tracing::instrument(
+    name = "daemon.engine.hooks.admit_unmounted_edit",
+    level = "trace",
+    skip_all
+)]
+pub(super) async fn admit_unmounted_file_edit(
+    stores: &super::StoreAdministration,
+    handshake: &super::DaemonHandshake,
+    request: Option<&JsonRpcRequest>,
+) -> Result<Option<super::DaemonHandshake>> {
+    let Some(request) = request.filter(|request| {
+        request.method == HOOK_EVENT_METHOD && tracedecay_mcp::server::opens_rmcp_session(request)
+    }) else {
+        return Ok(None);
+    };
+    // Leave foreign or malformed inline contexts to the RMCP authority. This
+    // fast admission path must not acknowledge a request RMCP would refuse.
+    let Some(meta) = request
+        .params
+        .as_ref()
+        .and_then(|params| params.get("_meta"))
+        .and_then(|meta| serde_json::from_value::<RequestMetaObject>(meta.clone()).ok())
+    else {
+        return Ok(None);
+    };
+    if !meta
+        .missing_required_keys(&ProtocolVersion::V_2026_07_28)
+        .is_empty()
+        || meta
+            .protocol_version()
+            .is_none_or(|version| !ProtocolVersion::KNOWN_VERSIONS.contains(&version))
+    {
+        return Ok(None);
+    }
+    let Some(event) = hook_events::parse_hook_event(request.params.as_ref()) else {
+        return Ok(None);
+    };
+    if event.kind != HookEventKind::FileEdit || event.rel_paths.is_empty() {
+        return Ok(None);
+    }
+    let root = HookProjectRouteCache::route_cwd(&event).ok_or_else(|| {
+        TraceDecayError::project_route(
+            "project_route_unavailable",
+            false,
+            "file edit did not name its worktree",
+        )
+    })?;
+    let mut routed = handshake.clone();
+    routed.project_path = Some(root.to_path_buf());
+    let (root, route_key) = super::project_route_for_handshake(&routed, stores.owner_home()?)?;
+    if stores
+        .project_servers()
+        .lock()
+        .await
+        .get_route_and_touch_for(
+            &route_key,
+            super::ProjectServerRequirement::RegisteredHostIngest,
+        )
+        .is_some()
+    {
+        return Ok(None);
+    }
+    admit_registered_file_edit(stores, routed, root, &event)
+        .await
+        .map(Some)
+}
+
+async fn admit_registered_file_edit(
+    stores: &super::StoreAdministration,
+    mut routed: super::DaemonHandshake,
+    root: PathBuf,
+    event: &hook_events::HookEvent,
+) -> Result<super::DaemonHandshake> {
+    super::ensure_registered_project_route(stores, &root, false).await?;
+    let registry = stores.registered_profile_database().await?;
+    let layout = tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
+        &root,
+        &super::handshake_open_options(&routed),
+        registry.as_ref(),
+    )
+    .await?;
+    let project_id = layout.identity.project_id.as_deref().ok_or_else(|| {
+        TraceDecayError::project_route(
+            "project_route_unavailable",
+            false,
+            "file edit has no registered project identity",
+        )
+    })?;
+    let owner = registry
+        .project_registry_context_by_id(project_id)
+        .await?
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "project_route_unavailable",
+                false,
+                "file edit project is no longer registered",
+            )
+        })?;
+    let (root, scope) = tracedecay_mcp::scope::resolve_query_scope(&owner, &root)
+        .map_err(|error| error.into_route_failure().into_error())?;
+    let database = stores
+        .registered_project_session_database(&root, &layout)
+        .await?;
+    let broker = stores.host_admission_broker(&database).await?;
+    let payload = hook_events::encode_durable_hook_event_plan(&HookEventPlan::SyncFilesAt {
+        root: root.clone(),
+        scope,
+        agent: event.agent,
+        event_kind: event.kind,
+        had_command: event.had_command,
+        route: event.route.clone(),
+        rel_paths: event.rel_paths.clone(),
+    })
+    .map_err(|_| {
+        TraceDecayError::project_route(
+            "invalid_host_event_plan",
+            false,
+            "file edit could not be encoded for durable admission",
+        )
+    })?;
+    broker
+        .admit(&event.admission_source(), &payload)
+        .await
+        .map_err(|outcome| {
+            TraceDecayError::project_route(
+                outcome.reason_code.unwrap_or("host_admission_unavailable"),
+                outcome.retryable,
+                "file edit was not durably admitted",
+            )
+        })?;
+    routed.project_path = Some(root);
+    Ok(routed)
+}
+
+/// Delivers `event` and resolves after the daemon commits durable admission.
+/// Index effects may still be owed; source currency includes that canonical
+/// pending work until scheduler acceptance. A host bounds this call itself.
 #[tracing::instrument(name = "daemon.engine.hooks.notify", level = "trace", skip_all)]
 pub async fn notify_hook_event(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
@@ -60,9 +201,9 @@ async fn notify_hook_event_to_connection(
     };
     // A stateless request, not a notification: its own daemon connection has
     // no `initialize` session for a notification to ride. The daemon answers
-    // once it has admitted the event, the edited paths into the code-index
-    // queue included, so `Delivered` means a status read issued afterwards
-    // already sees the save.
+    // after the broker commits admission. `Delivered` does not wait for
+    // scheduler acceptance; subsequent source-currency reads account for the
+    // exact routed edit while the broker still owes that handoff.
     let mut request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(serde_json::Value::from(1)),

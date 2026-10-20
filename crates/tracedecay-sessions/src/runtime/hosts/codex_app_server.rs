@@ -1578,6 +1578,7 @@ mod tests {
         let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(not(target_os = "linux"))]
         unsafe extern "C" {
             fn kill(pid: i32, signal: i32) -> i32;
         }
@@ -1608,6 +1609,30 @@ mod tests {
             .trim()
             .parse()
             .expect("descendant pid");
+        let descendant_is_live = || {
+            // A killed orphan can remain a zombie until the host reaps it;
+            // kill(pid, 0) still succeeds although it has already exited.
+            #[cfg(target_os = "linux")]
+            {
+                let stat = match std::fs::read_to_string(format!("/proc/{descendant_pid}/stat")) {
+                    Ok(stat) => stat,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+                    Err(error) => panic!("read descendant process state: {error}"),
+                };
+                stat.rsplit_once(')')
+                    .expect("descendant process stat must contain a command terminator")
+                    .1
+                    .split_whitespace()
+                    .next()
+                    .expect("descendant process stat must contain a state")
+                    != "Z"
+            }
+            #[cfg(not(target_os = "linux"))]
+            unsafe {
+                kill(descendant_pid, 0) == 0
+            }
+        };
+        assert!(descendant_is_live(), "descendant must run before shutdown");
 
         let shutdown = begin_codex_app_server_shutdown();
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1619,12 +1644,11 @@ mod tests {
             "active child should exit during shutdown"
         );
         let descendant_deadline = Instant::now() + Duration::from_secs(1);
-        while unsafe { kill(descendant_pid, 0) } == 0 && Instant::now() < descendant_deadline {
+        while descendant_is_live() && Instant::now() < descendant_deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_ne!(
-            unsafe { kill(descendant_pid, 0) },
-            0,
+        assert!(
+            !descendant_is_live(),
             "app-server descendant should exit during shutdown"
         );
 

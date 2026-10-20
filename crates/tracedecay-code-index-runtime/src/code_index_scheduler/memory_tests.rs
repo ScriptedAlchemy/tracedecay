@@ -490,7 +490,7 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
                     resident_bytes: unreclaimable_bytes,
                     unreclaimable_bytes,
                     swapped_bytes: 0,
-                    cgroup_committed_bytes: None,
+                    cgroup_headroom_bytes: None,
                 })
         }),
     ));
@@ -577,7 +577,7 @@ fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
                 resident_bytes: unreclaimable_bytes,
                 unreclaimable_bytes,
                 swapped_bytes: 0,
-                cgroup_committed_bytes: None,
+                cgroup_headroom_bytes: None,
             })
         }),
     ));
@@ -655,7 +655,7 @@ fn a_refresh_decodes_its_parent_before_planning_its_worker_slab() {
                 resident_bytes: 0,
                 unreclaimable_bytes: 0,
                 swapped_bytes: 0,
-                cgroup_committed_bytes: None,
+                cgroup_headroom_bytes: None,
             })
         }),
     ));
@@ -745,7 +745,7 @@ fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
                 resident_bytes: 0,
                 unreclaimable_bytes: 0,
                 swapped_bytes: 0,
-                cgroup_committed_bytes: None,
+                cgroup_headroom_bytes: None,
             })
         }),
     ));
@@ -829,7 +829,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
         resident_bytes: GIB,
         unreclaimable_bytes: GIB,
         swapped_bytes: 0,
-        cgroup_committed_bytes: None,
+        cgroup_headroom_bytes: None,
     }));
     let sampled = Arc::clone(&view);
     let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
@@ -853,7 +853,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
         resident_bytes: high_watermark - 1,
         unreclaimable_bytes: 2 * GIB,
         swapped_bytes: 0,
-        cgroup_committed_bytes: None,
+        cgroup_headroom_bytes: None,
     };
     let decoded = scheduler
         .latest_complete()
@@ -879,7 +879,7 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
         resident_bytes: high_watermark - 1,
         unreclaimable_bytes: high_watermark - 1,
         swapped_bytes: 0,
-        cgroup_committed_bytes: None,
+        cgroup_headroom_bytes: None,
     };
     assert!(matches!(
         scheduler.publication.load_active_shared(),
@@ -920,7 +920,7 @@ fn reconcile_stops_when_resident_memory_crosses_the_watermark() {
                 resident_bytes: unreclaimable_bytes,
                 unreclaimable_bytes,
                 swapped_bytes: 0,
-                cgroup_committed_bytes: None,
+                cgroup_headroom_bytes: None,
             })
         }),
     ));

@@ -4,10 +4,11 @@
 //! operation. This module owns only project patch validation shared before
 //! adapters invoke that operation.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// One field-level settings validation failure.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SettingsValidationIssueV1 {
     pub field: String,
     pub message: String,

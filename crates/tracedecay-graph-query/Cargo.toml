@@ -6,7 +6,6 @@ edition.workspace = true
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 description = "Generation-pinned verified code-graph queries and code-index-backed source readers"
-include = ["/src/**"]
 
 [dependencies]
 serde_json = "1"
