@@ -1285,10 +1285,13 @@ async fn read_retrieval_aliases_from_snapshot(
     let mut rows = snapshot
         .query(
             "SELECT alias.owner_json, alias.alias_kind, alias.locator_digest,
-                    alias.anchor_id, binding.observation_id
+                    alias.anchor_id, owner.observation_id
              FROM retrieval_anchor_aliases AS alias
              LEFT JOIN observation_retrieval_anchors AS binding
                ON binding.anchor_id = alias.anchor_id
+             LEFT JOIN observations AS owner
+               ON owner.observation_id = binding.observation_id
+              AND json_extract(owner.observation_json, '$.__retention_released') IS NULL
              JOIN json_each(?1) AS requested
                ON alias.owner_json =
                     json_extract(requested.value, '$.scope_json')
