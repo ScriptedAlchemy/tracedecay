@@ -249,7 +249,10 @@ fn anchored_write_under(
     AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap()
 }
 
-fn sequential_writes(session_id: &SessionId, count: usize) -> Vec<AnchoredObservationWrite> {
+pub(crate) fn sequential_writes(
+    session_id: &SessionId,
+    count: usize,
+) -> Vec<AnchoredObservationWrite> {
     sequential_writes_with_text(session_id, count, |ordinal| format!("frame {ordinal}"))
 }
 

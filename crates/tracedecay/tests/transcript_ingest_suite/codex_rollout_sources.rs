@@ -199,6 +199,36 @@ async fn rewriting_the_thread_rollout_supersedes_only_its_own_messages() {
     );
 }
 
+#[tokio::test]
+async fn restoring_a_rewritten_rollout_revives_the_replies_the_rewrite_dropped() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let db = open_project_session_db(&project).await.unwrap();
+    thread_rollout(&home, &project, &[LEDGER_MIGRATION, LEDGER_BACKFILL]);
+    ingest(&home, &db, &project).await;
+
+    thread_rollout(&home, &project, &[LEDGER_MIGRATION, INVOICE_RETRY]);
+    ingest(&home, &db, &project).await;
+    assert_eq!(
+        replies(&db).await,
+        sorted(&[LEDGER_MIGRATION, INVOICE_RETRY])
+    );
+
+    thread_rollout(
+        &home,
+        &project,
+        &[LEDGER_MIGRATION, LEDGER_BACKFILL, INVOICE_ROLLBACK],
+    );
+    for pass in 1..=2 {
+        ingest(&home, &db, &project).await;
+        assert_eq!(
+            replies(&db).await,
+            sorted(&[LEDGER_MIGRATION, LEDGER_BACKFILL, INVOICE_ROLLBACK]),
+            "pass {pass}: the restored layout offers the dropped reply again and drops the rewrite's"
+        );
+    }
+}
+
 async fn assert_a_shared_record_outlives_a_rewrite_of_either(
     thread_lines: &[serde_json::Value],
     revert_lines: &[serde_json::Value],
@@ -319,7 +349,12 @@ async fn upgrade_revives_a_revert_rollout_the_shipped_v2_binary_retired() {
         &db,
         &project,
         &[],
-        &[INVOICE_RETRY, INVOICE_ROLLBACK],
+        &[
+            LEDGER_MIGRATION,
+            LEDGER_BACKFILL,
+            INVOICE_RETRY,
+            INVOICE_ROLLBACK,
+        ],
     )
     .await;
 }
@@ -350,7 +385,12 @@ async fn upgrade_keeps_a_revert_rollout_the_shipped_v2_binary_read_last() {
         &db,
         &project,
         &[INVOICE_RETRY, INVOICE_ROLLBACK],
-        &[INVOICE_RETRY, INVOICE_ROLLBACK],
+        &[
+            LEDGER_MIGRATION,
+            LEDGER_BACKFILL,
+            INVOICE_RETRY,
+            INVOICE_ROLLBACK,
+        ],
     )
     .await;
 }
