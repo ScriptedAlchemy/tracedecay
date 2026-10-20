@@ -33,7 +33,9 @@ use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
     message_transition, write_workflow_fact_transition,
 };
-use tracedecay_session_temporal_store::record_canonical_observation_effect;
+use tracedecay_session_temporal_store::{
+    record_canonical_observation_effect, request_session_temporal_reset,
+};
 
 pub(super) const REBUILD_PAGE_SIZE: i64 = 128;
 const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
@@ -602,17 +604,7 @@ async fn project_observation_in_transaction_with_session(
     let mut effect = derive_projection_with_alias(transaction, &observation).await?;
     if sequence <= checkpoint.last_sequence() {
         verify_effect(transaction, &observation, &effect).await?;
-        if !matches!(
-            effect,
-            ObservationProjection::Skipped(
-                ProjectionSkipReason::InvalidContract
-                    | ProjectionSkipReason::NativeSourceSuperseded
-                    | ProjectionSkipReason::SourceRecordRetired
-            )
-        ) {
-            record_canonical_observation_effect(transaction, sequence, &observation, &effect)
-                .await?;
-        }
+        record_canonical_effect(transaction, sequence, &observation, &effect).await?;
         consume_projection_queue_item(transaction, observation_id).await?;
         return Ok((
             ProjectionPersistOutcome::ExactDuplicate(checkpoint),
@@ -640,16 +632,7 @@ async fn project_observation_in_transaction_with_session(
         &mut effect,
     ))
     .await?;
-    if !matches!(
-        effect,
-        ObservationProjection::Skipped(
-            ProjectionSkipReason::InvalidContract
-                | ProjectionSkipReason::NativeSourceSuperseded
-                | ProjectionSkipReason::SourceRecordRetired
-        )
-    ) {
-        record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
-    }
+    record_canonical_effect(transaction, sequence, &observation, &effect).await?;
     // A genuine session collision stays on its queue row with last_error set
     // and a terminal deadline. The checkpoint still advances, and head
     // selection skips that row, so later observations project.
@@ -667,6 +650,141 @@ async fn project_observation_in_transaction_with_session(
         }
     };
     Ok((outcome, session_id))
+}
+
+/// Restores the projection of an observation a source rewrite retired, once
+/// its source offers it again. An observation still queued past the
+/// checkpoint only needs its disposition removed, since the drain projects it
+/// next; one the drain already passed has its effect applied here. A rebuild
+/// that already staged it as retired restages it, or activation would bring
+/// the retirement back.
+pub(in super::super) async fn revive_source_record(
+    transaction: &DatabaseWriteTransaction<'_>,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<()> {
+    let retired = ProjectionSkipReason::SourceRecordRetired.as_str();
+    let revived = transaction
+        .execute(
+            "DELETE FROM observation_projection_dispositions
+             WHERE projector_version = ?1 AND observation_id = ?2 AND reason = ?3",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+                retired
+            ],
+        )
+        .await
+        .map_err(|error| storage("revive source record", error))?;
+    if revived == 0 {
+        return Ok(());
+    }
+    let (sequence, observation) = read_observation(transaction, observation_id)
+        .await?
+        .ok_or(ProjectionStoreError::ObservationNotFound)?;
+    if sequence <= read_checkpoint(transaction).await?.last_sequence() {
+        let mut effect = derive_projection_with_alias(transaction, &observation).await?;
+        Box::pin(write_effect_converging_collisions(
+            transaction,
+            &CollisionGuardedWrite::Drain,
+            sequence,
+            &observation,
+            &mut effect,
+        ))
+        .await?;
+        record_canonical_effect(transaction, sequence, &observation, &effect).await?;
+        request_session_temporal_reset(transaction, observation_id.as_str()).await?;
+    }
+    let Some(job) = read_optional_rebuild_job(transaction).await? else {
+        return Ok(());
+    };
+    let unstaged = transaction
+        .execute(
+            "DELETE FROM observation_projection_rebuild_dispositions
+             WHERE projector_version = ?1 AND generation = ?2
+               AND observation_id = ?3 AND reason = ?4",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                job.generation.as_str(),
+                observation_id.as_str(),
+                retired
+            ],
+        )
+        .await
+        .map_err(|error| storage("revive staged source record", error))?;
+    if unstaged == 0 {
+        return Ok(());
+    }
+    let effect = Box::pin(stage_rebuild_observation(
+        transaction,
+        &job.generation,
+        sequence,
+        &observation,
+    ))
+    .await?;
+    if matches!(effect, ObservationProjection::Skipped(_)) {
+        return Ok(());
+    }
+    let skipped_observations = job.skipped_observations.checked_sub(1).ok_or_else(|| {
+        storage_message(
+            "revive staged source record",
+            "staged retirement was not counted as skipped",
+        )
+    })?;
+    transaction
+        .execute(
+            "UPDATE observation_projection_rebuilds
+             SET projected_rows = ?3, skipped_observations = ?4
+             WHERE projector_version = ?1 AND generation = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                job.generation.as_str(),
+                usize_i64(job.projected_rows.saturating_add(effect.output_count()))?,
+                usize_i64(skipped_observations)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage("revive staged source record", error))?;
+    Ok(())
+}
+
+async fn stage_rebuild_observation(
+    transaction: &DatabaseWriteTransaction<'_>,
+    generation: &str,
+    sequence: u64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
+    let mut effect = derive_projection_for_rebuild(transaction, observation, generation).await?;
+    write_effect_converging_collisions(
+        transaction,
+        &CollisionGuardedWrite::Stage { generation },
+        sequence,
+        observation,
+        &mut effect,
+    )
+    .await?;
+    record_canonical_effect(transaction, sequence, observation, &effect).await?;
+    Ok(effect)
+}
+
+/// The skips that leave an observation without a canonical rendering record
+/// no temporal effect.
+async fn record_canonical_effect(
+    transaction: &DatabaseWriteTransaction<'_>,
+    sequence: u64,
+    observation: &DurableObservationV1,
+    effect: &ObservationProjection,
+) -> ProjectionStoreResult<()> {
+    if matches!(
+        effect,
+        ObservationProjection::Skipped(
+            ProjectionSkipReason::InvalidContract
+                | ProjectionSkipReason::NativeSourceSuperseded
+                | ProjectionSkipReason::SourceRecordRetired
+        )
+    ) {
+        return Ok(());
+    }
+    record_canonical_observation_effect(transaction, sequence, observation, effect).await
 }
 
 async fn start_or_resume_projection_rebuild_transaction(
@@ -859,29 +977,8 @@ async fn stage_projection_rebuild_batch_transaction(
                 "observation sequence gap before rebuild frontier",
             ));
         }
-        let mut effect =
-            derive_projection_for_rebuild(transaction, &observation, &job.generation).await?;
-        write_effect_converging_collisions(
-            transaction,
-            &CollisionGuardedWrite::Stage {
-                generation: &job.generation,
-            },
-            sequence,
-            &observation,
-            &mut effect,
-        )
-        .await?;
-        if !matches!(
-            effect,
-            ObservationProjection::Skipped(
-                ProjectionSkipReason::InvalidContract
-                    | ProjectionSkipReason::NativeSourceSuperseded
-                    | ProjectionSkipReason::SourceRecordRetired
-            )
-        ) {
-            record_canonical_observation_effect(transaction, sequence, &observation, &effect)
-                .await?;
-        }
+        let effect =
+            stage_rebuild_observation(transaction, &job.generation, sequence, &observation).await?;
         match &effect {
             ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
                 projected_rows = projected_rows.saturating_add(effect.output_count());
