@@ -8,11 +8,11 @@ sessions depend on the real `~/.claude`, `~/.tracedecay`, and
 
 ```bash
 # One-shot: build + isolate + install + index + one trivial scenario.
-evals/hermetic/run.sh smoke --agent claude --model sonnet --debug
-evals/hermetic/run.sh smoke --agent codex --debug
+evals/hermetic/run.sh smoke --agent claude --model sonnet
+evals/hermetic/run.sh smoke --agent codex
 
 # Full corpus against a reusable env:
-ENV=$(evals/hermetic/run.sh setup --agent claude --debug)
+ENV=$(evals/hermetic/run.sh setup --agent claude)
 evals/hermetic/run.sh index --env-dir "$ENV" --project /path/to/repo
 evals/hermetic/run.sh run   --agent claude --env-dir "$ENV" --corpus my-corpus.jsonl --model sonnet
 evals/hermetic/run.sh teardown --env-dir "$ENV"
@@ -21,6 +21,14 @@ evals/hermetic/run.sh teardown --env-dir "$ENV"
 Without `--project`, the harness indexes the checkout containing `run.sh`, not
 the caller's working directory or a machine-specific primary checkout. Pass
 `--project` explicitly to evaluate another repository.
+
+`setup` and `smoke` build the shipping target `//crates/tracedecay-cli:tracedecay`
+through `scripts/build-eval-binary.sh` (`bazel build --config=release`; set
+`TRACEDECAY_EVAL_BAZEL_CONFIG=dist` for the exact release bytes). The script
+prints the binary's version and sha256. A failed build aborts the run; there is
+no stale-binary fallback. `TRACEDECAY_BIN=<path>` stages an already-built
+binary instead (for example a release binary to compare against) and the same
+identity line records which one ran.
 
 Offline harness path-selection checks (no build, agent, or daemon required):
 
@@ -147,12 +155,12 @@ Each scored row in `results.jsonl` also records derived fields: **`verify_pass`*
 The args-ergonomics corpus compares MCP-first behavior with CLI fallback:
 
 ```bash
-ENV=$(evals/hermetic/run.sh setup --agent claude --debug)
+ENV=$(evals/hermetic/run.sh setup --agent claude)
 evals/hermetic/run.sh index --env-dir "$ENV" --project /path/to/tracedecay-worktree
 evals/hermetic/run.sh run --agent claude --env-dir "$ENV" \
   --corpus evals/hermetic/corpora/tool-args-ergonomics.jsonl --model sonnet
 
-ENV=$(evals/hermetic/run.sh setup --agent codex --debug)
+ENV=$(evals/hermetic/run.sh setup --agent codex)
 evals/hermetic/run.sh index --env-dir "$ENV" --project /path/to/tracedecay-worktree
 evals/hermetic/run.sh run --agent codex --env-dir "$ENV" \
   --corpus evals/hermetic/corpora/tool-args-ergonomics.jsonl
@@ -175,17 +183,15 @@ scenario) and `summary.md` (pass count + per-scenario table).
 - **Codex auth.** Codex mode copies only `~/.codex/auth.json` into the isolated
   `CODEX_HOME`. If Codex changes auth storage, `codex exec` will fail closed in
   the eval env instead of mutating the user's real config.
-- **Global cargo caches** (`~/.cargo/registry`) are shared, only the *output*
-  (`CARGO_TARGET_DIR=<worktree>/target`) is worktree-scoped. The build cannot
-  corrupt the user's install because it never writes to `~/.cargo/bin`.
+- **The build cache** is Bazel's, shared across worktrees. The build cannot
+  corrupt the user's install because it only stages a copy under the env dir.
 
 ## Post-merge re-eval protocol
 
 After the plugin-suite changes merge, re-run to compare against the baseline
 facts recorded in tracedecay memory:
 
-1. **Rebuild** from the merged checkout: `run.sh setup` (drop `--debug` for a
-   representative release build).
+1. **Rebuild** from the merged checkout: `run.sh setup`.
 2. **Re-index** the same target project into the fresh env.
 3. **Rerun the same corpus** at the same `--model`.
 4. **Compare** the new `summary.md` pass rate and per-scenario tracedecay-vs-
@@ -212,7 +218,7 @@ how close the agent is to the intended loop.
 Run recipe (adapted from the reusable-env examples above):
 
 ```bash
-ENV=$(evals/hermetic/run.sh setup --agent claude --debug)
+ENV=$(evals/hermetic/run.sh setup --agent claude)
 evals/hermetic/run.sh index --env-dir "$ENV" --project /path/to/repo
 evals/hermetic/run.sh run --agent claude --env-dir "$ENV" \
   --corpus evals/hermetic/corpora/fact-store-adoption.jsonl --model sonnet

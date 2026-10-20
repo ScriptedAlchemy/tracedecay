@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 LINEAGE_PATH = ROOT / "scripts/rust_cache_lineage.py"
 CHECKER_PATH = ROOT / "scripts/check-rust-cache-lineage.py"
 WORKFLOWS = ROOT / ".github/workflows"
-# The packaging battery still builds with Cargo behind rust-cache.
-FIXTURE = "distribution-acceptance.yml"
+# Hawk still uses the Cargo cache for its optional diagnostics.
+FIXTURE = "hawk.yml"
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -87,7 +87,7 @@ class WorkspaceRootTests(unittest.TestCase):
 
     def test_rejects_rooting_rust_cache_at_the_vendored_checkout(self) -> None:
         self._assert_rejected_after(
-            "crates -> ../target\n",
+            "crates -> ../target/hawk\n",
             ". -> target\n",
             f"{FIXTURE} rust-cache step must list workspace root 'crates -> ../target'",
         )

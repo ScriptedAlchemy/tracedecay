@@ -97,16 +97,15 @@ assets. It builds the production binary, smokes `--version`/`--help`, and
 packages the MCPB and archive from that same file. A source-tree inventory
 or a release-PR path policy is not acceptance.
 
-`scripts/check-distribution-acceptance.sh` proves the unpublished crate
-graph (`cargo package`, extracted-crate rebuilds, nextest, MCP inspector).
-That is not required to stamp the binary assets. The battery runs on demand
-only, on one free `ubuntu-latest` runner:
-`gh workflow run distribution-acceptance.yml --ref master`. Nothing in this
-repository runs on a timer. The battery's production binary is the CLI it
-release-builds from the extracted package; it does not release-build the
-source tree first (that compile is `shipped-cli` in `ci.yml`). A caller that
-already holds a source-tree production binary may pass
-`--reuse-release-binary` to prove that binary reports the same commit.
+Rust workspace crates remain unpublished. There is no packaged-crate
+reconstruction or downstream Cargo consumer acceptance path. Bazel builds
+and tests the supported feature graph directly; source-package publication
+requires a separate product decision with a real consumer.
+
+The `shipped-cli` CI job also exercises MCP stdio and the LSP initialize
+handshake against its production binary in isolated temporary profiles.
+Archive and MCPB verification stays attached to the exact release assets;
+SDK conformance stays attached to the npm tarball.
 
 Host install, update, and uninstall journeys, and recorded native host
 events as historical-ingestion evidence, stay product contracts. They do

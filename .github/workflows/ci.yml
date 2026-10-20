@@ -185,7 +185,10 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           cache-key: ci-format-linux
-          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Test the ranked-tail trim replay against the Rust rule cases
         run: bazel run //scripts:test-measure-ranked-tail-trim.py
@@ -205,18 +208,11 @@ jobs:
         run: |
           python3 scripts/test-check-packaged-lsp-bridge.py
           python3 scripts/test-build-mcpb.py
-          python3 scripts/test-resolve-installed-binary.py
-          python3 scripts/test-check-packaged-mcp-stdio.py
-          python3 scripts/test-check-distribution-feature-wiring.py
-          python3 scripts/test-resolve-release-source-profile.py
           python3 scripts/test-package-release-archive.py
           python3 scripts/test-plan-release-recovery.py
           python3 scripts/test-check-release-artifacts.py
           python3 scripts/test-update-release-checksums.py
           python3 scripts/test-neutralize-release-pr-closing-keywords.py
-          bash scripts/test-check-distribution-clean-source.sh
-          bash scripts/test-check-distribution-snapshot.sh
-          bash scripts/test-check-distribution-reuse.sh
           bash tests/macos_stable_codesign_test.sh
 
       # Exercise the release guard scripts when admitting proposed changes.
@@ -483,9 +479,12 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-test-v2
-          # Tailscale independently checks this repository and immutable actor
-          # ID. This condition avoids requesting credentials for fork PRs.
-          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
+          # Tailscale binds each client to this repository, workflow, and actor ID.
+          # Fork PRs never receive a fleet identity.
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
           # Prefer v2; keep legacy prefixes as restore fallbacks if still present.
           extra-restore-keys: ci-linux-test,ci-linux-workspace-test
 
@@ -606,9 +605,12 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-clippy
-          # Tailscale independently checks this repository and immutable actor
-          # ID. This condition avoids requesting credentials for fork PRs.
-          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
+          # Tailscale binds each client to this repository, workflow, and actor ID.
+          # Fork PRs never receive a fleet identity.
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
           extra-restore-keys: ci-linux-test-v2
 
       - name: Run blocking Clippy policy
@@ -668,7 +670,10 @@ jobs:
           config: release
           dest: target/x86_64-unknown-linux-gnu/release
           cache-key: release-x86_64-unknown-linux-gnu
-          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Read immutable packaging inputs
         id: packaging
@@ -687,6 +692,16 @@ jobs:
           platform: x86_64-linux
           archive: tar.gz
           epoch: ${{ steps.packaging.outputs.epoch }}
+
+      - name: Exercise shipped MCP and LSP transports
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$GITHUB_WORKSPACE/target/x86_64-unknown-linux-gnu/release/tracedecay"
+          smoke_work="$(mktemp -d)"
+          trap 'rm -rf -- "$smoke_work"' EXIT
+          TRACEDECAY_BIN="$binary" bazel run //scripts:mcp-conformance-smoke.sh
+          bazel run //scripts:packaged_lsp_bridge -- "$binary" "$smoke_work/lsp"
 
   # Frontend checks require no Rust compilation and must also validate drafts.
   # Do not serialize them behind repository-wide Rust formatting and gates.

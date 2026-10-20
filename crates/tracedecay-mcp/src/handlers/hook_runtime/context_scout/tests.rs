@@ -36,35 +36,6 @@ fn exact_retained_claim_lookup_commits_beyond_thirty_two_entries() {
 }
 
 #[test]
-fn exact_event_claim_lookup_is_unique_and_unexpired() {
-    let _guard = RETAINED_CLAIM_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let project_id = [201; 16];
-    let now = UtcMicros(999);
-    let claim = retained_claim(41);
-    let event_id = claim.lease.lease_id;
-
-    assert!(lookup_hook_v2_delivery_claim_for_event(project_id, event_id, now).is_none());
-    assert!(retain_hook_v2_delivery_claim(project_id, claim.clone(), now).is_ok());
-    assert_eq!(
-        lookup_hook_v2_delivery_claim_for_event(project_id, event_id, now),
-        Some(claim.clone())
-    );
-
-    let mut ambiguous = retained_claim(42);
-    ambiguous.lease.lease_id = event_id;
-    assert!(retain_hook_v2_delivery_claim(project_id, ambiguous.clone(), now).is_ok());
-    assert!(lookup_hook_v2_delivery_claim_for_event(project_id, event_id, now).is_none());
-    remove_hook_v2_delivery_claim(project_id, ambiguous.entry.envelope.envelope_id);
-    assert!(
-        lookup_hook_v2_delivery_claim_for_event(project_id, event_id, claim.lease.expires_at)
-            .is_none()
-    );
-    remove_hook_v2_delivery_claim(project_id, claim.entry.envelope.envelope_id);
-}
-
-#[test]
 fn retained_claims_backpressure_at_a_deterministic_bound() {
     let _guard = RETAINED_CLAIM_TEST_LOCK
         .lock()
@@ -192,7 +163,7 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
                 u64::try_from(order).unwrap() + 2,
             )
             .unwrap();
-            assert!(
+            assert_eq!(
                 admit_native_context_scout_lifecycle(
                     &sessions,
                     Some(&runtime.background_cpu()),
@@ -200,9 +171,10 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
                     &identity,
                     range,
                 )
-                .await
+                .await,
+                NativeLifecycleAdmissionV1::Ready,
             );
-            assert!(
+            assert_eq!(
                 admit_native_context_scout_lifecycle(
                     &sessions,
                     Some(&runtime.background_cpu()),
@@ -210,7 +182,8 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
                     &identity,
                     range,
                 )
-                .await
+                .await,
+                NativeLifecycleAdmissionV1::Ready,
             );
         }
         let lifecycle =
@@ -279,14 +252,23 @@ async fn lifecycle_positions_with_gaps_or_late_arrivals_settle() {
         }
     };
 
-    assert!(admit("call.kimi.first", 1).await);
-    assert!(admit("call.kimi.after-gap", 5).await, "a gap must commit");
-    assert!(
+    assert_eq!(
+        admit("call.kimi.first", 1).await,
+        NativeLifecycleAdmissionV1::Ready
+    );
+    assert_eq!(
         admit("call.kimi.after-gap", 5).await,
+        NativeLifecycleAdmissionV1::Ready,
+        "a gap must commit"
+    );
+    assert_eq!(
+        admit("call.kimi.after-gap", 5).await,
+        NativeLifecycleAdmissionV1::Ready,
         "a retry stays admitted"
     );
-    assert!(
+    assert_eq!(
         admit("call.kimi.late", 3).await,
+        NativeLifecycleAdmissionV1::Superseded,
         "an event older than the committed cursor is already covered"
     );
 

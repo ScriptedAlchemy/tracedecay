@@ -55,15 +55,9 @@ fn derive_hook_span_git_context(
     Some((worktree, branch))
 }
 
-fn configuration_authority_unavailable(detail: impl std::fmt::Display) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("configuration authority unavailable: {detail}"),
-    }
-}
-
-// Global accounting (savings ledger + worldwide-counter flushes) is enabled
-// by default; see `tracedecay_global_db::global_accounting_mode` for the env
-// override precedence.
+// Global accounting (the savings ledger) is enabled by default; see
+// `tracedecay_global_db::global_accounting_mode` for the env override
+// precedence.
 
 /// Where this server's savings-ledger and analytics writes land.
 ///
@@ -109,37 +103,6 @@ impl McpServer {
     /// than discovering the gap as an absent row much later.
     pub fn ledger_sink_is_mounted(&self) -> bool {
         matches!(self.ledger_sink(), LedgerSink::Mounted(_))
-    }
-
-    /// Reads the upload policy from the owning profile's configuration store.
-    /// There is deliberately no `config.toml` fallback: without the canonical
-    /// authority, the upload decision is unavailable.
-    #[tracing::instrument(name = "mcp.ledger.read_upload_policy", level = "trace", skip_all)]
-    pub(super) async fn canonical_upload_enabled(&self) -> Result<bool> {
-        let (Some(database), Some(identity)) =
-            (self.profile_session_db.clone(), self.profile_identity())
-        else {
-            return Err(configuration_authority_unavailable(
-                "server has no registered profile configuration store",
-            ));
-        };
-        let profile = tracedecay_project::config::read_or_initialize_profile_configuration(
-            database,
-            identity.profile_id(),
-        )
-        .await
-        .map_err(|error| {
-            configuration_authority_unavailable(format!("cannot read upload setting: {error}"))
-        })?;
-        match profile.value(tracedecay_domain::configuration::USER_UPLOAD_ENABLED_SETTING_KEY) {
-            Ok(tracedecay_domain::configuration::ConfigurationValueV1::Boolean(enabled)) => {
-                Ok(*enabled)
-            }
-            Ok(_) => Err(configuration_authority_unavailable(
-                "upload setting is not boolean",
-            )),
-            Err(error) => Err(configuration_authority_unavailable(error)),
-        }
     }
 
     /// Estimates the raw-file token cost ("before") for the given file
@@ -309,74 +272,6 @@ impl McpServer {
     #[cfg(test)]
     pub(crate) fn file_token_map_snapshot(&self) -> HashMap<String, u64> {
         crate::mcp::server::requests::recover_lock(&self.file_token_map).clone()
-    }
-
-    /// Admits one background worldwide-counter flush at each 30-second boundary.
-    ///
-    /// The complete flush runs on the observed ledger-write path so responses
-    /// never await configuration or cloud I/O and shutdown still drains it.
-    #[tracing::instrument(name = "mcp.ledger.flush_worldwide", level = "trace", skip_all)]
-    pub(crate) fn maybe_flush_worldwide(self: &Arc<Self>) {
-        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-        let last = self.last_flush_at.load(Ordering::Relaxed);
-        if now - last < 30 {
-            return;
-        }
-        if !claim_worldwide_flush(&self.last_flush_at, last, now) {
-            return;
-        }
-
-        let (Some(tokens_saved), Some(last_flushed_tokens)) =
-            (&self.tokens_saved, &self.last_flushed_tokens)
-        else {
-            return;
-        };
-        let current = tokens_saved.load(Ordering::Relaxed);
-        let last_flushed = last_flushed_tokens.load(Ordering::Relaxed);
-        if current <= last_flushed {
-            return;
-        }
-        let delta = current - last_flushed;
-
-        if !self.ledger_sink_is_mounted() {
-            return;
-        }
-        let Some(profile_root) = self
-            .owner_profile()
-            .map(|profile| profile.data_dir().to_path_buf())
-        else {
-            tracing::warn!("worldwide counter flush skipped: server has no owning profile");
-            return;
-        };
-
-        let server = Arc::clone(self);
-        self.spawn_observed_ledger_write(async move {
-            let upload_enabled = match server.canonical_upload_enabled().await {
-                Ok(enabled) => enabled,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "worldwide counter upload skipped because configuration authority is unavailable"
-                    );
-                    return;
-                }
-            };
-            let saved = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                persist_worldwide_delta(&profile_root, delta, upload_enabled)
-                    .inspect_err(|error| tracing::warn!(%error, "could not save upload config"))
-                    .is_ok()
-            })
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "worldwide counter flush task failed");
-                false
-            });
-            if saved
-                && let Some(last_flushed_tokens) = server.last_flushed_tokens.as_ref()
-            {
-                last_flushed_tokens.store(current, Ordering::Release);
-            }
-        });
     }
 
     #[tracing::instrument(name = "mcp.ledger.record_error_analytics", level = "trace", skip_all)]
@@ -602,163 +497,58 @@ impl McpServer {
     }
 }
 
-/// Adds `delta` to the profile's pending worldwide-counter count, uploading it
-/// when enabled, and saves the profile config.
-pub(super) fn persist_worldwide_delta(
-    profile_root: &Path,
-    delta: u64,
-    upload_enabled: bool,
-) -> std::result::Result<(), tracedecay_session_memory::user_config::ConfigSaveError> {
-    let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile_root)?;
-    config.pending_upload = config.pending_upload.saturating_add(delta);
-    if upload_enabled
-        && tracedecay_dashboard_api::cloud::flush_pending(config.pending_upload).is_some()
-    {
-        config.pending_upload = 0;
-        config.last_upload_at = tracedecay_runtime_core::tracedecay::current_timestamp();
-    }
-    config.save(profile_root)
-}
-
-fn claim_worldwide_flush(last_flush_at: &AtomicI64, expected: i64, now: i64) -> bool {
-    last_flush_at
-        .compare_exchange(expected, now, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
+    use serde_json::json;
+    use tracedecay_mcp::transport::JsonRpcRequest;
 
     use super::*;
 
-    #[test]
-    fn concurrent_boundary_calls_claim_exactly_one_worldwide_flush() {
-        let last_flush_at = Arc::new(AtomicI64::new(10));
-        let barrier = Arc::new(std::sync::Barrier::new(16));
-        let claimed = Arc::new(AtomicU64::new(0));
-        let workers = (0..16)
-            .map(|_| {
-                let last_flush_at = Arc::clone(&last_flush_at);
-                let barrier = Arc::clone(&barrier);
-                let claimed = Arc::clone(&claimed);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    if claim_worldwide_flush(&last_flush_at, 10, 40) {
-                        claimed.fetch_add(1, Ordering::AcqRel);
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        for worker in workers {
-            worker.join().expect("flush claimant");
-        }
-
-        assert_eq!(claimed.load(Ordering::Acquire), 1);
-        assert_eq!(last_flush_at.load(Ordering::Acquire), 40);
-    }
-
-    #[test]
-    fn disabled_upload_records_each_delta_once_after_durable_save() {
-        let profile = tempfile::tempdir().expect("profile");
-        let profile = profile.path();
-        let mut config = tracedecay_session_memory::user_config::UserConfig::load(profile).unwrap();
-        config.pending_upload = 0;
-        config
-            .save(profile)
-            .expect("initialize isolated user config");
-        let current = 37_u64;
-        let last_flushed = AtomicU64::new(0);
-
-        for _ in 0..2 {
-            let previous = last_flushed.load(Ordering::Acquire);
-            if current > previous
-                && persist_worldwide_delta(profile, current - previous, false).is_ok()
-            {
-                last_flushed.store(current, Ordering::Release);
-            }
-        }
-
-        let persisted = tracedecay_session_memory::user_config::UserConfig::load(profile).unwrap();
-        assert_eq!(persisted.pending_upload, current);
-        assert_eq!(last_flushed.load(Ordering::Acquire), current);
-    }
-
+    /// A completed tool response persists its tokens-saved accounting locally
+    /// and leaves the profile `config.toml` alone. The retired worldwide
+    /// counter used to write its pending-upload amount there after a response.
     #[tokio::test]
-    async fn concurrent_response_boundary_admits_one_observed_background_flush() {
+    async fn completed_response_persists_local_accounting_without_counter_state() {
         let (cg, _project, authority) =
             super::super::writer_test_support::init_indexed_repo().await;
+        let config_path =
+            tracedecay_session_memory::user_config::config_path(authority.profile_root());
+        let config_before = std::fs::read(&config_path).ok();
+        let project_root = cg.project_root().to_path_buf();
         let context = super::super::writer_test_support::registered_context(cg, &authority);
         let server = super::super::McpServer::new_with_context(context).await;
         let tokens_saved = server.tokens_saved.as_ref().expect("fixture token counter");
-        let last_flushed = server
-            .last_flushed_tokens
-            .as_ref()
-            .expect("fixture flushed counter");
-        let baseline = last_flushed.load(Ordering::Acquire);
+        let baseline = tokens_saved.load(Ordering::Acquire);
         tokens_saved.store(baseline + 41, Ordering::Release);
-        server.last_flush_at.store(0, Ordering::Release);
-        let started_before = server.ledger_writes_started.load(Ordering::SeqCst);
-        let barrier = Arc::new(tokio::sync::Barrier::new(16));
-        let callers = (0..16)
-            .map(|_| {
-                let server = Arc::clone(&server);
-                let barrier = Arc::clone(&barrier);
-                tokio::spawn(async move {
-                    barrier.wait().await;
-                    server.maybe_flush_worldwide();
-                })
-            })
-            .collect::<Vec<_>>();
-        for caller in callers {
-            caller.await.expect("boundary caller");
-        }
 
-        assert_eq!(
-            server.ledger_writes_started.load(Ordering::SeqCst),
-            started_before + 1,
-            "concurrent completed responses must admit exactly one flush owner"
-        );
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "tracedecay_search",
+                "arguments": { "query": "main" }
+            })),
+        };
+        server
+            .handle_request(&request)
+            .await
+            .expect("tool call should produce a response");
         server.ledger_writes_settled().await;
         assert_eq!(
-            last_flushed.load(Ordering::Acquire),
-            baseline + 41,
-            "shutdown-observed settlement must advance durable token accounting"
+            std::fs::read(&config_path).ok(),
+            config_before,
+            "a response must not write counter state into the profile config"
+        );
+
+        let accounted = tokens_saved.load(Ordering::Acquire);
+        server.spawn_token_accounting_persist(&project_root, "tracedecay_search", 41, 100);
+        server.ledger_writes_settled().await;
+        assert_eq!(
+            server.cg_snapshot().await.get_tokens_saved().await.unwrap(),
+            accounted + 41,
+            "local tokens-saved accounting must stay persisted"
         );
         server.shutdown_background_tasks().await;
-    }
-
-    /// The observed ledger write runs where no Tokio runtime exists and still
-    /// advances durable accounting.
-    #[test]
-    fn worldwide_flush_settles_without_a_tokio_runtime() {
-        let hazards = crate::test_support::native_runtime_hazards();
-        tracedecay_runtime_core::native_runtime::block_on(async {
-            assert!(tokio::runtime::Handle::try_current().is_err());
-            let (cg, _project, authority) =
-                super::super::writer_test_support::init_indexed_repo().await;
-            let context = super::super::writer_test_support::registered_context(cg, &authority);
-            let server = super::super::McpServer::new_with_context(context).await;
-            let tokens_saved = server.tokens_saved.as_ref().expect("fixture token counter");
-            let last_flushed = server
-                .last_flushed_tokens
-                .as_ref()
-                .expect("fixture flushed counter");
-            let baseline = last_flushed.load(Ordering::Acquire);
-            tokens_saved.store(baseline + 7, Ordering::Release);
-            server.last_flush_at.store(0, Ordering::Release);
-
-            server.maybe_flush_worldwide();
-
-            assert!(
-                server
-                    .ledger_writes_settled_within(Duration::from_secs(30))
-                    .await
-            );
-            assert_eq!(last_flushed.load(Ordering::Acquire), baseline + 7);
-            server.shutdown_background_tasks().await;
-        })
-        .expect("native runtime");
-        assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
     }
 }

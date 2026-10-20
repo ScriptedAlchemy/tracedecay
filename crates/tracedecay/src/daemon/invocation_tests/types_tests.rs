@@ -118,7 +118,7 @@ async fn hook_orchestration_backpressures_without_waiting() {
     let completed = Arc::new(tokio::sync::Notify::new());
     let completion_notification = Arc::clone(&completed);
     let mut request = saved_edit_request(None);
-    request.completion = Some(Arc::new(move || {
+    request.completion = Some(Arc::new(move |_| {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         completion_notification.notify_one();
     }));
@@ -201,6 +201,7 @@ async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
         1,
         false,
         None,
+        None,
     );
     ADMITTING_HOOK.set(false);
     assert_eq!(admission, HookOrchestrationAdmissionV1::Enqueued);
@@ -259,14 +260,14 @@ async fn hook_orchestration_coalesces_duplicate_work_and_completes_every_admissi
     let mut request = saved_edit_request(Some(hook_lifecycle()));
     let first_completions = Arc::clone(&completions);
     let first_completed = Arc::clone(&completed);
-    request.completion = Some(Arc::new(move || {
+    request.completion = Some(Arc::new(move |_| {
         first_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         first_completed.notify_one();
     }));
     let mut duplicate = request.clone();
     let duplicate_completions = Arc::clone(&completions);
     let duplicate_completed = Arc::clone(&completed);
-    duplicate.completion = Some(Arc::new(move || {
+    duplicate.completion = Some(Arc::new(move |_| {
         duplicate_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         duplicate_completed.notify_one();
     }));
@@ -327,7 +328,7 @@ async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
     let first_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_first_completions = Arc::clone(&first_completions);
     let mut first = saved_edit_request(Some(hook_lifecycle()));
-    first.completion = Some(Arc::new(move || {
+    first.completion = Some(Arc::new(move |_| {
         observed_first_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }));
     assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
@@ -354,7 +355,7 @@ async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
         false,
     )
     .unwrap();
-    second.completion = Some(Arc::new(move || {
+    second.completion = Some(Arc::new(move |_| {
         observed_second_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         observed_second_completed.notify_one();
     }));
@@ -475,7 +476,7 @@ async fn retryable_hook_work_does_not_acknowledge_the_durable_admission() {
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_completions = Arc::clone(&completions);
     let mut request = saved_edit_request(Some(hook_lifecycle()));
-    request.completion = Some(Arc::new(move || {
+    request.completion = Some(Arc::new(move |_| {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }));
 
@@ -541,7 +542,8 @@ async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {
             Some(hook_lifecycle()),
             1,
             false,
-            Some(Arc::new(move || {
+            None,
+            Some(Arc::new(move |_| {
                 first_acknowledged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             })),
         ),
@@ -570,7 +572,8 @@ async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {
             Some(hook_lifecycle()),
             1,
             false,
-            Some(Arc::new(move || {
+            None,
+            Some(Arc::new(move |_| {
                 replay_acknowledged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 replay_terminal.notify_one();
             })),
@@ -640,7 +643,7 @@ async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
     let observed_nested_finished = Arc::clone(&nested_finished_at_terminal);
     let completion_finished = Arc::clone(&blocking_finished);
     let mut first = saved_edit_request(Some(hook_lifecycle()));
-    first.completion = Some(Arc::new(move || {
+    first.completion = Some(Arc::new(move |_| {
         observed_nested_finished.store(
             completion_finished.load(std::sync::atomic::Ordering::Acquire),
             std::sync::atomic::Ordering::Release,
@@ -737,7 +740,7 @@ async fn superseded_queued_work_emits_its_own_receipt_terminal() {
     assert_eq!(
         runtime.admit(request(
             [2; 16],
-            Some(Arc::new(move || observed_queued_terminal.notify_one())),
+            Some(Arc::new(move |_| observed_queued_terminal.notify_one())),
         )),
         HookOrchestrationAdmissionV1::Enqueued
     );
@@ -770,7 +773,7 @@ async fn hook_orchestration_bounds_coalesced_completion_waiters() {
         }
     })
     .unwrap();
-    let completion = Arc::new(|| {}) as Arc<dyn Fn() + Send + Sync>;
+    let completion = Arc::new(|_| {}) as Arc<dyn Fn(HookOrchestrationSettlementV1) + Send + Sync>;
     let request = |completion| {
         let mut request = saved_edit_request(Some(hook_lifecycle()));
         request.completion = Some(completion);
@@ -809,7 +812,7 @@ async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_comp
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_completions = Arc::clone(&completions);
     let mut request = saved_edit_request(Some(hook_lifecycle()));
-    request.completion = Some(Arc::new(move || {
+    request.completion = Some(Arc::new(move |_| {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }));
     assert_eq!(
