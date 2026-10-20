@@ -261,13 +261,6 @@ struct IsolatedProductionCompositionRoots {
     project_roots: Vec<PathBuf>,
 }
 
-struct ProductionCompositionStoreHandles {
-    store_administration: StoreAdministration,
-    invocation: DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
-}
-
 fn isolate_production_composition_roots(
     isolation_root: PathBuf,
     project_roots: Vec<PathBuf>,
@@ -388,38 +381,29 @@ fn acquire_production_composition_identity(
 }
 
 async fn install_production_composition_stores(
-    profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
+    resources: &ProductionProjectHarnessResourcesV1,
+    profile_identity: &profile_identity::LocalProfileIdentityAuthorityV1,
     long_lived_session_maintenance_for_test: bool,
-) -> Result<ProductionCompositionStoreHandles> {
-    let owner = composed_owner_profile(profile_identity.profile_root());
-    let store_administration = StoreAdministration::default()
-        .with_profile_identity(profile_identity.clone())
-        .with_owner_profile(owner.clone());
+) -> Result<()> {
     #[cfg(test)]
     if long_lived_session_maintenance_for_test {
-        Box::pin(store_administration.install_long_lived_session_runtime_registry_for_test())
-            .await?;
+        Box::pin(
+            resources
+                .store_administration
+                .install_long_lived_session_runtime_registry_for_test(),
+        )
+        .await?;
     }
     #[cfg(not(test))]
     let _ = long_lived_session_maintenance_for_test;
-    let invocation = DaemonInvocationState::with_progress_producer_incarnation(1, owner.home());
-    invocation.configure_github_read_only_credentials(&profile_identity);
-    let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
-    let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     Box::pin(install_production_composition_profile_workers(
-        &store_administration,
-        &invocation,
-        &http_application_registry,
-        &project_open_gates,
-        &profile_identity,
+        &resources.store_administration,
+        &resources.invocation,
+        &resources.http_application_registry,
+        &resources._project_open_gates,
+        profile_identity,
     ))
-    .await?;
-    Ok(ProductionCompositionStoreHandles {
-        store_administration,
-        invocation,
-        http_application_registry,
-        project_open_gates,
-    })
+    .await
 }
 
 async fn install_production_composition_profile_workers(
@@ -463,20 +447,19 @@ async fn install_production_composition_profile_workers(
 }
 
 async fn mount_production_composition_projects(
-    stores: &ProductionCompositionStoreHandles,
+    resources: &mut ProductionProjectHarnessResourcesV1,
     project_roots: Vec<PathBuf>,
     profile_root: &Path,
     scope_prefix: Option<String>,
     wait_for_code_index: bool,
-) -> Result<HashMap<PathBuf, Arc<crate::mcp::McpServer>>> {
+) -> Result<()> {
     let client_identity = DaemonClientIdentity {
         profile_root: profile_root.to_path_buf(),
         global_db_path: profile_root.join("global.db"),
     };
-    let mut servers = HashMap::new();
     for (index, project_root) in project_roots.into_iter().enumerate() {
-        let (canonical_project_path, server) = Box::pin(mount_one_production_composition_project(
-            stores,
+        Box::pin(mount_one_production_composition_project(
+            resources,
             project_root,
             &client_identity,
             scope_prefix.as_deref(),
@@ -484,19 +467,18 @@ async fn mount_production_composition_projects(
             wait_for_code_index,
         ))
         .await?;
-        servers.insert(canonical_project_path, server);
     }
-    Ok(servers)
+    Ok(())
 }
 
 async fn mount_one_production_composition_project(
-    stores: &ProductionCompositionStoreHandles,
+    resources: &mut ProductionProjectHarnessResourcesV1,
     project_root: PathBuf,
     client_identity: &DaemonClientIdentity,
     scope_prefix: Option<&str>,
     index: usize,
     wait_for_code_index: bool,
-) -> Result<(PathBuf, Arc<crate::mcp::McpServer>)> {
+) -> Result<()> {
     let handshake = DaemonHandshake {
         client_version: binary_version()?.to_owned(),
         client_instance_id: format!("production-composition-harness-{index}"),
@@ -511,14 +493,14 @@ async fn mount_one_production_composition_project(
         moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     let (canonical_project_path, _) =
-        project_route_for_handshake(&handshake, stores.store_administration.owner_home()?)?;
-    let composition = stores
+        project_route_for_handshake(&handshake, resources.store_administration.owner_home()?)?;
+    let composition = resources
         .store_administration
         .with_writer(|| {
-            let store_administration = &stores.store_administration;
-            let project_open_gates = &stores.project_open_gates;
-            let invocation = &stores.invocation;
-            let http_application_registry = &stores.http_application_registry;
+            let store_administration = &resources.store_administration;
+            let project_open_gates = &resources._project_open_gates;
+            let invocation = &resources.invocation;
+            let http_application_registry = &resources.http_application_registry;
             let canonical_project_path = &canonical_project_path;
             let handshake = &handshake;
             Box::pin(async move {
@@ -541,6 +523,13 @@ async fn mount_one_production_composition_project(
             })
         })
         .await?;
+    // Own the current mount before readiness can fail, alongside every
+    // earlier project. Rollback joins all of their owners under the scopes
+    // that admitted them.
+    resources.servers.insert(
+        composition.canonical_project_path.clone(),
+        Arc::clone(&composition.server),
+    );
     if wait_for_code_index {
         let code_search_scope = {
             let graph = composition.server.cg().await;
@@ -553,21 +542,14 @@ async fn mount_one_production_composition_project(
                 message: format!("production-composition code-index scope is invalid: {error:?}"),
             })?
         };
-        if let Err(error) = Box::pin(wait_for_production_composition_code_index(
-            &stores.invocation,
+        Box::pin(wait_for_production_composition_code_index(
+            &resources.invocation,
             &composition.canonical_project_path,
             &code_search_scope,
         ))
-        .await
-        {
-            // An aborted mount must retire the server's background owners:
-            // file-locked workers like the delivery recorder outlive a dropped
-            // composition and wedge every later open on their lock.
-            composition.server.shutdown().await;
-            return Err(error);
-        }
+        .await?;
     }
-    Ok((composition.canonical_project_path, composition.server))
+    Ok(())
 }
 
 impl ProductionProjectCompositionHarnessV1 {
@@ -661,32 +643,61 @@ impl ProductionProjectCompositionHarnessV1 {
             )?;
             let (profile_identity, lifecycle_lease, database_scope) =
                 acquire_production_composition_identity(&isolated.profile_root)?;
-            let stores = Box::pin(install_production_composition_stores(
-                profile_identity,
-                long_lived_session_maintenance_for_test,
-            ))
-            .await?;
-            let servers = Box::pin(mount_production_composition_projects(
-                &stores,
-                isolated.project_roots,
-                &isolated.profile_root,
-                scope_prefix,
-                wait_for_code_index,
-            ))
-            .await?;
-            Ok(Self {
+            let owner = composed_owner_profile(profile_identity.profile_root());
+            let store_administration = StoreAdministration::default()
+                .with_profile_identity(profile_identity.clone())
+                .with_owner_profile(owner.clone());
+            let invocation =
+                DaemonInvocationState::with_progress_producer_incarnation(1, owner.home());
+            invocation.configure_github_read_only_credentials(&profile_identity);
+            // Establish the shutdown owner before the first initialization
+            // await. Cancellation uses Drop; a reported failure joins cleanup
+            // before returning, with database and lifecycle authority intact.
+            let mut harness = Self {
                 isolation_root: isolated.isolation_root,
                 profile_root: isolated.profile_root,
                 resources: Some(ProductionProjectHarnessResourcesV1 {
-                    store_administration: stores.store_administration,
-                    invocation: stores.invocation,
-                    _project_open_gates: stores.project_open_gates,
-                    http_application_registry: stores.http_application_registry,
-                    servers,
+                    store_administration,
+                    invocation,
+                    _project_open_gates: Arc::new(tokio::sync::Mutex::new(
+                        ProjectOpenGates::default(),
+                    )),
+                    http_application_registry:
+                        http_application::DaemonHttpApplicationRegistry::default(),
+                    servers: HashMap::new(),
                     _database_scope: database_scope,
                     _lifecycle_lease: lifecycle_lease,
                 }),
-            })
+            };
+            let initialized = match harness.resources.as_mut() {
+                Some(resources) => {
+                    async {
+                        Box::pin(install_production_composition_stores(
+                            resources,
+                            &profile_identity,
+                            long_lived_session_maintenance_for_test,
+                        ))
+                        .await?;
+                        Box::pin(mount_production_composition_projects(
+                            resources,
+                            isolated.project_roots,
+                            &harness.profile_root,
+                            scope_prefix,
+                            wait_for_code_index,
+                        ))
+                        .await
+                    }
+                    .await
+                }
+                None => Err(TraceDecayError::Config {
+                    message: "production-composition harness is shut down".to_owned(),
+                }),
+            };
+            if let Err(error) = initialized {
+                harness.shutdown().await;
+                return Err(error);
+            }
+            Ok(harness)
         })
     }
 

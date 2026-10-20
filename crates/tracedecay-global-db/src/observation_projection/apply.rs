@@ -23,9 +23,10 @@ use tracedecay_runtime_core::db::{
 use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
 
 use super::state::{
-    canonicalize_session_project_paths, message_projection, output_ownership_sql, read_message,
-    read_observation, read_output_state, read_session, reconcile_session_rows_detailed, storage,
-    storage_message, stored_output_digest, verify_output_state, verify_projection_rows,
+    canonical_message_location, canonicalize_session_project_paths, message_projection,
+    output_ownership_sql, read_message, read_observation, read_output_state, read_session,
+    reconcile_session_rows_detailed, storage, storage_message, stored_output_digest,
+    verify_output_state, verify_projection_rows,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -679,6 +680,7 @@ impl_send_projection_derive!(DatabaseWriteTransaction<'_>);
 impl_send_projection_derive!(DatabaseEngineReadConnection);
 impl_send_projection_derive!(DatabaseEngineReadSnapshot);
 impl_send_projection_derive!(crate::registered::RegisteredGlobalDbWriteTransaction<'_>);
+impl_send_projection_derive!(crate::registered::RegisteredGlobalDbWriteTx<'_, '_>);
 
 /// Objective used for goal-state dedupe: prefer native `/objective` (Codex),
 /// else the already-extracted `content_text`.
@@ -1065,7 +1067,8 @@ async fn upsert_projected_raw_message(
     conn: &impl Executor,
     message: &SessionMessageRecord,
 ) -> ProjectionStoreResult<()> {
-    tracedecay_lcm::raw::upsert_projection_raw_message(conn, message)
+    let location = canonical_message_location(message)?;
+    tracedecay_lcm::raw::upsert_projection_raw_message(conn, message, location.as_deref())
         .await
         .map_err(|error| match error {
             LcmError::SanitizationRefused {
@@ -1154,9 +1157,9 @@ pub(super) async fn retire_replaced_codex_output(
 
 /// Replaces the stored output row with the one this binary derives.
 ///
-/// The projected message row is derived state, so every field but its identity
-/// is rewritten from the record. A projector that owns the output also owns the
-/// row's session, so the row is first moved onto the projection's session.
+/// The projected rendering is derived state. The canonical origin is captured
+/// once and survives rendering repairs. A projector that owns the output also
+/// owns the row's session, so the row is first moved onto that session.
 /// A Hermes body belongs to the Hermes LCM turn authority: an existing Hermes
 /// row keeps its body and takes only the projection's session columns. Shared
 /// with released-rendering convergence, which reaches the same row through a
@@ -1167,11 +1170,13 @@ pub(super) async fn supersede_projected_message(
 ) -> ProjectionStoreResult<()> {
     adopt_owned_projection_raw_session(conn, message).await?;
     if message.provider == "hermes" {
+        let location = canonical_message_location(message)?;
         let updated = conn
             .execute(
                 "UPDATE lcm_raw_messages
                  SET role = ?3, timestamp = ?4, ordinal = ?5, kind = ?6, model = ?7,
-                     tool_names = ?8, source_path = ?9, source_offset = ?10
+                     tool_names = ?8, source_path = ?9, source_offset = ?10,
+                     location_path = COALESCE(location_path, ?11)
                  WHERE provider = ?1 AND message_id = ?2",
                 params![
                     message.provider.as_str(),
@@ -1184,6 +1189,7 @@ pub(super) async fn supersede_projected_message(
                     message.tool_names.as_deref(),
                     message.source_path.as_deref(),
                     message.source_offset,
+                    location.as_deref(),
                 ],
             )
             .await
@@ -2559,7 +2565,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projected_session_enrichment_is_commutative_and_rejects_real_path_collisions() {
+    fn projected_session_enrichment_is_commutative_and_rejects_real_transcript_collisions() {
         let sparse = SessionRecord {
             provider: "cursor".to_owned(),
             session_id: "session.fixture".to_owned(),
@@ -2623,10 +2629,20 @@ mod tests {
             Some(r#"{"source":"runtime_preflight"}"#)
         );
 
-        let conflicting = SessionRecord {
+        let other_cwd = SessionRecord {
             project_path: "/workspace/other".to_owned(),
-            ..rich
+            ..rich.clone()
         };
-        assert!(reconcile_session_rows_detailed(&forward, &conflicting).is_err());
+        let kept = reconcile_session_rows_detailed(&forward, &other_cwd).unwrap();
+        assert_eq!(kept.project_path, "/workspace/project");
+
+        let transcript = |path: &str| SessionRecord {
+            transcript_path: Some(path.to_owned()),
+            ..rich.clone()
+        };
+        let conflict =
+            reconcile_session_rows_detailed(&transcript("/a.jsonl"), &transcript("/b.jsonl"))
+                .unwrap_err();
+        assert_eq!(conflict.field(), "transcript_path");
     }
 }

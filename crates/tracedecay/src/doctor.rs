@@ -11,26 +11,13 @@ use tracedecay_contracts::project_open::{
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
-use tracedecay_contracts::{ApplicationOutcome, ResolvedSetting};
-use tracedecay_domain::configuration::{
-    ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
-};
 use tracedecay_domain::errors::ProjectOpenFailureKind;
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
 use tracedecay_application::advisory::github_runtime;
 use tracedecay_automation_runtime::automation::effect_runtime::pending_automation_effect_resets_blocking;
-use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_contracts::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
-use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
-use tracedecay_daemon_protocol::RequestedOutputFormat;
-use tracedecay_daemon_service::application_surface::{
-    execute_application_surface, resolve_application_surface_dispatch,
-};
 #[cfg(unix)]
 use tracedecay_daemon_service::logging::recent_watcher_events;
-use tracedecay_runtime_core::text::format_token_count;
 
 /// Opens an isolated daemon-registered profile database so Doctor tests can
 /// exercise the read-only session-temporal health adapter against the real
@@ -96,7 +83,6 @@ impl DoctorTestRuntime {
 /// itself, the composition root cannot depend on the CLI crate.
 #[derive(Clone, Copy)]
 pub struct AdmittedDoctorNetworkProbes {
-    pub fetch_worldwide_total: fn() -> Option<u64>,
     pub fetch_latest_version:
         fn() -> Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
 }
@@ -150,7 +136,7 @@ pub async fn run_doctor(
 
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let daemon_listening = tracedecay_daemon_control::daemon_socket_connectable(profile);
-    let mut independent = launch_independent_doctor_checks(
+    let independent = launch_independent_doctor_checks(
         profile,
         build_version,
         &project_path,
@@ -173,14 +159,9 @@ pub async fn run_doctor(
         &mut pending_reset,
     )?;
     dc.replay_from(join_doctor_check(independent.watcher).await?);
-    let upload_enabled = join_doctor_check(independent.upload).await?;
-    check_user_config(&mut dc, profile.data_dir(), upload_enabled.as_ref());
-    independent.network.admit_worldwide(upload_enabled.as_ref());
+    check_user_config(&mut dc, profile.data_dir());
     dc.replay_from(join_doctor_check(independent.hosts).await?);
-    independent
-        .network
-        .report(&mut dc, upload_enabled.as_ref())
-        .await?;
+    independent.network.report(&mut dc).await?;
     print_summary(&dc);
 
     let completion = doctor_result(&dc, pending_reset);
@@ -197,7 +178,6 @@ struct IndependentDoctorChecks {
     daemon_status:
         DoctorCheck<Option<tracedecay_domain::errors::Result<Option<serde_json::Value>>>>,
     watcher: DoctorCheck<DoctorCounters>,
-    upload: DoctorCheck<tracedecay_domain::errors::Result<UploadSetting>>,
     hosts: DoctorCheck<DoctorCounters>,
     network: DoctorNetworkChecks,
 }
@@ -220,7 +200,6 @@ fn launch_independent_doctor_checks(
     let project_for_hosts = project_path.to_path_buf();
     let profile_for_status = profile.clone();
     let project_for_status = project_path.to_path_buf();
-    let profile_for_upload = profile.clone();
 
     IndependentDoctorChecks {
         daemon_service: spawn_doctor_check(move || {
@@ -247,15 +226,6 @@ fn launch_independent_doctor_checks(
         }),
         watcher: spawn_doctor_check(move || {
             collect_quiet(|dc| check_watcher(dc, &profile_for_watcher))
-        }),
-        upload: spawn_doctor_task(async move {
-            if daemon_listening {
-                configured_upload_enabled(&profile_for_upload)
-                    .await
-                    .map(UploadSetting::Resolved)
-            } else {
-                Ok(UploadSetting::DaemonUnavailable)
-            }
         }),
         hosts: spawn_doctor_check(move || {
             collect_quiet(|dc| check_host_integrations(dc, &profile_for_hosts, &project_for_hosts))
@@ -463,7 +433,6 @@ struct ObservedDoctorFindingsV1 {
 }
 
 /// Typed state for a profile with no listening daemon.
-const DAEMON_UNAVAILABLE: &str = "daemon_unavailable";
 const DAEMON_UNAVAILABLE_STATEMENT: &str = "daemon_unavailable: no TraceDecay daemon is listening \
      for this profile, so the daemon's canonical Doctor findings were not read and only \
      binary-local checks ran. Pending operator action: start the daemon (`tracedecay daemon \
@@ -1216,135 +1185,24 @@ fn automation_effect_reset_findings(
         .collect())
 }
 
-#[tracing::instrument(name = "doctor.config.upload", level = "trace", skip_all)]
-async fn configured_upload_enabled(
-    profile: &tracedecay_runtime_core::config::ProfileRoot,
-) -> tracedecay_domain::errors::Result<bool> {
-    let setting = configured_setting(profile, USER_UPLOAD_ENABLED_SETTING_KEY).await?;
-    match setting.effective_value {
-        ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
-        _ => Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "worldwide counter upload setting is not boolean".to_owned(),
-        }),
-    }
-}
-
-async fn configured_setting(
-    profile: &tracedecay_runtime_core::config::ProfileRoot,
-    key: &str,
-) -> tracedecay_domain::errors::Result<ResolvedSetting> {
-    let operation = ApplicationSurfaceOperation::ConfigurationGet;
-    let key = SettingKey::new(key).map_err(|error| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        }
-    })?;
-    let request_id =
-        mint_global_request_id(GlobalRequestSurface::DaemonDoctor).map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("could not create Doctor configuration request: {error}"),
-            }
-        })?;
-    // The setting belongs to the profile: the request names no project.
-    let handshake = crate::daemon::handshake_for_current_client(profile, None, None, false, false)?;
-    let client = crate::daemon::invocation_client_for_current(profile, handshake)?;
-    let dispatched = resolve_application_surface_dispatch(
-        BindingSurface::Cli,
-        operation,
-        request_id.clone(),
-        ApplicationSurfaceRequest::Configuration(ConfigurationWireRequestV1::Get(
-            ConfigurationGetRequestV1 { key: key.clone() },
-        )),
-        RequestedOutputFormat::Json,
-    )
-    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-        message: error.to_string(),
-    })?;
-    let result = execute_application_surface(operation, dispatched, Some(&client))
-        .await
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-    let envelope = match result.result {
-        Ok(envelope) => envelope,
-        Err(problem) => {
-            return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: problem.problem.summary(),
-            });
-        }
-    };
-    let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "configuration get returned a non-evidence outcome".to_owned(),
-        });
-    };
-    let setting: ResolvedSetting = serde_json::from_value(evidence.payload.ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: "configuration get omitted its payload".to_owned(),
-        }
-    })?)
-    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!("configuration get returned an invalid setting: {error}"),
-    })?;
-    if setting.key != key {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "configuration get returned the wrong setting".to_owned(),
-        });
-    }
-    Ok(setting)
-}
-
-/// The worldwide-counter upload setting as the profile's configuration owner
-/// answered it.
-#[derive(Debug, PartialEq, Eq)]
-enum UploadSetting {
-    Resolved(bool),
-    /// No daemon listens for this profile, so no configuration owner answered.
-    DaemonUnavailable,
-}
-
-/// Check canonical user configuration and pending upload state.
-fn check_user_config(
-    dc: &mut DoctorCounters,
-    profile_root: &Path,
-    upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
-) {
+/// Check the profile `config.toml` and the GitHub review sources it names.
+fn check_user_config(dc: &mut DoctorCounters, profile_root: &Path) {
     dc.section("User config");
-    match upload_enabled {
-        Ok(UploadSetting::Resolved(true)) => dc.pass("Worldwide counter upload enabled"),
-        Ok(UploadSetting::Resolved(false)) => {
-            dc.info("Worldwide counter upload disabled (default)");
-        }
-        Ok(UploadSetting::DaemonUnavailable) => {
-            dc.info(&format!(
-                "Worldwide counter upload setting unread: {DAEMON_UNAVAILABLE}"
-            ));
-        }
-        Err(error) => dc.warn(&format!(
-            "Worldwide counter upload setting unavailable from canonical configuration: {error}"
-        )),
-    }
     match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
-        Ok(config) => {
-            if config.pending_upload > 0 {
-                dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
-            }
-            match github_runtime::check_configured_github_review_sources_v1(profile_root) {
-                Ok(findings) => {
-                    for finding in findings {
-                        dc.fail(&format!(
-                            "GitHub review source {finding}, so it is not registered; fix or \
+        Ok(_) => match github_runtime::check_configured_github_review_sources_v1(profile_root) {
+            Ok(findings) => {
+                for finding in findings {
+                    dc.fail(&format!(
+                        "GitHub review source {finding}, so it is not registered; fix or \
                              remove its github_review_sources entry in {}",
-                            tracedecay_session_memory::user_config::config_path(profile_root)
-                                .display()
-                        ));
-                    }
+                        tracedecay_session_memory::user_config::config_path(profile_root).display()
+                    ));
                 }
-                Err(error) => dc.fail(&format!(
-                    "GitHub review sources are unusable, none is registered: {error}"
-                )),
             }
-        }
+            Err(error) => dc.fail(&format!(
+                "GitHub review sources are unusable, none is registered: {error}"
+            )),
+        },
         Err(error) => dc.fail(&format!("Profile config is unusable: {error}")),
     }
 }
@@ -1464,72 +1322,28 @@ fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
 
 struct DoctorNetworkChecks {
     latest: DoctorCheck<Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>>,
-    worldwide: Option<DoctorCheck<Option<u64>>>,
-    fetch_worldwide_total: fn() -> Option<u64>,
 }
 
 impl DoctorNetworkChecks {
     fn start(network: AdmittedDoctorNetworkProbes) -> Self {
         Self {
             latest: spawn_doctor_check(move || (network.fetch_latest_version)()),
-            worldwide: None,
-            fetch_worldwide_total: network.fetch_worldwide_total,
-        }
-    }
-
-    fn admit_worldwide(
-        &mut self,
-        upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
-    ) {
-        if matches!(upload_enabled, Ok(UploadSetting::Resolved(true))) {
-            self.worldwide = Some(spawn_doctor_check(self.fetch_worldwide_total));
         }
     }
 
     #[tracing::instrument(name = "doctor.check.network", level = "trace", skip_all)]
-    async fn report(
-        self,
-        dc: &mut DoctorCounters,
-        upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
-    ) -> tracedecay_domain::errors::Result<()> {
+    async fn report(self, dc: &mut DoctorCounters) -> tracedecay_domain::errors::Result<()> {
         let latest = join_doctor_check(self.latest).await?;
-        let worldwide = match self.worldwide {
-            Some(handle) => Some(join_doctor_check(handle).await?),
-            None => None,
-        };
-        render_network(dc, upload_enabled, worldwide, latest);
+        render_network(dc, latest);
         Ok(())
     }
 }
 
 fn render_network(
     dc: &mut DoctorCounters,
-    upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
-    worldwide: Option<Option<u64>>,
     latest: Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
 ) {
     dc.section("Network");
-    match upload_enabled {
-        Ok(UploadSetting::Resolved(true)) => {
-            if let Some(total) = worldwide.flatten() {
-                dc.pass(&format!(
-                    "Worldwide counter reachable (total: {})",
-                    format_token_count(total)
-                ));
-            } else {
-                dc.warn("Worldwide counter unreachable (offline or timeout)");
-            }
-        }
-        Ok(UploadSetting::Resolved(false)) => {
-            dc.info("Worldwide counter skipped (upload disabled)");
-        }
-        Ok(UploadSetting::DaemonUnavailable) => {
-            dc.info(&format!("Worldwide counter check skipped: {DAEMON_UNAVAILABLE}"));
-        }
-        Err(error) => dc.warn(&format!(
-            "Worldwide counter check skipped because canonical configuration is unavailable: {error}"
-        )),
-    }
     match latest {
         Ok(latest) => dc.pass(&format!("GitHub releases API reachable (latest v{latest})")),
         Err(error) => dc.warn(&format!("GitHub release lookup failed, {error}")),

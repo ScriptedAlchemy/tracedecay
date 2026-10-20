@@ -1,4 +1,7 @@
 #[cfg(unix)]
+use std::time::Duration;
+
+#[cfg(unix)]
 use super::*;
 
 #[cfg(unix)]
@@ -476,6 +479,17 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
 #[cfg(unix)]
 #[tokio::test]
 async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
+    project_server_retains_read_authority_with_an_unavailable_spool(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn incompatible_host_spool_preserves_read_authority_and_typed_reset() {
+    project_server_retains_read_authority_with_an_unavailable_spool(true).await;
+}
+
+#[cfg(unix)]
+async fn project_server_retains_read_authority_with_an_unavailable_spool(requires_reset: bool) {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().canonicalize().expect("canonical temp dir");
     let client_identity = test_client_identity_for(project.join("profile"));
@@ -487,7 +501,22 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
         ".{}.host-admission",
         session_db_path.file_name().unwrap().to_string_lossy()
     ));
-    std::fs::write(&spool_path, "not a directory").expect("block spool directory open");
+    let incompatible_metadata = if requires_reset {
+        let (runtime, _) =
+            tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&session_db_path)
+                .unwrap();
+        drop(runtime);
+        let meta_path = spool_path.join("meta.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        metadata["version"] = serde_json::json!(metadata["version"].as_u64().unwrap() + 1);
+        let bytes = serde_json::to_vec(&metadata).unwrap();
+        std::fs::write(&meta_path, &bytes).unwrap();
+        Some((meta_path, bytes))
+    } else {
+        std::fs::write(&spool_path, "not a directory").expect("block spool directory open");
+        None
+    };
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity: client_identity.clone(),
@@ -499,10 +528,76 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
         "unavailable-host-admission-test",
     );
 
-    engine
+    let server = engine
         .project_server(&handshake)
         .await
         .expect("read/query server must open when admission spool is unavailable");
+    let graph = server.cg_snapshot().await;
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        &project,
+        &graph
+            .store_layout()
+            .identity
+            .project_id
+            .as_ref()
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap();
+    let reader = super::super::project_composition::project_hook_source_pending(
+        &engine.store_administration,
+        &graph,
+        &project,
+        &scope,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reader.read_pending(),
+        Err(
+            tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::ReadFailed
+        ),
+        "an unreadable spool cannot prove current source currency"
+    );
+    let observed = reader.revision();
+    let database = engine
+        .store_administration
+        .registered_project_session_database(graph.project_root(), graph.store_layout())
+        .await
+        .unwrap();
+    if let Some((meta_path, bytes)) = incompatible_metadata {
+        let error = engine
+            .store_administration
+            .host_admission_broker(&database)
+            .await
+            .err()
+            .expect("host capability must retain the incompatible spool refusal");
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _)| authority),
+            Some("host-admission spool")
+        );
+        assert_eq!(std::fs::read(&meta_path).unwrap(), bytes);
+        assert!(Arc::ptr_eq(
+            &server,
+            &engine.project_server(&handshake).await.unwrap()
+        ));
+        std::fs::remove_dir_all(&spool_path).unwrap();
+    } else {
+        std::fs::remove_file(&spool_path).unwrap();
+    }
+    engine
+        .store_administration
+        .host_admission_broker(&database)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), reader.changed(observed))
+        .await
+        .expect("the original reader must observe the recovered canonical broker");
+    assert_eq!(reader.read_pending(), Ok(false));
     engine.shutdown_all().await;
 }
 

@@ -4156,6 +4156,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.shutting_down),
             )
         };
+        let admission_pending = source_freshness.read_pending_source().map_err(|error| {
+            CodeIndexSchedulerErrorV1::Identity(format!("source admission read failed: {error:?}"))
+        })?;
+        if admission_pending {
+            return Ok(None);
+        }
         let known = known.cloned();
         let metadata = native_runtime::spawn_blocking(move || {
             owner.active_publication_text_metadata(known.as_ref())

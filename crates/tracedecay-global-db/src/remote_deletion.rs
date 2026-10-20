@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use crate::RegisteredGlobalDb;
 
@@ -323,45 +323,44 @@ impl RegisteredGlobalDb {
         tombstone: RemoteDeletionTombstone,
     ) -> Result<RemoteDeletionTombstoneRecordOutcome> {
         tombstone.validate_new()?;
-        let transaction = self.begin_write_transaction().await?;
-        if let Some(existing) = read_tombstone(
-            &transaction,
-            &tombstone.profile_id,
-            tombstone.target,
-            tombstone.project_key(),
-        )
-        .await?
-        {
-            transaction.commit().await.map_err(|error| {
-                remote_deletion_error("commit remote deletion tombstone replay", error)
-            })?;
-            return if existing.tombstone_id == tombstone.tombstone_id {
-                Ok(RemoteDeletionTombstoneRecordOutcome::Replayed(existing))
-            } else {
-                Ok(RemoteDeletionTombstoneRecordOutcome::Conflict { existing })
-            };
-        }
-        transaction
-            .execute(
-                "INSERT INTO remote_deletion_tombstones
-                    (profile_id, target_kind, project_id, tombstone_id, recorded_at_micros,
-                     cleanup_status, failure_code, failure_phase, retryable)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', NULL, NULL, NULL)",
-                params![
-                    tombstone.profile_id.as_str(),
-                    tombstone.target.as_str(),
-                    tombstone.project_key(),
-                    tombstone.tombstone_id.as_str(),
-                    tombstone.recorded_at_micros,
-                ],
+        self.transact(async move |transaction| {
+            if let Some(existing) = read_tombstone(
+                &transaction,
+                &tombstone.profile_id,
+                tombstone.target,
+                tombstone.project_key(),
             )
-            .await
-            .map_err(|error| remote_deletion_error("record remote deletion tombstone", error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| remote_deletion_error("commit remote deletion tombstone", error))?;
-        Ok(RemoteDeletionTombstoneRecordOutcome::Recorded(tombstone))
+            .await?
+            {
+                return Ok(if existing.tombstone_id == tombstone.tombstone_id {
+                    RemoteDeletionTombstoneRecordOutcome::Replayed(existing)
+                } else {
+                    RemoteDeletionTombstoneRecordOutcome::Conflict { existing }
+                });
+            }
+            transaction
+                .execute(
+                    "INSERT INTO remote_deletion_tombstones
+                        (profile_id, target_kind, project_id, tombstone_id, recorded_at_micros,
+                         cleanup_status, failure_code, failure_phase, retryable)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'pending', NULL, NULL, NULL)",
+                    params![
+                        tombstone.profile_id.as_str(),
+                        tombstone.target.as_str(),
+                        tombstone.project_key(),
+                        tombstone.tombstone_id.as_str(),
+                        tombstone.recorded_at_micros,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    remote_deletion_error("record remote deletion tombstone", error)
+                })?;
+            Ok(RemoteDeletionTombstoneRecordOutcome::Recorded(
+                tombstone.clone(),
+            ))
+        })
+        .await?
     }
 
     #[tracing::instrument(
@@ -376,70 +375,65 @@ impl RegisteredGlobalDb {
         next: RemoteDeletionCleanupState,
     ) -> Result<RemoteDeletionTombstoneTransitionOutcome> {
         validate_transition(&next)?;
-        let transaction = self.begin_write_transaction().await?;
-        let existing = read_tombstone(
-            &transaction,
-            &tombstone.profile_id,
-            tombstone.target,
-            tombstone.project_key(),
-        )
+        let tombstone = tombstone.clone();
+        let expected = expected.clone();
+        self.transact(async move |transaction| {
+            let existing = read_tombstone(
+                &transaction,
+                &tombstone.profile_id,
+                tombstone.target,
+                tombstone.project_key(),
+            )
+            .await?
+            .ok_or_else(|| {
+                remote_deletion_error(
+                    "transition remote deletion tombstone",
+                    "tombstone is unavailable",
+                )
+            })?;
+            if existing.tombstone_id != tombstone.tombstone_id {
+                return Ok(RemoteDeletionTombstoneTransitionOutcome::Conflict { existing });
+            }
+            if existing.cleanup != expected {
+                return Ok(RemoteDeletionTombstoneTransitionOutcome::StateChanged { existing });
+            }
+            let (failure_code, failure_phase, retryable) =
+                next.failure()
+                    .map_or((None, None, None), |(code, phase, retryable)| {
+                        (
+                            Some(code.as_str()),
+                            Some(phase.as_str()),
+                            Some(i64::from(retryable)),
+                        )
+                    });
+            transaction
+                .execute(
+                    "UPDATE remote_deletion_tombstones
+                     SET cleanup_status = ?1, failure_code = ?2, failure_phase = ?3, retryable = ?4
+                     WHERE profile_id = ?5 AND target_kind = ?6 AND project_id = ?7
+                       AND tombstone_id = ?8",
+                    params![
+                        next.status(),
+                        failure_code,
+                        failure_phase,
+                        retryable,
+                        tombstone.profile_id.as_str(),
+                        tombstone.target.as_str(),
+                        tombstone.project_key(),
+                        tombstone.tombstone_id.as_str(),
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    remote_deletion_error("transition remote deletion tombstone", error)
+                })?;
+            let updated = RemoteDeletionTombstone {
+                cleanup: next.clone(),
+                ..existing
+            };
+            Ok(RemoteDeletionTombstoneTransitionOutcome::Updated(updated))
+        })
         .await?
-        .ok_or_else(|| {
-            remote_deletion_error(
-                "transition remote deletion tombstone",
-                "tombstone is unavailable",
-            )
-        })?;
-        if existing.tombstone_id != tombstone.tombstone_id {
-            transaction.commit().await.map_err(|error| {
-                remote_deletion_error("commit remote deletion conflict read", error)
-            })?;
-            return Ok(RemoteDeletionTombstoneTransitionOutcome::Conflict { existing });
-        }
-        if existing.cleanup != expected {
-            transaction.commit().await.map_err(|error| {
-                remote_deletion_error("commit remote deletion state read", error)
-            })?;
-            return Ok(RemoteDeletionTombstoneTransitionOutcome::StateChanged { existing });
-        }
-        let (failure_code, failure_phase, retryable) =
-            next.failure()
-                .map_or((None, None, None), |(code, phase, retryable)| {
-                    (
-                        Some(code.as_str()),
-                        Some(phase.as_str()),
-                        Some(i64::from(retryable)),
-                    )
-                });
-        transaction
-            .execute(
-                "UPDATE remote_deletion_tombstones
-                 SET cleanup_status = ?1, failure_code = ?2, failure_phase = ?3, retryable = ?4
-                 WHERE profile_id = ?5 AND target_kind = ?6 AND project_id = ?7
-                   AND tombstone_id = ?8",
-                params![
-                    next.status(),
-                    failure_code,
-                    failure_phase,
-                    retryable,
-                    tombstone.profile_id.as_str(),
-                    tombstone.target.as_str(),
-                    tombstone.project_key(),
-                    tombstone.tombstone_id.as_str(),
-                ],
-            )
-            .await
-            .map_err(|error| {
-                remote_deletion_error("transition remote deletion tombstone", error)
-            })?;
-        transaction.commit().await.map_err(|error| {
-            remote_deletion_error("commit remote deletion tombstone transition", error)
-        })?;
-        let updated = RemoteDeletionTombstone {
-            cleanup: next,
-            ..existing
-        };
-        Ok(RemoteDeletionTombstoneTransitionOutcome::Updated(updated))
     }
 
     pub async fn remote_deletion_tombstone_for_project(
@@ -475,19 +469,20 @@ impl RegisteredGlobalDb {
 
     pub async fn delete_remote_deleted_project_registry_row(&self, project_id: &str) -> Result<()> {
         validate_identifier("remote deletion project id", project_id)?;
-        let transaction = self.begin_write_transaction().await?;
-        transaction
-            .execute(
-                "DELETE FROM code_projects WHERE project_id = ?1",
-                params![project_id],
-            )
-            .await
-            .map_err(|error| {
-                remote_deletion_error("remove remote-deleted project registry row", error)
-            })?;
-        transaction.commit().await.map_err(|error| {
-            remote_deletion_error("commit remote-deleted project registry row", error)
+        let project_id = project_id.to_owned();
+        self.transact(async move |transaction| {
+            transaction
+                .execute(
+                    "DELETE FROM code_projects WHERE project_id = ?1",
+                    params![project_id.as_str()],
+                )
+                .await
+                .map_err(|error| {
+                    remote_deletion_error("remove remote-deleted project registry row", error)
+                })?;
+            Ok(())
         })
+        .await?
     }
 }
 

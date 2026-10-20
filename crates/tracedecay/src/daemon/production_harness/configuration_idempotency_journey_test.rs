@@ -10,7 +10,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, UserProfileId,
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
@@ -330,7 +330,7 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
             layer: ConfigurationLayerIdV1::UserProfile {
                 profile_id: profile_id.clone(),
             },
-            key: SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("user setting key"),
+            key: SettingKey::new(USER_REPEATED_QUERY_HINTS_SETTING_KEY).expect("user setting key"),
             value: Box::new(ConfigurationValueV1::Boolean(true)),
         }],
         expected_revision: expected_revision.clone(),
@@ -390,7 +390,7 @@ async fn user_profile_configuration_batch_has_cli_dashboard_parity_after_restart
     let changed = ConfigurationBatchRequestV1 {
         mutations: vec![ConfigurationDirectMutationRequestV1::Set {
             layer: ConfigurationLayerIdV1::UserProfile { profile_id },
-            key: SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("user setting key"),
+            key: SettingKey::new(USER_REPEATED_QUERY_HINTS_SETTING_KEY).expect("user setting key"),
             value: Box::new(ConfigurationValueV1::Boolean(false)),
         }],
         ..request

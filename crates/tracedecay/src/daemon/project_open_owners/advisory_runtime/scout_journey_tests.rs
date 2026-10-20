@@ -782,6 +782,11 @@ async fn stock_disabled_configuration_produces_nothing() {
     );
 }
 
+type DecisionEngineRequestGate = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
 /// In-process decision engine: answers every configured question, recalling
 /// the earlier session with `recall` and everything else with 0.05, and
 /// records each request it receives.
@@ -789,6 +794,7 @@ struct RecordingDecisionEngine {
     recall: f64,
     requests: std::sync::atomic::AtomicUsize,
     states: std::sync::Mutex<Vec<String>>,
+    request_gate: std::sync::Mutex<Option<DecisionEngineRequestGate>>,
 }
 
 impl RecordingDecisionEngine {
@@ -797,11 +803,30 @@ impl RecordingDecisionEngine {
             recall,
             requests: std::sync::atomic::AtomicUsize::new(0),
             states: std::sync::Mutex::new(Vec::new()),
+            request_gate: std::sync::Mutex::new(None),
         })
     }
 
     fn requests(&self) -> usize {
         self.requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn hold_next_request(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        assert!(
+            self.request_gate
+                .lock()
+                .unwrap()
+                .replace((entered, held))
+                .is_none()
+        );
+        (started, release)
     }
 }
 
@@ -813,6 +838,10 @@ impl DecisionEnginePortV1 for RecordingDecisionEngine {
             .lock()
             .expect("recorded states")
             .push(request.state.clone());
+        if let Some((entered, release)) = self.request_gate.lock().unwrap().take() {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
         DecisionEngineOutcomeV1::Answered(DecisionAnswersV1 {
             answers: request
                 .questions
@@ -936,6 +965,59 @@ impl IntentJourneyFixture {
             Some(typed_id::<RefId>("refs/heads/main")),
         )
         .expect("scope");
+        let binding = tracedecay_hooks::HookScopeBindingV1 {
+            host: tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+            project_id: [8; 16],
+            repository_id: [61; 16],
+            worktree_id: [62; 16],
+            worktree_epoch: 1,
+            binding_token: [63; 32],
+            capabilities: [
+                tracedecay_hooks::HookEventFamily::SessionBoundary,
+                tracedecay_hooks::HookEventFamily::ToolLifecycle,
+            ]
+            .into_iter()
+            .map(|family| tracedecay_hooks::HookCapabilityV1 {
+                family,
+                support: tracedecay_hooks::stock_event_support(
+                    tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
+                    family,
+                ),
+            })
+            .collect(),
+        };
+        let lifecycle =
+            tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1 {
+                profile_id: typed_id("profile.scout.intent"),
+                provider_id: typed_id("claude"),
+                project_id: scope.project_id.clone(),
+                worktree_id: scope.worktree_id.clone(),
+                session_id: typed_id(INTENT_SESSION),
+                thread_id: typed_id("thread.scout.intent"),
+                turn_id: typed_id("turn.scout.intent"),
+                agent_id: typed_id("agent.scout.intent"),
+                logical_message_id: typed_id("message.scout.intent"),
+            };
+        Self::from_authorities(
+            temporary,
+            owner,
+            configuration,
+            scope,
+            binding,
+            lifecycle,
+            typed_id("commit.scout.intent"),
+        )
+    }
+
+    fn from_authorities(
+        temporary: tempfile::TempDir,
+        owner: Arc<ProjectContextScoutOwnerV1>,
+        configuration: ContextScoutConfigurationPinV1,
+        scope: ResolvedScope,
+        binding: tracedecay_hooks::HookScopeBindingV1,
+        lifecycle: tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1,
+        head_commit_id: CommitId,
+    ) -> Self {
         let issued_at = now_utc_micros();
         let grant = CapabilityGrantSnapshot::new(
             typed_id("grant.scout.intent"),
@@ -971,7 +1053,7 @@ impl IntentJourneyFixture {
                 repository_id: scope.repository_id.clone(),
                 worktree_id: scope.worktree_id.clone(),
                 branch_ref: "refs/heads/main".to_owned(),
-                head_commit_id: typed_id("commit.scout.intent"),
+                head_commit_id,
             },
             configuration,
             issued_at,
@@ -982,39 +1064,6 @@ impl IntentJourneyFixture {
             scope.project_id.clone(),
         )
         .expect("address registry");
-        let binding = tracedecay_hooks::HookScopeBindingV1 {
-            host: tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-            project_id: [8; 16],
-            repository_id: [61; 16],
-            worktree_id: [62; 16],
-            worktree_epoch: 1,
-            binding_token: [63; 32],
-            capabilities: [
-                tracedecay_hooks::HookEventFamily::SessionBoundary,
-                tracedecay_hooks::HookEventFamily::ToolLifecycle,
-            ]
-            .into_iter()
-            .map(|family| tracedecay_hooks::HookCapabilityV1 {
-                family,
-                support: tracedecay_hooks::stock_event_support(
-                    tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
-                    family,
-                ),
-            })
-            .collect(),
-        };
-        let lifecycle =
-            tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1 {
-                profile_id: typed_id("profile.scout.intent"),
-                provider_id: typed_id("claude"),
-                project_id: scope.project_id.clone(),
-                worktree_id: scope.worktree_id.clone(),
-                session_id: typed_id(INTENT_SESSION),
-                thread_id: typed_id("thread.scout.intent"),
-                turn_id: typed_id("turn.scout.intent"),
-                agent_id: typed_id("agent.scout.intent"),
-                logical_message_id: typed_id("message.scout.intent"),
-            };
         Self {
             _temporary: temporary,
             owner,
@@ -1141,19 +1190,10 @@ async fn seed_transcript_message(
         .expect("ingest transcript message");
 }
 
-/// The daemon intent pass at a completed tool call over a seeded session: one batched engine request
-/// over the window, exactly one session-evidence suggestion at the session's
-/// intent address, a claim at the next stop boundary, a delivery that writes
-/// the `hint_emitted` row hint settlement resolves into `hint_outcome`, and a
-/// later pass that withholds the delivered intent as a duplicate.
-#[tokio::test]
-async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled() {
-    let fixture = IntentJourneyFixture::open(Some(intent_settings())).await;
-    let harness =
-        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("intent-journey")
-            .await;
-    let sessions = harness.registered.as_ref();
-    let project_key = "/project/intent-journey";
+async fn seed_intent_session(
+    sessions: &tracedecay_global_db::RegisteredGlobalDb,
+    project_key: &str,
+) {
     assert!(
         sessions
             .upsert_session(&tracedecay_sessions::runtime::SessionRecord {
@@ -1201,6 +1241,22 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
         now_secs - 20,
     )
     .await;
+}
+
+/// The daemon intent pass at a completed tool call over a seeded session: one batched engine request
+/// over the window, exactly one session-evidence suggestion at the session's
+/// intent address, a claim at the next stop boundary, a delivery that writes
+/// the `hint_emitted` row hint settlement resolves into `hint_outcome`, and a
+/// later pass that withholds the delivered intent as a duplicate.
+#[tokio::test]
+async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled() {
+    let fixture = IntentJourneyFixture::open(Some(intent_settings())).await;
+    let harness =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open("intent-journey")
+            .await;
+    let sessions = harness.registered.as_ref();
+    let project_key = "/project/intent-journey";
+    seed_intent_session(sessions, project_key).await;
 
     let engine = RecordingDecisionEngine::new(0.9);
     let boundary = fixture.hook(71, completed_tool());
@@ -1459,4 +1515,53 @@ async fn absent_or_disabled_intent_configuration_never_asks_the_engine() {
         unregister_intent_owner(&fixture);
     }
     assert_eq!(engine.requests(), 0);
+}
+
+mod replay;
+
+#[tokio::test]
+async fn intent_waits_for_its_transcript_before_evaluation_and_disabled_never_asks() {
+    let fixture = IntentJourneyFixture::open(Some(intent_settings())).await;
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "intent-window-recovery",
+    )
+    .await;
+    let sessions = harness.registered.as_ref();
+    let project_key = "/project/intent-window-recovery";
+    let engine = RecordingDecisionEngine::new(0.9);
+    let boundary = fixture.hook(75, completed_tool());
+    let outcome = fixture
+        .pass(&boundary, sessions, project_key, &engine)
+        .await;
+    assert_eq!(outcome, ContextScoutIntentPassOutcomeV1::WindowEmpty);
+    assert_eq!(
+        intent_pass_work_outcome(&outcome),
+        HookOrchestrationWorkOutcomeV1::RetryableFailure
+    );
+    assert_eq!(engine.requests(), 0);
+    seed_intent_session(sessions, project_key).await;
+    let outcome = fixture
+        .pass(&boundary, sessions, project_key, &engine)
+        .await;
+    assert!(matches!(
+        outcome,
+        ContextScoutIntentPassOutcomeV1::Enqueued { .. }
+    ));
+    assert_eq!(engine.requests(), 1);
+
+    let disabled = IntentJourneyFixture::open(None).await;
+    let outcome = disabled
+        .pass(
+            &disabled.hook(76, completed_tool()),
+            sessions,
+            project_key,
+            &engine,
+        )
+        .await;
+    assert_eq!(outcome, ContextScoutIntentPassOutcomeV1::Disabled);
+    assert_eq!(
+        intent_pass_work_outcome(&outcome),
+        HookOrchestrationWorkOutcomeV1::Completed
+    );
+    assert_eq!(engine.requests(), 1);
 }

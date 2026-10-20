@@ -13,8 +13,8 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_application::operation_stream::OperationRequestControls;
 use tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE;
 use tracedecay_daemon_service::{
-    DaemonInvocationOperation, DaemonInvocationProblem, ProjectRuntimeRequestLeaseV1,
-    WorkApplicationOutcomeV1,
+    DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
+    ProjectRuntimeRequestLeaseV1, WorkApplicationOutcomeV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::native_runtime;
@@ -285,7 +285,7 @@ impl InProcessDaemonInvocationExecutor {
                     &self.store_administration,
                     Some(&self.project_path),
                     request,
-                    None,
+                    self.admitted_cancellation.clone(),
                 )
                 .await
         }
@@ -659,10 +659,29 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
                     stage: CancellationStage::BeforeAdmission,
                 },
             )?;
-            let executor = self.clone();
+            let mut executor = self.clone();
             let admitted_cancellation = self.admitted_cancellation.clone();
             let request_cancellations = self.invocation.service.request_cancellations().clone();
             let unavailable = |_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable;
+            // The graph owner must observe the caller's live signal directly:
+            // relaying through two native tasks lets a blocking file walk
+            // continue after the transport has acknowledged cancellation.
+            let cancellation_lease = if executor.admitted_cancellation.is_none()
+                && matches!(&request.payload, DaemonInvocationPayload::GraphTool { .. })
+            {
+                let Some(lease) = request_cancellations
+                    .register_with_signal(&request.request_id, cancellation.clone())
+                else {
+                    return Ok(DaemonInvocationResponse::problem(
+                        request.request_id,
+                        DaemonInvocationProblem::InvalidRequest,
+                    ));
+                };
+                executor.admitted_cancellation = Some(lease.token());
+                Some(lease)
+            } else {
+                None
+            };
             match native_runtime::NativeTask::spawn(async move {
                 let request_id = request.request_id.clone();
                 let invocation =
@@ -671,7 +690,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
                         tracing::trace_span!("daemon.invocation.invoke_once"),
                     ))
                     .map_err(unavailable)?;
-                settle_in_process_invocation(
+                let result = settle_in_process_invocation(
                     &request_cancellations,
                     &request_id,
                     invocation,
@@ -681,7 +700,9 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
                     policy,
                     DAEMON_TOOL_RESPONSE_GRACE,
                 )
-                .await
+                .await;
+                drop(cancellation_lease);
+                result
             })
             .map_err(unavailable)?
             .await

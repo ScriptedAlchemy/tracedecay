@@ -114,7 +114,6 @@ const BINDINGS: Readonly<Record<string, SettingsBinding>> = {
     field: 'auto_track_pr_poll_secs',
     input: 'integer',
   },
-  'user.upload_enabled': { scope: 'user', field: 'upload_enabled', input: 'boolean' },
   'user.watcher_debounce': { scope: 'user', field: 'watcher_debounce', input: 'duration' },
   'user.extraction_timeout_secs': {
     scope: 'user',
@@ -360,8 +359,6 @@ function withUserField(
   value: unknown,
 ): UserSettingsValues {
   switch (field) {
-    case 'upload_enabled':
-      return typeof value === 'boolean' ? { ...values, [field]: value } : values;
     case 'watcher_debounce':
     case 'extraction_timeout_secs':
       return typeof value === 'string' ? { ...values, [field]: value } : values;
