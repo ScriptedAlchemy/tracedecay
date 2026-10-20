@@ -242,6 +242,16 @@ async fn project_path_collisions_rearm_once_and_genuine_collisions_stay_parked()
         "projection session output collided at claude/s-4: project_path differs",
     ];
     let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    // Opening a fresh store already converges it. Model an older store whose
+    // parked rows predate the one-time project-path repair.
+    transaction
+        .execute(
+            "DELETE FROM tracedecay_schema_version
+             WHERE component = 'codex-project-path-collision-rearm-v1'",
+            (),
+        )
+        .await
+        .unwrap();
     for (sequence, error) in (1_i64..).zip(errors) {
         transaction
             .execute(
