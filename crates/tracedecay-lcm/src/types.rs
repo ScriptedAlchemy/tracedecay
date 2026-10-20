@@ -747,8 +747,6 @@ pub(crate) const NEEDS_SUMMARY_STATUS: &str = "needs_summary";
 const NEEDS_AUTHORITATIVE_SUMMARY_RETRY: &str = "needs_authoritative_summary";
 pub(crate) const CRITICAL_PRESSURE_CATCH_UP_RETRY: &str = "critical_pressure_catch_up";
 
-/// Control-flow reading of an [`LcmCompressionResponse`]: a pending summary
-/// always carries its request, and a deferral always carries its reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LcmCompressionOutcome<'a> {
     Complete,
@@ -784,8 +782,6 @@ impl LcmCompressionResponse {
         }
     }
 
-    /// Keeps the pending summary request and records why no authoritative
-    /// summary could be produced for it yet.
     pub fn defer_for_authoritative_summary(mut self, reason: &str) -> Self {
         self.reason = reason.to_string();
         self.retry_status = Some(NEEDS_AUTHORITATIVE_SUMMARY_RETRY.to_string());

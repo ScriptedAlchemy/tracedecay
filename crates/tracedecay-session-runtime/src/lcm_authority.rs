@@ -72,6 +72,33 @@ impl DaemonLcmAuthority {
         Self { database }
     }
 
+    async fn compact(
+        &self,
+        request: LcmCompressionRequest,
+    ) -> Result<LcmCompressionResponse, LcmError> {
+        super::lcm_effects::DaemonLcmEffectService::new(self.database.clone(), None, None)
+            .compress(request)
+            .await
+    }
+
+    async fn status(&self, query: &LcmStatusQuery) -> Result<LcmStatus, LcmError> {
+        self.database
+            .lcm_status_with_options(
+                &query.provider,
+                query.session_id.as_deref(),
+                query.deep,
+                &LcmGcConfig::default(),
+            )
+            .await
+    }
+
+    async fn doctor(&self) -> Result<serde_json::Value, LcmError> {
+        let health = SessionTemporalAccess::new(&*self.database)
+            .session_temporal_doctor_health()
+            .await;
+        serde_json::to_value(health).map_err(|error| LcmError::Db(error.to_string()))
+    }
+
     #[tracing::instrument(name = "daemon.lcm.execute", level = "trace", skip_all)]
     async fn execute_inner(&self, invocation: LcmAuthorityInvocation) -> LcmAuthorityResponse {
         let started_at = application_observed_at();
@@ -322,14 +349,8 @@ impl DaemonLcmAuthority {
         started_at: UtcMicros,
         query: LcmStatusQuery,
     ) -> LcmAuthorityResponse {
-        let gc_config = LcmGcConfig::default();
         tokio::select! {
-            result = self.database.lcm_status_with_options(
-                &query.provider,
-                query.session_id.as_deref(),
-                query.deep,
-                &gc_config,
-            ) => status_read_response(context, started_at, result),
+            result = self.status(&query) => status_read_response(context, started_at, result),
             () = cancellation.cancelled() => terminal_interruption(
                 context,
                 LcmAuthorityOperation::Status,
@@ -348,14 +369,8 @@ impl DaemonLcmAuthority {
         started_at: UtcMicros,
         _query: LcmDoctorQuery,
     ) -> LcmAuthorityResponse {
-        let doctor = async {
-            let health = SessionTemporalAccess::new(&*self.database)
-                .session_temporal_doctor_health()
-                .await;
-            serde_json::to_value(health).map_err(|error| LcmError::Db(error.to_string()))
-        };
         tokio::select! {
-            result = doctor => doctor_read_response(context, started_at, result),
+            result = self.doctor() => doctor_read_response(context, started_at, result),
             () = cancellation.cancelled() => terminal_interruption(
                 context,
                 LcmAuthorityOperation::Doctor,
@@ -388,8 +403,7 @@ impl DaemonLcmAuthority {
         let result = run_application_request_interruptible(
             context,
             cancellation,
-            super::lcm_effects::DaemonLcmEffectService::new(self.database.clone(), None, None)
-                .compress(request),
+            self.compact(request),
             || {},
         )
         .await;
@@ -459,16 +473,10 @@ impl DaemonLcmAuthority {
         started_at: UtcMicros,
         query: LcmStatusQuery,
     ) -> LcmAuthorityResponse {
-        let gc_config = LcmGcConfig::default();
         let result = run_application_request_interruptible(
             context,
             cancellation,
-            self.database.lcm_status_with_options(
-                &query.provider,
-                query.session_id.as_deref(),
-                query.deep,
-                &gc_config,
-            ),
+            self.status(&query),
             || {},
         )
         .await;
@@ -493,14 +501,9 @@ impl DaemonLcmAuthority {
         started_at: UtcMicros,
         _query: LcmDoctorQuery,
     ) -> LcmAuthorityResponse {
-        let doctor = async {
-            let health = SessionTemporalAccess::new(&*self.database)
-                .session_temporal_doctor_health()
-                .await;
-            serde_json::to_value(health).map_err(|error| LcmError::Db(error.to_string()))
-        };
         let result =
-            run_application_request_interruptible(context, cancellation, doctor, || {}).await;
+            run_application_request_interruptible(context, cancellation, self.doctor(), || {})
+                .await;
         match result {
             Ok(result) => doctor_read_response(context, started_at, result),
             Err(interruption) => terminal_interruption(
