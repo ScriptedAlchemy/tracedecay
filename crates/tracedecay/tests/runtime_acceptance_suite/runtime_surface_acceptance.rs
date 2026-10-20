@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
+use axum::Json;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
@@ -14,6 +15,10 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use tracedecay::daemon::call_default_tool;
+use tracedecay_api::configuration::{
+    DashboardConfigurationRouteErrorV1, configuration_application_problem_error,
+    configuration_authority_unavailable_error,
+};
 use tracedecay_api::sse_response;
 use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_application::feedback::concrete::open_feedback_runtime;
@@ -33,10 +38,11 @@ use tracedecay_contracts::retrieval::PrimitiveRequest;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_contracts::{ApplicationEnvelope, IdempotencyKey};
 use tracedecay_contracts::{
-    ApplicationOutcome, ApplicationProblemKind, CancellationContext, CancellationObservation,
-    CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
-    CoverageCompleteness, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
+    ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
+    CancellationContext, CancellationObservation, CancellationSignal, CancellationStage,
+    CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness, Deadline, DisclosureClass,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, RequestContext,
+    RequestId, ResolvedScope, ResultContractRef,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
@@ -73,7 +79,7 @@ use tracedecay_mcp::response_handles::{ResponseHandleLookup, retrieve_response_h
 use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
+use tracedecay_tool_catalog::{BindingSurface, CapabilityId, SchemaId, UseCaseId};
 
 static DASHBOARD_CONFIGURATION_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
@@ -1012,6 +1018,7 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
 
     let (status, envelope) = get_dashboard_json(&agent, &settings_url);
     assert_eq!(status, 200, "GET settings failed: {envelope}");
+    let read_fixture = serde_json::json!({ "status": status, "body": envelope });
     let settings = &envelope["payload"];
     let revision = settings["project"]["configuration_revision_id"]
         .as_str()
@@ -1041,7 +1048,7 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
             "idempotency_key": "configuration.idempotency.dashboard-project-commit",
             "exclude": ["target/**", "dist/**"],
             "include": [".github/**"],
-            "max_file_size": 2048
+            "max_file_size": 2_097_152
         }),
     );
     assert_eq!(
@@ -1054,7 +1061,7 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
     let applied_payload = &applied["current"]["payload"];
     assert_eq!(applied_payload["resync_recommended"], true);
     assert_eq!(
-        applied_payload["project"]["config"]["max_file_size"], 2048,
+        applied_payload["project"]["config"]["max_file_size"], 2_097_152,
         "the response must publish the daemon-returned snapshot: {applied_payload}"
     );
     let applied_revision = applied_payload["project"]["configuration_revision_id"]
@@ -1065,6 +1072,14 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         applied_revision, revision,
         "a committed mutation must publish a new configuration revision"
     );
+    let effect = &applied["application_outcome"]["value"];
+    assert_eq!(applied["application_outcome"]["outcome"], "effect");
+    assert_eq!(effect["execution"]["termination"], "completed");
+    assert_eq!(effect["receipt"]["outcome"], "completed");
+    assert!(effect["receipt"]["committed_state"].as_str().is_some());
+    assert_eq!(effect["reconciliation"], "pending");
+    assert_eq!(effect["payload"]["result_revision_id"], applied_revision);
+    let changed_fixture = serde_json::json!({ "status": status, "body": applied });
     assert_ne!(
         applied_payload["project"]["config"]["max_file_size"], original_max_file_size,
         "the committed value must differ from the pre-change reading"
@@ -1076,7 +1091,7 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
     assert_eq!(status, 200);
     assert_eq!(
         reloaded["payload"]["project"]["config"]["max_file_size"],
-        2048
+        2_097_152
     );
     assert_eq!(
         reloaded["payload"]["project"]["config"]["include"][0],
@@ -1085,6 +1100,60 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
     assert_eq!(
         reloaded["payload"]["project"]["configuration_revision_id"],
         applied_revision.as_str()
+    );
+
+    let (unchanged_status, unchanged) = patch_dashboard_json(
+        &agent,
+        &project_url,
+        &serde_json::json!({
+            "expected_revision_id": applied_revision,
+            "idempotency_key": "configuration.idempotency.dashboard-project-noop",
+            "max_file_size": 2_097_152
+        }),
+    );
+    assert_eq!(
+        unchanged_status, 200,
+        "unchanged project PATCH: {unchanged}"
+    );
+    assert!(unchanged["application_outcome"].is_null());
+    assert_eq!(
+        unchanged["current"]["payload"]["project"]["configuration_revision_id"],
+        applied_revision
+    );
+
+    let (idempotency_status, idempotency) = patch_dashboard_json(
+        &agent,
+        &project_url,
+        &serde_json::json!({
+            "expected_revision_id": applied_revision,
+            "idempotency_key": "configuration.idempotency.dashboard-project-commit",
+            "max_file_size": 4096
+        }),
+    );
+    assert_eq!(
+        idempotency_status, 409,
+        "idempotency conflict: {idempotency}"
+    );
+    assert_eq!(idempotency["problem"]["kind"], "conflict");
+
+    let (validation_status, validation) = patch_dashboard_json(
+        &agent,
+        &project_url,
+        &serde_json::json!({
+            "expected_revision_id": applied_revision,
+            "idempotency_key": "configuration.idempotency.dashboard-project-invalid",
+            "unknown_setting": true
+        }),
+    );
+    assert_eq!(
+        validation_status, 400,
+        "invalid project patch: {validation}"
+    );
+    assert!(
+        !validation["validation_errors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
 
     // CAS still holds against the real store: the superseded revision cannot
@@ -1101,6 +1170,38 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
     assert_eq!(status, 409, "a stale project patch must conflict: {stale}");
     assert_eq!(stale["code"], "configuration_revision_conflict");
     assert_eq!(stale["actual_revision_id"], applied_revision.as_str());
+
+    // The changed response above comes from the mounted daemon, including its
+    // durable configuration effect and refreshed revision. The two admission
+    // refusals below use the same typed route factories as production.
+    let refusal = |(status, Json(body)): DashboardConfigurationRouteErrorV1| serde_json::json!({ "status": status.as_u16(), "body": body });
+    let cancelled = ApplicationProblemEnvelope::new(
+        ResultContractRef::new(
+            SchemaId::new("schema.configuration.batch.result").unwrap(),
+            1,
+        )
+        .unwrap(),
+        RequestId::new("request.configuration.settings-cancelled").unwrap(),
+        ApplicationProblem::cancelled_before_admission(),
+    )
+    .unwrap();
+    let wire_fixture = serde_json::json!({
+        "read": read_fixture,
+        "changed": changed_fixture,
+        "unchanged": { "status": unchanged_status, "body": unchanged },
+        "revision_conflict": { "status": status, "body": stale },
+        "validation": { "status": validation_status, "body": validation },
+        "idempotency_conflict": { "status": idempotency_status, "body": idempotency },
+        "unavailable": refusal(configuration_authority_unavailable_error()),
+        "cancelled": refusal(configuration_application_problem_error(cancelled)),
+    });
+    if let Some(output) = std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR") {
+        std::fs::write(
+            PathBuf::from(output).join("settings-patch.json"),
+            format!("{}\n", serde_json::to_string_pretty(&wire_fixture).unwrap()),
+        )
+        .unwrap();
+    }
 
     let _ = call_default_tool(
         fixture.profile(),
@@ -1155,13 +1256,13 @@ async fn dashboard_user_settings_replay_through_application_restart() {
     let request = serde_json::json!({
         "expected_revision_id": initial_revision.clone(),
         "idempotency_key": idempotency_key,
-        "upload_enabled": true,
+        "extraction_timeout_secs": 90,
         "watcher_debounce": "15s"
     });
     let (status, applied) = patch_dashboard_json(&agent, &user_url, &request);
     assert_eq!(status, 200, "profile mutation failed: {applied}");
     assert_eq!(applied["payload"]["restart_recommended"], true);
-    assert_eq!(applied["payload"]["user"]["upload_enabled"], true);
+    assert_eq!(applied["payload"]["user"]["extraction_timeout_secs"], 90);
     assert_eq!(applied["payload"]["user"]["watcher_debounce"], "15s");
     let applied_revision = applied["payload"]["user"]["configuration_revision_id"]
         .as_str()
@@ -1214,7 +1315,7 @@ async fn dashboard_user_settings_replay_through_application_restart() {
     let conflicting_request = serde_json::json!({
         "expected_revision_id": initial_revision.clone(),
         "idempotency_key": idempotency_key,
-        "upload_enabled": false,
+        "extraction_timeout_secs": 30,
         "watcher_debounce": "15s"
     });
     let (status, conflict) =

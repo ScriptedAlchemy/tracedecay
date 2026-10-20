@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use tracedecay_contracts::{CancellationSignal, clock::now_micros};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 const PENDING_CAPACITY: usize = 1_024;
@@ -21,9 +22,15 @@ const COMPLETED_TTL: Duration = Duration::from_mins(1);
 
 #[derive(Default)]
 struct State {
-    active: BTreeMap<String, CancellationToken>,
+    active: BTreeMap<String, ActiveRequest>,
     pending: BTreeMap<String, Instant>,
     completed: BTreeMap<String, Instant>,
+}
+
+#[derive(Clone)]
+struct ActiveRequest {
+    token: CancellationToken,
+    signal: Option<CancellationSignal>,
 }
 
 /// The cancellation table of one invocation service generation.
@@ -55,6 +62,37 @@ impl RequestCancellationRegistryV1 {
     }
 
     pub fn register(&self, request_id: &str) -> Option<Lease> {
+        self.register_control(request_id, None)
+    }
+
+    /// Retains an in-process caller's live signal alongside its request lease.
+    /// Reconstructing it from its wire context would require an asynchronous
+    /// relay before a blocking worker could observe caller cancellation.
+    pub fn register_with_signal(
+        &self,
+        request_id: &str,
+        signal: CancellationSignal,
+    ) -> Option<Lease> {
+        self.register_control(request_id, Some(signal))
+    }
+
+    pub(crate) fn signal(
+        &self,
+        request_id: &str,
+        token: &CancellationToken,
+    ) -> Option<CancellationSignal> {
+        self.lock()
+            .active
+            .get(request_id)
+            .filter(|request| request.token.is_same_token(token))
+            .and_then(|request| request.signal.clone())
+    }
+
+    fn register_control(
+        &self,
+        request_id: &str,
+        signal: Option<CancellationSignal>,
+    ) -> Option<Lease> {
         let token = CancellationToken::for_application_request(request_id);
         let mut state = self.lock();
         expire_ephemeral(&mut state, Instant::now());
@@ -67,8 +105,17 @@ impl RequestCancellationRegistryV1 {
         state.completed.remove(request_id);
         if state.pending.remove(request_id).is_some() {
             token.cancel();
+            if let Some(signal) = &signal {
+                signal.cancel(now_micros());
+            }
         }
-        state.active.insert(request_id.to_owned(), token.clone());
+        state.active.insert(
+            request_id.to_owned(),
+            ActiveRequest {
+                token: token.clone(),
+                signal,
+            },
+        );
         Some(Lease {
             state: Arc::clone(&self.state),
             request_id: request_id.to_owned(),
@@ -81,9 +128,12 @@ impl RequestCancellationRegistryV1 {
         let mut state = self.lock();
         let now = Instant::now();
         expire_ephemeral(&mut state, now);
-        if let Some(token) = state.active.get(request_id).cloned() {
+        if let Some(request) = state.active.get(request_id).cloned() {
             drop(state);
-            token.cancel();
+            request.token.cancel();
+            if let Some(signal) = request.signal {
+                signal.cancel(now_micros());
+            }
             true
         } else if state.completed.contains_key(request_id) {
             true
@@ -128,7 +178,7 @@ impl Drop for Lease {
         if state
             .active
             .get(&self.request_id)
-            .is_some_and(|token| token.is_same_token(&self.token))
+            .is_some_and(|request| request.token.is_same_token(&self.token))
         {
             state.active.remove(&self.request_id);
             record_completed(&mut state, self.request_id.clone(), Instant::now());
@@ -141,6 +191,70 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{COMPLETED_CAPACITY, RequestCancellationRegistryV1, State, record_completed};
+    use tracedecay_contracts::{CancellationSignal, clock::now_micros};
+
+    #[test]
+    fn controlled_request_shares_live_cancellation_without_polling_a_relay() {
+        let registry = RequestCancellationRegistryV1::default();
+        let signal = CancellationSignal::active("cancel.controlled").unwrap();
+        let lease = registry
+            .register_with_signal("request.controlled", signal.clone())
+            .unwrap();
+        let worker = registry
+            .signal("request.controlled", &lease.token())
+            .unwrap();
+
+        assert!(signal.cancel(now_micros()));
+        assert!(worker.is_cancelled());
+
+        let foreign = RequestCancellationRegistryV1::default()
+            .register("request.controlled")
+            .unwrap();
+        assert!(
+            registry
+                .signal("request.controlled", &foreign.token())
+                .is_none()
+        );
+        drop(lease);
+        let retry = registry.register("request.controlled").unwrap();
+        assert!(
+            registry
+                .signal("request.controlled", &retry.token())
+                .is_none()
+        );
+        assert!(!retry.token().is_cancelled());
+    }
+
+    #[test]
+    fn daemon_cancel_reaches_the_controlled_signal_and_preserves_request_isolation() {
+        let registry = RequestCancellationRegistryV1::default();
+        let signal = CancellationSignal::active("cancel.controlled").unwrap();
+        let lease = registry
+            .register_with_signal("request.controlled", signal.clone())
+            .unwrap();
+        let other_signal = CancellationSignal::active("cancel.other").unwrap();
+        let other = registry
+            .register_with_signal("request.other", other_signal.clone())
+            .unwrap();
+
+        assert!(registry.cancel("request.controlled"));
+        assert!(signal.is_cancelled());
+        assert!(lease.token().is_cancelled());
+        assert!(!other_signal.is_cancelled());
+        assert!(!other.token().is_cancelled());
+    }
+
+    #[test]
+    fn pending_cancel_reaches_a_later_controlled_registration() {
+        let registry = RequestCancellationRegistryV1::default();
+        assert!(!registry.cancel("request.controlled"));
+        let signal = CancellationSignal::active("cancel.controlled").unwrap();
+        let lease = registry
+            .register_with_signal("request.controlled", signal.clone())
+            .unwrap();
+        assert!(signal.is_cancelled());
+        assert!(lease.token().is_cancelled());
+    }
 
     #[test]
     fn pre_registration_cancellation_is_retained_and_cleanup_is_exact() {

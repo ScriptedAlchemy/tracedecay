@@ -173,3 +173,93 @@ fn replay_requests_coalesce_into_one_pending_wake() {
         "a delivered request must leave no stored wake behind"
     );
 }
+
+#[asupersync::test]
+async fn pending_reads_include_leased_work_and_exclude_completed_records() {
+    let spool = tempfile::tempdir().unwrap();
+    let broker = open_broker(spool.path());
+    broker.admit("first", b"first").await.unwrap();
+    broker.admit("second", b"second").await.unwrap();
+    let replay = broker.begin_replay().await.unwrap();
+    let first = replay.lease_next().await.unwrap().unwrap();
+    let second = replay.lease_next().await.unwrap().unwrap();
+    assert!(
+        broker
+            .pending_replay_matches(|bytes| Ok(bytes == b"first"))
+            .unwrap()
+    );
+    assert!(
+        broker
+            .pending_replay_matches(|bytes| Ok(bytes == b"second"))
+            .unwrap()
+    );
+    assert_eq!(replay.commit(second.seq).await.unwrap(), 0);
+    assert!(
+        !broker
+            .pending_replay_matches(|bytes| Ok(bytes == b"second"))
+            .unwrap()
+    );
+    assert!(
+        broker
+            .pending_replay_matches(|bytes| Ok(bytes == b"first"))
+            .unwrap()
+    );
+    assert_eq!(replay.commit(first.seq).await.unwrap(), 2);
+    assert!(!broker.pending_replay_matches(|_| Ok(true)).unwrap());
+}
+
+#[asupersync::test]
+async fn progress_is_non_consuming_for_waiters_before_and_after_a_transition() {
+    let spool = tempfile::tempdir().unwrap();
+    let broker = open_broker(spool.path());
+    let observed = broker.progress_revision();
+    let mut first = pin!(broker.wait_for_progress(observed));
+    let mut second = pin!(broker.wait_for_progress(observed));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(first.as_mut().poll(&mut context).is_pending());
+    assert!(second.as_mut().poll(&mut context).is_pending());
+    broker.admit("source", b"event").await.unwrap();
+    assert!(first.as_mut().poll(&mut context).is_ready());
+    assert!(second.as_mut().poll(&mut context).is_ready());
+    assert!(
+        pin!(broker.wait_for_progress(observed))
+            .poll(&mut context)
+            .is_ready()
+    );
+    assert!(
+        pin!(broker.wait_for_replay_request())
+            .poll(&mut context)
+            .is_ready()
+    );
+    let admitted = broker.progress_revision();
+    let replay = broker.begin_replay().await.unwrap();
+    let record = replay.lease_next().await.unwrap().unwrap();
+    replay.commit(record.seq).await.unwrap();
+    assert!(
+        pin!(broker.wait_for_progress(admitted))
+            .poll(&mut context)
+            .is_ready()
+    );
+    assert!(!broker.pending_replay_matches(|_| Ok(true)).unwrap());
+}
+
+#[test]
+fn unavailable_pending_reads_are_typed_failures() {
+    let spool = tempfile::tempdir().unwrap();
+    let broker = open_broker(spool.path());
+    let guard = broker.runtime.lock().unwrap();
+    assert_eq!(
+        broker.pending_replay_matches(|_| Ok(false)),
+        Err(spool_runtime_unavailable())
+    );
+    drop(guard);
+    let runtime = Arc::clone(&broker.runtime);
+    let _ = std::panic::catch_unwind(|| {
+        let _guard = runtime.lock().unwrap();
+        panic!("poison isolated test runtime");
+    });
+    assert_eq!(
+        broker.pending_replay_matches(|_| Ok(false)),
+        Err(spool_runtime_unavailable())
+    );
+}

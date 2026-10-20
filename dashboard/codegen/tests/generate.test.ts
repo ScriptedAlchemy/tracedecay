@@ -164,14 +164,14 @@ describe("contracts generator", () => {
     expect(generated).toContain("export const DashboardEnvelopeV1MetadataSchema");
   });
 
-  it("rejects an emitted contract that still references an omitted envelope instance", () => {
+  it("rejects an emitted contract that references the untyped payload marker", () => {
     const bundle = structuredClone(bundles[0]!);
     bundle.$defs!.EnvelopeConsumer = {
-      $ref: "#/$defs/DashboardEnvelopeV12",
+      $ref: "#/$defs/DashboardPayloadMarkerV1",
     };
 
     expect(() => generateContracts([bundle])).toThrow(
-      "EnvelopeConsumer references omitted generated definition DashboardEnvelopeV12",
+      "EnvelopeConsumer references omitted generated definition DashboardPayloadMarkerV1",
     );
   });
 
@@ -216,6 +216,28 @@ describe("contracts generator", () => {
     const bundle: JsonSchema = {
       schemaRevision: "test.1",
       $defs: {
+        DashboardPayloadMarkerV1: { type: "null" },
+        DashboardEnvelopeV1: {
+          type: "object",
+          properties: {
+            schema_revision: { type: "string" },
+            payload: { $ref: "#/$defs/DashboardPayloadMarkerV1" },
+          },
+          required: ["schema_revision", "payload"],
+        },
+        NodeEnvelope: {
+          type: "object",
+          properties: {
+            schema_revision: { type: "string" },
+            payload: { $ref: "#/$defs/Node" },
+          },
+          required: ["schema_revision", "payload"],
+        },
+        EnvelopeConsumer: {
+          type: "object",
+          properties: { current: { $ref: "#/$defs/NodeEnvelope" } },
+          required: ["current"],
+        },
         Node: {
           type: "object",
           additionalProperties: false,
@@ -278,12 +300,15 @@ import {
   ChoiceSchema,
   ClosedReadingSchema,
   DashboardDomainStateV1Schema,
+  EnvelopeConsumerSchema,
   NodeSchema,
   OpenReadingSchema,
   ResultSchema,
   StatusSchema,
   type Choice,
   type ClosedReading,
+  type DashboardEnvelopeV1,
+  type EnvelopeConsumer,
   type Node,
   type OpenReading,
   type Result,
@@ -293,6 +318,10 @@ import {
 const catchInput: z.input<typeof DashboardDomainStateV1Schema> = 42;
 const valid: Node = { id: "root", label: null, metadata: null, child: { id: "leaf", label: "ok", metadata: {} } };
 const decoded: Node = NodeSchema.parse(valid);
+const nested: EnvelopeConsumer = { current: { schema_revision: "test.1", payload: valid } };
+const envelope: DashboardEnvelopeV1<Node> = EnvelopeConsumerSchema.parse(nested).current;
+// @ts-expect-error a nested envelope keeps its payload contract
+const invalidNested: EnvelopeConsumer = { current: { schema_revision: "test.1", payload: { id: 42 } } };
 const inferred: z.infer<typeof NodeSchema> = valid;
 // @ts-expect-error required nullable fields cannot be omitted
 const missing: Node = { id: "root" };
@@ -315,7 +344,7 @@ function unwrap(result: Result): Node | undefined {
     default: return assertNever(result);
   }
 }
-export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, closedMissing, closed, open, extended, field, status, choice, unwrap };
+export { catchInput, decoded, nested, envelope, invalidNested, inferred, missing, invalidChild, invalidStatus, closedMissing, closed, open, extended, field, status, choice, unwrap };
 `);
       checkContractTypes(directory, ["decoders.ts", "consumer.ts"]);
       // Node's loader avoids waiting on Vitest's shared transform server.
@@ -327,6 +356,14 @@ export { catchInput, decoded, inferred, missing, invalidChild, invalidStatus, cl
         child: { id: "leaf", label: "ok", metadata: 1 },
       };
       expect(runtime.NodeSchema!.parse(node)).toEqual(node);
+      const nested = { current: { schema_revision: "test.1", payload: node } };
+      expect(runtime.EnvelopeConsumerSchema!.parse(nested)).toEqual(nested);
+      expect(runtime.EnvelopeConsumerSchema!.safeParse({
+        current: { schema_revision: "test.1", payload: { ...node, id: 42 } },
+      }).success).toBe(false);
+      expect(runtime.EnvelopeConsumerSchema!.safeParse({
+        current: { schema_revision: "future", payload: node },
+      }).success).toBe(false);
       expect(runtime.NodeSchema!.safeParse({ id: "root", metadata: 1 }).success).toBe(false);
       expect(runtime.NodeSchema!.safeParse({ ...node, extra: true }).success).toBe(false);
       expect(runtime.NodeSchema!.safeParse({

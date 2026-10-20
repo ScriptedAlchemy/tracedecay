@@ -792,6 +792,16 @@ pub async fn ensure_registered_schema_for_admission(
     indexes.await.map_err(|error| {
         global_db_operation_error("initialize observation projection indexes", error)
     })?;
+    // Fresh stores have no history to index. Existing stores build this on
+    // the independently durable convergence writer after required admission.
+    if is_fresh {
+        installation
+            .execute_authority_revalidated_batch(
+                crate::registered_analytics::HOOK_ROUTE_PERFORMANCE_INDEX_SQL,
+            )
+            .await
+            .map_err(|error| global_db_operation_error("initialize hook route index", error))?;
+    }
     // Fresh installations publish the final LCM index shape. Keep each build
     // independently durable outside the shared schema transaction so a
     // real-scale index build gets the long lease without holding every other
@@ -1201,6 +1211,12 @@ pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
+    converge_migration_batches(
+        database,
+        "converge hook route performance index",
+        &[crate::registered_analytics::HOOK_ROUTE_PERFORMANCE_INDEX_SQL],
+    )
+    .await?;
     let bodies: Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>> =
         Box::pin(observation::converge_canonical_bodies(database));
     bodies.await?;
@@ -1318,6 +1334,12 @@ async fn converge_registered_schema_on(
 pub async fn converge_attached_registered_schema(
     database: &Database,
 ) -> tracedecay_domain::errors::Result<()> {
+    converge_migration_batches(
+        database,
+        "converge hook route performance index",
+        &[crate::registered_analytics::HOOK_ROUTE_PERFORMANCE_INDEX_SQL],
+    )
+    .await?;
     if hosts_session_features(&database.registered_binding().shard_id.scope) {
         converge_migration_batches(
             database,
