@@ -925,9 +925,18 @@ fn render_history_progress_md(md: &mut Md, progress: &serde_json::Map<String, Va
                 .get("passes_without_progress")
                 .and_then(Value::as_u64)
                 .unwrap_or_default();
+            let last_progress = progress
+                .get("last_progress_at_unix_micros")
+                .and_then(Value::as_i64)
+                .map_or_else(
+                    || "no progress yet".to_owned(),
+                    |micros| format!("last progress at {micros} unix micros"),
+                );
             md.field(
                 "session_history_catch_up.progress",
-                &format!("{state} ({passes} passes, {without_progress} without progress)"),
+                &format!(
+                    "{state} ({passes} passes, {without_progress} without progress, {last_progress})"
+                ),
             );
         }
         None => {
@@ -1970,7 +1979,9 @@ mod tests {
             "session_history_catch_up": { "status": "warming", "progress": stalled },
         }));
         assert!(
-            md.contains("stalled (4 passes, 3 without progress)"),
+            md.contains(
+                "stalled (4 passes, 3 without progress, last progress at 1000 unix micros)"
+            ),
             "markdown status must name the stall, got {md}"
         );
         assert!(
