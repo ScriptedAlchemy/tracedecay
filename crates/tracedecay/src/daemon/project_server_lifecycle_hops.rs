@@ -1,9 +1,9 @@
 //! Project-server lifecycle entry points shared by native daemon tasks.
 
+use super::{StoreAdministration, project_server_lifecycle};
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_domain::errors::Result;
-use super::{StoreAdministration, project_server_lifecycle};
 
 pub(super) async fn cancel_retained_session_history(administration: &StoreAdministration) {
     project_server_lifecycle::cancel_retained_session_history(administration).await;
