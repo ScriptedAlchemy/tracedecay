@@ -294,7 +294,11 @@ async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
     let ingestor: SharedSessionHistoricalIngestor = history;
     let handle = state.handle();
     assert_eq!(
-        handle.serving_status().history.state(),
+        handle
+            .serving_status()
+            .history
+            .expect("a mounted worker reports catch-up progress")
+            .state(),
         SessionHistoryProgressState::AwaitingFirstPass
     );
     state.wake_history();
@@ -308,7 +312,11 @@ async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
     ));
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while handle.serving_status().history.passes < 2 {
+    while handle
+        .serving_status()
+        .history
+        .is_none_or(|history| history.passes < 2)
+    {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the worker must record both history passes, saw {:?}",
@@ -316,7 +324,10 @@ async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let progress = handle.serving_status().history;
+    let progress = handle
+        .serving_status()
+        .history
+        .expect("a mounted worker reports catch-up progress");
     assert_eq!(progress.passes, 2);
     assert_eq!(progress.passes_without_progress, 0);
     assert!(progress.last_progress_at_unix_micros.is_some());

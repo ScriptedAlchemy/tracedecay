@@ -603,7 +603,7 @@ pub async fn compute_status(
                         // daemon authority drains its bounded backlog.
                         status.session_history_catch_up = Some(
                             tracing::Instrument::instrument(
-                                historical_session_catch_up(db, &history_progress),
+                                historical_session_catch_up(db, history_progress.as_ref()),
                                 tracing::trace_span!("mcp.info.status.session_history"),
                             )
                             .await,
@@ -791,7 +791,7 @@ fn session_git_evidence_state(health: CorrelationIndexHealth) -> StatusSessionGi
 /// backlog from a stalled one.
 async fn historical_session_catch_up(
     db: &RegisteredGlobalDb,
-    progress: &SessionHistoryCatchUpProgress,
+    progress: Option<&SessionHistoryCatchUpProgress>,
 ) -> Value {
     let mut state = match db.session_ingest_health_for_provider(None).await {
         Ok(ingest) => historical_session_catch_up_state(&ingest),
@@ -807,7 +807,13 @@ async fn historical_session_catch_up(
     state
 }
 
-fn historical_session_catch_up_progress(progress: &SessionHistoryCatchUpProgress) -> Value {
+fn historical_session_catch_up_progress(progress: Option<&SessionHistoryCatchUpProgress>) -> Value {
+    let Some(progress) = progress else {
+        return json!({
+            "state": "unavailable",
+            "reason": "refresh_worker_missing",
+        });
+    };
     let providers = progress
         .provider_units
         .iter()
@@ -908,6 +914,43 @@ fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Value {
     })
 }
 
+fn render_history_progress_md(md: &mut Md, progress: &serde_json::Map<String, Value>) {
+    let state = progress
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match progress.get("passes").and_then(Value::as_u64) {
+        Some(passes) => {
+            let without_progress = progress
+                .get("passes_without_progress")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            md.field(
+                "session_history_catch_up.progress",
+                &format!("{state} ({passes} passes, {without_progress} without progress)"),
+            );
+        }
+        None => {
+            md.field("session_history_catch_up.progress", state);
+        }
+    }
+    for provider in progress
+        .get("providers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        md.bullet(&format!(
+            "{}: {} projected, {} refused, {} parked, {} messages",
+            provider["provider"].as_str().unwrap_or_default(),
+            provider["units_projected"],
+            provider["units_refused"],
+            provider["units_parked"],
+            provider["messages_upserted"],
+        ));
+    }
+}
+
 pub(crate) fn render_status_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Project Status");
@@ -983,6 +1026,11 @@ pub(crate) fn render_status_md(value: &Value) -> String {
                         for finding in findings {
                             md.bullet(&finding.to_string());
                         }
+                    }
+                    if k == "session_history_catch_up"
+                        && let Some(progress) = o.get("progress").and_then(Value::as_object)
+                    {
+                        render_history_progress_md(&mut md, progress);
                     }
                     if k == "hook_replay"
                         && let Some(failures) = o.get("failures").and_then(Value::as_array)
@@ -1870,7 +1918,7 @@ mod tests {
         };
         let mut progress = SessionHistoryCatchUpProgress::default();
         assert_eq!(
-            historical_session_catch_up_progress(&progress)["state"],
+            historical_session_catch_up_progress(Some(&progress))["state"],
             "awaiting_first_pass"
         );
 
@@ -1883,14 +1931,14 @@ mod tests {
         for at in [2_000, 3_000] {
             progress.record_pass(false, false, &[("cursor", cursor_parked)].into(), at);
         }
-        let slow = historical_session_catch_up_progress(&progress);
+        let slow = historical_session_catch_up_progress(Some(&progress));
         assert_eq!(slow["state"], "advancing");
         assert_eq!(slow["passes"], 3);
         assert_eq!(slow["passes_without_progress"], 2);
         assert_eq!(slow["last_progress_at_unix_micros"], 1_000);
 
         progress.record_pass(false, false, &[("cursor", cursor_parked)].into(), 4_000);
-        let stalled = historical_session_catch_up_progress(&progress);
+        let stalled = historical_session_catch_up_progress(Some(&progress));
         assert_eq!(stalled["state"], "stalled");
         assert_eq!(stalled["passes_without_progress"], 3);
         assert_eq!(stalled["stalled_after_passes"], 3);
@@ -1918,9 +1966,26 @@ mod tests {
             ])
         );
 
+        let md = render_status_md(&json!({
+            "session_history_catch_up": { "status": "warming", "progress": stalled },
+        }));
+        assert!(
+            md.contains("stalled (4 passes, 3 without progress)"),
+            "markdown status must name the stall, got {md}"
+        );
+        assert!(
+            md.contains("cursor: 0 projected, 0 refused, 4 parked, 0 messages"),
+            "markdown status must list provider counters, got {md}"
+        );
+        assert_eq!(
+            historical_session_catch_up_progress(None),
+            json!({ "state": "unavailable", "reason": "refresh_worker_missing" }),
+            "no mounted worker is not a pending first pass"
+        );
+
         progress.record_pass(true, false, &BTreeMap::new(), 5_000);
         assert_eq!(
-            historical_session_catch_up_progress(&progress)["state"],
+            historical_session_catch_up_progress(Some(&progress))["state"],
             "advancing",
             "a pass that completes the backlog is not a stall"
         );

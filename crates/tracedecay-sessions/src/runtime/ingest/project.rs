@@ -346,10 +346,11 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
                 provider_runs.deferred_units = provider_runs
                     .deferred_units
                     .saturating_add(projection_stats.deferred_sources);
-                provider_runs.stats = provider_runs.stats.merge(
-                    projection_stats
-                        .deduplicated_transcript_stats(&mut claude_projected_session_ids),
-                );
+                let drained = projection_stats
+                    .deduplicated_transcript_stats(&mut claude_projected_session_ids);
+                provider_runs
+                    .add_provider_messages(SessionProvider::Claude.id(), drained.messages_upserted);
+                provider_runs.stats = provider_runs.stats.merge(drained);
             }
             Err(error) => {
                 let failure = claude_catch_up_failure("projection", &error);

@@ -179,6 +179,16 @@ impl<F> ProviderRunFold<F> {
         self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
     }
 
+    /// Attributes messages a provider committed outside its run, such as
+    /// Claude's projection drain, to that provider's tally.
+    pub fn add_provider_messages(&mut self, provider: &'static str, messages_upserted: u64) {
+        if messages_upserted == 0 {
+            return;
+        }
+        let units = self.provider_units.entry(provider).or_default();
+        units.messages_upserted = units.messages_upserted.saturating_add(messages_upserted);
+    }
+
     /// Accounts an admitted provider the pass budget never reached.
     pub fn park(&mut self, provider: &'static str) {
         let units = self.provider_units.entry(provider).or_default();
@@ -317,6 +327,8 @@ mod tests {
             "claude",
             ProviderRunOutcome::failed(Failure { retryable: true }, 3),
         );
+        fold.add_provider_messages("claude", 5);
+        fold.add_provider_messages("hermes", 0);
         fold.park("kimi");
         fold.record("pi", ProviderRunOutcome::skipped());
 
@@ -327,6 +339,7 @@ mod tests {
                     "claude",
                     ProviderPassUnits {
                         units_refused: 1,
+                        messages_upserted: 5,
                         ..ProviderPassUnits::default()
                     }
                 ),
@@ -354,7 +367,7 @@ mod tests {
                     }
                 ),
             ],
-            "a skipped provider was never admitted, so it has no tally"
+            "a skipped provider and an empty drain leave no tally"
         );
     }
 }

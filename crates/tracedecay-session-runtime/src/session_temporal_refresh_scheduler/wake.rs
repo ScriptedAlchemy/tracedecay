@@ -687,7 +687,7 @@ impl SessionTemporalRefreshWakeState {
                 }
             }),
             convergence,
-            history,
+            history: Some(history),
         }
     }
 

@@ -673,10 +673,11 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
         .await
         {
             Ok(projection_stats) => {
-                provider_runs.stats = provider_runs.stats.merge(
-                    projection_stats
-                        .deduplicated_transcript_stats(&mut claude_projected_session_ids),
-                );
+                let drained = projection_stats
+                    .deduplicated_transcript_stats(&mut claude_projected_session_ids);
+                provider_runs
+                    .add_provider_messages(SessionProvider::Claude.id(), drained.messages_upserted);
+                provider_runs.stats = provider_runs.stats.merge(drained);
                 provider_runs.deferred_units = provider_runs
                     .deferred_units
                     .saturating_add(projection_stats.deferred_sources);

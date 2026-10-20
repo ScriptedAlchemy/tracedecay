@@ -157,7 +157,9 @@ pub struct SessionProjectionServingStatus {
     pub blocker: Option<SessionProjectionWorkerBlocker>,
     pub retry_class: Option<SessionProjectionWorkerRetryClass>,
     pub convergence: SessionConvergenceStatus,
-    pub history: SessionHistoryCatchUpProgress,
+    /// Historical catch-up progress of the mounted worker; absent when no
+    /// worker is mounted, so status never reports a first pass as pending.
+    pub history: Option<SessionHistoryCatchUpProgress>,
 }
 
 pub trait SessionProjectionServingStatusPort: Send + Sync {
@@ -183,7 +185,7 @@ impl SessionProjectionServingStatusPort for RefreshWorkerMissing {
             blocker: Some(SessionProjectionWorkerBlocker::WorkerMissing),
             retry_class: None,
             convergence: SessionConvergenceStatus::unavailable(),
-            history: SessionHistoryCatchUpProgress::default(),
+            history: None,
         }
     }
 }
