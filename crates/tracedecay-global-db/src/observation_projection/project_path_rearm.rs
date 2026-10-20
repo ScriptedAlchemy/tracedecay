@@ -15,8 +15,6 @@ const OPERATION: &str = "rearm Codex project path collisions";
 /// Recorded once the rows parked on the obsolete `project_path` collision are
 /// re-armed.
 const CONVERGENCE: &str = "codex-project-path-collision-rearm-v1";
-const PARKED_ERROR_PATTERN: &str =
-    "projection session output collided at codex/%: project_path differs%";
 
 /// Re-arms queue rows parked terminal only because of the `project_path`
 /// collision, once per store, and returns how many it re-armed.
@@ -41,8 +39,9 @@ pub(crate) async fn rearm_project_path_collisions(
     let rows = transaction
         .execute(
             "UPDATE projection_queue SET next_retry_at_micros = 0
-             WHERE next_retry_at_micros = ?1 AND last_error LIKE ?2",
-            params![PROJECTION_TERMINAL_RETRY_MICROS, PARKED_ERROR_PATTERN],
+             WHERE next_retry_at_micros = ?1
+               AND last_error LIKE 'projection session output collided at codex/%: project_path differs%'",
+            params![PROJECTION_TERMINAL_RETRY_MICROS],
         )
         .await
         .map_err(|error| storage(OPERATION, error))?;
