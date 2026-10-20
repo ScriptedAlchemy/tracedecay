@@ -301,7 +301,8 @@ def cargo_package(
     return package_record(
         {
             "name": package_name,
-            "version": metadata.get("version", package.get("version", "NOASSERTION")),
+            # Cargo.lock resolves workspace-inherited package versions to strings.
+            "version": package.get("version", "NOASSERTION"),
             "checksum": package.get("checksum"),
         },
         manifest,

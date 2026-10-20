@@ -156,20 +156,20 @@ jobs:
             scripts/generate-release-inventory.py
 
       - name: Set up Bazel for inventory-only recovery
-        if: matrix.inventory_only == 'true'
+        if: matrix.inventory_only == true
         uses: ./.release-automation/.github/actions/setup-bazel
         with:
           cache-key: release-${{ matrix.target }}
           cache-save: "false"
 
       - name: Build dashboard bundle for inventory-only recovery
-        if: matrix.inventory_only == 'true'
+        if: matrix.inventory_only == true
         run: bazel build --config=dist --config=ci //dashboard:app_dist
 
       # Bazel builds and validates //dashboard:app_dist, and the CLI build
       # script refuses to embed it unless it matches //dashboard:bundle_sha256.
       - name: Build release binary for packaging
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         id: cli
         uses: ./.github/actions/build-cli
         with:
@@ -179,7 +179,7 @@ jobs:
 
       # verify-release requires every target to embed the same bundle.
       - name: Record the embedded dashboard digest
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         shell: bash
         run: |
           set -euo pipefail
@@ -189,7 +189,7 @@ jobs:
             "dashboard-sha256-${{ matrix.name }}.txt"
 
       - name: Upload embedded dashboard digest
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dashboard-sha256-${{ matrix.name }}
@@ -197,7 +197,7 @@ jobs:
           if-no-files-found: error
 
       - name: Package and verify native archive and MCPB
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         uses: ./.release-automation/.github/actions/package-release
         with:
           binary: ${{ steps.cli.outputs.path }}
@@ -229,7 +229,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload MCPB artifact
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mcpb-${{ matrix.name }}
@@ -237,7 +237,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload binary archive artifact
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-${{ matrix.name }}

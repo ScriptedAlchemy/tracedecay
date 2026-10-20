@@ -155,19 +155,19 @@ jobs:
             scripts/generate-release-inventory.py
 
       - name: Set up Bazel for inventory-only recovery
-        if: matrix.inventory_only == 'true'
+        if: matrix.inventory_only == true
         uses: ./.release-automation/.github/actions/setup-bazel
         with:
           cache-key: release-${{ matrix.target }}
           cache-save: "false"
 
       - name: Build dashboard bundle for inventory-only recovery
-        if: matrix.inventory_only == 'true'
+        if: matrix.inventory_only == true
         run: bazel build --config=dist --config=ci //dashboard:app_dist
 
       # Bazel builds the dashboard bundle the binary embeds (//dashboard:app_dist).
       - name: Build release binary for packaging
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         id: cli
         uses: ./.github/actions/build-cli
         with:
@@ -176,7 +176,7 @@ jobs:
           cache-key: release-${{ matrix.target }}
 
       - name: Package and verify native archive and MCPB
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         uses: ./.release-automation/.github/actions/package-release
         with:
           binary: ${{ steps.cli.outputs.path }}
@@ -208,7 +208,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload MCPB artifact
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mcpb-beta-${{ matrix.name }}
@@ -216,7 +216,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload binary archive artifact
-        if: matrix.inventory_only != 'true'
+        if: matrix.inventory_only != true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beta-${{ matrix.name }}

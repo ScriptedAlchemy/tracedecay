@@ -70,13 +70,21 @@ def main() -> None:
         (source / "MODULE.bazel").write_text(
             'patches = ["//scripts:bazel/patches/asupersync-test.patch"]\n', encoding="utf-8"
         )
+        (source / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/*"]\n\n'
+            '[workspace.package]\nversion = "1.2.3"\n',
+            encoding="utf-8",
+        )
         write_package(
             source / "crates/tracedecay-cli/Cargo.toml",
             "tracedecay-cli",
             "1.2.3",
             "MIT",
         )
-        write_package(source / "crates/tracedecay/Cargo.toml", "tracedecay", "1.2.3", "MIT")
+        (source / "crates/tracedecay/Cargo.toml").write_text(
+            '[package]\nname = "tracedecay"\nversion.workspace = true\nlicense = "MIT"\n',
+            encoding="utf-8",
+        )
         write_package(
             source / "crates/tracedecay-session-memory/Cargo.toml",
             "tracedecay-session-memory",
@@ -182,6 +190,8 @@ rust_library rule @@c__build-tool-1.0.0//:build_tool
         rust = {component["name"]: component for component in scoped["rust_components"]}
         assert {"tracedecay", "serde", "asupersync", "tokensave-medium-treesitters"} <= set(rust)
         assert "build-tool" not in rust
+        assert rust["tracedecay"]["version"] == "1.2.3"
+        assert rust["tracedecay"]["purl"] == "pkg:cargo/tracedecay@1.2.3"
         assert "https://github.com/vendor/asupersync" in rust["asupersync"]["downloadLocation"]
         embedded = {component["name"]: component for component in scoped["embedded_sources"]}
         assert embedded["sample-vendor"]["version"] == "v2.3.4"
@@ -279,6 +289,10 @@ rust_library rule @@c__build-tool-1.0.0//:build_tool
         assert "scheduler" in packages
         assert "@fontsource-variable/archivo" in packages
         assert "playwright" not in packages
+        assert packages["tracedecay"]["versionInfo"] == "1.2.3"
+        assert packages["tracedecay"]["externalRefs"][0]["referenceLocator"] == (
+            "pkg:cargo/tracedecay@1.2.3"
+        )
         assert packages["asupersync"]["sourceInfo"].startswith("git+https://github.com/vendor/")
         assert packages["tokensave-medium-treesitters"]["licenseDeclared"] == "NOASSERTION"
         assert packages["sample-vendor"]["licenseDeclared"] == "MIT"
