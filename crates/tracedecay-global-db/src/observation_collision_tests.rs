@@ -205,7 +205,7 @@ async fn overwrite_stored_observation_row(
 /// Original stored-row authority bytes captured before the tripwire arms, so
 /// restart-bearing tests can restore the row before remount, mount-time
 /// invariant convergence legitimately decodes committed observation rows.
-struct StoredRowBytes {
+pub(super) struct StoredRowBytes {
     payload_digest: String,
     observation_json: String,
     committed_cursor_json: String,
@@ -223,7 +223,7 @@ struct StoredRowBytes {
 /// contract into a behavioral proof: if a regression reintroduces stored-row
 /// decode, identity re-derivation, or payload re-hashing on the fast path,
 /// the corrupted bytes make it fail loudly instead of passing silently.
-async fn corrupt_stored_observation_row(
+pub(super) async fn corrupt_stored_observation_row(
     runtime: &HostAdmissionTestRuntimeV1,
     observation_id: &str,
 ) -> StoredRowBytes {
