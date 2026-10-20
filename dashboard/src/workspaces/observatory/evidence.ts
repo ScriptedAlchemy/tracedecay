@@ -209,7 +209,7 @@ export const SOURCE_IDENTITY: Record<EvidenceSourceId, SourceIdentity> = {
     id: 'analytics',
     title: 'Analytics controls',
     route: '/api/observatory',
-    authority: 'canonical analytics mode, retention lifecycle, egress and upload settings',
+    authority: 'canonical analytics mode, retention lifecycle and egress',
   },
   telemetry: {
     id: 'telemetry',

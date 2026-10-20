@@ -16,21 +16,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_contracts::{ApplicationContractError, ResolvedScope};
 use tracedecay_domain::{CommitId, ProjectId, RefId, RepositoryId, TreeId, WorktreeId};
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::scope_identity::ScopeIdentityError;
+
+pub use tracedecay_runtime_core::scope_identity::{
+    repository_id_for, repository_id_for_common_dir, worktree_id_for,
+};
 
 /// Failure to resolve an exact indexing identity from a checkout.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityErrorV1 {
     #[error("code-index identity: repository open failed: {0}")]
     Git(String),
-    #[error("code-index identity: canonical worktree path unavailable: {}: {source}", path.display())]
-    CanonicalWorktreePath {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("code-index identity: canonical id construction failed: {0}")]
-    Domain(String),
+    #[error(transparent)]
+    Structural(#[from] ScopeIdentityError),
 }
 
 /// The exact project/repository/worktree/ref/commit/tree identity of one
@@ -307,36 +305,10 @@ fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
     (git_dir.clone(), git_dir)
 }
 
-pub fn repository_id_for(project_root: &Path) -> Result<RepositoryId, IdentityErrorV1> {
-    let common = tracedecay_runtime_core::worktree::git_common_dir(project_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
-    repository_id_for_common_dir(&common)
-}
-
-pub fn repository_id_for_common_dir(common_dir: &Path) -> Result<RepositoryId, IdentityErrorV1> {
-    let digest = super::sha256_hex(common_dir.to_string_lossy().as_bytes());
-    RepositoryId::new(format!("repository.daemon.{digest}"))
-        .map_err(|error| IdentityErrorV1::Domain(error.to_string()))
-}
-
-pub fn worktree_id_for(project_root: &Path) -> Result<WorktreeId, IdentityErrorV1> {
-    let project_root = canonical_existing_identity(project_root).map_err(|source| {
-        IdentityErrorV1::CanonicalWorktreePath {
-            path: project_root.to_path_buf(),
-            source,
-        }
-    })?;
-    WorktreeId::new(format!(
-        "worktree.daemon.{}",
-        super::sha256_hex(project_root.to_string_lossy().as_bytes())
-    ))
-    .map_err(|error| IdentityErrorV1::Domain(error.to_string()))
-}
-
 /// Resolve the code-index `ResolvedScope` for one project checkout.
 ///
-/// Repository and worktree identities come from this module; the current
-/// branch is best-effort (`None` when HEAD is unborn or detached).
+/// Repository and worktree identities come from the shared runtime authority;
+/// the current branch is best-effort (`None` when HEAD is unborn or detached).
 pub fn resolved_scope_for_project(
     project_root: &Path,
     project_id: &ProjectId,

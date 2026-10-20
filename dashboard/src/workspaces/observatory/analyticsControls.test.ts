@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AnalyticsModeReadModelV1, MetricValueV1, StorageFindingKindStatusV1 } from '../../contracts/generated.ts';
-import { analyticsModeReading, egressFailureReading, retentionBacklogReading, shareStagingReading, uploadSettingReading } from './analyticsControls.ts';
+import { analyticsModeReading, egressFailureReading, retentionBacklogReading, shareStagingReading } from './analyticsControls.ts';
 
 describe('analyticsModeReading', () => {
   it('reports an unavailable mode as unknown and explicitly not Off', () => {
@@ -75,16 +75,6 @@ describe('retentionBacklogReading', () => {
     expect(reading.published).toBe(false);
     expect(reading.observedEntries).toBeNull();
     expect(reading.state).toBe('unsupported');
-  });
-});
-
-describe('uploadSettingReading', () => {
-
-  it('reports an unread setting as unknown rather than as disabled', () => {
-    const reading = uploadSettingReading(undefined);
-    expect(reading.enabled).toBeNull();
-    expect(reading.enabled).not.toBe(false);
-    expect(reading.state).toBe('unknown');
   });
 });
 

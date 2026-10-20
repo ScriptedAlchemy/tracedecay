@@ -303,9 +303,6 @@ pub struct McpServer {
     /// clone and swap in the freshly synced map on completion.
     file_token_map: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     tokens_saved: Option<AtomicU64>,
-    last_flushed_tokens: Option<AtomicU64>,
-    /// UNIX timestamp of last worldwide flush (`0` = never).
-    last_flush_at: AtomicI64,
     /// User-level database tracking all projects (best-effort). Wrapped in
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
@@ -1006,8 +1003,6 @@ impl McpServer {
             diagnostics_lsp,
             file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
             tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
-            last_flushed_tokens: persisted_tokens_saved.map(AtomicU64::new),
-            last_flush_at: AtomicI64::new(0),
             global_db,
             accounting_db,
             profile,

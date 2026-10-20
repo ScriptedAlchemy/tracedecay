@@ -78,10 +78,36 @@ fn observation(
     receipt_id: &str,
     session: Option<CanonicalObservationFactV1>,
 ) -> DurableObservationV1 {
+    observation_from_source(
+        provider, session_id, None, scope, record_id, text, receipt_id, session,
+    )
+}
+
+/// `source_key` names the rollout file the record came from, so one session can
+/// be read through several sources, each with its own cursor.
+#[allow(clippy::too_many_arguments)]
+fn observation_from_source(
+    provider: &str,
+    session_id: &str,
+    source_key: Option<&str>,
+    scope: ObservationScopeV1,
+    record_id: &str,
+    text: &str,
+    receipt_id: &str,
+    session: Option<CanonicalObservationFactV1>,
+) -> DurableObservationV1 {
     let provider_id = ProviderId::new(provider).unwrap();
     let session_id = SessionId::new(session_id).unwrap();
-    let source =
-        ObservationSourceIdentityV1::for_provider(provider_id.clone(), session_id.clone()).unwrap();
+    let source = match source_key {
+        Some(key) => ObservationSourceIdentityV1::for_provider_source(
+            provider_id.clone(),
+            session_id.clone(),
+            SessionId::new(key).unwrap(),
+        )
+        .unwrap(),
+        None => ObservationSourceIdentityV1::for_provider(provider_id.clone(), session_id.clone())
+            .unwrap(),
+    };
     let range = ObservationSourceRangeV1::new(0, 1).unwrap();
     let record = ObservationId::new(record_id).unwrap();
     let mut facts = Vec::new();
@@ -626,6 +652,15 @@ async fn genuine_session_collision_is_recorded_and_later_sessions_project() {
         store.next_queued_observation().await.unwrap().is_none(),
         "the terminal collision must not stay at the head of the queue"
     );
+    let window = store
+        .project_queued_observations(8)
+        .await
+        .unwrap()
+        .expect("the store drains in windows");
+    assert!(
+        window.items.is_empty() && !window.has_more,
+        "a parked terminal collision is not pending work, or every pass reports backpressure"
+    );
 }
 
 fn session_fact_with_transcript(cwd: &str, transcript_path: &str) -> CanonicalObservationFactV1 {
@@ -680,4 +715,375 @@ async fn queue_last_error(database: &RegisteredGlobalDb, observation_id: &str) -
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     row.get(0).unwrap()
+}
+
+async fn queue_attempts(
+    database: &RegisteredGlobalDb,
+    observation_id: &str,
+) -> Option<(i64, Option<String>)> {
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT attempt_count, last_error FROM projection_queue WHERE observation_id = ?1",
+            params![observation_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap()?;
+    Some((row.get(0).unwrap(), row.get(1).unwrap()))
+}
+
+/// A Codex session whose later records name another working directory (a
+/// rollout resumed from a linked worktree) is one session. Its messages must
+/// project and the session row keeps the first cwd instead of colliding on
+/// `project_path` for every later record.
+#[asupersync::test]
+async fn session_seen_from_another_cwd_projects_every_message() {
+    let tmp = TempDir::new().unwrap();
+    let profile = tmp.path().join("profile");
+    let first_cwd = tmp.path().join("repo");
+    let second_cwd = tmp.path().join("repo-worktree");
+    std::fs::create_dir_all(&first_cwd).unwrap();
+    std::fs::create_dir_all(&second_cwd).unwrap();
+    #[cfg(unix)]
+    let (first_observed, second_observed) = {
+        let first_alias = tmp.path().join("first-alias");
+        let second_alias = tmp.path().join("second-alias");
+        std::os::unix::fs::symlink(&first_cwd, &first_alias).unwrap();
+        std::os::unix::fs::symlink(&second_cwd, &second_alias).unwrap();
+        (first_alias, second_alias)
+    };
+    #[cfg(not(unix))]
+    let (first_observed, second_observed) = (first_cwd.clone(), second_cwd.clone());
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+
+    let mut ids = Vec::new();
+    for (record, text, cwd) in [
+        (
+            "record.codex.cwd-a",
+            "message from the first cwd",
+            &first_observed,
+        ),
+        (
+            "record.codex.cwd-b-1",
+            "message from the second cwd",
+            &second_observed,
+        ),
+        (
+            "record.codex.cwd-b-2",
+            "another message from the second cwd",
+            &second_observed,
+        ),
+    ] {
+        let write = observation_from_source(
+            "codex",
+            CODEX_SESSION,
+            Some(&format!("rollout.{record}")),
+            ObservationScopeV1::Profile,
+            record,
+            text,
+            &format!("receipt.{record}"),
+            Some(session_fact(&cwd.to_string_lossy())),
+        );
+        ids.push(write.observation_id().clone());
+        persist(&store, write).await;
+    }
+    let legacy = observation_from_source(
+        "codex",
+        CODEX_SESSION,
+        Some("rollout.legacy"),
+        ObservationScopeV1::Profile,
+        "record.codex.legacy",
+        "legacy message without directory evidence",
+        "receipt.codex.legacy",
+        None,
+    );
+    ids.push(legacy.observation_id().clone());
+    persist(&store, legacy).await;
+    drain_projection_queue(&store).await;
+
+    let texts = [
+        "message from the first cwd",
+        "message from the second cwd",
+        "another message from the second cwd",
+        "legacy message without directory evidence",
+    ];
+    let expected_path = durable_project_path_key(&first_cwd.to_string_lossy());
+    for id in &ids {
+        assert_eq!(
+            queue_attempts(database, id.as_str()).await,
+            None,
+            "a projected observation leaves the queue instead of parking on an error"
+        );
+    }
+    for text in texts {
+        assert!(
+            projected_text_contains(database, "codex", CODEX_SESSION, text).await,
+            "{text:?} must project"
+        );
+    }
+    let (_, project_path) = session_project_binding(database, "codex", CODEX_SESSION).await;
+    assert_eq!(project_path, expected_path);
+    assert_cwd_scoped_messages(database, &first_cwd, &second_cwd).await;
+    assert_cwd_scoped_messages(database, &first_observed, &second_observed).await;
+
+    // Protection re-ingest owns the body, while projection retains location.
+    let mut message = database
+        .search_session_messages("codex", Some(second_cwd.to_str().unwrap()), "message", 1)
+        .await
+        .unwrap()
+        .remove(0)
+        .message;
+    let mut metadata: Value =
+        serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+    metadata["protection_rescan"] = json!("retained provider metadata");
+    message.metadata_json = Some(metadata.to_string());
+    let storage_root = database.db_path().parent().unwrap();
+    let mut rollback =
+        tracedecay_lcm::payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
+    let transaction = database
+        .runtime_database()
+        .begin_write_transaction("protect a projected body")
+        .await
+        .unwrap();
+    tracedecay_lcm::raw::upsert_raw_message_with_payload_tracked(
+        &transaction,
+        storage_root,
+        &message,
+        &mut rollback,
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert_cwd_scoped_messages(database, &first_cwd, &second_cwd).await;
+
+    // The shipped v15 schema lacked the storage-only location. Opening that
+    // shape preserves rows and lets the bounded authority audit fill locations.
+    crate::schema_contract::ensure_authority_invariants(database.runtime_database(), false, false)
+        .await
+        .unwrap();
+    let immutable_before = message_renderings(database).await;
+    let transaction = database
+        .runtime_database()
+        .begin_write_transaction("restore released raw message shape")
+        .await
+        .unwrap();
+    transaction
+        .execute_batch(
+            "ALTER TABLE lcm_raw_messages DROP COLUMN location_path;
+             UPDATE authority_audit_checkpoints SET audit_version = 2;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    drop(store);
+    drop(runtime);
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    crate::schema_contract::ensure_authority_invariants(database.runtime_database(), false, false)
+        .await
+        .unwrap();
+    assert_eq!(message_renderings(database).await, immutable_before);
+    assert_cwd_scoped_messages(database, &first_cwd, &second_cwd).await;
+    assert_cwd_scoped_messages(database, &first_observed, &second_observed).await;
+
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+
+    // A prior capture can know an origin a later rendering no longer carries.
+    // Rebuild must preserve that materialized identity for the same message.
+    let legacy_message = database
+        .search_session_messages("codex", Some("user"), "legacy", 1)
+        .await
+        .unwrap()
+        .remove(0)
+        .message;
+    let transaction = database
+        .runtime_database()
+        .begin_write_transaction("retain earlier message origin")
+        .await
+        .unwrap();
+    tracedecay_lcm::raw::upsert_projection_raw_message(
+        &transaction,
+        &legacy_message,
+        Some(&expected_path),
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    // A rebuild replays the same records through the staging path.
+    let frontier = store.projection_checkpoint().await.unwrap().last_sequence();
+    let rebuilt = loop {
+        let outcome = store.rebuild_projection(frontier).await.unwrap();
+        if outcome.is_complete() {
+            break outcome;
+        }
+    };
+    assert_eq!(
+        rebuilt.skipped_observations(),
+        0,
+        "no replayed record is skipped"
+    );
+    for text in texts {
+        assert!(
+            projected_text_contains(database, "codex", CODEX_SESSION, text).await,
+            "{text:?} must survive the rebuild"
+        );
+    }
+    let (_, project_path) = session_project_binding(database, "codex", CODEX_SESSION).await;
+    assert_eq!(project_path, expected_path);
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot.query("SELECT location_path FROM lcm_raw_messages WHERE provider = 'codex' AND message_id = ?1", params![legacy_message.message_id.as_str()]).await.unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        expected_path,
+        "a rebuild without cwd evidence retains the captured origin"
+    );
+    drop(rows);
+    drop(snapshot);
+    assert_cwd_scoped_messages(database, &first_cwd, &second_cwd).await;
+    #[cfg(unix)]
+    {
+        let unrelated = tmp.path().join("unrelated");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::remove_file(&second_observed).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &second_observed).unwrap();
+        crate::schema_contract::ensure_authority_invariants(
+            database.runtime_database(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        while !store
+            .rebuild_projection(frontier)
+            .await
+            .unwrap()
+            .is_complete()
+        {}
+        assert_cwd_scoped_messages(database, &first_cwd, &second_cwd).await;
+        assert_eq!(
+            database
+                .session_message_count_for_project(unrelated.to_str().unwrap())
+                .await
+                .unwrap(),
+            0
+        );
+        std::fs::remove_file(&second_observed).unwrap();
+        crate::schema_contract::ensure_authority_invariants(
+            database.runtime_database(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        while !store
+            .rebuild_projection(frontier)
+            .await
+            .unwrap()
+            .is_complete()
+        {}
+        assert_cwd_scoped_messages(database, &first_cwd, &second_cwd).await;
+    }
+}
+
+async fn assert_cwd_scoped_messages(
+    database: &RegisteredGlobalDb,
+    first_cwd: &std::path::Path,
+    second_cwd: &std::path::Path,
+) {
+    for (cwd, expected) in [
+        (
+            first_cwd,
+            vec![
+                "legacy message without directory evidence",
+                "message from the first cwd",
+            ],
+        ),
+        (
+            second_cwd,
+            vec![
+                "another message from the second cwd",
+                "message from the second cwd",
+            ],
+        ),
+    ] {
+        let selector = cwd.to_str().unwrap();
+        assert_eq!(
+            database
+                .session_message_count_for_project(selector)
+                .await
+                .unwrap(),
+            2,
+            "directory-scoped counts use each message's cwd, with the session fallback"
+        );
+        let mut found = database
+            .search_session_messages("codex", Some(selector), "message", 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|result| result.message.text)
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(
+            found, expected,
+            "directory scopes must not leak other messages"
+        );
+    }
+    assert_eq!(
+        database
+            .session_message_count_for_project("user")
+            .await
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        database
+            .session_message_count_for_project("/unrelated")
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+async fn message_renderings(database: &RegisteredGlobalDb) -> Vec<(String, String, String)> {
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT m.message_id,
+                json_object('content', m.content, 'content_hash', m.content_hash,
+                            'storage_kind', m.storage_kind, 'payload_ref', m.payload_ref,
+                            'placeholder_text', m.placeholder_text, 'metadata_json', m.metadata_json),
+                p.output_digest
+         FROM lcm_raw_messages m JOIN observation_projection_provenance p
+           ON p.output_provider = m.provider AND p.output_message_id = m.message_id
+         ORDER BY m.message_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        values.push((
+            row.get(0).unwrap(),
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+        ));
+    }
+    values
 }

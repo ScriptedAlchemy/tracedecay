@@ -67,7 +67,6 @@ async fn git_authority_available(repo_root: &Path) -> bool {
     .unwrap_or(false)
 }
 
-#[cfg(test)]
 use super::branch_admin::StoreAdministration;
 
 mod runtime;
@@ -79,10 +78,12 @@ struct PrStoreAdministration<'a> {
     schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
     graph: Option<&'a Arc<tracedecay_project::project::TraceDecay>>,
     command_control: &'a PrCommandControl,
+    stores: Option<&'a StoreAdministration>,
 }
 
 impl<'a> PrStoreAdministration<'a> {
     fn with_control(
+        stores: &'a StoreAdministration,
         schedulers: &'a CodeIndexSchedulerRegistryV1,
         graph: &'a Arc<tracedecay_project::project::TraceDecay>,
         command_control: &'a PrCommandControl,
@@ -91,6 +92,21 @@ impl<'a> PrStoreAdministration<'a> {
             schedulers: Some(schedulers),
             graph: Some(graph),
             command_control,
+            stores: Some(stores),
+        }
+    }
+
+    #[cfg(test)]
+    fn unhosted_with_control(
+        schedulers: &'a CodeIndexSchedulerRegistryV1,
+        graph: &'a Arc<tracedecay_project::project::TraceDecay>,
+        command_control: &'a PrCommandControl,
+    ) -> Self {
+        Self {
+            schedulers: Some(schedulers),
+            graph: Some(graph),
+            command_control,
+            stores: None,
         }
     }
 
@@ -100,6 +116,7 @@ impl<'a> PrStoreAdministration<'a> {
             schedulers: None,
             graph: None,
             command_control: default_pr_command_control(),
+            stores: None,
         }
     }
 }
@@ -138,26 +155,30 @@ pub(crate) async fn activate_manual_branch_head(
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     branch: &str,
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
-    if schedulers.is_none() {
+    let Some(schedulers) = schedulers else {
         return Err(ManualBranchActivationError::scheduler_unavailable(
             "code-index scheduler authority is unavailable for branch activation",
         ));
-    }
+    };
     let lifecycle =
         acquire_manual_branch_lifecycle(&graph.store_layout().data_root, branch).await?;
-    activate_manual_branch_head_with_lifecycle(
+    activate_manual_branch_with_administration(
         repo_root,
-        graph,
-        schedulers,
+        &graph.store_layout().data_root,
         branch,
+        PrStoreAdministration::unhosted_with_control(
+            schedulers,
+            graph,
+            default_pr_command_control(),
+        ),
         &lifecycle,
-        default_pr_command_control(),
     )
     .await
 }
 
 #[tracing::instrument(name = "daemon.pr_autotrack.activate", level = "trace", skip_all)]
-pub(crate) async fn activate_manual_branch_head_with_lifecycle(
+pub(in crate::daemon) async fn activate_manual_branch_head_with_lifecycle(
+    stores: &StoreAdministration,
     repo_root: &Path,
     graph: &Arc<tracedecay_project::project::TraceDecay>,
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
@@ -165,17 +186,15 @@ pub(crate) async fn activate_manual_branch_head_with_lifecycle(
     lifecycle: &ManualBranchLifecycleLeaseV1,
     command_control: &PrCommandControl,
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
-    if !lifecycle.matches_branch(branch) {
-        return Err(ManualBranchActivationError::activation_failed(
-            "manual branch lifecycle lease does not match requested branch",
-        ));
-    }
     let administration = match schedulers {
-        Some(schedulers) => PrStoreAdministration::with_control(schedulers, graph, command_control),
+        Some(schedulers) => {
+            PrStoreAdministration::with_control(stores, schedulers, graph, command_control)
+        }
         None => PrStoreAdministration {
             schedulers: None,
             graph: Some(graph),
             command_control,
+            stores: Some(stores),
         },
     };
     activate_manual_branch_with_administration(
@@ -204,6 +223,11 @@ async fn activate_manual_branch_with_administration(
     administration: PrStoreAdministration<'_>,
     lifecycle: &ManualBranchLifecycleLeaseV1,
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
+    if !lifecycle.matches_branch(branch) {
+        return Err(ManualBranchActivationError::activation_failed(
+            "manual branch lifecycle lease does not match requested branch",
+        ));
+    }
     let Some(schedulers) = administration.schedulers else {
         return Err(ManualBranchActivationError::scheduler_unavailable(
             "code-index scheduler authority is unavailable for branch activation",
@@ -264,7 +288,7 @@ async fn activate_manual_branch_with_administration(
     .await?
     {
         if !schedulers.is_worktree_mounted(&worktree).await {
-            activate_linked_worktree(schedulers, graph, &worktree)
+            activate_linked_worktree(administration.stores, schedulers, graph, &worktree)
                 .await
                 .map_err(ManualBranchActivationError::activation_failed)?;
         }
@@ -336,7 +360,7 @@ async fn activate_manual_branch_with_administration(
         }
     }
 
-    match activate_linked_worktree(schedulers, graph, &worktree).await {
+    match activate_linked_worktree(administration.stores, schedulers, graph, &worktree).await {
         Ok(()) => Ok(ManualBranchActivation {
             branch: branch.to_string(),
             head_sha,
@@ -830,7 +854,7 @@ async fn track_pr(
         }
     }
 
-    match activate_linked_worktree(schedulers, graph, &worktree).await {
+    match activate_linked_worktree(administration.stores, schedulers, graph, &worktree).await {
         Ok(()) => Ok(ManagedPr {
             pr: pr.number,
             head_branch: pr.head_branch.clone(),
@@ -859,6 +883,7 @@ async fn track_pr(
     skip_all
 )]
 async fn activate_linked_worktree(
+    stores: Option<&StoreAdministration>,
     schedulers: &CodeIndexSchedulerRegistryV1,
     graph: &tracedecay_project::project::TraceDecay,
     worktree: &Path,
@@ -879,6 +904,31 @@ async fn activate_linked_worktree(
     let store_root = graph.store_layout().data_root.join("code-index-v1");
     let graph_runtime = graph.retained_store_runtime_registry();
     let project_database = Arc::new(graph.db().clone());
+    let pending_source = match stores {
+        Some(stores) => {
+            let scope =
+                tracedecay_code_index_runtime::resolved_scope_for_project(worktree, &project_id)
+                    .map_err(|error| scheduler_unavailable(&error.to_string()))?;
+            let reader = super::project_composition::project_hook_source_pending(
+                stores, graph, worktree, &scope,
+            )
+            .await
+            .map_err(|error| scheduler_unavailable(&error.to_string()))?;
+            Some(reader)
+        }
+        None => {
+            #[cfg(test)]
+            {
+                None
+            }
+            #[cfg(not(test))]
+            {
+                return Err(scheduler_unavailable(
+                    "host admission authority is unavailable for worktree activation",
+                ));
+            }
+        }
+    };
     schedulers
         .mount_worktree_with_graph_runtime(
             project_id,
@@ -889,7 +939,10 @@ async fn activate_linked_worktree(
             tracedecay_code_index_runtime::code_index_scheduler::CodeGraphActivationPolicyV1::from_enabled(
                 graph.get_config().native_graph_activation,
             ),
-            graph.get_config().index_paths.clone(),
+            tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSourceInputsV1 {
+                path_policy: graph.get_config().index_paths.clone(),
+                pending_admission: pending_source,
+            },
         )
         .await
         .map(|_| ())

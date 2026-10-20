@@ -67,7 +67,6 @@ Outbound capabilities include:
 | Configured remote sources and authorities | Policy-authorized retrieval and remote operations | Configured peer authentication and disclosure policy | Admission or authorization failures are reported; review each peer before enabling |
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
 | `huggingface.co` and Hugging Face artifact hosts | Download missing, revision-pinned semantic-model artifacts when semantic auto-download is enabled | None | Semantic retrieval reports model acquisition state or failure; exact, lexical, and graph retrieval remain available |
-| `tracedecay-counter.enzinol.workers.dev` | Aggregate token-savings counter | None | Silently ignored |
 
 Provider usage and pricing do not add an outbound connection. `tracedecay cost`
 reads immutable provider-native usage observations and the deterministic bundled
@@ -182,7 +181,6 @@ an old count of unsafe sites is not a security guarantee.
 
 The following are **not** security issues:
 
-- The aggregate token counter sending a count to the public Cloudflare Worker endpoint (this is documented behavior and contains no identifying information beyond an approximate country derived from IP by Cloudflare)
 - The database containing symbol names or file paths from your project (this is core functionality)
 - The MCP edit tools modifying files (this is opt-in functionality your AI agent invokes through its own tool-approval flow)
 - `tracedecay_run_affected_tests` compiling and running your project's own test suite (this is the tool's documented purpose)

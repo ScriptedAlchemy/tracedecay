@@ -611,15 +611,39 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     )
     .unwrap();
 
-    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
-        .await
-        .unwrap();
-    assert_eq!(report.outcome.collected.len(), 0);
+    let cancellation = CancellationToken::new();
+    let report = sweep_unregistered_store_page(
+        &db,
+        &profile_root,
+        UnregisteredStoreSweepRequestV1 {
+            cursor: None,
+            limit: DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT,
+            retention_secs: 7 * DAY,
+            now: base,
+            apply: true,
+            cancellation: &cancellation,
+            deadline: functional_sweep_deadline(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        report.completion,
+        UnregisteredSweepCompletionV1::Complete,
+        "functional durable-memory sweep was interrupted: {report:?}"
+    );
+    assert!(report.applied, "complete sweep was not applied: {report:?}");
+    assert!(
+        report.outcome.collected.is_empty(),
+        "durable memory store was collected: {report:?}"
+    );
+    assert_eq!(report.outcome.errors.len(), 1, "{report:?}");
     assert_eq!(
         report.outcome.errors[0].kind,
-        CollectionFailureKind::DurableDataProtected
+        CollectionFailureKind::DurableDataProtected,
+        "{report:?}"
     );
-    assert!(dir.exists());
+    assert!(dir.exists(), "durable memory store was removed: {report:?}");
 }
 
 /// Seeds `branches/feature.db` (carrying a durable memory row) and its WAL the

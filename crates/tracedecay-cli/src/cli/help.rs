@@ -446,29 +446,6 @@ Examples:
 
 Related: tracedecay current-counter, tracedecay gain.";
 
-pub(crate) const DISABLE_UPLOAD_COUNTER_LONG_ABOUT: &str = "\
-Opts this machine out of contributing anonymous token-savings counts to the \
-public worldwide counter. Only aggregate numbers are ever uploaded, never \
-code, paths, or queries, but uploading is entirely optional.";
-
-pub(crate) const DISABLE_UPLOAD_COUNTER_AFTER_HELP: &str = "\
-Examples:
-  tracedecay disable-upload-counter              Stop contributing counts
-
-Related: tracedecay enable-upload-counter, tracedecay gain (local ledger
-is unaffected).";
-
-pub(crate) const ENABLE_UPLOAD_COUNTER_LONG_ABOUT: &str = "\
-Re-enables contributing anonymous token-savings counts to the public \
-worldwide counter after a previous `disable-upload-counter`. Only aggregate \
-numbers are uploaded, never code, paths, or queries.";
-
-pub(crate) const ENABLE_UPLOAD_COUNTER_AFTER_HELP: &str = "\
-Examples:
-  tracedecay enable-upload-counter               Resume contributing counts
-
-Related: tracedecay disable-upload-counter, tracedecay gain.";
-
 pub(crate) const DOCTOR_LONG_ABOUT: &str = "\
 Checks the binary, PATH, daemon service, project index, and every agent \
 integration, printing actionable fixes for anything broken. The running \

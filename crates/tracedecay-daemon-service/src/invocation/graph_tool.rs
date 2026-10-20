@@ -9,8 +9,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use tracedecay_contracts::graph_tool::GraphToolCompletionV1;
 use tracedecay_contracts::{
-    ApplicationProblem, CancellationContext, CancellationSignal, CancellationState, Deadline,
-    RequestId, ResolvedScope, now_micros,
+    ApplicationProblem, CancellationSignal, Deadline, RequestId, ResolvedScope, now_micros,
 };
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationResponse,
@@ -92,21 +91,15 @@ pub(super) async fn execute_graph_tool(
     operation: ApplicationSurfaceOperation,
     arguments: Map<String, Value>,
     deadline: Deadline,
-    cancellation: CancellationContext,
+    signal: CancellationSignal,
     request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> DaemonInvocationResponse {
-    let (Ok(typed_request_id), Ok(signal)) = (
-        RequestId::new(request_id.clone()),
-        CancellationSignal::active(cancellation.token_id.as_str()),
-    ) else {
+    let Ok(typed_request_id) = RequestId::new(request_id.clone()) else {
         return DaemonInvocationResponse::problem(
             request_id,
             DaemonInvocationProblem::InvalidRequest,
         );
     };
-    if let CancellationState::Cancelled { requested_at } = &cancellation.state {
-        signal.cancel(*requested_at);
-    }
     let execution = owner.port.execute(GraphToolInvocationV1 {
         operation,
         arguments,

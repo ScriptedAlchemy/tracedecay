@@ -12,8 +12,7 @@ use std::pin::Pin;
 use tracedecay_automation::config::AutomationConfig;
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey,
-    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
-    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
 };
 
 use tracedecay_contracts::now_micros;
@@ -29,7 +28,6 @@ pub type UserSettingsFuture<'a, T> =
 pub struct UserSettingsSnapshotV1 {
     pub configuration_snapshot_id: String,
     pub configuration_revision_id: String,
-    pub upload_enabled: bool,
     pub watcher_debounce: String,
     pub watcher_debounce_ms: u64,
     pub extraction_timeout_secs: u64,
@@ -40,7 +38,6 @@ pub struct UserSettingsSnapshotV1 {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserSettingsMutationV1 {
-    pub upload_enabled: Option<bool>,
     /// Positive milliseconds already parsed at the settings boundary.
     pub watcher_debounce_ms: Option<u64>,
     pub extraction_timeout_secs: Option<u64>,
@@ -142,14 +139,12 @@ fn user_settings_snapshot(
     current: &ProfileConfigurationV1,
     metadata: UserMetadata,
 ) -> Result<UserSettingsSnapshotV1, UserSettingsAuthorityError> {
-    let upload_enabled = required_bool(current, USER_UPLOAD_ENABLED_SETTING_KEY)?;
     let watcher_debounce_ms = required_unsigned(current, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY)?;
     let extraction_timeout_secs =
         required_unsigned(current, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY)?;
     Ok(UserSettingsSnapshotV1 {
         configuration_snapshot_id: current.snapshot.snapshot_id.as_str().to_owned(),
         configuration_revision_id: current.revision_id.as_str().to_owned(),
-        upload_enabled,
         watcher_debounce: format_duration_millis(watcher_debounce_ms),
         watcher_debounce_ms,
         extraction_timeout_secs,
@@ -173,13 +168,6 @@ pub fn plan_user_settings_mutation(
     let mut mutations = Vec::new();
     let mut restart_recommended = false;
 
-    if let Some(upload_enabled) = mutation.upload_enabled {
-        mutations.push(set(
-            layer.clone(),
-            USER_UPLOAD_ENABLED_SETTING_KEY,
-            ConfigurationValueV1::Boolean(upload_enabled),
-        )?);
-    }
     if let Some(watcher_debounce_ms) = mutation.watcher_debounce_ms {
         mutations.push(set(
             layer.clone(),
@@ -235,16 +223,6 @@ fn setting_key(raw_key: &str) -> Result<SettingKey, UserSettingsAuthorityError> 
         .map_err(|error| unavailable(format!("registered user setting key: {error}")))
 }
 
-fn required_bool(
-    current: &ProfileConfigurationV1,
-    raw_key: &str,
-) -> Result<bool, UserSettingsAuthorityError> {
-    match current.value(raw_key) {
-        Ok(ConfigurationValueV1::Boolean(value)) => Ok(*value),
-        _ => Err(unavailable(format!("boolean user setting {raw_key}"))),
-    }
-}
-
 fn required_unsigned(
     current: &ProfileConfigurationV1,
     raw_key: &str,
@@ -271,7 +249,6 @@ mod tests {
         UserSettingsSnapshotV1 {
             configuration_snapshot_id: "configuration.snapshot.fixture".to_owned(),
             configuration_revision_id: "configuration.revision.fixture".to_owned(),
-            upload_enabled: false,
             watcher_debounce: "2s".to_owned(),
             watcher_debounce_ms: 2_000,
             extraction_timeout_secs: 60,
@@ -288,14 +265,13 @@ mod tests {
             &snapshot(),
             profile_id.clone(),
             UserSettingsMutationV1 {
-                upload_enabled: Some(true),
                 watcher_debounce_ms: Some(15_000),
                 extraction_timeout_secs: Some(60),
             },
         )
         .unwrap();
 
-        assert_eq!(plan.mutations.len(), 3);
+        assert_eq!(plan.mutations.len(), 2);
         assert!(plan.restart_recommended);
         assert!(plan.mutations.iter().any(|mutation| matches!(
             mutation,
