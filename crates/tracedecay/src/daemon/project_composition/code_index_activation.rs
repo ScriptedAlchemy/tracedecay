@@ -31,6 +31,7 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) cancellation: CancellationToken,
     pub(super) graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     pub(super) graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
+    pub(super) pending_source: Arc<dyn code_index_scheduler::CodeIndexSourcePendingReaderV1>,
 }
 
 /// Build the deferred code-index mount for this route. The closure is fenced on
@@ -52,6 +53,7 @@ pub(super) fn code_index_activation_mount(
         cancellation,
         graph_runtime,
         graph_publication_database,
+        pending_source,
     } = inputs;
     let mount: code_index_scheduler::CodeIndexActivationMountV1 = Arc::new(move || {
         let invocation = invocation.clone();
@@ -65,6 +67,7 @@ pub(super) fn code_index_activation_mount(
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::clone(&graph_publication_database);
+        let pending_source = Arc::clone(&pending_source);
         Box::pin(tracing::Instrument::instrument(
             async move {
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
@@ -80,6 +83,7 @@ pub(super) fn code_index_activation_mount(
                     index_paths,
                     graph_runtime,
                     graph_publication_database,
+                    pending_source,
                 );
                 tokio::select! {
                     biased;

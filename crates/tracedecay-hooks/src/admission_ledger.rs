@@ -11,9 +11,10 @@
 //! * otherwise: this is a first admission.
 //!
 //! Admissions that owe producer work also carry the provider envelope until
-//! that work completes, so a restart redrives it. It carries no session content
-//! and no application state. The daemon is the sole writer; the ledger is
-//! stored beside the transport spool in the same daemon-owned hook data root
+//! that work settles, so a restart redrives it. The exact native lifecycle
+//! prerequisite is retained with the admission; no session content or application
+//! state is stored. The daemon is the sole writer. The ledger is stored beside
+//! the transport spool in the same daemon-owned hook data root
 //! and never touches a migrated database.
 //!
 //! Everything lives in one append-only log of checksummed frames. An admission
@@ -29,13 +30,13 @@
 //! Bounds (stated, not implied): at most
 //! [`HookAdmissionLedgerLimitsV1::max_records`] live entries per host, nothing
 //! older than [`HookAdmissionLedgerLimitsV1::max_age_micros`], and at most
-//! [`MAX_SPOOL_BYTES_PER_HOST`] of pending work. Beyond the entry or age bound
-//! the oldest entries are dropped with any work they still owed, so
+//! [`MAX_SPOOL_BYTES_PER_HOST`] of pending work and retained native lifecycle
+//! metadata. Beyond the entry or age bound the oldest entries are dropped with any work they still owed, so
 //! idempotency converges within that window and no further, a replay older
 //! than the window is admitted again rather than silently believed to be new
 //! forever.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -73,6 +74,12 @@ const MAX_FRAME_BODY_BYTES: usize = ADMITTED_BODY_BYTES + MAX_HOOK_PAYLOAD_BYTES
 const FRAME_ADMITTED: u8 = 1;
 const FRAME_WORK: u8 = 2;
 const FRAME_COMPLETED: u8 = 3;
+const FRAME_ORDERED_ADMITTED: u8 = 4;
+const FRAME_NEXT_ORDER: u8 = 5;
+const FRAME_NATIVE_LIFECYCLE: u8 = 6;
+const FRAME_SUPERSEDED: u8 = 7;
+const FRAME_RECONSTRUCTED_ADMITTED: u8 = 8;
+const ORDERED_ADMITTED_BODY_BYTES: usize = ADMITTED_BODY_BYTES + 8;
 /// Superseded frames the log may carry before an append compacts it.
 const COMPACTION_SLACK_BYTES: u64 = 256 * 1024;
 const LOG_FILE: &str = "admissions.v2.log";
@@ -176,7 +183,18 @@ pub enum HookAdmissionDecisionV1 {
 pub struct HookAdmissionLedgerReceiptV1 {
     pub decision: HookAdmissionDecisionV1,
     pub order: u64,
-    pub work_completed: bool,
+    /// Historical compaction retained relative position, not a comparable
+    /// lifecycle sequence. Only a canonical observation can recover its range.
+    pub order_reconstructed: bool,
+    pub work_settlement: Option<HookAdmissionWorkSettlementV1>,
+}
+
+/// Durable terminal reason for producer work. Supersession settles the debt
+/// without claiming that the displaced producer ran successfully.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookAdmissionWorkSettlementV1 {
+    Completed,
+    Superseded,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -193,6 +211,10 @@ pub enum HookAdmissionLedgerError {
     RecordUndecodable,
     #[error("hook admission ledger identity is invalid")]
     InvalidIdentity,
+    #[error("hook admission ledger admission order is exhausted")]
+    OrderExhausted,
+    #[error("hook admission order authority is unavailable")]
+    OrderAuthorityUnavailable,
     #[error("hook admission ledger is busy in another daemon")]
     Busy,
     #[error("hook admission ledger holds its bound of pending producer work")]
@@ -217,6 +239,7 @@ struct LedgerEntry {
     digest: [u8; DIGEST_BYTES],
     admitted_at: UtcMicros,
     order: u64,
+    order_reconstructed: bool,
 }
 
 #[derive(Debug)]
@@ -293,6 +316,7 @@ impl HookAdmissionCommitV1 {
 pub struct HookAdmissionStagedV1 {
     pub receipt: HookAdmissionLedgerReceiptV1,
     pub commit: HookAdmissionCommitV1,
+    pub native_lifecycle: Option<crate::NativeContextScoutLifecycleV1>,
 }
 
 /// Digest over canonical native-event material. A provider retry observes the
@@ -317,7 +341,9 @@ pub struct HookAdmissionLedgerV1 {
     host: NativeHostIdentityV1,
     limits: HookAdmissionLedgerLimitsV1,
     entries: BTreeMap<[u8; IDENTITY_BYTES], LedgerEntry>,
-    completed_work: BTreeSet<[u8; IDENTITY_BYTES]>,
+    completed_work: BTreeMap<[u8; IDENTITY_BYTES], HookAdmissionWorkSettlementV1>,
+    native_lifecycles: BTreeMap<[u8; IDENTITY_BYTES], (crate::NativeContextScoutLifecycleV1, u64)>,
+    native_lifecycle_bytes: u64,
     pending_work: BTreeMap<[u8; IDENTITY_BYTES], PendingWork>,
     pending_work_bytes: u64,
     next_order: u64,
@@ -370,7 +396,9 @@ impl HookAdmissionLedgerV1 {
             host,
             limits,
             entries: BTreeMap::new(),
-            completed_work: BTreeSet::new(),
+            completed_work: BTreeMap::new(),
+            native_lifecycles: BTreeMap::new(),
+            native_lifecycle_bytes: 0,
             pending_work: BTreeMap::new(),
             pending_work_bytes: 0,
             next_order: 0,
@@ -436,15 +464,23 @@ impl HookAdmissionLedgerV1 {
     /// before the returned commit is awaited, and a duplicate of an admission
     /// still in flight waits for that admission's frames too.
     #[tracing::instrument(name = "hooks.admission.stage", level = "trace", skip_all)]
+    /// Admit or enrich one exact event. Lifecycle conflicts are checked before
+    /// any append, pending-work adoption, or retention mutation. The canonical
+    /// floor applies only after those checks to a new allocation; unavailable
+    /// order authority refuses new work without moving a duplicate position.
     pub fn stage_admission(
         &mut self,
         envelope: &HookEventEnvelopeV2,
         work: Option<&HookEventEnvelopeV2>,
+        lifecycle: Option<&crate::NativeContextScoutLifecycleV1>,
+        minimum_order: Option<u64>,
         now: UtcMicros,
     ) -> Result<HookAdmissionStagedV1, HookAdmissionLedgerError> {
         self.ensure_writable()?;
         let identity = envelope.event_id;
-        if identity == [0; IDENTITY_BYTES] {
+        if identity == [0; IDENTITY_BYTES]
+            || lifecycle.is_some_and(|lifecycle| !lifecycle.matches_envelope(envelope))
+        {
             return Err(HookAdmissionLedgerError::InvalidIdentity);
         }
         let digest = hook_admission_digest(envelope)?;
@@ -452,53 +488,82 @@ impl HookAdmissionLedgerV1 {
             .map(|work| encode_work(work).map(|encoded| (work, encoded)))
             .transpose()?;
         if let Some(existing) = self.entries.get(&identity).copied() {
-            if is_expired(existing.admitted_at, now, self.limits.max_age_micros) {
-                self.forget(&identity);
-            } else if existing.digest == digest {
-                return self.stage_duplicate(identity, existing.order, work);
-            } else {
-                let work_completed = self.completed_work.contains(&identity);
-                return Ok(self.staged(
-                    HookAdmissionDecisionV1::Conflict,
-                    existing.order,
-                    work_completed,
-                ));
+            if !is_expired(existing.admitted_at, now, self.limits.max_age_micros) {
+                if existing.digest != digest
+                    || lifecycle.is_some_and(|incoming| {
+                        self.native_lifecycles
+                            .get(&identity)
+                            .is_some_and(|(retained, _)| retained != incoming)
+                    })
+                {
+                    return Ok(self.staged(
+                        identity,
+                        HookAdmissionDecisionV1::Conflict,
+                        existing.order,
+                        existing.order_reconstructed,
+                    ));
+                }
+                return self.stage_duplicate(identity, existing, work, lifecycle);
             }
+            self.forget(&identity);
         }
-        if let Some((_, encoded)) = work.as_ref() {
-            self.ensure_work_capacity(encoded)?;
+        let minimum_order =
+            minimum_order.ok_or(HookAdmissionLedgerError::OrderAuthorityUnavailable)?;
+        let order = self.next_order.max(minimum_order);
+        if matches!(envelope.ordering, crate::HookOrderingV1::Unknown)
+            && order.checked_add(2).is_none()
+        {
+            return Err(HookAdmissionLedgerError::OrderExhausted);
         }
+        let next_order = order
+            .checked_add(1)
+            .ok_or(HookAdmissionLedgerError::OrderExhausted)?;
+        self.ensure_retained_capacity(
+            work.as_ref()
+                .map_or(0, |(_, bytes)| work_frame_bytes(bytes))
+                + lifecycle
+                    .map(native_lifecycle_frame_bytes)
+                    .transpose()?
+                    .unwrap_or(0),
+        )?;
         if self.entries.len() as u32 >= self.limits.max_records {
             self.trim_to((self.limits.max_records as usize).saturating_sub(1));
             self.rewrite()?;
         }
         let mut frames = Vec::new();
         encode_frame(
-            FRAME_ADMITTED,
+            FRAME_ORDERED_ADMITTED,
             &encode_admitted_body(
                 identity,
                 digest,
                 now,
+                order,
                 work.as_ref().map_or(&[][..], |(_, encoded)| encoded),
             ),
             &mut frames,
         )?;
+        if let Some(lifecycle) = lifecycle {
+            encode_native_lifecycle_frame(identity, lifecycle, &mut frames)?;
+        }
         self.append(&frames)?;
-        let order = self.next_order;
-        self.next_order = self.next_order.saturating_add(1);
+        self.next_order = next_order;
         self.entries.insert(
             identity,
             LedgerEntry {
                 digest,
                 admitted_at: now,
                 order,
+                order_reconstructed: false,
             },
         );
         if let Some((work, _)) = work {
             self.insert_pending_work(identity, work.clone())?;
         }
+        if let Some(lifecycle) = lifecycle {
+            self.insert_native_lifecycle(identity, lifecycle.clone())?;
+        }
         self.compact_if_sparse()?;
-        Ok(self.staged(HookAdmissionDecisionV1::Admitted, order, false))
+        Ok(self.staged(identity, HookAdmissionDecisionV1::Admitted, order, false))
     }
 
     /// Stage completion of an admission's producer work. `None` means it was
@@ -508,6 +573,16 @@ impl HookAdmissionLedgerV1 {
         &mut self,
         envelope: &HookEventEnvelopeV2,
     ) -> Result<Option<HookAdmissionCommitV1>, HookAdmissionLedgerError> {
+        self.stage_work_settlement(envelope, HookAdmissionWorkSettlementV1::Completed)
+    }
+
+    /// Settle owed work with its actual terminal reason. The first durable
+    /// terminal decision is immutable, including a later completion callback.
+    pub fn stage_work_settlement(
+        &mut self,
+        envelope: &HookEventEnvelopeV2,
+        settlement: HookAdmissionWorkSettlementV1,
+    ) -> Result<Option<HookAdmissionCommitV1>, HookAdmissionLedgerError> {
         self.ensure_writable()?;
         let identity = envelope.event_id;
         let Some(entry) = self.entries.get(&identity) else {
@@ -516,14 +591,18 @@ impl HookAdmissionLedgerV1 {
         if entry.digest != hook_admission_digest(envelope)? {
             return Err(HookAdmissionLedgerError::InvalidIdentity);
         }
-        if self.completed_work.contains(&identity) {
+        if self.completed_work.contains_key(&identity) {
             return Ok(None);
         }
         let mut frames = Vec::with_capacity(COMPLETED_FRAME_BYTES);
-        encode_frame(FRAME_COMPLETED, &identity, &mut frames)?;
+        let kind = match settlement {
+            HookAdmissionWorkSettlementV1::Completed => FRAME_COMPLETED,
+            HookAdmissionWorkSettlementV1::Superseded => FRAME_SUPERSEDED,
+        };
+        encode_frame(kind, &identity, &mut frames)?;
         self.append(&frames)?;
         self.remove_pending_work(&identity);
-        self.completed_work.insert(identity);
+        self.completed_work.insert(identity, settlement);
         self.compact_if_sparse()?;
         Ok(Some(self.commit_ticket()))
     }
@@ -585,39 +664,67 @@ impl HookAdmissionLedgerV1 {
                     identity,
                     digest,
                     admitted_at,
+                    order,
+                    order_reconstructed,
                     work,
                 } => {
+                    let order = order.unwrap_or(self.next_order);
+                    self.next_order = self.next_order.max(
+                        order
+                            .checked_add(1)
+                            .ok_or(HookAdmissionLedgerError::OrderExhausted)?,
+                    );
                     self.forget(&identity);
                     if is_expired(admitted_at, now, self.limits.max_age_micros) {
                         dropped_expired_records = dropped_expired_records.saturating_add(1);
                         continue;
                     }
                     admitted_frames = admitted_frames.saturating_add(1);
-                    let order = self.next_order;
-                    self.next_order = self.next_order.saturating_add(1);
                     self.entries.insert(
                         identity,
                         LedgerEntry {
                             digest,
                             admitted_at,
                             order,
+                            order_reconstructed,
                         },
                     );
                     if let Some(work) = work {
                         self.insert_pending_work(identity, work)?;
                     }
                 }
+                LogFrame::NextOrder(next_order) => {
+                    self.next_order = self.next_order.max(next_order);
+                }
                 LogFrame::Work { identity, envelope } => {
                     if self.entries.contains_key(&identity)
-                        && !self.completed_work.contains(&identity)
+                        && !self.completed_work.contains_key(&identity)
                     {
                         self.insert_pending_work(identity, envelope)?;
                     }
                 }
-                LogFrame::Completed { identity } => {
+                LogFrame::Settled {
+                    identity,
+                    settlement,
+                } => {
                     if self.entries.contains_key(&identity) {
                         self.remove_pending_work(&identity);
-                        self.completed_work.insert(identity);
+                        self.completed_work.entry(identity).or_insert(settlement);
+                    }
+                }
+                LogFrame::NativeLifecycle {
+                    identity,
+                    lifecycle,
+                } => {
+                    if self.entries.contains_key(&identity) {
+                        if self
+                            .native_lifecycles
+                            .get(&identity)
+                            .is_some_and(|(retained, _)| retained != &lifecycle)
+                        {
+                            return Err(HookAdmissionLedgerError::RecordUndecodable);
+                        }
+                        self.insert_native_lifecycle(identity, lifecycle)?;
                     }
                 }
             }
@@ -653,44 +760,71 @@ impl HookAdmissionLedgerV1 {
     fn stage_duplicate(
         &mut self,
         identity: [u8; IDENTITY_BYTES],
-        order: u64,
+        existing: LedgerEntry,
         work: Option<(&HookEventEnvelopeV2, Vec<u8>)>,
+        lifecycle: Option<&crate::NativeContextScoutLifecycleV1>,
     ) -> Result<HookAdmissionStagedV1, HookAdmissionLedgerError> {
-        let work_completed = self.completed_work.contains(&identity);
-        if let Some((work, encoded)) = work
-            && !work_completed
-            && !self.pending_work.contains_key(&identity)
-        {
-            self.ensure_work_capacity(&encoded)?;
-            let mut frames = Vec::new();
+        let work = work.filter(|_| {
+            !self.completed_work.contains_key(&identity)
+                && !self.pending_work.contains_key(&identity)
+        });
+        let lifecycle = lifecycle.filter(|_| !self.native_lifecycles.contains_key(&identity));
+        self.ensure_retained_capacity(
+            work.as_ref()
+                .map_or(0, |(_, bytes)| work_frame_bytes(bytes))
+                + lifecycle
+                    .map(native_lifecycle_frame_bytes)
+                    .transpose()?
+                    .unwrap_or(0),
+        )?;
+        let mut frames = Vec::new();
+        if let Some((_, encoded)) = work.as_ref() {
             encode_frame(
                 FRAME_WORK,
-                &encode_work_body(identity, &encoded),
+                &encode_work_body(identity, encoded),
                 &mut frames,
             )?;
+        }
+        if let Some(lifecycle) = lifecycle {
+            encode_native_lifecycle_frame(identity, lifecycle, &mut frames)?;
+        }
+        if !frames.is_empty() {
             self.append(&frames)?;
-            self.insert_pending_work(identity, work.clone())?;
+            if let Some((work, _)) = work {
+                self.insert_pending_work(identity, work.clone())?;
+            }
+            if let Some(lifecycle) = lifecycle {
+                self.insert_native_lifecycle(identity, lifecycle.clone())?;
+            }
+            self.compact_if_sparse()?;
         }
         Ok(self.staged(
+            identity,
             HookAdmissionDecisionV1::ExactDuplicate,
-            order,
-            work_completed,
+            existing.order,
+            existing.order_reconstructed,
         ))
     }
 
     fn staged(
         &self,
+        identity: [u8; IDENTITY_BYTES],
         decision: HookAdmissionDecisionV1,
         order: u64,
-        work_completed: bool,
+        order_reconstructed: bool,
     ) -> HookAdmissionStagedV1 {
         HookAdmissionStagedV1 {
             receipt: HookAdmissionLedgerReceiptV1 {
                 decision,
                 order,
-                work_completed,
+                order_reconstructed,
+                work_settlement: self.completed_work.get(&identity).copied(),
             },
             commit: self.commit_ticket(),
+            native_lifecycle: self
+                .native_lifecycles
+                .get(&identity)
+                .map(|(lifecycle, _)| lifecycle.clone()),
         }
     }
 
@@ -709,14 +843,34 @@ impl HookAdmissionLedgerV1 {
         Ok(())
     }
 
-    fn ensure_work_capacity(&self, work: &[u8]) -> Result<(), HookAdmissionLedgerError> {
+    fn ensure_retained_capacity(&self, additional: u64) -> Result<(), HookAdmissionLedgerError> {
         if self
             .pending_work_bytes
-            .saturating_add(work_frame_bytes(work))
+            .saturating_add(self.native_lifecycle_bytes)
+            .saturating_add(additional)
             > MAX_SPOOL_BYTES_PER_HOST
         {
             return Err(HookAdmissionLedgerError::WorkCapacityExceeded);
         }
+        Ok(())
+    }
+
+    fn insert_native_lifecycle(
+        &mut self,
+        identity: [u8; IDENTITY_BYTES],
+        lifecycle: crate::NativeContextScoutLifecycleV1,
+    ) -> Result<(), HookAdmissionLedgerError> {
+        let bytes = native_lifecycle_frame_bytes(&lifecycle)?;
+        let previous = self
+            .native_lifecycles
+            .get(&identity)
+            .map_or(0, |(_, bytes)| *bytes);
+        self.ensure_retained_capacity(bytes.saturating_sub(previous))?;
+        self.native_lifecycles.insert(identity, (lifecycle, bytes));
+        self.native_lifecycle_bytes = self
+            .native_lifecycle_bytes
+            .saturating_sub(previous)
+            .saturating_add(bytes);
         Ok(())
     }
 
@@ -743,6 +897,11 @@ impl HookAdmissionLedgerV1 {
         envelope: HookEventEnvelopeV2,
     ) -> Result<(), HookAdmissionLedgerError> {
         let frame_bytes = work_frame_bytes(&encode_work(&envelope)?);
+        let previous = self
+            .pending_work
+            .get(&identity)
+            .map_or(0, |work| work.frame_bytes);
+        self.ensure_retained_capacity(frame_bytes.saturating_sub(previous))?;
         if let Some(previous) = self.pending_work.insert(
             identity,
             PendingWork {
@@ -765,6 +924,9 @@ impl HookAdmissionLedgerV1 {
     fn forget(&mut self, identity: &[u8; IDENTITY_BYTES]) {
         self.entries.remove(identity);
         self.completed_work.remove(identity);
+        if let Some((_, bytes)) = self.native_lifecycles.remove(identity) {
+            self.native_lifecycle_bytes = self.native_lifecycle_bytes.saturating_sub(bytes);
+        }
         if self.pending_work.contains_key(identity) {
             tracing::debug!(
                 event = "hook_admission_pending_work_dropped",
@@ -798,8 +960,10 @@ impl HookAdmissionLedgerV1 {
 
     fn live_bytes(&self) -> u64 {
         HEADER_BYTES as u64
-            + self.entries.len() as u64 * ADMITTED_FRAME_BYTES as u64
+            + (8 + FRAME_OVERHEAD_BYTES) as u64
+            + self.entries.len() as u64 * (ADMITTED_FRAME_BYTES + 8) as u64
             + self.completed_work.len() as u64 * COMPLETED_FRAME_BYTES as u64
+            + self.native_lifecycle_bytes
             + self.pending_work_bytes
     }
 
@@ -835,25 +999,33 @@ impl HookAdmissionLedgerV1 {
                 .map(|work| encode_work(&work.envelope))
                 .transpose()?;
             encode_frame(
-                FRAME_ADMITTED,
+                if entry.order_reconstructed {
+                    FRAME_RECONSTRUCTED_ADMITTED
+                } else {
+                    FRAME_ORDERED_ADMITTED
+                },
                 &encode_admitted_body(
                     *identity,
                     entry.digest,
                     entry.admitted_at,
+                    entry.order,
                     work.as_deref().unwrap_or_default(),
                 ),
                 &mut bytes,
             )?;
-            if self.completed_work.contains(identity) {
-                encode_frame(FRAME_COMPLETED, identity, &mut bytes)?;
+            if let Some(settlement) = self.completed_work.get(identity) {
+                let kind = match settlement {
+                    HookAdmissionWorkSettlementV1::Completed => FRAME_COMPLETED,
+                    HookAdmissionWorkSettlementV1::Superseded => FRAME_SUPERSEDED,
+                };
+                encode_frame(kind, identity, &mut bytes)?;
+            }
+            if let Some((lifecycle, _)) = self.native_lifecycles.get(identity) {
+                encode_native_lifecycle_frame(*identity, lifecycle, &mut bytes)?;
             }
         }
-        for (index, (_, identity, _)) in ordered.iter().enumerate() {
-            if let Some(entry) = self.entries.get_mut(identity) {
-                entry.order = index as u64;
-            }
-        }
-        self.next_order = ordered.len() as u64;
+        // An empty retained window must not reuse an earlier lifecycle position.
+        encode_frame(FRAME_NEXT_ORDER, &self.next_order.to_le_bytes(), &mut bytes)?;
         let path = log_path(&self.root);
         let mut state = self
             .log
@@ -882,22 +1054,54 @@ impl HookAdmissionLedgerV1 {
 
 #[derive(Debug)]
 enum LogFrame {
+    NextOrder(u64),
     Admitted {
         identity: [u8; IDENTITY_BYTES],
         digest: [u8; DIGEST_BYTES],
         admitted_at: UtcMicros,
+        order: Option<u64>,
+        order_reconstructed: bool,
         work: Option<HookEventEnvelopeV2>,
     },
     Work {
         identity: [u8; IDENTITY_BYTES],
         envelope: HookEventEnvelopeV2,
     },
-    Completed {
+    Settled {
         identity: [u8; IDENTITY_BYTES],
+        settlement: HookAdmissionWorkSettlementV1,
+    },
+    NativeLifecycle {
+        identity: [u8; IDENTITY_BYTES],
+        lifecycle: crate::NativeContextScoutLifecycleV1,
     },
 }
 
+fn native_lifecycle_frame_bytes(
+    lifecycle: &crate::NativeContextScoutLifecycleV1,
+) -> Result<u64, HookAdmissionLedgerError> {
+    let bytes =
+        canonical_json_bytes(lifecycle).map_err(|_| HookAdmissionLedgerError::RecordUnencodable)?;
+    Ok((IDENTITY_BYTES + bytes.len() + FRAME_OVERHEAD_BYTES) as u64)
+}
+
+fn encode_native_lifecycle_frame(
+    identity: [u8; IDENTITY_BYTES],
+    lifecycle: &crate::NativeContextScoutLifecycleV1,
+    out: &mut Vec<u8>,
+) -> Result<(), HookAdmissionLedgerError> {
+    let mut body = identity.to_vec();
+    body.extend_from_slice(
+        &canonical_json_bytes(lifecycle)
+            .map_err(|_| HookAdmissionLedgerError::RecordUnencodable)?,
+    );
+    encode_frame(FRAME_NATIVE_LIFECYCLE, &body, out)
+}
+
 fn encode_frame(kind: u8, body: &[u8], out: &mut Vec<u8>) -> Result<(), HookAdmissionLedgerError> {
+    if body.len() > MAX_FRAME_BODY_BYTES {
+        return Err(HookAdmissionLedgerError::RecordUnencodable);
+    }
     let length =
         u32::try_from(body.len()).map_err(|_| HookAdmissionLedgerError::RecordUnencodable)?;
     let start = out.len();
@@ -913,12 +1117,14 @@ fn encode_admitted_body(
     identity: [u8; IDENTITY_BYTES],
     digest: [u8; DIGEST_BYTES],
     admitted_at: UtcMicros,
+    order: u64,
     work: &[u8],
 ) -> Vec<u8> {
-    let mut body = Vec::with_capacity(ADMITTED_BODY_BYTES + work.len());
+    let mut body = Vec::with_capacity(ORDERED_ADMITTED_BODY_BYTES + work.len());
     body.extend_from_slice(&identity);
     body.extend_from_slice(&digest);
     body.extend_from_slice(&admitted_at.0.to_le_bytes());
+    body.extend_from_slice(&order.to_le_bytes());
     body.extend_from_slice(work);
     body
 }
@@ -982,26 +1188,65 @@ fn scan_log(bytes: &[u8]) -> Result<(Vec<LogFrame>, usize), HookAdmissionLedgerE
         }
         let body = &bytes[offset + FRAME_PREFIX_BYTES..end];
         frames.push(match (kind, body.len()) {
-            (FRAME_ADMITTED, length) if length >= ADMITTED_BODY_BYTES => {
+            (FRAME_ADMITTED | FRAME_ORDERED_ADMITTED | FRAME_RECONSTRUCTED_ADMITTED, length)
+                if length
+                    >= if kind == FRAME_ADMITTED {
+                        ADMITTED_BODY_BYTES
+                    } else {
+                        ORDERED_ADMITTED_BODY_BYTES
+                    } =>
+            {
                 let mut digest = [0u8; DIGEST_BYTES];
                 digest.copy_from_slice(&body[IDENTITY_BYTES..IDENTITY_BYTES + DIGEST_BYTES]);
                 let mut admitted = [0u8; 8];
                 admitted.copy_from_slice(&body[IDENTITY_BYTES + DIGEST_BYTES..ADMITTED_BODY_BYTES]);
+                let (order, work_start) = if kind != FRAME_ADMITTED {
+                    let mut order = [0u8; 8];
+                    order.copy_from_slice(&body[ADMITTED_BODY_BYTES..ORDERED_ADMITTED_BODY_BYTES]);
+                    (Some(u64::from_le_bytes(order)), ORDERED_ADMITTED_BODY_BYTES)
+                } else {
+                    (None, ADMITTED_BODY_BYTES)
+                };
                 LogFrame::Admitted {
                     identity: identity_at(body),
                     digest,
                     admitted_at: UtcMicros(i64::from_le_bytes(admitted)),
-                    work: decode_work(&body[ADMITTED_BODY_BYTES..])?,
+                    order,
+                    order_reconstructed: kind != FRAME_ORDERED_ADMITTED,
+                    work: decode_work(&body[work_start..])?,
                 }
+            }
+            (FRAME_NEXT_ORDER, 8) => {
+                let mut next_order = [0u8; 8];
+                next_order.copy_from_slice(body);
+                LogFrame::NextOrder(u64::from_le_bytes(next_order))
             }
             (FRAME_WORK, length) if length > IDENTITY_BYTES => LogFrame::Work {
                 identity: identity_at(body),
                 envelope: decode_work(&body[IDENTITY_BYTES..])?
                     .ok_or(HookAdmissionLedgerError::RecordUndecodable)?,
             },
-            (FRAME_COMPLETED, IDENTITY_BYTES) => LogFrame::Completed {
+            (FRAME_COMPLETED | FRAME_SUPERSEDED, IDENTITY_BYTES) => LogFrame::Settled {
                 identity: identity_at(body),
+                settlement: if kind == FRAME_COMPLETED {
+                    HookAdmissionWorkSettlementV1::Completed
+                } else {
+                    HookAdmissionWorkSettlementV1::Superseded
+                },
             },
+            (FRAME_NATIVE_LIFECYCLE, length) if length > IDENTITY_BYTES => {
+                let identity = identity_at(body);
+                let lifecycle: crate::NativeContextScoutLifecycleV1 =
+                    serde_json::from_slice(&body[IDENTITY_BYTES..])
+                        .map_err(|_| HookAdmissionLedgerError::RecordUndecodable)?;
+                if lifecycle.event_id != identity {
+                    return Err(HookAdmissionLedgerError::RecordUndecodable);
+                }
+                LogFrame::NativeLifecycle {
+                    identity,
+                    lifecycle,
+                }
+            }
             _ => return Err(HookAdmissionLedgerError::RecordUndecodable),
         });
         offset = end + CHECKSUM_PREFIX_BYTES;
@@ -1095,6 +1340,7 @@ mod tests {
     use super::*;
     use crate::{HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1, HookEventV2, HookOrderingV1};
     use std::cell::Cell;
+    use std::collections::BTreeSet;
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1133,7 +1379,7 @@ mod tests {
             envelope: &HookEventEnvelopeV2,
             now: UtcMicros,
         ) -> Result<HookAdmissionLedgerReceiptV1, HookAdmissionLedgerError> {
-            let staged = self.stage_admission(envelope, None, now)?;
+            let staged = self.stage_admission(envelope, None, None, Some(0), now)?;
             staged.commit.wait()?;
             Ok(staged.receipt)
         }
@@ -1202,6 +1448,351 @@ mod tests {
         )
         .unwrap()
         .0
+    }
+
+    #[test]
+    fn admission_order_survives_compaction_with_retained_gaps() {
+        let root = TestDir::new("ledger-order-compaction");
+        let mut ledger = open(root.path(), UtcMicros(1));
+        for marker in 1..=3 {
+            assert_eq!(
+                ledger
+                    .admit_with_receipt(&envelope(marker, 5), UtcMicros(2))
+                    .unwrap()
+                    .order,
+                u64::from(marker - 1),
+            );
+        }
+        ledger.forget(&envelope(1, 5).event_id);
+        ledger.rewrite().unwrap();
+        assert_eq!(
+            ledger
+                .admit_with_receipt(&envelope(3, 5), UtcMicros(3))
+                .unwrap()
+                .order,
+            2,
+        );
+        drop(ledger);
+        let mut reopened = open(root.path(), UtcMicros(4));
+        assert_eq!(
+            reopened
+                .admit_with_receipt(&envelope(2, 5), UtcMicros(5))
+                .unwrap()
+                .order,
+            1,
+        );
+        assert_eq!(
+            reopened
+                .admit_with_receipt(&envelope(4, 5), UtcMicros(6))
+                .unwrap()
+                .order,
+            3,
+        );
+    }
+
+    #[test]
+    fn admission_order_survives_an_empty_retained_window_and_restart() {
+        let root = TestDir::new("ledger-order-empty");
+        let limits = HookAdmissionLedgerLimitsV1 {
+            max_age_micros: 10,
+            ..HookAdmissionLedgerLimitsV1::stock()
+        };
+        for (marker, now) in [(1, 1), (2, 21), (3, 41)] {
+            let mut ledger = HookAdmissionLedgerV1::open(
+                root.path(),
+                NativeHostIdentityV1::ClaudeCode,
+                limits,
+                UtcMicros(now),
+            )
+            .unwrap()
+            .0;
+            assert_eq!(ledger.live_records(), 0);
+            let admitted = ledger
+                .admit_with_receipt(&envelope(marker, 5), UtcMicros(now + 1))
+                .unwrap();
+            assert_eq!(admitted.order, u64::from(marker - 1));
+            assert_eq!(ledger.expire(UtcMicros(now + 12)).unwrap(), 1);
+            assert_eq!(ledger.live_records(), 0);
+        }
+    }
+
+    #[test]
+    fn legacy_frames_preserve_admission_order_when_rewritten() {
+        let root = TestDir::new("ledger-legacy-order");
+        drop(open(root.path(), UtcMicros(1)));
+        let first = envelope(9, 5);
+        let second = envelope(10, 5);
+        let mut bytes = log_header().to_vec();
+        for record in [&first, &second] {
+            // The master format stores identity, digest, time, then optional work.
+            let mut body = record.event_id.to_vec();
+            body.extend_from_slice(&hook_admission_digest(record).unwrap());
+            body.extend_from_slice(&2i64.to_le_bytes());
+            encode_frame(FRAME_ADMITTED, &body, &mut bytes).unwrap();
+        }
+        encode_frame(
+            FRAME_WORK,
+            &encode_work_body(second.event_id, &encode_work(&second).unwrap()),
+            &mut bytes,
+        )
+        .unwrap();
+        encode_frame(FRAME_COMPLETED, &first.event_id, &mut bytes).unwrap();
+        fs::write(root.path().join(LOG_FILE), bytes).unwrap();
+        let mut ledger = open(root.path(), UtcMicros(3));
+        let first_receipt = ledger.admit_with_receipt(&first, UtcMicros(4)).unwrap();
+        assert_eq!(first_receipt.order, 0);
+        assert!(first_receipt.order_reconstructed);
+        assert!(first_receipt.work_settlement.is_some());
+        assert_eq!(
+            ledger.pending_work_envelopes(UtcMicros(4)).unwrap(),
+            std::slice::from_ref(&second)
+        );
+        ledger.forget(&first.event_id);
+        ledger.rewrite().unwrap();
+        drop(ledger);
+        let mut reopened = open(root.path(), UtcMicros(5));
+        assert!(
+            reopened
+                .admit_with_receipt(&second, UtcMicros(6))
+                .unwrap()
+                .order_reconstructed
+        );
+        assert_eq!(
+            reopened
+                .admit_with_receipt(&second, UtcMicros(6))
+                .unwrap()
+                .order,
+            1
+        );
+        assert_eq!(
+            reopened
+                .admit_with_receipt(&envelope(11, 5), UtcMicros(6))
+                .unwrap()
+                .order,
+            2
+        );
+        assert_eq!(
+            reopened.pending_work_envelopes(UtcMicros(6)).unwrap(),
+            [second]
+        );
+    }
+
+    #[test]
+    fn canonical_order_floor_changes_only_new_admissions_and_refuses_exhaustion() {
+        let root = TestDir::new("ledger-canonical-order-floor");
+        let now = UtcMicros(2);
+        let mut ledger = open(root.path(), now);
+        let first = envelope(1, 5);
+        let admitted = ledger
+            .stage_admission(&first, Some(&first), None, Some(99), now)
+            .unwrap();
+        admitted.commit.wait().unwrap();
+        assert_eq!(admitted.receipt.order, 99);
+        assert!(!admitted.receipt.order_reconstructed);
+        let duplicate = ledger
+            .stage_admission(&first, Some(&first), None, None, now)
+            .unwrap();
+        duplicate.commit.wait().unwrap();
+        assert_eq!(duplicate.receipt.order, 99);
+        let mut conflict = first.clone();
+        conflict.worktree_epoch += 1;
+        let before = ledger.written;
+        let conflicted = ledger
+            .stage_admission(&conflict, Some(&conflict), None, Some(u64::MAX), now)
+            .unwrap();
+        conflicted.commit.wait().unwrap();
+        assert_eq!(
+            conflicted.receipt.decision,
+            HookAdmissionDecisionV1::Conflict
+        );
+        assert_eq!(
+            ledger.written, before,
+            "conflict cannot move the order floor"
+        );
+        let second = envelope(2, 5);
+        assert!(matches!(
+            ledger.stage_admission(&second, Some(&second), None, None, now),
+            Err(HookAdmissionLedgerError::OrderAuthorityUnavailable)
+        ));
+        for floor in [u64::MAX, u64::MAX - 1] {
+            assert!(matches!(
+                ledger.stage_admission(&second, Some(&second), None, Some(floor), now),
+                Err(HookAdmissionLedgerError::OrderExhausted)
+            ));
+            assert_eq!(ledger.written, before);
+        }
+        let final_order = ledger
+            .stage_admission(&second, Some(&second), None, Some(u64::MAX - 2), now)
+            .unwrap();
+        final_order.commit.wait().unwrap();
+        assert_eq!(final_order.receipt.order, u64::MAX - 2);
+        ledger.rewrite().unwrap();
+        drop(ledger);
+        let mut ledger = open(root.path(), now);
+        assert_eq!(
+            ledger.admit_with_receipt(&second, now).unwrap().order,
+            u64::MAX - 2
+        );
+        assert!(matches!(
+            ledger.stage_admission(&envelope(3, 5), None, None, Some(0), now),
+            Err(HookAdmissionLedgerError::OrderExhausted)
+        ));
+    }
+
+    #[test]
+    fn native_lifecycle_enrichment_is_durable_and_conflicts_before_work_adoption() {
+        let root = TestDir::new("ledger-native-lifecycle");
+        let mut event = envelope(41, 5);
+        let lifecycle = crate::NativeContextScoutLifecycleV1::new(
+            "session.native-metadata",
+            "call.native-metadata",
+            event.event_id,
+        )
+        .unwrap();
+        event.protected_session_id =
+            <sha2::Sha256 as sha2::Digest>::digest(lifecycle.session_id.as_str().as_bytes()).into();
+        event.event = HookEventV2::SavedEdit {
+            file_id: [8; 16],
+            changed_range_count: 1,
+        };
+        let mut ledger = open(root.path(), UtcMicros(1));
+        let first = ledger
+            .stage_admission(&event, None, None, Some(0), UtcMicros(2))
+            .unwrap();
+        let order = first.receipt.order;
+        assert_eq!(first.native_lifecycle, None);
+        first.commit.wait().unwrap();
+        let enriched = ledger
+            .stage_admission(&event, None, Some(&lifecycle), Some(0), UtcMicros(3))
+            .unwrap();
+        assert_eq!(
+            enriched.receipt.decision,
+            HookAdmissionDecisionV1::ExactDuplicate
+        );
+        assert_eq!(enriched.receipt.order, order);
+        assert_eq!(enriched.native_lifecycle, Some(lifecycle.clone()));
+        enriched.commit.wait().unwrap();
+        let before = fs::metadata(log_path(root.path())).unwrap().len();
+        let conflict = crate::NativeContextScoutLifecycleV1::new(
+            lifecycle.session_id.as_str(),
+            "call.different",
+            event.event_id,
+        )
+        .unwrap();
+        let refused = ledger
+            .stage_admission(&event, Some(&event), Some(&conflict), Some(0), UtcMicros(4))
+            .unwrap();
+        assert_eq!(refused.receipt.decision, HookAdmissionDecisionV1::Conflict);
+        refused.commit.wait().unwrap();
+        assert_eq!(fs::metadata(log_path(root.path())).unwrap().len(), before);
+        assert!(
+            ledger
+                .pending_work_envelopes(UtcMicros(4))
+                .unwrap()
+                .is_empty()
+        );
+        let forged = crate::NativeContextScoutLifecycleV1::new(
+            "session.foreign",
+            "call.foreign",
+            event.event_id,
+        )
+        .unwrap();
+        assert!(matches!(
+            ledger.stage_admission(&event, Some(&event), Some(&forged), Some(0), UtcMicros(4)),
+            Err(HookAdmissionLedgerError::InvalidIdentity)
+        ));
+        assert_eq!(fs::metadata(log_path(root.path())).unwrap().len(), before);
+        let owed = ledger
+            .stage_admission(
+                &event,
+                Some(&event),
+                Some(&lifecycle),
+                Some(0),
+                UtcMicros(5),
+            )
+            .unwrap();
+        owed.commit.wait().unwrap();
+        assert_eq!(
+            ledger.pending_work_envelopes(UtcMicros(5)).unwrap(),
+            [event.clone()]
+        );
+        ledger
+            .stage_work_completion(&event)
+            .unwrap()
+            .unwrap()
+            .wait()
+            .unwrap();
+        ledger.rewrite().unwrap();
+        drop(ledger);
+        let mut reopened = open(root.path(), UtcMicros(6));
+        let retained = reopened
+            .stage_admission(&event, Some(&event), None, Some(0), UtcMicros(6))
+            .unwrap();
+        assert_eq!(retained.receipt.order, order);
+        assert_eq!(
+            retained.receipt.work_settlement,
+            Some(HookAdmissionWorkSettlementV1::Completed)
+        );
+        assert_eq!(retained.native_lifecycle, Some(lifecycle));
+        retained.commit.wait().unwrap();
+        assert!(
+            reopened
+                .pending_work_envelopes(UtcMicros(6))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn producer_work_retains_its_first_typed_terminal_reason_through_restart() {
+        for terminal in [
+            HookAdmissionWorkSettlementV1::Completed,
+            HookAdmissionWorkSettlementV1::Superseded,
+        ] {
+            let root = TestDir::new("ledger-work-terminal");
+            let event = envelope(43, 5);
+            let mut ledger = open(root.path(), UtcMicros(1));
+            ledger
+                .stage_admission(&event, Some(&event), None, Some(0), UtcMicros(2))
+                .unwrap()
+                .commit
+                .wait()
+                .unwrap();
+            ledger
+                .stage_work_settlement(&event, terminal)
+                .unwrap()
+                .unwrap()
+                .wait()
+                .unwrap();
+            let other = match terminal {
+                HookAdmissionWorkSettlementV1::Completed => {
+                    HookAdmissionWorkSettlementV1::Superseded
+                }
+                HookAdmissionWorkSettlementV1::Superseded => {
+                    HookAdmissionWorkSettlementV1::Completed
+                }
+            };
+            assert!(
+                ledger
+                    .stage_work_settlement(&event, other)
+                    .unwrap()
+                    .is_none()
+            );
+            ledger.rewrite().unwrap();
+            drop(ledger);
+            let mut reopened = open(root.path(), UtcMicros(3));
+            let retry = reopened
+                .stage_admission(&event, Some(&event), None, Some(0), UtcMicros(3))
+                .unwrap();
+            assert_eq!(retry.receipt.work_settlement, Some(terminal));
+            retry.commit.wait().unwrap();
+            assert!(
+                reopened
+                    .pending_work_envelopes(UtcMicros(3))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -1351,16 +1942,48 @@ mod tests {
     }
 
     #[test]
+    fn pending_work_order_survives_compaction_and_restart() {
+        let root = TestDir::new("ordered-pending-work");
+        let older = envelope(21, 5);
+        let mut newer = envelope(22, 5);
+        newer.event = HookEventV2::SavedEdit {
+            file_id: [22; 16],
+            changed_range_count: 1,
+        };
+        {
+            let mut ledger = open(root.path(), UtcMicros(1));
+            for (envelope, at) in [(&older, 2), (&newer, 3)] {
+                let staged = ledger
+                    .stage_admission(envelope, Some(envelope), None, Some(0), UtcMicros(at))
+                    .unwrap();
+                staged.commit.wait().unwrap();
+            }
+            assert_eq!(
+                ledger.pending_work_envelopes(UtcMicros(4)).unwrap(),
+                vec![older.clone(), newer.clone()]
+            );
+            ledger.rewrite().unwrap();
+        }
+
+        let mut reopened = open(root.path(), UtcMicros(5));
+        assert_eq!(
+            reopened.pending_work_envelopes(UtcMicros(6)).unwrap(),
+            vec![older, newer],
+            "compaction and replay preserve producer admission order"
+        );
+    }
+
+    #[test]
     fn pending_producer_work_redrives_until_completion_survives_reopen() {
         let root = TestDir::new("ledger-work-completion");
         let admitted = envelope(9, 5);
         {
             let mut ledger = open(root.path(), UtcMicros(1));
             let first = ledger
-                .stage_admission(&admitted, Some(&admitted), UtcMicros(2))
+                .stage_admission(&admitted, Some(&admitted), None, Some(0), UtcMicros(2))
                 .unwrap();
             first.commit.wait().unwrap();
-            assert!(!first.receipt.work_completed);
+            assert!(first.receipt.work_settlement.is_none());
         }
 
         {
@@ -1373,7 +1996,7 @@ mod tests {
                 .admit_with_receipt(&admitted, UtcMicros(4))
                 .unwrap();
             assert_eq!(duplicate.decision, HookAdmissionDecisionV1::ExactDuplicate);
-            assert!(!duplicate.work_completed);
+            assert!(duplicate.work_settlement.is_none());
             assert!(restarted.mark_work_completed(&admitted).unwrap());
         }
 
@@ -1387,7 +2010,7 @@ mod tests {
         let duplicate = completed
             .admit_with_receipt(&admitted, UtcMicros(6))
             .unwrap();
-        assert!(duplicate.work_completed);
+        assert!(duplicate.work_settlement.is_some());
         assert!(!completed.mark_work_completed(&admitted).unwrap());
     }
 
@@ -1426,7 +2049,7 @@ mod tests {
         {
             let mut ledger = open(root.path(), UtcMicros(1));
             let staged = ledger
-                .stage_admission(&admitted, Some(&admitted), UtcMicros(2))
+                .stage_admission(&admitted, Some(&admitted), None, Some(0), UtcMicros(2))
                 .unwrap();
             staged.commit.wait().unwrap();
             assert_eq!(
@@ -1453,10 +2076,10 @@ mod tests {
         let root = TestDir::new("ledger-group-commit");
         let mut ledger = open(root.path(), UtcMicros(1));
         let first = ledger
-            .stage_admission(&envelope(9, 5), None, UtcMicros(2))
+            .stage_admission(&envelope(9, 5), None, None, Some(0), UtcMicros(2))
             .unwrap();
         let second = ledger
-            .stage_admission(&envelope(10, 5), None, UtcMicros(3))
+            .stage_admission(&envelope(10, 5), None, None, Some(0), UtcMicros(3))
             .unwrap();
         let before = COMMIT_SYNCS.with(Cell::get);
 
@@ -1487,7 +2110,13 @@ mod tests {
                         let staged = ledger
                             .lock()
                             .unwrap()
-                            .stage_admission(&admitted, Some(&admitted), UtcMicros(2))
+                            .stage_admission(
+                                &admitted,
+                                Some(&admitted),
+                                None,
+                                Some(0),
+                                UtcMicros(2),
+                            )
                             .unwrap();
                         assert_eq!(staged.receipt.decision, HookAdmissionDecisionV1::Admitted);
                         staged.commit.wait().unwrap();
@@ -1536,7 +2165,13 @@ mod tests {
                             let staged = ledger
                                 .lock()
                                 .unwrap()
-                                .stage_admission(&admitted, Some(&admitted), UtcMicros(2))
+                                .stage_admission(
+                                    &admitted,
+                                    Some(&admitted),
+                                    None,
+                                    Some(0),
+                                    UtcMicros(2),
+                                )
                                 .unwrap();
                             staged.commit.wait().unwrap();
                             println!("acked {id}");

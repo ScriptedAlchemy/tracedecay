@@ -6,7 +6,6 @@ edition.workspace = true
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 description = "Session retrieval, project memory, provider usage, and runtime telemetry use cases shared by CLI, MCP, and host-admission adapters"
-include = ["/src/**"]
 
 [features]
 default = []

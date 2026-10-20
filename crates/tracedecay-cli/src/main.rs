@@ -733,7 +733,7 @@ async fn run(cli: Cli) -> tracedecay_domain::errors::Result<CommandOutcome> {
         }
     };
 
-    run_startup_preamble(&profile, &command).await;
+    run_startup_preamble(&profile, &command);
     dispatch_command(&profile, command, host_bundle).await
 }
 
@@ -754,78 +754,13 @@ fn command_profile(command: Option<&Commands>) -> tracedecay_domain::errors::Res
 }
 
 #[tracing::instrument(name = "cli.startup.preamble", level = "trace", skip_all)]
-async fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
+fn run_startup_preamble(profile: &ProfileRoot, command: &Commands) {
     let startup_policy = CommandStartupPolicy::for_command(command);
-
-    // Check first-run before any config save creates the file.
-    let profile_root = profile.data_dir();
-    let is_first_run = !tracedecay_session_memory::user_config::UserConfig::exists(profile_root);
-
-    let is_force_flush = matches!(command, Commands::Sync { .. } | Commands::Status { .. });
-    match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
-        Ok(user_config) => {
-            flush_worldwide_counter(profile, command, is_force_flush, user_config).await;
-        }
-        Err(err) => eprintln!("warning: {err}"),
-    }
-
-    if is_first_run && startup_policy.runs_startup_maintenance() {
-        eprintln!(
-            "note: tracedecay can optionally upload anonymous token savings counts to a worldwide counter.\n\
-             \x20     Run `tracedecay enable-upload-counter` to opt in."
-        );
-    }
 
     if startup_policy.runs_agent_install_check()
         && let Some(home) = profile.home()
     {
         tracedecay_agent_hosts::agents::claude::check_install_stale(home);
-    }
-}
-
-async fn flush_worldwide_counter(
-    profile: &ProfileRoot,
-    command: &Commands,
-    is_force_flush: bool,
-    mut user_config: tracedecay_session_memory::user_config::UserConfig,
-) {
-    let profile_root = profile.data_dir();
-    // Skip the worldwide-counter flush on hot startup paths. `try_flush`
-    // makes a synchronous HTTP call which can add seconds to
-    // `tracedecay serve` startup on slow networks, long enough to blow the
-    // MCP client's 30 s `initialize` timeout. The canonical setting lookup is
-    // only consulted when there are pending tokens to flush: with nothing
-    // pending the setting cannot change behavior, and probing it on every
-    // command turned the daemon's transient "runtime still mounting" state
-    // into per-command stderr noise. A failed lookup on an ordinary command
-    // is deferred (the next command retries); the flush-bearing commands
-    // (`sync`, `status`) still surface it, so a persistent failure
-    // stays visible exactly where the flush is expected to happen.
-    // The setting belongs to the profile, so the flush does not depend on
-    // the current directory.
-    if runs_worldwide_counter_flush(command) && user_config.pending_upload > 0 {
-        match commands::canonical_upload_enabled(profile).await {
-            Ok(upload_enabled) => {
-                global::try_flush(&mut user_config, is_force_flush, upload_enabled);
-            }
-            Err(error) if is_force_flush => {
-                eprintln!(
-                    "warning: canonical worldwide-counter upload setting is unavailable: {}",
-                    commands::annotate_reset_required(error, None)
-                );
-            }
-            Err(error) => {
-                tracing::debug!(
-                    "worldwide-counter flush deferred: canonical upload setting unavailable: \
-                     {error}"
-                );
-            }
-        }
-    }
-    if !is_local_install_command(command)
-        && let Err(err) = user_config.save_if_exists(profile_root)
-    {
-        eprintln!("warning: could not save tracedecay config: {err}");
     }
 }
 
@@ -975,10 +910,7 @@ impl CommandFamily {
             | Commands::PostUpdate { .. }
             | Commands::PackageHook { .. }
             | Commands::Channel { .. } => Self::Update,
-            Commands::CurrentCounter { .. }
-            | Commands::ResetCounter { .. }
-            | Commands::DisableUploadCounter
-            | Commands::EnableUploadCounter => Self::Configuration,
+            Commands::CurrentCounter { .. } | Commands::ResetCounter { .. } => Self::Configuration,
             Commands::Doctor { .. }
             | Commands::Cost { .. }
             | Commands::Gain { .. }
@@ -1822,12 +1754,6 @@ async fn dispatch_configuration_command(
             }
             eprintln!("Local counter reset (was {prev})");
         }
-        Commands::DisableUploadCounter => {
-            commands::handle_upload_counter(profile, false).await?;
-        }
-        Commands::EnableUploadCounter => {
-            commands::handle_upload_counter(profile, true).await?;
-        }
         _ => unreachable!("non-configuration command passed to configuration dispatcher"),
     }
     Ok(())
@@ -2023,6 +1949,7 @@ impl CommandStartupPolicy {
         }
     }
 
+    #[cfg(test)]
     fn runs_startup_maintenance(self) -> bool {
         !matches!(self, Self::SkipAll)
     }
@@ -2030,11 +1957,6 @@ impl CommandStartupPolicy {
     fn runs_agent_install_check(self) -> bool {
         matches!(self, Self::Full)
     }
-}
-
-fn runs_worldwide_counter_flush(command: &Commands) -> bool {
-    !matches!(command, Commands::Init { .. })
-        && CommandStartupPolicy::for_command(command).runs_startup_maintenance()
 }
 
 #[cfg(test)]
@@ -2045,10 +1967,6 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
 #[cfg(test)]
 fn should_skip_agent_install_check(command: &Commands) -> bool {
     !CommandStartupPolicy::for_command(command).runs_agent_install_check()
-}
-
-fn is_local_install_command(command: &Commands) -> bool {
-    matches!(command, Commands::Install { local: true, .. })
 }
 
 fn normalize_tool_reserved_global_flags(cli: &mut Cli) {
