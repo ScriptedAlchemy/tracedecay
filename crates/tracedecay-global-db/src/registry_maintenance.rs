@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::{
     CodeProjectRecord, GraphScopeUpsert, ProjectRegistryContext, RegisteredGlobalDb,
-    RegisteredGlobalDbWriteTransaction, StoreArtifactUpsert, StoreInstanceUpsert,
+    StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::storage::{

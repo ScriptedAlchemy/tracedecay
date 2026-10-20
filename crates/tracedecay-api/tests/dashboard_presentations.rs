@@ -1,7 +1,8 @@
 use axum::http::StatusCode;
 use serde_json::json;
 use tracedecay_api::configuration::{
-    configuration_revision_conflict_error, parse_project_settings_patch, parse_user_settings_patch,
+    ConfigurationRefusalV1, DashboardConfigurationRefusalV1, configuration_revision_conflict_error,
+    parse_project_settings_patch, parse_user_settings_patch,
 };
 use tracedecay_api::feedback::{
     FeedbackStatusCoverageV1, FeedbackStatusDenominatorsV1, FeedbackStatusPresentationV1,
@@ -47,7 +48,12 @@ fn configuration_patch_and_cas_errors_are_api_owned() {
     )
     .expect_err("unknown field must remain a typed bad request");
     assert_eq!(shape_error.0, StatusCode::BAD_REQUEST);
-    assert_eq!(shape_error.1.0["validation_errors"][0]["field"], "unknown");
+    assert!(matches!(
+        &shape_error.1.0,
+        DashboardConfigurationRefusalV1::Validation { .. }
+    ));
+    let shape_body = serde_json::to_value(shape_error.1.0).expect("serialize validation refusal");
+    assert_eq!(shape_body["validation_errors"][0]["field"], "unknown");
 
     let conflict = configuration_revision_conflict_error(
         "settings changed after this edit began; refresh and retry",
@@ -55,9 +61,16 @@ fn configuration_patch_and_cas_errors_are_api_owned() {
         "revision.actual",
     );
     assert_eq!(conflict.0, StatusCode::CONFLICT);
-    assert_eq!(conflict.1.0["code"], "configuration_revision_conflict");
-    assert_eq!(conflict.1.0["expected_revision_id"], "revision.expected");
-    assert_eq!(conflict.1.0["actual_revision_id"], "revision.actual");
+    assert!(matches!(
+        &conflict.1.0,
+        DashboardConfigurationRefusalV1::Configuration(
+            ConfigurationRefusalV1::ConfigurationRevisionConflict { .. }
+        )
+    ));
+    let conflict_body = serde_json::to_value(conflict.1.0).expect("serialize revision refusal");
+    assert_eq!(conflict_body["code"], "configuration_revision_conflict");
+    assert_eq!(conflict_body["expected_revision_id"], "revision.expected");
+    assert_eq!(conflict_body["actual_revision_id"], "revision.actual");
 }
 
 #[test]

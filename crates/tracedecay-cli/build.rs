@@ -116,22 +116,6 @@ impl EmbeddedDashboard {
         )
     }
 
-    fn packaged(
-        asset_paths: Vec<String>,
-        digest_hex: String,
-        app_dist: &Path,
-        out_dir: &Path,
-    ) -> Result<Self, Box<dyn Error>> {
-        Self::from_sources(
-            &asset_paths,
-            "CARGO_MANIFEST_DIR",
-            "/dashboard/app-dist",
-            app_dist,
-            out_dir,
-            digest_hex,
-        )
-    }
-
     fn from_sources(
         asset_paths: &[String],
         identity_include_env: &'static str,
@@ -351,30 +335,18 @@ fn publish_prepared_set(
 /// `TRACEDECAY_SKIP_DASHBOARD_BUILD` is set the prebuilt `dashboard/app-dist`
 /// is staged instead and must match the digest
 /// `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` names, so a skip can never embed
-/// unproven bytes. Packaged crates carry a staged `dashboard/app-dist` whose
-/// integrity Cargo's package checksums already guarantee. A missing or invalid
-/// bundle always fails the build; there is no empty-assets fallback.
+/// unproven bytes. A missing or invalid bundle always fails the build;
+/// there is no empty-assets fallback.
 fn embed_dashboard(
     manifest_dir: &Path,
     out_dir: &Path,
 ) -> Result<EmbeddedDashboard, Box<dyn Error>> {
-    let package_local_dashboard = manifest_dir.join("dashboard");
-    if package_local_dashboard.is_dir() {
-        // Packaged-crate mode: release packaging staged the bundle into the
-        // crate directory and Cargo's checksums are the integrity authority.
-        let app_dist = package_local_dashboard.join("app-dist");
-        let asset_paths = dashboard_manifest::dashboard_asset_paths(&app_dist)?;
-        let digest_hex = dashboard_bundle::bundle_digest(&app_dist, &asset_paths)?;
-        return EmbeddedDashboard::packaged(asset_paths, digest_hex, &app_dist, out_dir);
-    }
-
     let repository_root = manifest_dir.join(REPOSITORY_ROOT_FROM_CRATE);
     let dashboard = repository_root.join("dashboard");
     if !dashboard.join("package.json").is_file() {
         return Err(format!(
-            "no dashboard to embed: {} has no package-local dashboard/ and {} has no \
-             package.json; a tracedecay binary cannot build without its dashboard bundle",
-            manifest_dir.display(),
+            "no dashboard to embed: {} has no package.json; a tracedecay binary cannot \
+             build without its dashboard bundle",
             dashboard.display(),
         )
         .into());

@@ -470,6 +470,15 @@ fn uninstall_after_an_upgrade_removes_tracedecay_residue_and_keeps_unprovable_st
         run_phase(&cli, id, &["install", "--agent", id], false);
     }
     strip_creation_records(&cli);
+    // Unproven directories must retain operator modes across update/uninstall,
+    // regardless of the umask that created them during the old installation.
+    for (relative, mode) in [(".cursor/plugins", 0o750), (".cursor/plugins/local", 0o710)] {
+        fs::set_permissions(
+            cli.home.path().join(relative),
+            fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+    }
     deposit_legacy_cursor_extension(&cli);
     let upgraded = home_snapshot(&cli);
     for residue in [
@@ -503,8 +512,8 @@ fn uninstall_after_an_upgrade_removes_tracedecay_residue_and_keeps_unprovable_st
                 "  + .cline/mcp.json: file 600 {}",
                 hex::encode(Sha256::digest(skeleton))
             ),
-            "  + .cursor/plugins: dir 755".to_string(),
-            "  + .cursor/plugins/local: dir 755".to_string(),
+            "  + .cursor/plugins: dir 750".to_string(),
+            "  + .cursor/plugins/local: dir 710".to_string(),
         ]
     );
 }

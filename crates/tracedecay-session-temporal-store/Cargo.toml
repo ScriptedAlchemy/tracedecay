@@ -6,7 +6,6 @@ edition.workspace = true
 license = "MIT"
 description = "Session-temporal projection, retrieval, and LCM hydration store"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-include = ["/src/**"]
 
 [features]
 # Exposes package-owned fixture constructors to dependent package tests only.

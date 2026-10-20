@@ -86,7 +86,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "settings must expose the profile worker snapshot: {settings}"
         );
 
-        assert_eq!(settings["user"]["upload_enabled"], false);
+        assert!(
+            settings["user"].get("upload_enabled").is_none(),
+            "the retired worldwide-counter upload setting must not be served: {settings}"
+        );
         assert_eq!(
             settings["user"]["code_index_workers"],
             json!({ "mode": "automatic" }),
@@ -334,7 +337,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &json!({
                 "expected_revision_id": user_revision,
                 "idempotency_key": "configuration.idempotency.dashboard-user-unmounted",
-                "upload_enabled": false,
+                "extraction_timeout_secs": 90,
                 "watcher_debounce": "15s"
             }),
         );
@@ -353,12 +356,30 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &user_url,
             &json!({
                 "expected_revision_id": user_revision,
-                "upload_enabled": false
+                "extraction_timeout_secs": 90
             }),
         );
         assert_eq!(
             status, 400,
             "missing user idempotency must be rejected: {absent_user_idempotency}"
+        );
+
+        let (status, retired_upload) = patch_json_body(
+            &agent,
+            &user_url,
+            &json!({
+                "expected_revision_id": user_revision,
+                "idempotency_key": "configuration.idempotency.dashboard-user-retired-upload",
+                "upload_enabled": true
+            }),
+        );
+        assert_eq!(
+            status, 400,
+            "the retired upload field must be refused, not silently accepted: {retired_upload}"
+        );
+        assert_eq!(
+            retired_upload["validation_errors"][0]["field"],
+            "upload_enabled"
         );
         assert_eq!(
             absent_user_idempotency["validation_errors"][0]["field"],
@@ -437,7 +458,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(reloaded["project"]["config"]["max_file_size"], 1_048_576);
         assert_eq!(reloaded["project"]["configuration_revision_id"], revision);
         assert_eq!(reloaded["user"]["configuration_revision_id"], user_revision);
-        assert_eq!(reloaded["user"]["upload_enabled"], false);
+        assert!(reloaded["user"].get("upload_enabled").is_none());
         assert_eq!(reloaded["user"]["watcher_debounce"], "2s");
     });
 }

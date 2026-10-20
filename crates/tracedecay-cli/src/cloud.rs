@@ -1,7 +1,5 @@
-//! HTTP client for the worldwide counter Cloudflare Worker and GitHub release
-//! version checking.
+//! HTTP client for GitHub release version checking.
 //!
-//! Counter operations are best-effort: failures surface as `None` / empty.
 //! Release lookups classify every failure as a [`ReleaseLookupError`]. All
 //! are synchronous `ureq` calls that block the calling thread for up to their
 //! own timeout, which an enclosing Tokio deadline cannot cut short. A caller
@@ -14,20 +12,14 @@ use serde::de::DeserializeOwned;
 use tracedecay_application::http_agent::http_agent;
 use tracedecay_dashboard_api::cloud::ReleaseLookupError;
 
-/// The Cloudflare Worker endpoint URL.
-const WORKER_URL: &str = "https://tracedecay-counter.enzinol.workers.dev";
-
 /// Base URL of the GitHub REST API release lookups are issued against.
 pub(crate) const GITHUB_API_URL: &str = "https://api.github.com";
 const GITHUB_OWNER: &str = "ScriptedAlchemy";
 const GITHUB_REPOSITORY: &str = "tracedecay";
 
-/// Timeout for flush (upload) requests.
-const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Timeout for opportunistic advisory reads (worldwide counter and the
-/// background / `doctor` version probe). Keep this short so a stalled
-/// GitHub or worker never blocks those paths.
+/// Timeout for opportunistic advisory reads (the background / `doctor`
+/// version probe). Keep this short so a stalled GitHub never blocks those
+/// paths.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Bound for each GitHub release-metadata read of an explicit `tracedecay
@@ -37,53 +29,6 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(1);
 /// for that transfer on a slow link, not for one round trip. Advisory reads
 /// keep [`FETCH_TIMEOUT`].
 pub(crate) const UPGRADE_RELEASE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Response from the worker's POST /increment and GET /total endpoints.
-#[derive(serde::Deserialize)]
-struct WorkerResponse {
-    total: u64,
-}
-
-/// Creates a ureq agent with the given timeout.
-pub fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
-    http_agent(
-        ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .build(),
-    )
-}
-
-/// Uploads pending tokens to the worldwide counter.
-/// Returns the new worldwide total on success, or None on any failure.
-#[tracing::instrument(name = "cloud.flush_pending", level = "trace", skip_all)]
-pub fn flush_pending(amount: u64) -> Option<u64> {
-    if amount == 0 {
-        return None;
-    }
-    let body = serde_json::json!({ "amount": amount });
-    let agent = agent_with_timeout(FLUSH_TIMEOUT);
-    let parsed: WorkerResponse = agent
-        .post(&format!("{WORKER_URL}/increment"))
-        .send_json(&body)
-        .ok()?
-        .body_mut()
-        .read_json()
-        .ok()?;
-    Some(parsed.total)
-}
-
-/// Fetches the current worldwide total from the worker.
-/// Returns None on timeout, network error, or parse failure.
-#[tracing::instrument(name = "cloud.fetch_worldwide_total", level = "trace", skip_all)]
-pub fn fetch_worldwide_total() -> Option<u64> {
-    fetch_worldwide_total_from(&format!("{WORKER_URL}/total"))
-}
-
-fn fetch_worldwide_total_from(url: &str) -> Option<u64> {
-    let agent = agent_with_timeout(FETCH_TIMEOUT);
-    let parsed: WorkerResponse = agent.get(url).call().ok()?.body_mut().read_json().ok()?;
-    Some(parsed.total)
-}
 
 /// Response from GitHub releases API (only the fields we need).
 #[derive(serde::Deserialize)]
@@ -356,16 +301,15 @@ pub fn is_beta() -> bool {
     tracedecay_dashboard_api::cloud::is_beta(env!("CARGO_PKG_VERSION"))
 }
 
-/// Admits these ureq implementations into the composition library so MCP
-/// flush/version checks can run after the binary starts. Unregistered
-/// lookups stay `None` (already best-effort).
+/// Admits the ureq release lookup into the composition library so MCP version
+/// checks can run after the binary starts. An unregistered lookup stays
+/// `None` (already best-effort).
 pub fn admit_sync_probes() {
-    tracedecay_dashboard_api::cloud::admit_sync_cloud_probes(flush_pending, fetch_latest_version);
+    tracedecay_dashboard_api::cloud::admit_sync_cloud_probes(fetch_latest_version);
 }
 
 pub fn doctor_network_probes() -> tracedecay::doctor::AdmittedDoctorNetworkProbes {
     tracedecay::doctor::AdmittedDoctorNetworkProbes {
-        fetch_worldwide_total,
         fetch_latest_version,
     }
 }
@@ -567,33 +511,6 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(1500),
             "advisory lookup waited for the delayed answer: {elapsed:?}"
-        );
-    }
-
-    #[test]
-    fn advisory_worldwide_total_still_times_out_at_the_one_second_budget() {
-        let (base, _heads) = stub_after(
-            Duration::from_millis(1500),
-            Some(respond(
-                "200 OK",
-                "Content-Type: application/json\r\n",
-                r#"{"total":42}"#,
-            )),
-        );
-        let started = Instant::now();
-
-        assert!(
-            fetch_worldwide_total_from(&format!("{base}/total")).is_none(),
-            "advisory worldwide-total must keep the one-second budget"
-        );
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= FETCH_TIMEOUT,
-            "advisory worldwide-total returned before its one-second budget: {elapsed:?}"
-        );
-        assert!(
-            elapsed < Duration::from_millis(1500),
-            "advisory worldwide-total waited for the delayed answer: {elapsed:?}"
         );
     }
 

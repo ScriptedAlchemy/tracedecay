@@ -10,8 +10,78 @@ use tempfile::TempDir;
 
 use super::ProductionProjectCompositionHarnessV1;
 use super::journey_test_support::initialize_project;
+use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 
 const RELEASE_DEADLINE: Duration = Duration::from_secs(60);
+
+#[tokio::test]
+async fn a_failed_later_mount_releases_the_whole_composition_before_returning() {
+    let isolation = TempDir::new().expect("production harness isolation");
+    let first = isolation.path().join("first");
+    let refused = isolation.path().join("refused");
+    initialize_project(&first);
+    initialize_project(&refused);
+    let retired = refused.join(".tracedecay");
+    std::fs::create_dir(&retired).expect("retired checkout layout");
+    std::fs::write(retired.join("config.json"), "{}").expect("retired configuration");
+
+    let error = match ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        [first.clone(), refused.clone()],
+    )
+    .await
+    {
+        Ok(harness) => {
+            harness.shutdown().await;
+            panic!("the retired checkout layout must refuse the second mount");
+        }
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("expected the retired-layout refusal: {error:?}"));
+    assert_eq!(authority, "project store");
+    assert!(reason.contains("retired checkout-local layout"), "{reason}");
+
+    let profile = isolation.path().join("profile");
+    let first_layout = default_profile_sharded_layout(&first, &profile)
+        .expect("the first mount enrolled its exact project identity");
+    let stores = [
+        profile.join("global.db"),
+        profile.join("user-sessions.db"),
+        first_layout.data_root.join("sessions.db"),
+        first_layout.graph_db_path,
+    ];
+    for store in &stores {
+        assert!(
+            store.is_file(),
+            "the first mount opened {}",
+            store.display()
+        );
+        let mut wal = store.as_os_str().to_owned();
+        wal.push("-wal");
+        let bytes =
+            std::fs::metadata(std::path::PathBuf::from(wal)).map_or(0, |metadata| metadata.len());
+        assert_eq!(
+            bytes,
+            0,
+            "failed-open rollback must close the writer for {} before returning",
+            store.display()
+        );
+    }
+
+    std::fs::remove_file(retired.join("config.json")).expect("remove the fixture refusal");
+    std::fs::remove_dir(retired).expect("remove the empty retired fixture directory");
+    let harness = ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        [first.clone(), refused.clone()],
+    )
+    .await
+    .expect("both exact projects reopen after failed-open rollback");
+    assert!(harness.server(&first).is_ok());
+    assert!(harness.server(&refused).is_ok());
+    harness.shutdown().await;
+}
 
 #[test]
 fn a_harness_dropped_as_its_runtime_stops_releases_its_session_registry() {
