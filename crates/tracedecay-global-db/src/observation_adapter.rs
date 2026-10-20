@@ -13,7 +13,8 @@ use tracedecay_domain::{
     RetrievalAnchorId, RetrievalAnchorRecord, SanitizationReceiptV1, canonical_json_bytes,
     canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
     cline_native_source_successor_id, cline_task_native_observation_id, codex_rollout_siblings,
-    is_canonical_payload_revision_replay, prove_cline_native_source_transition, sha256_hex_suffix,
+    is_canonical_payload_revision_replay, is_codex_rollout_source,
+    prove_cline_native_source_transition, sha256_hex_suffix,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
@@ -984,8 +985,23 @@ async fn load_observation_preflight(
     }
     let (retrieval_aliases, alias_owners) =
         read_retrieval_aliases_from_snapshot(&snapshot, writes, OPERATION).await?;
-    for owner_id in alias_owners.values() {
-        if !refused_observation_ids.contains(owner_id.as_str())
+    let mut sibling_candidate_anchors = HashSet::new();
+    for write in writes {
+        let observation = write.observation();
+        if !is_codex_rollout_source(observation.source()) {
+            continue;
+        }
+        for alias in write.retrieval_anchor().aliases() {
+            if let Some(anchor_id) =
+                retrieval_aliases.get(&retrieval_alias_key(observation.scope(), alias)?)
+            {
+                sibling_candidate_anchors.insert(anchor_id.clone());
+            }
+        }
+    }
+    for (anchor_id, owner_id) in &alias_owners {
+        if sibling_candidate_anchors.contains(anchor_id)
+            && !refused_observation_ids.contains(owner_id.as_str())
             && seen_observation_ids.insert(owner_id.as_str().to_owned())
         {
             observation_ids.push(owner_id.clone());

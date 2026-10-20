@@ -1080,7 +1080,7 @@ impl CodexRetainedScan {
                 current: None,
             },
             directories: Vec::new(),
-            epoch: CodexCorpusEpoch::initial(),
+            epoch: CodexCorpusEpoch::under_rollout_source_reading(),
             complete: true,
             skipped_oversized_entries: 0,
             files_considered: 0,
@@ -1825,6 +1825,9 @@ impl CodexSource {
     }
 }
 
+/// Bump when a rollout file's observation source mapping changes; every
+/// completion claim recorded under the old reading then misses once.
+const CODEX_ROLLOUT_SOURCE_READING: &[u8] = b"tracedecay.codex.rollout-source-reading.v2\0";
 const CODEX_FRONTIER_SWEEPING_V2: u64 = 2;
 const CODEX_FRONTIER_COMPLETE_V2: u64 = 3;
 
@@ -1948,6 +1951,12 @@ impl CodexCorpusEpoch {
 
     const fn is_initial(self) -> bool {
         self.high == 0 && self.low == 0 && self.files == 0
+    }
+
+    fn under_rollout_source_reading() -> Self {
+        let mut epoch = Self::initial();
+        epoch.fold(Sha256::digest(CODEX_ROLLOUT_SOURCE_READING).into());
+        epoch
     }
 
     const fn from_parse_offset(offset: ParseOffset) -> Self {

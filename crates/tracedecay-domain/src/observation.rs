@@ -362,15 +362,18 @@ pub fn cline_native_source_successor_id(
 /// observations stay offered and share the one message the record projects.
 pub fn codex_rollout_siblings(left: &DurableObservationV1, right: &DurableObservationV1) -> bool {
     let (left_source, right_source) = (left.source(), right.source());
-    left_source.provider().as_str() == "codex"
-        && right_source.provider().as_str() == "codex"
+    is_codex_rollout_source(left_source)
+        && is_codex_rollout_source(right_source)
         && left_source.session_id() == right_source.session_id()
-        && left_source.explicit_source_key().is_some()
-        && right_source.explicit_source_key().is_some()
         && left_source != right_source
         && left.scope() == right.scope()
         && left.identity().native_record_id().is_some()
         && left.identity().native_record_id() == right.identity().native_record_id()
+}
+
+/// A keyed Codex source feeds one rollout file of a thread.
+pub fn is_codex_rollout_source(source: &ObservationSourceIdentityV1) -> bool {
+    source.provider().as_str() == "codex" && source.explicit_source_key().is_some()
 }
 
 /// Permits only the evidenced combined-file to native-file source transition.

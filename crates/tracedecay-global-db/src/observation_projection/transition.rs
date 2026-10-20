@@ -66,7 +66,8 @@ impl MessageTransitionState {
                     latest_observation,
                     observation,
                 )
-                .is_none(),
+                .is_none()
+                && !tracedecay_domain::codex_rollout_siblings(latest_observation, observation),
             projector_owned,
         }
     }
