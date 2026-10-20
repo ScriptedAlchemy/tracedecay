@@ -1080,7 +1080,7 @@ impl CodexRetainedScan {
                 current: None,
             },
             directories: Vec::new(),
-            epoch: CodexCorpusEpoch::initial(),
+            epoch: CodexCorpusEpoch::under_rollout_source_reading(),
             complete: true,
             skipped_oversized_entries: 0,
             files_considered: 0,
@@ -1825,6 +1825,9 @@ impl CodexSource {
     }
 }
 
+/// Bump when a rollout file's observation source mapping changes; every
+/// completion claim recorded under the old reading then misses once.
+const CODEX_ROLLOUT_SOURCE_READING: &[u8] = b"tracedecay.codex.rollout-source-reading.v2\0";
 const CODEX_FRONTIER_SWEEPING_V2: u64 = 2;
 const CODEX_FRONTIER_COMPLETE_V2: u64 = 3;
 
@@ -1950,6 +1953,12 @@ impl CodexCorpusEpoch {
         self.high == 0 && self.low == 0 && self.files == 0
     }
 
+    fn under_rollout_source_reading() -> Self {
+        let mut epoch = Self::initial();
+        epoch.fold(Sha256::digest(CODEX_ROLLOUT_SOURCE_READING).into());
+        epoch
+    }
+
     const fn from_parse_offset(offset: ParseOffset) -> Self {
         Self {
             high: offset.byte_offset,
@@ -1966,13 +1975,17 @@ impl CodexCorpusEpoch {
         }
     }
 
-    fn observe(&mut self, digest: [u8; 32]) -> TranscriptIngestResult<()> {
+    fn fold(&mut self, digest: [u8; 32]) {
         let mut high = [0u8; 8];
         let mut low = [0u8; 8];
         high.copy_from_slice(&digest[..8]);
         low.copy_from_slice(&digest[8..16]);
         self.high ^= u64::from_be_bytes(high);
         self.low ^= u64::from_be_bytes(low);
+    }
+
+    fn observe(&mut self, digest: [u8; 32]) -> TranscriptIngestResult<()> {
+        self.fold(digest);
         self.files = self.files.checked_add(1).ok_or(
             TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                 detail: "Codex corpus file count overflowed",

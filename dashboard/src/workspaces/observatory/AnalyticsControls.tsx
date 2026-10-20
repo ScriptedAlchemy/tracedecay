@@ -3,19 +3,15 @@
  * analytics: local mode, share staging age, retention/deletion, and egress
  * failures.
  *
- * Two real reads back parts of this surface, `GET /api/settings` for the
- * `user.upload_enabled.v1` profile setting, and `GET /api/doctor/findings?family=storage` for
- * the typed `retention_backlog` status. They are read independently: a failed
- * settings read must not blank the retention evidence, and neither may stand in
- * for the analytics collection mode, which nothing publishes.
+ * `GET /api/doctor/findings?family=storage` backs the typed `retention_backlog`
+ * status. It is read independently of the observatory projection, and neither
+ * may stand in for the analytics collection mode, which nothing publishes.
  *
  * The rule this surface exists to hold is the one in `analyticsControls.ts`: an
  * unread mode is not `Off`, and an absent exporter is not zero egress failures.
  * Both would be reassuring, and both would be false.
  */
 import type { ComponentProps, ReactNode } from 'react';
-import { SettingsPayloadV1Schema } from '../../contracts/generated.ts';
-import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import { envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
@@ -26,20 +22,13 @@ import {
   egressFailureReading,
   retentionBacklogReading,
   shareStagingReading,
-  uploadSettingReading,
   type RetentionBacklogReading,
-  type UploadSettingReading,
 } from './analyticsControls.ts';
 import type { ObservatoryAccountingReads } from './accountingReads.ts';
 
 export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads }) {
-  const settings = useEnvelope(['settings', 'analytics-controls'], '/api/settings', SettingsPayloadV1Schema);
   const findings = useStorageFindings();
 
-  const settingsState = envelopeReadState(settings.isPending, settings.data, {
-    loading: 'requesting profile settings',
-    transport: 'profile settings could not be read',
-  });
   const findingsState = envelopeReadState(findings.isPending, findings.data, {
     loading: 'requesting doctor storage findings',
     transport: 'doctor storage findings could not be read',
@@ -175,26 +164,6 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
               : `${egress.failures.toLocaleString()} failures were recorded by the canonical projection.`}
           </p>
         </Block>
-
-        <Block
-          title="profile upload setting"
-          state={
-            settingsState.kind === 'ready'
-              ? uploadSettingReading(settingsState.value.payload).state
-              : settingsState.state
-          }
-          detail={settingsState.kind === 'ready' ? undefined : settingsState.detail}
-          reason={null}
-          marker="upload_setting"
-        >
-          {settingsState.kind === 'ready' ? (
-            <UploadSetting reading={uploadSettingReading(settingsState.value.payload)} />
-          ) : (
-            <p className="text-sm leading-snug text-text-muted">
-              the profile settings read did not resolve, so the setting is not stated
-            </p>
-          )}
-        </Block>
       </div>
     </section>
   );
@@ -256,28 +225,5 @@ function RetentionBacklog({ reading }: { reading: RetentionBacklogReading }) {
         <dd className="min-w-0 break-words text-text-secondary">{reading.reason}</dd>
       </div>
     </dl>
-  );
-}
-
-function UploadSetting({ reading }: { reading: UploadSettingReading }) {
-  return (
-    <>
-      <dl className="flex flex-col gap-1 text-sm leading-snug text-text-muted">
-        <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">setting</dt>
-          <dd className="min-w-0 break-words text-text-secondary">{reading.settingKey}</dd>
-        </div>
-        <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">value</dt>
-          <dd
-            className="min-w-0 break-words text-text-secondary"
-            data-upload-enabled={reading.enabled == null ? 'unknown' : String(reading.enabled)}
-          >
-            {reading.enabled == null ? 'not reported' : reading.enabled ? 'enabled' : 'disabled'}
-          </dd>
-        </div>
-      </dl>
-      <p className="text-sm leading-snug text-text-muted">{reading.disclaimer}</p>
-    </>
   );
 }

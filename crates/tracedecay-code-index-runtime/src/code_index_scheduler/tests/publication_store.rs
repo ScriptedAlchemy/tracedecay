@@ -98,7 +98,7 @@ fn selected_graph_build_bound_reserves_transient_memory_and_retries_after_releas
                 resident_bytes: 0,
                 unreclaimable_bytes: 0,
                 swapped_bytes: 0,
-                cgroup_committed_bytes: None,
+                cgroup_headroom_bytes: None,
             })
         }),
     ));

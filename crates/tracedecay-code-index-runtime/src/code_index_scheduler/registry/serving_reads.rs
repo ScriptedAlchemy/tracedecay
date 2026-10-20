@@ -262,6 +262,18 @@ impl CodeIndexSchedulerRegistryV1 {
         Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1>,
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1,
     > {
+        self.dashboard_freshness_read_with_source_admission(project_root, true)
+            .await
+    }
+
+    pub(super) async fn dashboard_freshness_read_with_source_admission(
+        &self,
+        project_root: &Path,
+        include_source_admission: bool,
+    ) -> Result<
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1>,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1,
+    > {
         let canonical_root = match canonical_existing_identity(project_root) {
             Ok(root) => root,
             Err(_) => return Ok(None),
@@ -301,6 +313,9 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         native_runtime::spawn_blocking(move || {
+            // Sample the broker before any generation/fence value. A record
+            // disappears only after the scheduler accepted the source hint.
+            let admission_pending = include_source_admission && source_freshness.read_pending_source_blocking()?;
             let mut progress = {
                 let _span = tracing::trace_span!("daemon.code_index.dashboard.progress").entered();
                 build_progress
@@ -313,7 +328,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 || pending_wake.lock()
                     .micros
                     != 0;
-            let source_change_pending = source_freshness.source_change_pending();
+            let source_change_pending = admission_pending || source_freshness.source_change_pending();
             let parked = convergence_park
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -396,7 +411,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             parked: parked.as_ref(),
                             // The scheduler lock is held by the pass this read
                             // could not join, so verification is unknown here.
-                            source_verified: None,
+                            source_verified: admission_pending.then_some(false),
                             hook_hint_count,
                             sources_omitted: identity.omitted_sources.is_some(),
                         },
@@ -418,7 +433,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         micros => Some(micros),
                     };
                     project_graph_publication_phase(&mut progress, &code_graph_serving);
-                    return tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+                    return Ok(tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         code_graph_serving,
                         clone_index: Some(clone_index),
@@ -432,10 +447,10 @@ impl CodeIndexSchedulerRegistryV1 {
                         parked,
                         generation_recovery,
                         ..identity
-                    };
+                    });
                 }
             };
-            let verified = scheduler.verified_against_source();
+            let verified = !admission_pending && scheduler.verified_against_source();
             let latest = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -506,7 +521,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 )
             });
             project_graph_publication_phase(&mut progress, &code_graph_serving);
-            tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            Ok(tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 code_graph_serving,
                 clone_index: Some(clone_index),
@@ -520,13 +535,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 parked,
                 generation_recovery,
                 ..identity
-            }
+            })
         })
         .await
-        .map(Some)
         .map_err(|_| {
             tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::ReadFailed
-        })
+        })?
+        .map(Some)
     }
 
     /// The deterministic contract violation currently parking background
@@ -765,6 +780,7 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let freshness_root = project_root.clone();
         let (request_reconcile, latest) = native_runtime::spawn_blocking(move || {
+            let source_ready = source_freshness.ready_without_stat(&freshness_root, &shutting_down);
             let serving = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -777,8 +793,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         witness.generation_id == serving.generation().manifest().generation_id
                     })
             });
-            let source_ready = witness_matches_seat
-                && source_freshness.ready_without_stat(&freshness_root, &shutting_down);
+            let source_ready = witness_matches_seat && source_ready;
             let latest = source_ready.then(|| serving.clone()).flatten();
             if latest.is_none() {
                 tracing::info!(
@@ -1103,6 +1118,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // before entering the exact freshness probe: probing an unseated slot
         // cannot produce a decoded owner, and on an initial lightweight mount
         // it would turn an unverified fence into a fabricated overflow wake.
+        let source_ready = source_freshness.ready_without_stat(project_root, &shutting_down);
         let serving = serving_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1123,7 +1139,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Self::note_wake_if_idle(&pending_wake, &wake, wake_trigger);
             return None;
         }
-        if !source_freshness.ready_without_stat(project_root, &shutting_down) {
+        if !source_ready {
             Self::note_wake_if_idle(&pending_wake, &wake, wake_trigger);
             return None;
         }
@@ -1525,6 +1541,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.shutting_down),
             )
         };
+        // Pending or unreadable admission evidence withdraws currency, not
+        // the immutable owner. Graph and text reads can still name the last
+        // complete generation while the freshness surface reports its error.
+        let admission_clear = source_freshness
+            .read_pending_source()
+            .is_ok_and(|pending| !pending);
         let scope = scope.clone();
         let latest = text_generation
             .read()
@@ -1534,11 +1556,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 (!require_serving_ready || latest.query_owners_are_ready())
                     && text_matches_scope_identity(latest, &scope)
             })?;
-        let current = source_freshness.serves_verified_source(
-            &latest.metadata().snapshot().content_identity,
-            &root,
-            &shutting_down,
-        );
+        let current = admission_clear
+            && source_freshness.serves_verified_source(
+                &latest.metadata().snapshot().content_identity,
+                &root,
+                &shutting_down,
+            );
         if !current {
             // Attribution, not admission. A read that cannot verify the owner
             // while a pass already owns the worktree is a follow-up to that

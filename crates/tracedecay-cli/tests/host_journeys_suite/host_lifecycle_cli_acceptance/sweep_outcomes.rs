@@ -518,7 +518,7 @@ fn doctor_fails_a_corrupt_profile_config_with_its_repair() {
     let _daemon = ProfileDaemon::start(&cli);
     let config = cli.profile.join("config.toml");
     let installed = fs::read_to_string(&config).unwrap();
-    fs::write(&config, "pending_upload = 0\n true").unwrap();
+    fs::write(&config, "last_version_check_at = 0\n true").unwrap();
 
     let doctor = cli.run(&["doctor"]);
     let doctor_stderr = stderr(&doctor);

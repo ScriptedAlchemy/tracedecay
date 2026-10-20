@@ -791,6 +791,15 @@ async fn saturated_history_admission_defers_the_pass_and_resumes() {
         SessionHistoricalIngestOutcome::Complete,
     ]));
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    registry
+        .ensure_profile(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+        )
+        .await;
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     let admission = registry.historical_ingest_admission();
     let permits = u32::try_from(admission.available_permits()).unwrap();
     assert!(permits > 0, "the historical ingest admission is bounded");
@@ -805,29 +814,30 @@ async fn saturated_history_admission_defers_the_pass_and_resumes() {
             ingestor.clone(),
         )
         .await;
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     let saturated = SessionProjectionServingState::Stale {
         reason: SessionProjectionStaleReason::HistoricalRetry {
             reason_code: "history_admission_saturated".to_owned(),
         },
     };
+    let saturated_observed = wait_until(
+        || wake.serving_status().state == saturated,
+        Duration::from_secs(2),
+    )
+    .await;
     assert!(
-        wait_until(
-            || wake.serving_status().state == saturated,
-            Duration::from_secs(2),
-        )
-        .await,
-        "the deferred pass must surface as typed retryable staleness"
+        saturated_observed,
+        "the deferred pass must surface as typed retryable staleness: {:?}",
+        wake.serving_status()
     );
     assert_eq!(
         ingestor.passes.get(),
         0,
         "a saturated admission must not run the historical pass"
     );
-    registry
-        .wait_profile_idle(authority.database().db_path())
-        .await;
-    assert_eq!(ingestor.passes.get(), 0);
 
     drop(held);
     ingestor.passes.wait_for(|passes| *passes >= 1).await;
@@ -851,6 +861,15 @@ async fn a_saturated_history_pass_runs_with_the_permit_its_queue_turn_grants() {
         SessionHistoricalIngestOutcome::Complete,
     ]));
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    registry
+        .ensure_profile(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+        )
+        .await;
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     let admission = registry.historical_ingest_admission();
     let mut held = (0..admission.available_permits())
         .map(|_| {
@@ -867,22 +886,24 @@ async fn a_saturated_history_pass_runs_with_the_permit_its_queue_turn_grants() {
             ingestor.clone(),
         )
         .await;
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     let saturated = SessionProjectionServingState::Stale {
         reason: SessionProjectionStaleReason::HistoricalRetry {
             reason_code: "history_admission_saturated".to_owned(),
         },
     };
+    let saturated_observed = wait_until(
+        || wake.serving_status().state == saturated,
+        Duration::from_secs(2),
+    )
+    .await;
     assert!(
-        wait_until(
-            || wake.serving_status().state == saturated,
-            Duration::from_secs(2),
-        )
-        .await
+        saturated_observed,
+        "the queued pass must surface as typed retryable staleness: {:?}",
+        wake.serving_status()
     );
-    registry
-        .wait_profile_idle(authority.database().db_path())
-        .await;
-
     let next_waiter = tokio::spawn(Arc::clone(&admission).acquire_owned());
     tokio::task::yield_now().await;
     held.pop();

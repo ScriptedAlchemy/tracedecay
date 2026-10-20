@@ -262,11 +262,9 @@ impl TraceDecay {
     ) -> bool {
         self.configuration_runtime
             .client()
-            .current()
+            .current_state()
             .await
-            .ok()
-            .map(tracedecay_configuration::PinnedRuntimeConfiguration::into_current_state)
-            .is_some_and(|current| pin.configuration().matches_current(&current))
+            .is_ok_and(|current| pin.configuration().matches_current(&current))
     }
 }
 

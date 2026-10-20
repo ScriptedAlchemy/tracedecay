@@ -6,6 +6,9 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 use tracedecay_runtime_core::native_runtime;
+use tracedecay_sessions::serving::{
+    SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
+};
 
 use super::super::history::{
     SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
@@ -14,6 +17,44 @@ use super::super::history::{
 use super::super::wake::SessionTemporalRefreshWakeState;
 use super::SessionTemporalRefreshSchedulerRegistry;
 use crate::StoreOwnerKey;
+
+/// A retained ingestor must own the first pass, even with every shared permit
+/// occupied. A summary-only first pass would queue ahead of its history and
+/// leave a caller waiting for the history refusal while holding those permits.
+#[tokio::test]
+async fn retained_history_precedes_summary_admission_on_worker_start() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-history-before-summary").await;
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let admission = registry.historical_ingest_admission();
+    let held = admission
+        .try_acquire_many(u32::try_from(admission.available_permits()).unwrap())
+        .unwrap();
+    let history = Arc::new(HeldHistory::default());
+    let path = harness.registered.db_path().to_path_buf();
+    let entry = registry.spawn_entry(harness.registered.clone(), None, Some(history.clone()));
+    let wake = entry.wake.clone();
+    registry.profile.lock().await.insert(path.clone(), entry);
+
+    tokio::time::timeout(Duration::from_secs(2), registry.wait_profile_idle(&path))
+        .await
+        .expect("history refusal must not wait for summary admission");
+    assert_eq!(
+        wake.serving_status().state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalRetry {
+                reason_code: "history_admission_saturated".to_owned(),
+            },
+        }
+    );
+    assert_eq!(history.passes.load(Ordering::Acquire), 0);
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(2), history.entered.notified())
+        .await
+        .expect("the retained history gets the released permit");
+    assert_eq!(history.passes.load(Ordering::Acquire), 1);
+    history.release.notify_one();
+    registry.shutdown().await;
+}
 
 /// A history pass that ignores cancellation until the test releases it. The
 /// pass holds a clone of `held` for as long as the worker owns it, standing in

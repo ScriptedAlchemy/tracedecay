@@ -620,9 +620,9 @@ pub async fn deliver_save(
     project: &Path,
     paths: &[&str],
 ) {
-    // The acknowledgement is the event a following status read relies on, so
-    // wait for it within the journey's receipt bound rather than the host
-    // hook's latency bound.
+    // ACK commits broker admission; indexing follows in replay. A following
+    // readiness read must include that exact route's still-owed handoff.
+    // This journey bounds delivery with its existing receipt deadline.
     let outcome = tokio::time::timeout(
         RECEIPT_TIMEOUT,
         notify_hook_event(

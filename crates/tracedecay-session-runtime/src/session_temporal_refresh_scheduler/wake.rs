@@ -689,7 +689,10 @@ impl SessionTemporalRefreshWakeState {
 
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn is_idle(&self) -> bool {
-        !self.busy.load(Ordering::Acquire) && !self.has_pending_work()
+        // Consuming a wake follows marking the worker busy. Read the flags
+        // first so observing their consumption also makes that busy state
+        // visible, rather than combining an old idle read with cleared flags.
+        !self.has_pending_work() && !self.busy.load(Ordering::Acquire)
     }
 }
 

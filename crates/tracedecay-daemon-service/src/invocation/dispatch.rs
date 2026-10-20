@@ -1,6 +1,7 @@
 //! The daemon invocation dispatcher: `DaemonInvocationService::invoke`.
 
 use super::*;
+use tracedecay_contracts::CancellationSignal;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -785,13 +786,26 @@ impl DaemonInvocationService {
                 let Some(owner) = graph_tool_owner else {
                     return missing_registered_owner_problem(publication, request_id);
                 };
+                let signal = match self.request_cancellations.signal(&request_id, &request_cancellation) {
+                    Some(signal) => signal,
+                    None => match CancellationSignal::active(cancellation.token_id.as_str()) {
+                        Ok(signal) => signal,
+                        Err(_) => return DaemonInvocationResponse::problem(
+                            request_id,
+                            DaemonInvocationProblem::InvalidRequest,
+                        ),
+                    },
+                };
+                if let CancellationState::Cancelled { requested_at } = cancellation.state {
+                    signal.cancel(requested_at);
+                }
                 Box::pin(execute_graph_tool(
                     request_id,
                     owner,
                     surface_operation,
                     arguments,
                     deadline,
-                    cancellation,
+                    signal,
                     request_cancellation,
                 ))
                 .await

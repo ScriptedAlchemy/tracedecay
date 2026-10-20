@@ -5,12 +5,14 @@ on:
     paths:
       - "evals/hermetic/**"
       - "evals/agent_adoption/**"
+      - "scripts/build-eval-binary.sh"
       - ".github/workflows/hermetic-evals.yml"
   push:
     branches: [master]
     paths:
       - "evals/hermetic/**"
       - "evals/agent_adoption/**"
+      - "scripts/build-eval-binary.sh"
       - ".github/workflows/hermetic-evals.yml"
 
 permissions:
@@ -34,6 +36,7 @@ jobs:
         run: |
           bash -n evals/hermetic/run.sh
           bash -n evals/agent_adoption/run.sh
+          bash -n scripts/build-eval-binary.sh
       - name: Run scorer and shell-runner regressions
         run: >-
           bazel test
@@ -41,4 +44,5 @@ jobs:
           //evals/hermetic:run_test
           //evals/hermetic:scorecard_test
           //evals/agent_adoption:selftest
+          //scripts:build_eval_binary_test
           --test_output=errors
