@@ -1175,6 +1175,7 @@ impl StdioLspClient {
         let mut result = DiagnosticRefreshResult {
             diagnostics: diagnostics_by_uri.into_values().flatten().collect(),
             documents: BTreeMap::new(),
+            roots: BTreeMap::new(),
         };
         for (uri, document) in &uri_to_document {
             result.documents.insert(
