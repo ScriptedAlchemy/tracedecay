@@ -1,11 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tracedecay_domain::ObservationScopeV1;
-use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::hosts::claude_observation::drain_projection_queue;
-use tracedecay_sessions::runtime::hosts::codex::try_admit_codex_rollout_under_shipped_v2_source_for_test;
 
 use crate::codex::write_jsonl;
 use crate::restart_atomicity::{
@@ -41,6 +37,10 @@ fn rollout_path(home: &Path, day: &str, file_ids: &str) -> PathBuf {
     let dir = home.join(format!(".codex/sessions/2026/01/{day}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join(format!("rollout-2026-01-{day}T00-00-00-{file_ids}.jsonl"))
+}
+
+fn revert_rollout_path(home: &Path, day: &str) -> PathBuf {
+    rollout_path(home, day, &format!("{THREAD}_{REVERT_ROLLOUT}"))
 }
 
 fn rollout(home: &Path, day: &str, file_ids: &str, cwd: &Path, replies: &[&str]) -> PathBuf {
@@ -92,27 +92,18 @@ async fn ingest(home: &Path, db: &ProjectSessionTestRuntime, project: &Path) {
     ingest_global_sources_for_provider(home, db, project, Some(SessionProvider::Codex)).await;
 }
 
-async fn shipped_v2_pass(db: &ProjectSessionTestRuntime, project: &Path, rollouts: &[&Path]) {
-    let facade = db.runtime().facade();
-    for path in rollouts {
-        try_admit_codex_rollout_under_shipped_v2_source_for_test(
-            path,
-            project,
-            db.project_id().clone(),
-            &facade,
-        )
-        .await
-        .unwrap();
-    }
-    drain_projection_queue(
-        &facade,
-        &ObservationScopeV1::Project {
-            project_id: db.project_id().clone(),
-        },
-        &ObservationCancellation::default(),
-    )
-    .await
-    .unwrap();
+async fn revert_rollout_the_shipped_v2_binary_read(
+    home: &Path,
+    db: &ProjectSessionTestRuntime,
+    project: &Path,
+    day: &str,
+    replies: &[&str],
+) -> PathBuf {
+    let staged = rollout(home, day, THREAD, project, replies);
+    ingest(home, db, project).await;
+    let revert = revert_rollout_path(home, day);
+    std::fs::rename(&staged, &revert).unwrap();
+    revert
 }
 
 async fn assert_upgrade_leaves(
@@ -208,29 +199,21 @@ async fn rewriting_the_thread_rollout_supersedes_only_its_own_messages() {
     );
 }
 
-#[tokio::test]
-async fn a_record_both_rollouts_hold_outlives_a_rewrite_of_either() {
+async fn assert_a_shared_record_outlives_a_rewrite_of_either(
+    thread_lines: &[serde_json::Value],
+    revert_lines: &[serde_json::Value],
+) {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let shared = agent_message("01", 1, SHARED_QUESTION);
     let thread = rollout_path(&home, "01", THREAD);
-    let revert = rollout_path(&home, "02", &format!("{THREAD}_{REVERT_ROLLOUT}"));
-    write_jsonl(
-        &thread,
-        &[
-            session_meta("01", &project),
-            shared.clone(),
-            agent_message("01", 2, LEDGER_MIGRATION),
-        ],
-    );
-    write_jsonl(
-        &revert,
-        &[
-            session_meta("02", &project),
-            shared.clone(),
-            agent_message("02", 2, INVOICE_RETRY),
-        ],
-    );
+    let revert = revert_rollout_path(&home, "02");
+    let with_meta = |day: &str, lines: &[serde_json::Value]| {
+        let mut all = vec![session_meta(day, &project)];
+        all.extend_from_slice(lines);
+        all
+    };
+    write_jsonl(&thread, &with_meta("01", thread_lines));
+    write_jsonl(&revert, &with_meta("02", revert_lines));
     let db = open_project_session_db(&project).await.unwrap();
     ingest(&home, &db, &project).await;
     assert_eq!(
@@ -240,10 +223,7 @@ async fn a_record_both_rollouts_hold_outlives_a_rewrite_of_either() {
 
     write_jsonl(
         &revert,
-        &[
-            session_meta("02", &project),
-            agent_message("02", 2, INVOICE_ROLLBACK),
-        ],
+        &with_meta("02", &[agent_message("02", 2, INVOICE_ROLLBACK)]),
     );
     ingest(&home, &db, &project).await;
     assert_eq!(
@@ -254,10 +234,7 @@ async fn a_record_both_rollouts_hold_outlives_a_rewrite_of_either() {
 
     write_jsonl(
         &thread,
-        &[
-            session_meta("01", &project),
-            agent_message("01", 2, LEDGER_BACKFILL),
-        ],
+        &with_meta("01", &[agent_message("01", 2, LEDGER_BACKFILL)]),
     );
     ingest(&home, &db, &project).await;
     assert_eq!(
@@ -268,13 +245,39 @@ async fn a_record_both_rollouts_hold_outlives_a_rewrite_of_either() {
 }
 
 #[tokio::test]
+async fn a_record_both_rollouts_hold_outlives_a_rewrite_of_either() {
+    let shared = agent_message("01", 1, SHARED_QUESTION);
+    assert_a_shared_record_outlives_a_rewrite_of_either(
+        &[shared.clone(), agent_message("01", 2, LEDGER_MIGRATION)],
+        &[shared, agent_message("02", 2, INVOICE_RETRY)],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_record_both_rollouts_hold_at_different_offsets_outlives_a_rewrite_of_either() {
+    let shared = agent_message("01", 1, SHARED_QUESTION);
+    assert_a_shared_record_outlives_a_rewrite_of_either(
+        &[shared.clone(), agent_message("01", 2, LEDGER_MIGRATION)],
+        &[agent_message("02", 2, INVOICE_RETRY), shared],
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn upgrade_keeps_both_rollouts_the_shipped_v2_binary_imported_together() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let thread = thread_rollout(&home, &project, &[LEDGER_MIGRATION, LEDGER_BACKFILL]);
-    let revert = revert_rollout(&home, &project, &[INVOICE_RETRY, INVOICE_ROLLBACK]);
+    thread_rollout(&home, &project, &[LEDGER_MIGRATION, LEDGER_BACKFILL]);
     let db = open_project_session_db(&project).await.unwrap();
-    shipped_v2_pass(&db, &project, &[&revert, &thread]).await;
+    revert_rollout_the_shipped_v2_binary_read(
+        &home,
+        &db,
+        &project,
+        "02",
+        &[INVOICE_RETRY, INVOICE_ROLLBACK],
+    )
+    .await;
 
     assert_upgrade_leaves(
         &home,
@@ -295,15 +298,21 @@ async fn upgrade_keeps_both_rollouts_the_shipped_v2_binary_imported_together() {
 async fn upgrade_revives_a_revert_rollout_the_shipped_v2_binary_retired() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let thread = thread_rollout(&home, &project, &[LEDGER_MIGRATION, LEDGER_BACKFILL]);
+    thread_rollout(&home, &project, &[LEDGER_MIGRATION, LEDGER_BACKFILL]);
     let db = open_project_session_db(&project).await.unwrap();
-    shipped_v2_pass(&db, &project, &[&thread]).await;
+    ingest(&home, &db, &project).await;
     assert_eq!(
         replies(&db).await,
         sorted(&[LEDGER_MIGRATION, LEDGER_BACKFILL])
     );
-    let revert = revert_rollout(&home, &project, &[INVOICE_RETRY, INVOICE_ROLLBACK]);
-    shipped_v2_pass(&db, &project, &[&revert, &thread]).await;
+    revert_rollout_the_shipped_v2_binary_read(
+        &home,
+        &db,
+        &project,
+        "02",
+        &[INVOICE_RETRY, INVOICE_ROLLBACK],
+    )
+    .await;
 
     assert_upgrade_leaves(
         &home,
@@ -316,13 +325,25 @@ async fn upgrade_revives_a_revert_rollout_the_shipped_v2_binary_retired() {
 }
 
 #[tokio::test]
-async fn upgrade_keeps_a_revert_rollout_a_shipped_v2_hook_admitted_last() {
+async fn upgrade_keeps_a_revert_rollout_the_shipped_v2_binary_read_last() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let thread = thread_rollout(&home, &project, &[LEDGER_MIGRATION, LEDGER_BACKFILL]);
-    let revert = revert_rollout(&home, &project, &[INVOICE_RETRY, INVOICE_ROLLBACK]);
+    rollout(
+        &home,
+        "02",
+        THREAD,
+        &project,
+        &[LEDGER_MIGRATION, LEDGER_BACKFILL],
+    );
     let db = open_project_session_db(&project).await.unwrap();
-    shipped_v2_pass(&db, &project, &[&thread, &revert]).await;
+    revert_rollout_the_shipped_v2_binary_read(
+        &home,
+        &db,
+        &project,
+        "01",
+        &[INVOICE_RETRY, INVOICE_ROLLBACK],
+    )
+    .await;
 
     assert_upgrade_leaves(
         &home,

@@ -95,8 +95,6 @@ pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
 pub use observation::codex_observation_source_v2;
 pub(crate) use observation::try_admit_codex_jsonl_observations_for_project_window;
-#[cfg(any(test, feature = "test-helpers"))]
-pub use observation::try_admit_codex_rollout_under_shipped_v2_source_for_test;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
     try_admit_codex_jsonl_observations_for_profile_with_admission,
@@ -1968,13 +1966,17 @@ impl CodexCorpusEpoch {
         }
     }
 
-    fn observe(&mut self, digest: [u8; 32]) -> TranscriptIngestResult<()> {
+    fn fold(&mut self, digest: [u8; 32]) {
         let mut high = [0u8; 8];
         let mut low = [0u8; 8];
         high.copy_from_slice(&digest[..8]);
         low.copy_from_slice(&digest[8..16]);
         self.high ^= u64::from_be_bytes(high);
         self.low ^= u64::from_be_bytes(low);
+    }
+
+    fn observe(&mut self, digest: [u8; 32]) -> TranscriptIngestResult<()> {
+        self.fold(digest);
         self.files = self.files.checked_add(1).ok_or(
             TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                 detail: "Codex corpus file count overflowed",

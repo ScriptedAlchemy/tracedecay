@@ -358,6 +358,73 @@ mod tests {
         ));
     }
 
+    fn codex_rollout_observation(source_key: &str) -> DurableObservationV1 {
+        use tracedecay_domain::{
+            ComponentVersion, ObservationId, ObservationIdentityMaterialV1,
+            ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+            ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
+            RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+            SanitizerDispositionV1, SensitivityV1, SessionId,
+        };
+
+        let source = ObservationSourceIdentityV1::for_provider_source(
+            ProviderId::new("codex").unwrap(),
+            SessionId::new("codex-thread").unwrap(),
+            SessionId::new(source_key).unwrap(),
+        )
+        .unwrap();
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(7).unwrap(),
+            ObservationSourceRangeV1::new(0, 1).unwrap(),
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationId::new("record-1").unwrap(),
+        )
+        .unwrap();
+        let payload = serde_json::json!({"text": "shared"});
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(format!("receipt-{source_key}")).unwrap(),
+                ComponentVersion::new("sanitizer.transition-test.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        DurableObservationV1::new(
+            identity,
+            receipt,
+            RetentionClass::new("retention.transition-test").unwrap(),
+            payload,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn codex_rollout_siblings_supersede_within_one_generation() {
+        let thread = codex_rollout_observation("sha256:thread");
+        let revert = codex_rollout_observation("sha256:revert");
+        let expected = message("expected");
+
+        let sibling = MessageTransitionState::new(&revert, &thread, 1, true);
+        assert!(sibling.same_lineage);
+        assert!(!sibling.same_generation);
+        assert_eq!(
+            classify_message_transition(2, &expected, Some(false), Some(sibling)).unwrap(),
+            MessageTransition::Supersede
+        );
+
+        let same_source = MessageTransitionState::new(&revert, &revert, 1, true);
+        assert!(same_source.same_generation);
+        assert!(matches!(
+            classify_message_transition(2, &expected, Some(false), Some(same_source)),
+            Err(ProjectionStoreError::OutputCollision { .. })
+        ));
+    }
+
     #[test]
     fn rollover_only_supersedes_exclusively_owned_rows() {
         let expected = message("expected");

@@ -602,50 +602,7 @@ fn codex_admission_gate(scope: &ObservationScopeV1, path: &Path) -> CodexAdmissi
     gate
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-pub async fn try_admit_codex_rollout_under_shipped_v2_source_for_test(
-    path: &Path,
-    project_root: &Path,
-    project_id: ProjectId,
-    admission: &dyn HostAdmission,
-) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
-    try_admit_codex_jsonl_observations_as(
-        |_, _| CodexRolloutFile::Thread,
-        path,
-        CodexObservationAdmission::Project {
-            root: project_root,
-            project_id,
-        },
-        admission,
-        None,
-        None,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
 async fn try_admit_codex_jsonl_observations(
-    path: &Path,
-    admission_scope: CodexObservationAdmission<'_>,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-    max_frames: Option<usize>,
-    cancellation: &ObservationCancellation,
-) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
-    try_admit_codex_jsonl_observations_as(
-        |path, session_id| CodexRolloutFile::of(path, session_id),
-        path,
-        admission_scope,
-        admission,
-        max_new_bytes,
-        max_frames,
-        cancellation,
-    )
-    .await
-}
-
-async fn try_admit_codex_jsonl_observations_as(
-    rollout_of: impl for<'p> FnOnce(&'p Path, &str) -> CodexRolloutFile<'p>,
     path: &Path,
     admission_scope: CodexObservationAdmission<'_>,
     admission: &dyn HostAdmission,
@@ -666,7 +623,7 @@ async fn try_admit_codex_jsonl_observations_as(
     if !admission_scope.accepts_session(&meta.session_id) {
         return Ok(CodexJsonlAdmissionProgress::default());
     }
-    let rollout = rollout_of(path, &meta.session_id);
+    let rollout = CodexRolloutFile::of(path, &meta.session_id);
     let canonical_source = rollout.source(&meta.session_id)?;
     let context = CodexAdmissionContext {
         path,
