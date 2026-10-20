@@ -215,12 +215,24 @@ impl ProductionConfigurationDaemonClient {
         )
     }
 
-    pub fn current(&self) -> ConfigurationOperationFuture<'_, PinnedRuntimeConfiguration> {
+    /// Reads the validated durable snapshot without compiling indexing and
+    /// synchronization settings. Consumers revalidating an existing pin need
+    /// its revision and contents, rather than another runtime materialization.
+    pub fn current_state(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
         let store = self.store.clone();
+        Box::pin(tracing::Instrument::instrument(
+            async move { ConfigurationControlStore::current(&store).await },
+            tracing::trace_span!("usecases.configuration.current_state"),
+        ))
+    }
+
+    pub fn current(&self) -> ConfigurationOperationFuture<'_, PinnedRuntimeConfiguration> {
         let target = self.target.clone();
         Box::pin(tracing::Instrument::instrument(
             async move {
-                let current = ConfigurationControlStore::current(&store).await?;
+                let current = self.current_state().await?;
+                let _materialization =
+                    tracing::trace_span!("usecases.configuration.materialize").entered();
                 PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)
                     .map_err(|_| ConfigurationError::Unavailable)
             },

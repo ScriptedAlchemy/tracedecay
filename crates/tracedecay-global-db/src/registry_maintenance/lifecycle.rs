@@ -209,7 +209,7 @@ pub async fn apply_registry_gc(
 }
 
 pub(super) async fn delete_registry_gc_candidates_in_transaction(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl tracedecay_runtime_core::db::engine::Executor,
     project_ids: &[String],
     project_paths: &[PathBuf],
 ) -> tracedecay_domain::errors::Result<(usize, usize)> {
@@ -269,19 +269,22 @@ pub async fn forget_registry_project(
     project_id: &str,
     project_paths: &[PathBuf],
 ) -> tracedecay_domain::errors::Result<ForgetRegistryProjectRows> {
-    let transaction = db.begin_write_transaction().await?;
-    let (code_projects_deleted, path_ledger_rows_deleted) =
-        delete_registry_gc_candidates_in_transaction(
-            &transaction,
-            &[project_id.to_string()],
-            project_paths,
-        )
-        .await?;
-    transaction.commit().await?;
-    Ok(ForgetRegistryProjectRows {
-        code_projects_deleted,
-        path_ledger_rows_deleted,
+    let project_ids = [project_id.to_string()];
+    let project_paths = project_paths.to_vec();
+    db.transact(async move |transaction| {
+        let (code_projects_deleted, path_ledger_rows_deleted) =
+            delete_registry_gc_candidates_in_transaction(
+                &transaction,
+                &project_ids,
+                &project_paths,
+            )
+            .await?;
+        Ok::<_, tracedecay_domain::errors::TraceDecayError>(ForgetRegistryProjectRows {
+            code_projects_deleted,
+            path_ledger_rows_deleted,
+        })
     })
+    .await?
 }
 
 /// Retires exact registry rows for project roots already removed by an
@@ -290,9 +293,11 @@ pub async fn retire_registry_project_paths(
     db: &RegisteredGlobalDb,
     project_paths: &[PathBuf],
 ) -> tracedecay_domain::errors::Result<usize> {
-    let transaction = db.begin_write_transaction().await?;
-    let (_, retired) =
-        delete_registry_gc_candidates_in_transaction(&transaction, &[], project_paths).await?;
-    transaction.commit().await?;
-    Ok(retired)
+    let project_paths = project_paths.to_vec();
+    db.transact(async move |transaction| {
+        let (_, retired) =
+            delete_registry_gc_candidates_in_transaction(&transaction, &[], &project_paths).await?;
+        Ok::<_, tracedecay_domain::errors::TraceDecayError>(retired)
+    })
+    .await?
 }

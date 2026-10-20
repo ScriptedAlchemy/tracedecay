@@ -578,20 +578,6 @@ pub enum Commands {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Disable uploading token counts to the worldwide counter
-    #[command(
-        name = "disable-upload-counter",
-        long_about = DISABLE_UPLOAD_COUNTER_LONG_ABOUT,
-        after_help = DISABLE_UPLOAD_COUNTER_AFTER_HELP
-    )]
-    DisableUploadCounter,
-    /// Enable uploading token counts to the worldwide counter
-    #[command(
-        name = "enable-upload-counter",
-        long_about = ENABLE_UPLOAD_COUNTER_LONG_ABOUT,
-        after_help = ENABLE_UPLOAD_COUNTER_AFTER_HELP
-    )]
-    EnableUploadCounter,
     /// Check tracedecay installation, configuration, and agent integration
     #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
     Doctor {

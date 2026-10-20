@@ -1,3 +1,19 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+py_test(
+    name = "real_model_runner_test",
+    srcs = ["run_real_model.py", "test_run_real_model.py"],
+    data = [
+        "//benchmark_data:run_benchmarks.py",
+        "//evals/hermetic:score.py",
+        "//scripts:build-eval-binary.sh",
+        "//scripts:lib/portable_process.py",
+    ],
+    imports = ["."],
+    legacy_create_init = 0,
+    main = "test_run_real_model.py",
+)
+
 filegroup(
     name = "scenarios",
     srcs = glob(["scenarios/*.json"]),

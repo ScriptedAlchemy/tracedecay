@@ -972,13 +972,6 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
     let home = TempDir::new().unwrap();
     let home = canonical_existing_path(home.path());
     let _daemon = common::spawn_tracedecay_daemon(&home);
-    let enable = tracedecay_command_with_home(&home)
-        .current_dir(&home)
-        .arg("enable-upload-counter")
-        .stdin(Stdio::null())
-        .output()
-        .expect("enable-upload-counter should run");
-    assert!(enable.status.success(), "{enable:?}");
 
     // The home directory is the ambient root, so the handshake names no project.
     let output = run_serve_requests(
@@ -987,7 +980,7 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
         None,
         &[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
-            configuration_get_request(2, "user.upload_enabled.v1"),
+            configuration_get_request(2, "user.repeated_query_hints.v1"),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
             configuration_get_request(4, "index.max_file_size.v1"),
         ],
@@ -1001,8 +994,8 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
             &setting["outcome"]["value"]["payload"]["effective_value"],
         ),
         (
-            &json!("user.upload_enabled.v1"),
-            &json!({ "kind": "boolean", "value": true }),
+            &json!("user.repeated_query_hints.v1"),
+            &json!({ "kind": "boolean", "value": false }),
         ),
         "{setting}"
     );
@@ -1053,13 +1046,6 @@ async fn unenrolled_directory_session_serves_user_settings() {
     let home = canonical_existing_path(home.path());
     let unenrolled = TempDir::new().unwrap();
     let _daemon = common::spawn_tracedecay_daemon(&home);
-    let enable = tracedecay_command_with_home(&home)
-        .current_dir(unenrolled.path())
-        .arg("enable-upload-counter")
-        .stdin(Stdio::null())
-        .output()
-        .expect("enable-upload-counter should run");
-    assert!(enable.status.success(), "{enable:?}");
 
     let output = run_serve_requests(
         &home,
@@ -1067,7 +1053,7 @@ async fn unenrolled_directory_session_serves_user_settings() {
         None,
         &[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
-            configuration_get_request(2, "user.upload_enabled.v1"),
+            configuration_get_request(2, "user.repeated_query_hints.v1"),
             configuration_get_request(3, "index.max_file_size.v1"),
         ],
     );
@@ -1075,7 +1061,7 @@ async fn unenrolled_directory_session_serves_user_settings() {
     let setting = json_rpc_tool_payload(&output.stdout, 2);
     assert_eq!(
         setting["outcome"]["value"]["payload"]["effective_value"],
-        json!({ "kind": "boolean", "value": true }),
+        json!({ "kind": "boolean", "value": false }),
         "{setting}"
     );
     let refusal = json_rpc_response(&output.stdout, 3);
