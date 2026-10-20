@@ -6,7 +6,6 @@ edition.workspace = true
 license = "MIT"
 description = "Lossless context memory engine: contracts, raw ingest, summary DAG, payload authority, retrieval, GC, and retention"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-include = ["/src/**", "/tests/**"]
 
 [features]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper

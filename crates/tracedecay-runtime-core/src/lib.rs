@@ -124,6 +124,7 @@ pub mod path_safety;
 pub mod resident_memory;
 pub mod runtime_identity;
 pub mod runtime_telemetry;
+pub mod scope_identity;
 pub mod shard_runtime;
 pub mod sqlite_read_snapshot;
 pub mod storage;

@@ -162,6 +162,7 @@ async fn activate_and_track_manual_branch(
     let published_data_root = data_root.clone();
     let published_schedulers = schedulers.clone();
     let published_registries = administration.session_runtime_registries();
+    let owned_administration = administration.clone();
 
     administration
         .admit_manual_branch_publication(|cancellation, admitted| async move {
@@ -195,7 +196,7 @@ async fn activate_and_track_manual_branch(
                     graph,
                     schedulers,
                     branch.clone(),
-                    data_root.clone(),
+                    owned_administration,
                     lifecycle,
                     cancellation,
                 )
@@ -352,12 +353,14 @@ pub(super) async fn activate_and_track_manual_branch_owned(
     graph: Arc<tracedecay_project::project::TraceDecay>,
     schedulers: CodeIndexSchedulerRegistryV1,
     branch: String,
-    data_root: std::path::PathBuf,
+    administration: StoreAdministration,
     lifecycle: ManualBranchLifecycleLeaseV1,
     cancellation: CancellationToken,
 ) -> Result<BranchAddOutcome, TraceDecayError> {
+    let data_root = graph.store_layout().data_root.clone();
     let publication = branch_publication_context(&graph)?;
     let activation = super::pr_autotrack::activate_manual_branch_head_with_lifecycle(
+        &administration,
         &project_root,
         &graph,
         Some(&schedulers),

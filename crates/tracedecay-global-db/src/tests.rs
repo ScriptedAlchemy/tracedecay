@@ -10,6 +10,8 @@ use super::{
 mod codex_response_echo;
 pub mod harness;
 #[cfg(test)]
+mod hook_route_analytics;
+#[cfg(test)]
 pub(crate) mod lcm_privacy_rescan;
 #[cfg(test)]
 mod lcm_schema;
@@ -1481,6 +1483,92 @@ async fn transact_rolls_back_when_scope_ends_before_commit() {
         !table_exists(&db, "transact_staged_before_commit").await,
         "failed commit did not roll back staged writes"
     );
+}
+
+#[asupersync::test]
+async fn transact_or_rollback_keeps_an_early_value_but_never_a_commit() {
+    use crate::registered::JobExit;
+    use tracedecay_runtime_core::db::engine::Executor as _;
+    let harness = RegisteredGlobalDbHarness::open("transact-or-rollback-exits").await;
+    let db = harness.registered.clone();
+
+    let replayed = db
+        .transact_or_rollback(
+            |error| error.to_string(),
+            async move |transaction| {
+                transaction
+                    .execute("CREATE TABLE job_exit_rolled_back (value INTEGER)", ())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Err::<u32, _>(JobExit::Rollback(7))
+            },
+        )
+        .await;
+    assert_eq!(replayed, Ok(7));
+    assert!(
+        !table_exists(&db, "job_exit_rolled_back").await,
+        "an early exit left its writes behind"
+    );
+
+    let failed = db
+        .transact_or_rollback(
+            |error| error.to_string(),
+            async move |transaction| {
+                transaction
+                    .execute("CREATE TABLE job_exit_failed (value INTEGER)", ())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Err::<u32, _>(JobExit::Fail("body failed".to_owned()))
+            },
+        )
+        .await;
+    assert_eq!(failed, Err("body failed".to_owned()));
+    assert!(!table_exists(&db, "job_exit_failed").await);
+}
+
+#[asupersync::test]
+async fn transact_or_wraps_a_scope_that_ended_mid_body_and_rolls_back() {
+    use tracedecay_runtime_core::db::engine::Executor as _;
+    let mut harness = RegisteredGlobalDbHarness::open("transact-or-scope-end").await;
+    let db = harness.registered.clone();
+    let scope = std::sync::Arc::new(std::sync::Mutex::new(harness.take_scope()));
+
+    let error = db
+        .transact_or(
+            |error| format!("wrapped: {error}"),
+            async move |transaction| {
+                transaction
+                    .execute("CREATE TABLE transact_or_staged (value INTEGER)", ())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                drop(scope.lock().unwrap().take());
+                Ok::<_, String>(())
+            },
+        )
+        .await
+        .expect_err("transact_or committed after the scope ended");
+
+    assert!(error.starts_with("wrapped: "), "{error}");
+    assert!(error.contains("active daemon"), "{error}");
+    assert!(
+        !table_exists(&db, "transact_or_staged").await,
+        "scope loss did not roll the job back"
+    );
+}
+
+#[asupersync::test]
+async fn converted_write_is_refused_without_a_write_scope() {
+    let mut harness = RegisteredGlobalDbHarness::open("converted-write-no-scope").await;
+    let db = harness.registered.clone();
+    harness.revoke();
+
+    let error = db
+        .try_record_savings("/project", "tool", 10, 4, 1)
+        .await
+        .expect_err("a converted write ran without a write scope");
+
+    assert!(error.to_string().contains("active daemon"), "{error}");
+    assert_eq!(row_count(&db, "savings_ledger").await, 0);
 }
 
 #[asupersync::test]

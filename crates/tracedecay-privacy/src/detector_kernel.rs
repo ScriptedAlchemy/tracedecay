@@ -192,7 +192,12 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
         let candidate = &text[start..end];
         let macos_temp_path = candidate.starts_with("/private/var/folders/")
             || candidate.starts_with("/var/folders/");
-        if macos_temp_path {
+        let uuid_path = !macos_temp_path
+            && candidate.starts_with('/')
+            && candidate.split('/').any(is_uuid_path_component);
+        if uuid_path {
+            extend_uuid_path_entropy_ranges(candidate, start, &mut ranges);
+        } else if macos_temp_path {
             let mut component_start = 0usize;
             for component in candidate.split('/') {
                 let component_end = component_start + component.len();
@@ -207,6 +212,77 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
         start = end;
     }
     ranges
+}
+
+// UUIDs contribute identity, not credential entropy. Dense components and their
+// neighbors can form one token. Sparse pairs need a standard Base64-shaped
+// alphabet so filename punctuation cannot lend credential evidence.
+// Inspect original, disjoint slices so ordinary prefixes cannot dilute secrets.
+fn extend_uuid_path_entropy_ranges(text: &str, offset: usize, ranges: &mut Vec<Range<usize>>) {
+    let mut component_start = 0usize;
+    let mut previous: Option<Range<usize>> = None;
+    let mut run: Option<Range<usize>> = None;
+    let mut run_prefix = None;
+    for component in text.split('/').chain(std::iter::once("")) {
+        let component_end = component_start + component.len();
+        let eligible = !component.is_empty() && !is_uuid_path_component(component);
+        if eligible
+            && entropy_bits_per_mille(component)
+                .is_none_or(|score| score >= MIN_TOKEN_ENTROPY_PER_MILLE)
+        {
+            match &mut run {
+                Some(run) => run.end = component_end,
+                None => {
+                    run_prefix = previous.take().map(|range| range.start);
+                    run = Some(component_start..component_end);
+                }
+            }
+        } else {
+            let mut consumed = false;
+            if let Some(run) = run.take() {
+                let matched = if looks_high_entropy_token(&text[run.clone()]) {
+                    Some(run.clone())
+                } else if let Some(prefix) = run_prefix
+                    && looks_high_entropy_token(&text[prefix..run.end])
+                {
+                    Some(prefix..run.end)
+                } else if eligible && looks_high_entropy_token(&text[run.start..component_end]) {
+                    consumed = true;
+                    Some(run.start..component_end)
+                } else {
+                    None
+                };
+                if let Some(matched) = matched {
+                    ranges.push(offset + matched.start..offset + matched.end);
+                }
+                run_prefix = None;
+            }
+            if !consumed
+                && eligible
+                && let Some(previous) = previous.take()
+                && text[previous.start..component_end]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+                && looks_high_entropy_token(&text[previous.start..component_end])
+            {
+                ranges.push(offset + previous.start..offset + component_end);
+                consumed = true;
+            }
+            previous = (eligible && !consumed).then_some(component_start..component_end);
+        }
+        component_start = component_end + 1;
+    }
+}
+
+fn is_uuid_path_component(component: &str) -> bool {
+    component.len() == 36
+        && component.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
 }
 
 fn is_lcm_payload_ref(candidate: &str) -> bool {
@@ -245,7 +321,7 @@ pub(crate) fn entropy_bits_per_mille(token: &str) -> Option<u32> {
 }
 
 pub fn looks_high_entropy_token(token: &str) -> bool {
-    if token.len() < 36
+    if token.len() < MIN_TOKEN_LENGTH
         || !token.bytes().all(token_byte)
         || token.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -268,9 +344,11 @@ pub fn looks_high_entropy_token(token: &str) -> bool {
             .filter(|count| *count != 0)
             .map(|count| count as u128 * fixed_log2(count))
             .sum::<u128>();
-    entropy_sum * 10 >= len * 42 * ENTROPY_SCALE
+    entropy_sum * 1_000 >= len * u128::from(MIN_TOKEN_ENTROPY_PER_MILLE) * ENTROPY_SCALE
 }
 
+const MIN_TOKEN_LENGTH: usize = 36;
+const MIN_TOKEN_ENTROPY_PER_MILLE: u32 = 4_200;
 const ENTROPY_SCALE: u128 = 1 << 20;
 
 fn fixed_log2(value: usize) -> u128 {
@@ -405,9 +483,13 @@ mod tests {
 
     #[test]
     fn entropy_kernel_preserves_ordinary_macos_temp_paths() {
-        let path = "/private/var/folders/ab/cd0123456789abcdefghijklmnopqrst/T/";
-        assert!(looks_high_entropy_token(path));
-        assert!(high_entropy_ranges(path).is_empty());
+        for path in [
+            "/private/var/folders/ab/cd0123456789abcdefghijklmnopqrst/T/",
+            "/private/var/folders/ab/cd0123456789abcdefghijklmnopqrst/T/fe600511-e406-4142-b74a-cbf177c5f2cb/",
+        ] {
+            assert!(looks_high_entropy_token(path));
+            assert!(high_entropy_ranges(path).is_empty());
+        }
     }
 
     #[test]
@@ -427,5 +509,205 @@ mod tests {
         assert!(secret.split('/').all(|part| part.len() < 36));
         assert!(looks_high_entropy_token(secret));
         assert_eq!(high_entropy_ranges(secret), vec![0..secret.len()]);
+    }
+
+    #[test]
+    fn entropy_kernel_preserves_absolute_paths_with_uuid_directories() {
+        let observed = "/run/nl/w/fe600511-e406-4142-b74a-cbf177c5f2cb/tmp/";
+        assert!(looks_high_entropy_token(observed));
+        for path in [
+            observed,
+            "/workspace/artifacts/fe600511-e406-4142-b74a-cbf177c5f2cb/project/src/",
+            "/workspace/FE600511-E406-4142-B74A-CBF177C5F2CB/source/",
+        ] {
+            assert!(high_entropy_ranges(path).is_empty(), "{path}");
+        }
+        let malformed = "/run/nl/w/fe600511-e406-4142-b74a-cbf177c5f2cg/tmp/";
+        assert_eq!(high_entropy_ranges(malformed), vec![0..malformed.len()]);
+    }
+
+    #[test]
+    fn entropy_kernel_redacts_secrets_inside_uuid_directory_paths() {
+        let prefix = "/run/nl/w/fe600511-e406-4142-b74a-cbf177c5f2cb/tmp/";
+        for secret in [
+            "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE",
+            "AbCdEfGhIjKlMnOpQrStUvWxYz01234/56789aBcDeFgHiJkLmNoPqRsTuVwXy",
+        ] {
+            let path = format!("{prefix}{secret}");
+            assert_eq!(
+                high_entropy_ranges(&path),
+                vec![prefix.len()..prefix.len() + secret.len()]
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_paths_preserve_dated_build_artifact_locations() {
+        for uuid in [
+            "00000000-0000-0000-0000-000000000000",
+            "fe600511-e406-4142-b74a-cbf177c5f2cb",
+        ] {
+            for artifact in [
+                "build_20261018_x86_64_linux",
+                "build_20261018_x86_64_linux/typescript",
+                "typescript/build_20261018_x86_64_linux",
+                "build_20261018_x86_64_linux/javascript",
+                "build_20261018_x86_64_linux/documentation",
+                "build_20261018_x86_64_linux/generated_sources",
+                "build_20261018_x86_64_linux/typescript_v2_01",
+                "typescript_v2_01/build_20261018_x86_64_linux",
+            ] {
+                let path = format!("/workspace/{uuid}/dist/{artifact}");
+                assert_eq!(
+                    high_entropy_ranges(&path),
+                    Vec::<Range<usize>>::new(),
+                    "{path}"
+                );
+                let metadata = json!({"path": path});
+                assert_eq!(
+                    crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+                        .expect("structured artifact metadata"),
+                    metadata
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn uuid_paths_do_not_dilute_adjacent_short_secret_components() {
+        let prefix = format!(
+            "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
+            "a".repeat(512)
+        );
+        let secret = "AbCdEfGhIjKlMnOpQrStUvWxYz01234/56789aBcDeFgHiJkLmNoPqRsTuVwXy";
+        assert!(secret.split('/').all(|component| component.len() < 36));
+        assert!(looks_high_entropy_token(secret));
+        let path = format!("{prefix}{secret}/source");
+        assert!(!looks_high_entropy_token(&path));
+        assert_eq!(
+            high_entropy_ranges(&path),
+            vec![prefix.len()..prefix.len() + secret.len()]
+        );
+    }
+
+    #[test]
+    fn uuid_paths_detect_tokens_with_a_sparse_neighbor_component() {
+        let prefix = "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/";
+        let letters = "AbCdEfGhIjKlMnOpQrStUvWxYzABCD";
+        let digits = "012345678901234567890123456789";
+        for secret in [format!("{letters}/{digits}"), format!("{digits}/{letters}")] {
+            assert!(secret.split('/').all(|component| component.len() < 36));
+            assert!(looks_high_entropy_token(&secret));
+            let path = format!("{prefix}{secret}/source");
+            assert_eq!(
+                high_entropy_ranges(&path),
+                vec![prefix.len()..prefix.len() + secret.len()]
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_paths_redact_slash_bearing_secrets_with_two_sparse_components() {
+        let secret = "abcdefghijklmnopabcdefghijklmnop/QRSTUVWXYZ012345QRSTUVWXYZ012345";
+        for component in secret.split('/') {
+            assert!(entropy_bits_per_mille(component).unwrap() < MIN_TOKEN_ENTROPY_PER_MILLE);
+        }
+        assert!(looks_high_entropy_token(secret));
+        let prefix = format!(
+            "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
+            "a".repeat(512)
+        );
+        let path = format!("{prefix}{secret}/source");
+        assert!(!looks_high_entropy_token(&path));
+        assert_eq!(
+            high_entropy_ranges(&path),
+            vec![prefix.len()..prefix.len() + secret.len()]
+        );
+        let metadata = json!({"path": path});
+        let sanitized = crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+            .expect("structured path metadata");
+        let sanitized_path = sanitized["path"].as_str().unwrap();
+        assert!(sanitized_path.starts_with(&prefix));
+        assert!(sanitized_path.ends_with("/source"));
+        assert!(!sanitized_path.contains(secret));
+        assert!(
+            secret
+                .split('/')
+                .all(|component| !sanitized_path.contains(component))
+        );
+        let (first, second) = secret.split_once('/').unwrap();
+        let separated = format!("/{first}/fe600511-e406-4142-b74a-cbf177c5f2cb/{second}");
+        assert!(
+            high_entropy_ranges(&separated).is_empty(),
+            "UUID identity must separate the candidate components"
+        );
+        let compact_secret = "abcdefghijklmnopab/QRSTUVWXYZ012345QR";
+        assert!(looks_high_entropy_token(compact_secret));
+        for component in compact_secret.split('/') {
+            assert!(entropy_bits_per_mille(component).unwrap() < MIN_TOKEN_ENTROPY_PER_MILLE);
+        }
+        let compact_path = format!("{prefix}{compact_secret}/source");
+        assert_eq!(
+            high_entropy_ranges(&compact_path),
+            vec![prefix.len()..prefix.len() + compact_secret.len()]
+        );
+    }
+
+    #[test]
+    fn uuid_paths_redact_minimum_width_tokens_at_every_internal_slash_position() {
+        let prefix = format!(
+            "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
+            "a".repeat(512)
+        );
+        for payload in [
+            "abcdefghijklmnopaQRSTUVWXYZ012345QR",
+            "abcdefghijklmnOPQRSTUVWXYZ012345OPQ",
+        ] {
+            assert_eq!(payload.len() + 1, MIN_TOKEN_LENGTH);
+            for split in 1..payload.len() {
+                let secret = format!("{}/{}", &payload[..split], &payload[split..]);
+                assert!(looks_high_entropy_token(&secret));
+                let path = format!("{prefix}{secret}/source");
+                assert!(!looks_high_entropy_token(&path));
+                assert_eq!(
+                    high_entropy_ranges(&path),
+                    vec![prefix.len()..prefix.len() + secret.len()],
+                    "{payload} split at {split}"
+                );
+                let metadata = json!({"path": path});
+                let sanitized = crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+                    .expect("structured path metadata");
+                let source = sanitized["path"].as_str().unwrap();
+                assert!(!source.contains(&secret), "{payload} split at {split}");
+                assert!(source.starts_with(&prefix));
+                assert!(source.ends_with("/source"));
+            }
+        }
+    }
+
+    #[test]
+    fn uuid_directory_paths_do_not_dilute_secret_components() {
+        let prefix = format!(
+            "/workspace/fe600511-e406-4142-b74a-cbf177c5f2cb/{}/",
+            "a".repeat(512)
+        );
+        let secret = "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE";
+        let path = format!("{prefix}{secret}");
+        assert!(!looks_high_entropy_token(&path));
+        assert_eq!(high_entropy_ranges(&path), vec![prefix.len()..path.len()]);
+    }
+
+    #[test]
+    fn structured_metadata_keeps_uuid_paths_but_redacts_path_credentials() {
+        let prefix = "/run/nl/w/fe600511-e406-4142-b74a-cbf177c5f2cb/tmp/";
+        let credential = "ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ";
+        let metadata = json!({
+            "path": format!("{prefix}.tmp4cknUf/project/src/lib.rs"),
+            "source": format!("{prefix}{credential}/source"),
+        });
+        let sanitized = crate::sanitize_provider_metadata_json(&metadata.to_string(), 4096)
+            .expect("structured path metadata");
+        assert_eq!(sanitized["path"], metadata["path"]);
+        assert!(!sanitized["source"].as_str().unwrap().contains(credential));
     }
 }

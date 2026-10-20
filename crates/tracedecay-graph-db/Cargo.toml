@@ -6,7 +6,6 @@ edition.workspace = true
 license = "MIT"
 description = "Embedded graph storage boundary for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-include = ["/src/**"]
 
 [features]
 test-helpers = []

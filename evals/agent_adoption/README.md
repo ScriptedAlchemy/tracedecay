@@ -89,8 +89,9 @@ paths, so do **not** commit run artifacts.
 | `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
 | `REPEATED_QUERY_HINTS` | `off` | `on` turns on the profile setting `user.repeated_query_hints.v1` for the eval's isolated profile before any agent launches, and suffixes transcripts with `__qhints`; see "Repeated-query hints on vs off" |
 | `REAL_CLAUDE_DIR` | `$CLAUDE_CONFIG_DIR` or `~/.claude` | where the Claude credential comes from: its `.claude_code_oauth_token` and `settings.json` `env`/`model` keys; see "Store isolation & auth" |
-| `TRACEDECAY_BIN` | candidate branch (live) | explicit binary override; required for the product-effectiveness cohort |
+| `TRACEDECAY_BIN` | Bazel build of this checkout | explicit prebuilt tracedecay binary; skips the build, must exist, and is required for the product-effectiveness cohort |
 | `EFFICIENCY_SCORECARD` | unset | optional no-model scorecard path, joined only when its binary digest matches |
+| `TRACEDECAY_EVAL_BAZEL_CONFIG` | `release` | Bazel config for the build; `dist` builds the exact release bytes |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
 | `LEARNED_SKILL_WORKFLOW` | unset | run only that workflow's held-out scenarios, once per variant, on `full` |
 | `LEARNED_SKILL_VARIANTS` | `none generated manual` | learned-skill variants to compare |
@@ -214,11 +215,15 @@ fails, and Codex drops the graph server without any transcript error. Name the m
 model that actually answered; an alias resolved through
 `ANTHROPIC_DEFAULT_*_MODEL` would be mislabelled.
 
-Live runs build a debug `tracedecay` binary from the checked-out candidate
-branch with ordinary Cargo and use it for fixture setup, MCP, hooks, and the
-throwaway Codex plugin install.
-`TRACEDECAY_BIN` pins a previously built candidate or release binary and avoids
-the runner build path. The daemon also receives a disposable HOME, XDG paths,
+Every run, dry or live, builds the shipping target
+`//crates/tracedecay-cli:tracedecay` from the checked-out candidate branch with
+`bazel build --config=release` (`scripts/build-eval-binary.sh`) and uses it for
+fixture setup, MCP, hooks, and the throwaway Codex plugin install. The runner
+prints the binary path, version, and sha256. A failed build stops the run; no
+older or PATH binary is substituted. Set `TRACEDECAY_EVAL_BAZEL_CONFIG=dist` to
+build the exact release bytes (thin LTO, stripped).
+`TRACEDECAY_BIN` pins a previously built candidate or release binary, which must
+exist, and skips the build; its identity line is printed the same way. The daemon also receives a disposable HOME, XDG paths,
 host-config paths, temporary directory, and working directory. Only explicit
 read-only authentication sources are carried across that boundary. Every
 Claude condition, including `full`, loads the candidate `plugin/` via

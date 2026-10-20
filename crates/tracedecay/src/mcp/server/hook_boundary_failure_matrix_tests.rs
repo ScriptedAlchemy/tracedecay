@@ -296,7 +296,10 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
             super::CodeIndexDemandAdmissionV1::Queued
         })
     });
-    let context = registered_context(cg, &authority).with_code_index_hook_sink(sink);
+    let spool = TempDir::new().unwrap();
+    let broker = default_spool_broker(spool.path());
+    let mut context = registered_context(cg, &authority).with_code_index_hook_sink(sink);
+    context.host_admission_broker = Some(broker);
     let server = McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server");
@@ -308,7 +311,8 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
     ))
     .unwrap();
 
-    Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
+    let outcome = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
+    assert_eq!(outcome.status, HostAdmissionStatus::Committed);
 
     {
         let recorded = recorded.lock().unwrap();

@@ -9,7 +9,7 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
     SETTINGS_REFRESH_OPERATION, admit_user_settings_patch, configuration_application_problem_error,
@@ -20,6 +20,7 @@ use tracedecay_api::configuration::{
 };
 use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemEnvelope, ApplicationProblemKind,
+    SettingsValidationIssueV1,
 };
 
 use super::DashboardState;
@@ -139,7 +140,7 @@ pub struct SettingsPayloadV1 {
     restart_recommended: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct ProjectSettingsPatchResponseV1 {
     /// Exact application settlement returned by the configuration binding.
     /// `None` means the submitted patch was already the current state.
@@ -212,7 +213,6 @@ struct UserSettingsPayloadV1 {
     /// user settings revision above.
     code_index_worker_configuration_snapshot_id: String,
     code_index_worker_configuration_revision_id: String,
-    upload_enabled: bool,
     code_index_workers: CodeIndexWorkerSelectionV1,
     /// The admitted process-wide plan. A persisted selection may differ until
     /// the daemon restarts, so unavailable is carried as `null` rather than
@@ -331,10 +331,11 @@ pub async fn patch_project_settings(
     let pr_autotrack = pr_autotrack_payload(&state)?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
-            settings_validation_error(json!([{
-                "field": "idempotency_key",
-                "message": "idempotency_key must be one non-empty canonical caller-stable value"
-            }]))
+            settings_validation_error([SettingsValidationIssueV1 {
+                field: "idempotency_key".to_owned(),
+                message: "idempotency_key must be one non-empty canonical caller-stable value"
+                    .to_owned(),
+            }])
         })?;
     let current = state
         .cached_runtime_configuration()
@@ -402,17 +403,19 @@ pub async fn patch_user_settings(
     let admitted = admit_user_settings_patch(&patch, parse_duration_millis)?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
-            settings_validation_error(json!([{
-                "field": "idempotency_key",
-                "message": "idempotency_key must be one non-empty canonical caller-stable value"
-            }]))
+            settings_validation_error([SettingsValidationIssueV1 {
+                field: "idempotency_key".to_owned(),
+                message: "idempotency_key must be one non-empty canonical caller-stable value"
+                    .to_owned(),
+            }])
         })?;
     let expected_revision =
         ConfigurationRevisionId::new(patch.expected_revision_id).map_err(|_| {
-            settings_validation_error(json!([{
-                "field": "expected_revision_id",
-                "message": "expected_revision_id must name one canonical configuration revision"
-            }]))
+            settings_validation_error([SettingsValidationIssueV1 {
+                field: "expected_revision_id".to_owned(),
+                message: "expected_revision_id must name one canonical configuration revision"
+                    .to_owned(),
+            }])
         })?;
     let runtime = state
         .application_invocation_executor
@@ -431,7 +434,6 @@ pub async fn patch_user_settings(
         &current,
         profile_id,
         UserSettingsMutationV1 {
-            upload_enabled: admitted.upload_enabled,
             watcher_debounce_ms: admitted.watcher_debounce_ms,
             extraction_timeout_secs: admitted.extraction_timeout_secs,
         },
@@ -489,17 +491,19 @@ pub async fn patch_code_index_worker_settings(
     }
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
-            settings_validation_error(json!([{
-                "field": "idempotency_key",
-                "message": "idempotency_key must be one non-empty canonical caller-stable value"
-            }]))
+            settings_validation_error([SettingsValidationIssueV1 {
+                field: "idempotency_key".to_owned(),
+                message: "idempotency_key must be one non-empty canonical caller-stable value"
+                    .to_owned(),
+            }])
         })?;
     let expected_revision =
         ConfigurationRevisionId::new(patch.expected_revision_id).map_err(|_| {
-            settings_validation_error(json!([{
-                "field": "expected_revision_id",
-                "message": "expected_revision_id must name one canonical configuration revision"
-            }]))
+            settings_validation_error([SettingsValidationIssueV1 {
+                field: "expected_revision_id".to_owned(),
+                message: "expected_revision_id must name one canonical configuration revision"
+                    .to_owned(),
+            }])
         })?;
     let port = state
         .profile_code_index_worker_settings
@@ -545,28 +549,28 @@ pub async fn patch_code_index_worker_settings(
 fn code_index_worker_admission_errors(
     selection: &CodeIndexWorkerSelectionV1,
     status: Option<&CodeIndexWorkerStatusV1>,
-) -> Vec<Value> {
+) -> Vec<SettingsValidationIssueV1> {
     let (CodeIndexWorkerSelectionV1::Exact { workers }, Some(status)) = (selection, status) else {
         return Vec::new();
     };
     let mut errors = Vec::new();
     if *workers > status.available_logical_cpus {
-        errors.push(json!({
-            "field": "code_index_workers",
-            "message": format!(
+        errors.push(SettingsValidationIssueV1 {
+            field: "code_index_workers".to_owned(),
+            message: format!(
                 "code_index_workers exact mode must request no more than {} available logical CPUs",
                 status.available_logical_cpus,
             ),
-        }));
+        });
     }
     if *workers > status.memory_safe_workers {
-        errors.push(json!({
-            "field": "code_index_workers",
-            "message": format!(
+        errors.push(SettingsValidationIssueV1 {
+            field: "code_index_workers".to_owned(),
+            message: format!(
                 "code_index_workers exact mode must request no more than {} memory-safe workers",
                 status.memory_safe_workers,
             ),
-        }));
+        });
     }
     errors
 }
@@ -678,7 +682,6 @@ fn user_settings_payload(
         code_index_worker_configuration_revision_id: worker_configuration
             .configuration_revision_id
             .clone(),
-        upload_enabled: user.upload_enabled,
         code_index_workers: worker_configuration.code_index_workers,
         code_index_worker_status: tracedecay_code_index::parallelism::installed_worker_status(),
         watcher_debounce: user.watcher_debounce.clone(),
@@ -1023,10 +1026,10 @@ mod tests {
                 &CodeIndexWorkerSelectionV1::Exact { workers: 5 },
                 Some(&status),
             ),
-            vec![json!({
-                "field": "code_index_workers",
-                "message": "code_index_workers exact mode must request no more than 4 available logical CPUs",
-            })]
+            vec![SettingsValidationIssueV1 {
+                field: "code_index_workers".to_owned(),
+                message: "code_index_workers exact mode must request no more than 4 available logical CPUs".to_owned(),
+            }]
         );
     }
 
@@ -1077,10 +1080,12 @@ mod tests {
                 &CodeIndexWorkerSelectionV1::Exact { workers: 5 },
                 Some(&status),
             ),
-            vec![json!({
-                "field": "code_index_workers",
-                "message": "code_index_workers exact mode must request no more than 4 memory-safe workers",
-            })]
+            vec![SettingsValidationIssueV1 {
+                field: "code_index_workers".to_owned(),
+                message:
+                    "code_index_workers exact mode must request no more than 4 memory-safe workers"
+                        .to_owned(),
+            }]
         );
     }
 }

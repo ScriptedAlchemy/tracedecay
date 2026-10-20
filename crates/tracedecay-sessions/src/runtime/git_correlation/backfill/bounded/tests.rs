@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior, params,
 };
@@ -286,24 +287,34 @@ async fn touch(store: &TestStore, session_id: &str) -> i64 {
     }
 }
 
-/// Real Git whose every read first takes two long polls, the way a large
-/// reflog or many worktrees do.
-struct SlowGit;
+/// Real Git whose reads must execute on the native blocking pool.
+#[derive(Default)]
+struct BlockingPoolGit {
+    reads: AtomicUsize,
+}
 
-impl SlowGit {
-    fn stall() {
-        std::thread::sleep(native_runtime::LONG_POLL * 2);
+impl BlockingPoolGit {
+    fn assert_blocking_pool(&self) {
+        // Nested blocking work runs inline on a pool thread. On a native
+        // worker it is queued elsewhere, so either readiness or identity
+        // differs without relying on host-dependent poll timing.
+        assert_eq!(
+            native_runtime::spawn_blocking(|| std::thread::current().id()).now_or_never(),
+            Some(Ok(std::thread::current().id())),
+            "Git reads must run on the native blocking pool"
+        );
+        self.reads.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-impl GitReflogSource for SlowGit {
+impl GitReflogSource for BlockingPoolGit {
     fn reflog(&self, worktree: &Path) -> Option<String> {
-        Self::stall();
+        self.assert_blocking_pool();
         SystemGit.reflog(worktree)
     }
 
     fn current_branch(&self, worktree: &Path) -> Option<String> {
-        Self::stall();
+        self.assert_blocking_pool();
         SystemGit.current_branch(worktree)
     }
 
@@ -312,27 +323,14 @@ impl GitReflogSource for SlowGit {
         worktree: &Path,
         reference: &str,
     ) -> Result<bool, GitCorrelationError> {
-        Self::stall();
+        self.assert_blocking_pool();
         SystemGit.commit_reference_exists(worktree, reference)
     }
 
     fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
-        Self::stall();
+        self.assert_blocking_pool();
         SystemGit.commit_log(worktree, branch, since)
     }
-}
-
-#[track_caller]
-fn spawned_here<T: Clone + Send + Sync + 'static>(
-    work: impl Future<Output = T> + Send + 'static,
-) -> (
-    native_runtime::NativeTask<T>,
-    &'static std::panic::Location<'static>,
-) {
-    (
-        native_runtime::NativeTask::spawn(work).expect("native task"),
-        std::panic::Location::caller(),
-    )
 }
 
 /// The session refresh worker runs this pass on a native task. Its Git reads
@@ -342,26 +340,27 @@ fn spawned_here<T: Clone + Send + Sync + 'static>(
 async fn convergence_waits_for_git_off_the_native_worker() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    // Keep the fixture's writer teardown outside the native task.
+    let store =
+        Arc::new(prepare_store(&directory.path().join("sessions.db"), repository.path()).await);
+    let git = Arc::new(BlockingPoolGit::default());
+    let task_store = Arc::clone(&store);
+    let task_git: Arc<dyn GitReflogSource> = git.clone();
 
-    let (pass, site) = spawned_here(async move {
-        converge_git_evidence_pass(&store, Arc::new(SlowGit), None)
+    let pass = native_runtime::NativeTask::spawn(async move {
+        converge_git_evidence_pass(task_store.as_ref(), task_git, None)
             .await
             .map(|outcome| outcome.pass.backfill)
             .map_err(|error| error.to_string())
-    });
+    })
+    .expect("native task");
     let native_runtime::NativeTaskOutcome::Completed(backfill) = pass.wait().await else {
         panic!("the convergence task did not complete");
     };
     let backfill = backfill.unwrap();
     assert!(backfill.spans_written > 0, "{backfill:?}");
     assert!(backfill.commits_attributed > 0, "{backfill:?}");
-    assert_eq!(
-        native_runtime::long_native_polls().get(site),
-        None,
-        "a Git read held the native worker past {:?}",
-        native_runtime::LONG_POLL
-    );
+    assert!(git.reads.load(Ordering::SeqCst) > 0, "real Git reads ran");
 }
 
 /// The evidence rows, the attribution mark, and the history frontier commit

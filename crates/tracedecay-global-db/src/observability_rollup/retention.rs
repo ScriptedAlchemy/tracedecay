@@ -1,4 +1,4 @@
-use crate::RegisteredGlobalDbWriteTransaction;
+use tracedecay_runtime_core::db::engine::Executor;
 
 use super::{
     OBSERVABILITY_ROLLUP_RETENTION_DAYS_V1, ObservabilityRollupRetentionReceiptV1, SECONDS_PER_DAY,
@@ -11,7 +11,7 @@ use super::{
 /// expired day as known-empty from already-pruned events. A query reaching
 /// past the horizon reports partial coverage.
 pub(crate) async fn expire_observability_rollups(
-    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl Executor,
     now_seconds: i64,
 ) -> Result<ObservabilityRollupRetentionReceiptV1, String> {
     let cutoff =

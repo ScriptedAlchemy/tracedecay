@@ -764,8 +764,8 @@ where
         Ok(result.into())
     }
 
-    /// A hook event arrives as a stateless request on its own daemon
-    /// connection; it is dispatched exactly like the notification form.
+    /// Hook requests retain their identity through dispatch so the application
+    /// answers only after durable admission; notifications carry no response.
     /// Any other custom request is an unknown method or a known one whose
     /// params did not fit its typed DTO; the dispatch authority answers it
     /// (method not found, invalid params) and accounts for it.
@@ -774,11 +774,6 @@ where
         request: CustomRequest,
         context: McpRequestContext,
     ) -> Result<CustomResult, ErrorData> {
-        if request.method == tracedecay_hooks::core_events::HOOK_EVENT_METHOD {
-            self.dispatch_notification(request.method, request.params)
-                .await;
-            return Ok(CustomResult::new(json!({})));
-        }
         // The session lifts `params._meta` into the request context; the
         // object it leaves empty is a request that carried no params of its
         // own (the stdio proxy creates `params` only to hold that context).

@@ -120,6 +120,28 @@ fn cancel_supervisor(
 }
 
 impl SessionTemporalRefreshSchedulerEntry {
+    fn wake_with_history(&self, history: Option<SharedSessionHistoricalIngestor>) {
+        let Some(history) = history else {
+            self.wake.wake();
+            return;
+        };
+        let mut retained = self.history.write().unwrap_or_else(PoisonError::into_inner);
+        let installed = retained.is_none();
+        if installed {
+            *retained = Some(history);
+            self.state.mark_history_pending();
+        }
+        let blocked = !installed && self.state.history_is_blocked();
+        drop(retained);
+        if !blocked {
+            // Publish both kinds of work before notifying the worker.
+            self.state.requeue_projection();
+            self.state.wake_history();
+        } else {
+            self.wake.wake();
+        }
+    }
+
     fn cancel(&self) {
         cancel_supervisor(&self.state, &self.history);
     }
@@ -340,6 +362,10 @@ impl SessionTemporalRefreshSchedulerRegistry {
         history: Option<SharedSessionHistoricalIngestor>,
     ) -> SessionTemporalRefreshSchedulerEntry {
         let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        if history.is_some() {
+            state.mark_history_pending();
+            state.wake_history();
+        }
         let history = Arc::new(std::sync::RwLock::new(history));
         let wake = route.unwrap_or_else(|| state.handle());
         wake.bind(&state);
@@ -584,6 +610,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
         owner: StoreOwnerKey,
         database: RegisteredGlobalDbLeaseV1,
     ) -> SessionTemporalRefreshWake {
+        self.ensure_project_with_retained_history(owner, database, None)
+            .await
+    }
+
+    async fn ensure_project_with_retained_history(
+        &self,
+        owner: StoreOwnerKey,
+        database: RegisteredGlobalDbLeaseV1,
+        history: Option<SharedSessionHistoricalIngestor>,
+    ) -> SessionTemporalRefreshWake {
         if self.shutting_down.load(Ordering::Acquire) {
             return inert_session_temporal_refresh_wake();
         }
@@ -613,7 +649,8 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .history
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
-                .clone();
+                .clone()
+                .or(history);
             self.retire(vec![(retired_owner.clone(), finished)])
                 .join()
                 .await;
@@ -631,11 +668,12 @@ impl SessionTemporalRefreshSchedulerRegistry {
             return wake;
         }
         if let Some(entry) = project.get(&owner) {
-            entry.wake.wake();
+            // Install history before any wake can start a summary-only pass.
+            entry.wake_with_history(history);
             return entry.wake.clone();
         }
         self.settle_retired(&retired_owner).await;
-        let entry = self.spawn_entry(database, None, None);
+        let entry = self.spawn_entry(database, None, history);
         let wake = entry.wake.clone();
         project.insert(owner, entry);
         wake
@@ -645,6 +683,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
         &self,
         database_path: std::path::PathBuf,
         database: RegisteredGlobalDbLeaseV1,
+    ) -> SessionTemporalRefreshWake {
+        self.ensure_profile_with_retained_history(database_path, database, None)
+            .await
+    }
+
+    async fn ensure_profile_with_retained_history(
+        &self,
+        database_path: std::path::PathBuf,
+        database: RegisteredGlobalDbLeaseV1,
+        history: Option<SharedSessionHistoricalIngestor>,
     ) -> SessionTemporalRefreshWake {
         if self.shutting_down.load(Ordering::Acquire) {
             return inert_session_temporal_refresh_wake();
@@ -665,7 +713,8 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .history
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
-                .clone();
+                .clone()
+                .or(history);
             self.retire(vec![(retired_owner.clone(), finished)])
                 .join()
                 .await;
@@ -679,11 +728,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
             return wake;
         }
         if let Some(entry) = profile.get(&database_path) {
-            entry.wake.wake();
+            entry.wake_with_history(history);
             return entry.wake.clone();
         }
         self.settle_retired(&retired_owner).await;
-        let entry = self.spawn_entry(database, None, None);
+        let entry = self.spawn_entry(database, None, history);
         let wake = entry.wake.clone();
         profile.insert(database_path, entry);
         wake
@@ -695,29 +744,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
         database: RegisteredGlobalDbLeaseV1,
         history: SharedSessionHistoricalIngestor,
     ) -> SessionTemporalRefreshWake {
-        let wake = self.ensure_project(owner.clone(), database).await;
-        if session_ingest_disabled() {
-            // Dev/profiling switch: never install a history ingestor, so the
-            // project-open catch-up path cannot ingest either.
-            return wake;
-        }
-        if let Some(entry) = self.project.lock().await.get(&owner) {
-            let mut retained = entry
-                .history
-                .write()
-                .unwrap_or_else(PoisonError::into_inner);
-            let installed = retained.is_none();
-            if installed {
-                *retained = Some(history);
-                entry.state.mark_history_pending();
-            }
-            let blocked = !installed && entry.state.history_is_blocked();
-            drop(retained);
-            if !blocked {
-                entry.state.wake_history();
-            }
-        }
-        wake
+        let history = (!session_ingest_disabled()).then_some(history);
+        self.ensure_project_with_retained_history(owner, database, history)
+            .await
     }
 
     pub async fn ensure_profile_with_history(
@@ -726,29 +755,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
         database: RegisteredGlobalDbLeaseV1,
         history: SharedSessionHistoricalIngestor,
     ) -> SessionTemporalRefreshWake {
-        let wake = self.ensure_profile(database_path.clone(), database).await;
-        if session_ingest_disabled() {
-            // Dev/profiling switch: never install a history ingestor, so the
-            // project-open catch-up path cannot ingest either.
-            return wake;
-        }
-        if let Some(entry) = self.profile.lock().await.get(&database_path) {
-            let mut retained = entry
-                .history
-                .write()
-                .unwrap_or_else(PoisonError::into_inner);
-            let installed = retained.is_none();
-            if installed {
-                *retained = Some(history);
-                entry.state.mark_history_pending();
-            }
-            let blocked = !installed && entry.state.history_is_blocked();
-            drop(retained);
-            if !blocked {
-                entry.state.wake_history();
-            }
-        }
-        wake
+        let history = (!session_ingest_disabled()).then_some(history);
+        self.ensure_profile_with_retained_history(database_path, database, history)
+            .await
     }
 
     pub async fn rekey_project(
