@@ -609,6 +609,18 @@ async fn bounded_project_catch_up_pass_persists_the_rotation_frontier() {
         "a bounded pass over a multi-provider backlog reports deferred work"
     );
     assert!(outcome.scheduling_state_written);
+    assert_eq!(
+        outcome.provider_units.into_iter().collect::<Vec<_>>(),
+        vec![(
+            "codex",
+            tracedecay_sessions::ProviderPassUnits {
+                units_projected: 1,
+                messages_upserted: 2,
+                ..Default::default()
+            }
+        )],
+        "the pass reports the dispositions of the one provider it admitted"
+    );
     assert_eq!(project_rotation_frontier(&runtime).await, Some(1));
     assert_eq!(runtime.database.session_message_count().await.unwrap(), 2);
 }

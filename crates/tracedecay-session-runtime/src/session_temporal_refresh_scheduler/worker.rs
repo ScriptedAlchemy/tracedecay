@@ -39,6 +39,18 @@ use tracedecay_session_temporal_store::{
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
+/// The unit dispositions of a historical pass the ingestor actually ran.
+type HistoryProviderUnits =
+    std::collections::BTreeMap<&'static str, tracedecay_sessions::ProviderPassUnits>;
+
+/// A history refresh's outcome, the tallies of a pass that ran, and the
+/// release its next pass waits on.
+type HistoryPassReport = (
+    SessionHistoricalIngestOutcome,
+    Option<HistoryProviderUnits>,
+    Option<HistoryRelease>,
+);
+
 fn history_allows_summary_convergence(outcome: Option<SessionHistoricalIngestOutcome>) -> bool {
     !outcome
         .as_ref()
@@ -266,24 +278,21 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 .take()
                 .filter(|_| history_requested);
             let history_outcome = if history_requested {
-                let history_pass: Pin<
-                    Box<
-                        dyn Future<
-                                Output = (SessionHistoricalIngestOutcome, Option<HistoryRelease>),
-                            > + Send
-                            + '_,
-                    >,
-                > = Box::pin(session_history_refresh(
-                    &history,
-                    &history_admission,
-                    granted,
-                ));
-                let (outcome, release) = tracing::Instrument::instrument(
+                let history_pass: Pin<Box<dyn Future<Output = HistoryPassReport> + Send + '_>> =
+                    Box::pin(session_history_refresh(
+                        &history,
+                        &history_admission,
+                        granted,
+                    ));
+                let (outcome, provider_units, release) = tracing::Instrument::instrument(
                     history_pass,
                     tracing::trace_span!("daemon.scheduler.session_temporal.history"),
                 )
                 .await;
                 history_release = release;
+                if let Some(provider_units) = &provider_units {
+                    state.record_history_pass(&outcome, provider_units);
+                }
                 Some(outcome)
             } else {
                 None
@@ -735,7 +744,7 @@ async fn session_history_refresh(
     history: &Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
     admission: &tokio::sync::Semaphore,
     granted: Option<tokio::sync::SemaphorePermit<'_>>,
-) -> (SessionHistoricalIngestOutcome, Option<HistoryRelease>) {
+) -> HistoryPassReport {
     let history = history
         .read()
         .unwrap_or_else(PoisonError::into_inner)
@@ -748,12 +757,15 @@ async fn session_history_refresh(
                         reason_code: HISTORY_ADMISSION_SATURATED_REASON.to_owned(),
                         made_progress: false,
                     },
+                    None,
                     Some(HistoryRelease::Admission),
                 );
             };
             let release = history.capacity_release();
+            let pass = history.run_pass().await;
             (
-                history.run_pass().await,
+                pass.outcome,
+                Some(pass.provider_units),
                 Some(HistoryRelease::Capacity(release)),
             )
         }
@@ -762,6 +774,7 @@ async fn session_history_refresh(
                 reason_code: "history_ingestor_missing".to_owned(),
                 made_progress: false,
             },
+            None,
             None,
         ),
     }

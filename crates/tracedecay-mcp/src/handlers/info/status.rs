@@ -33,7 +33,9 @@ use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_runtime_core::storage::{StorageMode, StoreKind};
 use tracedecay_session_runtime::retained::lcm_doctor_projection;
 use tracedecay_sessions::runtime::git_correlation::CorrelationIndexHealth;
-use tracedecay_sessions::serving::SessionProjectionServingStatus;
+use tracedecay_sessions::serving::{
+    SESSION_HISTORY_STALLED_PASSES, SessionHistoryCatchUpProgress, SessionProjectionServingStatus,
+};
 
 use crate::McpToolContext;
 use crate::handlers::workflow::current_head_commit_id;
@@ -503,6 +505,7 @@ pub async fn compute_status(
     } else {
         None
     };
+    let history_progress = session_projection.history.clone();
     let mut status = ProjectStatusV1 {
         project_root: display_path(ctx.project_root()),
         graph_statistics: graph_statistics_value(ctx.generation_census())?,
@@ -600,7 +603,7 @@ pub async fn compute_status(
                         // daemon authority drains its bounded backlog.
                         status.session_history_catch_up = Some(
                             tracing::Instrument::instrument(
-                                historical_session_catch_up(db),
+                                historical_session_catch_up(db, &history_progress),
                                 tracing::trace_span!("mcp.info.status.session_history"),
                             )
                             .await,
@@ -784,8 +787,13 @@ fn session_git_evidence_state(health: CorrelationIndexHealth) -> StatusSessionGi
 
 /// Reports daemon-owned historical warming when any provider's backlog exceeds
 /// the ordinary catch-up threshold, so partial recall is never read as current.
-async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Value {
-    match db.session_ingest_health_for_provider(None).await {
+/// `progress` is the refresh worker's pass history, which separates a slow
+/// backlog from a stalled one.
+async fn historical_session_catch_up(
+    db: &RegisteredGlobalDb,
+    progress: &SessionHistoryCatchUpProgress,
+) -> Value {
+    let mut state = match db.session_ingest_health_for_provider(None).await {
         Ok(ingest) => historical_session_catch_up_state(&ingest),
         Err(error) => json!({
             "status": "unavailable",
@@ -794,7 +802,33 @@ async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Value {
             "reason": "historical_backlog_measurement_failed",
             "message": error,
         }),
-    }
+    };
+    state["progress"] = historical_session_catch_up_progress(progress);
+    state
+}
+
+fn historical_session_catch_up_progress(progress: &SessionHistoryCatchUpProgress) -> Value {
+    let providers = progress
+        .provider_units
+        .iter()
+        .map(|(provider, units)| {
+            json!({
+                "provider": provider,
+                "units_projected": units.units_projected,
+                "units_refused": units.units_refused,
+                "units_parked": units.units_parked,
+                "messages_upserted": units.messages_upserted,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "state": progress.state(),
+        "passes": progress.passes,
+        "passes_without_progress": progress.passes_without_progress,
+        "stalled_after_passes": SESSION_HISTORY_STALLED_PASSES,
+        "last_progress_at_unix_micros": progress.last_progress_at_unix_micros,
+        "providers": providers,
+    })
 }
 
 fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Value {
@@ -1036,6 +1070,9 @@ pub async fn compute_active_project(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
     use tracedecay_global_db::{
         SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     };
@@ -1046,9 +1083,11 @@ mod tests {
 
     use super::{
         CodeIndexReadinessWaitReadV1, CorrelationIndexHealth, FreshnessLabelV1,
-        code_index_freshness_projection, code_index_freshness_status, git_staleness,
-        graph_statistics_value, historical_session_catch_up_state, readiness_wait_outcome,
-        render_status_md, schema_convergence_status, session_git_evidence_state,
+        SessionHistoryCatchUpProgress, code_index_freshness_projection,
+        code_index_freshness_status, git_staleness, graph_statistics_value,
+        historical_session_catch_up_progress, historical_session_catch_up_state,
+        readiness_wait_outcome, render_status_md, schema_convergence_status,
+        session_git_evidence_state,
     };
     use tracedecay_contracts::code_index_freshness::{
         CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1,
@@ -1815,6 +1854,75 @@ mod tests {
             warning
                 .expect("verification is named")
                 .contains("verifies source freshness")
+        );
+    }
+
+    #[test]
+    fn historical_progress_separates_a_slow_backlog_from_a_stalled_one() {
+        let codex = tracedecay_sessions::ProviderPassUnits {
+            units_projected: 1,
+            messages_upserted: 40,
+            ..Default::default()
+        };
+        let cursor_parked = tracedecay_sessions::ProviderPassUnits {
+            units_parked: 1,
+            ..Default::default()
+        };
+        let mut progress = SessionHistoryCatchUpProgress::default();
+        assert_eq!(
+            historical_session_catch_up_progress(&progress)["state"],
+            "awaiting_first_pass"
+        );
+
+        progress.record_pass(
+            false,
+            true,
+            &[("codex", codex), ("cursor", cursor_parked)].into(),
+            1_000,
+        );
+        for at in [2_000, 3_000] {
+            progress.record_pass(false, false, &[("cursor", cursor_parked)].into(), at);
+        }
+        let slow = historical_session_catch_up_progress(&progress);
+        assert_eq!(slow["state"], "advancing");
+        assert_eq!(slow["passes"], 3);
+        assert_eq!(slow["passes_without_progress"], 2);
+        assert_eq!(slow["last_progress_at_unix_micros"], 1_000);
+
+        progress.record_pass(false, false, &[("cursor", cursor_parked)].into(), 4_000);
+        let stalled = historical_session_catch_up_progress(&progress);
+        assert_eq!(stalled["state"], "stalled");
+        assert_eq!(stalled["passes_without_progress"], 3);
+        assert_eq!(stalled["stalled_after_passes"], 3);
+        assert_eq!(
+            stalled["last_progress_at_unix_micros"], 1_000,
+            "a pass that commits nothing must not refresh the last-progress time"
+        );
+        assert_eq!(
+            stalled["providers"],
+            json!([
+                {
+                    "provider": "codex",
+                    "units_projected": 1,
+                    "units_refused": 0,
+                    "units_parked": 0,
+                    "messages_upserted": 40,
+                },
+                {
+                    "provider": "cursor",
+                    "units_projected": 0,
+                    "units_refused": 0,
+                    "units_parked": 4,
+                    "messages_upserted": 0,
+                },
+            ])
+        );
+
+        progress.record_pass(true, false, &BTreeMap::new(), 5_000);
+        assert_eq!(
+            historical_session_catch_up_progress(&progress)["state"],
+            "advancing",
+            "a pass that completes the backlog is not a stall"
         );
     }
 

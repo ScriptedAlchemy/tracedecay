@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,9 +11,10 @@ use super::history::SessionHistoricalIngestOutcome;
 use tracedecay_session_temporal_store::{
     SessionRefreshRecoveryV1, SessionTemporalRefreshDiscoveryCursor,
 };
+use tracedecay_sessions::ProviderPassUnits;
 use tracedecay_sessions::serving::{
     RefreshWorkerMissing, SessionConvergenceState, SessionConvergenceStatus,
-    SessionProjectionServingState, SessionProjectionServingStatus,
+    SessionHistoryCatchUpProgress, SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
     SessionProjectionWorkerRetryClass,
@@ -89,6 +90,7 @@ struct SessionTemporalRefreshWorkerTelemetry {
     retry_class: Option<SessionTemporalRefreshRetryClass>,
     unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
     historical_state: SessionHistoricalServingState,
+    history_progress: SessionHistoryCatchUpProgress,
     /// The worker went idle with no dirty flag and no queued request, and
     /// nothing has requeued work since.
     quiescent: bool,
@@ -115,6 +117,7 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
             retry_class: None,
             unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Stopped),
             historical_state: SessionHistoricalServingState::Current,
+            history_progress: SessionHistoryCatchUpProgress::default(),
             quiescent: false,
             convergence_epoch: 0,
             converged_at_unix_micros: None,
@@ -486,6 +489,30 @@ impl SessionTemporalRefreshWakeState {
             .historical_state = state;
     }
 
+    /// Folds a pass the historical ingestor ran into the catch-up progress
+    /// status reports. Cancelled passes did not finish, so they are not
+    /// counted.
+    pub fn record_history_pass(
+        &self,
+        outcome: &SessionHistoricalIngestOutcome,
+        provider_units: &BTreeMap<&'static str, ProviderPassUnits>,
+    ) {
+        if matches!(outcome, SessionHistoricalIngestOutcome::Cancelled) {
+            return;
+        }
+        let now = tracedecay_runtime_core::tracedecay::saturating_utc_now().0;
+        self.telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .history_progress
+            .record_pass(
+                matches!(outcome, SessionHistoricalIngestOutcome::Complete),
+                outcome.made_progress(),
+                provider_units,
+                now,
+            );
+    }
+
     pub fn recover_history_after_worker_panic(&self) {
         let should_retry = matches!(
             &self
@@ -580,7 +607,7 @@ impl SessionTemporalRefreshWakeState {
 
     fn serving_status(&self) -> SessionProjectionServingStatus {
         let worker = self.status();
-        let (historical_state, convergence) = {
+        let (historical_state, convergence, history) = {
             let telemetry = self
                 .telemetry
                 .lock()
@@ -588,6 +615,7 @@ impl SessionTemporalRefreshWakeState {
             (
                 telemetry.historical_state.clone(),
                 convergence_status(&telemetry, worker.unavailable_reason),
+                telemetry.history_progress.clone(),
             )
         };
         SessionProjectionServingStatus {
@@ -659,6 +687,7 @@ impl SessionTemporalRefreshWakeState {
                 }
             }),
             convergence,
+            history,
         }
     }
 

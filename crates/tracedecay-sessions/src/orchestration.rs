@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::TranscriptIngestStats;
 
 /// Failure behavior needed by the provider-run retry loop.
@@ -75,6 +77,34 @@ impl<F: ProviderRunFailure> ProviderRunOutcome<F> {
     }
 }
 
+/// One provider's admitted-unit dispositions in bounded catch-up passes. A
+/// unit is one provider run inside a pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ProviderPassUnits {
+    /// Runs that finished within their byte grant without a failure.
+    pub units_projected: u64,
+    /// Runs that reported a failure.
+    pub units_refused: u64,
+    /// Work handed to a later pass: runs that stopped at their byte grant and
+    /// admitted providers the pass budget never reached.
+    pub units_parked: u64,
+    pub messages_upserted: u64,
+}
+
+impl ProviderPassUnits {
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            units_projected: self.units_projected.saturating_add(other.units_projected),
+            units_refused: self.units_refused.saturating_add(other.units_refused),
+            units_parked: self.units_parked.saturating_add(other.units_parked),
+            messages_upserted: self
+                .messages_upserted
+                .saturating_add(other.messages_upserted),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRunFold<F> {
     pub stats: TranscriptIngestStats,
@@ -86,6 +116,7 @@ pub struct ProviderRunFold<F> {
     pub byte_bounds_enforced: bool,
     /// Some run without a failure durably advanced source coverage.
     pub coverage_advanced: bool,
+    pub provider_units: BTreeMap<&'static str, ProviderPassUnits>,
 }
 
 impl<F> Default for ProviderRunFold<F> {
@@ -99,6 +130,7 @@ impl<F> Default for ProviderRunFold<F> {
             deferred_units: 0,
             byte_bounds_enforced: true,
             coverage_advanced: false,
+            provider_units: BTreeMap::new(),
         }
     }
 }
@@ -120,29 +152,43 @@ impl<F: ProviderRunFailure + Clone> ProviderRunFold<F> {
 }
 
 impl<F> ProviderRunFold<F> {
-    pub fn record(&mut self, outcome: ProviderRunOutcome<F>) {
+    pub fn record(&mut self, provider: &'static str, outcome: ProviderRunOutcome<F>) {
         if !outcome.admitted {
             return;
         }
         self.units_admitted = self.units_admitted.saturating_add(1);
+        let units = self.provider_units.entry(provider).or_default();
+        units.messages_upserted = units
+            .messages_upserted
+            .saturating_add(outcome.stats.messages_upserted);
         if outcome.failures.is_empty() {
             self.coverage_advanced |= outcome.coverage_advanced;
             if outcome.deferred_units == 0 {
                 self.units_completed = self.units_completed.saturating_add(1);
+                units.units_projected = units.units_projected.saturating_add(1);
+            } else {
+                units.units_parked = units.units_parked.saturating_add(1);
             }
         } else {
             self.units_failed = self.units_failed.saturating_add(1);
+            units.units_refused = units.units_refused.saturating_add(1);
         }
         self.stats = self.stats.merge(outcome.stats);
         self.failures.extend(outcome.failures);
         self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
         self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
     }
+
+    /// Accounts an admitted provider the pass budget never reached.
+    pub fn park(&mut self, provider: &'static str) {
+        let units = self.provider_units.entry(provider).or_default();
+        units.units_parked = units.units_parked.saturating_add(1);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderRunFailure, ProviderRunFold, ProviderRunOutcome};
+    use super::{ProviderPassUnits, ProviderRunFailure, ProviderRunFold, ProviderRunOutcome};
     use crate::TranscriptIngestStats;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,7 +206,7 @@ mod tests {
     fn skipped_provider_does_not_count_as_admitted() {
         let mut fold = ProviderRunFold::<Failure>::default();
 
-        fold.record(ProviderRunOutcome::skipped());
+        fold.record("codex", ProviderRunOutcome::skipped());
 
         assert_eq!(fold, ProviderRunFold::default());
     }
@@ -168,22 +214,28 @@ mod tests {
     #[test]
     fn fold_aggregates_bounded_provider_outcomes() {
         let mut fold = ProviderRunFold::<Failure>::default();
-        fold.record(ProviderRunOutcome::bounded(
-            TranscriptIngestStats {
-                sessions_upserted: u64::MAX,
-                messages_upserted: 2,
-            },
-            7,
-            false,
-        ));
-        fold.record(ProviderRunOutcome::bounded(
-            TranscriptIngestStats {
-                sessions_upserted: 1,
-                messages_upserted: 3,
-            },
-            11,
-            true,
-        ));
+        fold.record(
+            "codex",
+            ProviderRunOutcome::bounded(
+                TranscriptIngestStats {
+                    sessions_upserted: u64::MAX,
+                    messages_upserted: 2,
+                },
+                7,
+                false,
+            ),
+        );
+        fold.record(
+            "codex",
+            ProviderRunOutcome::bounded(
+                TranscriptIngestStats {
+                    sessions_upserted: 1,
+                    messages_upserted: 3,
+                },
+                11,
+                true,
+            ),
+        );
 
         assert_eq!(fold.stats.sessions_upserted, u64::MAX);
         assert_eq!(fold.stats.messages_upserted, 5);
@@ -208,7 +260,7 @@ mod tests {
         assert_eq!(fold.deferred_units, 2);
         assert!(!fold.byte_bounds_enforced);
 
-        fold.record(outcome);
+        fold.record("codex", outcome);
         assert_eq!(fold.units_admitted, 1);
         assert_eq!(fold.units_completed, 0);
         assert_eq!(fold.units_failed, 1);
@@ -224,16 +276,85 @@ mod tests {
 
         let mut fold = ProviderRunFold::default();
         fold.record_retry(&abandoned);
-        fold.record(ProviderRunOutcome::bounded(
-            TranscriptIngestStats::default(),
-            3,
-            false,
-        ));
+        fold.record(
+            "codex",
+            ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 3, false),
+        );
 
         assert_eq!(
             fold.failures,
             vec![permanent],
             "the retry skips a quarantined source, so only the abandoned attempt reports it"
+        );
+    }
+
+    #[test]
+    fn fold_tallies_each_provider_disposition_separately() {
+        let mut fold = ProviderRunFold::<Failure>::default();
+        fold.record(
+            "codex",
+            ProviderRunOutcome::bounded(
+                TranscriptIngestStats {
+                    sessions_upserted: 1,
+                    messages_upserted: 4,
+                },
+                7,
+                false,
+            ),
+        );
+        fold.record(
+            "cursor",
+            ProviderRunOutcome::bounded(
+                TranscriptIngestStats {
+                    sessions_upserted: 0,
+                    messages_upserted: 2,
+                },
+                11,
+                true,
+            ),
+        );
+        fold.record(
+            "claude",
+            ProviderRunOutcome::failed(Failure { retryable: true }, 3),
+        );
+        fold.park("kimi");
+        fold.record("pi", ProviderRunOutcome::skipped());
+
+        assert_eq!(
+            fold.provider_units.into_iter().collect::<Vec<_>>(),
+            vec![
+                (
+                    "claude",
+                    ProviderPassUnits {
+                        units_refused: 1,
+                        ..ProviderPassUnits::default()
+                    }
+                ),
+                (
+                    "codex",
+                    ProviderPassUnits {
+                        units_projected: 1,
+                        messages_upserted: 4,
+                        ..ProviderPassUnits::default()
+                    }
+                ),
+                (
+                    "cursor",
+                    ProviderPassUnits {
+                        units_parked: 1,
+                        messages_upserted: 2,
+                        ..ProviderPassUnits::default()
+                    }
+                ),
+                (
+                    "kimi",
+                    ProviderPassUnits {
+                        units_parked: 1,
+                        ..ProviderPassUnits::default()
+                    }
+                ),
+            ],
+            "a skipped provider was never admitted, so it has no tally"
         );
     }
 }

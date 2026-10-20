@@ -95,7 +95,7 @@ impl SessionHistoricalIngestor for HeldHistory {
                 }
             }
             self.release.notified().await;
-            SessionHistoricalIngestOutcome::Cancelled
+            SessionHistoricalIngestOutcome::Cancelled.into()
         })
     }
 

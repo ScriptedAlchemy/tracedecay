@@ -635,7 +635,7 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
             unit_result.byte_bounds_enforced &= within_byte_grant;
             remaining_bytes = remaining_bytes.saturating_sub(unit_result.bytes_consumed.min(grant));
             if unit_result.succeeded() {
-                provider_runs.record(unit_result);
+                provider_runs.record(candidate.id(), unit_result);
                 break;
             }
             if unit_result.retryable()
@@ -647,7 +647,7 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
                 retries = retries.saturating_add(1);
                 continue;
             }
-            provider_runs.record(unit_result);
+            provider_runs.record(candidate.id(), unit_result);
             break;
         }
         if cancellation.is_cancelled() {
@@ -659,6 +659,11 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
         }
     }
 
+    for &index in plan.admitted_indices.iter().skip(attempted) {
+        if let Some(candidate) = selected.get(index) {
+            provider_runs.park(candidate.id());
+        }
+    }
     if !cancelled {
         match claude_observation::drain_projection_queue(
             facade,
@@ -751,6 +756,7 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
         units_failed: provider_runs.units_failed,
         byte_bounds_enforced: provider_runs.byte_bounds_enforced,
         coverage_advanced: provider_runs.coverage_advanced || scheduling_state_written,
+        provider_units: provider_runs.provider_units,
     }
 }
 
