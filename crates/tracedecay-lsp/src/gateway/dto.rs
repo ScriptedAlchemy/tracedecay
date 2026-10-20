@@ -453,10 +453,7 @@ impl LspSemanticRequest {
         }
     }
 
-    pub(crate) fn with_document_snapshot(
-        mut self,
-        snapshot: LspSemanticDocumentSnapshot,
-    ) -> Self {
+    pub(crate) fn with_document_snapshot(mut self, snapshot: LspSemanticDocumentSnapshot) -> Self {
         self.document_snapshot = Some(snapshot);
         self
     }

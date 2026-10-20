@@ -40,9 +40,7 @@ struct StdioLspSemanticAuthorityInner {
 impl StdioLspSemanticAuthorityInner {
     /// Held only for one map operation and never across an await, so start
     /// and cancel wait for a peer instead of refusing or dropping the request.
-    fn operations(
-        &self,
-    ) -> MutexGuard<'_, BTreeMap<SemanticOperationKey, Arc<CancellationToken>>> {
+    fn operations(&self) -> MutexGuard<'_, BTreeMap<SemanticOperationKey, Arc<CancellationToken>>> {
         self.operations
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -777,11 +775,7 @@ mod tests {
         let authority = unspawnable_authority();
         let root = AdmittedRoot::new("file:///project");
         let request_id = LspRequestId::Number(5);
-        let future = authority.start(
-            root.clone(),
-            request_id.clone(),
-            document_symbol_request(),
-        );
+        let future = authority.start(root.clone(), request_id.clone(), document_symbol_request());
         assert_eq!(authority.inner.operations().len(), 1);
 
         drop(future);

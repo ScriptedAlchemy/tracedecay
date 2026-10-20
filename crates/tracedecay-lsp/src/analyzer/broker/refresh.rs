@@ -14,8 +14,8 @@ use super::super::client::{
 };
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
 use super::super::launch::AnalyzerLaunch;
-use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
 use super::EngineState;
+use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
 use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
@@ -256,8 +256,9 @@ impl PreparedRefresh {
                     failures.insert(workspace_root, failure);
                 }
                 Err(_) => {
-                    let failure =
-                        RefreshFailure::crashed_message("analyzer refresh task panicked".to_owned());
+                    let failure = RefreshFailure::crashed_message(
+                        "analyzer refresh task panicked".to_owned(),
+                    );
                     for document in documents {
                         refresh
                             .documents
@@ -287,13 +288,11 @@ async fn collect_refresh_batch(
     let launch = batch.launch;
     let shared = batch.client;
     let deadline = timeouts.operation_deadline();
-    let mut client_slot = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        shared.client(),
-    )
-    .await
-    .map_err(|_| RefreshFailure::timed_out())?
-    .map_err(|error| RefreshFailure::crashed(&error))?;
+    let mut client_slot =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), shared.client())
+            .await
+            .map_err(|_| RefreshFailure::timed_out())?
+            .map_err(|error| RefreshFailure::crashed(&error))?;
     let mut use_of_analyzer = if let Some(client) = client_slot.take() {
         RefreshUseOfAnalyzer::new(&shared, client_slot, shared.current_attempt(), Some(client))
     } else {

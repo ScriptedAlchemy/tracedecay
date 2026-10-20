@@ -16,8 +16,7 @@ use super::dto::{
     LspSemanticDocumentSnapshot, LspSemanticOperationOutcome, LspSemanticRequest,
     MethodUnavailableReason, OutgoingCall, RenameCandidateResult, SemanticProviderOutcome,
     SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
-    empty_semantic_response,
-    lsp_semantic_request, project_semantic_outcome,
+    empty_semantic_response, lsp_semantic_request, project_semantic_outcome,
 };
 use crate::capabilities::{
     CapabilityAvailability, ClientCapabilities, EffectiveCapabilities, GatewayCapabilities,
@@ -1113,13 +1112,15 @@ where
             request.method(),
             request.capability(),
             request.document_uri(),
-            |provider, root| provider.request_with_document(
-                root,
-                request_id,
-                request,
-                document_snapshot,
-                deadline,
-            ),
+            |provider, root| {
+                provider.request_with_document(
+                    root,
+                    request_id,
+                    request,
+                    document_snapshot,
+                    deadline,
+                )
+            },
         )
     }
 

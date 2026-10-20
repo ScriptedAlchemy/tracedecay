@@ -1593,10 +1593,7 @@ async fn semantic_gateway_synchronizes_the_admitted_overlay_snapshot_once() {
     struct NoopFeedback;
 
     impl FeedbackCyclePort for NoopFeedback {
-        fn request_feedback_cycle(
-            &self,
-            _request: FeedbackCycleRequest,
-        ) -> FeedbackCycleResponse {
+        fn request_feedback_cycle(&self, _request: FeedbackCycleRequest) -> FeedbackCycleResponse {
             FeedbackCycleResponse::Deferred {
                 reason: "test-not-configured".to_owned(),
             }
@@ -1631,12 +1628,7 @@ async fn semantic_gateway_synchronizes_the_admitted_overlay_snapshot_once() {
     {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                match gateway.semantic_request_with_document(
-                    request_id,
-                    request,
-                    snapshot,
-                    None,
-                ) {
+                match gateway.semantic_request_with_document(request_id, request, snapshot, None) {
                     GatewayResponse::Pending => tokio::task::yield_now().await,
                     GatewayResponse::Value(value) => return value,
                     other => panic!("semantic request did not complete: {other:?}"),
@@ -1742,8 +1734,7 @@ while True:
     };
     let mut client = ClientCapabilities::default();
     client.semantic = SemanticCapability::ALL.into_iter().collect();
-    let capabilities =
-        negotiate_capabilities(&client, &GatewayCapabilities::default(), &upstream);
+    let capabilities = negotiate_capabilities(&client, &GatewayCapabilities::default(), &upstream);
     let semantic = SemanticProviderAdapter::new(Arc::new(TokioSpawner), authority);
     let gateway = DaemonLspGateway::new(
         AdmittedRoot::new(root_uri.clone()),
@@ -1945,24 +1936,23 @@ while True:
         if request_id == 22 {
             std::fs::write(&document_path, expected).unwrap();
         }
-        let outcome = block(authority.start(
-            root.clone(),
-            LspRequestId::Number(request_id),
-            request(),
-        ));
+        let outcome =
+            block(authority.start(root.clone(), LspRequestId::Number(request_id), request()));
         let tracedecay_lsp::LspSemanticOperationOutcome::Complete(value) = outcome else {
             panic!("semantic request was incomplete: {outcome:?}");
         };
         assert_eq!(value[0]["name"], expected);
     }
-    let missing = block(authority.start(
-        root,
-        LspRequestId::Number(23),
-        tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
-            document_uri: format!("{root_uri}src/missing.fake"),
-        })
-        .unwrap(),
-    ));
+    let missing = block(
+        authority.start(
+            root,
+            LspRequestId::Number(23),
+            tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+                document_uri: format!("{root_uri}src/missing.fake"),
+            })
+            .unwrap(),
+        ),
+    );
     assert!(matches!(
         missing,
         tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
@@ -2199,8 +2189,7 @@ while True:
         vec![script_path.display().to_string()],
         vec!["workspace.marker".to_owned()],
     );
-    let mut broker =
-        lsp::broker::DiagnosticBroker::new_for_test(temp.path(), vec![adapter]);
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(temp.path(), vec![adapter]);
     let documents = |root_text: &str, nested_text: &str| {
         vec![
             fake_document(FAKE_LANGUAGE, "src/a.fake", root_text),
@@ -2229,17 +2218,12 @@ while True:
     assert!(error.to_string().contains("workspace root"));
     let diagnostics = broker.snapshot().diagnostics;
     assert_eq!(diagnostics.len(), 2);
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.file == "src/a.fake" && diagnostic.message == "updated updated root"
-        })
-    );
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.file == "member/src/b.fake"
-                && diagnostic.message == "initial initial nested"
-        })
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.file == "src/a.fake" && diagnostic.message == "updated updated root"
+    }));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.file == "member/src/b.fake" && diagnostic.message == "initial initial nested"
+    }));
 }
 
 #[tokio::test]

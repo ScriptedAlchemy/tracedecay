@@ -4,8 +4,8 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::{
-    AdmittedRoot, AnalyzerCancellationPort, LspRequestId, SemanticProviderOutcome,
-    LspSemanticDocumentSnapshot, SemanticProviderPort, SemanticRequest, SemanticResponse,
+    AdmittedRoot, AnalyzerCancellationPort, LspRequestId, LspSemanticDocumentSnapshot,
+    SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
 };
 
 /// One extension set routed to one language-specific semantic provider.
@@ -84,8 +84,13 @@ impl SemanticProviderPort for PolyglotSemanticProvider {
         document_snapshot: Option<&LspSemanticDocumentSnapshot>,
         deadline: Option<std::time::Instant>,
     ) -> SemanticProviderOutcome<SemanticResponse> {
-        self.provider_for(request)
-            .request_with_document(root, request_id, request, document_snapshot, deadline)
+        self.provider_for(request).request_with_document(
+            root,
+            request_id,
+            request,
+            document_snapshot,
+            deadline,
+        )
     }
 }
 

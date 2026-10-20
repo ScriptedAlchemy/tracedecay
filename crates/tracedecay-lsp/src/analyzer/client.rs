@@ -66,10 +66,7 @@ impl LspRefreshTimeouts {
 
     pub(super) fn operation_deadline(self) -> Instant {
         self.deadline.unwrap_or_else(|| {
-            Instant::now()
-                + self
-                    .initialize_response
-                    .saturating_add(self.refresh)
+            Instant::now() + self.initialize_response.saturating_add(self.refresh)
         })
     }
 
@@ -604,14 +601,9 @@ impl StdioLspClient {
                 class: "admitted semantic document snapshot is stale".to_owned(),
             });
         }
-        self.synchronize_document(
-            &uri,
-            &snapshot.language_id,
-            &snapshot.text,
-            timeouts,
-        )
-        .await
-        .map_err(semantic_write_error)?;
+        self.synchronize_document(&uri, &snapshot.language_id, &snapshot.text, timeouts)
+            .await
+            .map_err(semantic_write_error)?;
         self.document_snapshot_versions
             .insert(uri, snapshot.version);
         Ok(())
@@ -975,11 +967,10 @@ impl StdioLspClient {
                 timeouts.message_io,
             ) => result,
         };
-        write
-            .map_err(|error| match error {
-                LspMessageWriteError::DeadlineElapsed => LspSemanticRequestError::TimedOut,
-                LspMessageWriteError::Failed(error) => semantic_transport_error(error),
-            })?;
+        write.map_err(|error| match error {
+            LspMessageWriteError::DeadlineElapsed => LspSemanticRequestError::TimedOut,
+            LspMessageWriteError::Failed(error) => semantic_transport_error(error),
+        })?;
 
         loop {
             let message = tokio::select! {
@@ -1155,9 +1146,7 @@ impl StdioLspClient {
                     .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
                     .collect(),
             );
-            quiet_deadline = Some(
-                deadline.min(Instant::now() + timeouts.diagnostics_quiet),
-            );
+            quiet_deadline = Some(deadline.min(Instant::now() + timeouts.diagnostics_quiet));
         }
         // Servers that suppress empty publishes (only publishing for files WITH
         // problems) never emit for clean files, so a fully-reported batch still
@@ -1355,9 +1344,7 @@ async fn write_message_until(
         .write_frame(&body, deadline.min(Instant::now() + timeout))
         .await
     {
-        Err(AsyncContentLengthError::DeadlineElapsed) => {
-            Err(LspMessageWriteError::DeadlineElapsed)
-        }
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(LspMessageWriteError::DeadlineElapsed),
         Err(error) => Err(LspMessageWriteError::Failed(frame_write_error(error))),
         Ok(()) => Ok(()),
     }
@@ -1472,7 +1459,9 @@ fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
     let value: Value = serde_json::from_slice(body).map_err(|error| TraceDecayError::Config {
         message: format!("failed to parse LSP message: {error}"),
     })?;
-    let object = value.as_object().ok_or_else(|| invalid_json_rpc_envelope())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_json_rpc_envelope())?;
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Err(invalid_json_rpc_envelope());
     }
@@ -1490,9 +1479,10 @@ fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
             .ok_or_else(invalid_json_rpc_envelope)?
             .to_owned();
         let params = object.get("params").cloned();
-        if params.as_ref().is_some_and(|params| {
-            !(params.is_object() || params.is_array())
-        }) {
+        if params
+            .as_ref()
+            .is_some_and(|params| !(params.is_object() || params.is_array()))
+        {
             return Err(invalid_json_rpc_envelope());
         }
         return match id {
@@ -1637,9 +1627,8 @@ pub(crate) fn file_uri(path: &Path) -> String {
 }
 
 fn read_semantic_document(path: &Path) -> std::result::Result<String, String> {
-    let file = std::fs::File::open(path).map_err(|error| {
-        format!("failed to read semantic document: {error}")
-    })?;
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to read semantic document: {error}"))?;
     let mut bytes = Vec::with_capacity(crate::overlay::MAX_OVERLAY_BYTES);
     file.take((crate::overlay::MAX_OVERLAY_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
@@ -1650,9 +1639,8 @@ fn read_semantic_document(path: &Path) -> std::result::Result<String, String> {
             crate::overlay::MAX_OVERLAY_BYTES
         ));
     }
-    String::from_utf8(bytes).map_err(|error| {
-        format!("semantic document is not valid UTF-8: {error}")
-    })
+    String::from_utf8(bytes)
+        .map_err(|error| format!("semantic document is not valid UTF-8: {error}"))
 }
 
 fn lsp_initialization_options(command: &str) -> Value {
@@ -1895,7 +1883,8 @@ mod tests {
         for body in [
             br#"{"jsonrpc":"1.0","id":2,"result":null}"#.as_slice(),
             br#"{"jsonrpc":"2.0","id":2}"#.as_slice(),
-            br#"{"jsonrpc":"2.0","id":2,"result":null,"error":{"code":-1,"message":"bad"}}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":2,"result":null,"error":{"code":-1,"message":"bad"}}"#
+                .as_slice(),
             br#"{"jsonrpc":"2.0","id":null,"result":null}"#.as_slice(),
             br#"{"jsonrpc":"2.0","id":2,"method":"request","result":null}"#.as_slice(),
         ] {

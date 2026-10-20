@@ -878,11 +878,9 @@ fn partial_root_refresh_replaces_only_published_document_diagnostics() {
             .iter()
             .any(|diagnostic| diagnostic.file == "src/a.fake" && diagnostic.message == "new a")
     );
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.file == "member/src/b.fake" && diagnostic.message == "old b"
-        })
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.file == "member/src/b.fake" && diagnostic.message == "old b"
+    }));
 }
 
 fn code_diagnostic(file: &str, message: &str) -> CodeDiagnostic {
