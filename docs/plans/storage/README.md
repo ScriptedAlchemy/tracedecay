@@ -773,6 +773,24 @@ changes a file that holds memory.
   clones what it owns into the closure. A rollup rebuild that finds its stored
   receipt still ends by rolling back, so replay does not advance the transaction
   generation.
+- Step 5i-4, global-db job writes (2026-10-18, branch
+  `refactor/storage-global-db-jobs-2`). The accounting, workflow-index, topology
+  anchor, discovery queue, GitHub stack delivery, delivery settlement, source
+  rewrite, registry forget and retire, remote deletion and analytics outbox writes
+  now run as `RegisteredGlobalDb::transact` jobs. `transact_or` maps a refused job
+  to the site's own error type. `transact_or_rollback` lets a body end early with
+  a value the caller wants as success, as a replayed append does, and the job
+  rolls back so a replay leaves no commit. Helpers under these sites take
+  `&impl Executor`, so one body serves the job and the remaining interactive
+  transactions. `WorkflowIngestWriteTxn` had no caller left and is deleted. Still
+  interactive, for later slices: `apply_registry_gc` (it reads outside the
+  transaction while holding it), `relink_orphan_store_instance` (a manifest file
+  effect sits between the SQL and the commit), `claim_and_settle_observability_emissions`
+  (its `FnMut` allocates producer sequences, so a re-run would allocate twice),
+  `append_analytics_event` (a writer connection, not an interactive transaction),
+  and the project registry, observation projection, LCM, provider usage,
+  dashboard, session, schema-stage and invariant, git-index and observation
+  retention and canonical-body groups.
 - #4138 (2026-10-16). Shutdown store close waits up to 3 s for leases to drain
   before deciding a store's WAL cannot be truncated. Under load, owners joined
   before store close could still be unwinding the tasks that held their leases,

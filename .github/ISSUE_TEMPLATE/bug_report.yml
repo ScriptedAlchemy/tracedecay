@@ -33,7 +33,7 @@ body:
     attributes:
       label: Installation method
       options:
-        - cargo install
+        - Built from source (Bazel)
         - Homebrew (brew)
         - Scoop
         - Built from source

@@ -15,7 +15,6 @@ use crate::identity::application_identifier;
 use super::{CancellationObservation, OperationBudgetUsage, OperationReceipt, ResultContractRef};
 
 application_identifier!(
-    @no_schema
     EvidenceIdentity => ("evidence identity", 512),
     ScoreId => ("score id", 512),
     // Existing authenticated query cursors bind typed scope, access, key,
@@ -26,7 +25,7 @@ application_identifier!(
 
 /// Exact continuation authority for the enclosing evidence page: an opaque
 /// cursor bound to the operation and request that minted it.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PageCursor {
     Opaque { cursor: OpaqueCursor },
@@ -47,7 +46,9 @@ impl From<OpaqueCursor> for PageCursor {
 }
 
 /// Application-level freshness. Missing or partial truth never becomes current.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FreshnessState {
     Current,
@@ -56,7 +57,7 @@ pub enum FreshnessState {
 }
 
 /// Temporal provenance for a packet.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TemporalState {
     pub requested_mode: TemporalModeV1,
@@ -363,7 +364,9 @@ pub struct Omission {
 }
 
 /// Evidence score semantics. Scores are metadata, never authority.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceScoreKind {
     OrdinalRank,
@@ -372,7 +375,7 @@ pub enum EvidenceScoreKind {
     CalibratedInterval,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum EvidenceScoreValue {
     Ordinal {
@@ -387,7 +390,7 @@ pub enum EvidenceScoreValue {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceScore {
     pub score_id: ScoreId,
@@ -399,7 +402,7 @@ pub struct EvidenceScore {
 }
 
 /// Evidence authority is separate from caller authority and cannot grant access.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceAuthority {
     pub evidence_id: EvidenceIdentity,
@@ -411,7 +414,9 @@ pub struct EvidenceAuthority {
 }
 
 /// Bounded elapsed-work classification supplied by a retriever.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetClass {
     WithinBudget,
@@ -420,7 +425,9 @@ pub enum BudgetClass {
 }
 
 /// Terminal state reported by one retriever contribution.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrieverContributionState {
     Completed,
@@ -434,7 +441,7 @@ pub enum RetrieverContributionState {
 }
 
 /// One source-owned contribution to the packet fold.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrieverContribution {
     pub retriever_id: RetrieverId,
@@ -453,7 +460,7 @@ pub struct RetrieverContribution {
 
 /// Stable page state. General cursor bytes stay opaque until authorization is
 /// revalidated; structural fact cursors retain their canonical ordering type.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PageState {
     pub sort_contract_id: SortContractId,
@@ -510,7 +517,7 @@ pub struct RetrievalEvidence<T> {
 }
 
 /// Immutable evidence packet consumed by adapters and later planner work.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidencePacket<T> {
     pub temporal: TemporalState,

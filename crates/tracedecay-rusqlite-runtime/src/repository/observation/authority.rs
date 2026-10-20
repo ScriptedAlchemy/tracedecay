@@ -9,7 +9,7 @@ use tracedecay_domain::{
     AnchorSourceGeneration, DurableObservationV1, EvidenceAvailabilityV1, FactOwnerV1,
     GenerationBoundRepositoryProvenanceV1, ObservationSourceCursorV1, RepositoryProvenanceV1,
     RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
-    prove_cline_native_source_transition,
+    codex_rollout_siblings, prove_cline_native_source_transition,
 };
 use tracedecay_store::{
     AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
@@ -180,7 +180,7 @@ fn verify_retrieval_anchor(
             owned_aliases += 1;
         } else if !matches!(
             stored_anchor_id.as_deref(),
-            Some(current) if cline_alias_transition_is_valid(connection, anchor, current)?
+            Some(current) if shared_alias_is_valid(connection, anchor, current)?
         ) {
             return Err(invalid("retrieval anchor alias collision"));
         }
@@ -197,10 +197,7 @@ fn verify_retrieval_anchor(
     Ok(())
 }
 
-// Alias promotion belongs to the projector transaction: a newly captured
-// successor may wait behind the still-readable predecessor. Once promoted,
-// immutable historical anchor replay requires the exact supersession receipt.
-fn cline_alias_transition_is_valid(
+fn shared_alias_is_valid(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorRecord,
     current_anchor_id: &str,
@@ -258,6 +255,9 @@ fn cline_alias_transition_is_valid(
         super::decode_stored_observation(connection, anchor_json.as_str())?;
     let current_observation: DurableObservationV1 =
         super::decode_stored_observation(connection, current_json.as_str())?;
+    if codex_rollout_siblings(&current_observation, &candidate_observation) {
+        return Ok(true);
+    }
     if prove_cline_native_source_transition(&current_observation, &candidate_observation).is_some()
     {
         // Pending successor: leave current alias and predecessor availability

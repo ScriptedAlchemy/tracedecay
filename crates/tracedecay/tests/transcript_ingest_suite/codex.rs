@@ -4,9 +4,11 @@ use tempfile::TempDir;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
+use tracedecay_sessions::runtime::shared::durable_project_path_key;
 
 use crate::restart_atomicity::{
     ingest_global_sources_for_provider, ingest_user_provider, open_project_session_db,
+    run_user_provider_pass,
 };
 
 pub(crate) fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
@@ -496,4 +498,113 @@ pub(crate) fn write_codex_rollout_with_structured_events(
         ],
     );
     path
+}
+
+/// Seeds a `moved-session` row under another working directory, naming
+/// `stored_transcript` (or the rollout itself), then runs user-scope passes
+/// over the session's rollout until one reports no failure. Returns the
+/// runtime and the number of passes that took.
+async fn ingest_rollout_over_stored_session(
+    tmp: &TempDir,
+    stored_transcript: Option<&str>,
+) -> (HostAdmissionTestRuntimeV1, usize) {
+    let home = tmp.path().join("home");
+    let general = tmp.path().join("general-chat");
+    let stored_cwd = tmp.path().join("earlier-cwd");
+    std::fs::create_dir_all(&general).unwrap();
+    std::fs::create_dir_all(&stored_cwd).unwrap();
+    let rollout = write_codex_rollout(&home, &general, "moved-session");
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
+        .await
+        .unwrap();
+    let stored = tracedecay_sessions::runtime::SessionRecord {
+        provider: "codex".to_owned(),
+        session_id: "moved-session".to_owned(),
+        project_key: "user".to_owned(),
+        project_path: durable_project_path_key(&stored_cwd.to_string_lossy()),
+        title: None,
+        started_at: Some(1),
+        ended_at: None,
+        transcript_path: Some(
+            stored_transcript.map_or_else(|| rollout.to_string_lossy().into_owned(), str::to_owned),
+        ),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    assert!(
+        runtime
+            .upsert_session_for_test(HostAdmissionScope::Profile, &stored)
+            .await
+            .unwrap()
+    );
+
+    let mut passes = 0;
+    loop {
+        passes += 1;
+        let outcome =
+            run_user_provider_pass(&runtime, &home, SessionProvider::Codex, Vec::new()).await;
+        if outcome.failures.is_empty() {
+            break;
+        }
+        assert!(passes < 4, "still retrying: {:?}", outcome.failures);
+    }
+    // Settled: another pass has nothing to retry.
+    ingest_user_provider(&runtime, &home, SessionProvider::Codex, Vec::new()).await;
+    (runtime, passes)
+}
+
+async fn billing_messages(runtime: &HostAdmissionTestRuntimeV1) -> usize {
+    runtime
+        .search_session_messages_for_test(
+            HostAdmissionScope::Profile,
+            "codex",
+            None,
+            "billing pipeline",
+            10,
+        )
+        .await
+        .unwrap()
+        .len()
+}
+
+/// A session row written earlier under another working directory (a hook
+/// payload, LCM, or an older build) still names the same transcript. The
+/// rollout's messages must project and the stored directory stays. Before the
+/// fix each message was parked as a `project_path` session collision and every
+/// pass reported `ingest_pass_backpressured` again.
+#[tokio::test]
+async fn user_scope_projects_a_codex_rollout_whose_cwd_differs_from_the_stored_session() {
+    let tmp = TempDir::new().unwrap();
+    let (runtime, passes) = ingest_rollout_over_stored_session(&tmp, None).await;
+
+    assert_eq!(passes, 1, "one pass must settle, not retry");
+    assert_eq!(billing_messages(&runtime).await, 2, "both messages project");
+    let session = runtime
+        .session_for_test(HostAdmissionScope::Profile, "codex", "moved-session")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        session.project_path,
+        durable_project_path_key(&tmp.path().join("earlier-cwd").to_string_lossy())
+    );
+}
+
+/// A stored session that names a different transcript is a genuine duplicate:
+/// its messages are still refused as a collision. The parked collision must
+/// not keep every later pass reporting `ingest_pass_backpressured`.
+#[tokio::test]
+async fn user_scope_settles_after_a_genuine_codex_session_collision() {
+    let tmp = TempDir::new().unwrap();
+    let (runtime, _) =
+        ingest_rollout_over_stored_session(&tmp, Some("/elsewhere/other-rollout.jsonl")).await;
+
+    assert_eq!(
+        billing_messages(&runtime).await,
+        0,
+        "a conflicting transcript identity stays a collision"
+    );
 }

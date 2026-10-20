@@ -43,7 +43,11 @@
 #                        read-only against shared fixtures, so this is safe
 #   REPEATED_QUERY_HINTS on|off: the eval profile's repeated-query hint setting
 #                        (default: off); on suffixes transcripts with __qhints
-#   TRACEDECAY_BIN       tracedecay binary (default: resolve from PATH)
+#   TRACEDECAY_BIN       prebuilt tracedecay binary to run instead of the Bazel
+#                        build (default: bazel build --config=release
+#                        //crates/tracedecay-cli:tracedecay)
+#   TRACEDECAY_EVAL_BAZEL_CONFIG  Bazel config for that build (default: release;
+#                        dist builds the exact release bytes)
 #   EVAL_OUT            directory to also copy scoreboard.json + report.md into
 #   LEARNED_SKILL_WORKFLOW  run only learned_skills/<workflow>'s held-out scenarios,
 #                        once per skill variant, on the full condition
@@ -111,36 +115,11 @@ STEER_TEXT="This repository has indexed code-relationship evidence available. Ch
 live=0
 if [[ "${TRACEDECAY_AGENT_EVALS:-}" == "1" ]]; then live=1; fi
 
-# Live runs default to the candidate branch binary. TRACEDECAY_BIN remains an
-# explicit override for release-binary comparisons; dry runs reuse a built
-# candidate when present and otherwise fall back to PATH.
-if [[ -n "${TRACEDECAY_BIN:-}" ]]; then
-  TD="$TRACEDECAY_BIN"
-elif [[ "$live" == "1" ]]; then
-  echo "building candidate tracedecay binary..."
-  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
-    eval_target="$CARGO_TARGET_DIR"
-  elif [[ -d /fast/cargo-target && -w /fast/cargo-target ]]; then
-    eval_target="/fast/cargo-target/tracedecay-agent-adoption-evals"
-  else
-    eval_target="$repo_root/target"
-  fi
-  (
-    cd "$repo_root"
-    CARGO_TARGET_DIR="$eval_target" \
-      cargo build --quiet --package tracedecay-cli --bin tracedecay
-  )
-  TD="$eval_target/debug/tracedecay"
-elif [[ -x "$repo_root/target/debug/tracedecay" ]]; then
-  TD="$repo_root/target/debug/tracedecay"
-else
-  TD="$(command -v tracedecay || true)"
-fi
-if [[ -z "$TD" || ! -x "$TD" ]]; then
-  echo "error: tracedecay binary not found; set TRACEDECAY_BIN" >&2
-  exit 2
-fi
-TD="$(cd "$(dirname "$TD")" && pwd)/$(basename "$TD")"
+# Live and dry runs both use the shipping Bazel binary built from this checkout
+# (scripts/build-eval-binary.sh). TRACEDECAY_BIN selects an already-built
+# artifact, such as a release binary, and must exist. A failed build exits;
+# no PATH or older-build fallback exists.
+TD="$("$repo_root/scripts/build-eval-binary.sh")" || exit 2
 
 # Neutrality lint (USER DOCTRINE): fail fast, before building fixtures or
 # spending a single token, if any scenario prompt names tracedecay/MCP/a
@@ -358,7 +337,6 @@ echo "query hints:  $REPEATED_QUERY_HINTS"
 if [[ -n "$LEARNED_SKILL_WORKFLOW" ]]; then
   echo "learned:      $LEARNED_SKILL_WORKFLOW variants=[${ACTIVE_VARIANTS# }]"
 fi
-"$TD" disable-upload-counter >/dev/null 2>&1 || true
 
 # ---- build fixtures -------------------------------------------------------- #
 gitc() { git -C "$1" -c user.email=eval@tracedecay -c user.name=eval "${@:2}"; }

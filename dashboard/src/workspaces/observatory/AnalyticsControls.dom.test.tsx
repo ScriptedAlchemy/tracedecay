@@ -11,12 +11,11 @@ import type { ObservatoryAccountingReads } from './accountingReads.ts';
 /**
  * The Plan 26 `analytics-controls` view.
  *
- * Two real reads back parts of it, `/api/settings` for the profile upload
- * setting and `/api/doctor/findings?family=storage` for the typed retention-backlog status,
- * and they are read independently. The assertions pin the two reassuring
- * falsehoods this surface could most easily tell: that an unpublished
- * collection mode is `Off`, and that an absent exporter means zero egress
- * failures.
+ * `/api/doctor/findings?family=storage` backs the typed retention-backlog
+ * status and is read independently of the observatory projection. The
+ * assertions pin the two reassuring falsehoods this surface could most easily
+ * tell: that an unpublished collection mode is `Off`, and that an absent
+ * exporter means zero egress failures.
  */
 
 const NOW_MICROS = 1_753_003_600_000_000;
@@ -26,30 +25,29 @@ afterEach(() => {
 });
 
 describe('Observatory analytics controls', () => {
-
-  it('keeps a failed settings read from blanking the retention evidence', async () => {
-    // Independent sources: one refusing must not take the other down with it.
-    renderControls({ settingsStatus: 503 });
+  it('states retention evidence and no longer reads or shows an upload setting', async () => {
+    const fetchMock = renderControls();
 
     await screen.findByText('retention sweep observed 4 entries');
-    const upload = screen.getByRole('region', { name: 'profile upload setting' });
-    expect(upload.textContent).toContain('the profile settings read did not resolve');
-    expect(upload.textContent).not.toContain('disabled');
+    expect(screen.queryByRole('region', { name: 'profile upload setting' })).toBeNull();
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).includes('/api/settings')),
+    ).toBe(false);
   });
 
-  it('keeps a failed findings read from blanking the profile setting', async () => {
+  it('keeps a failed findings read from blanking the collection mode', async () => {
     renderControls({ findingsStatus: 503 });
 
-    await screen.findByText('user.upload_enabled.v1');
-    const retention = screen.getByRole('region', { name: 'retention and deletion' });
-    expect(retention.textContent).toContain('could not be read');
+    const retention = await screen.findByRole('region', { name: 'retention and deletion' });
+    await screen.findByText('could not be read', { exact: false });
     expect(retention.textContent).not.toContain('retention sweep observed');
+    const mode = screen.getByRole('region', { name: 'collection mode' });
+    expect(mode.textContent).not.toContain('could not be read');
   });
 });
 
 function renderControls(
   options: {
-    settingsStatus?: number;
     findingsStatus?: number;
     retentionStatuses?: unknown[];
   } = {},
@@ -62,31 +60,24 @@ function renderControls(
       reason: 'retention sweep observed 4 entries',
     },
   ];
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes('/api/settings')) {
-        if (options.settingsStatus != null) {
-          return new Response('{}', { status: options.settingsStatus });
-        }
-        return new Response(JSON.stringify(envelope(settingsPayload())), { status: 200 });
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/doctor/findings?family=storage')) {
+      if (options.findingsStatus != null) {
+        return new Response('{}', { status: options.findingsStatus });
       }
-      if (url.includes('/api/doctor/findings?family=storage')) {
-        if (options.findingsStatus != null) {
-          return new Response('{}', { status: options.findingsStatus });
-        }
-        return new Response(JSON.stringify(envelope(findingsPayload(statuses))), { status: 200 });
-      }
-      return new Response('{}', { status: 404 });
-    }),
-  );
+      return new Response(JSON.stringify(envelope(findingsPayload(statuses))), { status: 200 });
+    }
+    return new Response('{}', { status: 404 });
+  });
+  vi.stubGlobal('fetch', fetchMock);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(
     <QueryClientProvider client={client}>
       <AnalyticsControls reads={accountingReads()} />
     </QueryClientProvider>,
   );
+  return fetchMock;
 }
 
 function accountingReads(): ObservatoryAccountingReads {
@@ -180,74 +171,6 @@ function findingsPayload(kindStatuses: unknown[]) {
     schema_convergences: [],
     note: 'doctor storage findings',
     report_coverage: null,
-  };
-}
-
-function settingsPayload() {
-  return {
-    automation: {
-      availability: { available: true, reason: null, required_authority: null },
-      backend: null,
-      config_endpoint: '/api/plugins/holographic/curation/config',
-      enabled: false,
-      host_mode: null,
-      source_coverage: { effective: 'global', global: 'default', project: 'absent' },
-    },
-    environment: {
-      global_accounting_enabled: false,
-      global_accounting_mode: 'off',
-      pricing_offline: true,
-      variables: [],
-    },
-    project: {
-      config: {
-        exclude: [],
-        extract_docstrings: true,
-        context_scout: false,
-        include: [],
-        max_file_size: 1_048_576,
-        sync: { auto_track_pr_branches: false, auto_track_pr_poll_secs: 300 },
-        telemetry: { timings: false },
-        track_call_sites: true,
-      },
-      configuration_revision_id: 'revision-1',
-      configuration_snapshot_id: 'snapshot-1',
-      pr_autotrack: { tracked: [] },
-    },
-    restart_recommended: null,
-    resync_recommended: null,
-    storage: {
-      dashboard_root: '/store/dashboard',
-      graph_db: '/store/graph.db',
-      lcm_db: '/store/lcm.db',
-      lcm_scope: 'project',
-      memory_db: '/store/memory.db',
-      project_id: 'tracedecay',
-      project_root: '/repo',
-      savings_db: '/store/savings.db',
-      storage_mode: 'profile_sharded',
-      store_root: '/store',
-    },
-    user: {
-      code_index_worker_status: {
-        available_logical_cpus: 4,
-        configured: { mode: 'automatic' },
-        effective_workers: 4,
-        environment_override_workers: null,
-        limiting_reason: 'automatic_all_cores',
-        memory_safe_workers: 6,
-      },
-      code_index_workers: { mode: 'automatic' },
-      code_index_worker_configuration_revision_id: 'worker-revision-1',
-      code_index_worker_configuration_snapshot_id: 'worker-snapshot-1',
-      configuration_revision_id: 'revision-1',
-      configuration_snapshot_id: 'snapshot-1',
-      extraction_timeout_secs: 30,
-      installed_agents: ['claude'],
-      upload_enabled: false,
-      watcher_debounce: '500ms',
-    },
-    version: { cached_latest_version: null, channel: 'stable', version: '0.0.0' },
   };
 }
 

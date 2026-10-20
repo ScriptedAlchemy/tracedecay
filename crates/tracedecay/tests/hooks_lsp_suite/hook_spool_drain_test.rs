@@ -17,7 +17,10 @@ use tracedecay_hooks::{
 };
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 
-use crate::common::{git_program, spawn_tracedecay_daemon, tracedecay_command_with_home};
+use crate::common::{
+    git_program, spawn_tracedecay_daemon, spawn_tracedecay_daemon_logged,
+    tracedecay_command_with_home,
+};
 
 /// Well under the replay consumer's 30 s interval sweep, so a drain inside it
 /// can only come from the append wake or the startup open.
@@ -510,42 +513,88 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     let home = tempfile::TempDir::new().unwrap();
     let home = home.path().canonicalize().unwrap();
     let project = init_git_project(&home);
-    let _daemon = spawn_tracedecay_daemon(&home);
+    let daemon = spawn_tracedecay_daemon(&home);
     tracedecay(&home, &project, &["init"]);
     let data_root = default_profile_sharded_layout(&project, &home.join(".tracedecay"))
         .unwrap()
         .data_root;
     let worktree = project.join(".claude/worktrees/agent-x");
-    assert!(
-        Command::new(git_program())
-            .args(["worktree", "add", "-q", "-b", "agent-x"])
-            .arg(&worktree)
-            .current_dir(&project)
-            .status()
-            .unwrap()
-            .success()
-    );
-    std::fs::write(
-        worktree.join("src/lib.rs"),
-        "pub fn edited_in_worktree() {}\n",
-    )
-    .unwrap();
+    let other_worktree = project.join(".claude/worktrees/agent-y");
+    for (root, branch) in [(&worktree, "agent-x"), (&other_worktree, "agent-y")] {
+        assert!(
+            Command::new(git_program())
+                .args(["worktree", "add", "-q", "-b", branch])
+                .arg(root)
+                .current_dir(&project)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(root.join("src/lib.rs"), "pub fn edited_in_worktree() {}\n").unwrap();
+    }
     assert_eq!(
         bound_worktrees(&data_root),
         1,
         "only the main checkout is bound"
     );
 
+    drop(daemon);
+    let hold = home.join("hold-after-core");
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    std::fs::write(&hold, b"hold").unwrap();
+    let log = home.join("daemon.log");
+    let _daemon = spawn_tracedecay_daemon_logged(&home, &log, |command| {
+        command.env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold);
+    });
     assert_eq!(
         claude_edit(&home, &worktree, &data_root, "toolu_unbound_first"),
         "hook_v2_accepted",
-        "the first edit in an unbound worktree must reach the daemon, not be dropped"
+        "the first edit in an unbound worktree must reach the daemon: {}\n{}",
+        std::fs::read_to_string(&log).unwrap(),
+        std::fs::read_to_string(data_root.join("hook_analytics.jsonl")).unwrap()
+    );
+    assert!(
+        latency_until(PROMPT_DRAIN, || entered.is_file()).is_some(),
+        "the ordinary project open must reach the existing core publication hold: {}",
+        std::fs::read_to_string(&log).unwrap()
+    );
+    assert!(
+        hold.is_file(),
+        "the first edit was acknowledged while full publication is held"
     );
     assert_eq!(
-        bound_worktrees(&data_root),
-        2,
-        "delivering that edit opens the worktree and publishes its binding"
+        claude_edit(
+            &home,
+            &other_worktree,
+            &data_root,
+            "toolu_other_unbound_first"
+        ),
+        "hook_v2_accepted",
+        "another linked checkout's same relative file must commit while full publication is held"
     );
+    // Graph admission publishes hook bindings before the core hold. Full
+    // publication is the capability boundary this fixture actually holds.
+    let full_markers = [&worktree, &other_worktree]
+        .map(|root| format!("project={} phase=full_published", root.display()));
+    let held_log = std::fs::read_to_string(&log).unwrap();
+    for marker in &full_markers {
+        assert!(
+            !held_log.contains(marker),
+            "full publication escaped its hold: {held_log}"
+        );
+    }
+    std::fs::remove_file(&hold).unwrap();
+    assert!(
+        latency_until(PROMPT_DRAIN, || {
+            let published = std::fs::read_to_string(&log).unwrap();
+            bound_worktrees(&data_root) == 3
+                && full_markers.iter().all(|marker| published.contains(marker))
+        })
+        .is_some(),
+        "delivering that edit opens the worktree and publishes its binding: {}",
+        std::fs::read_to_string(&log).unwrap()
+    );
+    assert_eq!(bound_worktrees(&data_root), 3);
     let next = claude_edit(&home, &worktree, &data_root, "toolu_unbound_next");
     assert!(
         matches!(next.as_str(), "hook_v2_accepted" | "hook_v2_spooled"),

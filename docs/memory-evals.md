@@ -117,7 +117,7 @@ actually determines whether durable memory helps a user. That is the
 
 ### How it works
 
-`evals/hermetic/run.sh` builds the dev binary, stages it at a non-cargo path,
+`evals/hermetic/run.sh` builds the shipping Bazel binary, stages a copy under the env dir,
 installs the plugin into a throwaway `CLAUDE_CONFIG_DIR`/`CODEX_HOME`/
 `TRACEDECAY_DATA_DIR`, indexes a project, then drives a **real** agent
 (`claude -p` or `codex exec --json`) at each corpus prompt and records the
@@ -128,7 +128,7 @@ each session used. The adoption corpus is
 per bucket.
 
 ```bash
-ENV=$(evals/hermetic/run.sh setup --agent codex --debug)   # subscription; no API
+ENV=$(evals/hermetic/run.sh setup --agent codex)   # subscription; no API
 evals/hermetic/run.sh index --env-dir "$ENV" --project <repo>
 evals/hermetic/run.sh run   --agent codex --env-dir "$ENV" \
   --corpus evals/hermetic/corpora/fact-store-adoption.jsonl

@@ -288,6 +288,20 @@ impl HostAdmissionRuntime {
         }
     }
 
+    /// Inspect the canonical uncompleted records in place, including leased
+    /// records. A completed sequence can remain behind an older prefix.
+    pub(super) fn pending_matches(
+        &self,
+        mut predicate: impl FnMut(&[u8]) -> Result<bool, HostAdmissionOutcome>,
+    ) -> Result<bool, HostAdmissionOutcome> {
+        for record in self.spool.pending_records() {
+            if !self.completed.contains(&record.seq) && predicate(&record.payload)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn pending_count(&self) -> usize {
         self.spool.pending_count()
     }

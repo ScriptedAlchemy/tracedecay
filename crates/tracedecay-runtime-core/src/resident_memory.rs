@@ -301,31 +301,24 @@ pub struct ProcessResidentSampleV1 {
     pub unreclaimable_bytes: u64,
     /// Anonymous pages the kernel moved to swap (`VmSwap`).
     pub swapped_bytes: u64,
-    /// Bytes the kernel charges toward a finite `memory.max`: `memory.current`
-    /// minus `inactive_file`, plus `memory.swap.current`, on the cgroup with
-    /// the tightest finite ceiling.
-    ///
-    /// `None` when no cgroup has a finite `memory.max`. An unlimited cgroup's
-    /// file cache is not a kill line, and inactive file pages are what the
-    /// kernel reclaims before it kills. Active file pages of a mapped store
-    /// stay in this figure because they are not dropped before the kill.
-    pub cgroup_committed_bytes: Option<u64>,
+    /// Remaining committed capacity across every finite ancestor `memory.max`.
+    /// Committed bytes include swap and exclude reclaimable inactive file pages.
+    /// `None` means no finite cgroup ceiling was observed.
+    pub cgroup_headroom_bytes: Option<u64>,
 }
 
 impl ProcessResidentSampleV1 {
-    /// Bytes admission compares with the watermark.
-    ///
-    /// The daemon's anonymous state is the floor, swapped pages included:
-    /// they are live heap the next touch faults back in, so a sample taken
-    /// while the kernel swaps under a cgroup ceiling must not read as room.
-    /// A finite cgroup ceiling also counts its committed working set, so a
-    /// build cannot be admitted while `memory.current` is already at the kill
-    /// line and only the anonymous subset sits under the watermark.
+    /// Occupancy against a process budget, constrained by shared cgroup room.
+    /// Peers consume shared capacity without spending this process's budget.
+    /// Swapped anonymous pages remain live process allocations.
     #[must_use]
-    pub fn admission_bytes(self) -> u64 {
+    pub fn admission_bytes(self, limit_bytes: u64) -> u64 {
         self.unreclaimable_bytes
             .saturating_add(self.swapped_bytes)
-            .max(self.cgroup_committed_bytes.unwrap_or(0))
+            .max(
+                self.cgroup_headroom_bytes
+                    .map_or(0, |room| limit_bytes.saturating_sub(room)),
+            )
     }
 }
 
@@ -349,7 +342,7 @@ fn process_resident_sample_from_status_v1(status: &str) -> Option<ProcessResiden
         resident_bytes: status_kib_field_bytes(status, "VmRSS")?,
         unreclaimable_bytes: anon.checked_add(shmem)?,
         swapped_bytes: status_kib_field_bytes(status, "VmSwap")?,
-        cgroup_committed_bytes: None,
+        cgroup_headroom_bytes: None,
     })
 }
 
@@ -364,24 +357,32 @@ fn memory_stat_field_bytes(stat: &str, field: &str) -> Option<u64> {
     })
 }
 
-/// Working set a finite `memory.max` will kill for: `memory.current` minus
-/// `inactive_file`, plus the cgroup's swapped anonymous pages
-/// (`memory.swap.current`), on the cgroup directory with the tightest finite
-/// ceiling.
-///
-/// `None` when every `memory.max` is absent or `max`. Counting `memory.current`
-/// on an unlimited cgroup treats the machine's page cache as a kill line and
-/// refuses work the kernel can reclaim.
+/// The smallest remaining committed capacity across all finite ancestors.
+/// A larger ancestor can have less room than a smaller child because it also
+/// contains peers. Inactive file pages are reclaimable; swapped heap is not.
 #[cfg(target_os = "linux")]
-fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Option<u64> {
+fn cgroup_headroom_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Option<u64> {
     let mut directory = cgroup_v2_process_directory_v1(proc_self_cgroup, cgroup_root)?;
-    let mut chosen: Option<(std::path::PathBuf, u64)> = None;
+    let mut headroom = None;
     loop {
         if let Some(limit) = finite_cgroup_memory_value_v1(&directory.join("memory.max")) {
-            let tighter = chosen.as_ref().is_none_or(|(_, current)| limit < *current);
-            if tighter {
-                chosen = Some((directory.clone(), limit));
-            }
+            let current = std::fs::read_to_string(directory.join("memory.current"))
+                .ok()?
+                .trim()
+                .parse::<u64>()
+                .ok()?;
+            let inactive_file = std::fs::read_to_string(directory.join("memory.stat"))
+                .ok()
+                .and_then(|stat| memory_stat_field_bytes(&stat, "inactive_file"))
+                .unwrap_or(0);
+            let swapped = std::fs::read_to_string(directory.join("memory.swap.current"))
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let committed = current
+                .saturating_sub(inactive_file)
+                .saturating_add(swapped);
+            headroom = Some(tighten(headroom, limit.saturating_sub(committed)));
         }
         if directory == cgroup_root {
             break;
@@ -392,25 +393,7 @@ fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Opt
         }
         directory = parent.to_path_buf();
     }
-    let (directory, _) = chosen?;
-    let current = std::fs::read_to_string(directory.join("memory.current"))
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()?;
-    let inactive_file = std::fs::read_to_string(directory.join("memory.stat"))
-        .ok()
-        .and_then(|stat| memory_stat_field_bytes(&stat, "inactive_file"))
-        .unwrap_or(0);
-    let swapped = std::fs::read_to_string(directory.join("memory.swap.current"))
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(0);
-    Some(
-        current
-            .saturating_sub(inactive_file)
-            .saturating_add(swapped),
-    )
+    headroom
 }
 
 /// Sample this process's resident set directly from the kernel.
@@ -439,8 +422,8 @@ pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
         let mut sample = process_resident_sample_from_status_v1(
             &std::fs::read_to_string("/proc/self/status").ok()?,
         )?;
-        sample.cgroup_committed_bytes =
-            cgroup_committed_bytes_v1(Path::new(PROC_SELF_CGROUP_V1), Path::new(CGROUP_V2_ROOT_V1));
+        sample.cgroup_headroom_bytes =
+            cgroup_headroom_bytes_v1(Path::new(PROC_SELF_CGROUP_V1), Path::new(CGROUP_V2_ROOT_V1));
         Some(sample)
     }
     #[cfg(target_os = "windows")]
@@ -482,7 +465,7 @@ pub(crate) fn process_resident_sample_from_macos_vm_info_v1(
         resident_bytes: resident_size.max(unreclaimable_bytes),
         unreclaimable_bytes,
         swapped_bytes: 0,
-        cgroup_committed_bytes: None,
+        cgroup_headroom_bytes: None,
     })
 }
 
@@ -548,7 +531,7 @@ fn process_resident_sample_from_counters_v1() -> Option<ProcessResidentSampleV1>
         resident_bytes: counters.WorkingSetSize as u64,
         unreclaimable_bytes: counters.PrivateUsage as u64,
         swapped_bytes: 0,
-        cgroup_committed_bytes: None,
+        cgroup_headroom_bytes: None,
     })
 }
 
@@ -669,7 +652,7 @@ pub struct ResidentMemoryPressureRegistrationFailureV1;
 /// The measured side of the memory accounting loop.
 ///
 /// One dedicated reader samples the process (`/proc/self/status` on Linux)
-/// and feeds this cell the unreclaimable bytes. Admission re-measures through the same sampler;
+/// and its shared cgroup room. Admission re-measures through the same sampler;
 /// there is no second parser or publisher.
 ///
 /// Every request refused for memory, by any authority on this cell, waits on
@@ -680,8 +663,8 @@ pub struct ResidentMemoryPressureV1 {
     limit_bytes: NonZeroU64,
     high_watermark_bytes: u64,
     low_watermark_bytes: u64,
-    observed_bytes: AtomicU64,
-    observed: AtomicBool,
+    /// Retain kernel measurements so narrower ceilings can derive their own view.
+    observation: Mutex<Option<ProcessResidentSampleV1>>,
     over_budget: AtomicBool,
     headroom: watch::Sender<u64>,
     /// Authorities holding a refused request, settled on every observation.
@@ -754,8 +737,7 @@ impl ResidentMemoryPressureV1 {
             limit_bytes,
             high_watermark_bytes,
             low_watermark_bytes,
-            observed_bytes: AtomicU64::new(0),
-            observed: AtomicBool::new(false),
+            observation: Mutex::new(None),
             over_budget: AtomicBool::new(false),
             headroom: watch::channel(0).0,
             waiting: Mutex::new(Vec::new()),
@@ -773,10 +755,7 @@ impl ResidentMemoryPressureV1 {
         &self,
     ) -> Option<(ProcessResidentSampleV1, ResidentMemoryPressureStateV1)> {
         let sample = (self.sampler)()?;
-        Some((
-            sample,
-            self.publish_observed_resident_bytes(sample.admission_bytes()),
-        ))
+        Some((sample, self.publish_sample(sample)))
     }
 
     /// Publish a fresh admission sample without running pressure reclaimers.
@@ -810,7 +789,7 @@ impl ResidentMemoryPressureV1 {
             Ordering::Release,
         );
         if let Some(sample) = sample {
-            self.publish_observation(sample.admission_bytes());
+            self.publish_observation(sample);
         }
         self.state()
     }
@@ -818,7 +797,7 @@ impl ResidentMemoryPressureV1 {
     /// Refresh pressure after reclaim without running reclaimers recursively.
     fn resample_after_reclaim(&self) -> Option<ResidentMemoryPressureStateV1> {
         let sample = (self.sampler)()?;
-        self.publish_observation(sample.admission_bytes());
+        self.publish_observation(sample);
         Some(self.state())
     }
 
@@ -832,7 +811,7 @@ impl ResidentMemoryPressureV1 {
         self.sample_and_publish().map_or(0, |(sample, state)| {
             state
                 .observed_bytes()
-                .unwrap_or_else(|| sample.admission_bytes())
+                .unwrap_or_else(|| sample.admission_bytes(self.limit_bytes()))
         })
     }
 
@@ -863,16 +842,36 @@ impl ResidentMemoryPressureV1 {
         &self,
         observed_bytes: u64,
     ) -> ResidentMemoryPressureStateV1 {
-        self.publish_observation(observed_bytes);
+        self.publish_sample(ProcessResidentSampleV1 {
+            resident_bytes: observed_bytes,
+            unreclaimable_bytes: observed_bytes,
+            swapped_bytes: 0,
+            cgroup_headroom_bytes: None,
+        })
+    }
+
+    fn publish_sample(&self, sample: ProcessResidentSampleV1) -> ResidentMemoryPressureStateV1 {
+        let observed_bytes = sample.admission_bytes(self.limit_bytes());
+        self.publish_observation(sample);
         if observed_bytes >= self.high_watermark_bytes {
             self.run_pressure_reclaimers(observed_bytes);
         }
         self.state()
     }
 
-    fn publish_observation(&self, observed_bytes: u64) {
-        self.observed_bytes.store(observed_bytes, Ordering::Release);
-        self.observed.store(true, Ordering::Release);
+    fn observed_bytes_for_limit(&self, limit_bytes: u64) -> Option<u64> {
+        self.observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map(|sample| sample.admission_bytes(limit_bytes))
+    }
+
+    fn publish_observation(&self, sample: ProcessResidentSampleV1) {
+        let observed_bytes = sample.admission_bytes(self.limit_bytes());
+        *self
+            .observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sample);
         if observed_bytes >= self.high_watermark_bytes {
             self.over_budget.store(true, Ordering::Release);
         } else if observed_bytes <= self.low_watermark_bytes
@@ -918,7 +917,7 @@ impl ResidentMemoryPressureV1 {
             authority.upgrade().is_some_and(|authority| {
                 let mut state = authority.lock_state();
                 settled |= authority.settle_waiter(&mut state);
-                state.waiting_level.is_some()
+                !state.waiting_requests.is_empty()
             })
         });
         self.any_waiting
@@ -931,10 +930,9 @@ impl ResidentMemoryPressureV1 {
 
     #[must_use]
     pub fn state(&self) -> ResidentMemoryPressureStateV1 {
-        if !self.observed.load(Ordering::Acquire) {
+        let Some(observed_bytes) = self.observed_bytes_for_limit(self.limit_bytes()) else {
             return ResidentMemoryPressureStateV1::Unobserved;
-        }
-        let observed_bytes = self.observed_bytes.load(Ordering::Acquire);
+        };
         if self.over_budget.load(Ordering::Acquire) {
             return ResidentMemoryPressureStateV1::OverBudget {
                 observed_bytes,
@@ -1412,9 +1410,9 @@ struct ResidentMemoryStateV1 {
     used_bytes: u64,
     charges: BTreeMap<ResidentMemoryKeyV1, u64>,
     process_shared_charges: BTreeMap<ResidentMemoryComponentIdV1, u64>,
-    /// The highest occupancy (ledger or measured, whichever is larger) at
-    /// which some refused request fits; `None` while nothing waits.
-    waiting_level: Option<u64>,
+    /// The smallest refused request per ceiling is the first that can fit.
+    /// Shared headroom must be evaluated against each distinct ceiling.
+    waiting_requests: BTreeMap<u64, u64>,
 }
 
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
@@ -1468,12 +1466,16 @@ impl ProcessResidentMemoryV1 {
     /// measured process. The pressure cell's headroom epoch advances once it
     /// would, and every refusal this authority makes registers the same way.
     pub fn wait_for_headroom(self: &Arc<Self>, bytes: u64, ceiling: u64) {
-        let Some(level) = ceiling.checked_sub(bytes) else {
+        if bytes > ceiling {
             return;
-        };
+        }
         {
             let mut state = self.lock_state();
-            state.waiting_level = Some(state.waiting_level.map_or(level, |held| held.max(level)));
+            state
+                .waiting_requests
+                .entry(ceiling)
+                .and_modify(|held| *held = (*held).min(bytes))
+                .or_insert(bytes);
         }
         self.pressure.register_waiting(self);
     }
@@ -1481,15 +1483,18 @@ impl ProcessResidentMemoryV1 {
     /// Clear the waiters once the most satisfiable one fits; each still
     /// refused registers again on its retry.
     fn settle_waiter(&self, state: &mut ResidentMemoryStateV1) -> bool {
-        let Some(level) = state.waiting_level else {
-            return false;
-        };
-        let pressure = self.pressure.state();
-        let occupied = state.used_bytes.max(pressure.observed_bytes().unwrap_or(0));
-        if pressure.is_over_budget() || occupied > level {
+        if self.pressure.state().is_over_budget()
+            || !state.waiting_requests.iter().any(|(ceiling, bytes)| {
+                let observed = self
+                    .pressure
+                    .observed_bytes_for_limit(*ceiling)
+                    .unwrap_or(0);
+                state.used_bytes.max(observed) <= ceiling.saturating_sub(*bytes)
+            })
+        {
             return false;
         }
-        state.waiting_level = None;
+        state.waiting_requests.clear();
         true
     }
 
@@ -1590,7 +1595,12 @@ impl ProcessResidentMemoryV1 {
     /// this authority's limit and the measurement to the pressure cell's, as
     /// [`Self::reserve`] holds them.
     pub fn headroom_below(&self, ceiling: u64) -> ResidentMemoryHeadroomV1 {
-        let observed_bytes = self.pressure.measure_admission_bytes();
+        self.pressure.measure_admission_bytes();
+        let measured_ceiling = ceiling.min(self.pressure.limit_bytes());
+        let observed_bytes = self
+            .pressure
+            .observed_bytes_for_limit(measured_ceiling)
+            .unwrap_or(0);
         let used_bytes = self.lock_state().used_bytes;
         let available_bytes = if self.pressure.state().is_over_budget() {
             0
@@ -1598,9 +1608,7 @@ impl ProcessResidentMemoryV1 {
             let ledger_room = ceiling
                 .min(self.limit_bytes.get())
                 .saturating_sub(used_bytes);
-            let measured_room = ceiling
-                .min(self.pressure.limit_bytes())
-                .saturating_sub(observed_bytes);
+            let measured_room = measured_ceiling.saturating_sub(observed_bytes);
             ledger_room.min(measured_room)
         };
         ResidentMemoryHeadroomV1 {
