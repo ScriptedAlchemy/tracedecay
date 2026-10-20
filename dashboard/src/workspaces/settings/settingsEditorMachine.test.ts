@@ -153,9 +153,11 @@ describe('settings editor direct Save', () => {
       idempotencyKey: IDEMPOTENCY_KEY,
       patch: { max_file_size: 2_097_152 },
     });
-    const reloaded = run(uncertain, { type: 'reloaded_from_authority' });
+    const authority = withProjectRevision(AUTHORITY, 'rev-43');
+    const reloaded = run(uncertain, { type: 'reloaded_from_authority', authority });
     expect(reloaded.status).toBe('editing');
     expect(settingsScopeDirty(reloaded, 'project')).toBe(false);
+    expect(reloaded).toMatchObject({ authority: { projectExpectedRevisionId: 'rev-43' } });
   });
 
   it('keeps a stale-revision refusal actionable without overwriting the draft', () => {

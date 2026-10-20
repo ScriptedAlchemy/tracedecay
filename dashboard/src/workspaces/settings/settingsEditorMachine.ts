@@ -133,8 +133,8 @@ export type SettingsEditorAction =
     }
   | { readonly type: 'retry_requested' }
   | { readonly type: 'submit_settled'; readonly result: SettingsMutationResult }
-  /** Discard the draft and take the authority's current values. */
-  | { readonly type: 'reloaded_from_authority' };
+  /** Discard the draft only after a successful explicit authority read. */
+  | { readonly type: 'reloaded_from_authority'; readonly authority: SettingsEditor };
 
 const EDITOR_UNAVAILABLE: SettingsEditorState = { status: 'editor_unavailable' };
 
@@ -166,7 +166,7 @@ export function reduceSettingsEditor(
     case 'reloaded_from_authority':
       return state.status === 'editor_unavailable' || state.status === 'submitting'
         ? state
-        : editing(state.authority, draftOf(state.authority), CLEAN);
+        : editing(action.authority, draftOf(action.authority), CLEAN);
     default: {
       const exhaustive: never = action;
       return exhaustive;

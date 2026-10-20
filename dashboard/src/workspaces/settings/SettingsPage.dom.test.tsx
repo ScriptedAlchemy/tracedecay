@@ -476,6 +476,73 @@ describe('SettingsPage direct settings editing', () => {
     expect(methods).toEqual(['GET /api/settings', 'GET /api/settings', 'GET /api/settings']);
   });
 
+  it('loads a conflict revision already observed while the draft was dirty', async () => {
+    let current = settings();
+    const patches: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/project' && init?.method === 'PATCH') {
+        patches.push(JSON.parse(String(init.body)));
+        current = updatedSettings('rev-44');
+        return jsonResponse(projectPatchResponse(current));
+      }
+      return jsonResponse(current);
+    }));
+    const user = userEvent.setup();
+    const { client } = renderSettings();
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+
+    current = updatedSettings('rev-43');
+    const project = settingsBody(current)['project'] as Record<string, unknown>;
+    (project['config'] as Record<string, unknown>)['max_file_size'] = 4096;
+    await act(() => client.invalidateQueries({ queryKey: ['settings'] }));
+    await waitFor(() => expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy());
+    expect((proposal(MAX_FILE_SIZE) as HTMLInputElement).value).toBe('2097152');
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText(/Settings changed since you loaded them/);
+    await user.click(screen.getByRole('button', { name: 'Load current values' }));
+    expect(await screen.findByDisplayValue('4096')).toBeTruthy();
+
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText('Project settings saved');
+    expect(patches).toEqual([expect.objectContaining({ expected_revision_id: 'rev-43' })]);
+  });
+
+  it('keeps an uncertain write locked until its requested reload completes', async () => {
+    let patchAttempted = false;
+    let finishReload!: (response: Response) => void;
+    const reloadResponse = new Promise<Response>((resolve) => { finishReload = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/project' && init?.method === 'PATCH') {
+        patchAttempted = true;
+        throw new TypeError('connection lost');
+      }
+      if (url === '/api/settings' && patchAttempted) return reloadResponse;
+      return jsonResponse(settings());
+    }));
+    const user = userEvent.setup();
+    renderSettings();
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText(/The connection was lost while saving/);
+    await user.click(screen.getByRole('button', { name: 'Load current values' }));
+
+    expect(screen.getByText(/The connection was lost while saving/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    await act(async () => { finishReload(jsonResponse(updatedSettings('rev-43'))); });
+    expect(await screen.findByDisplayValue('2097152')).toBeTruthy();
+    expect(screen.queryByText(/The connection was lost while saving/)).toBeNull();
+    expect(saveReadout()).toBe('none');
+  });
+
   it('locks both configuration_batch scopes when the effect is withdrawn, and says why', async () => {
     const calls: string[] = [];
     vi.stubGlobal(

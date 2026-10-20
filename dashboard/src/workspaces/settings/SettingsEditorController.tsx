@@ -46,12 +46,12 @@ export function useSettingsEditor({
   payload,
   routes,
   writability,
-  onApplied,
+  refresh,
 }: {
   payload: SettingsPayloadV1;
   routes: SettingsRoutes;
   writability: ScopeWritability;
-  onApplied: () => void;
+  refresh: () => Promise<SettingsPayloadV1 | null>;
 }): SettingsEditorHandle {
   const authority = useMemo(() => buildSettingsEditor(payload), [payload]);
   const [state, dispatch] = useReducer(
@@ -68,7 +68,7 @@ export function useSettingsEditor({
     mutationFn: applySettingsMutation,
     onSuccess: (result) => {
       dispatch({ type: 'submit_settled', result });
-      if (result.outcome === 'success') onApplied();
+      if (result.outcome === 'success') void refresh();
     },
     onError: (error) => {
       dispatch({
@@ -129,10 +129,23 @@ export function useSettingsEditor({
   }, []);
 
   const retry = useCallback(() => dispatch({ type: 'retry_requested' }), []);
-  const reload = useCallback(() => {
-    dispatch({ type: 'reloaded_from_authority' });
-    onApplied();
-  }, [onApplied]);
+  const reloadPending = useRef(false);
+  const reload = useCallback(async () => {
+    if (reloadPending.current) return;
+    reloadPending.current = true;
+    try {
+      const current = await refresh();
+      const reloadedAuthority = current === null ? null : buildSettingsEditor(current);
+      // A failed or pending read cannot settle an uncertain write. Carry the
+      // successful read explicitly: React Query may reuse a snapshot already
+      // observed while the draft was dirty, so its effect need not run again.
+      if (reloadedAuthority !== null) {
+        dispatch({ type: 'reloaded_from_authority', authority: reloadedAuthority });
+      }
+    } finally {
+      reloadPending.current = false;
+    }
+  }, [refresh]);
 
   return useMemo(
     () => ({ state, edit, revert, save, retry, reload }),

@@ -74,7 +74,12 @@ export function SettingsPage() {
     [readUrl, scope],
   );
   const refetch = settings.refetch;
-  const onApplied = useCallback(() => void refetch(), [refetch]);
+  const refresh = useCallback(async () => {
+    const result = await refetch();
+    return !result.isError && result.data?.outcome === 'ok'
+      ? result.data.data.payload
+      : null;
+  }, [refetch]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -84,7 +89,7 @@ export function SettingsPage() {
             envelope={envelope}
             writability={writability}
             routes={routes}
-            onApplied={onApplied}
+            refresh={refresh}
           />
         )}
       </PayloadBoundary>
@@ -119,12 +124,12 @@ function SettingsSurface({
   envelope,
   writability,
   routes,
-  onApplied,
+  refresh,
 }: {
   envelope: DashboardEnvelopeV1<SettingsPayloadV1>;
   writability: ScopeWritability;
   routes: SettingsRoutes;
-  onApplied: () => void;
+  refresh: () => Promise<SettingsPayloadV1 | null>;
 }) {
   const payload = envelope.payload;
   const model = useMemo(() => buildSettingsModel(payload), [payload]);
@@ -132,7 +137,7 @@ function SettingsSurface({
     () => writableScopes(envelope.legal_actions, writability),
     [envelope.legal_actions, writability],
   );
-  const editor = useSettingsEditor({ payload, routes, writability, onApplied });
+  const editor = useSettingsEditor({ payload, routes, writability, refresh });
 
   const [query, setQuery] = useState('');
   const [inspectedKey, setInspectedKey] = useState<string | null>(null);
