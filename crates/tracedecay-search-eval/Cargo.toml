@@ -6,7 +6,6 @@ edition.workspace = true
 license = "MIT"
 description = "TraceDecay search-quality evaluator: exact/lexical/graph candidate generation and direct evaluation"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
-include = ["/assets/**", "/src/**"]
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }

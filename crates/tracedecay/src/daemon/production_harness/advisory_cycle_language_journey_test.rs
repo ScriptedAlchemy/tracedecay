@@ -413,7 +413,8 @@ async fn hook_work_completes(
             None,
             1,
             false,
-            Some(std::sync::Arc::new(move || {
+            None,
+            Some(std::sync::Arc::new(move |_| {
                 if let Some(completed) = completed.lock().expect("completion").take() {
                     let _ = completed.send(());
                 }

@@ -746,50 +746,26 @@ async fn temporal_health_does_not_block_on_a_saturated_general_reader_lane() {
     drop(held);
 }
 
-static NETWORK_PROBE_STARTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-fn rendezvous_network_probe() {
-    use std::sync::atomic::Ordering;
-
-    NETWORK_PROBE_STARTED.fetch_add(1, Ordering::SeqCst);
-    while NETWORK_PROBE_STARTED.load(Ordering::SeqCst) < 2 {
-        std::thread::yield_now();
-    }
-}
-
 #[tokio::test]
-async fn independent_network_probes_overlap() {
-    use std::sync::atomic::Ordering;
-
-    NETWORK_PROBE_STARTED.store(0, Ordering::SeqCst);
+async fn network_section_probes_only_the_github_release_lookup() {
     let mut counters = DoctorCounters::quiet();
-    let mut network = DoctorNetworkChecks::start(AdmittedDoctorNetworkProbes {
-        fetch_worldwide_total: || {
-            rendezvous_network_probe();
-            Some(7)
-        },
-        fetch_latest_version: || {
-            rendezvous_network_probe();
-            Ok("1.2.3".to_owned())
-        },
+    let network = DoctorNetworkChecks::start(AdmittedDoctorNetworkProbes {
+        fetch_latest_version: || Ok("1.2.3".to_owned()),
     });
-    network.admit_worldwide(Ok(&UploadSetting::Resolved(true)));
-    network
-        .report(&mut counters, Ok(&UploadSetting::Resolved(true)))
-        .await
-        .unwrap();
-    assert!(
-        counters.checks.iter().any(|check| check
-            .message
-            .contains("Worldwide counter reachable (total: 7)")),
-        "{:?}",
-        counters.checks
-    );
+    network.report(&mut counters).await.unwrap();
     assert!(
         counters.checks.iter().any(|check| check
             .message
             .contains("GitHub releases API reachable (latest v1.2.3)")),
         "{:?}",
+        counters.checks
+    );
+    assert!(
+        !counters
+            .checks
+            .iter()
+            .any(|check| check.message.to_lowercase().contains("worldwide")),
+        "doctor must not probe or mention the retired worldwide counter: {:?}",
         counters.checks
     );
 }

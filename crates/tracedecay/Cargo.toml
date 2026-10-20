@@ -11,59 +11,6 @@ homepage = "https://github.com/ScriptedAlchemy/tracedecay"
 readme = "../../README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "semantic-search"]
 categories = ["development-tools", "command-line-utilities"]
-# Explicit source-archive whitelist retained for local distribution validation.
-# Frontend sources and the prebuilt dashboard/app-dist are deliberately
-# excluded: the CLI package stages and embeds the dashboard bundle and
-# registers it into this library at process start.
-include = [
-    "/CHANGELOG.md",
-    "/LICENSE",
-    "/README.md",
-    "/rust-toolchain.toml",
-    "/.cargo/config.toml",
-    "/src/**",
-    "/benches/**",
-    "/examples/**",
-    "/tests/fixtures/analytics/**",
-    "/tests/fixtures/packaged_host_events/**",
-    "/tests/fixtures/provider_normalization/**",
-    "/tests/fixtures/redundancy_eval_labeled.json",
-    "/tests/fixtures/transcript_golden/cline_like/**",
-    "/benchmark_data/claude-observation/**",
-    "/benchmark_data/session-temporal/**",
-    "/benchmark_data/query-code-index/**",
-    "/scripts/run-session-temporal-benchmark.sh",
-    "/plugin/.claude-plugin/**",
-    "/plugin/.cursor-plugin/**",
-    "/plugin/.codex-plugin/**",
-    "/plugin/.kimi-plugin/**",
-    "/plugin/.lsp.json",
-    "/plugin/.mcp.json",
-    "/plugin/plugin.json",
-    "/plugin/mcp.json",
-    "/plugin/README*.md",
-    "/plugin/chatgpt-extension/README.md",
-    "/plugin/chatgpt-extension/assets/icon.svg",
-    "/plugin/chatgpt-extension/embedded/app.html",
-    "/plugin/chatgpt-extension/embedded/server.mjs",
-    "/plugin/agents/**",
-    "/plugin/commands/**",
-    "/plugin/hooks/**",
-    "/plugin/mcp-cursor.json",
-    "/plugin/opencode/**",
-    "/plugin/overlays/**",
-    "/plugin/rules/**",
-    "/plugin/skills/**",
-    "/plugin/cursor-native-extension/package.json",
-    "/plugin/cursor-native-extension/README.md",
-    "/plugin/cursor-native-extension/LICENSE",
-    "/plugin/cursor-native-extension/embedded/extension.js",
-    "/vendor/**",
-    "/dashboard/hermes-wrapper/manifest.json",
-    "/dashboard/hermes-wrapper/plugin_api.py",
-    "/dashboard/hermes-wrapper/embed_proxy.py",
-    "/dashboard/hermes-wrapper/src/**",
-]
 
 # Measured aggregate suites exceed the native five-minute medium limit.
 [package.metadata.bazel.test_sizes]

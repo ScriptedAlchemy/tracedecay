@@ -44,6 +44,10 @@ pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.messa
        AND messages.provider = ?1
        AND messages.message_id = requested.value";
 
+// A resumed session can move directories. Only messages without a canonical
+// storage location inherit the session path.
+const MESSAGE_PROJECT_PATH_SQL: &str = "COALESCE(m.location_path, s.project_path)";
+
 /// Appends the project-scope predicate.
 ///
 /// `project_key` is an opaque authority and stays byte-exact. `project_path`
@@ -53,6 +57,7 @@ fn push_project_identity_predicate(
     sql: &mut String,
     query_params: &mut Vec<Value>,
     project_selector: &str,
+    project_path_sql: &str,
 ) {
     query_params.push(Value::Text(project_selector.to_owned()));
     let key_parameter = query_params.len();
@@ -62,7 +67,7 @@ fn push_project_identity_predicate(
     let opened_parameter = query_params.len();
     let _ = write!(
         sql,
-        " AND (s.project_key = ?{key_parameter} OR s.project_path IN (?{path_parameter}, ?{opened_parameter}))"
+        " AND (s.project_key = ?{key_parameter} OR {project_path_sql} IN (?{path_parameter}, ?{opened_parameter}))"
     );
 }
 
@@ -481,7 +486,12 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                  WHERE 1 = 1"
             .to_owned();
         let mut query_params = Vec::with_capacity(2);
-        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
+        push_project_identity_predicate(
+            &mut sql,
+            &mut query_params,
+            project_key,
+            MESSAGE_PROJECT_PATH_SQL,
+        );
         let mut rows = self
             .read_connection()
             .query(sql.as_str(), query_params)
@@ -705,7 +715,12 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         ];
         let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
         if let Some(project_key) = project_key {
-            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
+            push_project_identity_predicate(
+                &mut sql,
+                &mut query_params,
+                project_key,
+                MESSAGE_PROJECT_PATH_SQL,
+            );
         }
         for term in &literal_terms {
             query_params.push(Value::Text(term.clone()));
@@ -849,7 +864,12 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .to_owned();
         let mut query_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
-            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
+            push_project_identity_predicate(
+                &mut sql,
+                &mut query_params,
+                project_key,
+                "s.project_path",
+            );
         }
         query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
@@ -1009,7 +1029,7 @@ async fn search_workflow_facts(
     ];
     let _ = write!(sql, " AND w.provider = ?{}", query_params.len());
     if let Some(project_key) = project_key {
-        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key, "s.project_path");
     }
     let mut term_predicates = Vec::with_capacity(terms.len());
     for term in terms {
@@ -1345,7 +1365,7 @@ mod identity_tests {
         }
         let mut sql = "SELECT count(*) FROM sessions s WHERE 1 = 1".to_owned();
         let mut params = Vec::new();
-        push_project_identity_predicate(&mut sql, &mut params, opened);
+        push_project_identity_predicate(&mut sql, &mut params, opened, "s.project_path");
         let params = params.iter().map(|value| match value {
             Value::Text(text) => text.as_str(),
             _ => panic!("project identity parameters must be text"),

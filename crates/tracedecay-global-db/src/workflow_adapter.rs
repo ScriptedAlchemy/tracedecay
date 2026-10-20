@@ -7,14 +7,13 @@ use std::path::Path;
 use tracedecay_domain::ProjectId;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
-use tracedecay_runtime_core::db::engine::params;
+use crate::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{Executor as _, params};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::source::TranscriptIngestResult;
 use tracedecay_sessions::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowAgent, WorkflowIndexError,
-    WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
-    upsert_run,
+    WorkflowIngestSink, WorkflowRun, read_ingest_watermark, upsert_agent, upsert_run,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::runtime::workflow_ingest::{
@@ -118,26 +117,27 @@ where
 
     #[tracing::instrument(name = "global_db.workflow.bump_watermark", level = "trace", skip_all)]
     async fn bump_ingest_watermark(&self, value: i64) {
-        let Ok(transaction) = self.db().begin_write_transaction().await else {
-            tracing::debug!("workflow ingest writer unavailable");
-            return;
-        };
-        let write = async {
-            transaction
-                .execute(
-                    "INSERT INTO workflow_index_meta(key, value)
+        let write = self
+            .db()
+            .transact(async move |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO workflow_index_meta(key, value)
                          VALUES (?1, ?2)
                          ON CONFLICT(key) DO UPDATE SET
                              value = MAX(value, excluded.value),
                              updated_at = unixepoch()",
-                    params![INGEST_WATERMARK_KEY, value],
-                )
-                .await?;
-            RegisteredGlobalDbWriteTransaction::commit(transaction).await
-        }
-        .await;
-        if let Err(err) = write {
-            tracing::debug!(error = %err, "workflow ingest watermark not advanced");
+                        params![INGEST_WATERMARK_KEY, value],
+                    )
+                    .await
+            })
+            .await;
+        match write {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::debug!(error = %err, "workflow ingest watermark not advanced");
+            }
+            Err(err) => tracing::debug!(error = %err, "workflow ingest writer unavailable"),
         }
     }
 
@@ -147,15 +147,17 @@ where
         run: &WorkflowRun,
         agents: &[WorkflowAgent],
     ) -> Result<(), WorkflowIndexError> {
-        let transaction = self
-            .db()
-            .begin_write_transaction()
+        let run = run.clone();
+        let agents = agents.to_vec();
+        self.db()
+            .transact(async move |transaction| {
+                upsert_run(&transaction, &run).await?;
+                for agent in &agents {
+                    upsert_agent(&transaction, agent).await?;
+                }
+                Ok(())
+            })
             .await
-            .map_err(|error| WorkflowIndexError::Db(error.to_string()))?;
-        upsert_run(&transaction, run).await?;
-        for agent in agents {
-            upsert_agent(&transaction, agent).await?;
-        }
-        WorkflowIngestWriteTxn::commit(transaction).await
+            .map_err(|error| WorkflowIndexError::Db(error.to_string()))?
     }
 }

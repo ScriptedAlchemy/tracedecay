@@ -7,15 +7,6 @@ license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 description = "Tree-sitter language extraction for TraceDecay"
 build = "build.rs"
-include = [
-    "/src/**",
-    "/fixtures/**",
-    "/tests/**",
-    "/vendor/tree-sitter-wgsl/src/**",
-    "/vendor/tree-sitter-wgsl/LICENSE",
-    "/vendor/tree-sitter-wgsl/PROVENANCE.md",
-    "/build.rs",
-]
 
 [features]
 default = ["lite", "medium", "full"]

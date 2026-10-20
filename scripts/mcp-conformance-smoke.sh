@@ -116,7 +116,6 @@ NODE
     echo "error: tracedecay init failed" >&2
     return 1
   fi
-  "$TRACEDECAY_BIN" disable-upload-counter >/dev/null 2>&1 || true
 
   # Resolve and cache the inspector package before any timed call: on a cold
   # runner `npx` spends its first invocation downloading the package, and

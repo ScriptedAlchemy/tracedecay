@@ -14,8 +14,8 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    CanonicalObservationFactV1, CanonicalObservationIdV1, CanonicalObservationRelationsV1,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProviderId, RetentionClass, SessionId, UtcMicros,
 };
@@ -27,7 +27,7 @@ use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
+use tracedecay_store::{ObservationPersistOutcome, ObservationStore, StoreShardScopeV1};
 
 use super::admission::{HookV2BindingAdmission, hook_v2_binding_admission};
 use super::envelope::{hook_now, hook_v2_envelope};
@@ -54,46 +54,227 @@ pub(super) fn hook_v2_native_context_scout_lifecycle(
     lifecycle.matches_envelope(envelope).then_some(lifecycle)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NativeLifecycleAdmissionV1 {
+    Ready,
+    Superseded,
+    Unavailable,
+}
+
+fn native_lifecycle_authorities<'a>(
+    sessions: &'a RegisteredGlobalDb,
+    background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,
+    provider: ProviderId,
+    session: SessionId,
+) -> Option<(
+    HostAdmissionFacade<'a>,
+    ObservationScopeV1,
+    ObservationSourceIdentityV1,
+)> {
+    let StoreShardScopeV1::ProjectSessions { project_id } = &sessions.binding().shard_id.scope
+    else {
+        return None;
+    };
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let source = ObservationSourceIdentityV1::for_provider(provider, session).ok()?;
+    let binding = sessions.binding();
+    let authorities = HostAdmissionAuthorities::for_project(
+        binding.shard_id.brain_id.clone(),
+        binding.shard_id.profile_id.clone(),
+        project_id.clone(),
+        sessions,
+    );
+    let facade = HostAdmissionFacade::new(match background_cpu {
+        Some(cpu) => authorities.with_background_cpu(std::sync::Arc::clone(cpu)),
+        None => authorities,
+    });
+    Some((facade, scope, source))
+}
+
+/// The compatible durable source cursor is a floor only for a new daemon
+/// allocation. A missing cursor starts this source; incompatible or unavailable
+/// authority cannot be converted into a zero floor.
+pub(super) async fn native_lifecycle_order_floor(
+    sessions: &RegisteredGlobalDb,
+    provider: ProviderId,
+    session: SessionId,
+) -> Option<u64> {
+    let (facade, scope, source) = native_lifecycle_authorities(sessions, None, provider, session)?;
+    match facade.get_source_cursor(&source, &scope).await {
+        Ok(None) => Some(0),
+        Ok(Some(cursor))
+            if cursor.source() == &source
+                && cursor.scope() == &scope
+                && cursor.generation().file_id() == 1
+                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence
+                && cursor.position().checked_add(1).is_some() =>
+        {
+            Some(cursor.position().saturating_sub(1))
+        }
+        Ok(Some(_)) | Err(_) => None,
+    }
+}
+
+fn native_lifecycle_observation_envelope(
+    provider: ProviderId,
+    lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
+    range: ObservationSourceRangeV1,
+) -> std::result::Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    let session = lifecycle.session_id.clone();
+    let call = lifecycle.call_id.clone();
+    let agent = ObservationId::new(session.as_str().to_owned())
+        .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
+    CanonicalObservationEnvelopeV1::new(
+        provider,
+        "hook_tool_after",
+        call.clone(),
+        CanonicalObservationRelationsV1::new(session)
+            .with_thread_id(agent.clone())
+            .with_turn_id(call.clone())
+            .with_agent_id(agent)
+            .with_message_id(call),
+        vec![CanonicalObservationFactV1::Boundary {
+            boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::DaemonSequence, range),
+    )
+    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+}
+
+/// A reconstructed legacy position never proves that producer work ran or
+/// became obsolete. Recover its immutable range from the canonical native
+/// observation, and compare only that range with the compatible source cursor.
+pub(super) async fn recovered_native_lifecycle_order(
+    sessions: &RegisteredGlobalDb,
+    provider: ProviderId,
+    lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
+    reconstructed_range: ObservationSourceRangeV1,
+) -> NativeLifecycleAdmissionV1 {
+    let Some((facade, scope, source)) = native_lifecycle_authorities(
+        sessions,
+        None,
+        provider.clone(),
+        lifecycle.session_id.clone(),
+    ) else {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    };
+    let Ok(generation) = ObservationSourceGenerationV1::new(1) else {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    };
+    // Native identity derivation uses source/scope/call, not the candidate's
+    // range. No reconstructed range is persisted or used for cursor ordering.
+    let Ok(candidate) = ObservationIdentityMaterialV1::for_native_record(
+        source.clone(),
+        scope.clone(),
+        generation,
+        reconstructed_range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        lifecycle.call_id.clone(),
+    ) else {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    };
+    let Ok(id) = CanonicalObservationIdV1::derive(&candidate) else {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    };
+    let Ok(Some(stored)) = sessions.observation_store().get_observation(&id).await else {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    };
+    let observation = stored.observation();
+    let identity = observation.identity();
+    if identity.source() != &source
+        || identity.scope() != &scope
+        || identity.generation() != generation
+        || identity.ordering_domain() != ObservationOrderingDomainV1::DaemonSequence
+        || identity.native_record_id() != Some(&lifecycle.call_id)
+    {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    }
+    let range = identity.position();
+    let Ok(expected) =
+        native_lifecycle_observation_envelope(provider, lifecycle, range).and_then(|envelope| {
+            serde_json::to_value(envelope)
+                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+        })
+    else {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    };
+    let committed = stored.committed_cursor();
+    if observation.payload() != &expected
+        || committed.source() != &source
+        || committed.scope() != &scope
+        || committed.generation() != generation
+        || committed.ordering_domain() != ObservationOrderingDomainV1::DaemonSequence
+        || committed.position() != range.end()
+    {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    }
+    match facade.get_source_cursor(&source, &scope).await {
+        Ok(Some(cursor))
+            if cursor.source() == &source
+                && cursor.scope() == &scope
+                && cursor.generation() == generation
+                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence =>
+        {
+            match cursor.position().cmp(&range.end()) {
+                std::cmp::Ordering::Equal => NativeLifecycleAdmissionV1::Ready,
+                std::cmp::Ordering::Greater => NativeLifecycleAdmissionV1::Superseded,
+                std::cmp::Ordering::Less => NativeLifecycleAdmissionV1::Unavailable,
+            }
+        }
+        Ok(None | Some(_)) | Err(_) => NativeLifecycleAdmissionV1::Unavailable,
+    }
+}
+
+/// A later canonical lifecycle is proof that an older boundary is superseded,
+/// including after its successor has left the in-flight orchestration maps.
+pub(super) async fn native_lifecycle_order(
+    sessions: &RegisteredGlobalDb,
+    background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,
+    provider: ProviderId,
+    session: SessionId,
+    range: ObservationSourceRangeV1,
+) -> NativeLifecycleAdmissionV1 {
+    let Some((facade, scope, source)) =
+        native_lifecycle_authorities(sessions, background_cpu, provider, session)
+    else {
+        return NativeLifecycleAdmissionV1::Unavailable;
+    };
+    match facade.get_source_cursor(&source, &scope).await {
+        Ok(None) => NativeLifecycleAdmissionV1::Ready,
+        Ok(Some(cursor))
+            if cursor.source() == &source
+                && cursor.scope() == &scope
+                && cursor.generation().file_id() == 1
+                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence =>
+        {
+            if cursor.position() > range.end() {
+                NativeLifecycleAdmissionV1::Superseded
+            } else {
+                NativeLifecycleAdmissionV1::Ready
+            }
+        }
+        Ok(Some(_)) | Err(_) => NativeLifecycleAdmissionV1::Unavailable,
+    }
+}
+
 #[tracing::instrument(name = "mcp.hook_runtime.scout_lifecycle", level = "trace", skip_all)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Context-scout admission is one native lifecycle bind for the scout claim."
-)]
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
     background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,
     provider: ProviderId,
     lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
     range: ObservationSourceRangeV1,
-) -> bool {
-    let StoreShardScopeV1::ProjectSessions { project_id } = &sessions.binding().shard_id.scope
-    else {
-        return false;
-    };
-    let project_id = project_id.clone();
-    let scope = ObservationScopeV1::Project {
-        project_id: project_id.clone(),
-    };
-    let source = match ObservationSourceIdentityV1::for_provider(
+) -> NativeLifecycleAdmissionV1 {
+    let Some((facade, scope, source)) = native_lifecycle_authorities(
+        sessions,
+        background_cpu,
         provider.clone(),
         lifecycle.session_id.clone(),
-    ) {
-        Ok(source) => source,
-        Err(_) => return false,
+    ) else {
+        return NativeLifecycleAdmissionV1::Unavailable;
     };
-    let binding = sessions.binding();
-    let authorities = HostAdmissionAuthorities::for_project(
-        binding.shard_id.brain_id.clone(),
-        binding.shard_id.profile_id.clone(),
-        project_id,
-        sessions,
-    );
-    let facade = HostAdmissionFacade::new(match background_cpu {
-        Some(background_cpu) => {
-            authorities.with_background_cpu(std::sync::Arc::clone(background_cpu))
-        }
-        None => authorities,
-    });
     // Admission order is per host, so another session's events, or this
     // session's events without a lifecycle, leave gaps between this session's
     // lifecycle positions. The observation covers from the session cursor to
@@ -102,73 +283,50 @@ pub(super) async fn admit_native_context_scout_lifecycle(
     let (range, expected_cursor) = match facade.get_source_cursor(&source, &scope).await {
         Ok(None) => (range, None),
         Ok(Some(cursor))
-            if cursor.generation().file_id() == 1
+            if cursor.source() == &source
+                && cursor.scope() == &scope
+                && cursor.generation().file_id() == 1
                 && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence =>
         {
-            if cursor.position() >= range.end() {
-                return true;
+            if cursor.position() > range.end() {
+                return NativeLifecycleAdmissionV1::Superseded;
+            }
+            if cursor.position() == range.end() {
+                return NativeLifecycleAdmissionV1::Ready;
             }
             let Ok(covered) = ObservationSourceRangeV1::new(cursor.position(), range.end()) else {
-                return false;
+                return NativeLifecycleAdmissionV1::Unavailable;
             };
             (covered, Some(cursor))
         }
-        Ok(Some(_)) | Err(_) => return false,
+        Ok(Some(_)) | Err(_) => return NativeLifecycleAdmissionV1::Unavailable,
     };
     let raw = match serde_json::to_vec(lifecycle) {
         Ok(raw) => raw,
-        Err(_) => return false,
+        Err(_) => return NativeLifecycleAdmissionV1::Unavailable,
     };
-    let session_id = lifecycle.session_id.clone();
-    let call_id = lifecycle.call_id.clone();
-    let canonical_provider = provider.clone();
     let parsed = match parse_normalized_observation_record_v1(
         &raw,
         range,
         ObservationOrderingDomainV1::DaemonSequence,
-        move |_| {
-            CanonicalObservationEnvelopeV1::new(
-                canonical_provider,
-                "hook_tool_after",
-                call_id.clone(),
-                CanonicalObservationRelationsV1::new(session_id.clone())
-                    .with_thread_id(
-                        ObservationId::new(session_id.as_str().to_owned())
-                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
-                    )
-                    .with_turn_id(call_id.clone())
-                    .with_agent_id(
-                        ObservationId::new(session_id.as_str().to_owned())
-                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
-                    )
-                    .with_message_id(call_id.clone()),
-                vec![CanonicalObservationFactV1::Boundary {
-                    boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
-                }],
-                CanonicalObservationEvidenceV1::new(
-                    ObservationOrderingDomainV1::DaemonSequence,
-                    range,
-                ),
-            )
-            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-        },
+        move |_| native_lifecycle_observation_envelope(provider, lifecycle, range),
     ) {
         Ok(parsed) => parsed,
-        Err(_) => return false,
+        Err(_) => return NativeLifecycleAdmissionV1::Unavailable,
     };
     let identity = match ObservationIdentityMaterialV1::for_native_record(
         source,
         scope,
         match ObservationSourceGenerationV1::new(1) {
             Ok(generation) => generation,
-            Err(_) => return false,
+            Err(_) => return NativeLifecycleAdmissionV1::Unavailable,
         },
         range,
         ObservationOrderingDomainV1::DaemonSequence,
         lifecycle.call_id.clone(),
     ) {
         Ok(identity) => identity,
-        Err(_) => return false,
+        Err(_) => return NativeLifecycleAdmissionV1::Unavailable,
     };
     let request = match CaptureObservationRequest::new(
         parsed,
@@ -176,12 +334,12 @@ pub(super) async fn admit_native_context_scout_lifecycle(
         expected_cursor,
         match RetentionClass::new("transcript.hook-lifecycle.v1") {
             Ok(retention) => retention,
-            Err(_) => return false,
+            Err(_) => return NativeLifecycleAdmissionV1::Unavailable,
         },
         ObservationCancellation::default(),
     ) {
         Ok(request) => request,
-        Err(_) => return false,
+        Err(_) => return NativeLifecycleAdmissionV1::Unavailable,
     };
     // Admission is the durable commit of the lifecycle observation. Providers
     // routed through the external-source replay path commit the same durable
@@ -189,16 +347,17 @@ pub(super) async fn admit_native_context_scout_lifecycle(
     // queued projection never blocks Scout lifecycle admission. Idempotent
     // re-admission of the exact same record remains admitted.
     match facade.capture_observation(request).await {
-        Ok(CaptureObservationOutcome::Persisted { .. }) => true,
-        Ok(CaptureObservationOutcome::AcceptedForReplay { outcome, .. }) => matches!(
-            *outcome,
-            ObservationPersistOutcome::Committed(_) | ObservationPersistOutcome::ExactDuplicate(_)
-        ),
-        Ok(
-            CaptureObservationOutcome::Rejected { .. }
-            | CaptureObservationOutcome::Quarantined { .. },
-        )
-        | Err(_) => false,
+        Ok(CaptureObservationOutcome::Persisted { .. }) => NativeLifecycleAdmissionV1::Ready,
+        Ok(CaptureObservationOutcome::AcceptedForReplay { outcome, .. })
+            if matches!(
+                *outcome,
+                ObservationPersistOutcome::Committed(_)
+                    | ObservationPersistOutcome::ExactDuplicate(_)
+            ) =>
+        {
+            NativeLifecycleAdmissionV1::Ready
+        }
+        Ok(_) | Err(_) => NativeLifecycleAdmissionV1::Unavailable,
     }
 }
 
@@ -238,25 +397,6 @@ pub(super) fn lookup_hook_v2_delivery_claim(
         .ok()?
         .get(&(project_id, envelope_id))
         .cloned()
-}
-
-pub(super) fn lookup_hook_v2_delivery_claim_for_event(
-    project_id: [u8; 16],
-    event_id: [u8; 16],
-    now: UtcMicros,
-) -> Option<ContextScoutDurableClaimV1> {
-    let claims = retained_hook_v2_delivery_claims().lock().ok()?;
-    let mut matching = claims
-        .iter()
-        .filter(|((candidate_project_id, _), claim)| {
-            *candidate_project_id == project_id && claim.lease.lease_id == event_id
-        })
-        .map(|(_, claim)| claim);
-    let claim = matching.next()?;
-    if matching.next().is_some() || claim.lease.expires_at.0 <= now.0 {
-        return None;
-    }
-    Some(claim.clone())
 }
 
 pub(super) fn remove_hook_v2_delivery_claim(project_id: [u8; 16], envelope_id: [u8; 16]) {

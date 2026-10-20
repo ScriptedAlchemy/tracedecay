@@ -188,7 +188,7 @@ pub enum ReconciliationState {
 }
 
 /// Read-only preview of a future typed effect.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewResult<T> {
     pub preview_id: PreviewId,

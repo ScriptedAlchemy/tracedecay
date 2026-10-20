@@ -1,5 +1,8 @@
 //! Worktree mount: cold-mount admission through the first serving generation.
 
+#[cfg(test)]
+mod pending_source_tests;
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -353,7 +356,7 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_runtime: Arc<dyn crate::code_graph_seat::CodeGraphSeatRuntimePortV1>,
         project_database: Arc<tracedecay_runtime_core::db::Database>,
         graph_activation_policy: CodeGraphActivationPolicyV1,
-        path_policy: IndexPathPolicyV1,
+        source_inputs: super::super::CodeIndexSourceInputsV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
@@ -365,7 +368,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
                 seated: Arc::default(),
             },
-            path_policy,
+            source_inputs.path_policy,
+            source_inputs.pending_admission,
         )
         .await
     }
@@ -386,6 +390,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 policy: Arc::new(AtomicBool::new(true)),
             },
             crate::config::registry_default_index_path_policy(),
+            None,
         )
         .await
     }
@@ -406,6 +411,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 policy: Arc::new(AtomicBool::new(policy.is_enabled())),
             },
             crate::config::registry_default_index_path_policy(),
+            None,
         )
         .await
     }
@@ -540,6 +546,7 @@ impl CodeIndexSchedulerRegistryV1 {
         store_root: PathBuf,
         graph_activation: CodeGraphActivationAuthorityV1,
         path_policy: IndexPathPolicyV1,
+        pending_source: Option<Arc<dyn super::super::CodeIndexSourcePendingReaderV1>>,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
         #[cfg(test)]
@@ -606,7 +613,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let progress_producer_incarnation = self.mint_progress_producer_incarnation()?;
         let mounted_path_policy = path_policy.clone();
         let mut cold_mount_reservation = cold_mount_reservation;
-        let opened = loop {
+        let mut opened = loop {
             let open_project_id = project_id.clone();
             let open_project_root = project_root.clone();
             let open_store_root = scoped_store_root.clone();
@@ -656,6 +663,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 opened => break opened?,
             }
         };
+        opened.bind_pending_source_reader(pending_source);
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();

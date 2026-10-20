@@ -6,7 +6,6 @@ edition.workspace = true
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 description = "TraceDecay exact/lexical/graph code retrieval query kernel and search-quality candidate/profile inputs"
-include = ["/src/**", "/assets/**"]
 
 [dependencies]
 # Raw deflate for lexical row text; already in the tree through

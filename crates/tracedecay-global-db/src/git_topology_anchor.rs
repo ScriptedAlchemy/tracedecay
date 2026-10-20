@@ -8,7 +8,7 @@ use tracedecay_contracts::retrieval::{
     GitTopologyAnchorResolutionOutcome,
 };
 use tracedecay_domain::{ObservationScopeV1, RetrievalAnchorRecord, RetrievalAnchorTarget};
-use tracedecay_runtime_core::db::engine::{params, params_from_iter};
+use tracedecay_runtime_core::db::engine::{Executor as _, params, params_from_iter};
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -30,58 +30,51 @@ impl RegisteredGitTopologyAnchorAuthority {
         if !binding_matches_owner(&self.database, publication.owner()) {
             return Err(GitTopologyAnchorAuthorityError::Unavailable);
         }
-        let transaction = self
-            .database
-            .begin_write_transaction()
-            .await
-            .map_err(map_database_error)?;
         let records = publication.into_records();
         let anchor_ids = records
             .iter()
             .map(|record| record.anchor_id().as_str().to_owned())
             .collect::<Vec<_>>();
-        let existing = read_records(&transaction, &anchor_ids).await?;
-        let mut published = false;
-        for candidate in records {
-            let existing = existing.get(candidate.anchor_id().as_str());
-            match existing {
-                Some(existing) if existing.is_semantic_replay_of(&candidate) => continue,
-                Some(_) => {
+        self.database
+            .transact(async move |transaction| {
+                let existing = read_records(&transaction, &anchor_ids).await?;
+                let mut published = false;
+                for candidate in &records {
+                    let existing = existing.get(candidate.anchor_id().as_str());
+                    match existing {
+                        Some(existing) if existing.is_semantic_replay_of(candidate) => continue,
+                        Some(_) => return Err(GitTopologyAnchorAuthorityError::Conflict),
+                        None => {}
+                    }
+                    let anchor_json = serde_json::to_string(candidate)
+                        .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
+                    let owner_json = candidate
+                        .owner_column_json()
+                        .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
                     transaction
-                        .rollback()
+                        .execute(
+                            "INSERT INTO retrieval_anchors (
+                                anchor_id, anchor_json, owner_json, projection_generation
+                             ) VALUES (?1, ?2, ?3, ?4)",
+                            params![
+                                candidate.anchor_id().as_str(),
+                                anchor_json,
+                                owner_json,
+                                candidate.projection_generation().as_str(),
+                            ],
+                        )
                         .await
-                        .map_err(|_| GitTopologyAnchorAuthorityError::Unavailable)?;
-                    return Err(GitTopologyAnchorAuthorityError::Conflict);
+                        .map_err(map_engine_error)?;
+                    published = true;
                 }
-                None => {}
-            }
-            let anchor_json = serde_json::to_string(&candidate)
-                .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
-            let owner_json = candidate
-                .owner_column_json()
-                .map_err(|_| GitTopologyAnchorAuthorityError::Conflict)?;
-            transaction
-                .execute(
-                    "INSERT INTO retrieval_anchors (
-                        anchor_id, anchor_json, owner_json, projection_generation
-                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        candidate.anchor_id().as_str(),
-                        anchor_json,
-                        owner_json,
-                        candidate.projection_generation().as_str(),
-                    ],
-                )
-                .await
-                .map_err(map_engine_error)?;
-            published = true;
-        }
-        transaction.commit().await.map_err(map_engine_error)?;
-        Ok(if published {
-            GitTopologyAnchorPublicationOutcome::Published
-        } else {
-            GitTopologyAnchorPublicationOutcome::Replayed
-        })
+                Ok(if published {
+                    GitTopologyAnchorPublicationOutcome::Published
+                } else {
+                    GitTopologyAnchorPublicationOutcome::Replayed
+                })
+            })
+            .await
+            .map_err(map_database_error)?
     }
 
     async fn resolve_record(

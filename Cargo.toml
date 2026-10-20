@@ -64,7 +64,7 @@ resolver = "3"
 # inheritance table is the sanctioned single source of truth.
 [workspace.package]
 edition = "2024"
-version = "1.0.0-beta.88"
+version = "1.0.0-beta.89"
 
 [workspace.dependencies]
 # nightly-outcome-try is an asupersync default (Outcome's Try impls). It
