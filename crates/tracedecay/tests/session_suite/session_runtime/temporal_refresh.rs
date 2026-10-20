@@ -1489,7 +1489,8 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
     new_authority
         .rekey_project(&registry, &old_owner, new_owner.clone())
         .await;
-    wake.wake();
+    // The replacement worker owns the dirty flag; join its actual pass.
+    assert!(wake.wake_and_wait_until_idle(Duration::from_secs(1)).await);
 
     assert!(old_state.is_cancelled());
     assert!(registry.project_state(&old_owner).await.is_none());
@@ -1501,6 +1502,5 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
     assert!(!stale.wake());
     assert!(registry.project_state(&old_owner).await.is_none());
     assert_eq!(registry.project_worker_count().await, 1);
-    assert!(new_state.take_dirty());
     registry.shutdown().await;
 }

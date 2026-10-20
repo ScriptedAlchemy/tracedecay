@@ -10,7 +10,6 @@ description = "Bounded event capture primitives for TraceDecay"
 readme = "README.md"
 keywords = ["ai", "code-intelligence", "observability", "capture"]
 categories = ["development-tools", "parsing"]
-include = ["/src/**", "/tests/**", "/README.md"]
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }

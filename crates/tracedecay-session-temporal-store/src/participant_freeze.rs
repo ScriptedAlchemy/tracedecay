@@ -531,7 +531,9 @@ mod tests {
         bind_test_session_relation_graph, open_registered_test_database_fixture,
         publish_test_session_relation_projection,
     };
-    use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+    use tracedecay_global_db::{
+        RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1, RegisteredGlobalDbWriterConnection,
+    };
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
     use tracedecay_temporal_query::candidates::CandidateChannel;
@@ -656,7 +658,7 @@ mod tests {
 
     /// `execute()` signs its continuation cursors, so a root fixture that stops at
     /// `freeze()` needs no key and one that runs a query needs exactly one.
-    async fn seed_root_cursor_key(connection: &TestConnection) {
+    async fn seed_root_cursor_key(connection: &impl Executor) {
         connection
             .execute(
                 "INSERT INTO session_query_cursor_keys (
@@ -675,7 +677,7 @@ mod tests {
     /// on to publish a real projection must let the publisher mint its own.
     async fn publish_root_relation_projection(
         database: &RegisteredGlobalDbLeaseV1,
-        connection: &TestConnection,
+        connection: &impl Executor,
         session_id: &str,
     ) {
         for table in [
@@ -784,7 +786,7 @@ mod tests {
     }
 
     async fn seed_root_sessions(
-        connection: &TestConnection,
+        connection: &impl Executor,
         count: usize,
         hit_count: usize,
         source_frontier: u64,
@@ -801,7 +803,7 @@ mod tests {
     /// Term overlap across sessions is what separates the lexical tiers, so a
     /// fixture that exercises them has to choose each session's words.
     async fn seed_root_sessions_with_text(
-        connection: &TestConnection,
+        connection: &impl Executor,
         count: usize,
         hit_count: usize,
         source_frontier: u64,
@@ -978,13 +980,11 @@ mod tests {
         }
     }
 
+    /// Opens the registered root without attaching a second writer to its file.
+    /// Callers seed through `writer_connection`, the same lane projection uses.
     async fn open_root_fixture(
         directory: &TempDir,
-    ) -> (
-        RegisteredGlobalDbLeaseV1,
-        RegisteredGlobalDbOwnerV1,
-        TestConnection,
-    ) {
+    ) -> (RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1) {
         let database_path = directory.path().join("sessions.db");
         let (database, owner) = open_registered_test_database_fixture(
             &database_path,
@@ -993,12 +993,20 @@ mod tests {
         .await
         .expect("registered schema");
         bind_test_session_relation_graph(&database).expect("session relation graph");
-        (database, owner, TestConnection::open(&database_path))
+        (database, owner)
+    }
+
+    fn root_fixture_writer(
+        database: &RegisteredGlobalDbLeaseV1,
+    ) -> RegisteredGlobalDbWriterConnection<'_> {
+        database
+            .writer_connection()
+            .expect("registered root fixture writer")
     }
 
     /// Groups the first seeded session's matching occurrence together with
     /// `extra_members` further matching occurrences into one span evidence row.
-    async fn seed_root_span_evidence(connection: &TestConnection, extra_members: usize) {
+    async fn seed_root_span_evidence(connection: &impl Executor, extra_members: usize) {
         seed_root_span(connection, extra_members, "needle cohort", "anchor.000").await;
     }
 
@@ -1006,14 +1014,14 @@ mod tests {
     /// happens to contain the one message the query matched. Each member carries
     /// its own anchor and text, so no channel proposes it as a result.
     async fn seed_root_span_over_unmatched_members(
-        connection: &TestConnection,
+        connection: &impl Executor,
         extra_members: usize,
     ) {
         seed_root_span(connection, extra_members, "surrounding chatter", "").await;
     }
 
     async fn seed_root_span(
-        connection: &TestConnection,
+        connection: &impl Executor,
         extra_members: usize,
         text: &str,
         shared_anchor: &str,
@@ -1149,7 +1157,7 @@ mod tests {
     /// query's terms is common and their conjunction is rare. Two sessions carry
     /// all four terms; every other session carries three of them, so an OR clause
     /// proposes the entire root and even a drop-one clause proposes hundreds.
-    async fn seed_root_lexical_cohort(connection: &TestConnection, count: usize) {
+    async fn seed_root_lexical_cohort(connection: &impl Executor, count: usize) {
         seed_root_sessions_with_text(connection, count, count, 1, &|index| {
             match index {
                 0 | 1 => "alpha beta gamma delta",
@@ -1167,7 +1175,7 @@ mod tests {
 
     /// One session holds three of the query's four terms and nothing holds all
     /// four, so the strict tier is a verified zero and the drop-one tier answers.
-    async fn seed_root_relaxable_cohort(connection: &TestConnection) {
+    async fn seed_root_relaxable_cohort(connection: &impl Executor) {
         seed_root_sessions_with_text(connection, 4, 4, 1, &|index| match index {
             0 => "alpha beta gamma".to_string(),
             _ => format!("beta without the rest {index}"),
@@ -1207,7 +1215,8 @@ mod tests {
     #[asupersync::test]
     async fn root_conjunctive_lexical_answers_with_the_messages_every_term_matches() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_lexical_cohort(&connection, 300).await;
         seed_root_cursor_key(&connection).await;
         for session in ["session.000", "session.001"] {
@@ -1256,7 +1265,8 @@ mod tests {
     #[asupersync::test]
     async fn a_verified_zero_strict_tier_relaxes_one_named_step() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_relaxable_cohort(&connection).await;
         seed_root_cursor_key(&connection).await;
         publish_root_relation_projection(&database, &connection, "session.000").await;
@@ -1285,7 +1295,8 @@ mod tests {
     #[asupersync::test]
     async fn a_timed_out_strict_tier_refuses_instead_of_relaxing() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_relaxable_cohort(&connection).await;
         seed_root_cursor_key(&connection).await;
         publish_root_relation_projection(&database, &connection, "session.000").await;
@@ -1313,7 +1324,8 @@ mod tests {
     #[asupersync::test]
     async fn root_span_matched_by_many_members_is_one_candidate_over_300_sessions() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_sessions(&connection, 300, 1, 1).await;
         seed_root_span_evidence(&connection, 4).await;
 
@@ -1347,7 +1359,8 @@ mod tests {
     #[asupersync::test]
     async fn root_rare_hit_executes_under_the_unchanged_record_ceiling() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_sessions(&connection, 300, 1, 1).await;
         seed_root_cursor_key(&connection).await;
         publish_root_relation_projection(&database, &connection, "session.000").await;
@@ -1381,7 +1394,8 @@ mod tests {
     #[asupersync::test]
     async fn root_record_read_exhaustion_is_a_typed_budget_refusal_from_execute() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_sessions(&connection, 300, 8, 1).await;
         seed_root_cursor_key(&connection).await;
         for index in 0..8 {
@@ -1428,7 +1442,8 @@ mod tests {
     #[asupersync::test]
     async fn root_no_hit_over_256_sessions_is_truthful_zero_not_manifest_limit() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_sessions(&connection, 300, 0, 1).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -1467,7 +1482,8 @@ mod tests {
     #[asupersync::test]
     async fn root_no_hit_reports_aggregate_projection_staleness() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_sessions(&connection, 3, 0, 2).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -1486,7 +1502,8 @@ mod tests {
     #[asupersync::test]
     async fn root_rare_hit_over_256_sessions_freezes_only_the_admitted_participant() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_sessions(&connection, 300, 1, 1).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -1511,7 +1528,8 @@ mod tests {
     #[asupersync::test]
     async fn root_strict_population_over_one_window_returns_truthful_partial_coverage() {
         let directory = tempdir().expect("temporary directory");
-        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        let (database, _owner) = open_root_fixture(&directory).await;
+        let connection = root_fixture_writer(&database);
         seed_root_sessions_with_text(&connection, 300, 280, 1, &|index| {
             format!("needle strict-{index:03} cohort")
         })

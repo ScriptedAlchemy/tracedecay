@@ -1507,6 +1507,40 @@ fn serve_broker_socket_client_inner(
                     return Ok(());
                 }
 
+                match Box::pin(super::core_hooks::admit_unmounted_file_edit(
+                    &engine.store_administration,
+                    &handshake,
+                    first_request.parsed(),
+                ))
+                .await
+                {
+                    Ok(Some(routed)) => {
+                        let response = first_request
+                            .parsed()
+                            .and_then(|request| request.id.clone())
+                            .map(|id| JsonRpcResponse::success(id, serde_json::json!({})));
+                        let written = match response {
+                            Some(response) => write_daemon_response(&mut transport, &response).await,
+                            None => Ok(()),
+                        };
+                        if let Err(error) = engine.schedule_project_server_warmup(routed, None).await {
+                            tracing::warn!(%error, "durably admitted file edit awaits project publication");
+                        }
+                        written?;
+                        return Ok(());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        write_project_open_error(
+                            &mut transport,
+                            &first_request,
+                            &handshake.client_instance_id,
+                            &error,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
                 let projectless_request = projectless_first_request(first_request.parsed());
                 let project_owner = boxed_broker_connection_phase(async {
                     if handshake.project_path.is_some() && !projectless_request {
@@ -2030,6 +2064,52 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             if let Some(response) = response {
                 write_daemon_response(&mut transport, &response).await?;
             }
+            return Ok(());
+        }
+    }
+    match Box::pin(super::core_hooks::admit_unmounted_file_edit(
+        &store_administration,
+        &handshake,
+        first_request.parsed(),
+    ))
+    .await
+    {
+        Ok(Some(routed)) => {
+            let response = first_request
+                .parsed()
+                .and_then(|request| request.id.clone())
+                .map(|id| JsonRpcResponse::success(id, serde_json::json!({})));
+            let written = match response {
+                Some(response) => write_daemon_response(&mut transport, &response).await,
+                None => Ok(()),
+            };
+            if let Err(error) = Box::pin(schedule_portable_project_server_warmup(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry.clone(),
+                routed,
+                None,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ))
+            .await
+            {
+                tracing::warn!(%error, "durably admitted file edit awaits project publication");
+            }
+            written?;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(error) => {
+            write_project_open_error(
+                &mut transport,
+                &first_request,
+                &handshake.client_instance_id,
+                &error,
+            )
+            .await?;
             return Ok(());
         }
     }

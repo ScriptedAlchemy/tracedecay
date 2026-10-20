@@ -44,6 +44,24 @@ py_test(
 )
 
 py_test(
+    name = "build_eval_binary_test",
+    size = "small",
+    srcs = ["test-build-eval-binary.py"],
+    data = ["build-eval-binary.sh"],
+    main = "test-build-eval-binary.py",
+)
+
+py_test(
+    name = "bazel_dependency_patches_test",
+    size = "small",
+    srcs = ["test-bazel-dependency-patches.py"],
+    data = [
+        "//:MODULE.bazel",
+    ] + glob(["bazel/patches/*.patch"]),
+    main = "test-bazel-dependency-patches.py",
+)
+
+py_test(
     name = "ambient_tokio_check_test",
     size = "small",
     srcs = [
@@ -53,9 +71,38 @@ py_test(
     main = "test-check-ambient-tokio.py",
 )
 
+py_binary(
+    name = "packaged_lsp_bridge",
+    srcs = [
+        "check-packaged-lsp-bridge.py",
+        "lib/__init__.py",
+        "lib/portable_process.py",
+        "lib/process_control.py",
+    ],
+    imports = ["."],
+    main = "check-packaged-lsp-bridge.py",
+)
+
+py_test(
+    name = "packaged_lsp_bridge_test",
+    size = "small",
+    srcs = [
+        "check-packaged-lsp-bridge.py",
+        "test-check-packaged-lsp-bridge.py",
+        "lib/__init__.py",
+        "lib/portable_process.py",
+        "lib/process_control.py",
+    ],
+    imports = ["."],
+    main = "test-check-packaged-lsp-bridge.py",
+)
+
 exports_files(
     [
         "bazel/rust_test.bzl",
+        "build-eval-binary.sh",
+        "test-rust-cache-lineage.py",
+        "test-check-packaged-lsp-bridge.py",
         "test-check-sdk-publish-workflow.py",
         "check-sdk-publish-workflow.py",
         "test-build-mcpb.py",
@@ -68,6 +115,7 @@ exports_files(
         "check-dashboard-bundle.py",
         "check-github-hosted-runners.py",
         "run-session-temporal-benchmark.sh",
+        "mcp-conformance-smoke.sh",
         "test-check-github-hosted-runners.py",
         "test-gen-builds-default-alias.py",
         "test-measure-ranked-tail-trim.py",

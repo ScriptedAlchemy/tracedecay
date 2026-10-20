@@ -266,7 +266,7 @@ fn pressure_from_sample(
             resident_bytes: 0,
             unreclaimable_bytes: 0,
             swapped_bytes: 0,
-            cgroup_committed_bytes: None,
+            cgroup_headroom_bytes: None,
         },
     ));
     let sampled = Arc::clone(&sample);
@@ -288,7 +288,7 @@ fn set_sample(
             resident_bytes: unreclaimable_bytes,
             unreclaimable_bytes,
             swapped_bytes: 0,
-            cgroup_committed_bytes: None,
+            cgroup_headroom_bytes: None,
         };
 }
 
@@ -2206,7 +2206,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
             resident_bytes: 0,
             unreclaimable_bytes: 0,
             swapped_bytes: 0,
-            cgroup_committed_bytes: None,
+            cgroup_headroom_bytes: None,
         },
     ));
     let refuse_once_projecting = Arc::new(AtomicBool::new(true));
@@ -2227,7 +2227,7 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
                             resident_bytes: limit_bytes,
                             unreclaimable_bytes: limit_bytes,
                             swapped_bytes: 0,
-                            cgroup_committed_bytes: None,
+                            cgroup_headroom_bytes: None,
                         },
                     );
                 }
@@ -2383,7 +2383,7 @@ async fn sealed_publication_samples_resident_memory_per_interval_not_per_row() {
                 resident_bytes: 0,
                 unreclaimable_bytes: 0,
                 swapped_bytes: 0,
-                cgroup_committed_bytes: None,
+                cgroup_headroom_bytes: None,
             })
         }),
     ));

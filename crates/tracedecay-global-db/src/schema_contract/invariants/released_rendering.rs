@@ -62,7 +62,7 @@
 
 use std::sync::Mutex;
 
-use tracedecay_runtime_core::db::engine::Executor;
+use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_store::{
     ProjectionStoreError, SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection,
     message_output_digest,
@@ -94,9 +94,23 @@ pub(super) enum StoredProvenanceRendering {
 #[derive(Default)]
 pub(super) struct ReleasedRenderingLedger {
     outputs: Mutex<Vec<SessionMessageProjection>>,
+    locations: Mutex<Vec<(String, String, String)>>,
 }
 
 impl ReleasedRenderingLedger {
+    /// Storage-only backfill for a verified row whose protected rendering is current.
+    pub(super) fn record_location(&self, projection: &SessionMessageProjection, location: String) {
+        let message = projection.message();
+        self.locations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((
+                message.provider.clone(),
+                message.message_id.clone(),
+                location,
+            ));
+    }
+
     pub(super) fn record(&self, projection: &SessionMessageProjection) {
         let mut outputs = self
             .outputs
@@ -127,8 +141,36 @@ impl ReleasedRenderingLedger {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
+        let locations = std::mem::take(
+            &mut *self
+                .locations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if !locations.is_empty() {
+            let encoded = serde_json::to_string(&locations).map_err(|error| {
+                authority_violation(format!(
+                    "failed to encode projected message locations: {error}"
+                ))
+            })?;
+            conn.execute(
+                "UPDATE lcm_raw_messages AS message
+                 SET location_path = json_extract(location.value, '$[2]')
+                 FROM json_each(?1) AS location
+                 WHERE message.provider = json_extract(location.value, '$[0]')
+                   AND message.message_id = json_extract(location.value, '$[1]')
+                   AND message.location_path IS NULL",
+                params![encoded.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                authority_violation(format!(
+                    "failed to backfill projected message locations: {error}"
+                ))
+            })?;
+        }
         if outputs.is_empty() {
-            return Ok(0);
+            return Ok(locations.len());
         }
         // Retiring a quarantined observation removes every output it created,
         // so its remaining recorded outputs are already converged; re-running
@@ -176,7 +218,7 @@ impl ReleasedRenderingLedger {
             retired = retired.len(),
             "converged released projection output renderings to this binary's rendering"
         );
-        Ok(outputs.len())
+        Ok(outputs.len() + locations.len())
     }
 }
 
@@ -533,7 +575,7 @@ mod tests {
             message.session_id, session.session_id,
             "the fixture's released output must belong to its released session"
         );
-        tracedecay_lcm::raw::upsert_projection_raw_message(conn, &message)
+        tracedecay_lcm::raw::upsert_projection_raw_message(conn, &message, None)
             .await
             .expect("restore the released message row");
         conn.execute(
@@ -967,7 +1009,7 @@ mod tests {
         )
         .await
         .expect("install the released session row");
-        tracedecay_lcm::raw::upsert_projection_raw_message(conn, &message)
+        tracedecay_lcm::raw::upsert_projection_raw_message(conn, &message, None)
             .await
             .expect("the released rendering must still be servable by this binary's sanitizer");
         let digest = stored_release_digest(&session, &message);

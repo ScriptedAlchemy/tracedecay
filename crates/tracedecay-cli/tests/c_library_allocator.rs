@@ -19,10 +19,15 @@ static MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const MIB: usize = 1024 * 1024;
 
 /// Bytes glibc's arenas and its mmapped chunks hold for live allocations.
+///
+/// The hermetic toolchain links against glibc 2.31, which predates
+/// `mallinfo2`. `mallinfo` reports the same counters as `int`, which this
+/// test's few-MiB working set stays far below.
 fn glibc_in_use() -> usize {
-    // SAFETY: `mallinfo2` only reads allocator statistics.
-    let info = unsafe { libc::mallinfo2() };
-    info.uordblks + info.hblkhd
+    // SAFETY: `mallinfo` only reads allocator statistics.
+    let info = unsafe { libc::mallinfo() };
+    usize::try_from(info.uordblks).expect("in-use arena bytes fit in int")
+        + usize::try_from(info.hblkhd).expect("mmapped bytes fit in int")
 }
 
 #[test]

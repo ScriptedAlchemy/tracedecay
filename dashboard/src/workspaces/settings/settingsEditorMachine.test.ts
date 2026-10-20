@@ -391,6 +391,7 @@ describe('settings editor: each verdict is its own state', () => {
       resyncRecommended: false,
       restartRecommended: false,
       effectReceipt: null,
+      effectReconciliation: null,
     });
 
     expect(settled).toBe(editing);
@@ -408,6 +409,7 @@ describe('settings editor: a save and a pending change cannot be shown at once',
       resyncRecommended: true,
       restartRecommended: false,
       effectReceipt: null,
+      effectReconciliation: null,
     });
 
   it('records the save the authority reported, and nothing it did not', () => {
@@ -420,6 +422,7 @@ describe('settings editor: a save and a pending change cannot be shown at once',
       revisionId: 'rev-43',
       resyncRecommended: true,
       restartRecommended: false,
+      effectReconciliation: null,
     });
     expect(settingsRejection(state)).toBeNull();
     expect(settingsReviewOf(state)).toBeNull();

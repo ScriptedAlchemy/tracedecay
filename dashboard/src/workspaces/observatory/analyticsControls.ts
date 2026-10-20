@@ -1,9 +1,8 @@
-/** Plan 26 analytics controls over canonical settings and Observatory reads. */
+/** Plan 26 analytics controls over Observatory reads. */
 import type {
   AnalyticsModeV1,
   AnalyticsModeReadModelV1,
   MetricValueV1,
-  SettingsPayloadV1,
   StorageFindingKindStatusV1,
 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
@@ -229,29 +228,4 @@ export function shareStagingReading(metrics: readonly MetricValueV1[]): ShareSta
     };
   }
   return { ageSeconds: metric.value, state: 'ready', reason: '' };
-}
-
-export interface UploadSettingReading {
-  /** The profile setting value, or `null` when the settings read carried none. */
-  enabled: boolean | null;
-  settingKey: string;
-  state: DomainStateKind;
-  /** The one sentence that keeps this from being mistaken for the analytics
-   * collection mode. */
-  disclaimer: string;
-}
-
-/** The `user.upload_enabled.v1` profile setting from `/api/settings`. Real,
- * wire-published, and explicitly not `AnalyticsModeV1`. */
-export function uploadSettingReading(
-  settings: SettingsPayloadV1 | undefined,
-): UploadSettingReading {
-  const enabled = settings?.user.upload_enabled ?? null;
-  return {
-    enabled,
-    settingKey: 'user.upload_enabled.v1',
-    state: enabled == null ? 'unknown' : 'ready',
-    disclaimer:
-      'This is the profile upload setting, not the Plan 26 analytics collection mode. It does not select Off, LocalOnly, or AggregateShare and does not govern adoption analytics.',
-  };
 }
