@@ -256,12 +256,12 @@ pub async fn save_scheduler_control(
         )
     })
     .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to write automation scheduler control '{}': {e}",
-                path.display()
-            ),
-        })
+    .map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to write automation scheduler control '{}': {e}",
+            path.display()
+        ),
+    })
 }
 
 impl AutomationTaskLock {
