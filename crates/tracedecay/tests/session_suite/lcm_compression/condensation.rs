@@ -55,7 +55,7 @@ async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
                 summary_fan_in: Some(3),
                 ..Default::default()
             },
-            summarizer: provided_summary("depth one condensed".into()),
+            summarizer: provided_summary("depth one condensed"),
         })
         .await
         .unwrap();
@@ -164,7 +164,7 @@ async fn condensation_waits_for_one_depth_with_enough_unparented_nodes() {
                 summary_fan_in: Some(3),
                 ..Default::default()
             },
-            summarizer: provided_summary("should not mix depths".into()),
+            summarizer: provided_summary("should not mix depths"),
         })
         .await
         .unwrap();
@@ -243,7 +243,7 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
                 summary_fan_in: Some(3),
                 ..Default::default()
             },
-            summarizer: provided_summary("depth one condensed".into()),
+            summarizer: provided_summary("depth one condensed"),
         })
         .await
         .unwrap();
@@ -309,7 +309,7 @@ async fn condensation_respects_default_incremental_max_depth() {
     let mut request = compress_request(
         "cursor",
         "session-1",
-        provided_summary("should not condense above max depth".into()),
+        provided_summary("should not condense above max depth"),
     );
     request.overrides.summary_fan_in = Some(3);
     let response = db.lcm_compress(request).await.unwrap();
@@ -373,7 +373,7 @@ async fn condensation_honors_non_default_incremental_max_depth() {
     let mut request = compress_request(
         "cursor",
         "session-1",
-        provided_summary("condensed depth one summaries".into()),
+        provided_summary("condensed depth one summaries"),
     );
     request.overrides.summary_fan_in = Some(3);
     request.overrides.incremental_max_depth = Some(2);

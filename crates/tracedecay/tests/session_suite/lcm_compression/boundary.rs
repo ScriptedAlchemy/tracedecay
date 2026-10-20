@@ -184,7 +184,7 @@ async fn compression_boundary_links_without_reassigning_lcm_data() {
         .lcm_compress(compress_request(
             "cursor",
             "session-old",
-            provided_summary("old summary".into()),
+            provided_summary("old summary"),
         ))
         .await
         .unwrap();
@@ -269,7 +269,7 @@ async fn compression_boundary_links_without_reassigning_lcm_data() {
         .lcm_compress(compress_request(
             "cursor",
             "session-new",
-            provided_summary("unused".into()),
+            provided_summary("unused"),
         ))
         .await
         .unwrap();
@@ -365,7 +365,7 @@ async fn compression_boundary_link_preserves_payload_owner_and_projects_debt() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-old",
-            provided_summary("first chunk summary".into()),
+            provided_summary("first chunk summary"),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
@@ -467,7 +467,7 @@ async fn boundary_link_to_existing_target_leaves_source_session_state_intact() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-old",
-            provided_summary("first chunk summary".into()),
+            provided_summary("first chunk summary"),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,

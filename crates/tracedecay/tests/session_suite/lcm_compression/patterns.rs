@@ -22,7 +22,7 @@ async fn ignored_session_pattern_skips_active_ingest_and_compression() {
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             overrides: Default::default(),
-            summarizer: provided_summary("should not be used".into()),
+            summarizer: provided_summary("should not be used"),
         })
         .await
         .unwrap();
@@ -91,7 +91,7 @@ async fn stateless_session_pattern_keeps_replay_but_does_not_persist_lcm_rows() 
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             overrides: Default::default(),
-            summarizer: provided_summary("should not be used".into()),
+            summarizer: provided_summary("should not be used"),
         })
         .await
         .unwrap();

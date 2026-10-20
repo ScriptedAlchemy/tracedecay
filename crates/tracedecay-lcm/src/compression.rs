@@ -10,14 +10,16 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value as SqlV
 use tracedecay_store::{SessionMessageRecord, session_project_fields};
 
 use super::compression_decision::{
-    self, AssemblyCapInput, CompressionPlanInput, CondensationCandidateDecision,
-    CondensationDecision, CondensationDecisionInput, OverflowRecoveryCapInput,
-    PreflightDecisionInput,
+    self, CompressionPlanInput, CondensationCandidateDecision, CondensationDecision,
+    CondensationDecisionInput, OverflowRecoveryCapInput, PreflightDecisionInput,
 };
 use super::compression_policy::{is_policy_anchor_role, source_token_count};
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
-use super::types::{LcmExtractionResult, LcmRelationProjectionStatus, LcmSummarySourceRange};
+use super::types::{
+    CRITICAL_PRESSURE_CATCH_UP_RETRY, LcmExtractionResult, LcmRelationProjectionStatus,
+    LcmSummarySourceRange, NEEDS_SUMMARY_STATUS,
+};
 use super::{
     LCM_DEFAULT_FRESH_TAIL_COUNT, LcmCompressionRequest, LcmCompressionResponse, LcmError,
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
@@ -289,9 +291,7 @@ pub async fn preflight(
 ) -> Result<LcmPreflightResponse, LcmError> {
     let mut request = request;
     request.overrides.max_assembly_tokens =
-        compression_decision::effective_assembly_token_cap(AssemblyCapInput {
-            overrides: &request.overrides,
-        });
+        compression_decision::effective_assembly_token_cap(&request.overrides);
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
         &request.ignore_session_patterns,
@@ -473,9 +473,7 @@ pub async fn begin_compression_pass(
     payload_rollback: &mut payload::PayloadFileRollback,
     retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<CompressionAdmission, LcmError> {
-    let assembly_token_cap = compression_decision::effective_assembly_token_cap(AssemblyCapInput {
-        overrides: &request.overrides,
-    });
+    let assembly_token_cap = compression_decision::effective_assembly_token_cap(&request.overrides);
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
         &request.ignore_session_patterns,
@@ -641,7 +639,7 @@ async fn prepare_compression_context(
     let overflow_assembly_cap =
         compression_decision::overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
             current_tokens: request.current_tokens,
-            overrides: &request.overrides,
+            max_assembly_tokens: assembly_token_cap,
             messages: &request.messages,
         });
 
@@ -857,7 +855,7 @@ fn auxiliary_summary_response(
         replay_without_summary(&context.window.pinned_anchors, &context.window.fresh_tail);
 
     Some(compression_response(
-        "needs_summary",
+        NEEDS_SUMMARY_STATUS,
         "hermes_auxiliary_not_available",
         Vec::new(),
         replay_messages,
@@ -948,7 +946,7 @@ async fn persist_and_replay_backlog_compression(
     let retry_status = context
         .plan
         .forced_overflow_recovery
-        .then_some("critical_pressure_catch_up");
+        .then_some(CRITICAL_PRESSURE_CATCH_UP_RETRY);
 
     Ok(compression_response_with_attempt_state(
         CompressionResponseParts {

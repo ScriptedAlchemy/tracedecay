@@ -8,7 +8,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_lcm::summary_convergence::{
     LcmSummaryConvergenceCandidate, LcmSummaryConvergenceQueueState,
 };
-use tracedecay_lcm::{LcmCompressionRequest, LcmError, LcmSummarizerMode};
+use tracedecay_lcm::{LcmCompressionOutcome, LcmCompressionRequest, LcmError, LcmSummarizerMode};
 
 use crate::session_temporal_refresh_scheduler::registry::session_refresh_retry_delay;
 use crate::session_temporal_refresh_scheduler::wake::SessionTemporalRefreshRetryClass;
@@ -438,18 +438,19 @@ async fn process_candidate(
                 return record_candidate_error(database, candidate, error, now_unix_ms).await;
             }
         };
-    let mut bounded = bounded;
-    let response_outcome = bounded.response.take_outcome()?;
-    let deferred_reason = match &response_outcome {
-        tracedecay_lcm::LcmCompressionOutcome::Complete => None,
-        tracedecay_lcm::LcmCompressionOutcome::Deferred { reason, .. } => Some(reason.as_str()),
-        tracedecay_lcm::LcmCompressionOutcome::NeedsSummary(_) => {
-            return Err(LcmError::Db(
-                "retained compression left an unresolved summary request".to_string(),
-            ));
+    let response = &bounded.response;
+    let deferred_reason = match response.outcome() {
+        Ok(LcmCompressionOutcome::Complete) => None,
+        Ok(LcmCompressionOutcome::Deferred { reason }) => Some(reason),
+        Ok(LcmCompressionOutcome::NeedsSummary(_)) => {
+            let error =
+                LcmError::Db("retained compression left an unresolved summary request".to_string());
+            return record_candidate_error(database, candidate, error, now_unix_ms).await;
+        }
+        Err(error) => {
+            return record_candidate_error(database, candidate, error, now_unix_ms).await;
         }
     };
-    let response = &bounded.response;
     let (state, disposition, failure_code) = if let Some(reason) = deferred_reason {
         (
             LcmSummaryConvergenceQueueState::Unavailable,

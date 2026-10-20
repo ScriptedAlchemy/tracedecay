@@ -522,3 +522,49 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
     );
     assert!(mount_registered_lcm_authority(database, project_identity, &shard).is_none());
 }
+
+#[test]
+fn pressure_conversion_keeps_every_override_and_drops_host_content() {
+    let overrides = tracedecay_lcm::LcmCompressionOverrides {
+        threshold_tokens: Some(11),
+        max_assembly_tokens: Some(12),
+        leaf_chunk_tokens: Some(13),
+        max_source_messages: Some(14),
+        summary_fan_in: Some(15),
+        incremental_max_depth: Some(-1),
+        fresh_tail_count: Some(0),
+        dynamic_leaf_chunk_enabled: Some(true),
+        dynamic_leaf_chunk_max: Some(18),
+        context_length: Some(19),
+        reserve_tokens_floor: Some(20),
+    };
+    let request = pressure_compression_request(LcmPreflightRequest {
+        provider: "cursor".to_owned(),
+        session_id: "session.lcm-test".to_owned(),
+        messages: vec![serde_json::json!({
+            "role": "user",
+            "content": "host-authored text that must not be compacted",
+        })],
+        current_tokens: Some(42),
+        overrides: overrides.clone(),
+        ignore_session_patterns: vec!["ignored-*".to_owned()],
+        stateless_session_patterns: vec!["stateless-*".to_owned()],
+    });
+
+    assert_eq!(
+        request,
+        LcmCompressionRequest {
+            provider: "cursor".to_owned(),
+            session_id: "session.lcm-test".to_owned(),
+            messages: Vec::new(),
+            current_tokens: Some(42),
+            focus_topic: None,
+            ignore_session_patterns: vec!["ignored-*".to_owned()],
+            stateless_session_patterns: vec!["stateless-*".to_owned()],
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
+            overrides,
+            summarizer: LcmSummarizerMode::HermesAuxiliary,
+        }
+    );
+}

@@ -130,19 +130,18 @@ impl DaemonLcmEffectService {
         // The message corpus is owned once by `request`; only `summarizer`
         // changes between the planning pass and the final commit.
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
-        let mut pending = self.commit_compression(&request).await?;
-        let summary_request = match pending.take_outcome()? {
-            LcmCompressionOutcome::Complete => return Ok(pending),
-            outcome @ LcmCompressionOutcome::Deferred { .. } => {
-                return Ok(outcome.into_response(pending));
-            }
+        let pending = self.commit_compression(&request).await?;
+        let summary_request = match pending.outcome()? {
             LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
+            LcmCompressionOutcome::Complete | LcmCompressionOutcome::Deferred { .. } => {
+                return Ok(pending);
+            }
         };
         let summary = match super::lcm_summarization::resolve_authoritative_summary(
             &self.db,
             &request.provider,
             &request.session_id,
-            &summary_request,
+            summary_request,
             self.control.remaining()?,
             None,
         )
@@ -154,11 +153,7 @@ impl DaemonLcmEffectService {
             }
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
-                return Ok(LcmCompressionOutcome::Deferred {
-                    summary_request,
-                    reason: reason.to_string(),
-                }
-                .into_response(pending));
+                return Ok(pending.defer_for_authoritative_summary(reason));
             }
         };
         self.control.checkpoint()?;
@@ -182,17 +177,14 @@ impl DaemonLcmEffectService {
         }
 
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
-        let mut pending = self
+        let pending = self
             .commit_retained_compression(&request, Some(convergence_candidate), None)
             .await?;
-        let outcome = pending.response.take_outcome()?;
-        let summary_request = match outcome {
-            LcmCompressionOutcome::Complete => return Ok(pending),
-            outcome @ LcmCompressionOutcome::Deferred { .. } => {
-                pending.response = outcome.into_response(pending.response);
+        let summary_request = match pending.response.outcome()? {
+            LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
+            LcmCompressionOutcome::Complete | LcmCompressionOutcome::Deferred { .. } => {
                 return Ok(pending);
             }
-            LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
         };
         // Host-native compaction text is usable for retained convergence only
         // when its evidence binds the exact raw source range selected by this
@@ -202,7 +194,7 @@ impl DaemonLcmEffectService {
             &self.db,
             &request.provider,
             &request.session_id,
-            &summary_request,
+            summary_request,
             self.control.remaining()?,
             Some(&required_native_source_range),
         )
@@ -218,15 +210,12 @@ impl DaemonLcmEffectService {
                 let mut pending = pending;
                 // An absent interval is its own typed state; only a present
                 // interval that binds a different range is a mismatch.
-                pending.response = LcmCompressionOutcome::Deferred {
-                    summary_request,
-                    reason: summary
+                pending.response = pending.response.defer_for_authoritative_summary(
+                    summary
                         .source_range
                         .absent_reason()
-                        .unwrap_or("authoritative_summary_source_mismatch")
-                        .to_string(),
-                }
-                .into_response(pending.response);
+                        .unwrap_or("authoritative_summary_source_mismatch"),
+                );
                 return Ok(pending);
             }
             Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {
@@ -235,11 +224,7 @@ impl DaemonLcmEffectService {
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
                 let mut pending = pending;
-                pending.response = LcmCompressionOutcome::Deferred {
-                    summary_request,
-                    reason: reason.to_string(),
-                }
-                .into_response(pending.response);
+                pending.response = pending.response.defer_for_authoritative_summary(reason);
                 return Ok(pending);
             }
         };

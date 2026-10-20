@@ -16,7 +16,7 @@ async fn compress_noops_for_sub_threshold_backlog_in_threshold_mode() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            provided_summary("should not be written".into()),
+            provided_summary("should not be written"),
             Some(10),
             None,
             None,
@@ -87,7 +87,7 @@ async fn compress_proceeds_at_exact_leaf_chunk_threshold() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            provided_summary("boundary summary".into()),
+            provided_summary("boundary summary"),
             Some(4),
             None,
             None,
@@ -121,7 +121,7 @@ async fn maintenance_debt_bypasses_sub_threshold_noop_guard() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            provided_summary("first chunk summary".into()),
+            provided_summary("first chunk summary"),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
@@ -142,7 +142,7 @@ async fn maintenance_debt_bypasses_sub_threshold_noop_guard() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            provided_summary("debt catch-up summary".into()),
+            provided_summary("debt catch-up summary"),
             Some(50),
             None,
             None,
@@ -183,7 +183,7 @@ async fn zero_leaf_chunk_tokens_disables_threshold_guard() {
                 fresh_tail_count: Some(1),
                 ..Default::default()
             },
-            summarizer: provided_summary("should not be used".into()),
+            summarizer: provided_summary("should not be used"),
         })
         .await
         .unwrap();
@@ -206,7 +206,7 @@ async fn zero_leaf_chunk_tokens_disables_threshold_guard() {
                 fresh_tail_count: Some(1),
                 ..Default::default()
             },
-            summarizer: provided_summary("zero leaf summary".into()),
+            summarizer: provided_summary("zero leaf summary"),
         })
         .await
         .unwrap();
@@ -241,7 +241,7 @@ async fn zero_fresh_tail_count_keeps_no_raw_tail() {
                 fresh_tail_count: Some(0),
                 ..Default::default()
             },
-            summarizer: provided_summary("zero tail summary".into()),
+            summarizer: provided_summary("zero tail summary"),
         })
         .await
         .unwrap();
@@ -292,7 +292,7 @@ async fn dynamic_chunking_compacts_bounded_oldest_leaf_chunk_and_records_backlog
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            provided_summary("first chunk summary".into()),
+            provided_summary("first chunk summary"),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
@@ -360,7 +360,7 @@ async fn fake_summarizer_compacts_backlog_and_preserves_fresh_tail() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            provided_summary("old summary".into()),
+            provided_summary("old summary"),
         ))
         .await
         .unwrap();
@@ -410,7 +410,7 @@ async fn compression_preserves_leading_system_developer_tool_anchor_outside_summ
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            provided_summary("old exchange summary".into()),
+            provided_summary("old exchange summary"),
         ))
         .await
         .unwrap();
@@ -485,7 +485,7 @@ async fn compression_summarizes_historical_tool_messages_instead_of_pinning_all(
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            provided_summary("tool result summary".into()),
+            provided_summary("tool result summary"),
         ))
         .await
         .unwrap();
@@ -542,7 +542,7 @@ async fn compression_preserves_interleaved_policy_anchor_outside_summary() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            provided_summary("old exchange summary".into()),
+            provided_summary("old exchange summary"),
         ))
         .await
         .unwrap();

@@ -306,7 +306,7 @@ async fn idless_compression_replay_does_not_reingest_existing_raw_messages() {
     let mut request = compress_request(
         "cursor",
         "session-idless-replay",
-        provided_summary("condensed old context".into()),
+        provided_summary("condensed old context"),
     );
     request.messages = initial.replay_messages;
     let compressed = db.lcm_compress(request).await.unwrap();
@@ -394,7 +394,7 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             overrides: Default::default(),
-            summarizer: provided_summary("unused".into()),
+            summarizer: provided_summary("unused"),
         })
         .await
         .unwrap();
@@ -456,7 +456,7 @@ async fn raw_replay_strips_disposable_provider_reasoning_sidecars() {
         .lcm_compress(compress_request(
             "cursor",
             "session-sidecars",
-            provided_summary("unused".into()),
+            provided_summary("unused"),
         ))
         .await
         .unwrap();
@@ -519,7 +519,7 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
             overrides: Default::default(),
-            summarizer: provided_summary("unused".into()),
+            summarizer: provided_summary("unused"),
         })
         .await
         .unwrap();
@@ -606,7 +606,7 @@ async fn active_replay_tool_calls_apply_ingest_protection_and_externalize_media_
         .lcm_compress(compress_request(
             "cursor",
             "session-tool-calls-protection",
-            provided_summary("unused".into()),
+            provided_summary("unused"),
         ))
         .await
         .unwrap();
@@ -731,7 +731,7 @@ async fn no_backlog_compress_replays_persisted_uncondensed_summaries() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            provided_summary("old summary".into()),
+            provided_summary("old summary"),
         ))
         .await
         .unwrap();
@@ -741,7 +741,7 @@ async fn no_backlog_compress_replays_persisted_uncondensed_summaries() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            provided_summary("unused".into()),
+            provided_summary("unused"),
         ))
         .await
         .unwrap();

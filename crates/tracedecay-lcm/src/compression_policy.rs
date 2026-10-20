@@ -23,15 +23,10 @@ pub(crate) fn policy_anchor_role_sql_in_list() -> String {
         .join(", ")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AssemblyCapInput<'a> {
-    pub overrides: &'a LcmCompressionOverrides,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct OverflowRecoveryCapInput<'a> {
     pub current_tokens: Option<i64>,
-    pub overrides: &'a LcmCompressionOverrides,
+    pub max_assembly_tokens: Option<i64>,
     pub messages: &'a [Value],
 }
 
@@ -78,14 +73,11 @@ pub fn incremental_max_depth_limit(configured: Option<i64>) -> i64 {
     }
 }
 
-pub fn effective_assembly_token_cap(input: AssemblyCapInput<'_>) -> Option<i64> {
-    let explicit_cap = input.overrides.max_assembly_tokens.filter(|cap| *cap > 0);
+pub fn effective_assembly_token_cap(overrides: &LcmCompressionOverrides) -> Option<i64> {
+    let explicit_cap = overrides.max_assembly_tokens.filter(|cap| *cap > 0);
     let reserve_cap = match (
-        input.overrides.context_length.filter(|length| *length > 0),
-        input
-            .overrides
-            .reserve_tokens_floor
-            .filter(|floor| *floor > 0),
+        overrides.context_length.filter(|length| *length > 0),
+        overrides.reserve_tokens_floor.filter(|floor| *floor > 0),
     ) {
         (Some(context_length), Some(reserve_tokens_floor)) => {
             Some(context_length - reserve_tokens_floor).filter(|cap| *cap > 0)
@@ -101,9 +93,7 @@ pub fn effective_assembly_token_cap(input: AssemblyCapInput<'_>) -> Option<i64> 
 
 #[tracing::instrument(name = "sessions.lcm.overflow_cap", level = "trace", skip_all)]
 pub fn overflow_recovery_assembly_cap(input: OverflowRecoveryCapInput<'_>) -> Option<i64> {
-    let assembly_cap = effective_assembly_token_cap(AssemblyCapInput {
-        overrides: input.overrides,
-    })?;
+    let assembly_cap = input.max_assembly_tokens?;
     let Some(current_tokens) = input.current_tokens.filter(|tokens| *tokens > 0) else {
         return Some(assembly_cap);
     };

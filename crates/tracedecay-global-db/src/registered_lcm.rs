@@ -454,15 +454,10 @@ impl RegisteredGlobalDb {
             ),
             tracing::trace_span!("sessions.lcm.compress"),
         );
-        let mut bounded = compressed.await?;
-        let outcome = bounded.response.take_outcome()?;
-        let needs_summary = matches!(
-            &outcome,
-            tracedecay_lcm::LcmCompressionOutcome::NeedsSummary(_)
-                | tracedecay_lcm::LcmCompressionOutcome::Deferred { .. }
-        );
-        bounded.response = outcome.into_response(bounded.response);
-        if !needs_summary && let Some(candidate) = convergence_candidate {
+        let bounded = compressed.await?;
+        if bounded.response.outcome()? == tracedecay_lcm::LcmCompressionOutcome::Complete
+            && let Some(candidate) = convergence_candidate
+        {
             let state = if bounded.has_more {
                 tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Pending
             } else {

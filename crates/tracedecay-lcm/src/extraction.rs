@@ -63,3 +63,12 @@ fn serialize_messages(messages: &[LcmSummarySourceMessage]) -> String {
         .collect::<Vec<_>>()
         .join("\n\n")
 }
+
+pub(crate) fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}

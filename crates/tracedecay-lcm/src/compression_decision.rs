@@ -1,12 +1,12 @@
 pub(super) use super::compression_policy::threshold_pressure;
 pub use super::compression_policy::{
-    AssemblyCapInput, OverflowRecoveryCapInput, bounded_leaf_chunk_len,
-    effective_assembly_token_cap, effective_leaf_chunk_tokens, has_eligible_backlog,
-    overflow_recovery_assembly_cap, progress_leaf_chunk_len,
-};
-pub use super::compression_policy::{
     CondensationCandidateDecision, CondensationDecision, CondensationPolicy,
     CondensationSkipReason, condensation_candidate_decision, incremental_max_depth_limit,
+};
+pub use super::compression_policy::{
+    OverflowRecoveryCapInput, bounded_leaf_chunk_len, effective_assembly_token_cap,
+    effective_leaf_chunk_tokens, has_eligible_backlog, overflow_recovery_assembly_cap,
+    progress_leaf_chunk_len,
 };
 use super::compression_policy::{forced_overflow_pressure, source_token_count};
 use super::summarizer::CompressionSummarizerAdapter;

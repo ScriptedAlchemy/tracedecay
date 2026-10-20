@@ -16,7 +16,7 @@ async fn fresh_tail_boundary_keeps_multi_tool_transaction_atomic_and_shrinking()
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-tail",
-        provided_summary("compact summary".into()),
+        provided_summary("compact summary"),
         None,
         None,
         Some(400),
@@ -66,7 +66,7 @@ async fn bounded_leaf_chunk_backs_off_before_multi_tool_transaction() {
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-leaf",
-        provided_summary("transaction summary".into()),
+        provided_summary("transaction summary"),
         None,
         Some(2),
         None,
@@ -102,7 +102,7 @@ async fn budget_and_overflow_replay_never_split_tool_transaction() {
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-budget",
-        provided_summary("summary".into()),
+        provided_summary("summary"),
         None,
         None,
         Some(8),
@@ -163,11 +163,8 @@ async fn legacy_partial_tool_transaction_drops_invalid_group_and_repairs_orphans
         "role": "user",
         "content": "the unmatched call is now a closed legacy group",
     }));
-    let mut request = compress_request(
-        "cursor",
-        "session-legacy-tools",
-        provided_summary("unused".into()),
-    );
+    let mut request =
+        compress_request("cursor", "session-legacy-tools", provided_summary("unused"));
     request.messages = transaction;
     request.overrides.fresh_tail_count = Some(10);
 

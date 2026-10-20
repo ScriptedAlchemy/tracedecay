@@ -30,7 +30,7 @@ async fn compress_frontier_changed_preserves_existing_transaction_state() {
     let mut request = compress_request(
         "cursor",
         "session-frontier-noop",
-        provided_summary("should not be written".into()),
+        provided_summary("should not be written"),
     );
     request.expected_current_frontier_store_id = Some(0);
 
@@ -69,7 +69,7 @@ async fn compress_persists_summary_frontier_and_remaining_backlog_debt() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-write-success",
-            provided_summary("writer summary".into()),
+            provided_summary("writer summary"),
             None,
             Some(1),
             None,
@@ -126,7 +126,7 @@ async fn compress_rolls_back_summary_and_lifecycle_when_debt_write_fails() {
         .lcm_compress_for_test(limited_compress_request(
             "cursor",
             "session-write-rollback",
-            provided_summary("writer summary".into()),
+            provided_summary("writer summary"),
             None,
             Some(1),
             None,
@@ -164,7 +164,7 @@ async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_
     let mut request = limited_compress_request(
         "cursor",
         "session-late-payload-rollback",
-        provided_summary("must roll back".into()),
+        provided_summary("must roll back"),
         Some(1),
         Some(1),
         None,
@@ -291,7 +291,7 @@ async fn compression_noops_when_expected_frontier_is_stale() {
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: Some(0),
             overrides: Default::default(),
-            summarizer: provided_summary("stale summary".into()),
+            summarizer: provided_summary("stale summary"),
         })
         .await
         .unwrap();

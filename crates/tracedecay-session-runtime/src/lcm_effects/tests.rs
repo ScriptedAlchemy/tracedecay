@@ -80,9 +80,7 @@ fn compression_request(session_id: &str) -> LcmCompressionRequest {
             fresh_tail_count: Some(1),
             ..Default::default()
         },
-        summarizer: provided_summary(
-            "fixture summary preserving canonical historical context".to_string(),
-        ),
+        summarizer: provided_summary("fixture summary preserving canonical historical context"),
     }
 }
 
@@ -1379,7 +1377,7 @@ async fn retained_commit_defers_whole_session_replay_and_relation_application() 
             .unwrap();
     }
     let mut initial = compression_request(session_id);
-    initial.summarizer = provided_summary("old whole-session replay sentinel".to_string());
+    initial.summarizer = provided_summary("old whole-session replay sentinel");
     DaemonLcmEffectService::new(db.clone(), None, None)
         .compress(initial)
         .await
@@ -1398,7 +1396,7 @@ async fn retained_commit_defers_whole_session_replay_and_relation_application() 
         .unwrap();
     drop(snapshot);
     let mut retained = compression_request(session_id);
-    retained.summarizer = provided_summary("new bounded-page summary".to_string());
+    retained.summarizer = provided_summary("new bounded-page summary");
     let bounded = db
         .lcm_compress_retained_page_guarded(
             &retained,
