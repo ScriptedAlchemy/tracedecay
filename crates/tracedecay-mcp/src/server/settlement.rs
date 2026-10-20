@@ -648,7 +648,20 @@ impl DispatchControl {
         let outcome = tokio::select! {
             biased;
             () = &mut cancellation, if self.live_cancellable => {
-                Err(DispatchFailure::new(dispatch_cancelled_error(
+                // An admitted worker shares this signal and can cancel it
+                // when the carried deadline expires before our timer polls.
+                // Preserve the signal's timestamp so an earlier caller cancel
+                // also stays a cancellation when this task resumes late.
+                let terminal = if self
+                    .cancellation
+                    .cancelled_at()
+                    .is_some_and(|at| at >= self.deadline.expires_at)
+                {
+                    dispatch_deadline_error
+                } else {
+                    dispatch_cancelled_error
+                };
+                Err(DispatchFailure::new(terminal(
                     &self.tool_name,
                     // A signal cancelled before this worker was admitted has
                     // already won the commit compare-and-swap: the effect's
@@ -843,6 +856,49 @@ mod tests {
                 canonical_effect_settlement: tool_name == "tracedecay_configuration_set",
             },
         )
+    }
+
+    #[tokio::test]
+    async fn worker_deadline_cancellation_keeps_the_deadline_terminal() {
+        assert_worker_cancellation_terminal(0, "tool_dispatch_deadline_exceeded").await;
+    }
+
+    #[tokio::test]
+    async fn caller_cancellation_before_the_deadline_keeps_the_cancelled_terminal() {
+        assert_worker_cancellation_terminal(-1, "tool_dispatch_cancelled").await;
+    }
+
+    async fn assert_worker_cancellation_terminal(offset_micros: i64, expected: &str) {
+        let registry = RetainedDispatchRegistry::new();
+        let cancellation = tracedecay_contracts::CancellationSignal::active("cancel.worker")
+            .expect("cancellation");
+        let deadline = deadline_after(std::time::Duration::from_mins(1));
+        let requested_at = tracedecay_domain::UtcMicros(deadline.expires_at.0 + offset_micros);
+        let control =
+            dispatch_control("tracedecay_search", deadline, cancellation.clone()).expect("control");
+        let release = Arc::new(tokio::sync::Notify::new());
+        let worker_release = Arc::clone(&release);
+        let outcome = control
+            .run_retained(&registry, async move {
+                // Drive the shared worker signal before the outer timer. Its
+                // recorded event time, not timer polling order, owns the cause.
+                assert!(cancellation.cancel(requested_at));
+                worker_release.notified().await;
+                Ok::<_, tracedecay_domain::errors::TraceDecayError>(())
+            })
+            .await;
+        assert_eq!(
+            outcome
+                .result
+                .expect_err("signal settles the caller")
+                .project_route_context()
+                .map(|context| context.0),
+            Some(expected),
+        );
+        assert_eq!(outcome.settlement.snapshot(), DispatchSettlement::Settling);
+        release.notify_one();
+        registry.shutdown().await;
+        assert_eq!(outcome.settlement.snapshot(), DispatchSettlement::Joined);
     }
 
     #[tokio::test]
