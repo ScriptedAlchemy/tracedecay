@@ -291,11 +291,12 @@ pub fn census_profile_footprint(
     registered_roots: &BTreeMap<String, String>,
     bound_overrides: &BTreeMap<String, u64>,
 ) -> ProfileFootprintV1 {
-    census_with_entry_ceiling(
+    let mut remaining_entries = MAX_FOOTPRINT_ENTRIES;
+    census_profile_footprint_with_budget(
         profile_root,
         registered_roots,
         bound_overrides,
-        MAX_FOOTPRINT_ENTRIES,
+        &mut remaining_entries,
     )
 }
 
@@ -313,41 +314,49 @@ struct FootprintKeys {
     project: Option<(String, PathBuf)>,
 }
 
-fn census_with_entry_ceiling(
+/// Charge the profile census to the same entry budget as its caller's other
+/// filesystem observations.
+pub(crate) fn census_profile_footprint_with_budget(
     profile_root: &Path,
     registered_roots: &BTreeMap<String, String>,
     bound_overrides: &BTreeMap<String, u64>,
-    entry_ceiling: usize,
+    remaining_entries: &mut usize,
 ) -> ProfileFootprintV1 {
     let mut tallies: BTreeMap<(String, ProfileFamilyV1), EntryTally> = BTreeMap::new();
     let mut total_bytes = 0u64;
     let mut unavailable_entry_count = 0usize;
-    let truncated = walk_regular_files(profile_root, entry_ceiling, &mut |path, walked| {
-        if let WalkedEntryV1::File { bytes } = walked {
-            total_bytes = total_bytes.saturating_add(bytes);
-        } else {
-            unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-        }
-        let Some(keys) = path
-            .strip_prefix(profile_root)
-            .ok()
-            .and_then(footprint_keys)
-        else {
-            return;
-        };
-        let primary = tallies.entry(keys.primary).or_default();
-        tally(primary, walked);
-        if let (Some((_, store_relative)), WalkedEntryV1::File { bytes }) = (&keys.project, walked)
-        {
-            primary
-                .kinds
-                .get_or_insert_with(StoreKindBytesV1::default)
-                .add(store_relative, bytes);
-        }
-        if let Some(overlay) = keys.overlay {
-            tally(tallies.entry(overlay).or_default(), walked);
-        }
-    });
+    let termination = walk_regular_files_with_budget(
+        profile_root,
+        remaining_entries,
+        &|| None,
+        &mut |path, walked| {
+            if let WalkedEntryV1::File { bytes } = walked {
+                total_bytes = total_bytes.saturating_add(bytes);
+            } else {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+            }
+            let Some(keys) = path
+                .strip_prefix(profile_root)
+                .ok()
+                .and_then(footprint_keys)
+            else {
+                return;
+            };
+            let primary = tallies.entry(keys.primary).or_default();
+            tally(primary, walked);
+            if let (Some((_, store_relative)), WalkedEntryV1::File { bytes }) =
+                (&keys.project, walked)
+            {
+                primary
+                    .kinds
+                    .get_or_insert_with(StoreKindBytesV1::default)
+                    .add(store_relative, bytes);
+            }
+            if let Some(overlay) = keys.overlay {
+                tally(tallies.entry(overlay).or_default(), walked);
+            }
+        },
+    );
     let entries = tallies
         .into_iter()
         .map(|((key, family), tally)| {
@@ -377,7 +386,7 @@ fn census_with_entry_ceiling(
         entries,
         total_bytes,
         unavailable_entry_count,
-        truncated,
+        truncated: termination == WalkTerminationV1::EntryBudgetExceeded,
         total_bound_bytes: bound_overrides
             .get(PROFILE_TOTAL_KEY)
             .copied()
@@ -927,10 +936,16 @@ mod tests {
     #[test]
     fn a_walk_stopped_at_its_entry_ceiling_reports_a_floor() {
         let fixture = profile_fixture();
-        let footprint =
-            census_with_entry_ceiling(&fixture.profile, &fixture.registered, &BTreeMap::new(), 3);
+        let mut remaining_entries = 3;
+        let footprint = census_profile_footprint_with_budget(
+            &fixture.profile,
+            &fixture.registered,
+            &BTreeMap::new(),
+            &mut remaining_entries,
+        );
 
         assert!(footprint.truncated);
+        assert_eq!(remaining_entries, 0);
         assert_eq!(
             footprint.full_profile_size().state,
             ProfileTotalCoverageStateV1::Partial

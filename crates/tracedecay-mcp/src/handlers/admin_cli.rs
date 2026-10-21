@@ -986,7 +986,8 @@ mod tests {
             serde_json::json!({
                 "state": "complete",
                 "next_cursor": null,
-                "unregistered_size": {"state": "complete", "unavailable_entry_count": 0}
+                "unregistered_size": {"state": "complete", "unavailable_entry_count": 0},
+                "unregistered_count_is_lower_bound": false
             })
         );
     }

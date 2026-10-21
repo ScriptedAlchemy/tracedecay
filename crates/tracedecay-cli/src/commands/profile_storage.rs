@@ -6,6 +6,10 @@ use tracedecay_runtime_core::native_runtime;
 use crate::cli::ProfileStorageAction;
 use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
 use tracedecay_global_db::profile_registry_maintenance::remove_store_directory;
+use tracedecay_maintenance::retention::storage_report::{
+    StorageReport, StorageReportCoverageState, StorageReportSizeCoverageV1,
+    StorageReportSizeReasonV1, StorageReportSizeStateV1, StoreSizeReportEntry,
+};
 use tracedecay_runtime_core::lifecycle_lease::{
     ExclusiveLeaseAttempt, try_acquire_exclusive_for_profile,
 };
@@ -310,14 +314,21 @@ async fn brokered_storage_report(
     Ok(report)
 }
 
-fn merge_storage_report_page(
-    report: &mut tracedecay_maintenance::retention::storage_report::StorageReport,
-    page: tracedecay_maintenance::retention::storage_report::StorageReport,
-) {
-    let unregistered_size = report
-        .coverage
-        .unregistered_size
-        .merge(page.coverage.unregistered_size);
+fn merge_storage_report_page(report: &mut StorageReport, page: StorageReport) {
+    // Project pages and empty directory pages carry no backlog sample. Their
+    // default Complete coverage is neutral, not evidence of measured bytes.
+    let unregistered_size = if !has_unregistered_size_sample(report) {
+        page.coverage.unregistered_size
+    } else if !has_unregistered_size_sample(&page) {
+        report.coverage.unregistered_size
+    } else {
+        report
+            .coverage
+            .unregistered_size
+            .merge(page.coverage.unregistered_size)
+    };
+    let unregistered_count_is_lower_bound = report.coverage.unregistered_count_is_lower_bound
+        || page.coverage.unregistered_count_is_lower_bound;
     if report.profile_root.is_empty() {
         report.profile_root = page.profile_root;
     }
@@ -340,6 +351,13 @@ fn merge_storage_report_page(
         .max(page.user_sessions_db_bytes);
     report.coverage = page.coverage;
     report.coverage.unregistered_size = unregistered_size;
+    report.coverage.unregistered_count_is_lower_bound = unregistered_count_is_lower_bound;
+}
+
+fn has_unregistered_size_sample(report: &StorageReport) -> bool {
+    report.unregistered_dir_count > 0
+        || report.unregistered_bytes > 0
+        || report.coverage.unregistered_size != StorageReportSizeCoverageV1::default()
 }
 
 /// Read-only per-store size / free-page-ratio / unregistered-directory report
@@ -552,7 +570,11 @@ async fn handle_storage_report(
     }
     println!(
         "  unregistered directories: {} ({})",
-        report.unregistered_dir_count,
+        storage_directory_count_label(
+            report.unregistered_dir_count,
+            report.coverage.unregistered_count_is_lower_bound
+                || report.coverage.state == StorageReportCoverageState::Partial,
+        ),
         storage_size_label(report.unregistered_bytes, report.coverage.unregistered_size)
     );
     if report.coverage.unregistered_size.state
@@ -598,66 +620,58 @@ async fn handle_storage_report(
     Ok(())
 }
 
-fn storage_size_label(
-    bytes: u64,
-    coverage: tracedecay_maintenance::retention::storage_report::StorageReportSizeCoverageV1,
-) -> String {
-    use tracedecay_maintenance::retention::storage_report::StorageReportSizeStateV1 as State;
-
+fn storage_size_label(bytes: u64, coverage: StorageReportSizeCoverageV1) -> String {
     match coverage.state {
-        State::Complete => format!("{} total", format_bytes(bytes)),
-        State::Partial => format!("at least {} (partial)", format_bytes(bytes)),
-        State::Unavailable => format!("size unavailable ({} measured)", format_bytes(bytes)),
+        StorageReportSizeStateV1::Complete => format!("{} total", format_bytes(bytes)),
+        StorageReportSizeStateV1::Partial => format!("at least {} (partial)", format_bytes(bytes)),
+        StorageReportSizeStateV1::Unavailable => {
+            format!("size unavailable ({} measured)", format_bytes(bytes))
+        }
     }
 }
 
-fn effective_store_size_coverage(
-    store: &tracedecay_maintenance::retention::storage_report::StoreSizeReportEntry,
-) -> tracedecay_maintenance::retention::storage_report::StorageReportSizeCoverageV1 {
-    use tracedecay_maintenance::retention::storage_report::{
-        StorageReportSizeCoverageV1, StorageReportSizeReasonV1, StorageReportSizeStateV1 as State,
-    };
+fn storage_directory_count_label(count: usize, is_lower_bound: bool) -> String {
+    if is_lower_bound {
+        format!("at least {count}")
+    } else {
+        count.to_string()
+    }
+}
 
+fn effective_store_size_coverage(store: &StoreSizeReportEntry) -> StorageReportSizeCoverageV1 {
     let mut coverage = store.size_coverage;
     coverage.unavailable_entry_count = coverage
         .unavailable_entry_count
         .max(store.unavailable_entry_count);
-    if coverage.state == State::Complete && store.unavailable_entry_count > 0 {
+    if coverage.state == StorageReportSizeStateV1::Complete && store.unavailable_entry_count > 0 {
         coverage.state = if store.total_bytes == 0 {
-            State::Unavailable
+            StorageReportSizeStateV1::Unavailable
         } else {
-            State::Partial
+            StorageReportSizeStateV1::Partial
         };
         coverage.reason = Some(StorageReportSizeReasonV1::UnreadableEntries);
     }
-    if coverage.state == State::Complete && coverage.unavailable_entry_count == 0 {
+    if coverage.state == StorageReportSizeStateV1::Complete && coverage.unavailable_entry_count == 0
+    {
         return StorageReportSizeCoverageV1::default();
     }
     coverage
 }
 
-fn storage_coverage_state_label(
-    state: tracedecay_maintenance::retention::storage_report::StorageReportSizeStateV1,
-) -> &'static str {
-    use tracedecay_maintenance::retention::storage_report::StorageReportSizeStateV1 as State;
-
+fn storage_coverage_state_label(state: StorageReportSizeStateV1) -> &'static str {
     match state {
-        State::Complete => "complete",
-        State::Partial => "partial lower bound",
-        State::Unavailable => "unavailable",
+        StorageReportSizeStateV1::Complete => "complete",
+        StorageReportSizeStateV1::Partial => "partial lower bound",
+        StorageReportSizeStateV1::Unavailable => "unavailable",
     }
 }
 
-fn storage_coverage_reason_label(
-    reason: tracedecay_maintenance::retention::storage_report::StorageReportSizeReasonV1,
-) -> &'static str {
-    use tracedecay_maintenance::retention::storage_report::StorageReportSizeReasonV1 as Reason;
-
+fn storage_coverage_reason_label(reason: StorageReportSizeReasonV1) -> &'static str {
     match reason {
-        Reason::UnreadableEntries => "unreadable entries",
-        Reason::EntryBudgetExceeded => "entry budget exceeded",
-        Reason::Cancelled => "cancelled",
-        Reason::DeadlineExceeded => "deadline exceeded",
+        StorageReportSizeReasonV1::UnreadableEntries => "unreadable entries",
+        StorageReportSizeReasonV1::EntryBudgetExceeded => "entry budget exceeded",
+        StorageReportSizeReasonV1::Cancelled => "cancelled",
+        StorageReportSizeReasonV1::DeadlineExceeded => "deadline exceeded",
     }
 }
 
@@ -744,10 +758,95 @@ mod footprint_output_tests {
 #[cfg(test)]
 mod storage_coverage_output_tests {
     use tracedecay_maintenance::retention::storage_report::{
-        StorageReportSizeCoverageV1, StorageReportSizeReasonV1, StorageReportSizeStateV1,
+        StorageReport, StorageReportCoverage, StorageReportSizeCoverageV1,
+        StorageReportSizeReasonV1, StorageReportSizeStateV1,
     };
 
-    use super::storage_size_label;
+    use super::{merge_storage_report_page, storage_directory_count_label, storage_size_label};
+
+    #[test]
+    fn unavailable_backlog_stays_unavailable_across_empty_and_unavailable_pages() {
+        let mut report = StorageReport::default();
+        let empty_page = StorageReport {
+            profile_root: "/profile".to_owned(),
+            ..StorageReport::default()
+        };
+        merge_storage_report_page(&mut report, empty_page.clone());
+        let unavailable_page = StorageReport {
+            profile_root: "/profile".to_owned(),
+            unregistered_dir_count: 1,
+            coverage: StorageReportCoverage {
+                unregistered_size: StorageReportSizeCoverageV1 {
+                    state: StorageReportSizeStateV1::Unavailable,
+                    reason: Some(StorageReportSizeReasonV1::UnreadableEntries),
+                    unavailable_entry_count: 1,
+                },
+                ..StorageReportCoverage::default()
+            },
+            ..StorageReport::default()
+        };
+        merge_storage_report_page(&mut report, unavailable_page.clone());
+        assert_eq!(
+            report.coverage.unregistered_size.state,
+            StorageReportSizeStateV1::Unavailable
+        );
+        merge_storage_report_page(&mut report, unavailable_page);
+        merge_storage_report_page(&mut report, empty_page);
+        assert_eq!(report.unregistered_dir_count, 2);
+        assert_eq!(report.unregistered_bytes, 0);
+        assert_eq!(
+            report.coverage.unregistered_size.state,
+            StorageReportSizeStateV1::Unavailable
+        );
+        assert_eq!(report.coverage.unregistered_size.unavailable_entry_count, 2);
+
+        merge_storage_report_page(
+            &mut report,
+            StorageReport {
+                profile_root: "/profile".to_owned(),
+                unregistered_dir_count: 1,
+                unregistered_bytes: 7,
+                ..StorageReport::default()
+            },
+        );
+        assert_eq!(report.unregistered_bytes, 7);
+        assert_eq!(
+            report.coverage.unregistered_size.state,
+            StorageReportSizeStateV1::Partial
+        );
+    }
+
+    #[test]
+    fn truncated_directory_counts_remain_lower_bounds_after_page_aggregation() {
+        let mut report = StorageReport::default();
+        merge_storage_report_page(
+            &mut report,
+            StorageReport {
+                coverage: StorageReportCoverage {
+                    unregistered_count_is_lower_bound: true,
+                    ..StorageReportCoverage::default()
+                },
+                ..StorageReport::default()
+            },
+        );
+        merge_storage_report_page(
+            &mut report,
+            StorageReport {
+                unregistered_dir_count: 2,
+                ..StorageReport::default()
+            },
+        );
+        assert!(report.coverage.unregistered_count_is_lower_bound);
+        assert_eq!(storage_directory_count_label(0, true), "at least 0");
+        assert_eq!(
+            storage_directory_count_label(
+                report.unregistered_dir_count,
+                report.coverage.unregistered_count_is_lower_bound
+            ),
+            "at least 2"
+        );
+        assert_eq!(storage_directory_count_label(2, false), "2");
+    }
 
     #[test]
     fn partial_sizes_render_as_lower_bounds_not_exact_totals() {

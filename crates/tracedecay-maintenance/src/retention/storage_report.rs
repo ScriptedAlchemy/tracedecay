@@ -26,6 +26,7 @@
 //! size.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::TraceDecayError;
@@ -48,7 +49,8 @@ use tracedecay_runtime_core::storage::{SESSIONS_DB_FILENAME, USER_SESSIONS_DB_FI
 
 use super::footprint::{
     MAX_FOOTPRINT_ENTRIES, ProfileFootprintV1, ProjectRootStateV1, WalkInterruptionV1,
-    WalkTerminationV1, WalkedEntryV1, census_profile_footprint, walk_regular_files_with_budget,
+    WalkTerminationV1, WalkedEntryV1, census_profile_footprint_with_budget,
+    walk_regular_files_with_budget,
 };
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
@@ -128,14 +130,19 @@ impl StorageReportSizeCoverageV1 {
     /// Combine coverage from separate directory pages without hiding an
     /// unavailable page or its unreadable-entry count.
     pub fn merge(self, other: Self) -> Self {
-        use StorageReportSizeStateV1 as State;
-
         let state = match (self.state, other.state) {
-            (State::Complete, State::Complete) => State::Complete,
-            (State::Unavailable, State::Unavailable) => State::Unavailable,
-            (State::Partial, _) | (_, State::Partial) => State::Partial,
-            (State::Unavailable, State::Complete) | (State::Complete, State::Unavailable) => {
-                State::Partial
+            (StorageReportSizeStateV1::Complete, StorageReportSizeStateV1::Complete) => {
+                StorageReportSizeStateV1::Complete
+            }
+            (StorageReportSizeStateV1::Unavailable, StorageReportSizeStateV1::Unavailable) => {
+                StorageReportSizeStateV1::Unavailable
+            }
+            (StorageReportSizeStateV1::Partial, _) | (_, StorageReportSizeStateV1::Partial) => {
+                StorageReportSizeStateV1::Partial
+            }
+            (StorageReportSizeStateV1::Unavailable, StorageReportSizeStateV1::Complete)
+            | (StorageReportSizeStateV1::Complete, StorageReportSizeStateV1::Unavailable) => {
+                StorageReportSizeStateV1::Partial
             }
         };
         Self {
@@ -290,6 +297,12 @@ pub struct StorageReportCoverage {
     /// partially sampled subtree was fully sized.
     #[serde(default)]
     pub unregistered_size: StorageReportSizeCoverageV1,
+    /// Enumeration stopped before all unregistered directories were counted.
+    /// Independent of size coverage: all names can be counted even when a
+    /// subtree cannot be measured. Counts across unfinished pages also remain
+    /// lower bounds through the outer `state` and continuation cursor.
+    #[serde(default)]
+    pub unregistered_count_is_lower_bound: bool,
 }
 
 impl StorageReportCoverage {
@@ -298,6 +311,7 @@ impl StorageReportCoverage {
             state: StorageReportCoverageState::Partial,
             next_cursor: Some(next_cursor),
             unregistered_size: StorageReportSizeCoverageV1::default(),
+            unregistered_count_is_lower_bound: false,
         }
     }
 }
@@ -594,6 +608,13 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 pub async fn build_storage_report(
     profile_root: &Path,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
+    build_storage_report_with_walk_budget(profile_root, MAX_STORAGE_REPORT_WALK_ENTRIES).await
+}
+
+async fn build_storage_report_with_walk_budget(
+    profile_root: &Path,
+    walk_entry_budget: usize,
+) -> tracedecay_domain::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // The registry rows come from an off-profile copy, so reading them first
     // leaves the profile untouched.
@@ -606,24 +627,25 @@ pub async fn build_storage_report(
     // readers. A report must describe the profile supplied by its caller, not
     // implementation-dependent SQLite sidecar churn caused while collecting
     // the remaining diagnostic fields.
-    let full_profile_root = profile_root.to_path_buf();
     let registered_roots: BTreeMap<String, String> = registered_projects.iter().cloned().collect();
-    let footprint = native_runtime::spawn_blocking(move || {
-        census_profile_footprint(&full_profile_root, &registered_roots, &BTreeMap::new())
-    })
-    .await
-    .map_err(|error| report_error("join profile footprint census", error))?;
     let profile_root_buf = profile_root.to_path_buf();
     let walk_control = StorageReportWalkControl::default();
-    let sampled = native_runtime::spawn_blocking(move || {
-        let mut remaining_entries = MAX_STORAGE_REPORT_WALK_ENTRIES;
-        sample_registered_storage(
+    let (footprint, sampled) = native_runtime::spawn_blocking(move || {
+        let mut remaining_entries = walk_entry_budget;
+        let footprint = census_profile_footprint_with_budget(
+            &profile_root_buf,
+            &registered_roots,
+            &BTreeMap::new(),
+            &mut remaining_entries,
+        );
+        let sampled = sample_registered_storage(
             &profile_root_buf,
             &global_db_path,
             registered_projects,
             &mut remaining_entries,
             &walk_control,
-        )
+        )?;
+        Ok::<_, TraceDecayError>((footprint, sampled))
     })
     .await
     .map_err(|error| report_error("join storage report sample", error))??;
@@ -641,6 +663,7 @@ pub async fn build_storage_report(
         footprint: Some(footprint),
         coverage: StorageReportCoverage {
             unregistered_size: sampled.unregistered_size,
+            unregistered_count_is_lower_bound: sampled.unregistered_count_is_lower_bound,
             ..StorageReportCoverage::default()
         },
     })
@@ -653,6 +676,7 @@ struct SampledRegisteredStorage {
     unregistered_dir_count: usize,
     unregistered_bytes: u64,
     unregistered_size: StorageReportSizeCoverageV1,
+    unregistered_count_is_lower_bound: bool,
     global_db_bytes: u64,
     user_sessions_db_bytes: u64,
 }
@@ -766,6 +790,7 @@ fn sample_registered_storage(
         unregistered_dir_count: unregistered.directory_count,
         unregistered_bytes: unregistered.bytes,
         unregistered_size: unregistered.coverage,
+        unregistered_count_is_lower_bound: unregistered.count_is_lower_bound,
         global_db_bytes: database_family_bytes(global_db_path),
         user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
     })
@@ -1521,8 +1546,6 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
 /// enough for a size report. `None` for a file that is not a SQLite database
 /// or whose header counts are stale.
 fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
-    use std::io::Read as _;
-
     if !std::fs::symlink_metadata(graph_db_path)
         .is_ok_and(|metadata| metadata.file_type().is_file())
     {
@@ -1564,6 +1587,7 @@ fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
 #[derive(Debug)]
 struct UnregisteredDirectorySample {
     directory_count: usize,
+    count_is_lower_bound: bool,
     bytes: u64,
     unavailable_entry_count: usize,
     coverage: StorageReportSizeCoverageV1,
@@ -1606,6 +1630,7 @@ fn sample_unregistered_paths(
     }
     UnregisteredDirectorySample {
         directory_count,
+        count_is_lower_bound: false,
         bytes,
         unavailable_entry_count,
         coverage: size_coverage(termination, bytes, unavailable_entry_count),
@@ -1624,6 +1649,7 @@ fn scan_unregistered_dirs(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return UnregisteredDirectorySample {
                 directory_count: 0,
+                count_is_lower_bound: false,
                 bytes: 0,
                 unavailable_entry_count: 0,
                 coverage: StorageReportSizeCoverageV1::default(),
@@ -1632,6 +1658,7 @@ fn scan_unregistered_dirs(
         Err(_) => {
             return UnregisteredDirectorySample {
                 directory_count: 0,
+                count_is_lower_bound: true,
                 bytes: 0,
                 unavailable_entry_count: 1,
                 coverage: size_coverage(WalkTerminationV1::Complete, 0, 1),
@@ -1677,6 +1704,8 @@ fn scan_unregistered_dirs(
         paths.push(entry.path());
     }
     let directory_count = paths.len();
+    let count_is_lower_bound =
+        termination != WalkTerminationV1::Complete || unavailable_entry_count > 0;
     let mut bytes = 0u64;
     for path in paths {
         if termination != WalkTerminationV1::Complete {
@@ -1701,6 +1730,7 @@ fn scan_unregistered_dirs(
     }
     UnregisteredDirectorySample {
         directory_count,
+        count_is_lower_bound,
         bytes,
         unavailable_entry_count,
         coverage: size_coverage(termination, bytes, unavailable_entry_count),
@@ -1724,6 +1754,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::retention::footprint::census_profile_footprint;
     use tracedecay_runtime_core::db::engine::TestConnection;
 
     fn store(project_id: &str, total_bytes: u64) -> StoreSizeReportEntry {
@@ -2217,6 +2248,40 @@ mod tests {
                     .then(|| (member.clone(), std::fs::read(member).unwrap()))
             })
             .collect()
+    }
+
+    #[asupersync::test]
+    async fn offline_footprint_and_store_sizing_share_one_request_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let store_root = profile_root.join("projects/proj_a");
+        std::fs::create_dir_all(&store_root).unwrap();
+        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
+        for index in 0..16 {
+            std::fs::write(store_root.join(format!("payload-{index}")), [1u8]).unwrap();
+        }
+        std::fs::create_dir_all(profile_root.join("projects/proj_orphan")).unwrap();
+
+        let report = build_storage_report_with_walk_budget(&profile_root, 8)
+            .await
+            .unwrap();
+
+        assert!(report.footprint.as_ref().unwrap().truncated);
+        assert_eq!(
+            report.full_profile_size.as_ref().unwrap().state,
+            ProfileTotalCoverageStateV1::Partial
+        );
+        assert_eq!(report.stores.len(), 1);
+        assert_eq!(
+            report.stores[0].total_bytes, 0,
+            "the store walk cannot reset the exhausted census budget"
+        );
+        assert_eq!(
+            report.stores[0].size_coverage.reason,
+            Some(StorageReportSizeReasonV1::EntryBudgetExceeded)
+        );
+        assert_eq!(report.unregistered_dir_count, 0);
+        assert!(report.coverage.unregistered_count_is_lower_bound);
     }
 
     #[asupersync::test]
@@ -2951,6 +3016,39 @@ mod tests {
     }
 
     #[test]
+    fn directory_count_coverage_distinguishes_enumeration_from_sizing() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["proj_first", "proj_second"] {
+            let path = tmp.path().join("projects").join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("payload"), [1u8]).unwrap();
+        }
+        let control = StorageReportWalkControl::default();
+        let mut remaining = 1;
+        let partial_inventory =
+            scan_unregistered_dirs(tmp.path(), &HashSet::new(), &mut remaining, &control);
+        assert_eq!(partial_inventory.directory_count, 1);
+        assert!(partial_inventory.count_is_lower_bound);
+        assert_eq!(
+            partial_inventory.coverage.reason,
+            Some(StorageReportSizeReasonV1::EntryBudgetExceeded)
+        );
+
+        let mut remaining = 2;
+        let complete_inventory =
+            scan_unregistered_dirs(tmp.path(), &HashSet::new(), &mut remaining, &control);
+        assert_eq!(complete_inventory.directory_count, 2);
+        assert!(
+            !complete_inventory.count_is_lower_bound,
+            "exhausting the byte walk does not erase a complete directory count"
+        );
+        assert_eq!(
+            complete_inventory.coverage.reason,
+            Some(StorageReportSizeReasonV1::EntryBudgetExceeded)
+        );
+    }
+
+    #[test]
     fn unregistered_subtrees_share_the_same_sizing_accounting_and_budget() {
         let tmp = tempfile::TempDir::new().unwrap();
         let first = tmp.path().join("first");
@@ -3259,6 +3357,7 @@ mod tests {
             stores: vec![partial_store],
             unregistered_bytes: 3,
             coverage: StorageReportCoverage {
+                unregistered_count_is_lower_bound: true,
                 unregistered_size: StorageReportSizeCoverageV1 {
                     state: StorageReportSizeStateV1::Partial,
                     reason: Some(StorageReportSizeReasonV1::EntryBudgetExceeded),
@@ -3279,6 +3378,7 @@ mod tests {
             decoded.coverage.unregistered_size.unavailable_entry_count,
             2
         );
+        assert!(decoded.coverage.unregistered_count_is_lower_bound);
         let total = decoded.profile_total_size();
         assert_eq!(total.accounted_bytes, 7);
         assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
