@@ -3262,7 +3262,7 @@ mod tests {
             scoped_code_index_store_root(&data_root.join("code-index-v1"), Path::new("/repos/a"));
         let generations = store_root.join(CODE_GENERATIONS_DIRECTORY);
         std::fs::create_dir_all(&generations).unwrap();
-        std::fs::write(store_root.join("active-code-generation-v1.json"), b"active").unwrap();
+        std::fs::write(store_root.join("active-code-generation-v1.json"), []).unwrap();
         for index in 0..5 {
             std::fs::write(generations.join(format!("empty-{index}")), []).unwrap();
         }
