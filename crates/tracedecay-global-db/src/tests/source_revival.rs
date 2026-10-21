@@ -222,7 +222,7 @@ async fn temporal_reset_requested(
 async fn source_presence_generation(
     registered: &RegisteredGlobalDb,
     write: &AnchoredObservationWrite,
-) -> i64 {
+) -> u64 {
     let snapshot = registered.read_snapshot().await.unwrap();
     let mut rows = snapshot
         .query(
@@ -232,7 +232,14 @@ async fn source_presence_generation(
         )
         .await
         .unwrap();
-    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    rows.next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 async fn clear_temporal_reset(registered: &RegisteredGlobalDb, write: &AnchoredObservationWrite) {
