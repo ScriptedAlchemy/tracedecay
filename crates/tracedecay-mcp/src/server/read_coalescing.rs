@@ -199,11 +199,12 @@ pub fn tool_allows_identical_read_coalescing(
     tool_name: &str,
     tool_is_read_only: impl FnOnce(&str) -> bool,
 ) -> bool {
-    // Every owner side effect runs per call; identical calls never share one.
-    if ApplicationSurfaceOperation::from_tool_name(tool_name)
-        .and_then(ApplicationSurfaceOperation::owner_side_effect)
-        .is_some()
-    {
+    // The key identifies graph data, not an application invocation's authority
+    // or cancellation. Every non-graph call must reach its own executor.
+    let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) else {
+        return false;
+    };
+    if !operation.is_graph_tool() || operation.owner_side_effect().is_some() {
         return false;
     }
     if matches!(
@@ -428,6 +429,10 @@ mod tests {
             "tracedecay_dependency_depth",
             "tracedecay_health",
             "tracedecay_dsm",
+            "tracedecay_configuration_get",
+            "tracedecay_project_list",
+            "tracedecay_fact_store_search",
+            "tracedecay_source_outline",
         ] {
             assert!(
                 !tool_allows_identical_read_coalescing(controlled_read, |_| true),
@@ -435,7 +440,7 @@ mod tests {
             );
         }
         assert!(tool_allows_identical_read_coalescing(
-            "tracedecay_source_outline",
+            "tracedecay_files",
             |_| true,
         ));
         assert!(!tool_allows_identical_read_coalescing(
