@@ -33,8 +33,9 @@ named Hermes profile or uses `HERMES_HOME` as TraceDecay storage.
 Each scenario also owns an isolated `tracedecay daemon run` (private socket,
 started via `scripts/lib/portable_process.py`) that must be ready before
 `init`. Setup, daemon, agent, and cancellation failures are written to the
-report as error entries, and the daemon, fixture, and profile are removed on
-every exit path.
+report as error entries. Cleanup is attempted on every exit path. If owned
+work cannot be stopped or deletion fails, retained paths and cleanup errors
+are recorded in the report.
 
 Run reports land under `evals/memory/runs/<timestamp>/` (gitignored).
 
