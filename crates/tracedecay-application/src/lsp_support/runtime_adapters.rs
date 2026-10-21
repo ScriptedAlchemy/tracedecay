@@ -8,7 +8,7 @@ use tracedecay_lsp::analyzer::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
     RefreshCommitOutcome,
 };
-use tracedecay_lsp::analyzer::client::LspDocument;
+use tracedecay_lsp::analyzer::client::{DiagnosticDocumentCoverage, LspDocument};
 use tracedecay_lsp::{
     AdmittedRoot, CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
     CanonicalWorkspaceDiagnosticRefreshRequest, DiagnosticSource, GatewayDiagnostic,
@@ -293,6 +293,7 @@ where
         let immediate_snapshot = prepared.is_none().then(|| broker.snapshot());
         (prepared, immediate_snapshot)
     };
+    let requires_publication = prepared.is_some();
     let snapshot = if let Some(prepared) = prepared {
         let completed = prepared.collect_diagnostics(diagnostics_quiet_window).await;
         match broker
@@ -312,16 +313,32 @@ where
         immediate_snapshot
             .ok_or_else(|| LspRuntimeFailure::new("diagnostic-broker-snapshot-unavailable"))?
     };
+    let document_coverage = snapshot
+        .coverage
+        .get(&language)
+        .and_then(|coverage| coverage.documents.get(&relative_path));
+    if requires_publication
+        && !matches!(
+            document_coverage,
+            Some(DiagnosticDocumentCoverage::Published { content_digest, .. })
+                if Some(content_digest) == request.expected_content_digest.as_ref()
+        )
+    {
+        return Err(LspRuntimeFailure::new(
+            "diagnostic-broker-coverage-incomplete",
+        ));
+    }
     let upstream_authority_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.lsp.upstream-diagnostic-authority.v1",
         &snapshot.settings,
         &snapshot.settings_unavailable,
+        document_coverage,
     ))
     .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))?;
     let upstream = snapshot
         .diagnostics
         .into_iter()
-        .filter(|diagnostic| diagnostic.file == relative_path)
+        .filter(|diagnostic| diagnostic.language == language && diagnostic.file == relative_path)
         .map(|diagnostic| broker_diagnostic(request.document_uri.as_str(), diagnostic))
         .collect();
     let expected_code_generation_id = request.expected_code_generation_id.clone();
@@ -429,6 +446,7 @@ mod tests {
                     language_id: "unknown".to_owned(),
                     relative_path: "src/lib.rs".to_owned(),
                     text: "fn main() {}".to_owned(),
+                    snapshot_version: None,
                 })
             })
         }

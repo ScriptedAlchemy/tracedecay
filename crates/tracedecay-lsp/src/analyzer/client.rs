@@ -19,8 +19,8 @@ use lsp_types::{
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
     WorkspaceSymbolParams,
 };
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 use tracedecay_domain::ContentDigest;
@@ -100,27 +100,41 @@ pub struct LspDocument {
     pub language_id: String,
     pub relative_path: String,
     pub text: String,
+    /// The editor version from the admitted overlay, when this is not a disk sweep.
+    pub snapshot_version: Option<i64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum DiagnosticDocumentCoverage {
-    Published { version_verified: bool },
+    Published {
+        version_verified: bool,
+        content_digest: ContentDigest,
+    },
     NoPublication,
     StalePublication,
     RootFailed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiagnosticRootCoverage {
     Completed,
     Failed,
 }
 
+/// Coverage of the latest admitted refresh scope. A missing document was not
+/// observed by that refresh; any retained findings for it remain unverified.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticCoverage {
+    pub documents: BTreeMap<String, DiagnosticDocumentCoverage>,
+    pub roots: BTreeMap<PathBuf, DiagnosticRootCoverage>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiagnosticRefreshResult {
     pub diagnostics: Vec<CodeDiagnostic>,
-    pub documents: BTreeMap<String, DiagnosticDocumentCoverage>,
-    pub roots: BTreeMap<PathBuf, DiagnosticRootCoverage>,
+    pub coverage: DiagnosticCoverage,
 }
 
 /// Standard LSP semantic/navigation requests retained by the analyzer client.
@@ -363,13 +377,17 @@ pub async fn collect_document_diagnostics_with_timeouts(
         .map_err(TraceDecayError::from)
 }
 
+struct SynchronizedDocument {
+    wire_version: i32,
+    text: String,
+    snapshot_version: Option<i64>,
+}
+
 pub struct StdioLspClient {
     command: String,
     workspace_root: PathBuf,
     upstream_capabilities: UpstreamCapabilities,
-    document_versions: BTreeMap<String, i32>,
-    document_contents: BTreeMap<String, String>,
-    document_snapshot_versions: BTreeMap<String, i64>,
+    documents: BTreeMap<String, SynchronizedDocument>,
     next_request_id: ConnectionLocalRequestSequence,
     /// Killed and reaped when the client drops.
     process: AnalyzerProcess,
@@ -514,9 +532,7 @@ impl StdioLspClient {
             upstream_capabilities: UpstreamCapabilities::from_initialize_response(
                 &initialize_response,
             ),
-            document_versions: BTreeMap::new(),
-            document_contents: BTreeMap::new(),
-            document_snapshot_versions: BTreeMap::new(),
+            documents: BTreeMap::new(),
             next_request_id: ConnectionLocalRequestSequence::starting_at(2),
             process,
         })
@@ -526,19 +542,8 @@ impl StdioLspClient {
         self.upstream_capabilities.clone()
     }
 
-    /// Opens `path` upstream once, so a semantic request can name it.
-    ///
-    /// The analyzer answers only for documents in its own view. Diagnostics
-    /// already open theirs (`collect_document_diagnostics`), but the semantic
-    /// lane forwarded the bare request, so a document the diagnostics sweep had
-    /// not happened to open yet came back `-32603 file not found`, surfaced to
-    /// the client as `providerUnavailable` for `documentSymbol`/`hover` on a
-    /// file it had just opened. Both lanes share one client and one
-    /// `document_versions` ledger, so this never re-opens what the other lane
-    /// already sent.
-    ///
-    /// ponytail: on-disk text, matching the diagnostics lane. Unsaved buffer
-    /// content would need the gateway's synced document plumbed down here.
+    /// Synchronizes a semantic request admitted without an overlay. This
+    /// explicitly returns the document to disk authority after an overlay closes.
     pub(crate) async fn ensure_document_open(
         &mut self,
         path: &Path,
@@ -567,7 +572,7 @@ impl StdioLspClient {
             class: format!("semantic document read did not complete: {error}"),
         })?
         .map_err(|class| LspSemanticRequestError::InvalidResponse { class })?;
-        self.synchronize_document(&uri, language_id, &text, timeouts)
+        self.synchronize_document(&uri, language_id, &text, None, timeouts)
             .await
             .map_err(semantic_write_error)?;
         Ok(())
@@ -587,26 +592,29 @@ impl StdioLspClient {
                 class: "admitted semantic document snapshot is invalid".to_owned(),
             });
         }
-        if self
-            .document_snapshot_versions
-            .get(&uri)
-            .is_some_and(|version| *version > snapshot.version)
-            || (self.document_snapshot_versions.get(&uri) == Some(&snapshot.version)
-                && self
-                    .document_contents
-                    .get(&uri)
-                    .is_some_and(|text| text != snapshot.text.as_ref()))
-        {
+        if self.snapshot_is_stale(&uri, snapshot.version, &snapshot.text) {
             return Err(LspSemanticRequestError::InvalidResponse {
                 class: "admitted semantic document snapshot is stale".to_owned(),
             });
         }
-        self.synchronize_document(&uri, &snapshot.language_id, &snapshot.text, timeouts)
-            .await
-            .map_err(semantic_write_error)?;
-        self.document_snapshot_versions
-            .insert(uri, snapshot.version);
+        self.synchronize_document(
+            &uri,
+            &snapshot.language_id,
+            &snapshot.text,
+            Some(snapshot.version),
+            timeouts,
+        )
+        .await
+        .map_err(semantic_write_error)?;
         Ok(())
+    }
+
+    fn snapshot_is_stale(&self, uri: &str, version: i64, text: &str) -> bool {
+        self.documents.get(uri).is_some_and(|current| {
+            current.snapshot_version.is_some_and(|current_version| {
+                current_version > version || (current_version == version && current.text != text)
+            })
+        })
     }
 
     async fn synchronize_document(
@@ -614,17 +622,19 @@ impl StdioLspClient {
         uri: &str,
         language_id: &str,
         text: &str,
+        snapshot_version: Option<i64>,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<i32, LspMessageWriteError> {
-        let current_version = self.document_versions.get(uri).copied().unwrap_or(0);
-        if current_version > 0
-            && self
-                .document_contents
-                .get(uri)
-                .is_some_and(|current| current == text)
+        if let Some(current) = self.documents.get_mut(uri)
+            && current.text == text
         {
-            return Ok(current_version);
+            current.snapshot_version = snapshot_version;
+            return Ok(current.wire_version);
         }
+        let current_version = self
+            .documents
+            .get(uri)
+            .map_or(0, |current| current.wire_version);
         let (version, notification) = if current_version == 0 {
             (
                 1,
@@ -668,9 +678,14 @@ impl StdioLspClient {
             .request_deadline()
             .min(Instant::now() + timeouts.refresh);
         write_message_until(&self.process, notification, deadline, timeouts.message_io).await?;
-        self.document_versions.insert(uri.to_owned(), version);
-        self.document_contents
-            .insert(uri.to_owned(), text.to_owned());
+        self.documents.insert(
+            uri.to_owned(),
+            SynchronizedDocument {
+                wire_version: version,
+                text: text.to_owned(),
+                snapshot_version,
+            },
+        );
         Ok(version)
     }
 
@@ -1056,13 +1071,31 @@ impl StdioLspClient {
         let deadline = timeouts.request_deadline();
         let mut uri_to_document = BTreeMap::new();
         let mut expected_versions = BTreeMap::new();
-        for document in documents {
+        for mut document in documents {
             let uri = file_uri(&project_root.join(&document.relative_path));
+            if let Some(version) = document.snapshot_version
+                && self.snapshot_is_stale(&uri, version, &document.text)
+            {
+                return Err(LspRefreshError::InvalidResponse {
+                    message: "admitted diagnostic document snapshot is stale".to_owned(),
+                });
+            }
+            // Background disk sweeps do not revoke an admitted editor snapshot.
+            // A diagnostic request carrying a newer overlay may advance the same
+            // ledger as the semantic lane; a disk-only semantic request releases it.
+            if document.snapshot_version.is_none()
+                && let Some(current) = self.documents.get(&uri)
+                && current.snapshot_version.is_some()
+            {
+                document.text.clone_from(&current.text);
+                document.snapshot_version = current.snapshot_version;
+            }
             let version = self
                 .synchronize_document(
                     &uri,
                     &document.language_id,
                     &document.text,
+                    document.snapshot_version,
                     timeouts.with_deadline(deadline),
                 )
                 .await
@@ -1136,6 +1169,7 @@ impl StdioLspClient {
                 published.uri.as_str().to_owned(),
                 DiagnosticDocumentCoverage::Published {
                     version_verified: published.version.is_some(),
+                    content_digest: ContentDigest::of_bytes(document.text.as_bytes()),
                 },
             );
             diagnostics_by_uri.insert(
@@ -1163,15 +1197,14 @@ impl StdioLspClient {
         }
         let mut result = DiagnosticRefreshResult {
             diagnostics: diagnostics_by_uri.into_values().flatten().collect(),
-            documents: BTreeMap::new(),
-            roots: BTreeMap::new(),
+            coverage: DiagnosticCoverage::default(),
         };
         for (uri, document) in &uri_to_document {
-            result.documents.insert(
+            result.coverage.documents.insert(
                 document.relative_path.clone(),
                 coverage_by_uri
                     .get(uri)
-                    .copied()
+                    .cloned()
                     .unwrap_or(DiagnosticDocumentCoverage::NoPublication),
             );
         }

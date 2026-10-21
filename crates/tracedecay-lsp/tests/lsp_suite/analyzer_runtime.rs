@@ -492,9 +492,10 @@ async fn stdio_client_collects_publish_diagnostics() {
     );
     assert_eq!(refresh.diagnostics[0].code.as_deref(), Some("E_FAKE"));
     assert_eq!(
-        refresh.documents.get(FAKE_PATH),
+        refresh.coverage.documents.get(FAKE_PATH),
         Some(&lsp::client::DiagnosticDocumentCoverage::Published {
             version_verified: false,
+            content_digest: tracedecay_domain::ContentDigest::of_bytes(b"let nope"),
         })
     );
 }
@@ -568,6 +569,7 @@ fn fake_document(language: &str, relative_path: &str, text: &str) -> lsp::client
         language_id: language.to_string(),
         relative_path: relative_path.to_string(),
         text: text.to_string(),
+        snapshot_version: None,
     }
 }
 

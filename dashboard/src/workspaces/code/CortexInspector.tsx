@@ -719,7 +719,6 @@ function DiagnosticsLines({
   file: FileDiagnostics | null;
   fileName: string | null | undefined;
 }) {
-  const anyReady = engines.some((engine) => engine.state === 'ready');
   const shortFile = fileName ? fileName.slice(fileName.lastIndexOf('/') + 1) : null;
   return (
     <div className="flex flex-col gap-1.5">
@@ -743,13 +742,16 @@ function DiagnosticsLines({
           {' · '}
           <span className={cn(file.warnings > 0 && 'text-state-partial')}>{file.warnings} warnings</span>
           <span className="text-text-muted"> in {shortFile}</span>
+          <span className="block text-text-muted">
+            {file.verified} verified · {file.retained} retained · {file.versionUnverified} version unverified
+          </span>
         </p>
-      ) : anyReady ? (
+      ) : file.hasVerifiedPublication ? (
         <p className="text-2xs text-text-muted" data-file-diagnostics={0}>
-          the ready engines report no diagnostics in {shortFile}
+          the verified publications report no diagnostics in {shortFile}
         </p>
       ) : (
-        <Absent>no engine is ready, so {shortFile} has no diagnostic reading</Absent>
+        <Absent>no verified publication for {shortFile}</Absent>
       )}
     </div>
   );

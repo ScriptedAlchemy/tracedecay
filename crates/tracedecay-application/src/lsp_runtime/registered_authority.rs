@@ -214,7 +214,7 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
                 authority.validate_root(&request.root)?;
                 let (path, relative_path) = authority.document_path(&request.document_uri)?;
                 let relative = Path::new(&relative_path);
-                let (language, language_id, text) = match request.overlay {
+                let (language, language_id, text, snapshot_version) = match request.overlay {
                     Some(overlay) => {
                         let overlay = admit_overlay(overlay, &request.document_uri)?;
                         let adapter = builtin_adapters()
@@ -227,6 +227,7 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
                             adapter.language,
                             adapter.language_id,
                             overlay.text.to_string(),
+                            Some(overlay.version),
                         )
                     }
                     None => {
@@ -234,7 +235,7 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
                             LspRuntimeFailure::new("document-language-not-registered")
                         })?;
                         let text = authority.read_disk_document(relative).await?;
-                        (adapter.language, adapter.language_id, text)
+                        (adapter.language, adapter.language_id, text, None)
                     }
                 };
                 let document = LspDocument {
@@ -242,6 +243,7 @@ impl LspDiagnosticDocumentPort for RegisteredProjectLspAuthority {
                     language_id,
                     relative_path,
                     text,
+                    snapshot_version,
                 };
                 let observed_content_digest = ContentDigest::of_bytes(document.text.as_bytes());
                 if request

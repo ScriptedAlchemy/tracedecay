@@ -479,13 +479,14 @@ async fn stdio_client_returns_diagnostics_for_suppress_empty_servers() {
     assert_eq!(diagnostics.diagnostics[0].file, "src/first.fake");
     assert_eq!(diagnostics.diagnostics[0].message, "first file error");
     assert_eq!(
-        diagnostics.documents.get("src/first.fake"),
+        diagnostics.coverage.documents.get("src/first.fake"),
         Some(&lsp::client::DiagnosticDocumentCoverage::Published {
             version_verified: false,
+            content_digest: tracedecay_domain::ContentDigest::of_bytes(b"let nope"),
         })
     );
     assert_eq!(
-        diagnostics.documents.get("src/second.fake"),
+        diagnostics.coverage.documents.get("src/second.fake"),
         Some(&lsp::client::DiagnosticDocumentCoverage::NoPublication)
     );
 }
@@ -1653,6 +1654,7 @@ import json
 import sys
 
 documents = {{}}
+versions = {{}}
 
 def read_message():
     headers = {{}}
@@ -1676,6 +1678,13 @@ def record(event):
     with open({events_path:?}, "a", encoding="utf-8") as output:
         output.write(json.dumps(event) + "\n")
 
+def publish(uri):
+    send({{
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {{"uri": uri, "version": versions[uri], "diagnostics": []}}
+    }})
+
 while True:
     message = read_message()
     if message is None:
@@ -1686,12 +1695,15 @@ while True:
     elif method == "textDocument/didOpen":
         document = message["params"]["textDocument"]
         documents[document["uri"]] = document["text"]
+        versions[document["uri"]] = document["version"]
         record({{"method": "open", "text": document["text"]}})
     elif method == "textDocument/didChange":
         document = message["params"]["textDocument"]
         text = message["params"]["contentChanges"][0]["text"]
         documents[document["uri"]] = text
-        record({{"method": "change", "text": text}})
+        versions[document["uri"]] = document["version"]
+        record({{"method": "change", "text": text, "version": document["version"]}})
+        publish(document["uri"])
     elif method == "textDocument/documentSymbol":
         uri = message["params"]["textDocument"]["uri"]
         text = documents.get(uri, "missing document")
@@ -1706,6 +1718,7 @@ while True:
                 "selectionRange": {{"start": {{"line": 0, "character": 0}}, "end": {{"line": 0, "character": 1}}}}
             }}]
         }})
+        publish(uri)
 "#,
             events_path = events_path.display().to_string(),
         ),
@@ -1769,6 +1782,22 @@ while True:
             if symbols.first().is_some_and(|symbol| symbol.name == "unsaved snapshot one")
     ));
 
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "stale disk text")],
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .expect("a disk sweep must collect against the admitted overlay");
+    assert_eq!(
+        broker.snapshot().coverage[FAKE_LANGUAGE].documents[FAKE_PATH],
+        lsp::client::DiagnosticDocumentCoverage::Published {
+            version_verified: true,
+            content_digest: tracedecay_domain::ContentDigest::of_bytes(b"unsaved snapshot one"),
+        }
+    );
+
     let same = LspSemanticDocumentSnapshot::from_overlay(&initial);
     let result =
         complete_semantic_request(&gateway, &LspRequestId::Number(12), &request, Some(&same)).await;
@@ -1789,6 +1818,16 @@ while True:
             }],
         )
         .unwrap();
+    let mut diagnostic_document = fake_document(FAKE_LANGUAGE, FAKE_PATH, changed.text.as_ref());
+    diagnostic_document.snapshot_version = Some(changed.version);
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![diagnostic_document],
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .expect("diagnostics may advance the shared ledger to a newer admitted overlay");
     let result = complete_semantic_request(
         &gateway,
         &LspRequestId::Number(13),
@@ -1821,6 +1860,14 @@ while True:
             .map(|event| event["text"].as_str().unwrap())
             .collect::<Vec<_>>(),
         ["unsaved snapshot two"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "change")
+            .map(|event| event["version"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        [2],
     );
     assert_eq!(
         events
@@ -2056,7 +2103,7 @@ while True:
         uri = message["params"]["textDocument"]["uri"]
         text = message["params"]["contentChanges"][0]["text"]
         if uri.endswith("a.fake"):
-            publish(uri, [])
+            publish_version(uri, message["params"]["textDocument"]["version"], [])
         elif text == "stale b":
             publish_version(uri, 1, [finding("stale replacement")])
 "#,
@@ -2080,6 +2127,20 @@ while True:
         .expect("both initial versionless publications should be accepted");
     assert_eq!(broker.snapshot().diagnostics.len(), 2);
 
+    let initial = broker.snapshot();
+    assert!(matches!(
+        initial.coverage[FAKE_LANGUAGE].documents["src/b.fake"],
+        lsp::client::DiagnosticDocumentCoverage::Published {
+            version_verified: false,
+            ..
+        }
+    ));
+    let retained = initial
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.file == "src/b.fake")
+        .unwrap();
+
     broker
         .refresh_documents(
             FAKE_LANGUAGE,
@@ -2091,6 +2152,29 @@ while True:
         )
         .await
         .expect("an explicit clean publication makes the partial refresh useful");
+
+    let partial = broker.snapshot();
+    assert_eq!(partial.diagnostics, vec![retained.clone()]);
+    assert_eq!(
+        partial.coverage[FAKE_LANGUAGE].documents["src/b.fake"],
+        lsp::client::DiagnosticDocumentCoverage::NoPublication,
+    );
+    assert!(matches!(
+        partial.coverage[FAKE_LANGUAGE].documents["src/a.fake"],
+        lsp::client::DiagnosticDocumentCoverage::Published {
+            version_verified: true,
+            ..
+        }
+    ));
+    let published = serde_json::to_value(&partial).unwrap();
+    assert_eq!(
+        published["coverage"][FAKE_LANGUAGE]["documents"]["src/b.fake"]["state"],
+        "no_publication"
+    );
+    assert_eq!(
+        published["coverage"][FAKE_LANGUAGE]["documents"]["src/a.fake"]["version_verified"],
+        true
+    );
 
     broker
         .refresh_documents(
@@ -2104,16 +2188,48 @@ while True:
         .await
         .expect("the current clean publication makes a stale sibling incomplete");
 
-    let diagnostics = broker.snapshot().diagnostics;
+    let stale = broker.snapshot();
+    assert_eq!(
+        stale.coverage[FAKE_LANGUAGE].documents["src/b.fake"],
+        lsp::client::DiagnosticDocumentCoverage::StalePublication,
+    );
+    let published = serde_json::to_value(&stale).unwrap();
+    assert_eq!(
+        published["coverage"][FAKE_LANGUAGE]["documents"]["src/b.fake"]["state"],
+        "stale_publication"
+    );
+    let diagnostics = stale.diagnostics;
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].file, "src/b.fake");
     assert_eq!(diagnostics[0].message, "initial finding");
+
+    broker
+        .refresh_documents(
+            FAKE_LANGUAGE,
+            vec![fake_document(
+                FAKE_LANGUAGE,
+                "src/a.fake",
+                "single document refresh",
+            )],
+            FAKE_LSP_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let narrowed = broker.snapshot();
+    assert_eq!(narrowed.coverage[FAKE_LANGUAGE].documents.len(), 1);
+    assert!(
+        !narrowed.coverage[FAKE_LANGUAGE]
+            .documents
+            .contains_key("src/b.fake")
+    );
+    assert_eq!(narrowed.diagnostics, vec![retained.clone()]);
 }
 
 #[tokio::test]
 async fn successful_root_findings_survive_a_failed_sibling_root() {
     let temp = tempfile::tempdir().unwrap();
     let member = temp.path().join("member");
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::create_dir_all(member.join("src")).unwrap();
     std::fs::write(temp.path().join("workspace.marker"), "").unwrap();
     std::fs::write(member.join("workspace.marker"), "").unwrap();
@@ -2216,7 +2332,26 @@ while True:
         .await
         .expect_err("a failed sibling root must remain visible to the caller");
     assert!(error.to_string().contains("workspace root"));
-    let diagnostics = broker.snapshot().diagnostics;
+    let partial = broker.snapshot();
+    let coverage = &partial.coverage[FAKE_LANGUAGE];
+    assert_eq!(
+        coverage.documents["member/src/b.fake"],
+        lsp::client::DiagnosticDocumentCoverage::RootFailed,
+    );
+    assert_eq!(
+        coverage.roots[&temp.path().canonicalize().unwrap()],
+        lsp::client::DiagnosticRootCoverage::Completed,
+    );
+    assert_eq!(
+        coverage.roots[&member.canonicalize().unwrap()],
+        lsp::client::DiagnosticRootCoverage::Failed,
+    );
+    let published = serde_json::to_value(&partial).unwrap();
+    assert_eq!(
+        published["coverage"][FAKE_LANGUAGE]["documents"]["member/src/b.fake"]["state"],
+        "root_failed",
+    );
+    let diagnostics = partial.diagnostics;
     assert_eq!(diagnostics.len(), 2);
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.file == "src/a.fake" && diagnostic.message == "updated updated root"

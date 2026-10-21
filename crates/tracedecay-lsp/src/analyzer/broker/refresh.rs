@@ -239,18 +239,21 @@ impl PreparedRefresh {
             match result {
                 Ok(Ok((_, batch))) => {
                     refresh.diagnostics.extend(batch.diagnostics);
-                    refresh.documents.extend(batch.documents);
+                    refresh.coverage.documents.extend(batch.coverage.documents);
                     refresh
+                        .coverage
                         .roots
                         .insert(workspace_root, DiagnosticRootCoverage::Completed);
                 }
                 Ok(Err(failure)) => {
                     for document in documents {
                         refresh
+                            .coverage
                             .documents
                             .insert(document, DiagnosticDocumentCoverage::RootFailed);
                     }
                     refresh
+                        .coverage
                         .roots
                         .insert(workspace_root.clone(), DiagnosticRootCoverage::Failed);
                     failures.insert(workspace_root, failure);
@@ -261,10 +264,12 @@ impl PreparedRefresh {
                     );
                     for document in documents {
                         refresh
+                            .coverage
                             .documents
                             .insert(document, DiagnosticDocumentCoverage::RootFailed);
                     }
                     refresh
+                        .coverage
                         .roots
                         .insert(workspace_root.clone(), DiagnosticRootCoverage::Failed);
                     failures.insert(workspace_root, failure);

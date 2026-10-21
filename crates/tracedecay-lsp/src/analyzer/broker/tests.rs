@@ -196,6 +196,7 @@ mod rustup_proxy {
             language_id: "rust".to_owned(),
             relative_path: "src/lib.rs".to_owned(),
             text: "pub fn lib() {}".to_owned(),
+            snapshot_version: None,
         }
     }
 
@@ -430,6 +431,7 @@ mod rustup_proxy {
                     language_id: "rust".to_owned(),
                     relative_path: "member/src/lib.rs".to_owned(),
                     text: "pub fn member() {}".to_owned(),
+                    snapshot_version: None,
                 },
             ]
         };
@@ -756,6 +758,7 @@ fn refresh_rejects_a_removed_project_root_after_one_canonicalization() {
             language_id: "rust".to_owned(),
             relative_path: "src/lib.rs".to_owned(),
             text: "fn removed_root() {}".to_owned(),
+            snapshot_version: None,
         }],
     )) else {
         panic!("removed project root must fail closed");
@@ -785,6 +788,7 @@ fn refresh_rejects_root_batch_queue_saturation_before_starting_analyzers() {
             language_id: "rust".to_owned(),
             relative_path: format!("package-{index}/src/lib.rs"),
             text: "fn package() {}".to_owned(),
+            snapshot_version: None,
         });
     }
     let mut broker = DiagnosticBroker::new_for_test(
@@ -841,28 +845,31 @@ fn partial_root_refresh_replaces_only_published_document_diagnostics() {
         epoch: 1,
         result: Ok(crate::analyzer::client::DiagnosticRefreshResult {
             diagnostics: vec![code_diagnostic("src/a.fake", "new a")],
-            documents: BTreeMap::from([
-                (
-                    "src/a.fake".to_owned(),
-                    DiagnosticDocumentCoverage::Published {
-                        version_verified: true,
-                    },
-                ),
-                (
-                    "member/src/b.fake".to_owned(),
-                    DiagnosticDocumentCoverage::RootFailed,
-                ),
-            ]),
-            roots: BTreeMap::from([
-                (
-                    PathBuf::from("/project"),
-                    crate::analyzer::client::DiagnosticRootCoverage::Completed,
-                ),
-                (
-                    root.clone(),
-                    crate::analyzer::client::DiagnosticRootCoverage::Failed,
-                ),
-            ]),
+            coverage: crate::analyzer::client::DiagnosticCoverage {
+                documents: BTreeMap::from([
+                    (
+                        "src/a.fake".to_owned(),
+                        DiagnosticDocumentCoverage::Published {
+                            version_verified: true,
+                            content_digest: tracedecay_domain::ContentDigest::of_bytes(b"new a"),
+                        },
+                    ),
+                    (
+                        "member/src/b.fake".to_owned(),
+                        DiagnosticDocumentCoverage::RootFailed,
+                    ),
+                ]),
+                roots: BTreeMap::from([
+                    (
+                        PathBuf::from("/project"),
+                        crate::analyzer::client::DiagnosticRootCoverage::Completed,
+                    ),
+                    (
+                        root.clone(),
+                        crate::analyzer::client::DiagnosticRootCoverage::Failed,
+                    ),
+                ]),
+            },
         }),
         root_failures: BTreeMap::from([(root, failure)]),
     };
