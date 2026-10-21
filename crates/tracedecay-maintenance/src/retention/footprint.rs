@@ -1004,7 +1004,7 @@ mod tests {
         std::fs::write(second.join("payload"), [2]).expect("second payload");
         let mut remaining = 1;
         let mut visits = 0usize;
-        let mut visit = |_, _| visits += 1;
+        let mut visit = |_: &Path, _: WalkedEntryV1| visits += 1;
 
         assert_eq!(
             walk_regular_files_with_budget(&first, &mut remaining, &|| None, &mut visit),

@@ -1767,13 +1767,19 @@ fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
     }
 
     let cancellation_observations = std::cell::Cell::new(0_usize);
-    let holds_segments = store_may_hold_generation_segments(store.path(), &|| {
-        cancellation_observations.set(cancellation_observations.get() + 1);
-        cancellation_observations.get() > 1
-    })
+    let mut remaining_entries = 1;
+    let holds_segments = store_may_hold_generation_segments(
+        store.path(),
+        &|| {
+            cancellation_observations.set(cancellation_observations.get() + 1);
+            cancellation_observations.get() > 1
+        },
+        &mut remaining_entries,
+    )
     .expect("one observed entry conservatively proves possible segment work");
 
     assert!(holds_segments);
+    assert_eq!(remaining_entries, 0);
     assert_eq!(
         cancellation_observations.get(),
         1,
@@ -1793,20 +1799,32 @@ fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
 }
 
 #[test]
-fn metadata_only_segment_census_distinguishes_empty_and_cancelled() {
+fn metadata_only_segment_census_distinguishes_empty_cancelled_and_exhausted() {
     let store = tempfile::TempDir::new().expect("create unpublished store");
     let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
     std::fs::create_dir_all(&segments_root).expect("create segment root");
 
+    let mut remaining_entries = 1;
     assert!(
-        !store_may_hold_generation_segments(store.path(), &|| false)
+        !store_may_hold_generation_segments(store.path(), &|| false, &mut remaining_entries)
             .expect("empty segment directory")
     );
+    assert_eq!(remaining_entries, 1);
 
     std::fs::write(segments_root.join("crash-debris"), b"debris").expect("write crash debris");
-    let error = store_may_hold_generation_segments(store.path(), &|| true)
+    let error = store_may_hold_generation_segments(store.path(), &|| true, &mut remaining_entries)
         .expect_err("cancellation wins before an observed entry is accepted");
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
+    assert_eq!(remaining_entries, 1);
+
+    remaining_entries = 0;
+    let error = store_may_hold_generation_segments(store.path(), &|| false, &mut remaining_entries)
+        .expect_err("a nonempty segment directory needs an entry from the shared budget");
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::EntryBudgetExceeded
+    ));
+    assert_eq!(remaining_entries, 0);
 }
 
 #[test]
