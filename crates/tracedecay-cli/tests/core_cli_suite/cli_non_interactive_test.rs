@@ -37,10 +37,11 @@ fn ephemeral_safe_fixture_base(test_path: &str) -> Option<PathBuf> {
         assert!(!tracedecay_global_db::is_ephemeral_path(&root));
         return Some(root);
     }
-    // macOS's per-user temporary directory leaves too little room for the
-    // nested child home and its Unix daemon socket. The private child TMPDIR
+    // Worker scratch paths and macOS's per-user temporary directory can leave
+    // too little room for the nested child home and its Unix daemon socket.
+    // Use a short, private root on Unix. The private child TMPDIR
     // still defines the ephemeral boundary, with durable fixtures beside it.
-    let scratch = if cfg!(target_os = "macos") {
+    let scratch = if cfg!(unix) {
         TempDir::new_in("/tmp")
     } else {
         TempDir::new()
