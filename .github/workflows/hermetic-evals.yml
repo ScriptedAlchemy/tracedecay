@@ -36,6 +36,7 @@ jobs:
         run: |
           bash -n evals/hermetic/run.sh
           bash -n evals/agent_adoption/run.sh
+          bash -n evals/agent_adoption/claude_tools.sh
           bash -n scripts/build-eval-binary.sh
       - name: Run scorer and shell-runner regressions
         run: >-
@@ -46,3 +47,5 @@ jobs:
           //evals/agent_adoption:selftest
           //scripts:build_eval_binary_test
           --test_output=errors
+      - name: Execute stock-edit oracle regressions
+        run: python3 evals/agent_adoption/stock_check_selftest.py

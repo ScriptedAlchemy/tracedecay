@@ -13,6 +13,12 @@ use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
 #[cfg(unix)]
 use tracedecay_daemon_control::{SOCKET_ENV, default_socket_path};
 #[cfg(unix)]
+use tracedecay_daemon_identity::current_daemon_connection;
+#[cfg(unix)]
+use tracedecay_daemon_protocol::DaemonEndpoint;
+#[cfg(target_os = "linux")]
+use tracedecay_daemon_protocol::unix_socket_path_within_limit;
+#[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[cfg(unix)]
@@ -424,18 +430,27 @@ impl ProfileDaemon {
                 .unwrap_or_else(|error| format!("could not read daemon stderr: {error}"))
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while let Err(error) = std::os::unix::net::UnixStream::connect(&socket) {
+        // Follow the exact isolated profile's published endpoint, retaining
+        // child ownership and startup diagnostics if admission fails.
+        while !current_daemon_connection(&cli.profile).is_ok_and(|connection| {
+            match connection.endpoint() {
+                DaemonEndpoint::Unix(socket) => {
+                    std::os::unix::net::UnixStream::connect(socket).is_ok()
+                }
+                DaemonEndpoint::Loopback(address) => std::net::TcpStream::connect(address).is_ok(),
+            }
+        }) {
             if let Some(status) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
                 panic!(
-                    "profile daemon exited before listening at {}: {status}; stderr:\n{}",
-                    socket.display(),
+                    "profile daemon exited before listening for {}: {status}; stderr:\n{}",
+                    cli.profile.display(),
                     stderr()
                 );
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the profile daemon never listened at {}: {error}; stderr:\n{}",
-                socket.display(),
+                "the registered daemon never listened for profile {}; stderr:\n{}",
+                cli.profile.display(),
                 stderr()
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
@@ -935,7 +950,12 @@ fn doctor_observes_copilots_vscode_settings_without_failing_on_them() {
 #[cfg(target_os = "linux")]
 #[test]
 fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
-    let cli = IsolatedCli::new();
+    let mut cli = IsolatedCli::new();
+    cli.profile = cli.home.path().join("profile".repeat(20));
+    assert!(
+        !unix_socket_path_within_limit(&cli.profile.join("daemon.sock")),
+        "this journey must exercise production's short endpoint for a deep profile"
+    );
     install_cline(&cli);
     fs::create_dir_all(cli.home.path().join(".config/zed")).unwrap();
     fs::create_dir_all(cli.home.path().join(".gemini/antigravity")).unwrap();
