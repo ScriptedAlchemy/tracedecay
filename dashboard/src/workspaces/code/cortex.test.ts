@@ -218,6 +218,7 @@ describe('diagnostics in a file', () => {
   const snapshot = {
     summary: { total_errors: 1, total_warnings: 1, pending_refreshes: 0, last_refresh_age_seconds: 4 },
     engines: [],
+    coverage: {},
     settings: { idle_backfill: 'idle', languages: {} },
     settings_revision: 'r1',
     diagnostics: [
@@ -234,6 +235,51 @@ describe('diagnostics in a file', () => {
     expect(file?.warnings).toBe(1);
     expect(diagnosticsForFile(snapshot, null)).toBeNull();
     expect(diagnosticsForFile(snapshot, 'src/c.rs')?.rows).toEqual([]);
+  });
+
+  it('keeps retained findings distinct from exact, version-verified publications', () => {
+    const covered = {
+      ...snapshot,
+      engines: [{ language: 'rust', enabled: true, state: 'ready', command: 'rust-analyzer', last_error: null }],
+      coverage: { rust: {
+        documents: { 'src/a.rs': { state: 'published', version_verified: true, content_digest: `sha256:${'ab'.repeat(32)}` } },
+        roots: { '/abs': 'completed' },
+      } },
+    } as DiagnosticsSnapshot;
+    expect(diagnosticsForFile(covered, 'src/a.rs')).toMatchObject({
+      verified: 1, retained: 1, versionUnverified: 0, hasVerifiedPublication: true,
+    });
+    expect(diagnosticsForFile(covered, 'src/c.rs')).toMatchObject({ hasVerifiedPublication: false });
+    expect(diagnosticsForFile(snapshot, 'src/a.rs')).toMatchObject({
+      verified: 0, retained: 2, hasVerifiedPublication: false,
+    });
+    const failedRoot = { ...covered, coverage: { rust: {
+      ...covered.coverage['rust']!, roots: { '/abs': 'failed' as const },
+    } } };
+    expect(diagnosticsForFile(failedRoot, 'src/a.rs')?.hasVerifiedPublication).toBe(false);
+    const differentEngine = { ...covered, engines: [{
+      ...covered.engines[0]!, language: 'typescript',
+    }] };
+    expect(diagnosticsForFile(differentEngine, 'src/a.rs')?.hasVerifiedPublication).toBe(false);
+  });
+
+  it.each(['no_publication', 'stale_publication', 'root_failed'] as const)(
+    'does not turn %s into an empty clean reading', (state) => {
+      const incomplete = { ...snapshot, diagnostics: [], coverage: { rust: {
+        documents: { 'src/a.rs': { state } }, roots: { '/abs': 'completed' as const },
+      } } };
+      expect(diagnosticsForFile(incomplete, 'src/a.rs')?.hasVerifiedPublication).toBe(false);
+    },
+  );
+
+  it('keeps versionless publication distinct from verified and retained findings', () => {
+    const versionless = { ...snapshot, coverage: { rust: {
+      documents: { 'src/a.rs': { state: 'published' as const, version_verified: false, content_digest: `sha256:${'ab'.repeat(32)}` } },
+      roots: { '/abs': 'completed' as const },
+    } } };
+    expect(diagnosticsForFile(versionless, 'src/a.rs')).toMatchObject({
+      verified: 0, retained: 1, versionUnverified: 1, hasVerifiedPublication: false,
+    });
   });
 });
 
