@@ -522,9 +522,9 @@ fn pressure_only_command(
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
             overrides: tracedecay_lcm::LcmCompressionOverrides {
-                max_source_messages: max_source_messages,
-                fresh_tail_count: fresh_tail_count,
-                context_length: context_length,
+                max_source_messages,
+                fresh_tail_count,
+                context_length,
                 ..Default::default()
             },
         },
