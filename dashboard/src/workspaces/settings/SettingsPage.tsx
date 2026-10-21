@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Search, X } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   DashboardEnvelopeV1Schema,
   SettingsPayloadV1Schema,
@@ -7,8 +8,10 @@ import {
   type SettingsPayloadV1,
 } from '../../contracts/generated.ts';
 import { usePayload } from '../../data/query/usePayload.ts';
+import type { PayloadResult } from '../../data/query/payload.ts';
 import {
   scopeWritable,
+  scopedQueryKey,
   scopedUrl,
   useScope,
   type ScopeWritability,
@@ -27,12 +30,17 @@ import {
 } from './settingsEditorMachine.ts';
 import { writableScopes } from './settingsGates.ts';
 import { SettingsInspector } from './SettingsInspector.tsx';
-import { buildSettingsModel, type SettingsModel } from './settingsModel.ts';
+import {
+  buildSettingsModel,
+  settingsPayloadWithAppliedScope,
+  type SettingsModel,
+  type SettingsScope,
+} from './settingsModel.ts';
 import { effectiveRows, filterEffectiveRows, type EffectiveRow } from './settingsRows.ts';
 import { SectionsRail } from './SettingsSections.tsx';
 
 /**
- * Settings: the effective-configuration review.
+ * Settings: effective configuration with direct, revision-checked editing.
  *
  * `/api/settings` reports effective values. It does not attribute individual
  * keys to the layer that set them, and its groups do not address a shared key
@@ -44,22 +52,44 @@ import { SectionsRail } from './SettingsSections.tsx';
  *     `edited` for this reader's own unapplied proposal;
  *   - ORIGIN per group: the file path or endpoint the payload names, or a
  *     stated absence;
- *   - WRITE per key: editable through the compare-and-swap PATCH path, locked
+ *  - WRITE per key: editable when authorized, locked
  *     by a named gate, or without any write path at all.
  *
- * Hover and focus inspect; click selects and opens the review under the row.
+ * Hover and focus inspect; click selects and opens the editor under the row.
  * The effective value stays authoritative until the write authority validates,
- * persists against the held revision, reports its apply requirement, and the
- * read comes back.
+ * persists against the held revision, and reports its value and apply requirement.
  */
 export function SettingsPage() {
   const scope = useScope((state) => state.scope);
+  const client = useQueryClient();
   const settings = usePayload(
     ['settings'],
     '/api/settings',
     DashboardEnvelopeV1Schema(SettingsPayloadV1Schema),
   );
   const readUrl = scopedUrl(scope, '/api/settings');
+  const queryKey = useMemo(() => scopedQueryKey(scope, ['settings'], '/api/settings'), [scope]);
+  const publishApplied = useCallback(
+    async (savedScope: SettingsScope, payload: SettingsPayloadV1) => {
+      // A read started before PATCH may still carry the prior value. Cancel it
+      // before publishing the response; the normal post-save read follows.
+      await client.cancelQueries({ queryKey, exact: true });
+      client.setQueryData<PayloadResult<DashboardEnvelopeV1<SettingsPayloadV1>>>(
+        queryKey,
+        (current) => {
+          if (current?.outcome !== 'ok') return current;
+          return {
+            ...current,
+            data: {
+              ...current.data,
+              payload: settingsPayloadWithAppliedScope(current.data.payload, payload, savedScope),
+            },
+          };
+        },
+      );
+    },
+    [client, queryKey],
+  );
   // Project and ordinary user writes are addressed through the project gateway.
   // The ProfileSessions worker resource deliberately is not.
   const writability = scopeWritable(scope);
@@ -74,17 +104,24 @@ export function SettingsPage() {
     [readUrl, scope],
   );
   const refetch = settings.refetch;
-  const onApplied = useCallback(() => void refetch(), [refetch]);
+  const refresh = useCallback(async () => {
+    const result = await refetch();
+    return !result.isError && result.data?.outcome === 'ok'
+      ? result.data.data.payload
+      : null;
+  }, [refetch]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PayloadBoundary title="Settings" pending={settings.isPending} result={settings.data}>
         {(envelope) => (
           <SettingsSurface
+            key={readUrl}
             envelope={envelope}
             writability={writability}
             routes={routes}
-            onApplied={onApplied}
+            refresh={refresh}
+            publishApplied={publishApplied}
           />
         )}
       </PayloadBoundary>
@@ -119,12 +156,14 @@ function SettingsSurface({
   envelope,
   writability,
   routes,
-  onApplied,
+  refresh,
+  publishApplied,
 }: {
   envelope: DashboardEnvelopeV1<SettingsPayloadV1>;
   writability: ScopeWritability;
   routes: SettingsRoutes;
-  onApplied: () => void;
+  refresh: () => Promise<SettingsPayloadV1 | null>;
+  publishApplied: (scope: SettingsScope, payload: SettingsPayloadV1) => Promise<void>;
 }) {
   const payload = envelope.payload;
   const model = useMemo(() => buildSettingsModel(payload), [payload]);
@@ -132,7 +171,7 @@ function SettingsSurface({
     () => writableScopes(envelope.legal_actions, writability),
     [envelope.legal_actions, writability],
   );
-  const editor = useSettingsEditor({ payload, routes, writability, onApplied });
+  const editor = useSettingsEditor({ payload, routes, writability, refresh, publishApplied });
 
   const [query, setQuery] = useState('');
   const [inspectedKey, setInspectedKey] = useState<string | null>(null);
@@ -173,7 +212,7 @@ function SettingsSurface({
         // leading slash here silently falls through to the `--` fallback.
         path="settings"
         title="Settings"
-        note="effective configuration review"
+        note="effective configuration"
       />
 
       <SettingsRegister
@@ -228,7 +267,7 @@ function SettingsSurface({
           <p className="shrink-0 border-t border-edge-subtle px-3 py-1.5 text-sm leading-relaxed text-text-muted">
             Showing effective configuration only. Origins are shown only when the server names
             them; otherwise a key's provenance is <span className="td-value">unserved</span>. Hover
-            or focus a row to inspect it; Enter or click opens its review; Escape closes.
+            or focus a row to inspect it; Enter or click opens its editor; Escape closes.
           </p>
         </section>
 
@@ -275,7 +314,7 @@ function groupBySection(model: SettingsModel, rows: readonly EffectiveRow[]): Se
  * The register under the header: the search over key, value, and served
  * description, and the three readings a reader needs before touching a row , 
  * what the scope permits, that this is the effective-only mode, and where the
- * one review the editor can hold currently stands.
+ * the current save status.
  */
 function SettingsRegister({
   query,
@@ -294,7 +333,7 @@ function SettingsRegister({
   writability: ScopeWritability;
   state: SettingsEditorState;
 }) {
-  const review = reviewReading(state);
+  const save = saveReading(state);
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge-subtle bg-surface-1 px-3 py-2">
       <div className="relative min-w-0 flex-1 basis-64 md:max-w-md">
@@ -339,8 +378,8 @@ function SettingsRegister({
           {writability.state === 'writable' ? 'writable' : writability.state.replace('_', '-')}
         </Register>
         <Register label="mode">effective-only</Register>
-        <Register label="review" tone={review.tone} data-review={review.value}>
-          {review.value}
+        <Register label="save" tone={save.tone} data-save-status={save.value}>
+          {save.value}
         </Register>
       </dl>
     </div>
@@ -356,7 +395,7 @@ function Register({
   label: string;
   tone?: string;
   children: ReactNode;
-  'data-review'?: string;
+  'data-save-status'?: string;
 }) {
   return (
     <div className="flex items-baseline gap-2" {...data}>
@@ -366,38 +405,30 @@ function Register({
   );
 }
 
-/** Where the editor's one review stands, as one word the register can carry. */
-function reviewReading(state: SettingsEditorState): { value: string; tone: string } {
+/** The current save outcome, as one word the register can carry. */
+function saveReading(state: SettingsEditorState): { value: string; tone: string } {
   switch (state.status) {
     case 'editor_unavailable':
       return { value: 'unavailable', tone: 'text-state-error' };
     case 'editing': {
-      // A refusal always describes the current draft (an edit clears it), so
-      // it outranks the bare fact of a proposal; a fresh proposal outranks the
-      // receipt of the last write, which survives a redraft only as the
-      // panel's receipt. The register answers "what is pending now".
+      // A refusal describes the current draft; a fresh change outranks the
+      // receipt of the last write, which remains visible in the editor.
       if (settingsRejection(state)) return { value: 'rejected', tone: 'text-state-error' };
       const dirty = (['project', 'user', 'code_index_workers'] as const).some((scope) =>
         settingsScopeDirty(state, scope),
       );
-      if (dirty) return { value: 'proposal', tone: 'text-accent' };
+      if (dirty) return { value: 'unsaved', tone: 'text-accent' };
       if (settingsApplied(state)) return { value: 'applied', tone: 'text-state-ready' };
       return { value: 'none', tone: 'text-text-muted' };
     }
-    case 'reviewing':
-      return { value: 'pending', tone: 'text-accent' };
-    case 'confirmed':
-      return { value: 'confirmed', tone: 'text-accent' };
     case 'submitting':
-      return { value: 'applying', tone: 'text-state-loading' };
+      return { value: 'saving', tone: 'text-state-loading' };
     case 'conflicted':
       return { value: 'conflict', tone: 'text-state-conflicting' };
-    case 'review_superseded':
-      return { value: 'superseded', tone: 'text-state-conflicting' };
     case 'authority_withdrawn':
-      return { value: 'withdrawn', tone: 'text-state-offline' };
+      return { value: 'unavailable', tone: 'text-state-offline' };
     case 'submit_failed':
-      return { value: 'failed', tone: 'text-state-error' };
+      return { value: 'uncertain', tone: 'text-state-error' };
     default: {
       const exhaustive: never = state;
       return exhaustive;
