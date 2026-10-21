@@ -251,7 +251,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
 /**
  * When a persisted change takes effect, as the product states it: the one
  * documented requirement in its own register, or the statement that the write
- * authority reports it on apply. Shared by the review panel and the inspector.
+ * authority reports it on Save. Shared by the editor and the inspector.
  */
 export function ApplyRequirementText({ requirement }: { requirement: ApplyRequirement }) {
   switch (requirement.kind) {
@@ -269,7 +269,7 @@ export function ApplyRequirementText({ requirement }: { requirement: ApplyRequir
         <>
           <span className="td-value text-sm text-text-secondary">reported on apply</span>
           <span className="mt-0.5 block text-sm leading-relaxed text-text-muted">
-            the write authority states resync or restart requirements in its response
+            this page will show if a restart or resync is needed after saving
           </span>
         </>
       );
@@ -280,25 +280,20 @@ export function ApplyRequirementText({ requirement }: { requirement: ApplyRequir
   }
 }
 
-/** The held review's state as one word a sentence can carry. */
-export function reviewStatusWord(status: SettingsEditorState['status']): string {
+/** The last save's state as one word a sentence can carry. */
+export function saveStatusWord(status: SettingsEditorState['status']): string {
   switch (status) {
-    case 'reviewing':
-    case 'confirmed':
-      return 'pending';
     case 'submitting':
-      return 'applying';
+      return 'saving';
     case 'conflicted':
-      return 'in conflict';
-    case 'review_superseded':
-      return 'superseded';
+      return 'conflict';
     case 'authority_withdrawn':
-      return 'withdrawn';
+      return 'unavailable';
     case 'submit_failed':
-      return 'failed';
+      return 'uncertain';
     case 'editor_unavailable':
     case 'editing':
-      return 'not held';
+      return 'none';
     default: {
       const exhaustive: never = status;
       return exhaustive;
