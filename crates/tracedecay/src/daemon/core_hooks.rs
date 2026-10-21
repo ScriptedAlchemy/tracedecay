@@ -19,6 +19,7 @@ use tracedecay_daemon_protocol::{DaemonClientStream, SOCKET_ENV};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::hook_events::{self, HookEventKind, HookEventPlan};
 use tracedecay_mcp::server::attach_stateless_request_context;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::{JsonRpcRequest, write_daemon_preamble};
 
@@ -145,7 +146,7 @@ async fn admit_registered_file_edit(
             "file edit could not be encoded for durable admission",
         )
     })?;
-    broker
+    let admitted = broker
         .admit(&event.admission_source(), &payload)
         .await
         .map_err(|outcome| {
@@ -155,6 +156,17 @@ async fn admit_registered_file_edit(
                 "file edit was not durably admitted",
             )
         })?;
+    // The host may have exhausted its acknowledgement budget by now. Retain
+    // operator evidence of the exact durable receipt independently of the
+    // response write and the later project/binding publication.
+    log_daemon_event(
+        "hook_file_edit_admitted",
+        &[
+            ("project", root.display().to_string()),
+            ("paths", format!("{:?}", event.rel_paths)),
+            ("seq", admitted.seq.to_string()),
+        ],
+    );
     routed.project_path = Some(root);
     Ok(routed)
 }

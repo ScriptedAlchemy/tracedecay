@@ -15,6 +15,8 @@ use tracedecay_hooks::{
     HOOK_SYNCHRONOUS_BUDGET, HookDeliveryReceiptWriterV1, HookDeliveryRetentionV1,
     HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
 };
+use tracedecay_runtime_core::logging::format_daemon_log_line;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 
 use crate::common::{
@@ -508,6 +510,20 @@ fn bound_worktrees(data_root: &Path) -> usize {
     std::fs::read_dir(data_root.join("hook-configurations")).map_or(0, Iterator::count)
 }
 
+fn admitted_edit_sequence(log: &str, root: &Path) -> Option<u64> {
+    let marker = format_daemon_log_line(
+        "hook_file_edit_admitted",
+        &[
+            ("project", root.display().to_string()),
+            ("paths", format!("{:?}", ["src/lib.rs"])),
+        ],
+    );
+    let prefix = format!("{marker} seq=");
+    log.lines()
+        .filter_map(|line| line.strip_prefix(prefix.as_str())?.parse::<u64>().ok())
+        .find(|sequence| *sequence > 0)
+}
+
 #[test]
 fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     let home = tempfile::TempDir::new().unwrap();
@@ -532,6 +548,8 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
         );
         std::fs::write(root.join("src/lib.rs"), "pub fn edited_in_worktree() {}\n").unwrap();
     }
+    let canonical_roots =
+        [&worktree, &other_worktree].map(|root| canonical_existing_identity(root).unwrap());
     assert_eq!(
         bound_worktrees(&data_root),
         1,
@@ -581,8 +599,30 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     );
     // A callback's fixed acknowledgement budget can expire while the daemon
     // still commits its already-received event. Do not resubmit either edit:
-    // both exact worktrees must publish their bindings while full publication
-    // remains held, proving that each first edit reached durable admission.
+    // require its exact root/path receipt from the canonical broker before
+    // releasing full publication. Bindings alone cannot prove admission.
+    assert!(
+        latency_until(
+            completion_deadline.saturating_duration_since(Instant::now()),
+            || {
+                let admitted = std::fs::read_to_string(&log).unwrap();
+                canonical_roots
+                    .iter()
+                    .all(|root| admitted_edit_sequence(&admitted, root).is_some())
+            },
+        )
+        .is_some(),
+        "both first edits must have exact durable receipts before releasing publication (first={first}, second={second}): {}",
+        std::fs::read_to_string(&log).unwrap(),
+    );
+    let admitted = std::fs::read_to_string(&log).unwrap();
+    let sequences = canonical_roots
+        .each_ref()
+        .map(|root| admitted_edit_sequence(&admitted, root).unwrap());
+    assert_ne!(
+        sequences[0], sequences[1],
+        "each linked-worktree edit must have its own committed broker record"
+    );
     assert!(
         latency_until(
             completion_deadline.saturating_duration_since(Instant::now()),
@@ -595,8 +635,15 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     );
     // Graph admission publishes hook bindings before the core hold. Full
     // publication is the capability boundary this fixture actually holds.
-    let full_markers = [&worktree, &other_worktree]
-        .map(|root| format!("project={} phase=full_published", root.display()));
+    let full_markers = canonical_roots.each_ref().map(|root| {
+        format_daemon_log_line(
+            "project_open_phase",
+            &[
+                ("project", root.display().to_string()),
+                ("phase", "full_published".to_owned()),
+            ],
+        )
+    });
     let held_log = std::fs::read_to_string(&log).unwrap();
     for marker in &full_markers {
         assert!(
