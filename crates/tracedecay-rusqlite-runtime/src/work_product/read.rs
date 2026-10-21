@@ -58,14 +58,14 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ProjectionGenerationId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAuthority,
-    WorkProductGraphV1, WorkProductProjectionBundleV1, WorkProjectionSequenceV1,
-    WorkRuntimeAttemptProjectionV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1,
-    canonical_sha256,
+    WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductProjectionBundleV1,
+    WorkProjectionSequenceV1, WorkRuntimeAttemptProjectionV1, WorkRuntimeProjectionCoverageV1,
+    WorkRuntimeProjectionV1, canonical_sha256,
 };
 
 use super::{
     FromStoreFault, JournalFoldV1, WorkProductJournalEntryV1, WorkProductPublishedVersionV1,
-    load_covered_journal, verified_version,
+    checkpoint, load_covered_journal, recovered_graph_digest, verified_version,
 };
 use crate::work::WorkSqliteStorage;
 
@@ -146,7 +146,13 @@ fn read_graph(
     // mistake a slice for the whole.
     let covered = load_covered_journal(storage.handle(), scope).map_err(PortError::from_fault)?;
     let selection_coverage = covered.coverage;
-    if covered.published.is_empty() && !covered.journal.is_empty() {
+    if covered.published.len() != covered.journal.len()
+        || covered
+            .published
+            .iter()
+            .zip(&covered.journal)
+            .any(|(version, entry)| version.event_sequence != entry.sequence)
+    {
         return Err(PortError::Unavailable);
     }
 
@@ -160,12 +166,19 @@ fn read_graph(
         .iter()
         .filter(|version| version.observed_at <= request.observed_at)
         .collect::<Vec<_>>();
+    let invalidated_from = visible
+        .last()
+        .map(|head| checkpoint::invalidated_from(storage.handle(), scope, head.event_sequence))
+        .transpose()
+        .map_err(PortError::from_fault)?
+        .flatten();
     let entries = |selected: &dyn Fn(usize, &WorkProductPublishedVersionV1) -> bool| {
         build_entries(
             storage,
             authority,
             &covered.journal,
             &visible,
+            invalidated_from,
             selected,
             request.observed_at,
         )
@@ -242,6 +255,7 @@ fn build_entries(
     authority: Option<&WorkAuthority>,
     journal: &[WorkProductJournalEntryV1],
     visible: &[&WorkProductPublishedVersionV1],
+    invalidated_from: Option<WorkProductEventSequenceV1>,
     selected: &dyn Fn(usize, &WorkProductPublishedVersionV1) -> bool,
     projected_at: UtcMicros,
 ) -> Result<Vec<WorkGraphVersionEntryV1>, PortError> {
@@ -259,7 +273,13 @@ fn build_entries(
             return Err(PortError::Unavailable);
         }
         let verified = verified_version(version, &entry.event).ok_or(PortError::Unavailable)?;
-        if !selected(index, version) {
+        let selected = selected(index, version);
+        if (selected || invalidated_from.is_some_and(|from| entry.sequence >= from))
+            && recovered_graph_digest(graph).as_ref() != Some(verified.recovered_graph_digest())
+        {
+            return Err(PortError::Unavailable);
+        }
+        if !selected {
             continue;
         }
         let graph = graph.clone();

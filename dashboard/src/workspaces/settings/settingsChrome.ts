@@ -3,8 +3,7 @@
  * bezel inside a larger hit area the way the panel-header controls do. `+2px`
  * on the input is its two hairlines, so the content box lands on 44.
  *
- * Shared by the editor fields and the review dialog, which are one control
- * surface split across two modules. */
+ * Shared by the editor fields and the surrounding settings surface. */
 
 export const settingsInputClass =
   'h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 px-2 text-xs text-text-primary outline-none focus-visible:border-accent';
