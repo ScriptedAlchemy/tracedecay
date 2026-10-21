@@ -142,11 +142,11 @@ export function boundKeys(): readonly string[] {
 /**
  * What a row's write column states. Three answers, none of which is a
  * boolean: a key may be writable (and to what), locked by a gate (and by
- * which, with the authority's reason), or simply have no write path at all.
+ * which, with the authority's reason), or simply cannot be edited here.
  *
  * `locked` carries a fourth gate beside the three scope gates: the read itself
  * named no revision to hold a write against, so the editor is unavailable for
- * every bound key at once. Folded in here so the WRITE column and the review
+ * every bound key at once. Folded in here so the WRITE column and editor
  * panel cannot disagree about whether a key can be edited.
  */
 export type WriteCapability =
@@ -160,7 +160,7 @@ export type WriteCapability =
   | { readonly kind: 'no_write_path' };
 
 const EDITOR_UNAVAILABLE_REASON =
-  'GET /api/settings named no configuration revision to hold a write against, so nothing here can be edited until it does.';
+  'Current settings are unavailable, so editing is paused. Reload settings before trying again.';
 
 export function writeCapability(
   key: string,
@@ -180,7 +180,7 @@ export function writeCapability(
       return {
         kind: 'locked',
         gate: gate.state,
-        reason: `this dashboard is not authorized to apply ${scopeNoun(binding.scope)} settings`,
+        reason: `This dashboard cannot change ${scopeNoun(binding.scope)} settings. Ask an administrator for configuration-edit access.`,
         binding,
       };
     case 'read_only':

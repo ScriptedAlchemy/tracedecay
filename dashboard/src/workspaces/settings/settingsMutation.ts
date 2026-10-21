@@ -137,7 +137,13 @@ export async function applySettingsMutation(
       idempotency_key: request.idempotencyKey,
     }),
   });
-  if (patched.outcome !== 'response') return patched;
+  if (patched.outcome === 'offline') {
+    return {
+      outcome: 'unsettled',
+      detail: 'The connection was lost while saving. The change may have been applied. Load current values before trying again.',
+    };
+  }
+  if (patched.outcome === 'protocol_error') return patched;
   // The gateway's read-only refusal, recognized by its own body rather than by
   // the status alone: a 405 this dashboard cannot account for stays a plain
   // error below rather than borrowing the scope explanation.
@@ -216,7 +222,10 @@ function projectSettingsPatchResponse(
   )) {
     return {
       parsed: false,
-      violation: { outcome: 'unsettled', detail: 'The settings effect is not confirmed. Refresh current values before retrying.' },
+      violation: {
+        outcome: 'unsettled',
+        detail: 'The settings change may have been applied, but the result is uncertain. Load current values before trying again.',
+      },
     };
   }
   return {
@@ -301,7 +310,10 @@ function settingsRefusal(body: unknown, status: number, authority: string): Sett
       : applicationProblemStatusMatches(status, refusal.problem.kind);
     if (!matches) return protocolError(authority, 'the application problem disagrees with its HTTP status.');
     if (refusal.problem.committed_receipt !== null) {
-      return { outcome: 'unsettled', detail: `${refusal.problem.message} Refresh current values before retrying.` };
+      return {
+        outcome: 'unsettled',
+        detail: `${refusal.problem.message} The settings change may have been applied. Load current values before trying again.`,
+      };
     }
     return { outcome: 'error', detail: refusal.problem.message };
   }
