@@ -482,6 +482,12 @@ const SESSION_SUMMARY_AUTHORITY_IMMUTABILITY: &[Trigger] = &[
     },
 ];
 
+pub(crate) const TEMPORAL_OBSERVATION_EFFECT_DELETE_GUARD_SQL: &str =
+    "CREATE TRIGGER session_temporal_observation_effects_immutable_delete_v1
+            BEFORE DELETE ON session_temporal_observation_effects BEGIN
+                SELECT RAISE(ABORT, 'session temporal observation effects are immutable');
+            END";
+
 const SESSION_RECEIPT_IMMUTABILITY: &[Trigger] = &[
     Trigger {
         name: "session_temporal_projection_receipts_insert_guard_v1",
@@ -538,10 +544,7 @@ const SESSION_RECEIPT_IMMUTABILITY: &[Trigger] = &[
     Trigger {
         name: "session_temporal_observation_effects_immutable_delete_v1",
         table: "session_temporal_observation_effects",
-        create_sql: "CREATE TRIGGER session_temporal_observation_effects_immutable_delete_v1
-            BEFORE DELETE ON session_temporal_observation_effects BEGIN
-                SELECT RAISE(ABORT, 'session temporal observation effects are immutable');
-            END",
+        create_sql: TEMPORAL_OBSERVATION_EFFECT_DELETE_GUARD_SQL,
     },
     Trigger {
         name: "session_temporal_projection_receipts_immutable_update_v1",
