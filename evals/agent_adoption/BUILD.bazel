@@ -7,8 +7,9 @@ py_test(
         "carry_claude_profile.py",
         "grade.py",
         "selftest.py",
+        "stock_check.py",
     ],
-    data = glob([
+    data = ["claude_tools.sh"] + glob([
         "learned_skills/**",
         "scenarios/*.json",
     ]),

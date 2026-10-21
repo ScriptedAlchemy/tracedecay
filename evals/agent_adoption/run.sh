@@ -58,6 +58,7 @@ umask 077
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+source "$here/claude_tools.sh"
 EVAL_SCENARIOS_DIR="$(cd "${EVAL_SCENARIOS_DIR:-$here/scenarios}" && pwd)"
 export EVAL_SCENARIOS_DIR
 
@@ -613,7 +614,8 @@ for fn in sorted(os.listdir(sdir)):
         continue
     for host in s.get("hosts", []):
         # emit: id \t host \t fixture \t effect(0|1) \t prompt
-        effect = "1" if s.get("outcome", {}).get("files") else "0"
+        outcome = s.get("outcome", {})
+        effect = "1" if outcome.get("files") or outcome.get("behavior") else "0"
         print("\t".join([s["id"], host, s.get("fixture", "main"), effect, s["prompt"].replace("\t", " ").replace("\n", " ").replace("\r", " ")]))
 PY
 
@@ -621,10 +623,8 @@ PY
 run_claude() {
   # Uses the global CLAUDE_EXTRA array set by claude_extra_for.
   local prompt="$1" fixture="$2" out="$3" err="$4" model="$5" home="$6" condition="$7"
-  local allowed="Read,Glob,Grep,Task,Agent,Skill,mcp__tracedecay__*,mcp__plugin_tracedecay_graph__*,Bash(tracedecay tool *),Bash($TD tool *)"
-  if [[ "$condition" == "native" ]]; then
-    allowed="Read,Write,Edit,Glob,Grep,Task,Agent,Skill"
-  fi
+  local allowed
+  allowed="$(claude_allowed_tools "$condition" "$TD")"
   ( cd "$fixture" && HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" PATH="$EVAL_PATH" \
       timeout "$SCENARIO_TIMEOUT" claude -p "$prompt" \
       --output-format stream-json --verbose --include-hook-events \

@@ -118,6 +118,9 @@ TRACEDECAY_AGENT_EVALS=1 EVAL_INCLUDE_BASELINE=1 HOSTS=claude \
 This is 45 live agent turns; the existing explicit `TRACEDECAY_AGENT_EVALS=1`
 opt-in remains required. Native runs receive only Claude's standard file tools
 and no TraceDecay MCP/plugin/CLI surface; the native condition is Claude-only.
+Every condition retains the same native `Read`, `Write`, `Edit`, `Glob`, `Grep`,
+`Task`, `Agent`, and `Skill` permissions. Product conditions add their product
+tool permissions to that common set.
 `bare` exposes MCP tool descriptions without hooks or skills. `no-hints` and
 `no-skills` are the existing channel ablations; `full` is the ordinary bundled
 experience. Read per-task results rather than adoption averages: the same
@@ -149,6 +152,21 @@ The scorecard is rejected unless its binary SHA-256 equals the agent run's
 recorded artifact digest. Its wall times and resource measurements remain a
 separate cost dimension rather than being converted to model tokens or dollars.
 No live-model task outcomes or usage values are checked into the repository.
+
+The currency task requests one JSON object and compares all three facts to the
+seeded decision. Extra claims, duplicate keys, missing facts, and contradictory
+prose fail the check. The stock-rename task compiles its captured source with
+Bazel and executes trusted assertions for the renamed API, stock boundaries,
+reservations, and order totals. The assertions live outside the agent fixture.
+Compilation or toolchain failures remain `unverified`; only successful test
+execution can pass. Temporary Bazel packages are removed after verification.
+This requires a writable repository checkout and Bazel when grading the edit.
+
+The no-model native regressions run in the Hermetic evaluation regressions CI
+job. To exercise valid and destructive edits locally, run
+`python3 evals/agent_adoption/stock_check_selftest.py` from the checkout; its
+compiler/test invocations all go through Bazel. The ordinary grader self-test
+also checks structured-answer rejection and permission parity without a build.
 
 ### Related product-surface dispositions
 
@@ -322,8 +340,8 @@ answer pass.
 
 | `kind` | what is checked | evidence |
 |--------|-----------------|----------|
-| `answer` | the final answer states every `required` conclusion and none of the `forbidden` ones | regex per conclusion (case-insensitive) |
-| `effect` | the resulting state. `files` maps a glob over the post-run `src/**/*.rs` snapshot to required/forbidden checks; `tool_effects` requires a named tool to have executed successfully with matching input | file text; tool result |
+| `answer` | the final answer states every `required` conclusion and none of the `forbidden` ones, or is one JSON object exactly matching `json_equals` | regex per conclusion (case-insensitive), or parsed structured facts |
+| `effect` | the resulting state. `behavior: "stock_check_rename"` executes the trusted stock/order suite against captured sources. Other scenarios use `files` for file checks or `tool_effects` for successfully executed calls | Bazel test result; file text; tool result |
 | `ungraded` | nothing: no verifiable ground truth (run-dependent output, deferred fixture gap, or a routing-only specialist scenario). It carries a `reason` | none |
 
 A check is `{"id": "<conclusion>", "pattern": "<regex>"}`. The score is the

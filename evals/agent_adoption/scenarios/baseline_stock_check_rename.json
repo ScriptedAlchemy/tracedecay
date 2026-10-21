@@ -9,44 +9,7 @@
   "prompt": "Rename the warehouse availability check to has_sufficient_stock and update its callers. Keep the existing stock boundary behavior unchanged.",
   "outcome": {
     "kind": "effect",
-    "files": {
-      "src/inventory.rs": {
-        "required": [
-          {
-            "id": "renamed function exists",
-            "pattern": "\\bfn has_sufficient_stock\\b"
-          },
-          {
-            "id": "zero-default and inclusive stock boundary preserved",
-            "pattern": "unwrap_or\\(0\\)\\s*>=\\s*qty"
-          }
-        ],
-        "forbidden": [
-          {
-            "id": "old function name remains",
-            "pattern": "\\bcheck_availability\\b"
-          },
-          {
-            "id": "stock boundary changed to strict comparison",
-            "pattern": "unwrap_or\\(0\\)\\s*>\\s*qty"
-          }
-        ]
-      },
-      "src/*.rs": {
-        "required": [
-          {
-            "id": "new name is referenced",
-            "pattern": "\\bhas_sufficient_stock\\b"
-          }
-        ],
-        "forbidden": [
-          {
-            "id": "old name remains in source",
-            "pattern": "\\bcheck_availability\\b"
-          }
-        ]
-      }
-    }
+    "behavior": "stock_check_rename"
   },
-  "notes": "New held-out mutation task; post-run source snapshots verify the rename and reject a harmful boundary change."
+  "notes": "Held-out mutation task. Trusted Bazel tests compile the captured sources and exercise the renamed API, stock boundaries, reservations, and order totals. Missing execution is unverified, never a pass."
 }

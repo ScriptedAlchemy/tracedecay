@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -821,17 +822,78 @@ def test_product_effectiveness_comparisons():
         baseline[scenario["id"]] = scenario
     check("effectiveness: baseline tasks are neutral and independently graded",
           not grade.lint_scenarios(baseline) and not grade.lint_outcomes(baseline))
-    edit = baseline["baseline_stock_check_rename"]
-    good = {
-        "src/inventory.rs": "pub fn has_sufficient_stock(&self, sku: &str, qty: u32) -> bool { self.on_hand.get(sku).copied().unwrap_or(0) >= qty }",
-        "src/orders.rs": "has_sufficient_stock",
+
+
+def test_baseline_oracles():
+    currency = json.loads((Path(HERE) / "scenarios/baseline_currency_decision.json").read_text())
+    expected = {"multi_currency_decision": "rejected", "review_month": "2026-05",
+                "order_total_units": "USD cents"}
+    answers = {
+        "valid structured facts": (json.dumps(expected), "pass"),
+        "reordered structured facts": (json.dumps(dict(reversed(list(expected.items())))), "pass"),
+        "contradictory prose containing all keywords": (
+            "Multi-currency was not rejected in the 2026-05 review; totals are not USD cents.", "fail"),
+        "wrong decision": (json.dumps({**expected, "multi_currency_decision": "accepted"}), "fail"),
+        "wrong units": (json.dumps({**expected, "order_total_units": "EUR cents"}), "fail"),
+        "missing date": (json.dumps({key: value for key, value in expected.items()
+                                    if key != "review_month"}), "fail"),
+        "extra contradictory explanation": (json.dumps({**expected, "explanation": "Actually accepted"}), "fail"),
+        "trailing contradiction": (json.dumps(expected) + " But that rejection was reversed.", "fail"),
+        "duplicate contradictory decision": (
+            '{"multi_currency_decision":"accepted","multi_currency_decision":"rejected",'
+            '"review_month":"2026-05","order_total_units":"USD cents"}', "fail"),
     }
-    harmful = {**good, "src/inventory.rs": good["src/inventory.rs"].replace(">= qty", "> qty")}
-    edit_result = grade.score_scenario(edit, transcript([claude_result("done")]), {}, {}, good)
-    harmful_result = grade.score_scenario(edit, transcript([claude_result("done")]), {}, {}, harmful)
-    check("effectiveness: mutation outcome rejects harmful stock boundary edits",
-          edit_result["correctness"]["status"] == "pass"
-          and harmful_result["correctness"]["status"] == "fail")
+    for name, (answer, status) in answers.items():
+        got = grade.grade_outcome(currency, transcript([claude_result(answer)]))
+        check("currency oracle: " + name, got["status"] == status, str(got))
+
+    edit = json.loads((Path(HERE) / "scenarios/baseline_stock_check_rename.json").read_text())
+    destructive = {
+        "src/inventory.rs": "pub fn has_sufficient_stock(&self, sku: &str, qty: u32) -> bool { self.on_hand.get(sku).copied().unwrap_or(0) >= qty }",
+        "src/orders.rs": "// has_sufficient_stock\npub fn place_order() {}",
+    }
+    got = grade.grade_outcome(edit, transcript([claude_result("done")]), destructive)
+    check("stock oracle: deleting the order implementation cannot pass", got["status"] != "pass", str(got))
+    missing = grade.grade_outcome(edit, transcript([claude_result("done")]))
+    check("stock oracle: missing snapshot is unverified",
+          missing["status"] == "unverified" and missing["score"] is None)
+    with patch.object(grade.stock_check.shutil, "which", return_value=None):
+        unavailable = grade.grade_outcome(edit, transcript([claude_result("done")]), {"src/lib.rs": ""})
+    check("stock oracle: unavailable execution is never a pass",
+          unavailable["status"] == "unverified" and unavailable["score"] is None)
+    unsafe = grade.grade_outcome(edit, transcript([claude_result("done")]),
+                                 {"src/lib.rs": "", "src/../../escape.rs": ""})
+    check("stock oracle: captured paths cannot escape temporary staging",
+          unsafe["status"] == "unverified" and unsafe["score"] is None)
+    mixed_answer = {"kind": "answer", "answer": {
+        "json_equals": expected, "required": [{"id": "keyword", "pattern": "rejected"}],
+    }}
+    check("schema: structured facts cannot silently bypass other answer checks",
+          bool(grade.lint_outcomes({"mixed": {"outcome": mixed_answer}})))
+    check("schema: unknown behavior oracles are rejected",
+          bool(grade.lint_outcomes({"unknown": {"outcome": {"kind": "effect", "behavior": "unknown"}}})))
+    check("schema: behavioral checks cannot silently bypass other effect checks",
+          bool(grade.lint_outcomes({"mixed": {"outcome": {
+              **edit["outcome"], "tool_effects": [{"id": "call", "tools": ["Edit"]}],
+          }}})))
+
+
+def test_claude_permissions():
+    native = {"Read", "Write", "Edit", "Glob", "Grep", "Task", "Agent", "Skill"}
+    for condition in grade.CONDITIONS:
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1" && claude_allowed_tools "$2" "$3"',
+             "permissions", str(Path(HERE) / "claude_tools.sh"), condition, "/tmp/eval binary"],
+            capture_output=True, text=True,
+        )
+        allowed = set(result.stdout.strip().split(","))
+        check(f"permissions: {condition} retains identical native editing capabilities",
+              result.returncode == 0 and allowed.intersection(native) == native, result.stderr)
+        check(f"permissions: {condition} controls product capabilities only",
+              allowed == native if condition == "native" else
+              allowed == native | {"mcp__tracedecay__*", "mcp__plugin_tracedecay_graph__*",
+                                    "Bash(tracedecay tool *)", "Bash(/tmp/eval binary tool *)"},
+              str(allowed))
 
 
 LEARNED_SKILL = "pricing-change-review"
@@ -1189,6 +1251,8 @@ def main() -> int:
     test_skill_routing()
     test_cost_and_corrections()
     test_product_effectiveness_comparisons()
+    test_baseline_oracles()
+    test_claude_permissions()
     test_learned_skill_routing()
     test_learned_skill_lint()
     test_learned_skill_end_to_end()

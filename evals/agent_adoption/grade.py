@@ -36,6 +36,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import stock_check
+
 # Tools that do not count as a "meaningful" action for first-choice/efficiency.
 # Loading a skill is routing, which is scored separately.
 IGNORED_TOOLS = {"TodoWrite", "Skill"}
@@ -771,8 +773,10 @@ def repeated_query_hint_next_steps(tr: Transcript) -> list[str]:
 # --------------------------------------------------------------------------- #
 # A scenario's `outcome` block declares what a correct run must establish.
 #   {"kind": "answer",  "answer": CHECKS}                  final answer states conclusions
+#   {"kind": "answer",  "answer": {"json_equals": {...}}}  exact structured facts
 #   {"kind": "effect",  "files": {glob: CHECKS}, "tool_effects": [...]}
 #                                                          resulting state / successful call
+#   {"kind": "effect",  "behavior": "stock_check_rename"} compiled behavior of edited source
 #   {"kind": "ungraded", "reason": "..."}                  no verifiable ground truth
 # CHECKS = {"required": [CHECK...], "forbidden": [CHECK...]} with
 # CHECK = {"id": "<conclusion>", "pattern": "<regex, case-insensitive>"}.
@@ -798,6 +802,25 @@ def _evaluate_checks(text: str, checks: dict) -> dict:
     }
 
 
+def _structured_answer(text: str, expected: dict) -> dict:
+    """Compare complete facts, rejecting contradictory prose and duplicate keys."""
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate answer key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        actual = json.loads(text, object_pairs_hook=unique_keys)
+    except ValueError as error:
+        return {"status": "fail", "score": 0.0, "reason": f"answer is not one unambiguous JSON object: {error}"}
+    matched = actual == expected
+    return {"status": "pass" if matched else "fail", "score": float(matched),
+            "evidence": {"answer": {"expected": expected, "actual": actual}}}
+
+
 def _glob_files(effects: dict, pattern: str) -> str:
     """Concatenate the snapshotted files a glob selects (`*` crosses `/`)."""
     return "\n".join(
@@ -818,12 +841,26 @@ def grade_outcome(scn: dict, tr: Transcript, effects: Optional[dict] = None) -> 
     """Task correctness, independent of which tools the agent chose.
 
     status: pass | fail | ungraded (no ground truth declared) | unverified
-    (an effect scenario whose post-run snapshot was not captured).
+    (the post-run snapshot or its behavioral verification is unavailable).
     """
     outcome = scn.get("outcome") or {"kind": "ungraded", "reason": "scenario declares no outcome"}
     kind = outcome["kind"]
     if kind == "ungraded":
         return {"kind": kind, "status": "ungraded", "score": None, "reason": outcome.get("reason")}
+    if kind == "answer" and "json_equals" in outcome["answer"]:
+        return {"kind": kind, **_structured_answer(tr.final_text, outcome["answer"]["json_equals"])}
+    if kind == "effect" and outcome.get("behavior"):
+        if effects is None:
+            return {"kind": kind, "status": "unverified", "score": None,
+                    "reason": "no post-run file snapshot for the behavior oracle"}
+        if outcome["behavior"] != "stock_check_rename":
+            return {"kind": kind, "status": "unverified", "score": None,
+                    "reason": "unknown behavior oracle"}
+        result = stock_check.verify(effects)
+        status = result["status"]
+        return {"kind": kind, "status": status,
+                "score": None if status == "unverified" else float(status == "pass"),
+                "reason": result["reason"], "evidence": {"behavior": result}}
 
     missing: list[str] = []
     forbidden: list[str] = []
@@ -897,8 +934,19 @@ def lint_outcomes(scenarios: dict) -> list[str]:
             if not outcome.get("reason"):
                 problems.append(f"{sid}: ungraded outcome needs a reason")
         elif kind == "answer":
-            check_checks(sid, "outcome.answer", outcome.get("answer"))
+            answer = outcome.get("answer")
+            if isinstance(answer, dict) and "json_equals" in answer:
+                expected = answer["json_equals"]
+                if (set(answer) != {"json_equals"} or not isinstance(expected, dict)
+                        or not expected or any(not isinstance(v, str) for v in expected.values())):
+                    problems.append(f"{sid}: json_equals must be the sole answer check and contain nonempty string facts")
+            else:
+                check_checks(sid, "outcome.answer", answer)
         else:
+            if "behavior" in outcome:
+                if set(outcome) != {"kind", "behavior"} or outcome["behavior"] != "stock_check_rename":
+                    problems.append(f"{sid}: behavior must be stock_check_rename and the sole effect oracle")
+                continue
             files, tool_effects = outcome.get("files", {}), outcome.get("tool_effects", [])
             if not files and not tool_effects:
                 problems.append(f"{sid}: effect outcome needs files or tool_effects")

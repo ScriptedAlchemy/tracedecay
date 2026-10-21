@@ -6,26 +6,17 @@
   ],
   "fixture": "main",
   "status": "baseline",
-  "prompt": "Was multi-currency support accepted or rejected, and what units are order totals stored in?",
+  "prompt": "Was multi-currency support accepted or rejected, in which architecture-review month, and what units are order totals stored in? Return only a JSON object with the keys multi_currency_decision, review_month (YYYY-MM), and order_total_units. Use null for any fact you cannot establish.",
   "outcome": {
     "kind": "answer",
     "answer": {
-      "required": [
-        {
-          "id": "identifies the rejection",
-          "pattern": "\\brejected\\b"
-        },
-        {
-          "id": "identifies the 2026-05 review",
-          "pattern": "\\b2026\\-05\\b"
-        },
-        {
-          "id": "states USD cents",
-          "pattern": "\\bUSD cents\\b"
-        }
-      ]
+      "json_equals": {
+        "multi_currency_decision": "rejected",
+        "review_month": "2026-05",
+        "order_total_units": "USD cents"
+      }
     }
   },
   "seeded_fact": "currency_fact_id",
-  "notes": "New held-out session-memory task with structured answer checks; this decision is seeded in memory but is not present in the fixture source."
+  "notes": "Held-out session-memory task. The complete structured answer must match the seeded decision; contradictory prose, duplicate keys, and extra claims cannot pass."
 }
