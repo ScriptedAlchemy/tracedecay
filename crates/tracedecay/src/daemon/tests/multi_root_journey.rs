@@ -98,7 +98,10 @@ async fn execute_native_daemon_invocation(
     let engine = engine.clone();
     let handshake = handshake.clone();
     let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
-        assert!(tracedecay_runtime_core::native_runtime::on_native_thread());
+        assert!(
+            tracedecay_runtime_core::native_runtime::Runtime::current_handle().is_some(),
+            "the daemon invocation must run on a native worker"
+        );
         Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
     })
     .expect("native daemon invocation");
