@@ -357,7 +357,7 @@ async fn workspace_symbols_preserve_deadline_and_cancel_all_languages() {
     let expired = Instant::now();
     assert!(matches!(
         harness.complete(1, &request, expired).await,
-        SemanticProviderOutcome::Partial { coverage, .. } if coverage == "analyzer-timed-out"
+        SemanticProviderOutcome::Partial { coverage, .. } if coverage == "analyzer-timeout"
     ));
     let deadline = Instant::now() + TEST_BOUND;
     assert_eq!(

@@ -14,7 +14,7 @@ use super::super::error::{
     AnalyzerCancellation as CancellationToken, AnalyzerRuntimeError as TraceDecayError,
 };
 use super::super::launch::AnalyzerLaunch;
-use super::shared_client::SharedAnalyzerClient;
+use super::shared_client::{AnalyzerClientUse, SharedAnalyzerClient};
 use crate::{
     AdmittedRoot, AnalyzerEvent, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
     LspSemanticOperationOutcome, LspSemanticRequestAuthority, SemanticCapability,
@@ -314,7 +314,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                         return LspSemanticOperationOutcome::Unavailable;
                     };
                     match client {
-                        Ok(Some(mut client)) => {
+                        Ok(Some(client)) => {
                             let Some(attempt) = inner.shared.mark_ready(attempt) else {
                                 // Superseded: this caller no longer owns the
                                 // start, so its client is not the session's
@@ -322,6 +322,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 // over the replacement's.
                                 slot.retire(client);
                                 return analyzer_event_outcome(AnalyzerEvent::Cancelled);
+                            };
+                            let mut usage = AnalyzerClientUse::new(
+                                &inner.shared,
+                                slot,
+                                attempt,
+                                Some(client),
+                            );
+                            let Some(client) = usage.client.as_mut() else {
+                                return LspSemanticOperationOutcome::Unavailable;
                             };
                             // Workspace fan-out asks every retained language
                             // authority. Capability evidence belongs to this
@@ -331,7 +340,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             if matches!(&request, AnalyzerSemanticRequest::WorkspaceSymbols(_))
                                 && !client.upstream_capabilities().semantic.contains(&SemanticCapability::WorkspaceSymbol)
                             {
-                                slot.replace(client);
+                                usage.restore(AnalyzerEvent::Ready);
                                 return LspSemanticOperationOutcome::Unsupported;
                             }
                             // The analyzer answers only for documents in its
@@ -377,21 +386,20 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 } else {
                                     AnalyzerEvent::TimedOut
                                 };
-                                slot.retire(client);
-                                inner.shared.record(attempt, event);
+                                usage.retire(event);
                                 return analyzer_event_outcome(event);
                             };
                             if let Err(error) = document_sync {
+                                let event = error.analyzer_event();
                                 if matches!(
                                     &error,
                                     LspSemanticRequestError::Transport { .. }
                                         | LspSemanticRequestError::TimedOut
                                 ) {
-                                    slot.retire(client);
+                                    usage.retire(event);
                                 } else {
-                                    slot.replace(client);
+                                    usage.restore(event);
                                 }
-                                inner.shared.record(attempt, error.analyzer_event());
                                 return semantic_operation_outcome(Err(error));
                             }
                             // Boxed: this future covers the whole semantic
@@ -412,27 +420,21 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             // Reusing the client would make every later request
                             // parse from the middle of a message, so retire it
                             // alongside the transport failures.
-                            if matches!(
-                                &result,
-                                Err(LspSemanticRequestError::Transport { .. }
-                                    | LspSemanticRequestError::ProcessExited { .. }
-                                    | LspSemanticRequestError::InvalidResponse { .. }
-                                    | LspSemanticRequestError::TimedOut
-                                    | LspSemanticRequestError::Cancelled)
-                            ) {
-                                slot.retire(client);
-                            } else {
-                                slot.replace(client);
-                            }
-                            match &result {
+                            let event = match &result {
                                 Ok(_)
                                 | Err(LspSemanticRequestError::Remote {
                                     code: Some(-32601),
                                     ..
-                                }) => inner.shared.record(attempt, AnalyzerEvent::Ready),
-                                Err(error) => {
-                                    inner.shared.record(attempt, error.analyzer_event());
-                                }
+                                }) => AnalyzerEvent::Ready,
+                                Err(error) => error.analyzer_event(),
+                            };
+                            if matches!(
+                                &result,
+                                Ok(_) | Err(LspSemanticRequestError::Remote { .. })
+                            ) {
+                                usage.restore(event);
+                            } else {
+                                usage.retire(event);
                             }
                             // Closing the session can race the analyzer response.
                             // The completed exchange leaves the client reusable,

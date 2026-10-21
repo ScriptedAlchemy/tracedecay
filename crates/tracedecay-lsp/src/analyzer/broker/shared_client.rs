@@ -199,6 +199,61 @@ impl SharedAnalyzerClient {
     }
 }
 
+/// One operation's use of the shared analyzer, concluded exactly once.
+///
+/// Either lane can be aborted at any await while it holds the client out of
+/// the slot, which drops the process with it. Without this guard the supervisor
+/// would keep describing that incarnation as live, and the next caller would
+/// serve its replacement on the retired attempt.
+pub(crate) struct AnalyzerClientUse<'a> {
+    shared: &'a SharedAnalyzerClient,
+    client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+    pub(crate) client: Option<StdioLspClient>,
+    attempt: u32,
+    concluded: bool,
+}
+
+impl<'a> AnalyzerClientUse<'a> {
+    pub(crate) fn new(
+        shared: &'a SharedAnalyzerClient,
+        client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+        attempt: u32,
+        client: Option<StdioLspClient>,
+    ) -> Self {
+        Self {
+            shared,
+            client_slot,
+            client,
+            attempt,
+            concluded: false,
+        }
+    }
+
+    pub(crate) fn restore(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+        if let Some(client) = self.client.take() {
+            self.client_slot.replace(client);
+        }
+    }
+
+    pub(crate) fn retire(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+    }
+}
+
+impl Drop for AnalyzerClientUse<'_> {
+    fn drop(&mut self) {
+        if !self.concluded {
+            self.shared.record(self.attempt, AnalyzerEvent::Retired);
+        }
+        if let Some(client) = self.client.take() {
+            self.client_slot.retire(client);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::poll_fn;

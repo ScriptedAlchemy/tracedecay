@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracedecay_runtime_core::native_runtime;
 
 use super::super::client::{
@@ -16,7 +16,7 @@ use super::super::client::{
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
 use super::super::launch::AnalyzerLaunch;
 use super::EngineState;
-use super::shared_client::{SharedAnalyzerClient, SharedAnalyzerClientSlot};
+use super::shared_client::{AnalyzerClientUse, SharedAnalyzerClient};
 use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
@@ -300,7 +300,7 @@ async fn collect_refresh_batch(
         .map_err(RefreshFailure::timeout)?
         .map_err(|error| RefreshFailure::crashed(&error))?;
     let mut use_of_analyzer = if let Some(client) = client_slot.take() {
-        RefreshUseOfAnalyzer::new(&shared, client_slot, shared.current_attempt(), Some(client))
+        AnalyzerClientUse::new(&shared, client_slot, shared.current_attempt(), Some(client))
     } else {
         // Restart exhaustion is a stable health state
         // (`MAX_ANALYZER_RESTARTS`), not an invitation for this lane to
@@ -310,7 +310,7 @@ async fn collect_refresh_batch(
                 "analyzer '{command}' is retired: restart budget exhausted"
             )));
         };
-        let mut use_of_analyzer = RefreshUseOfAnalyzer::new(&shared, client_slot, attempt, None);
+        let mut use_of_analyzer = AnalyzerClientUse::new(&shared, client_slot, attempt, None);
         use_of_analyzer.client = match StdioLspClient::start_with_launch(
             &launch,
             &args,
@@ -360,61 +360,6 @@ async fn collect_refresh_batch(
             let failure = RefreshFailure::client(&error);
             use_of_analyzer.retire(error.analyzer_event());
             Err(failure)
-        }
-    }
-}
-
-/// One refresh's use of the shared analyzer, concluded exactly once.
-///
-/// A refresh task can be aborted at any await while it holds the client out of
-/// the slot, which drops the process with it. Without this guard the supervisor
-/// would keep describing that incarnation as live, and the next caller would
-/// serve its replacement on the retired attempt.
-struct RefreshUseOfAnalyzer<'a> {
-    shared: &'a SharedAnalyzerClient,
-    client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
-    client: Option<StdioLspClient>,
-    attempt: u32,
-    concluded: bool,
-}
-
-impl<'a> RefreshUseOfAnalyzer<'a> {
-    fn new(
-        shared: &'a SharedAnalyzerClient,
-        client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
-        attempt: u32,
-        client: Option<StdioLspClient>,
-    ) -> Self {
-        Self {
-            shared,
-            client_slot,
-            client,
-            attempt,
-            concluded: false,
-        }
-    }
-
-    fn restore(mut self, event: AnalyzerEvent) {
-        self.concluded = true;
-        self.shared.record(self.attempt, event);
-        if let Some(client) = self.client.take() {
-            self.client_slot.replace(client);
-        }
-    }
-
-    fn retire(mut self, event: AnalyzerEvent) {
-        self.concluded = true;
-        self.shared.record(self.attempt, event);
-    }
-}
-
-impl Drop for RefreshUseOfAnalyzer<'_> {
-    fn drop(&mut self) {
-        if !self.concluded {
-            self.shared.record(self.attempt, AnalyzerEvent::Retired);
-        }
-        if let Some(client) = self.client.take() {
-            self.client_slot.retire(client);
         }
     }
 }

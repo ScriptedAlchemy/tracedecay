@@ -685,7 +685,21 @@ impl StdioLspClient {
             .documents
             .get(identity)
             .map(|current| current.uri.clone());
-        let notification = if previous_uri.as_deref() != Some(uri) {
+        let notification = if previous_uri.as_deref() == Some(uri) {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "version": version
+                    },
+                    "contentChanges": [{
+                        "text": text,
+                    }]
+                }
+            })
+        } else {
             if let Some(previous_uri) = previous_uri {
                 write_message_until(
                     &self.process,
@@ -709,20 +723,6 @@ impl StdioLspClient {
                         "version": version,
                         "text": text,
                     }
-                }
-            })
-        } else {
-            json!({
-                "jsonrpc": "2.0",
-                "method": "textDocument/didChange",
-                "params": {
-                    "textDocument": {
-                        "uri": uri,
-                        "version": version
-                    },
-                    "contentChanges": [{
-                        "text": text,
-                    }]
                 }
             })
         };
@@ -1374,14 +1374,20 @@ impl StdioLspClient {
     /// Terminates and waits for a retired process. The shared client slot
     /// stores this future when an in-flight owner is dropped, and no successor
     /// may acquire that slot until the future completes.
-    pub(crate) async fn reap(mut self) -> Result<()> {
-        self.process
-            .terminate()
-            .await
-            .map(drop)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("failed to reap LSP server '{}': {error}", self.command),
-            })
+    pub(crate) fn reap(mut self) -> impl Future<Output = Result<()>> + Send {
+        // The slot retains this future so no successor can overlap the old
+        // process. Start termination before returning it: cancellation may
+        // have no successor to poll the retained settlement future.
+        self.process.begin_terminate();
+        async move {
+            self.process
+                .finish_terminate()
+                .await
+                .map(drop)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("failed to reap LSP server '{}': {error}", self.command),
+                })
+        }
     }
 }
 
