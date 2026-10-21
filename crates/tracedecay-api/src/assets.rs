@@ -18,7 +18,7 @@ use axum::http::{HeaderMap, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Router, http::StatusCode};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use http_encoding_headers::{Encoding, decode_header_value};
 
 /// Wire encoding of [`StaticDashboardAsset::contents`].
@@ -179,7 +179,7 @@ fn response_encoding(
 }
 
 fn inflate_gzip(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    let mut decoder = GzDecoder::new(bytes);
+    let mut decoder = MultiGzDecoder::new(bytes);
     let mut inflated = Vec::new();
     decoder.read_to_end(&mut inflated)?;
     Ok(inflated)
@@ -486,6 +486,39 @@ mod tests {
             .expect("body");
         assert_eq!(body.as_ref(), raw);
     }
+
+    #[tokio::test]
+    async fn identity_responses_decode_every_member_of_a_prepared_gzip_asset() {
+        let mut compressed = gzip_bytes(b"<html>");
+        compressed.extend(gzip_bytes(b"complete dashboard</html>"));
+        let assets = Box::leak(Box::new([StaticDashboardAsset {
+            path: "index.html",
+            contents: Box::leak(compressed.into_boxed_slice()),
+            content_type: "text/html; charset=utf-8",
+            encoding: StaticAssetEncoding::Gzip,
+        }]));
+        let response = static_dashboard_router(StaticDashboardAssets {
+            assets,
+            cache_tag: "gzip-members",
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::ACCEPT_ENCODING, "identity")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+            b"<html>complete dashboard</html>"
+        );
+    }
+
     #[tokio::test]
     async fn compressed_asset_validators_follow_the_selected_representation() {
         let raw = b"<html>cache variants</html>";
