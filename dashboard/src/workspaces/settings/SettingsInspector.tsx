@@ -21,7 +21,7 @@ import { formatMicrosUtc } from '../../ui/format.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { MultiRootPanel } from './MultiRootPanel.tsx';
 import { RemoteBrainPanel } from './RemoteBrainPanel.tsx';
-import { settingsReviewOf, type SettingsEditorState } from './settingsEditorMachine.ts';
+import { settingsSubmissionOf, type SettingsEditorState } from './settingsEditorMachine.ts';
 import type { WritableScopes } from './settingsGates.ts';
 import { settingsRevisionId, type SettingsModel } from './settingsModel.ts';
 import {
@@ -39,7 +39,7 @@ import {
   ValueCell,
   WriteCell,
   provenanceSentence,
-  reviewStatusWord,
+  saveStatusWord,
   type RowProvenance,
 } from './SettingsValues.tsx';
 
@@ -64,13 +64,13 @@ export function SettingsInspector({
 }) {
   return (
     <div className="flex flex-col">
-      <section aria-label="Provenance / review" className="border-b border-edge-subtle">
+      <section aria-label="Configuration details" className="border-b border-edge-subtle">
         <header className="flex min-h-10 items-center gap-2.5 border-b border-edge-subtle px-2.5 py-2">
           <span className="flex min-w-0 flex-col gap-0.5">
             <span className="text-2xs uppercase tracking-[0.08em] text-text-muted">
               {row ? 'inspecting' : 'configuration snapshot'}
             </span>
-            <h2 className="td-title truncate">Provenance / review</h2>
+            <h2 className="td-title truncate">Configuration details</h2>
           </span>
           <span aria-hidden className="td-rule" />
         </header>
@@ -185,7 +185,7 @@ function writeSentence(
     case 'locked':
       return capability.reason;
     case 'no_write_path':
-      return 'No settings PATCH route addresses this key; it is reported, not edited, here.';
+      return 'This value is read-only here. Change it in the configuration source that owns it.';
     default: {
       const exhaustive: never = capability;
       return exhaustive;
@@ -257,7 +257,7 @@ function SnapshotFacts({
         <Fact term="scope">
           <ScopeFact writability={writability} />
         </Fact>
-        <HeldReviewFact state={state} />
+        <PendingSaveFact state={state} />
         {model.overrides.length > 0 ? (
           <Fact term="environment overrides">
             <span className="td-value text-sm text-text-secondary" data-cell="numeric">
@@ -267,9 +267,8 @@ function SnapshotFacts({
         ) : null}
         <Fact term="concurrent edit detection">
           <span className="text-body leading-relaxed text-text-muted">
-            A proposal is validated against the revision it was planned from and checked again
-            immediately before apply. If the revision changes first, the patch is rejected as a
-            conflict and nothing is written.
+            If settings change while you edit, Save stops and asks you to load current values.
+            Your changes are never silently written over newer settings.
           </span>
         </Fact>
       </dl>
@@ -278,20 +277,16 @@ function SnapshotFacts({
 }
 
 /**
- * The one review the editor can hold, stated here so a verdict, a conflict,
- * a withdrawn authority, a failed write, stays visible after its row's panel
- * is closed, rather than surviving only as a word in the register.
+ * A save's outcome stays visible after its row's editor is closed.
  */
-function HeldReviewFact({ state }: { state: SettingsEditorState }) {
-  const review = settingsReviewOf(state);
-  if (review === null) return null;
+function PendingSaveFact({ state }: { state: SettingsEditorState }) {
+  const submission = settingsSubmissionOf(state);
+  if (submission === null) return null;
   return (
-    <Fact term="held review">
-      <span className="text-body leading-relaxed text-text-secondary" data-settings-held-review={state.status}>
-        <span className="td-value text-text-primary">{reviewStatusWord(state.status)}</span> ·{' '}
-        {scopeNoun(review.scope)} change against revision{' '}
-        <span className="td-value">{review.expectedRevisionId}</span>. Select a{' '}
-        {scopeNoun(review.scope)} key to resolve it.
+    <Fact term="save status">
+      <span className="text-body leading-relaxed text-text-secondary" data-settings-save-status={state.status}>
+        <span className="td-value text-text-primary">{saveStatusWord(state.status)}</span> ·{' '}
+        {scopeNoun(submission.scope)} settings. Select a matching setting to see the next action.
       </span>
     </Fact>
   );

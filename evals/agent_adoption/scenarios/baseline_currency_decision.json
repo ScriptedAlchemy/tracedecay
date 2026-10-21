@@ -1,0 +1,22 @@
+{
+  "id": "baseline_currency_decision",
+  "category": "product_effectiveness",
+  "hosts": [
+    "claude"
+  ],
+  "fixture": "main",
+  "status": "baseline",
+  "prompt": "Was multi-currency support accepted or rejected, in which architecture-review month, and what units are order totals stored in? Return only a JSON object with the keys multi_currency_decision, review_month (YYYY-MM), and order_total_units. Use null for any fact you cannot establish.",
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "json_equals": {
+        "multi_currency_decision": "rejected",
+        "review_month": "2026-05",
+        "order_total_units": "USD cents"
+      }
+    }
+  },
+  "seeded_fact": "currency_fact_id",
+  "notes": "Held-out session-memory task. The complete structured answer must match the seeded decision; contradictory prose, duplicate keys, and extra claims cannot pass."
+}
