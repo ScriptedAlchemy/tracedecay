@@ -693,6 +693,7 @@ fn drain_daemon_stderr(
     startup: String,
     mut stderr: BufReader<std::process::ChildStderr>,
     log: Option<PathBuf>,
+    mirror_stderr: bool,
 ) {
     std::thread::spawn(move || {
         if let Some(path) =
@@ -703,6 +704,18 @@ fn drain_daemon_stderr(
                 .open(path)
         {
             let _ = file.write_all(startup.as_bytes());
+            if mirror_stderr {
+                let mut line = Vec::new();
+                while stderr
+                    .read_until(b'\n', &mut line)
+                    .is_ok_and(|read| read != 0)
+                {
+                    let _ = file.write_all(&line);
+                    let _ = std::io::stderr().write_all(&line);
+                    line.clear();
+                }
+                return;
+            }
             let _ = std::io::copy(&mut stderr, &mut file);
             return;
         }
@@ -1165,6 +1178,8 @@ pub fn spawn_tracedecay_daemon_with(
 
 /// [`spawn_tracedecay_daemon_with`], streaming the daemon's stderr to `log`
 /// for assertions over its diagnostic events.
+/// Set `TRACEDECAY_TEST_DAEMON_LOG_STDERR=1` in `configure` to also stream the
+/// diagnostics to test stderr, preserving evidence when a runner kills a test.
 pub fn spawn_tracedecay_daemon_logged(
     home: &Path,
     log: &Path,
@@ -1276,6 +1291,9 @@ fn spawn_tracedecay_daemon_process(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     configure(&mut command);
+    let mirror_stderr = command.get_envs().any(|(key, value)| {
+        key == "TRACEDECAY_TEST_DAEMON_LOG_STDERR" && value == Some(OsStr::new("1"))
+    });
     bind_to_test_process(&mut command);
     let child = command.spawn().expect("tracedecay daemon should start");
     let mut daemon = DaemonProcess::new(child);
@@ -1315,6 +1333,9 @@ fn spawn_tracedecay_daemon_process(
         let read = stderr
             .read_line(&mut startup)
             .expect("daemon stderr should be readable");
+        if mirror_stderr {
+            let _ = std::io::stderr().write_all(startup[line_start..].as_bytes());
+        }
         if read == 0 {
             let status = daemon
                 .child
@@ -1329,7 +1350,7 @@ fn spawn_tracedecay_daemon_process(
             break;
         }
     }
-    drain_daemon_stderr(startup, stderr, log);
+    drain_daemon_stderr(startup, stderr, log, mirror_stderr);
     daemon
 }
 
