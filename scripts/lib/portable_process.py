@@ -165,6 +165,21 @@ def _stop_group(pid: int, grace_seconds: float) -> bool:
     return forced
 
 
+def stop_process(process: subprocess.Popen, grace_seconds: float) -> None:
+    """Stop an owned session and reap its leader, including on stop errors."""
+    try:
+        _stop_group(process.pid, grace_seconds)
+    except BaseException:
+        _signal_group(process.pid, signal.SIGKILL)
+        raise
+    finally:
+        try:
+            process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            _signal_group(process.pid, signal.SIGKILL)
+            process.wait()
+
+
 def _return_code(status: int) -> int:
     return status if status >= 0 else 128 + abs(status)
 

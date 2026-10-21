@@ -4,8 +4,11 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -15,6 +18,7 @@ MODULE_PATH = Path(__file__).with_name("run_real_model.py")
 SPEC = importlib.util.spec_from_file_location("run_real_model", MODULE_PATH)
 run_real_model = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(run_real_model)
+from scripts.lib import portable_process
 
 BENCHMARK_PATH = MODULE_PATH.parent.parent.parent / "benchmark_data" / "run_benchmarks.py"
 BENCHMARK_SPEC = importlib.util.spec_from_file_location("run_benchmarks", BENCHMARK_PATH)
@@ -108,7 +112,7 @@ class BinaryResolutionTest(unittest.TestCase):
                 self.assertEqual(
                     run_real_model.resolve_tracedecay_bin(binary), str(binary)
                 )
-                with self.assertRaises(SystemExit):
+                with self.assertRaises(run_real_model.EvalSetupError):
                     run_real_model.resolve_tracedecay_bin(Path(tmp) / "missing")
 
     def test_default_never_falls_back_to_a_prebuilt_or_path_binary(self):
@@ -119,10 +123,26 @@ class BinaryResolutionTest(unittest.TestCase):
             path_binary.chmod(0o755)
             with (
                 mock.patch.dict("os.environ", {"PATH": tmp}),
-                mock.patch.object(run_real_model.subprocess, "run", return_value=failed),
-                self.assertRaises(SystemExit),
+                mock.patch.object(run_real_model, "run", return_value=failed),
+                self.assertRaises(run_real_model.EvalSetupError),
             ):
                 run_real_model.resolve_tracedecay_bin(None)
+
+    def test_build_failure_writes_a_failed_report_before_any_scenario_starts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp)),
+                mock.patch.object(run_real_model, "load_scenarios", return_value=[{"id": "test"}]),
+                mock.patch.object(run_real_model, "run", return_value=subprocess.CompletedProcess([], 2, stdout="")),
+                mock.patch.object(run_real_model, "run_scenario") as scenario,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(run_real_model.main(["--agent-turn", "--i-understand-model-cost"]), 1)
+            report = json.loads(next(Path(tmp).glob("*/report.json")).read_text())
+        scenario.assert_not_called()
+        self.assertEqual(report["status"], "fail")
+        self.assertIn("build-eval-binary.sh exited 2", report["error"])
+        self.assertIsNone(report["tracedecay_bin"])
 
 
 class CursorComposerSelectionTest(unittest.TestCase):
@@ -327,6 +347,170 @@ class IsolatedLifecycleTest(unittest.TestCase):
                 self.assertEqual(
                     entry["error"], str(exc) or "interrupted"
                 )
+
+    def test_daemon_cleanup_failure_preserves_report_and_removes_artifacts(self):
+        binary = self.make_bin()
+        for agent_failure, cleanup_failure in (
+            (RuntimeError("agent failed"), OSError("cleanup failed")),
+            (None, OSError("cleanup failed")),
+            (None, KeyboardInterrupt("cancelled during cleanup")),
+        ):
+            with self.subTest(agent=agent_failure, cleanup=cleanup_failure):
+                environment = run_real_model.create_eval_environment("cleanup-failure")
+                daemon_pid = None
+                outcomes = [{"name": "completed assertion", "passed": True}]
+                transcripts = [{"turn_valid": True}]
+
+                def stop_then_fail(env):
+                    nonlocal daemon_pid
+                    daemon_pid = env.daemon.pid
+                    run_real_model.stop_process(env.daemon, 5)
+                    raise cleanup_failure
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    with (
+                        mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp)),
+                        mock.patch.object(run_real_model, "load_scenarios", return_value=[self.scenario()]),
+                        mock.patch.object(run_real_model, "resolve_tracedecay_bin", return_value=binary),
+                        mock.patch.object(run_real_model, "create_eval_environment", return_value=environment),
+                        mock.patch.object(run_real_model, "drive_hermes", side_effect=agent_failure, return_value=transcripts),
+                        mock.patch.object(run_real_model, "evaluate_assertions", return_value=outcomes),
+                        mock.patch.object(run_real_model.EvalEnvironment, "stop_daemon", autospec=True, side_effect=stop_then_fail),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        cancelled = isinstance(cleanup_failure, KeyboardInterrupt)
+                        self.assertEqual(
+                            run_real_model.main(["--agent-turn", "--i-understand-model-cost"]),
+                            130 if cancelled else 1,
+                        )
+                    report = json.loads(next(Path(tmp).glob("*/report.json")).read_text())
+                self.assertEqual(report["status"], "cancelled" if cancelled else "fail")
+                entry = report["scenarios"][0]
+                if agent_failure is not None:
+                    self.assertEqual(entry["error"], str(agent_failure))
+                    self.assertIn(str(cleanup_failure), entry["cleanup_error"])
+                else:
+                    self.assertIn(str(cleanup_failure), entry["error"])
+                    self.assertEqual(entry["assertions"], outcomes)
+                    self.assertEqual(entry["transcripts"], transcripts)
+                self.assertFalse(environment.root.exists())
+                self.assertFalse(environment.socket_dir.exists())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(daemon_pid, 0)
+
+
+class ProcessCancellationTest(unittest.TestCase):
+    def test_stop_failure_still_kills_and_reaps_the_owned_process(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            start_new_session=True,
+        )
+        try:
+            with mock.patch.object(portable_process, "_stop_group", side_effect=OSError("stop failed")):
+                with self.assertRaisesRegex(OSError, "stop failed"):
+                    portable_process.stop_process(process, 1)
+            self.assertIsNotNone(process.returncode)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(process.pid, 0)
+        finally:
+            portable_process.stop_process(process, 1)
+
+    def test_signals_during_binary_resolution_and_turns_stop_owned_groups_and_write_reports(self):
+        workload = """
+import os, subprocess, sys, time
+from pathlib import Path
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])
+Path(sys.argv[1]).write_text(str(os.getpid()))
+time.sleep(600)
+"""
+        entrypoint = """
+import sys
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+import run_real_model as runner
+root, phase = Path(sys.argv[2]), sys.argv[3]
+runner.RUNS_DIR = root / 'runs'
+scenario = {'id': 'cancel', 'setup': {}, 'assertions': []}
+def work(*args, **kwargs):
+    return runner.run([sys.executable, '-c', sys.argv[4], str(root / 'work.pid')])
+with mock.patch.object(runner, 'load_scenarios', return_value=[scenario]):
+    if phase == 'build':
+        runner.resolve_tracedecay_bin = work
+    else:
+        runner.resolve_tracedecay_bin = lambda explicit: sys.argv[5]
+        runner.drive_hermes = work
+    sys.exit(runner.main(['--agent-turn', '--i-understand-model-cost']))
+"""
+        for phase in ("build", "turn"):
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                with self.subTest(phase=phase, signal=sig), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    binary = root / "tracedecay"
+                    binary.write_text(FAKE_BIN)
+                    binary.chmod(0o755)
+                    process = subprocess.Popen(
+                        [sys.executable, "-c", entrypoint, str(MODULE_PATH.parent), tmp,
+                         phase, workload, str(binary)],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                        start_new_session=True,
+                    )
+                    group = None
+                    try:
+                        deadline = time.monotonic() + 15
+                        while not (root / "work.pid").exists() and process.poll() is None:
+                            if time.monotonic() >= deadline:
+                                self.fail("owned workload did not start")
+                            time.sleep(0.02)
+                        self.assertTrue((root / "work.pid").exists())
+                        group = int((root / "work.pid").read_text())
+                        process.send_signal(sig)
+                        output, _ = process.communicate(timeout=15)
+                        self.assertEqual(process.returncode, 130, output)
+                        report = json.loads(next((root / "runs").glob("*/report.json")).read_text())
+                        self.assertEqual(report["status"], "cancelled", report)
+                        if phase == "turn":
+                            self.assertEqual(report["scenarios"][0]["status"], "cancelled")
+                        self.assertEqual(
+                            subprocess.run(
+                                [sys.executable, "-S", str(run_real_model.PROCESS_HELPER),
+                                 "group-alive", "--pid", str(group)],
+                                check=False,
+                            ).returncode,
+                            1,
+                            "a cancelled workload left runnable descendants",
+                        )
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(group, 0)
+                    finally:
+                        run_real_model.stop_process(process, 1)
+                        if group is not None:
+                            try:
+                                os.killpg(group, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        if process.stdout is not None:
+                            process.stdout.close()
+
+    def test_timeout_stops_descendants_and_reaps_the_leader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "pid"
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_real_model.run(
+                    [sys.executable, "-c",
+                     "import os, subprocess, sys, time; "
+                     "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+                     "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(600)",
+                     str(pid_path)], timeout=0.5,
+                )
+            pid = int(pid_path.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+            self.assertEqual(subprocess.run(
+                [sys.executable, "-S", str(run_real_model.PROCESS_HELPER),
+                 "group-alive", "--pid", str(pid)], check=False,
+            ).returncode, 1)
 
 
 class ExactFactStoreEvaluationTest(unittest.TestCase):

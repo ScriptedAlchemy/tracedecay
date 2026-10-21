@@ -30,16 +30,20 @@ import subprocess
 import sys
 import tempfile
 import signal
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+from scripts.lib.portable_process import dies_with_this_process, stop_process
+
 SCENARIO_DIR = EVAL_DIR / "scenarios"
 RUNS_DIR = EVAL_DIR / "runs"
 PROCESS_HELPER = REPO_ROOT / "scripts/lib/portable_process.py"
 DAEMON_READY_TIMEOUT_SECONDS = 60
-DAEMON_STOP_GRACE_SECONDS = 5
+PROCESS_STOP_GRACE_SECONDS = 5
 
 DEFAULT_HERMES_DIR = Path.home() / "hermes-agent"
 DEFAULT_MODEL = "gpt-5.4-mini"
@@ -143,13 +147,6 @@ class EvalEnvironment:
         with open(self.daemon_log, "wb") as log:
             self.daemon = subprocess.Popen(
                 [
-                    sys.executable,
-                    "-S",
-                    str(PROCESS_HELPER),
-                    "exec-session",
-                    "--parent-pid",
-                    str(os.getpid()),
-                    "--",
                     tracedecay_bin,
                     "daemon",
                     "run",
@@ -159,8 +156,10 @@ class EvalEnvironment:
                 env=self.env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
+                start_new_session=True,
+                preexec_fn=dies_with_this_process(),
             )
-        ready = subprocess.run(
+        ready = run(
             [
                 sys.executable,
                 "-S",
@@ -173,9 +172,7 @@ class EvalEnvironment:
                 "--timeout",
                 str(ready_timeout),
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+            check=False,
         )
         if ready.returncode != 0:
             raise EvalSetupError(
@@ -189,36 +186,30 @@ class EvalEnvironment:
         return self.daemon_log.read_text(errors="replace")[-4096:] or "(no daemon output captured)"
 
     def stop_daemon(self):
-        daemon, self.daemon = self.daemon, None
-        if daemon is None:
+        if self.daemon is None:
             return
-        subprocess.run(
-            [
-                sys.executable,
-                "-S",
-                str(PROCESS_HELPER),
-                "stop-group",
-                "--pid",
-                str(daemon.pid),
-                "--grace",
-                str(DAEMON_STOP_GRACE_SECONDS),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            daemon.wait(timeout=DAEMON_STOP_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait()
+        stop_process(self.daemon, PROCESS_STOP_GRACE_SECONDS)
+        self.daemon = None
 
     def cleanup(self):
+        errors = []
         try:
             self.stop_daemon()
-        finally:
-            if self.socket_dir is not None:
-                shutil.rmtree(self.socket_dir, ignore_errors=True)
+        except (Exception, KeyboardInterrupt) as exc:
+            errors.append(exc)
+        if self.socket_dir is not None:
+            try:
+                shutil.rmtree(self.socket_dir)
+            except FileNotFoundError:
+                pass
+            except (Exception, KeyboardInterrupt) as exc:
+                errors.append(exc)
+        try:
             self._temp_dir.cleanup()
+        except (Exception, KeyboardInterrupt) as exc:
+            errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("isolated environment cleanup failed", errors)
 
 
 class EvalSetupError(RuntimeError):
@@ -226,12 +217,21 @@ class EvalSetupError(RuntimeError):
 
 
 def cleanup_eval_artifacts(fixture, eval_env):
-    try:
-        if fixture is not None:
-            shutil.rmtree(fixture, ignore_errors=True)
-    finally:
-        if eval_env is not None:
+    errors = []
+    if fixture is not None:
+        try:
+            shutil.rmtree(fixture)
+        except FileNotFoundError:
+            pass
+        except (Exception, KeyboardInterrupt) as exc:
+            errors.append(exc)
+    if eval_env is not None:
+        try:
             eval_env.cleanup()
+        except (Exception, KeyboardInterrupt, BaseExceptionGroup) as exc:
+            errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup("eval artifact cleanup failed", errors)
 
 
 def create_eval_environment(scenario_id):
@@ -271,15 +271,16 @@ def resolve_tracedecay_bin(explicit):
     env = dict(os.environ)
     if explicit:
         env["TRACEDECAY_BIN"] = str(explicit)
-    result = subprocess.run(
+    result = run(
         [str(REPO_ROOT / "scripts/build-eval-binary.sh")],
         env=env,
-        stdout=subprocess.PIPE,
-        text=True,
+        stderr=None,
         check=False,
     )
     if result.returncode != 0:
-        sys.exit(f"no tracedecay binary: scripts/build-eval-binary.sh exited {result.returncode}")
+        raise EvalSetupError(
+            f"no tracedecay binary: scripts/build-eval-binary.sh exited {result.returncode}"
+        )
     return result.stdout.strip()
 
 
@@ -304,16 +305,30 @@ def load_scenarios(ids):
     return scenarios
 
 
-def run(cmd, cwd=None, env=None, timeout=None, check=True):
-    result = subprocess.run(
+def run(cmd, cwd=None, env=None, timeout=None, check=True, stderr=subprocess.STDOUT):
+    process = subprocess.Popen(
         cmd,
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=stderr,
         text=True,
-        timeout=timeout,
+        start_new_session=True,
+        preexec_fn=dies_with_this_process(),
     )
+    try:
+        stdout, captured_stderr = process.communicate(timeout=timeout)
+    finally:
+        # A turn, setup command, or build owns its descendants even if its
+        # caller is cancelled or the command leader has already exited.
+        try:
+            stop_process(process, PROCESS_STOP_GRACE_SECONDS)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+    result = subprocess.CompletedProcess(cmd, process.returncode, stdout, captured_stderr)
     if check and result.returncode != 0:
         raise EvalSetupError(
             f"command failed ({result.returncode}): {' '.join(map(str, cmd))}\n{result.stdout}"
@@ -822,6 +837,8 @@ def run_scenario(args, scenario, run_dir, report):
     """
     eval_env = None
     fixture = None
+    failure = None
+    cancelled = False
     try:
         eval_env = create_eval_environment(scenario["id"])
         eval_env.start_daemon(args.tracedecay_bin)
@@ -834,17 +851,32 @@ def run_scenario(args, scenario, run_dir, report):
             transcripts = drive_cursor_agent(args, scenario, fixture, run_dir, eval_env.env)
         outcomes = evaluate_assertions(scenario, args.tracedecay_bin, fixture, eval_env.env)
     except KeyboardInterrupt as exc:
-        report["scenarios"].append(error_entry(scenario, "cancelled", str(exc) or "interrupted"))
-        print(f"[{scenario['id']}] cancelled")
-        return False, True
+        failure = error_entry(scenario, "cancelled", str(exc) or "interrupted")
+        cancelled = True
     except Exception as exc:
-        report["scenarios"].append(
-            error_entry(scenario, "error (setup or agent failure)", str(exc))
-        )
-        print(f"[{scenario['id']}] error: {exc}", file=sys.stderr)
-        return False, False
+        failure = error_entry(scenario, "error (setup or agent failure)", str(exc))
     finally:
-        cleanup_eval_artifacts(fixture, eval_env)
+        try:
+            cleanup_eval_artifacts(fixture, eval_env)
+        except (Exception, KeyboardInterrupt, BaseExceptionGroup) as exc:
+            detail = "".join(traceback.format_exception(exc))
+            cleanup_cancelled = isinstance(exc, KeyboardInterrupt) or (
+                isinstance(exc, BaseExceptionGroup)
+                and exc.subgroup(KeyboardInterrupt) is not None
+            )
+            cancelled |= cleanup_cancelled
+            if failure is None:
+                status = "cancelled" if cleanup_cancelled else "error (cleanup failure)"
+                failure = error_entry(scenario, status, detail)
+                failure["assertions"] = outcomes
+                failure["transcripts"] = transcripts
+            else:
+                failure["cleanup_error"] = detail
+
+    if failure is not None:
+        report["scenarios"].append(failure)
+        print(f"[{scenario['id']}] {failure['status']}: {failure['error']}", file=sys.stderr)
+        return False, cancelled
 
     failed = [o for o in outcomes if not o["passed"]]
     status = "pass" if not failed else "fail"
@@ -917,36 +949,45 @@ def main(argv):
         print(f"\nblocked report written to {report_path}", file=sys.stderr)
         return 2
 
-    args.tracedecay_bin = resolve_tracedecay_bin(args.tracedecay_bin)
-    report["tracedecay_bin"] = args.tracedecay_bin
+    cancellation_requested = False
 
     def raise_cancelled(signum, _frame):
-        raise KeyboardInterrupt(f"cancelled by signal {signum}")
+        nonlocal cancellation_requested
+        if not cancellation_requested:
+            cancellation_requested = True
+            raise KeyboardInterrupt(f"cancelled by signal {signum}")
 
-    previous_term = signal.signal(signal.SIGTERM, raise_cancelled)
+    previous_handlers = {
+        sig: signal.signal(sig, raise_cancelled)
+        for sig in (signal.SIGINT, signal.SIGTERM)
+    }
     overall_ok = True
     cancelled = False
     try:
-        for scenario in scenarios:
-            ok, cancelled = run_scenario(args, scenario, run_dir, report)
-            overall_ok &= ok
-            if cancelled:
-                break
-    finally:
-        signal.signal(signal.SIGTERM, previous_term)
+        try:
+            args.tracedecay_bin = resolve_tracedecay_bin(args.tracedecay_bin)
+            report["tracedecay_bin"] = args.tracedecay_bin
+            for scenario in scenarios:
+                ok, cancelled = run_scenario(args, scenario, run_dir, report)
+                overall_ok &= ok
+                if cancelled:
+                    break
+        except KeyboardInterrupt as exc:
+            cancelled = True
+            report["error"] = str(exc) or "interrupted"
+        except Exception as exc:
+            overall_ok = False
+            report["error"] = str(exc)
 
-    if cancelled:
-        report["status"] = "cancelled"
+        cancelled |= cancellation_requested
+        report["status"] = "cancelled" if cancelled else "pass" if overall_ok else "fail"
         report_path = run_dir / "report.json"
         report_path.write_text(json.dumps(report, indent=2) + "\n")
-        print(f"\ncancelled; report written to {report_path}", file=sys.stderr)
-        return 130
-
-    report["status"] = "pass" if overall_ok else "fail"
-    report_path = run_dir / "report.json"
-    report_path.write_text(json.dumps(report, indent=2) + "\n")
-    print(f"\nreport written to {report_path}")
-    return 0 if overall_ok else 1
+        print(f"\n{report['status']}; report written to {report_path}")
+        return 130 if cancelled else 0 if overall_ok else 1
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":
