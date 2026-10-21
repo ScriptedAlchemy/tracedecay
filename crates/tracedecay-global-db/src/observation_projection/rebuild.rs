@@ -2,7 +2,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
+use tracedecay_domain::{
+    CanonicalObservationIdV1, DurableObservationV1, ObservationScopeV1, ObservationSourceIdentityV1,
+};
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::{
     Database, DatabaseWriteTransaction,
@@ -661,6 +663,8 @@ async fn project_observation_in_transaction_with_session(
 pub(in super::super) async fn revive_source_record(
     transaction: &DatabaseWriteTransaction<'_>,
     observation_id: &CanonicalObservationIdV1,
+    source: &ObservationSourceIdentityV1,
+    scope: &ObservationScopeV1,
 ) -> ProjectionStoreResult<()> {
     let retired = ProjectionSkipReason::SourceRecordRetired.as_str();
     let revived = transaction
@@ -681,6 +685,9 @@ pub(in super::super) async fn revive_source_record(
     let (sequence, observation) = read_observation(transaction, observation_id)
         .await?
         .ok_or(ProjectionStoreError::ObservationNotFound)?;
+    if observation.source() != source || observation.scope() != scope {
+        return Err(ProjectionStoreError::ProvenanceCollision);
+    }
     if sequence <= read_checkpoint(transaction).await?.last_sequence() {
         let mut effect = derive_projection_with_alias(transaction, &observation).await?;
         Box::pin(write_effect_converging_collisions(

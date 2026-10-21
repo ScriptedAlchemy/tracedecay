@@ -115,6 +115,8 @@ impl RegisteredGlobalDb {
                 Box::pin(revive_source_record(
                     transaction.database_transaction(),
                     &record.observation_id,
+                    source,
+                    scope,
                 ))
                 .await?;
             }

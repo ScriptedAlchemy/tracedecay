@@ -6,14 +6,15 @@ use tempfile::TempDir;
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1, SessionId,
 };
-use tracedecay_runtime_core::db::engine::QueryExecutor;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason,
 };
 
 use crate::observation_batch_tests::sequential_writes;
-use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::tests::harness::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1, RegisteredGlobalDbTestRuntime,
+};
 use crate::{GlobalDbObservationStore, ObservationSourcePresenceV1, RegisteredGlobalDb};
 
 /// One file-byte source, laid out the way admission lays out a rewrite.
@@ -143,27 +144,23 @@ async fn projected_messages(registered: &RegisteredGlobalDb) -> Vec<String> {
 #[asupersync::test]
 async fn a_reoffered_retired_record_projects_again_across_rebuild_and_restart() {
     let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+    let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
         .await
         .unwrap();
     let writes = sequential_writes(&SessionId::new("session.source-reoffer").unwrap(), 2);
     {
-        let store = runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let registered = runtime
-            .registered_database(HostAdmissionScope::Profile)
-            .unwrap();
-        let source = Source::of(&registered, &writes);
+        let registered = runtime.profile_database();
+        let store = registered.observation_store();
+        let source = Source::of(registered, &writes);
         source.offer(1, &[&writes[0], &writes[1]]).await;
         persist(&store, &writes).await;
         drain(&store).await;
         assert_eq!(
-            projected_messages(&registered).await,
+            projected_messages(registered).await,
             ["message.batch.0", "message.batch.1"]
         );
         assert_eq!(source.rewrite(1, 2, 0, &[]).await, 2);
-        assert!(projected_messages(&registered).await.is_empty());
+        assert!(projected_messages(registered).await.is_empty());
 
         assert!(matches!(
             store.persist_observation(writes[0].clone()).await.unwrap(),
@@ -171,44 +168,40 @@ async fn a_reoffered_retired_record_projects_again_across_rebuild_and_restart() 
         ));
         drain(&store).await;
         assert!(
-            projected_messages(&registered).await.is_empty(),
+            projected_messages(registered).await.is_empty(),
             "a replayed durable write is not an offer from its source"
         );
-        rebuild_to_completion(&registered).await;
+        rebuild_to_completion(registered).await;
         assert!(
-            projected_messages(&registered).await.is_empty(),
+            projected_messages(registered).await.is_empty(),
             "a rebuild keeps the retirement"
         );
     }
 
     let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
     {
-        let registered = runtime
-            .registered_database(HostAdmissionScope::Profile)
-            .unwrap();
-        let source = Source::of(&registered, &writes);
-        assert!(projected_messages(&registered).await.is_empty());
+        let registered = runtime.profile_database();
+        let source = Source::of(registered, &writes);
+        assert!(projected_messages(registered).await.is_empty());
         assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
         assert_eq!(
-            projected_messages(&registered).await,
+            projected_messages(registered).await,
             ["message.batch.0"],
             "the re-offered record projects again; the other stays retired"
         );
         source.offer(3, &[&writes[0]]).await;
-        assert_eq!(projected_messages(&registered).await, ["message.batch.0"]);
-        rebuild_to_completion(&registered).await;
+        assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
+        rebuild_to_completion(registered).await;
         assert_eq!(
-            projected_messages(&registered).await,
+            projected_messages(registered).await,
             ["message.batch.0"],
             "a rebuild keeps the revival"
         );
     }
 
     let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
-    let registered = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-    assert_eq!(projected_messages(&registered).await, ["message.batch.0"]);
+    let registered = runtime.profile_database();
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
 #[asupersync::test]
@@ -224,18 +217,110 @@ async fn a_newer_layout_retires_a_revived_record_again() {
         .registered_database(HostAdmissionScope::Profile)
         .unwrap();
     let writes = sequential_writes(&SessionId::new("session.source-relayout").unwrap(), 1);
-    let source = Source::of(&registered, &writes);
+    let source = Source::of(registered, &writes);
     source.offer(1, &[&writes[0]]).await;
     persist(&store, &writes).await;
     drain(&store).await;
 
     assert_eq!(source.rewrite(1, 2, 0, &[]).await, 1);
     assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
-    assert_eq!(projected_messages(&registered).await, ["message.batch.0"]);
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
     assert_eq!(source.rewrite(3, 4, 0, &[]).await, 1);
-    assert!(projected_messages(&registered).await.is_empty());
+    assert!(projected_messages(registered).await.is_empty());
     assert_eq!(source.rewrite(4, 5, 0, &[&writes[0]]).await, 0);
-    assert_eq!(projected_messages(&registered).await, ["message.batch.0"]);
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
+}
+
+#[asupersync::test]
+async fn a_foreign_source_cannot_revive_a_retired_record() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let registered = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = registered.observation_store();
+    let writes = sequential_writes(&SessionId::new("session.source-owner").unwrap(), 1);
+    let source = Source::of(registered, &writes);
+    source.offer(1, &[&writes[0]]).await;
+    persist(&store, &writes).await;
+    drain(&store).await;
+    assert_eq!(source.rewrite(1, 2, 0, &[]).await, 1);
+
+    let foreign =
+        ObservationSourceIdentityV1::new(SessionId::new("session.source-foreign").unwrap())
+            .unwrap();
+    let error = registered
+        .record_observation_source_presence(
+            &foreign,
+            &source.scope,
+            &[ObservationSourcePresenceV1 {
+                observation_id: writes[0].observation().observation_id().clone(),
+                generation: ObservationSourceGenerationV1::new(3).unwrap(),
+                start_offset: 0,
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            tracedecay_store::ProjectionStoreError::ProvenanceCollision
+        ),
+        "{error:?}"
+    );
+    assert!(projected_messages(registered).await.is_empty());
+    assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
+}
+
+#[asupersync::test]
+async fn a_failed_presence_batch_rolls_back_its_revival() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let registered = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = registered.observation_store();
+    let writes = sequential_writes(&SessionId::new("session.source-rollback").unwrap(), 2);
+    let source = Source::of(registered, &writes);
+    source.offer(1, &[&writes[0], &writes[1]]).await;
+    persist(&store, &writes).await;
+    drain(&store).await;
+    assert_eq!(source.rewrite(1, 2, 0, &[]).await, 2);
+
+    let generation = ObservationSourceGenerationV1::new(3).unwrap();
+    let error = registered
+        .record_observation_source_presence(
+            &source.identity,
+            &source.scope,
+            &[
+                ObservationSourcePresenceV1 {
+                    observation_id: writes[0].observation().observation_id().clone(),
+                    generation,
+                    start_offset: 0,
+                },
+                ObservationSourcePresenceV1 {
+                    observation_id: writes[1].observation().observation_id().clone(),
+                    generation,
+                    start_offset: u64::MAX,
+                },
+            ],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        tracedecay_store::ProjectionStoreError::SequenceOverflow(u64::MAX)
+    ));
+    assert!(projected_messages(registered).await.is_empty());
+    rebuild_to_completion(registered).await;
+    assert!(projected_messages(registered).await.is_empty());
+    assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
 #[asupersync::test]
@@ -251,7 +336,7 @@ async fn a_record_retired_before_its_drain_projects_once_offered_again() {
         .registered_database(HostAdmissionScope::Profile)
         .unwrap();
     let writes = sequential_writes(&SessionId::new("session.source-queued").unwrap(), 2);
-    let source = Source::of(&registered, &writes);
+    let source = Source::of(registered, &writes);
     source.offer(1, &[&writes[0], &writes[1]]).await;
     persist(&store, &writes).await;
 
@@ -271,7 +356,7 @@ async fn a_record_retired_before_its_drain_projects_once_offered_again() {
         ),
         "{outcomes:?}"
     );
-    assert_eq!(projected_messages(&registered).await, ["message.batch.0"]);
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
 #[asupersync::test]
@@ -292,13 +377,13 @@ async fn a_rebuild_that_staged_a_retirement_activates_the_revival() {
         .unwrap();
     let writes = sequential_writes(&SessionId::new("session.source-rebuild").unwrap(), RECORDS);
     let all: Vec<_> = writes.iter().collect();
-    let source = Source::of(&registered, &writes);
+    let source = Source::of(registered, &writes);
     source.offer(1, &all).await;
     persist(&store, &writes).await;
     drain(&store).await;
     assert_eq!(source.rewrite(1, 2, 0, &all[1..]).await, 1);
 
-    let staged = rebuild(&registered).await;
+    let staged = rebuild(registered).await;
     assert!(!staged.is_complete());
     assert_eq!(staged.skipped_observations(), 1, "the retirement is staged");
 
@@ -307,9 +392,9 @@ async fn a_rebuild_that_staged_a_retirement_activates_the_revival() {
         source.rewrite(2, 3, retained_through, &[&writes[0]]).await,
         0
     );
-    let rebuilt = rebuild_to_completion(&registered).await;
+    let rebuilt = rebuild_to_completion(registered).await;
     assert_eq!(rebuilt.skipped_observations(), 0);
-    let messages = projected_messages(&registered).await;
+    let messages = projected_messages(registered).await;
     assert_eq!(messages.len(), RECORDS);
     assert!(messages.iter().any(|message| message == "message.batch.0"));
 }
