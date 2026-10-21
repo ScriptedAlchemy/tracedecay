@@ -32,7 +32,7 @@ use tracedecay_domain::{
     PrivacyDomainId, ProjectId, ProviderEvaluationStateV1, PublicRetrieverStatus,
     QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget, RetrievalRequest,
     RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision,
-    ScoreDomainId, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark,
+    ScoreDomainId, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
     encode_lowercase_hex, sha256_hex_suffix,
 };
 use tracedecay_query::retrieval::{
@@ -49,7 +49,8 @@ use tracedecay_query::retrieval::{
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ProcessResidentSampleV1,
-    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentMemoryPressureV1,
+    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentMemoryAdmissionFailureV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureV1,
     resident_memory_watermark_bytes_v1,
 };
 
@@ -2087,15 +2088,13 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
 
 #[test]
 fn overlapping_text_builds_share_one_admission_watermark_headroom() {
-    use tracedecay_domain::WorktreeId;
-    use tracedecay_runtime_core::resident_memory::{
-        ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
-    };
-
     let limit = NonZeroU64::new(1_000).expect("nonzero process ceiling");
     let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
         limit,
-        Arc::new(ResidentMemoryPressureV1::new(limit)),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        )),
     ));
     let key = ResidentMemoryKeyV1 {
         project_id: ProjectId::new("project.overlapping-text-builds").expect("project"),
@@ -2107,7 +2106,7 @@ fn overlapping_text_builds_share_one_admission_watermark_headroom() {
     let requested = NonZeroU64::new(300).expect("nonzero build request");
     let builds = [(); 3].map(|()| {
         authority
-            .reserve_below(
+            .reserve_up_to(
                 key.clone(),
                 requested,
                 authority.admission_watermark_bytes(),
@@ -2121,7 +2120,7 @@ fn overlapping_text_builds_share_one_admission_watermark_headroom() {
         "the retained ledger owns the three build ceilings, not three margins"
     );
     assert!(matches!(
-        authority.reserve_below(
+        authority.reserve_up_to(
             key,
             NonZeroU64::new(100).expect("remaining hard-limit room"),
             authority.admission_watermark_bytes(),

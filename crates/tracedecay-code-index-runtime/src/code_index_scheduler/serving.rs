@@ -5,7 +5,6 @@ mod family_report;
 use std::{
     collections::{BTreeSet, VecDeque},
     io::Read,
-    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock,
@@ -1147,9 +1146,8 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
     }
 
-    /// Reserve one artifact memory ceiling below the process-wide admission
-    /// watermark. Only the component's bytes are charged to the ledger and
-    /// checked against shared cgroup headroom.
+    /// Charge the artifact's ceiling below the process admission watermark.
+    /// Sizing and charging share one measured headroom reading.
     fn reserve_resident_memory(
         &self,
         generation_id: &CodeGenerationId,
@@ -1158,26 +1156,6 @@ impl DaemonCodeTextArtifactStoreV1 {
     ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
         self.reserve_resident_memory_up_to(generation_id, component, bytes, bytes)
             .map(|(reservation, _)| reservation)
-    }
-
-    /// Measure headroom and size the build below the admission watermark.
-    fn text_artifact_admission(
-        &self,
-        preferred: NonZeroU64,
-        minimum: NonZeroU64,
-    ) -> Result<u64, RetrievalPortError> {
-        let admission_watermark = self.resident_memory.admission_watermark_bytes();
-        let headroom = self.resident_memory.headroom_below(admission_watermark);
-        let admitted_bytes = text_artifact_admitted_build_budget(
-            preferred.get(),
-            minimum.get(),
-            headroom.available_bytes,
-        )
-        .inspect_err(|_| {
-            self.resident_memory
-                .wait_for_headroom(minimum.get(), admission_watermark);
-        })?;
-        Ok(admitted_bytes)
     }
 
     fn reserve_resident_memory_up_to(
@@ -1205,7 +1183,33 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
-        let admitted_bytes = match self.text_artifact_admission(preferred, minimum) {
+        let admission_watermark = self.resident_memory.admission_watermark_bytes();
+        let reserve = || {
+            let reservation = self
+                .resident_memory
+                .reserve_up_to(
+                    ResidentMemoryKeyV1 {
+                        project_id: self.project_id.clone(),
+                        worktree_id: self.worktree_id.clone(),
+                        generation_id: generation_id.clone(),
+                        component,
+                    },
+                    preferred,
+                    admission_watermark,
+                )
+                .map_err(|error| {
+                    RetrievalPortError::ResidentMemoryRefused(format!(
+                        "text-artifact resident-memory admission was refused: {error}"
+                    ))
+                })?;
+            let admitted = text_artifact_admitted_build_budget(
+                preferred.get(),
+                minimum.get(),
+                reservation.reserved_bytes(),
+            )?;
+            Ok((reservation, admitted))
+        };
+        let (reservation, admitted) = match reserve() {
             Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
                 let released = self
                     .resident_owners
@@ -1213,8 +1217,6 @@ impl DaemonCodeTextArtifactStoreV1 {
                 for release in &released {
                     log_resident_owner_release_v1(release);
                 }
-                // Freed pages sit in the pool workers' allocator heaps
-                // whether or not an owner was shed.
                 let trim = release_process_allocator_memory_v1();
                 tracing::info!(
                     event = "code_text_artifact_build_shed_retained_state",
@@ -1223,33 +1225,17 @@ impl DaemonCodeTextArtifactStoreV1 {
                     refused = %detail,
                     "text-artifact build shed retained state before re-measuring headroom"
                 );
-                self.text_artifact_admission(preferred, minimum)
+                reserve()
             }
-            admission => admission,
-        }?;
-        let admitted = NonZeroU64::new(admitted_bytes).ok_or_else(|| {
-            RetrievalPortError::Contract(
-                "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
-            )
+            result => result,
+        }
+        .inspect_err(|error| {
+            if matches!(error, RetrievalPortError::ResidentMemoryRefused(_)) {
+                self.resident_memory
+                    .wait_for_headroom(minimum.get(), admission_watermark);
+            }
         })?;
-        let reservation = self
-            .resident_memory
-            .reserve_below(
-                ResidentMemoryKeyV1 {
-                    project_id: self.project_id.clone(),
-                    worktree_id: self.worktree_id.clone(),
-                    generation_id: generation_id.clone(),
-                    component,
-                },
-                admitted,
-                self.resident_memory.admission_watermark_bytes(),
-            )
-            .map_err(|error| {
-                RetrievalPortError::ResidentMemoryRefused(format!(
-                    "text-artifact resident-memory admission was refused: {error}"
-                ))
-            })?;
-        let admitted = usize::try_from(admitted.get()).map_err(|error| {
+        let admitted = usize::try_from(admitted).map_err(|error| {
             RetrievalPortError::Contract(format!(
                 "text-artifact admitted reservation exceeds the platform limit: {error}"
             ))
