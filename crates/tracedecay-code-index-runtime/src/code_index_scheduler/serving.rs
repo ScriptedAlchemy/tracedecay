@@ -229,6 +229,29 @@ impl CodeIndexBuildProgressSlotStateV1 {
         let _ = self.publish(&generation_id, self.owner_epoch, snapshot);
     }
 
+    /// A text refusal belongs to its pending owner. A caller without the
+    /// projection claim must also identify the progress it observed before
+    /// attempting admission, so a delayed refusal cannot overwrite new work.
+    pub(super) fn block_owned_text(
+        &mut self,
+        generation_id: &CodeGenerationId,
+        owner_epoch: u64,
+        reason: CodeIndexBuildBlockedReasonV1,
+        expected_progress_epoch: Option<u64>,
+    ) -> bool {
+        let Some(current) = self.snapshot() else {
+            return false;
+        };
+        if current.phase == CodeIndexBuildPhaseV1::Ready
+            || expected_progress_epoch.is_some_and(|epoch| current.progress_epoch != epoch)
+        {
+            return false;
+        }
+        let mut snapshot = current.as_ref().clone();
+        snapshot.blocked_reason = Some(reason);
+        self.publish(generation_id, owner_epoch, snapshot)
+    }
+
     pub fn snapshot(&self) -> Option<Arc<CodeIndexBuildProgressV1>> {
         self.snapshot.as_ref().map(Arc::clone)
     }
@@ -2673,9 +2696,13 @@ impl LatestCodeTextGenerationV1 {
                 // its phase before it re-attempts the work that was refused, so
                 // clearing here erased the reason between two identical refusals
                 // and status reported `blocked_reason: null` throughout a stall.
-                // A committed boundary is the honest clear -- it builds a fresh
-                // snapshot with no blocked reason -- and only that runs after work
-                // actually landed.
+                // A committed boundary clears the refusal. Ready is also a
+                // successful boundary: it is published only after the verified
+                // query owners are installed, even if finalization completed
+                // without another pending boundary in between.
+                if phase == CodeIndexBuildPhaseV1::Ready {
+                    snapshot.blocked_reason = None;
+                }
                 let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
             }
         };
@@ -2692,18 +2719,26 @@ impl LatestCodeTextGenerationV1 {
     fn publish_text_artifact_block(&self, error: &CodeLexicalArtifactErrorV1) {
         match error {
             CodeLexicalArtifactErrorV1::Unreserved(_) => {
-                self.publish_text_progress_blocked(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+                self.publish_text_progress_blocked(
+                    CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                    None,
+                );
             }
             CodeLexicalArtifactErrorV1::Io(_) | CodeLexicalArtifactErrorV1::Missing(_) => {
                 self.publish_text_progress_blocked(
                     CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
+                    None,
                 );
             }
             _ => {}
         }
     }
 
-    fn publish_text_progress_blocked(&self, reason: CodeIndexBuildBlockedReasonV1) {
+    fn publish_text_progress_blocked(
+        &self,
+        reason: CodeIndexBuildBlockedReasonV1,
+        expected_progress_epoch: Option<u64>,
+    ) {
         let generation_id = &self.metadata.manifest().generation_id;
         {
             let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
@@ -2712,12 +2747,12 @@ impl LatestCodeTextGenerationV1 {
                     .text_progress_slot
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let Some(current) = slot.snapshot() else {
-                    return;
-                };
-                let mut snapshot = current.as_ref().clone();
-                snapshot.blocked_reason = Some(reason);
-                let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
+                let _ = slot.block_owned_text(
+                    generation_id,
+                    self.text_progress_owner_epoch,
+                    reason,
+                    expected_progress_epoch,
+                );
             }
         };
     }
@@ -2761,6 +2796,12 @@ impl LatestCodeTextGenerationV1 {
         maximum_work: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
+        let progress_before_admission = self
+            .text_progress_slot
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshot()
+            .map(|snapshot| snapshot.progress_epoch);
         let workers = self
             .text_artifact_store
             .worker_runtime
@@ -2777,14 +2818,20 @@ impl LatestCodeTextGenerationV1 {
             });
         let result = match workers {
             Ok(_workers) => self.advance_text_serving_inner(maximum_work, control),
-            Err(error) => Err(error),
+            Err(error) => {
+                if matches!(&error, RetrievalPortError::ResidentMemoryRefused(_))
+                    && let Some(epoch) = progress_before_admission
+                {
+                    // Worker admission owns no projection claim. Only the
+                    // unchanged progress it observed can inherit this refusal.
+                    self.publish_text_progress_blocked(
+                        CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                        Some(epoch),
+                    );
+                }
+                Err(error)
+            }
         };
-        // A refusal before the builder opens has no batch/finalization error
-        // to classify. Preserve that refusal on the same generation's progress
-        // instead of leaving its completed source scan looking unblocked.
-        if matches!(&result, Err(RetrievalPortError::ResidentMemoryRefused(_))) {
-            self.publish_text_progress_blocked(CodeIndexBuildBlockedReasonV1::ResidentMemory);
-        }
         if result.as_ref().is_err_and(|error| {
             matches!(
                 error,
@@ -3306,7 +3353,17 @@ impl LatestCodeTextGenerationV1 {
             let outcome = {
                 let _span = tracing::trace_span!("query.artifact.head_open").entered();
                 self.open_published_head_or_begin_build(control)
-            }?;
+            }
+            .inspect_err(|error| {
+                if matches!(error, RetrievalPortError::ResidentMemoryRefused(_)) {
+                    // Keep the claim until this attempt's refusal is visible;
+                    // no later wake can publish progress ahead of this block.
+                    self.publish_text_progress_blocked(
+                        CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                        None,
+                    );
+                }
+            })?;
             match outcome {
                 TextHeadOpenOutcomeV1::Served => return Ok(true),
                 TextHeadOpenOutcomeV1::Build(initialized) => {
@@ -3597,7 +3654,15 @@ impl LatestCodeTextGenerationV1 {
             &content_key,
             build_reservation,
             control,
-        )?;
+        )
+        .inspect_err(|error| {
+            if matches!(error, RetrievalPortError::ResidentMemoryRefused(_)) {
+                self.publish_text_progress_blocked(
+                    CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                    None,
+                );
+            }
+        })?;
         Ok(true)
     }
 
