@@ -118,9 +118,11 @@ Also redact credential-bearing git remotes, database overrides such as `TRACEDEC
 - `tracedecay_run_affected_tests`, compiles and runs the project's own test suite via a `cargo` subprocess (bounded by a configurable wall-clock timeout, default 300 s, and a per-invocation test cap)
 
 The edit tools target a single file with a unique anchor and re-index in place.
-They never run shell commands you did not supply. Network-capable operations
-are limited to the documented release, pricing, semantic-model, telemetry, and
-configured GitHub review paths above. Every editing and state-mutating tool is
+They never run shell commands you did not supply. Outbound operations are
+limited to the documented GitHub release/update and review reads, explicitly
+enabled semantic-model downloads, and configured remote sources and authorities
+above. Bundled pricing and native usage reads
+are local-only and do not make an outbound request. Every editing and state-mutating tool is
 single-file or single-record scoped. There is no bulk-delete or
 recursive-write primitive.
 
@@ -157,9 +159,31 @@ acceptance. Enabling signing remains blocked on external signing-service and cer
 provisioning, followed by workflow and published-artifact verification. The previously cited
 PR #79 was unrelated and does not provide evidence for a Smart App Control report.
 
-### Opt-in background daemon
+### Required daemon authority; optional service installation
 
-tracedecay installs **no background daemon, system service, or autostart process by default**. Users can explicitly opt in with `tracedecay daemon install-service`, which installs a per-user systemd service on Linux or a per-user LaunchAgent on macOS. The daemon runs with **standard user privileges** and never requests elevation. Index freshness still relies on on-demand staleness checks, catch-up syncs when MCP clients connect, and bounded hook notifications; the daemon provides shared MCP process/socket reuse and scheduled automation for projects that connect to it.
+The **running daemon is required** for daemon-owned operations, including
+`tracedecay init`, project admission, and code-index convergence. If the
+code-index scheduler is unavailable, `init` refuses with the typed
+`code_index_scheduler_unavailable` error before enrollment writes. Status and
+doctor remain read-only diagnostics; they do not start a daemon, repair
+storage, or silently index a project. An unavailable daemon is reported as
+unavailable rather than as a complete or fresh generation.
+
+Installing a persistent background **user service is optional**: TraceDecay
+installs no system service or autostart process by default.
+`tracedecay daemon install-service` explicitly enables per-user service
+management (systemd on Linux, LaunchAgent on macOS, user Task Scheduler on
+Windows). Alternatively, `tracedecay daemon run` starts the same authority
+in the foreground without installing a persistent service. The daemon uses
+standard user privileges and never requests elevation.
+
+The daemon owns freshness and background convergence; hints from hooks, MCP,
+LSP, and workspace events are bounded, while queries report exact
+worktree/generation provenance and typed not-ready coverage instead of
+performing hidden syncs. See the canonical
+[README index-freshness contract](README.md#index-freshness) and
+[user guide daemon lifecycle](docs/USER-GUIDE.md#daemon-service)
+for operations and recovery.
 
 ### Unsafe code
 
