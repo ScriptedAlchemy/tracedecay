@@ -233,7 +233,14 @@ fn read_flight_key(
     arguments: &Value,
     scope_prefix: Option<&str>,
 ) -> ReadFlightKey {
-    let arguments = serde_json::to_vec(arguments).unwrap_or_default();
+    // Routing assigns correlation identities per connection/request. They
+    // control cancellation, not the read's inputs; including them prevents
+    // identical requests from ever sharing a flight across connections.
+    let mut arguments = arguments.clone();
+    if let Some(arguments) = arguments.as_object_mut() {
+        arguments.remove("__mcp_request_id");
+    }
+    let arguments = serde_json::to_vec(&arguments).unwrap_or_default();
     let scope_present: &[u8] = if scope_prefix.is_some() { b"1" } else { b"0" };
     let scope = scope_prefix.unwrap_or_default();
     ReadFlightKey(canonical_framed_sha256_bytes(
@@ -259,8 +266,8 @@ mod tests {
         let coalescer = IdenticalReadCoalescer::default();
         let leader = match coalescer.claim(
             "graph-main",
-            "tracedecay_search",
-            &json!({"query": "DaemonEngine"}),
+            "tracedecay_files",
+            &json!({"path": "src", "__mcp_request_id": "connection-a:1"}),
             None,
         ) {
             ReadFlightClaim::Leader(leader) => leader,
@@ -268,8 +275,8 @@ mod tests {
         };
         let follower = match coalescer.claim(
             "graph-main",
-            "tracedecay_search",
-            &json!({"query": "DaemonEngine"}),
+            "tracedecay_files",
+            &json!({"path": "src", "__mcp_request_id": "connection-b:1"}),
             None,
         ) {
             ReadFlightClaim::Follower(follower) => follower,

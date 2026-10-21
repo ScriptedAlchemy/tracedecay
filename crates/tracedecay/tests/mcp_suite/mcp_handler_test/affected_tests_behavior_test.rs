@@ -538,7 +538,6 @@ async fn identical_concurrent_test_runs_each_run_while_identical_reads_still_rid
     overlap.hold_next_read();
     // A join alone can run two successive leaders. Hold the dispatcher
     // after its claim until the second request is waiting on that flight.
-    // The tracing barrier parks a blocking thread, never an async worker.
     let first_read = tokio::task::spawn_blocking(move || {
         runtime.block_on(call_tool(
             &leader_fixture,
