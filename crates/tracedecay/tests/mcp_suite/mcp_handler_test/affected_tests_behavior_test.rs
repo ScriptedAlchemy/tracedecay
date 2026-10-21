@@ -643,7 +643,7 @@ async fn concurrent_read_refusals_keep_each_callers_request_identity() {
         let request_id = problem["request_id"].as_str().expect("refusal request id");
         assert!(request_id.starts_with("request.mcp."), "{response}");
         assert_eq!(problem["trace_id"], request_id, "{response}");
-        let rendered: Value = serde_json::from_str(&extract_text(result)).expect("JSON refusal");
+        let rendered: Value = serde_json::from_str(extract_text(result)).expect("JSON refusal");
         assert_eq!(rendered["request_id"], request_id, "{response}");
         assert_eq!(rendered["problem"], *problem, "{response}");
     }
