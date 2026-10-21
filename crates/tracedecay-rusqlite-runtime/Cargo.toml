@@ -14,15 +14,15 @@ test-transport = []
 test-runtime = []
 
 [dependencies]
-async-channel = "2.5.0"
+async-channel.workspace = true
 dunce = "1.0.5"
-futures-util = "0.3.33"
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "cache", "hooks", "limits", "trace"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+futures-util.workspace = true
+rusqlite = { workspace = true, features = ["bundled", "cache", "hooks", "limits", "trace"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 ring = "0.17.14"
 sha2 = "0.11.0"
-thiserror = "2"
+thiserror.workspace = true
 asupersync.workspace = true
 # `native_runtime::tokio_handle` hands the daemon's Tokio runtime to the sites
 # that still need one.
@@ -30,11 +30,11 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-store = { path = "../tracedecay-store" }
-tracing = "0.1"
+tracing.workspace = true
 
 # Thread CPU time for the long-poll count on native tasks.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [dev-dependencies]
 # Self dev-dependency: every workspace test build shares one resolution, so
@@ -42,7 +42,7 @@ libc = "0.2"
 tracedecay-rusqlite-runtime = { path = ".", features = ["test-runtime"] }
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
-tempfile = "3"
+tempfile.workspace = true
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [lints.rust]

@@ -44,7 +44,10 @@ not-found-or-not-authorized problem rather than an empty success.
 Inside the server a `DaemonBridge` reads through `@tracedecay/sdk` (the
 workspace's generated operation contracts, never hand-edited):
 
-- MCP-transport operations (`project_list`, `search`, `node`, `impact`,
+- Registry operations (`project_list`, `project_context`) use a projectless
+  `RegistryClient` over a profile-scoped `tracedecay serve` session; it takes
+  no base URL, project id, or token.
+- MCP-transport project operations (`search`, `node`, `impact`,
   `context`, `status`, `find_exact_symbol`) go through an `McpToolAdapter`
   that spawns `tracedecay serve` as an MCP client.
 - HTTP operations (`code_symbol_search`, `code_callers`, `code_callees`,
