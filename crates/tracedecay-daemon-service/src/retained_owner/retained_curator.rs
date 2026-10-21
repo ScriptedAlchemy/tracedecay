@@ -86,6 +86,17 @@ pub async fn execute_retained_memory_curator(
                 "the automation project context could not be composed: {error}"
             ))
         })?;
+    // The Started reply ends the invocation's request lease. This lease
+    // follows the accepted run through durable settlement, so project
+    // retirement cannot close its stores or observability producer first.
+    let runtime_lease = invocation_service
+        .project_runtimes
+        .admit_request(automation_context.project_root(), None)
+        .ok_or_else(|| {
+            RetainedSurfaceExecutionErrorV1::unavailable(
+                "the memory curator project runtime is retiring".to_owned(),
+            )
+        })?;
     let prepared: Pin<
         Box<
             dyn Future<
@@ -128,12 +139,17 @@ pub async fn execute_retained_memory_curator(
             ));
         }
     };
-    // The run outlives this request, so it answers to the request's own
-    // cancellation and deadline, which bound the effect's settlement too.
+    // The run outlives this request, but must stop admitting work when its
+    // request expires or the exact project owner begins retirement.
     let control = AutomationRunControl::from_interrupted(Arc::new({
         let cancellation = context.cancellation_signal.clone();
         let deadline = context.request_context.deadline().clone();
-        move || cancellation.is_cancelled() || deadline.is_elapsed_at(now_micros())
+        let runtime_lease = runtime_lease.clone();
+        move || {
+            cancellation.is_cancelled()
+                || deadline.is_elapsed_at(now_micros())
+                || runtime_lease.is_retiring()
+        }
     }));
     let observation_producer = crate::automation_observation::project_run_observation_producer(
         invocation_service,
@@ -157,6 +173,7 @@ pub async fn execute_retained_memory_curator(
         min_confidence,
     };
     let run = async move {
+        let _runtime_lease = runtime_lease;
         let retained_run = run_memory_curator_with_backend_for_retained_settlement(
             &automation_context,
             &config,
@@ -173,12 +190,13 @@ pub async fn execute_retained_memory_curator(
     };
     // The Codex backend blocks its thread for the whole model run
     // (`CodexAppServerBackend::run_task`), so the run polls on a blocking-pool
-    // thread. Dropping the task detaches it; the run outlives this request.
-    if let Err(error) =
-        NativeTask::spawn(async move { native_runtime::off_native_thread(run).await })
-    {
-        tracing::error!(%error, "memory curator run was not started");
-    }
+    // thread. The project drain joins the lease held by that blocking work,
+    // independently of this request or its detached task handle.
+    NativeTask::spawn_off_native_thread(run).map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the memory curator run was not started: {error}"
+        ))
+    })?;
     Ok(started)
 }
 
