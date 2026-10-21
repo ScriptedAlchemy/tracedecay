@@ -5,6 +5,14 @@ export default defineConfig({
   // Bazel exposes declared source inputs as symlinks within the test runfiles.
   resolve: { preserveSymlinks: true },
   test: {
+    // Emit Bazel's report with the tests instead of queueing a second remote
+    // action to synthesize one from the console log.
+    ...(process.env.XML_OUTPUT_FILE
+      ? {
+          reporters: ['default', 'junit'] as const,
+          outputFile: { junit: process.env.XML_OUTPUT_FILE },
+        }
+      : {}),
     projects: [
       {
         extends: true,
