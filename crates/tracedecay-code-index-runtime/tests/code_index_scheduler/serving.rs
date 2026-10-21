@@ -2163,11 +2163,7 @@ fn retained_text_admission_reports_its_block_and_recovers_after_headroom_release
 
     drop(headroom.borrow_and_update());
     drop(competing);
-    assert!(
-        headroom
-            .has_changed()
-            .expect("headroom authority remains live")
-    );
+    assert!(headroom.has_changed());
     assert_eq!(memory.snapshot().used_bytes, 0);
     text.production_query_owners()
         .expect("same owner builds after headroom is released");
