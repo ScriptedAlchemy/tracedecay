@@ -77,9 +77,14 @@ impl SharedAnalyzerClientSlot {
         self.state = SharedAnalyzerClientSlotState::Starting(Box::new(startup));
     }
 
-    pub(crate) fn cancel_startup(&self) {
-        if let SharedAnalyzerClientSlotState::Starting(startup) = &self.state {
-            startup.cancel();
+    pub(crate) fn cancel_startup(&mut self) {
+        if let SharedAnalyzerClientSlotState::Starting(startup) = &self.state
+            && let Some(client) = startup.cancel()
+        {
+            // Startup may already have finished before its caller was
+            // abandoned. Retire that queued client now, retaining its reaper
+            // just as if cancellation happened after the caller took it.
+            self.retire(client);
         }
     }
 

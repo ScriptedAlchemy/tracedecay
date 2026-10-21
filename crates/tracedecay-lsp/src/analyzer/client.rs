@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lsp_types::request::{
@@ -25,7 +26,7 @@ use serde_json::{Value, json};
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 use tracedecay_domain::ContentDigest;
 use tracedecay_runtime_core::native_runtime;
-use tracedecay_runtime_core::native_runtime::NativeTask;
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, plain_host_path};
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
@@ -403,13 +404,13 @@ pub struct StdioLspClient {
 /// A startup owned independently from the request that first needed it.
 ///
 /// Once admitted, the task runs through process termination on cancellation.
-/// The shared client slot retains this receiver until that settlement finishes,
+/// The shared client slot retains this result until that settlement finishes,
 /// so dropping a request can never make room for a successor beside the old
 /// process.
 pub(crate) struct StdioLspClientStartup {
     cancellation: CancellationToken,
-    result: async_channel::Receiver<StdioLspClientStartupSettlement>,
-    _task: NativeTask<()>,
+    result: Arc<Mutex<Option<StdioLspClientStartupSettlement>>>,
+    task: NativeTask<()>,
 }
 
 pub(crate) enum StdioLspClientStartupSettlement {
@@ -428,7 +429,8 @@ impl StdioLspClientStartup {
     ) -> Result<Self> {
         let cancellation = CancellationToken::new();
         let startup_cancellation = cancellation.clone();
-        let (sender, result) = async_channel::bounded(1);
+        let result = Arc::new(Mutex::new(None));
+        let startup_result = Arc::clone(&result);
         let task = NativeTask::spawn(async move {
             let started = StdioLspClient::start_with_launch_until_cancelled(
                 &launch,
@@ -438,27 +440,69 @@ impl StdioLspClientStartup {
                 &startup_cancellation,
             )
             .await;
-            let _ = sender.send(started).await;
+            {
+                // Publication and cancellation share one handoff. Either the
+                // caller drains an already-started client or this task reaps
+                // it; no successful result can arrive after an empty drain.
+                let mut result = startup_result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !startup_cancellation.is_cancelled() {
+                    *result = Some(started);
+                    return;
+                }
+            }
+            let settled = match started {
+                StdioLspClientStartupSettlement::Started(client) => match client.reap().await {
+                    Ok(()) => StdioLspClientStartupSettlement::Cancelled,
+                    Err(error) => StdioLspClientStartupSettlement::ReapFailed(error),
+                },
+                settled => settled,
+            };
+            *startup_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(settled);
         })
         .map_err(TraceDecayError::new)?;
         Ok(Self {
             cancellation,
             result,
-            _task: task,
+            task,
         })
     }
 
-    pub(crate) fn cancel(&self) {
+    /// Cancels an in-flight start or hands its completed client back to the
+    /// slot for immediate retirement with a retained reap settlement.
+    pub(crate) fn cancel(&self) -> Option<StdioLspClient> {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.cancellation.cancel();
+        match result.take() {
+            Some(StdioLspClientStartupSettlement::Started(client)) => Some(client),
+            settlement => {
+                *result = settlement;
+                None
+            }
+        }
     }
 
     pub(crate) async fn settle(&self) -> StdioLspClientStartupSettlement {
-        match self.result.recv().await {
-            Ok(settlement) => settlement,
-            Err(_) => StdioLspClientStartupSettlement::ReapFailed(TraceDecayError::Config {
+        if !matches!(self.task.wait().await, NativeTaskOutcome::Completed(())) {
+            return StdioLspClientStartupSettlement::ReapFailed(TraceDecayError::Config {
                 message: "LSP analyzer startup ended without a settlement".to_owned(),
-            }),
+            });
         }
+        self.result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| {
+                StdioLspClientStartupSettlement::ReapFailed(TraceDecayError::Config {
+                    message: "LSP analyzer startup ended without a settlement".to_owned(),
+                })
+            })
     }
 }
 
@@ -2041,15 +2085,141 @@ fn code_to_string(value: NumberOrString) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     use lsp_types::PublishDiagnosticsParams;
     use serde_json::json;
 
     use super::{
-        JsonRpcMessage, LspSemanticRequestError, cancel_request_message, decode_message,
-        decode_semantic_request, encode_semantic_request, file_uri_from_path_text,
-        is_current_diagnostic_publication,
+        AnalyzerLaunch, JsonRpcMessage, LspRefreshTimeouts, LspSemanticRequestError,
+        NativeTaskOutcome, StdioLspClientStartup, StdioLspClientStartupSettlement,
+        cancel_request_message, decode_message, decode_semantic_request, encode_semantic_request,
+        file_uri_from_path_text, is_current_diagnostic_publication,
     };
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_after_startup_completed_reaps_without_a_successor() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("analyzer.pid");
+        let script_path = temp.path().join("initialized_analyzer.py");
+        std::fs::write(
+            &script_path,
+            r#"
+import json
+import os
+import sys
+
+with open(sys.argv[1], "w") as pid_file:
+    pid_file.write(str(os.getpid()))
+
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line == b"\r\n":
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    message = json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+    if message.get("method") == "initialize":
+        body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}}).encode("utf-8")
+        sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+        sys.stdout.buffer.flush()
+"#,
+        )
+        .unwrap();
+        let python = if std::path::Path::new("/usr/bin/python3").is_file() {
+            "/usr/bin/python3"
+        } else {
+            "python3"
+        };
+        let startup = StdioLspClientStartup::start(
+            AnalyzerLaunch::direct(python),
+            vec![
+                script_path.to_string_lossy().into_owned(),
+                pid_path.to_string_lossy().into_owned(),
+            ],
+            temp.path().to_path_buf(),
+            LspRefreshTimeouts::new(
+                Duration::from_secs(1),
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+                Duration::from_millis(50),
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(10), startup.task.wait())
+                .await
+                .expect("startup completes before its caller is abandoned"),
+            NativeTaskOutcome::Completed(())
+        ));
+        let pid = std::fs::read_to_string(pid_path).unwrap();
+        let is_alive = || {
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(
+            is_alive(),
+            "the completed startup still owns a live process"
+        );
+
+        // The startup task has already returned, but no caller has claimed
+        // its successful settlement. Cancellation must transfer that client
+        // to the slot's retained reaper instead of leaving it for a successor.
+        let client = startup
+            .cancel()
+            .expect("cancellation must drain the completed startup's client");
+        let reaper = client.reap();
+        assert!(
+            startup.cancel().is_none(),
+            "the client is retired only once"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while is_alive() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retirement starts termination before any successor polls its reaper");
+        tokio::time::timeout(Duration::from_secs(2), reaper)
+            .await
+            .expect("retain the process settlement after it exits")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_preserves_a_completed_startup_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let startup = StdioLspClientStartup::start(
+            AnalyzerLaunch::direct(temp.path().join("missing-analyzer")),
+            Vec::new(),
+            temp.path().to_path_buf(),
+            LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), startup.task.wait())
+                .await
+                .unwrap(),
+            NativeTaskOutcome::Completed(())
+        ));
+
+        assert!(startup.cancel().is_none());
+        assert!(matches!(
+            startup.settle().await,
+            StdioLspClientStartupSettlement::Failed(_)
+        ));
+    }
 
     #[test]
     fn semantic_request_codec_round_trips_standard_wire_shape() {
