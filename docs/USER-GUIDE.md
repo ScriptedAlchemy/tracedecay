@@ -79,14 +79,21 @@ Download from the [latest release](https://github.com/ScriptedAlchemy/tracedecay
 
 ## Your First Index
 
-Start the daemon first — either install the optional per-user service, or keep
-a foreground terminal running the same daemon:
+Start the daemon first. To install the optional per-user service:
 
 ```bash
-tracedecay daemon install-service   # persistent per-user service (optional)
-# or
-tracedecay daemon run               # same daemon, in the foreground
+tracedecay daemon install-service
+```
 
+Or keep the daemon running in a foreground terminal:
+
+```bash
+tracedecay daemon run
+```
+
+After the daemon is running, use another terminal if you chose foreground mode:
+
+```bash
 cd /path/to/your/project
 tracedecay init
 ```

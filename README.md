@@ -115,8 +115,8 @@ the installed cache is loaded.
 ## Common Commands
 
 ```bash
-tracedecay daemon install-service   # install + start the user service (required before init)
-tracedecay daemon run               # foreground daemon when no systemd user session exists
+tracedecay daemon install-service   # optional persistent user service
+tracedecay daemon run               # foreground alternative; use another terminal for init
 tracedecay init [path]              # enroll and request the first index
 tracedecay sync [path]              # explicit administrative refresh
 tracedecay status [path]            # graph stats, freshness, savings, cost
