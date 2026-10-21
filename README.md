@@ -199,15 +199,17 @@ Network-capable effects are separate from core retrieval:
   explicitly configured private GitHub review source can use a read-only
   credential from the operating-system keyring; missing, ambiguous,
   write-capable, or unverifiable credentials fail closed.
-- Provider usage and pricing: `tracedecay cost` performs a side-effect-free read
-  over immutable native usage observations and the deterministic bundled
-  all-provider pricing table. Unknown or unavailable evidence remains typed.
 - Semantic models: when semantic auto-download is enabled, TraceDecay can
   download missing revision-pinned artifacts from Hugging Face hosts and verify
   their catalog-pinned lengths and SHA-256 digests before publication.
 - Configured remote authority: an authenticated, policy-authorized peer can
   perform remote retrieval, replication, backup, restore, or failover. This
   path fails closed with typed `unavailable`, `denied`, or `stale-peer` state.
+
+Local-only reads include `tracedecay cost`: it uses immutable native
+usage observations and the bundled all-provider pricing table without network
+refresh or an environment-driven pricing cache. Unknown or unavailable
+pricing evidence remains typed rather than being silently set to zero.
 
 These services receive normal transport metadata, including the connection's
 source address, in addition to any request payload. Use a network policy or
