@@ -546,10 +546,13 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     let _daemon = spawn_tracedecay_daemon_logged(&home, &log, |command| {
         command.env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold);
     });
-    assert_eq!(
-        claude_edit(&home, &worktree, &data_root, "toolu_unbound_first"),
-        "hook_v2_accepted",
-        "the first edit in an unbound worktree must reach the daemon: {}\n{}",
+    let first = claude_edit(&home, &worktree, &data_root, "toolu_unbound_first");
+    assert!(
+        matches!(
+            first.as_str(),
+            "hook_v2_accepted" | "hook_v2_catchup_required"
+        ),
+        "the unbound callback must report its acknowledgement outcome, got {first}: {}\n{}",
         std::fs::read_to_string(&log).unwrap(),
         std::fs::read_to_string(data_root.join("hook_analytics.jsonl")).unwrap()
     );
@@ -560,17 +563,35 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     );
     assert!(
         hold.is_file(),
-        "the first edit was acknowledged while full publication is held"
+        "the first edit reached core publication while full publication is held"
     );
-    assert_eq!(
-        claude_edit(
-            &home,
-            &other_worktree,
-            &data_root,
-            "toolu_other_unbound_first"
+    let completion_deadline = Instant::now() + PROMPT_DRAIN;
+    let second = claude_edit(
+        &home,
+        &other_worktree,
+        &data_root,
+        "toolu_other_unbound_first",
+    );
+    assert!(
+        matches!(
+            second.as_str(),
+            "hook_v2_accepted" | "hook_v2_catchup_required"
         ),
-        "hook_v2_accepted",
-        "another linked checkout's same relative file must commit while full publication is held"
+        "the second unbound callback must report its acknowledgement outcome, got {second}"
+    );
+    // A callback's fixed acknowledgement budget can expire while the daemon
+    // still commits its already-received event. Do not resubmit either edit:
+    // both exact worktrees must publish their bindings while full publication
+    // remains held, proving that each first edit reached durable admission.
+    assert!(
+        latency_until(
+            completion_deadline.saturating_duration_since(Instant::now()),
+            || bound_worktrees(&data_root) == 3,
+        )
+        .is_some(),
+        "both first edits must bind their worktrees before releasing publication (first={first}, second={second}): {}\n{}",
+        std::fs::read_to_string(&log).unwrap(),
+        std::fs::read_to_string(data_root.join("hook_analytics.jsonl")).unwrap(),
     );
     // Graph admission publishes hook bindings before the core hold. Full
     // publication is the capability boundary this fixture actually holds.
@@ -585,11 +606,14 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     }
     std::fs::remove_file(&hold).unwrap();
     assert!(
-        latency_until(PROMPT_DRAIN, || {
-            let published = std::fs::read_to_string(&log).unwrap();
-            bound_worktrees(&data_root) == 3
-                && full_markers.iter().all(|marker| published.contains(marker))
-        })
+        latency_until(
+            completion_deadline.saturating_duration_since(Instant::now()),
+            || {
+                let published = std::fs::read_to_string(&log).unwrap();
+                bound_worktrees(&data_root) == 3
+                    && full_markers.iter().all(|marker| published.contains(marker))
+            }
+        )
         .is_some(),
         "delivering that edit opens the worktree and publishes its binding: {}",
         std::fs::read_to_string(&log).unwrap()
