@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 use tracedecay_domain::ContentDigest;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
@@ -404,13 +405,20 @@ impl StdioLspClient {
         timeouts: LspRefreshTimeouts,
     ) -> Result<Self> {
         let timeouts = timeouts.with_deadline(timeouts.operation_deadline());
-        let launch = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(timeouts.operation_deadline()),
+        let launch = native_runtime::timeout_at(
+            timeouts.operation_deadline(),
             resolve_analyzer_launch(command, project_root),
         )
         .await
-        .map_err(|_| TraceDecayError::Config {
-            message: "LSP analyzer launch resolution timed out".to_owned(),
+        .map_err(|error| TraceDecayError::Config {
+            message: match error {
+                native_runtime::TimeoutError::Elapsed => {
+                    "LSP analyzer launch resolution timed out".to_owned()
+                }
+                native_runtime::TimeoutError::TimerUnavailable(error) => {
+                    format!("LSP analyzer launch timer unavailable: {error}")
+                }
+            },
         })?
         .map_err(|error| TraceDecayError::Config {
             message: error.engine_error(),
@@ -562,16 +570,20 @@ impl StdioLspClient {
             .map_err(|error| LspSemanticRequestError::InvalidResponse {
                 class: format!("failed to schedule semantic document read: {error}"),
             })?;
-        let text = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(timeouts.request_deadline()),
-            read.join(&cx),
-        )
-        .await
-        .map_err(|_| LspSemanticRequestError::TimedOut)?
-        .map_err(|error| LspSemanticRequestError::InvalidResponse {
-            class: format!("semantic document read did not complete: {error}"),
-        })?
-        .map_err(|class| LspSemanticRequestError::InvalidResponse { class })?;
+        let text = native_runtime::timeout_at(timeouts.request_deadline(), read.join(&cx))
+            .await
+            .map_err(|error| match error {
+                native_runtime::TimeoutError::Elapsed => LspSemanticRequestError::TimedOut,
+                native_runtime::TimeoutError::TimerUnavailable(error) => {
+                    LspSemanticRequestError::Transport {
+                        class: format!("semantic document read timer unavailable: {error}"),
+                    }
+                }
+            })?
+            .map_err(|error| LspSemanticRequestError::InvalidResponse {
+                class: format!("semantic document read did not complete: {error}"),
+            })?
+            .map_err(|class| LspSemanticRequestError::InvalidResponse { class })?;
         self.synchronize_document(&uri, language_id, &text, None, timeouts)
             .await
             .map_err(semantic_write_error)?;

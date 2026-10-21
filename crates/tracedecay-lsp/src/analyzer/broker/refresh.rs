@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
+use tracedecay_runtime_core::native_runtime;
 
 use super::super::client::{
     DiagnosticDocumentCoverage, DiagnosticRefreshResult, DiagnosticRootCoverage, LspDocument,
@@ -72,14 +73,18 @@ pub(crate) struct PreparedRefreshReservation {
 }
 
 impl PreparedRefreshReservation {
-    async fn acquire_run(&self, deadline: Instant) -> Option<OwnedSemaphorePermit> {
-        tokio::time::timeout_at(
-            tokio::time::Instant::from_std(deadline),
-            self.running.clone().acquire_owned(),
-        )
-        .await
-        .ok()?
-        .ok()
+    async fn acquire_run(
+        &self,
+        deadline: Instant,
+    ) -> std::result::Result<OwnedSemaphorePermit, RefreshFailure> {
+        native_runtime::timeout_at(deadline, self.running.clone().acquire_owned())
+            .await
+            .map_err(RefreshFailure::timeout)?
+            .map_err(|error| {
+                RefreshFailure::crashed_message(format!(
+                    "analyzer refresh capacity unavailable: {error}"
+                ))
+            })
     }
 }
 
@@ -208,10 +213,7 @@ impl PreparedRefresh {
                 let spawn = self.spawn.clone();
                 async move {
                     let result = AssertUnwindSafe(async move {
-                        let run_permit = reservation
-                            .acquire_run(deadline)
-                            .await
-                            .ok_or_else(RefreshFailure::timed_out)?;
+                        let run_permit = reservation.acquire_run(deadline).await?;
                         collect_refresh_batch(
                             ordinal,
                             batch,
@@ -293,11 +295,10 @@ async fn collect_refresh_batch(
     let launch = batch.launch;
     let shared = batch.client;
     let deadline = timeouts.operation_deadline();
-    let mut client_slot =
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), shared.client())
-            .await
-            .map_err(|_| RefreshFailure::timed_out())?
-            .map_err(|error| RefreshFailure::crashed(&error))?;
+    let mut client_slot = native_runtime::timeout_at(deadline, shared.client())
+        .await
+        .map_err(RefreshFailure::timeout)?
+        .map_err(|error| RefreshFailure::crashed(&error))?;
     let mut use_of_analyzer = if let Some(client) = client_slot.take() {
         RefreshUseOfAnalyzer::new(&shared, client_slot, shared.current_attempt(), Some(client))
     } else {
@@ -429,6 +430,15 @@ pub(crate) struct RefreshFailure {
 }
 
 impl RefreshFailure {
+    fn timeout(error: native_runtime::TimeoutError) -> Self {
+        match error {
+            native_runtime::TimeoutError::Elapsed => Self::timed_out(),
+            native_runtime::TimeoutError::TimerUnavailable(error) => {
+                Self::crashed_message(format!("analyzer refresh timer unavailable: {error}"))
+            }
+        }
+    }
+
     fn client(error: &LspRefreshError) -> Self {
         Self {
             state: if error.is_policy_retirement()
@@ -503,7 +513,10 @@ mod tests {
             .expect("full queue reservation");
         let (started, observed) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let _run = reservation.acquire_run().await;
+            let _run = reservation
+                .acquire_run(Instant::now() + Duration::from_secs(1))
+                .await
+                .expect("run permit acquired");
             let _ = started.send(());
             pending::<()>().await;
         });
@@ -514,14 +527,15 @@ mod tests {
         let released = capacity
             .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES)
             .expect("aborted work releases queued capacity");
+        let deadline = Instant::now() + Duration::from_secs(1);
         let (one, two, three, four) = tokio::join!(
-            released.acquire_run(),
-            released.acquire_run(),
-            released.acquire_run(),
-            released.acquire_run(),
+            released.acquire_run(deadline),
+            released.acquire_run(deadline),
+            released.acquire_run(deadline),
+            released.acquire_run(deadline),
         );
         let permits = [one, two, three, four];
-        assert!(permits.iter().all(Option::is_some));
+        assert!(permits.iter().all(std::result::Result::is_ok));
         assert!(capacity.running.clone().try_acquire_owned().is_err());
     }
 
@@ -532,7 +546,7 @@ mod tests {
             .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES)
             .expect("initial reservation should fit");
         let running = reservation
-            .acquire_run()
+            .acquire_run(Instant::now() + Duration::from_secs(1))
             .await
             .expect("run permit should be available");
 
@@ -547,5 +561,47 @@ mod tests {
             capacity.running.clone().acquire_owned(),
         );
         assert!(one.is_ok() && two.is_ok() && three.is_ok() && four.is_ok());
+    }
+
+    #[test]
+    fn native_refresh_waits_release_capacity_after_drop_and_deadline() {
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let capacity = BrokerRefreshCapacity::new();
+            let reservation = capacity.reserve(1).expect("queued reservation");
+            let held = capacity
+                .running
+                .clone()
+                .try_acquire_many_owned(MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS as u32)
+                .expect("hold every running permit");
+
+            let mut pending =
+                Box::pin(reservation.acquire_run(Instant::now() + Duration::from_secs(1)));
+            assert!(futures_util::poll!(pending.as_mut()).is_pending());
+            drop(pending);
+
+            let expired = reservation
+                .acquire_run(Instant::now() + Duration::from_millis(10))
+                .await
+                .expect_err("capacity remains held through the deadline");
+            assert_eq!(expired, RefreshFailure::timed_out());
+            drop(held);
+            let acquired = reservation
+                .acquire_run(Instant::now() + Duration::from_secs(1))
+                .await
+                .expect("dropped and expired waits must not consume a permit");
+            assert_eq!(
+                capacity.running.available_permits(),
+                MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS - 1,
+            );
+            drop(acquired);
+            drop(reservation);
+            assert_eq!(
+                capacity.running.available_permits(),
+                MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS,
+            );
+            assert!(capacity.reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES).is_some());
+        })
+        .expect("native runtime");
     }
 }

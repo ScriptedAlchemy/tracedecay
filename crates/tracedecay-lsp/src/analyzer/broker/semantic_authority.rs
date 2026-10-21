@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 
 use super::super::client::{
     LspRefreshTimeouts, LspSemanticRequestError, StdioLspClient, decode_semantic_request,
@@ -251,8 +252,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             let document_snapshot = document_snapshot;
             let document = document;
             let outcome = tokio::select! {
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                    analyzer_event_outcome(AnalyzerEvent::TimedOut)
+                timer = native_runtime::sleep_until(deadline) => {
+                    match timer {
+                        Ok(()) => analyzer_event_outcome(AnalyzerEvent::TimedOut),
+                        Err(error) => semantic_operation_outcome(Err(
+                            LspSemanticRequestError::Transport {
+                                class: format!("semantic request timer unavailable: {error}"),
+                            },
+                        )),
+                    }
                 }
                 () = cancellation.cancelled() => {
                     LspSemanticOperationOutcome::Partial {
@@ -285,10 +293,11 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     } else if let Some(attempt) = inner.shared.begin_start() {
                         let started = tokio::select! {
                             () = cancellation.cancelled() => Ok(None),
-                            () = tokio::time::sleep_until(
-                                tokio::time::Instant::from_std(deadline)
-                            ) => Err(TraceDecayError::Config {
-                                message: "LSP semantic request timed out during analyzer startup".to_owned(),
+                            timer = native_runtime::sleep_until(deadline) => Err(TraceDecayError::Config {
+                                message: match timer {
+                                    Ok(()) => "LSP semantic request timed out during analyzer startup".to_owned(),
+                                    Err(error) => format!("LSP analyzer startup timer unavailable: {error}"),
+                                },
                             }),
                             client = StdioLspClient::start_with_launch(
                                 &inner.launch,
@@ -340,9 +349,12 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                     }
                                 } => Some(result),
                                 () = cancellation.cancelled() => None,
-                                () = tokio::time::sleep_until(
-                                    tokio::time::Instant::from_std(deadline)
-                                ) => None,
+                                timer = native_runtime::sleep_until(deadline) => Some(Err(match timer {
+                                    Ok(()) => LspSemanticRequestError::TimedOut,
+                                    Err(error) => LspSemanticRequestError::Transport {
+                                        class: format!("semantic document synchronization timer unavailable: {error}"),
+                                    },
+                                })),
                             };
                             let Some(document_sync) = document_sync else {
                                 let event = if cancellation.is_cancelled() {
@@ -768,6 +780,55 @@ mod tests {
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
         )
+    }
+
+    #[test]
+    fn native_queued_semantic_operations_release_registration_on_timeout_cancel_and_drop() {
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let authority = unspawnable_authority();
+            let root = AdmittedRoot::new("file:///project");
+            let held_client = authority.inner.shared.client().await.unwrap();
+
+            let outcome = authority
+                .start(
+                    root.clone(),
+                    LspRequestId::Number(10),
+                    document_symbol_request()
+                        .with_deadline(Instant::now() + Duration::from_millis(10)),
+                )
+                .await;
+            assert!(matches!(
+                outcome,
+                LspSemanticOperationOutcome::Partial { coverage, .. }
+                    if coverage == "analyzer-timeout"
+            ));
+            assert!(authority.inner.operations().is_empty());
+
+            let request_id = LspRequestId::Number(11);
+            let mut cancelled =
+                authority.start(root.clone(), request_id.clone(), document_symbol_request());
+            assert!(futures_util::poll!(cancelled.as_mut()).is_pending());
+            assert!(authority.cancel_request(&root, &request_id));
+            assert!(matches!(
+                cancelled.await,
+                LspSemanticOperationOutcome::Partial { coverage, .. }
+                    if coverage == "semantic-cancelled"
+            ));
+            assert!(authority.inner.operations().is_empty());
+
+            let mut abandoned =
+                authority.start(root.clone(), request_id.clone(), document_symbol_request());
+            assert!(futures_util::poll!(abandoned.as_mut()).is_pending());
+            drop(abandoned);
+            assert!(authority.inner.operations().is_empty());
+            let reused = authority.start(root, request_id, document_symbol_request());
+            assert_eq!(authority.inner.operations().len(), 1);
+            drop(reused);
+            assert!(authority.inner.operations().is_empty());
+            drop(held_client);
+        })
+        .expect("native runtime");
     }
 
     #[tokio::test]
