@@ -31,8 +31,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FileAttributeTagInfo, FileRenameInfoEx, GetDiskFreeSpaceExW,
-    GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
-    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -303,6 +303,35 @@ pub fn create_private_file_retained(
         ));
     }
     Ok(file)
+}
+
+/// Publish a same-volume rename with the Windows namespace durability barrier.
+/// `MOVEFILE_COPY_ALLOWED` is deliberately absent: publication must remain one
+/// rename, including when the destination already exists.
+///
+/// Unlike the unsupported `REPLACEFILE_WRITE_THROUGH`, `MOVEFILE_WRITE_THROUGH`
+/// makes completion wait for the move on disk:
+/// <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw>.
+pub(crate) fn rename_paths_durable(
+    source: &Path,
+    destination: &Path,
+    replace_existing: bool,
+) -> io::Result<()> {
+    let source = encode_path(&absolute_security_path(source)?)?;
+    let destination = encode_path(&absolute_security_path(destination)?)?;
+    let flags = MOVEFILE_WRITE_THROUGH
+        | if replace_existing {
+            MOVEFILE_REPLACE_EXISTING
+        } else {
+            0
+        };
+    // SAFETY: both buffers are NUL-terminated with embedded NUL rejected and
+    // stay live for the entire synchronous call.
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Atomically replace one sibling file with another, returning the exact

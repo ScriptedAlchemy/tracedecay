@@ -118,6 +118,94 @@ fn prepared_publish_is_private_and_readable_through_the_adapter() {
     }
 }
 
+#[cfg(windows)]
+mod windows_publication {
+    use std::fs;
+    use std::io::{ErrorKind, Read};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use tracedecay_private_fs::framed_log::{
+        DirectorySyncPolicy, atomic_write, rename_noreplace, replace_via_rename,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    #[test]
+    fn durable_replacement_preserves_readers_and_cleans_failed_staging_on_long_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let mut directory = root.path().join("scheduler-状態");
+        while directory.as_os_str().encode_wide().count() < 280 {
+            directory.push("nested-dashboard-directory");
+        }
+        fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("control.json");
+        let publish = |bytes: &[u8]| {
+            atomic_write(&destination, "control", bytes, DirectorySyncPolicy::Strict)
+        };
+
+        publish(b"first").unwrap();
+        let mut reader = fs::File::open(&destination).unwrap();
+        publish(b"second").unwrap();
+        let mut displaced = Vec::new();
+        reader.read_to_end(&mut displaced).unwrap();
+        assert_eq!(displaced, b"first");
+        assert_eq!(fs::read(&destination).unwrap(), b"second");
+        drop(reader);
+
+        let blocker = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&destination)
+            .unwrap();
+        publish(b"blocked").expect_err("a reader denying delete must reject replacement");
+        assert_eq!(fs::read(&destination).unwrap(), b"second");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        drop(blocker);
+
+        publish(b"third").unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"third");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn durable_rename_rejects_nul_paths_and_keeps_no_replace_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.tmp");
+        let destination = root.path().join("destination");
+        fs::write(&source, b"new").unwrap();
+        fs::write(&destination, b"old").unwrap();
+
+        for invalid_source in [true, false] {
+            let mut invalid = if invalid_source {
+                source.clone().into_os_string()
+            } else {
+                destination.clone().into_os_string()
+            };
+            invalid.push("\0ignored");
+            let invalid = std::path::PathBuf::from(invalid);
+            let result = if invalid_source {
+                replace_via_rename(&invalid, &destination)
+            } else {
+                replace_via_rename(&source, &invalid)
+            };
+            assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
+            assert_eq!(fs::read(&source).unwrap(), b"new");
+            assert_eq!(fs::read(&destination).unwrap(), b"old");
+        }
+
+        assert_eq!(
+            rename_noreplace(&source, &destination).unwrap_err().kind(),
+            ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"new");
+        assert_eq!(fs::read(&destination).unwrap(), b"old");
+        let vacant = root.path().join("vacant");
+        rename_noreplace(&source, &vacant).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(vacant).unwrap(), b"new");
+    }
+}
+
 /// A batch makes its own members durable and nothing else: syncing one small
 /// member must not wait for another writer's dirty data on the same
 /// filesystem. Asserted as a latency class against the cost of flushing that

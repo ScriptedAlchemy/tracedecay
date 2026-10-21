@@ -232,36 +232,35 @@ pub async fn save_scheduler_control(
     control: &AutomationSchedulerControl,
 ) -> Result<()> {
     let path = scheduler_control_path(dashboard_root);
-    if let Some(parent) = path.parent() {
-        let directory = parent.to_path_buf();
-        crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
-            .await
-            .map_err(|e| TraceDecayError::Config {
-                message: format!(
-                    "failed to create automation scheduler control directory '{}': {e}",
-                    parent.display()
-                ),
-            })?;
-    }
     let bytes = serde_json::to_vec_pretty(control).map_err(|e| TraceDecayError::Config {
         message: format!("failed to encode automation scheduler control: {e}"),
     })?;
-    let write_path = path.clone();
-    crate::automation::blocking_fs(move || {
-        tracedecay_private_fs::framed_log::atomic_write(
-            &write_path,
-            "scheduler-control",
-            &bytes,
-            tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
-        )
-    })
-    .await
-    .map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to write automation scheduler control '{}': {e}",
-            path.display()
-        ),
-    })
+    let directory = dashboard_root.to_path_buf();
+    crate::automation::blocking_fs(move || save_scheduler_control_blocking(&directory, &bytes))
+        .await
+        .map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "failed to write automation scheduler control '{}': {e}",
+                path.display()
+            ),
+        })
+}
+
+fn save_scheduler_control_blocking(dashboard_root: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // Resolve existing OS aliases before the private-store authority validates
+    // the path, while leaving the control file itself subject to its no-follow
+    // publication checks. A new dashboard and every missing ancestor must be
+    // durable before a pause can be acknowledged.
+    let directory = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(
+        &std::path::absolute(dashboard_root)?,
+    );
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&directory)?;
+    tracedecay_private_fs::framed_log::atomic_write(
+        &scheduler_control_path(&directory),
+        "scheduler-control",
+        bytes,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
+    )
 }
 
 impl AutomationTaskLock {
@@ -1590,6 +1589,49 @@ mod tests {
             load_scheduler_control(dir.path()).await,
             Err(TraceDecayError::Config { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn scheduler_control_creates_private_missing_ancestors() {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let dashboard = profile.join("dashboard");
+        assert!(!dashboard.exists());
+
+        save_scheduler_control(&dashboard, &AutomationSchedulerControl { paused: true })
+            .await
+            .unwrap();
+
+        assert!(load_scheduler_control(&dashboard).await.unwrap().paused);
+        tracedecay_private_fs::validate_private_directory(&profile).unwrap();
+        tracedecay_private_fs::validate_private_directory(&dashboard).unwrap();
+        assert_eq!(std::fs::read_dir(&dashboard).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_control_does_not_publish_after_an_ancestor_sync_fails() {
+        use tracedecay_runtime_core::storage::with_durable_namespace_sync_fault_for_test;
+
+        // The first barrier covers the existing prefix; the following two
+        // publish the new profile and dashboard entries, respectively.
+        for barrier in [2, 3] {
+            let root = tempdir().unwrap();
+            let dashboard = root.path().join("profile").join("dashboard");
+            let bytes = br#"{"paused":true}"#;
+            let error = with_durable_namespace_sync_fault_for_test(barrier, || {
+                save_scheduler_control_blocking(&dashboard, bytes)
+            })
+            .expect_err("an uncommitted ancestor must prevent acknowledgement");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert!(!scheduler_control_path(&dashboard).exists());
+            save_scheduler_control_blocking(&dashboard, bytes).unwrap();
+            assert_eq!(
+                std::fs::read(scheduler_control_path(&dashboard)).unwrap(),
+                bytes
+            );
+        }
     }
 
     #[tokio::test]

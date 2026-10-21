@@ -30,6 +30,8 @@ pub enum DirectorySyncPolicy {
 }
 
 /// Flush a directory's metadata so a preceding create/rename/remove is durable.
+/// Windows replacement durability is requested by the write-through rename
+/// primitive itself rather than this POSIX directory barrier.
 #[tracing::instrument(
     name = "private_fs.framed_log.sync_directory",
     level = "trace",
@@ -468,11 +470,12 @@ pub fn sync_file_data(path: &Path, file: &File) -> io::Result<()> {
     }
 }
 
-/// A synced replacement for `destination`, staged so its durability barrier
+/// A synced replacement for `destination`, staged so its content barrier
 /// runs before, and outside, whatever lock guards publication.
 ///
-/// [`Self::publish`] renames it into place without a barrier; the caller makes
-/// the directory entry durable. Dropping it unpublished removes the staging.
+/// [`Self::publish`] uses a write-through rename on Windows. On Unix the caller
+/// makes the directory entry durable after publication. Dropping it unpublished
+/// removes the staging.
 #[derive(Debug)]
 pub struct StagedReplacement {
     temporary: PathBuf,
@@ -562,7 +565,14 @@ pub fn with_owned_temp_publish<T>(
 }
 
 pub fn replace_via_rename(temporary: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(temporary, destination)
+    #[cfg(windows)]
+    {
+        crate::windows::rename_paths_durable(temporary, destination, true)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary, destination)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -759,7 +769,9 @@ pub fn atomic_write_accelerator(destination: &Path, kind: &str, bytes: &[u8]) ->
     let result = (|| {
         output.write_all(bytes)?;
         drop(output);
-        replace_via_rename(&temporary, destination)
+        // Rebuildable bytes deliberately need neither a Windows write-through
+        // rename nor a Unix parent-directory barrier.
+        fs::rename(&temporary, destination)
     })();
     if result.is_err() {
         remove_owned_temp(&temporary);
