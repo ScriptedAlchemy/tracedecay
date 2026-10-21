@@ -268,10 +268,9 @@ impl SessionHistoricalIngestor for TalliedHistory {
 async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
     let harness = RegisteredGlobalDbHarness::open("refresh-history-progress").await;
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
-    let units = |units_projected, units_parked, messages_upserted| ProviderPassUnits {
+    let units = |units_projected, units_parked| ProviderPassUnits {
         units_projected,
         units_parked,
-        messages_upserted,
         ..ProviderPassUnits::default()
     };
     let history = Arc::new(TalliedHistory {
@@ -282,12 +281,12 @@ async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
                         made_progress: true,
                     },
                     made_progress: true,
-                    provider_units: [("codex", units(1, 0, 3)), ("cursor", units(0, 1, 0))].into(),
+                    provider_units: [("codex", units(1, 0)), ("cursor", units(0, 1))].into(),
                 },
                 SessionHistoricalPass {
                     outcome: SessionHistoricalIngestOutcome::Complete,
                     made_progress: true,
-                    provider_units: [("cursor", units(1, 0, 2))].into(),
+                    provider_units: [("cursor", units(1, 0))].into(),
                 },
             ]
             .into(),
@@ -336,7 +335,7 @@ async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
     assert_eq!(progress.state(), SessionHistoryProgressState::Advancing);
     assert_eq!(
         progress.provider_units.into_iter().collect::<Vec<_>>(),
-        vec![("codex", units(1, 0, 3)), ("cursor", units(1, 1, 2))]
+        vec![("codex", units(1, 0)), ("cursor", units(1, 1))]
     );
     state.cancel();
     worker.await.expect("refresh worker exits on cancellation");

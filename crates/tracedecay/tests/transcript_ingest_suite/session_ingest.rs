@@ -615,7 +615,6 @@ async fn bounded_project_catch_up_pass_persists_the_rotation_frontier() {
             "codex",
             tracedecay_sessions::ProviderPassUnits {
                 units_projected: 1,
-                messages_upserted: 2,
                 ..Default::default()
             }
         )],

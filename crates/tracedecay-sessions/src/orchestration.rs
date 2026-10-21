@@ -88,7 +88,6 @@ pub struct ProviderPassUnits {
     /// Work handed to a later pass: runs that stopped at their byte grant and
     /// admitted providers the pass budget never reached.
     pub units_parked: u64,
-    pub messages_upserted: u64,
 }
 
 impl ProviderPassUnits {
@@ -98,9 +97,6 @@ impl ProviderPassUnits {
             units_projected: self.units_projected.saturating_add(other.units_projected),
             units_refused: self.units_refused.saturating_add(other.units_refused),
             units_parked: self.units_parked.saturating_add(other.units_parked),
-            messages_upserted: self
-                .messages_upserted
-                .saturating_add(other.messages_upserted),
         }
     }
 }
@@ -158,9 +154,6 @@ impl<F> ProviderRunFold<F> {
         }
         self.units_admitted = self.units_admitted.saturating_add(1);
         let units = self.provider_units.entry(provider).or_default();
-        units.messages_upserted = units
-            .messages_upserted
-            .saturating_add(outcome.stats.messages_upserted);
         if outcome.failures.is_empty() {
             self.coverage_advanced |= outcome.coverage_advanced;
             if outcome.deferred_units == 0 {
@@ -177,16 +170,6 @@ impl<F> ProviderRunFold<F> {
         self.failures.extend(outcome.failures);
         self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
         self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
-    }
-
-    /// Attributes messages a provider committed outside its run, such as
-    /// Claude's projection drain, to that provider's tally.
-    pub fn add_provider_messages(&mut self, provider: &'static str, messages_upserted: u64) {
-        if messages_upserted == 0 {
-            return;
-        }
-        let units = self.provider_units.entry(provider).or_default();
-        units.messages_upserted = units.messages_upserted.saturating_add(messages_upserted);
     }
 
     /// Accounts an admitted provider the pass budget never reached.
@@ -327,8 +310,6 @@ mod tests {
             "claude",
             ProviderRunOutcome::failed(Failure { retryable: true }, 3),
         );
-        fold.add_provider_messages("claude", 5);
-        fold.add_provider_messages("hermes", 0);
         fold.park("kimi");
         fold.record("pi", ProviderRunOutcome::skipped());
 
@@ -339,7 +320,6 @@ mod tests {
                     "claude",
                     ProviderPassUnits {
                         units_refused: 1,
-                        messages_upserted: 5,
                         ..ProviderPassUnits::default()
                     }
                 ),
@@ -347,7 +327,6 @@ mod tests {
                     "codex",
                     ProviderPassUnits {
                         units_projected: 1,
-                        messages_upserted: 4,
                         ..ProviderPassUnits::default()
                     }
                 ),
@@ -355,7 +334,6 @@ mod tests {
                     "cursor",
                     ProviderPassUnits {
                         units_parked: 1,
-                        messages_upserted: 2,
                         ..ProviderPassUnits::default()
                     }
                 ),

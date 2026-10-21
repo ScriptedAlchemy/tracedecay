@@ -823,7 +823,6 @@ fn historical_session_catch_up_progress(progress: Option<&SessionHistoryCatchUpP
                 "units_projected": units.units_projected,
                 "units_refused": units.units_refused,
                 "units_parked": units.units_parked,
-                "messages_upserted": units.messages_upserted,
             })
         })
         .collect::<Vec<_>>();
@@ -950,12 +949,11 @@ fn render_history_progress_md(md: &mut Md, progress: &serde_json::Map<String, Va
         .flatten()
     {
         md.bullet(&format!(
-            "{}: {} projected, {} refused, {} parked, {} messages",
+            "{}: {} projected, {} refused, {} parked",
             provider["provider"].as_str().unwrap_or_default(),
             provider["units_projected"],
             provider["units_refused"],
             provider["units_parked"],
-            provider["messages_upserted"],
         ));
     }
 }
@@ -1918,7 +1916,6 @@ mod tests {
     fn historical_progress_separates_a_slow_backlog_from_a_stalled_one() {
         let codex = tracedecay_sessions::ProviderPassUnits {
             units_projected: 1,
-            messages_upserted: 40,
             ..Default::default()
         };
         let cursor_parked = tracedecay_sessions::ProviderPassUnits {
@@ -1963,14 +1960,12 @@ mod tests {
                     "units_projected": 1,
                     "units_refused": 0,
                     "units_parked": 0,
-                    "messages_upserted": 40,
                 },
                 {
                     "provider": "cursor",
                     "units_projected": 0,
                     "units_refused": 0,
                     "units_parked": 4,
-                    "messages_upserted": 0,
                 },
             ])
         );
@@ -1985,7 +1980,7 @@ mod tests {
             "markdown status must name the stall, got {md}"
         );
         assert!(
-            md.contains("cursor: 0 projected, 0 refused, 4 parked, 0 messages"),
+            md.contains("cursor: 0 projected, 0 refused, 4 parked"),
             "markdown status must list provider counters, got {md}"
         );
         assert_eq!(
