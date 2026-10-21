@@ -1,8 +1,10 @@
 //! Gateway request/response DTOs and their JSON-RPC wire codecs.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::{Value, json};
+use tracedecay_domain::ContentDigest;
 
 use super::admission::{AdmittedRoot, DocumentConfinement};
 use crate::capabilities::SemanticCapability;
@@ -416,11 +418,51 @@ pub enum SemanticResponse {
 pub struct LspSemanticRequest {
     method: &'static str,
     params: Value,
+    document_snapshot: Option<LspSemanticDocumentSnapshot>,
+    deadline: Option<Instant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LspSemanticDocumentSnapshot {
+    pub uri: String,
+    pub language_id: String,
+    pub version: i64,
+    pub content_digest: ContentDigest,
+    pub text: Arc<str>,
+    pub lifetime: crate::overlay::OverlayLifetime,
+}
+
+impl LspSemanticDocumentSnapshot {
+    pub fn from_overlay(snapshot: &crate::overlay::OverlaySnapshot) -> Self {
+        Self {
+            uri: snapshot.uri.clone(),
+            language_id: snapshot.language_id.clone(),
+            version: snapshot.version,
+            content_digest: snapshot.content_digest.clone(),
+            text: Arc::clone(&snapshot.text),
+            lifetime: snapshot.lifetime.clone(),
+        }
+    }
 }
 
 impl LspSemanticRequest {
     pub(crate) fn from_standard(method: &'static str, params: Value) -> Self {
-        Self { method, params }
+        Self {
+            method,
+            params,
+            document_snapshot: None,
+            deadline: None,
+        }
+    }
+
+    pub(crate) fn with_document_snapshot(mut self, snapshot: LspSemanticDocumentSnapshot) -> Self {
+        self.document_snapshot = Some(snapshot);
+        self
+    }
+
+    pub(crate) fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 
     pub fn method(&self) -> &'static str {
@@ -429,6 +471,14 @@ impl LspSemanticRequest {
 
     pub fn params(&self) -> &Value {
         &self.params
+    }
+
+    pub fn document_snapshot(&self) -> Option<&LspSemanticDocumentSnapshot> {
+        self.document_snapshot.as_ref()
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.deadline
     }
 
     pub fn into_params(self) -> Value {
@@ -445,6 +495,10 @@ pub enum LspSemanticOperationOutcome {
         detail: Option<&'static str>,
     },
     RenameCandidate(RenameCandidateResult),
+    /// The initialized analyzer explicitly does not offer this operation.
+    /// Fan-out may omit this language; an unavailable advertised provider
+    /// must instead leave the overall result unavailable or partial.
+    Unsupported,
     Unavailable,
 }
 
@@ -565,7 +619,12 @@ pub fn lsp_semantic_request(request: &SemanticRequest) -> Result<LspSemanticRequ
             position_params(document_uri, *position),
         ),
     };
-    Ok(LspSemanticRequest { method, params })
+    Ok(LspSemanticRequest {
+        method,
+        params,
+        document_snapshot: None,
+        deadline: None,
+    })
 }
 
 pub fn project_semantic_outcome(
@@ -613,7 +672,9 @@ pub fn project_semantic_outcome(
         LspSemanticOperationOutcome::RenameCandidate(value) => {
             SemanticProviderOutcome::Complete(SemanticResponse::RenameCandidate(value))
         }
-        LspSemanticOperationOutcome::Unavailable => SemanticProviderOutcome::Unavailable,
+        LspSemanticOperationOutcome::Unsupported | LspSemanticOperationOutcome::Unavailable => {
+            SemanticProviderOutcome::Unavailable
+        }
     }
 }
 

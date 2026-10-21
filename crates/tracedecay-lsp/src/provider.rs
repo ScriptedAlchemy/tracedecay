@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use crate::diagnostics::{GatewayDiagnostic, LspPosition};
 use crate::gateway::{
     AdmittedRoot, CallHierarchyItem, DocumentSymbol, Hover, IncomingCall, LspLocation,
-    OutgoingCall, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
-    SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
+    LspSemanticDocumentSnapshot, OutgoingCall, SemanticProviderOutcome, SemanticProviderPort,
+    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
 use crate::overlay::OverlaySnapshot;
 use crate::session::{AuthorizedLspWorkspace, LspRequestId};
@@ -582,6 +582,36 @@ where
         self.route(
             |provider| provider.request(root, request_id, request),
             |provider| provider.request(root, request_id, request),
+        )
+    }
+
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        self.route(
+            |provider| {
+                provider.request_with_document(
+                    root,
+                    request_id,
+                    request,
+                    document_snapshot,
+                    deadline,
+                )
+            },
+            |provider| {
+                provider.request_with_document(
+                    root,
+                    request_id,
+                    request,
+                    document_snapshot,
+                    deadline,
+                )
+            },
         )
     }
 

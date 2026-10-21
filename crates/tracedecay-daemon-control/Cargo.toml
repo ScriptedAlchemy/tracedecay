@@ -11,15 +11,15 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [dependencies]
-hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-tracing = "0.1"
+tracing.workspace = true
 
 # COM Task Scheduler bindings for the per-user Windows daemon task
 # (`service/windows_task.rs`). `Win32_System_Ole` is not imported by name but
@@ -34,6 +34,6 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [dev-dependencies]
-socket2 = "0.6"
-tempfile = "3"
+socket2.workspace = true
+tempfile.workspace = true
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }

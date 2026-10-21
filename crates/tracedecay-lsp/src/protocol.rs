@@ -40,7 +40,8 @@ use crate::diagnostics::{
 use crate::dispatch::{dispatch_incoming, parse_incoming};
 use crate::gateway::{
     AdmittedRoot, DaemonLspGateway, FeedbackCyclePort, FeedbackCycleResponse, GatewayMethod,
-    GatewayResponse, MethodUnavailableReason, SemanticProviderPort, SemanticRequest,
+    GatewayResponse, LspSemanticDocumentSnapshot, MethodUnavailableReason, SemanticProviderPort,
+    SemanticRequest,
 };
 use crate::overlay::{
     DebouncedDiagnosticKind, OverlayDiagnosticDebouncer, OverlayError, OverlayStore,

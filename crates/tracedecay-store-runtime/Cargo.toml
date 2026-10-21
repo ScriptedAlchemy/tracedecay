@@ -19,14 +19,14 @@ test-helpers = []
 
 [dependencies]
 asupersync.workspace = true
-futures-util = "0.3.33"
-hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync"] }
-tracing = "0.1"
+futures-util.workspace = true
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention" }
@@ -51,20 +51,20 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 # `/proc/self/mountinfo` instead; `MNT_LOCAL` is the kernel's direct answer
 # to "is this volume local").
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 # Windows store-locality detection: drive type and volume filesystem name for
 # the locator's metadata (`GetDriveTypeW`, `GetVolumeInformationW`).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_WindowsProgramming",
 ] }
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["full", "test-util"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
 # Test-only helper surfaces reached across crate boundaries by this crate's
 # test targets. Feature unification supplies them to the test build only.
 # code-index-runtime/test-helpers is the same fixture surface the root test
