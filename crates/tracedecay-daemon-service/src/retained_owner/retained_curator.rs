@@ -118,11 +118,18 @@ pub async fn execute_retained_memory_curator(
         configuration_digest,
         automation_request,
     ));
-    let admission = prepared.await.map_err(|error| {
-        RetainedSurfaceExecutionErrorV1::unavailable(format!(
-            "the automation effect authority could not be prepared: {error}"
-        ))
-    })?;
+    // Forced socket-client shutdown can abandon preparation while its
+    // journal writer is still running. The writer keeps this exact project
+    // lease until its I/O returns, independently of the request future.
+    let prepare_owner: Arc<dyn Send + Sync> = Arc::new(runtime_lease.clone());
+    let admission = native_runtime::BLOCKING_WORK_OWNER
+        .scope(prepare_owner, prepared)
+        .await
+        .map_err(|error| {
+            RetainedSurfaceExecutionErrorV1::unavailable(format!(
+                "the automation effect authority could not be prepared: {error}"
+            ))
+        })?;
     let effect = match admission {
         tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Execute(effect) => effect,
         tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Replay(terminal) => {
