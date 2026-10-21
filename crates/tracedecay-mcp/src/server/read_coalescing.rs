@@ -11,7 +11,7 @@ use serde_json::Value;
 use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use crate::ToolResult;
+use crate::{ToolResult, tool_result_has_semantic_error};
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -152,6 +152,11 @@ impl ReadFlight {
 
 impl ReadFlightLeader {
     pub fn complete(mut self, result: ToolResult) -> ToolResult {
+        // Refusals carry the caller's identity and invocation controls. Dropping
+        // this unfinished flight wakes followers to run their own dispatch.
+        if tool_result_has_semantic_error(&result) {
+            return result;
+        }
         self.finished = true;
         self.remove_registration();
         // Deregistration closes this flight to new followers (a later
@@ -207,6 +212,11 @@ pub fn tool_allows_identical_read_coalescing(
     if !operation.is_graph_tool() || operation.owner_side_effect().is_some() {
         return false;
     }
+    // A view records usage under this caller's request identity before reading
+    // the resulting summary, so every caller must execute the handler.
+    if operation == ApplicationSurfaceOperation::SkillView {
+        return false;
+    }
     if matches!(
         tool_name,
         "tracedecay_search"
@@ -235,8 +245,8 @@ fn read_flight_key(
     scope_prefix: Option<&str>,
 ) -> ReadFlightKey {
     // Routing assigns correlation identities per connection/request. They
-    // control cancellation, not the read's inputs; including them prevents
-    // identical requests from ever sharing a flight across connections.
+    // control cancellation, not eligible reads' inputs. Only successful reads
+    // are shared; a refusal makes every caller dispatch with its own identity.
     let mut arguments = arguments.clone();
     if let Some(arguments) = arguments.as_object_mut() {
         arguments.remove("__mcp_request_id");
@@ -433,10 +443,11 @@ mod tests {
             "tracedecay_project_list",
             "tracedecay_fact_store_search",
             "tracedecay_source_outline",
+            "tracedecay_skill_view",
         ] {
             assert!(
                 !tool_allows_identical_read_coalescing(controlled_read, |_| true),
-                "{controlled_read} has caller-specific cancellation and deadline controls"
+                "{controlled_read} must execute with each caller's own identity and controls"
             );
         }
         assert!(tool_allows_identical_read_coalescing(
