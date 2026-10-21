@@ -1521,14 +1521,39 @@ impl ProcessResidentMemoryV1 {
         key: ResidentMemoryKeyV1,
         requested_bytes: NonZeroU64,
     ) -> Result<ResidentMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
-        if let Some(failure) = self.observed_over_budget_refusal(requested_bytes) {
+        self.reserve_below(key, requested_bytes, u64::MAX)
+    }
+
+    /// Reserve below a caller's admission ceiling using the same occupancy
+    /// as [`Self::headroom_below`]. The ceiling constrains both the ledger and
+    /// the process measurement; shared cgroup capacity constrains only the
+    /// requested allocation. Reserving the band above the ceiling as fake
+    /// component bytes would charge that band against cgroup room as well.
+    #[tracing::instrument(
+        name = "runtime_core.resident.reserve_below",
+        level = "trace",
+        skip_all
+    )]
+    pub fn reserve_below(
+        self: &Arc<Self>,
+        key: ResidentMemoryKeyV1,
+        requested_bytes: NonZeroU64,
+        ceiling: u64,
+    ) -> Result<ResidentMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
+        if let Some(failure) = self.observed_over_budget_refusal_below(requested_bytes, ceiling) {
             return Err(self.refused(failure));
         }
-        if let Some(reservation) = self.try_reserve(&key, requested_bytes) {
+        let ledger_ceiling = ceiling.min(self.limit_bytes.get());
+        if let Some(reservation) = self.try_reserve(&key, requested_bytes, ledger_ceiling) {
             return Ok(reservation);
         }
 
-        Err(self.refused(self.admission_failure(requested_bytes)))
+        let failure = ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+            used_bytes: self.lock_state().used_bytes,
+            requested_bytes: requested_bytes.get(),
+            limit_bytes: ledger_ceiling,
+        };
+        Err(self.refused(failure))
     }
 
     /// Reserves one process-shared component without fabricating a project,
@@ -1637,10 +1662,11 @@ impl ProcessResidentMemoryV1 {
         self: &Arc<Self>,
         key: &ResidentMemoryKeyV1,
         requested_bytes: NonZeroU64,
+        ceiling: u64,
     ) -> Option<ResidentMemoryReservationV1> {
         let mut state = self.lock_state();
         let next_used = state.used_bytes.checked_add(requested_bytes.get())?;
-        if next_used > self.limit_bytes.get() {
+        if next_used > ceiling {
             return None;
         }
         state.used_bytes = next_used;
@@ -1663,27 +1689,31 @@ impl ProcessResidentMemoryV1 {
         &self,
         requested_bytes: NonZeroU64,
     ) -> Option<ResidentMemoryAdmissionFailureV1> {
+        self.observed_over_budget_refusal_below(requested_bytes, u64::MAX)
+    }
+
+    fn observed_over_budget_refusal_below(
+        &self,
+        requested_bytes: NonZeroU64,
+        ceiling: u64,
+    ) -> Option<ResidentMemoryAdmissionFailureV1> {
         let pressure = self.pressure.state();
-        let observed_bytes = pressure.observed_bytes()?;
+        let measured_ceiling = ceiling.min(self.pressure.limit_bytes());
+        let observed_bytes = self.pressure.observed_bytes_for_limit(measured_ceiling)?;
         let high_watermark_bytes = self.pressure.high_watermark_bytes();
         if requested_bytes.get() <= RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1
             || (!pressure.is_over_budget()
-                && requested_bytes.get()
-                    <= self.pressure.limit_bytes().saturating_sub(observed_bytes))
+                && requested_bytes.get() <= measured_ceiling.saturating_sub(observed_bytes))
         {
             return None;
         }
         Some(ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
             observed_bytes,
-            limit_bytes: self.pressure.limit_bytes(),
+            limit_bytes: measured_ceiling,
             high_watermark_bytes,
             requested_bytes: requested_bytes.get(),
             floor_bytes: RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
         })
-    }
-
-    fn admission_failure(&self, requested_bytes: NonZeroU64) -> ResidentMemoryAdmissionFailureV1 {
-        self.admission_failure_from_used(self.lock_state().used_bytes, requested_bytes)
     }
 
     fn admission_failure_from_used(

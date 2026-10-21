@@ -2087,41 +2087,53 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
 
 #[test]
 fn overlapping_text_builds_share_one_admission_watermark_headroom() {
-    let limit_bytes = 1_000_u64;
-    let watermark_headroom = 100_u64;
-    let requested = NonZeroU64::new(300).expect("nonzero build request");
-    let mut used_bytes = 0_u64;
+    use tracedecay_domain::WorktreeId;
+    use tracedecay_runtime_core::resident_memory::{
+        ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+    };
 
-    for _ in 0..3 {
-        let accounted =
-            super::super::text_artifact_resident_memory_charge(requested, watermark_headroom)
-                .expect("bounded admission accounting");
-        assert!(
-            used_bytes + accounted.get() <= limit_bytes,
-            "each overlapping build fits beneath the same 900-byte high watermark"
-        );
-        used_bytes += requested.get();
-    }
+    let limit = NonZeroU64::new(1_000).expect("nonzero process ceiling");
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::new(limit)),
+    ));
+    let key = ResidentMemoryKeyV1 {
+        project_id: ProjectId::new("project.overlapping-text-builds").expect("project"),
+        worktree_id: WorktreeId::new("worktree.overlapping-text-builds").expect("worktree"),
+        generation_id: CodeGenerationId::new("generation.overlapping-text-builds")
+            .expect("generation"),
+        component: ResidentMemoryComponentIdV1::new("code-text-artifact-build").expect("component"),
+    };
+    let requested = NonZeroU64::new(300).expect("nonzero build request");
+    let builds = [(); 3].map(|()| {
+        authority
+            .reserve_below(
+                key.clone(),
+                requested,
+                authority.admission_watermark_bytes(),
+            )
+            .expect("each build fits beneath the shared 900-byte watermark")
+    });
 
     assert_eq!(
-        used_bytes, 900,
+        authority.snapshot().used_bytes,
+        900,
         "the retained ledger owns the three build ceilings, not three margins"
     );
-    for overflow in [
-        super::super::text_artifact_resident_memory_charge(
-            NonZeroU64::new(u64::MAX).expect("maximum nonzero request"),
-            1,
+    assert!(matches!(
+        authority.reserve_below(
+            key,
+            NonZeroU64::new(100).expect("remaining hard-limit room"),
+            authority.admission_watermark_bytes(),
         ),
-        super::super::text_artifact_resident_memory_charge(requested, u64::MAX),
-    ] {
-        assert!(
-            matches!(
-                overflow,
-                Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
-            ),
-            "overflow must remain a typed contract refusal: {overflow:?}"
-        );
-    }
+        Err(ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+            used_bytes: 900,
+            requested_bytes: 100,
+            limit_bytes: 900,
+        })
+    ));
+    drop(builds);
+    assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
 #[test]
@@ -2199,7 +2211,14 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
     );
     let fitting_live = watermark - build_floor;
-    for (live_bytes, admitted) in [(fitting_live, true), (fitting_live + 1, false)] {
+    for (live_bytes, cgroup_headroom, admitted) in [
+        (fitting_live, None, true),
+        (fitting_live + 1, None, false),
+        // Shared cgroup room must cover the actual build, not a second copy
+        // of the band above the process admission watermark.
+        (0, Some(build_floor), true),
+        (0, Some(build_floor - 1), false),
+    ] {
         let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
             measured_limit,
             Arc::new(move || {
@@ -2207,7 +2226,7 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
                     resident_bytes: live_bytes,
                     unreclaimable_bytes: live_bytes,
                     swapped_bytes: 0,
-                    cgroup_headroom_bytes: None,
+                    cgroup_headroom_bytes: cgroup_headroom,
                 })
             }),
         ));
@@ -2224,11 +2243,13 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         let latest = scheduler
             .latest_complete()
             .expect("measured latest generation");
-        let advanced = latest.advance_text_serving(1);
+        // Open the build and its reservation without consuming source pages,
+        // so every case tests admission of the same unpublished artifact.
+        let advanced = latest.advance_text_serving(0);
         if admitted {
             assert!(
                 advanced.is_ok(),
-                "{live_bytes} B live leaves the build floor below the watermark: {advanced:?}"
+                "{live_bytes} B live with cgroup room {cgroup_headroom:?} admits the build floor: {advanced:?}"
             );
         } else {
             assert!(
@@ -2236,7 +2257,7 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
                     advanced,
                     Err(tracedecay_query::retrieval::RetrievalPortError::ResidentMemoryRefused(_))
                 ),
-                "{live_bytes} B live leaves less than the build floor: {advanced:?}"
+                "{live_bytes} B live with cgroup room {cgroup_headroom:?} leaves less than the build floor: {advanced:?}"
             );
             assert_eq!(
                 measured.snapshot().used_bytes,
