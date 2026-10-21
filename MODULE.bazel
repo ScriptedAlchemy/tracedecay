@@ -176,6 +176,9 @@ npm.npm_translate_lock(
         "//dashboard:package.json",
     ],
     pnpm_lock = "//:pnpm-lock.yaml",
+    # React Router imports React types from the shared npm store, outside
+    # dashboard/node_modules. Make that peer declaration resolvable there.
+    public_hoist_packages = {"@types/react": [""]},
     verify_node_modules_ignored = "//:.bazelignore",
 )
 use_repo(npm, "npm")
