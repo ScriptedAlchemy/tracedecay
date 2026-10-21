@@ -24,7 +24,7 @@ use crate::{
 };
 
 const MAX_QUERY_ROWS: usize = 10_000;
-const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
 /// SQLite's statement-length limit, less the authority suffix
 /// [`guard::prepare_cached`] appends to a cached statement's text.
 const MAX_SQL_BYTES: usize = 1024 * 1024 - guard::MAX_CACHE_KEY_SUFFIX_BYTES;
