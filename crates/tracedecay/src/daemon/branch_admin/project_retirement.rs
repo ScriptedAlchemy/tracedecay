@@ -1074,7 +1074,7 @@ mod tests {
         let http_application_registry =
             crate::daemon::http_application::DaemonHttpApplicationRegistry::default();
         let mut shutdown = Box::pin(project_server_lifecycle::shutdown_project_servers(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            Instant::now() + std::time::Duration::from_secs(5),
             &administration,
             &http_application_registry,
         ));
