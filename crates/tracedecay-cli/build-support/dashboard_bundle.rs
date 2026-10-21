@@ -9,7 +9,12 @@
 /// implements the same algorithm): sha256 over this prefix, then for each
 /// manifest-validated relative path in sorted order the UTF-8 path bytes, one
 /// 0x00 byte, the file byte length as u64 little-endian, then the file bytes.
+/// A nonempty gzip mapping appends `GZIP_MAPPING_DIGEST_PREFIX`, its entry
+/// count as u64 little-endian, then each source/payload pair in source order
+/// using that same entry encoding (the payload path replaces file bytes).
+/// Empty mappings preserve the shipped identity-only digest contract.
 pub const BUNDLE_DIGEST_PREFIX: &[u8] = b"tracedecay-dashboard-bundle-v1\0";
+const GZIP_MAPPING_DIGEST_PREFIX: &[u8] = b"\0tracedecay-dashboard-gzip-v1\0";
 
 /// Transient producer output inside the bundle store. A bundle lives here only
 /// until it validates; a build killed mid-way leaves at most this directory
@@ -27,8 +32,8 @@ pub const BUILD_RECORD_FILE: &str = "built-from";
 pub struct StagedBundle {
     /// `<store>/<digest_hex>`.
     pub root: std::path::PathBuf,
-    /// Manifest-validated relative asset paths, sorted.
-    pub asset_paths: Vec<String>,
+    /// Validated inventory and payload selection from the producer manifest.
+    pub manifest: super::dashboard_manifest::DashboardManifest,
     pub digest_hex: String,
 }
 
@@ -41,15 +46,22 @@ pub struct BuildRecord {
 
 pub fn bundle_digest(
     root: &std::path::Path,
-    sorted_relative_paths: &[String],
+    manifest: &super::dashboard_manifest::DashboardManifest,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     sha2::Digest::update(&mut hasher, BUNDLE_DIGEST_PREFIX);
-    for relative in sorted_relative_paths {
+    for relative in &manifest.asset_paths {
         let bytes = std::fs::read(root.join(relative)).map_err(|error| {
             format!("failed to read dashboard asset {relative} for the bundle digest: {error}")
         })?;
         hash_entry(&mut hasher, relative, &bytes);
+    }
+    if !manifest.gzip.is_empty() {
+        sha2::Digest::update(&mut hasher, GZIP_MAPPING_DIGEST_PREFIX);
+        sha2::Digest::update(&mut hasher, (manifest.gzip.len() as u64).to_le_bytes());
+        for (source, encoded) in &manifest.gzip {
+            hash_entry(&mut hasher, source, encoded.as_bytes());
+        }
     }
     Ok(hex(sha2::Digest::finalize(hasher).as_slice()))
 }
@@ -137,8 +149,8 @@ pub fn open(
     if !root.is_dir() {
         return Ok(None);
     }
-    let asset_paths = super::dashboard_manifest::dashboard_asset_paths(&root)?;
-    let actual = bundle_digest(&root, &asset_paths)?;
+    let manifest = super::dashboard_manifest::read_dashboard_manifest(&root)?;
+    let actual = bundle_digest(&root, &manifest)?;
     if actual != digest_hex {
         return Err(format!(
             "staged dashboard bundle {} has digest {actual}, not the digest it is named after; \
@@ -149,7 +161,7 @@ pub fn open(
     }
     Ok(Some(StagedBundle {
         root,
-        asset_paths,
+        manifest,
         digest_hex: digest_hex.to_owned(),
     }))
 }
@@ -172,8 +184,8 @@ pub fn prepare_staging(store: &std::path::Path) -> std::io::Result<std::path::Pa
 /// names the current bundle, and a rerun regenerates it.
 pub fn promote(store: &std::path::Path) -> Result<StagedBundle, Box<dyn std::error::Error>> {
     let staging = store.join(STAGING_DIR);
-    let asset_paths = super::dashboard_manifest::dashboard_asset_paths(&staging)?;
-    let digest_hex = bundle_digest(&staging, &asset_paths)?;
+    let manifest = super::dashboard_manifest::read_dashboard_manifest(&staging)?;
+    let digest_hex = bundle_digest(&staging, &manifest)?;
     let root = store.join(&digest_hex);
     if root.exists() {
         std::fs::remove_dir_all(&root).map_err(|error| {
@@ -207,7 +219,7 @@ pub fn promote(store: &std::path::Path) -> Result<StagedBundle, Box<dyn std::err
     }
     Ok(StagedBundle {
         root,
-        asset_paths,
+        manifest,
         digest_hex,
     })
 }
@@ -221,8 +233,8 @@ pub fn stage_copy(
     store: &std::path::Path,
     source: &std::path::Path,
 ) -> Result<StagedBundle, Box<dyn std::error::Error>> {
-    let asset_paths = super::dashboard_manifest::dashboard_asset_paths(source)?;
-    stage_copy_validated(store, source, &asset_paths)
+    let manifest = super::dashboard_manifest::read_dashboard_manifest(source)?;
+    stage_copy_validated(store, source, &manifest.asset_paths)
 }
 
 /// Same staging contract as `stage_copy` for a source whose entries may be
@@ -234,8 +246,8 @@ pub fn stage_copy_build_output(
     store: &std::path::Path,
     source: &std::path::Path,
 ) -> Result<StagedBundle, Box<dyn std::error::Error>> {
-    let asset_paths = super::dashboard_manifest::dashboard_asset_paths_build_output(source)?;
-    stage_copy_validated(store, source, &asset_paths)
+    let manifest = super::dashboard_manifest::read_dashboard_manifest_build_output(source)?;
+    stage_copy_validated(store, source, &manifest.asset_paths)
 }
 
 fn stage_copy_validated(
