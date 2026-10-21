@@ -4,7 +4,8 @@ Thanks for downloading TraceDecay!
 
 TraceDecay is a code intelligence tool that builds a semantic knowledge graph of your codebase. It gives AI coding agents (like Claude Code) instant, structured access to your code's symbols, relationships, and dependencies, so they spend fewer tokens scanning files and more time writing code.
 
-Core indexing and retrieval run through the local daemon by default. Configured
+Core indexing and retrieval require the local daemon: `tracedecay init` and the
+read commands connect to a running daemon rather than starting one. Configured
 remote sources and authorities are separate, policy-bound effects; see
 [Privacy and Network](#privacy-and-network) before assuming an offline-only
 deployment.
@@ -78,10 +79,14 @@ Download from the [latest release](https://github.com/ScriptedAlchemy/tracedecay
 
 ## Your First Index
 
-Start the daemon first, then enroll the project:
+Start the daemon first — either install the optional per-user service, or keep
+a foreground terminal running the same daemon:
 
 ```bash
-tracedecay daemon install-service
+tracedecay daemon install-service   # persistent per-user service (optional)
+# or
+tracedecay daemon run               # same daemon, in the foreground
+
 cd /path/to/your/project
 tracedecay init
 ```
@@ -395,7 +400,7 @@ Cursor install is plugin-based:
   TraceDecay does not install it. The daemon owns transcript capture, indexing,
   compaction, branch/preflight work, and advisory delivery.
   Manual or external-terminal changes are still best covered by the git
-  post-commit hook and on-demand MCP staleness checks.
+  post-commit hook and the bounded MCP freshness check.
 
 Manual Cursor plugin install for local development:
 
@@ -618,8 +623,8 @@ multiple clients are serialized by the daemon authority.
 
 The daemon is required, not optional: `tracedecay init` brokers through the
 daemon-owned code-index scheduler, and the read commands connect to the daemon
-rather than starting one. Install the per-user service to manage the daemon
-through the host service manager:
+rather than starting one. How it runs is the optional part. Installing the
+per-user service manages the daemon through the host service manager:
 
 ```bash
 tracedecay daemon install-service
@@ -628,9 +633,7 @@ tracedecay daemon status
 
 On Linux this installs a systemd user service. On macOS this installs a LaunchAgent at `~/Library/LaunchAgents/com.tracedecay.daemon.plist`. On Windows this registers a least-privilege, per-user Task Scheduler task that starts at logon. The task name and ACL are scoped to the current Windows SID, and the daemon endpoint is an authenticated loopback connection discovered from the selected profile.
 
-Headless Linux containers and remote shells may have no systemd user bus
-(`systemctl --user` reports `Failed to connect to bus`). In that environment,
-run the daemon in the foreground:
+The supported alternative to installing a service is the foreground daemon:
 
 ```bash
 tracedecay daemon run
@@ -638,7 +641,9 @@ tracedecay daemon run
 
 Keep that terminal running, then run `tracedecay init` and other commands in a
 second terminal under the same user and profile. The foreground daemon owns the
-same authenticated endpoint; it does not require a service manager.
+same authenticated endpoint; it does not require a service manager, so it is
+also the path for headless Linux containers and remote shells that have no
+systemd user bus (`systemctl --user` reports `Failed to connect to bus`).
 `tracedecay daemon status` exits 0 only when that endpoint is serving; a
 stopped or unreachable daemon exits non-zero.
 
@@ -679,7 +684,8 @@ only when you intentionally want the daemon running.
 
 ### CLI-Only Workflows
 
-If you don't keep an agent attached, install the supported daemon service and
+If you don't keep an agent attached, keep the daemon running — the optional
+per-user service or a `tracedecay daemon run` terminal — and install the
 optional Git hint hook:
 
 ```bash
