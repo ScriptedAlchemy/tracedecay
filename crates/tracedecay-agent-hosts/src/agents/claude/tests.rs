@@ -171,15 +171,15 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
         );
     }
     for root in [&source, &cache] {
-        assert_eq!(
-            unexpected_bundle_entrypoints(
-                root,
-                &relatives,
-                &[".claude-plugin", "agents", "commands", "hooks", "skills"],
-            )
-            .unwrap(),
-            [],
-            "refresh left auto-discovered entrypoints outside the catalog at {}",
+        let unexpected = unexpected_bundle_entrypoints(
+            root,
+            &relatives,
+            &[".claude-plugin", "agents", "commands", "hooks", "skills"],
+        )
+        .unwrap();
+        assert!(
+            unexpected.is_empty(),
+            "refresh left auto-discovered entrypoints outside the catalog at {}: {unexpected:?}",
             root.display()
         );
     }
