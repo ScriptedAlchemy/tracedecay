@@ -107,7 +107,7 @@ pub async fn documents_for_adapter(
                     language_id,
                     relative_path,
                     text: std::fs::read_to_string(path).ok()?,
-                    snapshot_version: None,
+                    snapshot: None,
                 })
             })
             .collect()

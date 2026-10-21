@@ -446,7 +446,7 @@ mod tests {
                     language_id: "unknown".to_owned(),
                     relative_path: "src/lib.rs".to_owned(),
                     text: "fn main() {}".to_owned(),
-                    snapshot_version: None,
+                    snapshot: None,
                 })
             })
         }

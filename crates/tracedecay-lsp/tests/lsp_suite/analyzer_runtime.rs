@@ -569,7 +569,7 @@ fn fake_document(language: &str, relative_path: &str, text: &str) -> lsp::client
         language_id: language.to_string(),
         relative_path: relative_path.to_string(),
         text: text.to_string(),
-        snapshot_version: None,
+        snapshot: None,
     }
 }
 

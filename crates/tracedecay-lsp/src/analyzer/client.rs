@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 use tracedecay_domain::ContentDigest;
 use tracedecay_runtime_core::native_runtime;
-use tracedecay_runtime_core::path_safety::plain_host_path;
+use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, plain_host_path};
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
 use super::error::{
@@ -101,8 +101,9 @@ pub struct LspDocument {
     pub language_id: String,
     pub relative_path: String,
     pub text: String,
-    /// The editor version from the admitted overlay, when this is not a disk sweep.
-    pub snapshot_version: Option<i64>,
+    /// The exact admitted overlay and its open-document lifetime, when this
+    /// is not a disk sweep.
+    pub snapshot: Option<crate::LspSemanticDocumentSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -134,6 +135,8 @@ pub struct DiagnosticCoverage {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiagnosticRefreshResult {
+    /// Findings backed by `Published` coverage. The broker owns retention of
+    /// older findings for every unverified document.
     pub diagnostics: Vec<CodeDiagnostic>,
     pub coverage: DiagnosticCoverage,
 }
@@ -379,9 +382,10 @@ pub async fn collect_document_diagnostics_with_timeouts(
 }
 
 struct SynchronizedDocument {
+    uri: String,
     wire_version: i32,
     text: String,
-    snapshot_version: Option<i64>,
+    snapshot: Option<crate::LspSemanticDocumentSnapshot>,
     diagnostics: Option<(Vec<CodeDiagnostic>, DiagnosticDocumentCoverage)>,
 }
 
@@ -389,7 +393,7 @@ pub struct StdioLspClient {
     command: String,
     workspace_root: PathBuf,
     upstream_capabilities: UpstreamCapabilities,
-    documents: BTreeMap<String, SynchronizedDocument>,
+    documents: BTreeMap<PathBuf, SynchronizedDocument>,
     next_request_id: ConnectionLocalRequestSequence,
     /// Killed and reaped when the client drops.
     process: AnalyzerProcess,
@@ -556,10 +560,15 @@ impl StdioLspClient {
     pub(crate) async fn ensure_document_open(
         &mut self,
         path: &Path,
+        uri: &str,
         language_id: &str,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<(), LspSemanticRequestError> {
-        let uri = file_uri(path);
+        let identity = document_identity(path, uri).ok_or_else(|| {
+            LspSemanticRequestError::InvalidResponse {
+                class: "admitted semantic document URI is invalid".to_owned(),
+            }
+        })?;
         let path = path.to_path_buf();
         let cx = tracedecay_runtime_core::native_runtime::cx().ok_or_else(|| {
             LspSemanticRequestError::Transport {
@@ -585,7 +594,7 @@ impl StdioLspClient {
                 class: format!("semantic document read did not complete: {error}"),
             })?
             .map_err(|class| LspSemanticRequestError::InvalidResponse { class })?;
-        self.synchronize_document(&uri, language_id, &text, None, timeouts)
+        self.synchronize_document(&identity, uri, language_id, &text, None, timeouts)
             .await
             .map_err(semantic_write_error)?;
         Ok(())
@@ -597,106 +606,137 @@ impl StdioLspClient {
         snapshot: &crate::LspSemanticDocumentSnapshot,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<(), LspSemanticRequestError> {
-        let uri = file_uri(path);
-        if snapshot.uri != uri
-            || ContentDigest::of_bytes(snapshot.text.as_bytes()) != snapshot.content_digest
-        {
+        if !snapshot.lifetime.is_open() {
+            return Err(LspSemanticRequestError::Cancelled);
+        }
+        let identity = document_identity(path, &snapshot.uri).ok_or_else(|| {
+            LspSemanticRequestError::InvalidResponse {
+                class: "admitted semantic document URI is invalid".to_owned(),
+            }
+        })?;
+        if ContentDigest::of_bytes(snapshot.text.as_bytes()) != snapshot.content_digest {
             return Err(LspSemanticRequestError::InvalidResponse {
                 class: "admitted semantic document snapshot is invalid".to_owned(),
             });
         }
-        if self.snapshot_is_stale(&uri, snapshot.version, &snapshot.text) {
+        if self.snapshot_is_stale(&identity, snapshot) {
             return Err(LspSemanticRequestError::InvalidResponse {
                 class: "admitted semantic document snapshot is stale".to_owned(),
             });
         }
         self.synchronize_document(
-            &uri,
+            &identity,
+            &snapshot.uri,
             &snapshot.language_id,
             &snapshot.text,
-            Some(snapshot.version),
+            Some(snapshot),
             timeouts,
         )
         .await
         .map_err(semantic_write_error)?;
+        if !snapshot.lifetime.is_open() {
+            return Err(LspSemanticRequestError::Cancelled);
+        }
         Ok(())
     }
 
-    fn snapshot_is_stale(&self, uri: &str, version: i64, text: &str) -> bool {
-        self.documents.get(uri).is_some_and(|current| {
-            current.snapshot_version.is_some_and(|current_version| {
-                current_version > version || (current_version == version && current.text != text)
+    fn snapshot_is_stale(
+        &self,
+        identity: &Path,
+        snapshot: &crate::LspSemanticDocumentSnapshot,
+    ) -> bool {
+        !snapshot.lifetime.is_open()
+            || self.documents.get(identity).is_some_and(|current| {
+                current.snapshot.as_ref().is_some_and(|admitted| {
+                    admitted.lifetime == snapshot.lifetime
+                        && (admitted.version > snapshot.version
+                            || (admitted.version == snapshot.version
+                                && current.text != snapshot.text.as_ref()))
+                })
             })
-        })
     }
 
     async fn synchronize_document(
         &mut self,
+        identity: &Path,
         uri: &str,
         language_id: &str,
         text: &str,
-        snapshot_version: Option<i64>,
+        snapshot: Option<&crate::LspSemanticDocumentSnapshot>,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<i32, LspMessageWriteError> {
-        if let Some(current) = self.documents.get_mut(uri)
+        if let Some(current) = self.documents.get_mut(identity)
+            && current.uri == uri
             && current.text == text
         {
-            current.snapshot_version = snapshot_version;
+            current.snapshot = snapshot.cloned();
             return Ok(current.wire_version);
         }
         let current_version = self
             .documents
-            .get(uri)
+            .get(identity)
             .map_or(0, |current| current.wire_version);
-        let (version, notification) = if current_version == 0 {
-            (
-                1,
-                json!({
-                    "jsonrpc": "2.0",
-                    "method": "textDocument/didOpen",
-                    "params": {
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": language_id,
-                            "version": 1,
-                            "text": text,
-                        }
+        let version = current_version.checked_add(1).ok_or_else(|| {
+            LspMessageWriteError::Failed(TraceDecayError::Config {
+                message: "analyzer document version is exhausted".to_owned(),
+            })
+        })?;
+        let previous_uri = self
+            .documents
+            .get(identity)
+            .map(|current| current.uri.clone());
+        let notification = if previous_uri.as_deref() != Some(uri) {
+            if let Some(previous_uri) = previous_uri {
+                write_message_until(
+                    &self.process,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didClose",
+                        "params": { "textDocument": { "uri": previous_uri } }
+                    }),
+                    timeouts.request_deadline(),
+                    timeouts.message_io,
+                )
+                .await?;
+            }
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": language_id,
+                        "version": version,
+                        "text": text,
                     }
-                }),
-            )
+                }
+            })
         } else {
-            let version = current_version.checked_add(1).ok_or_else(|| {
-                LspMessageWriteError::Failed(TraceDecayError::Config {
-                    message: "analyzer document version is exhausted".to_owned(),
-                })
-            })?;
-            (
-                version,
-                json!({
-                    "jsonrpc": "2.0",
-                    "method": "textDocument/didChange",
-                    "params": {
-                        "textDocument": {
-                            "uri": uri,
-                            "version": version
-                        },
-                        "contentChanges": [{
-                            "text": text,
-                        }]
-                    }
-                }),
-            )
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "version": version
+                    },
+                    "contentChanges": [{
+                        "text": text,
+                    }]
+                }
+            })
         };
         let deadline = timeouts
             .request_deadline()
             .min(Instant::now() + timeouts.refresh);
         write_message_until(&self.process, notification, deadline, timeouts.message_io).await?;
         self.documents.insert(
-            uri.to_owned(),
+            identity.to_path_buf(),
             SynchronizedDocument {
+                uri: uri.to_owned(),
                 wire_version: version,
                 text: text.to_owned(),
-                snapshot_version,
+                snapshot: snapshot.cloned(),
                 diagnostics: None,
             },
         );
@@ -1086,52 +1126,77 @@ impl StdioLspClient {
         let deadline = timeouts.request_deadline();
         let mut uri_to_document = BTreeMap::new();
         let mut expected_versions = BTreeMap::new();
+        let mut result = DiagnosticRefreshResult::default();
         for mut document in documents {
-            let uri = file_uri(&project_root.join(&document.relative_path));
-            if let Some(version) = document.snapshot_version
-                && self.snapshot_is_stale(&uri, version, &document.text)
+            let path = project_root.join(&document.relative_path);
+            let mut uri = document
+                .snapshot
+                .as_ref()
+                .map_or_else(|| file_uri(&path), |snapshot| snapshot.uri.clone());
+            let identity =
+                document_identity(&path, &uri).ok_or_else(|| LspRefreshError::InvalidResponse {
+                    message: "admitted diagnostic document URI is invalid".to_owned(),
+                })?;
+            if let Some(snapshot) = document.snapshot.as_ref() {
+                if snapshot.text.as_ref() != document.text
+                    || ContentDigest::of_bytes(document.text.as_bytes()) != snapshot.content_digest
+                {
+                    return Err(LspRefreshError::InvalidResponse {
+                        message: "admitted diagnostic document snapshot is invalid".to_owned(),
+                    });
+                }
+                if self.snapshot_is_stale(&identity, snapshot) {
+                    // A queued editor admission may expire before this client
+                    // is acquired. It is stale caller work, not an analyzer
+                    // protocol failure; do not send its text or retire the
+                    // healthy process serving the other documents.
+                    result.coverage.documents.insert(
+                        document.relative_path.clone(),
+                        DiagnosticDocumentCoverage::StalePublication,
+                    );
+                    continue;
+                }
+            } else if let Some(current) = self.documents.get(&identity)
+                && current
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.lifetime.is_open())
             {
-                return Err(LspRefreshError::InvalidResponse {
-                    message: "admitted diagnostic document snapshot is stale".to_owned(),
-                });
-            }
-            // Background disk sweeps do not revoke an admitted editor snapshot.
-            // A diagnostic request carrying a newer overlay may advance the same
-            // ledger as the semantic lane; a disk-only semantic request releases it.
-            if document.snapshot_version.is_none()
-                && let Some(current) = self.documents.get(&uri)
-                && current.snapshot_version.is_some()
-            {
+                // Only the overlay store can keep this admission alive. Closing
+                // or dropping its session returns a later sweep to disk text.
                 document.text.clone_from(&current.text);
-                document.snapshot_version = current.snapshot_version;
+                document.snapshot = current.snapshot.clone();
+                uri.clone_from(&current.uri);
             }
             let version = self
                 .synchronize_document(
+                    &identity,
                     &uri,
                     &document.language_id,
                     &document.text,
-                    document.snapshot_version,
+                    document.snapshot.as_ref(),
                     timeouts.with_deadline(deadline),
                 )
                 .await
                 .map_err(refresh_write_error)?;
             expected_versions.insert(uri.clone(), version);
-            uri_to_document.insert(uri, document);
+            uri_to_document.insert(uri, (identity, document));
         }
 
         if uri_to_document.is_empty() {
-            return Ok(DiagnosticRefreshResult::default());
+            return Ok(result);
         }
         let mut diagnostics_by_uri: BTreeMap<String, Vec<CodeDiagnostic>> = BTreeMap::new();
         let mut coverage_by_uri = BTreeMap::new();
+        let mut current_publications = BTreeSet::new();
         // An unchanged document sends no notification, so the server need not
         // publish again. Its last accepted publication remains authoritative
         // for this wire version. Synchronizing changed text replaces the
         // document record and discards that publication.
-        for uri in uri_to_document.keys() {
+        for (uri, (identity, _)) in &uri_to_document {
             if let Some((diagnostics, coverage)) = self
                 .documents
-                .get(uri)
+                .get(identity)
                 .and_then(|document| document.diagnostics.as_ref())
             {
                 diagnostics_by_uri.insert(uri.clone(), diagnostics.clone());
@@ -1186,13 +1251,19 @@ impl StdioLspClient {
                         message: format!("failed to decode LSP publishDiagnostics params: {error}"),
                     }
                 })?;
-            let Some(document) = uri_to_document.get(published.uri.as_str()) else {
+            let Some((identity, document)) = uri_to_document.get(published.uri.as_str()) else {
                 continue;
             };
             if !is_current_diagnostic_publication(&published, &expected_versions) {
-                coverage_by_uri
-                    .entry(published.uri.as_str().to_owned())
-                    .or_insert(DiagnosticDocumentCoverage::StalePublication);
+                if !current_publications.contains(published.uri.as_str()) {
+                    coverage_by_uri.insert(
+                        published.uri.as_str().to_owned(),
+                        DiagnosticDocumentCoverage::StalePublication,
+                    );
+                    if let Some(current) = self.documents.get_mut(identity) {
+                        current.diagnostics = None;
+                    }
+                }
                 continue;
             }
             let coverage = DiagnosticDocumentCoverage::Published {
@@ -1204,12 +1275,14 @@ impl StdioLspClient {
                 .into_iter()
                 .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
                 .collect::<Vec<_>>();
-            if let Some(current) = self.documents.get_mut(published.uri.as_str()) {
+            if let Some(current) = self.documents.get_mut(identity) {
                 current.diagnostics = Some((diagnostics.clone(), coverage.clone()));
             }
+            current_publications.insert(published.uri.as_str().to_owned());
             coverage_by_uri.insert(published.uri.as_str().to_owned(), coverage);
             diagnostics_by_uri.insert(published.uri.as_str().to_owned(), diagnostics);
-            quiet_deadline = Some(deadline.min(Instant::now() + timeouts.diagnostics_quiet));
+            quiet_deadline =
+                Some(refresh_deadline.min(Instant::now() + timeouts.diagnostics_quiet));
         }
         // Servers that suppress empty publishes (only publishing for files WITH
         // problems) never emit for clean files, so a fully-reported batch still
@@ -1224,18 +1297,33 @@ impl StdioLspClient {
                 ),
             });
         }
-        let mut result = DiagnosticRefreshResult {
-            diagnostics: diagnostics_by_uri.into_values().flatten().collect(),
-            coverage: DiagnosticCoverage::default(),
-        };
-        for (uri, document) in &uri_to_document {
-            result.coverage.documents.insert(
-                document.relative_path.clone(),
-                coverage_by_uri
-                    .get(uri)
-                    .cloned()
-                    .unwrap_or(DiagnosticDocumentCoverage::NoPublication),
-            );
+        for (uri, (identity, document)) in &uri_to_document {
+            if document
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.lifetime.is_open())
+            {
+                coverage_by_uri.insert(uri.clone(), DiagnosticDocumentCoverage::StalePublication);
+                if let Some(current) = self.documents.get_mut(identity) {
+                    current.diagnostics = None;
+                }
+            }
+            let coverage = coverage_by_uri
+                .remove(uri)
+                .unwrap_or(DiagnosticDocumentCoverage::NoPublication);
+            // The broker retains its old findings for unverified coverage.
+            // Returning those cached findings as well would duplicate them;
+            // a newly received publication for a closed overlay must likewise
+            // not replace or append to that retained evidence.
+            if matches!(coverage, DiagnosticDocumentCoverage::Published { .. })
+                && let Some(diagnostics) = diagnostics_by_uri.remove(uri)
+            {
+                result.diagnostics.extend(diagnostics);
+            }
+            result
+                .coverage
+                .documents
+                .insert(document.relative_path.clone(), coverage);
         }
         Ok(result)
     }
@@ -1688,6 +1776,16 @@ pub(crate) fn file_uri(path: &Path) -> String {
             .join(path)
     };
     file_uri_from_path_text(&absolute.to_string_lossy())
+}
+
+/// Key the shared ledger by filesystem identity while keeping the admitted
+/// presentation URI on the wire. A disk sweep through the registered root
+/// and an editor request through a root alias must reach the same record.
+fn document_identity(path: &Path, uri: &str) -> Option<PathBuf> {
+    let (_, uri_path) = crate::gateway::strict_file_uri_path(uri)?;
+    let path = canonicalize_existing_prefix(path)?;
+    let uri_path = canonicalize_existing_prefix(&uri_path)?;
+    (path == uri_path).then_some(path)
 }
 
 fn read_semantic_document(path: &Path) -> std::result::Result<String, String> {

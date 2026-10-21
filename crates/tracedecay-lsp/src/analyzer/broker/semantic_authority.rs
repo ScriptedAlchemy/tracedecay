@@ -7,7 +7,8 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime;
 
 use super::super::client::{
-    LspRefreshTimeouts, LspSemanticRequestError, StdioLspClient, decode_semantic_request,
+    LspRefreshTimeouts, LspSemanticRequest as AnalyzerSemanticRequest, LspSemanticRequestError,
+    StdioLspClient, decode_semantic_request,
 };
 use super::super::error::{
     AnalyzerCancellation as CancellationToken, AnalyzerRuntimeError as TraceDecayError,
@@ -16,7 +17,8 @@ use super::super::launch::AnalyzerLaunch;
 use super::shared_client::SharedAnalyzerClient;
 use crate::{
     AdmittedRoot, AnalyzerEvent, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
-    LspSemanticOperationOutcome, LspSemanticRequestAuthority, UpstreamCapabilities,
+    LspSemanticOperationOutcome, LspSemanticRequestAuthority, SemanticCapability,
+    UpstreamCapabilities,
 };
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -321,6 +323,17 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 slot.retire(client);
                                 return analyzer_event_outcome(AnalyzerEvent::Cancelled);
                             };
+                            // Workspace fan-out asks every retained language
+                            // authority. Capability evidence belongs to this
+                            // client, under the same deadline and lock as the
+                            // request; no second capability cache or startup
+                            // preflight may outlive the admitted operation.
+                            if matches!(&request, AnalyzerSemanticRequest::WorkspaceSymbols(_))
+                                && !client.upstream_capabilities().semantic.contains(&SemanticCapability::WorkspaceSymbol)
+                            {
+                                slot.replace(client);
+                                return LspSemanticOperationOutcome::Unsupported;
+                            }
                             // The analyzer answers only for documents in its
                             // own view, and this lane is reached for documents
                             // the diagnostics sweep may never have opened.
@@ -328,25 +341,26 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                 result = async {
                                     match (
                                         document.as_deref(),
+                                        document_uri.as_deref(),
                                         document_snapshot.as_ref(),
                                     ) {
-                                        (Some(path), Some(snapshot)) => {
+                                        (Some(path), Some(_), Some(snapshot)) => {
                                             client
                                                 .ensure_document_snapshot(path, snapshot, timeouts)
                                                 .await
                                         }
-                                        (Some(path), None) => {
+                                        (Some(path), Some(uri), None) => {
                                             client
-                                                .ensure_document_open(path, &inner.language, timeouts)
+                                                .ensure_document_open(path, uri, &inner.language, timeouts)
                                                 .await
                                         }
-                                        (None, Some(_)) => {
+                                        (_, _, Some(_)) | (Some(_), None, None) | (None, Some(_), None) => {
                                             Err(LspSemanticRequestError::InvalidResponse {
                                                 class: "semantic document snapshot has no request document"
                                                     .to_owned(),
                                             })
                                         }
-                                        (None, None) => Ok(()),
+                                        (None, None, None) => Ok(()),
                                     }
                                 } => Some(result),
                                 () = cancellation.cancelled() => None,
@@ -420,7 +434,14 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                                     inner.shared.record(attempt, error.analyzer_event());
                                 }
                             }
-                            semantic_operation_outcome(result)
+                            // Closing the session can race the analyzer response.
+                            // The completed exchange leaves the client reusable,
+                            // but its old overlay no longer admits a result.
+                            if document_snapshot.as_ref().is_some_and(|snapshot| !snapshot.lifetime.is_open()) {
+                                semantic_operation_outcome(Err(LspSemanticRequestError::Cancelled))
+                            } else {
+                                semantic_operation_outcome(result)
+                            }
                         }
                         Ok(None) => {
                             inner.shared.record(attempt, AnalyzerEvent::Cancelled);

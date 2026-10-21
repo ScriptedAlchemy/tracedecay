@@ -1584,7 +1584,7 @@ while True:
 }
 
 #[tokio::test]
-async fn semantic_gateway_synchronizes_the_admitted_overlay_snapshot_once() {
+async fn semantic_gateway_preserves_overlay_identity_until_its_session_closes() {
     use tracedecay_lsp::{
         ClientCapabilities, DaemonLspGateway, FeedbackCyclePort, FeedbackCycleRequest,
         FeedbackCycleResponse, GatewayCapabilities, GatewayResponse, LspRuntimeFuture,
@@ -1647,12 +1647,16 @@ async fn semantic_gateway_synchronizes_the_admitted_overlay_snapshot_once() {
     std::fs::write(&document_path, "stale disk text").unwrap();
     let script_path = temp.path().join("snapshot_lsp.py");
     let events_path = temp.path().join("events.jsonl");
+    let request_arrived = temp.path().join("request-arrived");
+    let release_request = temp.path().join("release-request");
     std::fs::write(
         &script_path,
         format!(
             r#"
 import json
+import os
 import sys
+import time
 
 documents = {{}}
 versions = {{}}
@@ -1697,7 +1701,8 @@ while True:
         document = message["params"]["textDocument"]
         documents[document["uri"]] = document["text"]
         versions[document["uri"]] = document["version"]
-        record({{"method": "open", "text": document["text"]}})
+        record({{"method": "open", "uri": document["uri"], "text": document["text"]}})
+        publish(document["uri"])
     elif method == "textDocument/didChange":
         document = message["params"]["textDocument"]
         text = message["params"]["contentChanges"][0]["text"]
@@ -1709,6 +1714,11 @@ while True:
         uri = message["params"]["textDocument"]["uri"]
         text = documents.get(uri, "missing document")
         record({{"method": "request", "text": text}})
+        if text == "close during request":
+            with open({request_arrived:?}, "w", encoding="utf-8") as signal:
+                signal.write("ready")
+            while not os.path.exists({release_request:?}):
+                time.sleep(0.001)
         send({{
             "jsonrpc": "2.0",
             "id": message["id"],
@@ -1722,6 +1732,8 @@ while True:
         publish(uri)
 "#,
             events_path = events_path.display().to_string(),
+            request_arrived = request_arrived.display().to_string(),
+            release_request = release_request.display().to_string(),
         ),
     )
     .unwrap();
@@ -1758,14 +1770,27 @@ while True:
         NoopFeedback,
         semantic,
     );
-    let uri = format!("{root_uri}{FAKE_PATH}");
+    #[cfg(unix)]
+    let presentation_root = {
+        let alias = temp.path().join("root-alias");
+        std::os::unix::fs::symlink(temp.path(), &alias).unwrap();
+        url::Url::from_directory_path(alias).unwrap().to_string()
+    };
+    #[cfg(not(unix))]
+    let presentation_root = root_uri.clone();
+    // URI spelling is presentation, not filesystem identity. On Unix the
+    // admitted spelling also crosses a root alias.
+    let uri = format!(
+        "{presentation_root}{}",
+        FAKE_PATH.replacen("src", "%73rc", 1)
+    );
     let mut overlays = tracedecay_lsp::OverlayStore::default();
     let initial = overlays
         .open(
             &AdmittedRoot::new(root_uri.clone()),
             uri.clone(),
             "fake",
-            1,
+            41,
             "unsaved snapshot one",
         )
         .unwrap();
@@ -1813,7 +1838,7 @@ while True:
     let changed = overlays
         .change(
             &uri,
-            2,
+            42,
             &[tracedecay_lsp::OverlayChange {
                 range: None,
                 range_length: None,
@@ -1822,7 +1847,7 @@ while True:
         )
         .unwrap();
     let mut diagnostic_document = fake_document(FAKE_LANGUAGE, FAKE_PATH, changed.text.as_ref());
-    diagnostic_document.snapshot_version = Some(changed.version);
+    diagnostic_document.snapshot = Some(LspSemanticDocumentSnapshot::from_overlay(&changed));
     broker
         .refresh_documents_with_timeouts(
             FAKE_LANGUAGE,
@@ -1844,7 +1869,7 @@ while True:
             if symbols.first().is_some_and(|symbol| symbol.name == "unsaved snapshot two")
     ));
 
-    let events = std::fs::read_to_string(events_path).unwrap();
+    let events = std::fs::read_to_string(&events_path).unwrap();
     let events = events
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
@@ -1883,6 +1908,174 @@ while True:
             "unsaved snapshot one",
             "unsaved snapshot two"
         ]
+    );
+
+    overlays.close(&uri).unwrap();
+    let reopened = overlays
+        .open(
+            &AdmittedRoot::new(root_uri.clone()),
+            uri.clone(),
+            "fake",
+            1,
+            "reopened snapshot",
+        )
+        .unwrap();
+    let reopened_snapshot = LspSemanticDocumentSnapshot::from_overlay(&reopened);
+    let result = complete_semantic_request(
+        &gateway,
+        &LspRequestId::Number(14),
+        &request,
+        Some(&reopened_snapshot),
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            SemanticResponse::DocumentSymbols(ref symbols)
+                if symbols.first().is_some_and(|symbol| symbol.name == "reopened snapshot")
+        ),
+        "editor version 1 belongs to the reopened lifetime, not version 42's lifetime"
+    );
+
+    let stale_snapshot = LspSemanticDocumentSnapshot::from_overlay(&changed);
+    let stale = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match gateway.semantic_request_with_document(
+                &LspRequestId::Number(15),
+                &request,
+                Some(&stale_snapshot),
+                None,
+            ) {
+                GatewayResponse::Pending => tokio::task::yield_now().await,
+                outcome => return outcome,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(stale, GatewayResponse::Partial { ref coverage, .. }
+        if coverage == "analyzer-cancelled"),
+        "queued work from a closed lifetime cannot overwrite the reopened buffer: {stale:?}"
+    );
+    let result = complete_semantic_request(
+        &gateway,
+        &LspRequestId::Number(16),
+        &request,
+        Some(&reopened_snapshot),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        SemanticResponse::DocumentSymbols(ref symbols)
+            if symbols.first().is_some_and(|symbol| symbol.name == "reopened snapshot")
+    ));
+
+    overlays.close(&uri).unwrap();
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "stale disk text")],
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .expect("closing the overlay returns the shared analyzer to disk authority");
+    assert_eq!(
+        broker.snapshot().coverage[FAKE_LANGUAGE].documents[FAKE_PATH],
+        lsp::client::DiagnosticDocumentCoverage::Published {
+            version_verified: true,
+            content_digest: tracedecay_domain::ContentDigest::of_bytes(b"stale disk text"),
+        }
+    );
+    let events = std::fs::read_to_string(&events_path).unwrap();
+    let events = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .find(|event| event["method"] == "open")
+            .unwrap()["uri"],
+        uri
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["method"] == "change")
+            .map(|event| event["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["unsaved snapshot two", "reopened snapshot"]
+    );
+    assert_eq!(events.last().unwrap()["text"], "stale disk text");
+
+    let closing = overlays
+        .open(
+            &AdmittedRoot::new(root_uri.clone()),
+            uri.clone(),
+            "fake",
+            1,
+            "close during request",
+        )
+        .unwrap();
+    let closing_snapshot = LspSemanticDocumentSnapshot::from_overlay(&closing);
+    assert!(matches!(
+        gateway.semantic_request_with_document(
+            &LspRequestId::Number(17),
+            &request,
+            Some(&closing_snapshot),
+            None,
+        ),
+        GatewayResponse::Pending
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !request_arrived.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("analyzer must receive the request before its overlay closes");
+    overlays.close(&uri).unwrap();
+    let surviving = overlays
+        .open(
+            &AdmittedRoot::new(root_uri),
+            uri.clone(),
+            "fake",
+            1,
+            "surviving reopened snapshot",
+        )
+        .unwrap();
+    std::fs::write(release_request, "continue").unwrap();
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match gateway.semantic_request_with_document(
+                &LspRequestId::Number(17),
+                &request,
+                Some(&closing_snapshot),
+                None,
+            ) {
+                GatewayResponse::Pending => tokio::task::yield_now().await,
+                outcome => return outcome,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(cancelled, GatewayResponse::Partial { ref coverage, .. }
+        if coverage == "analyzer-cancelled"),
+        "a response arriving after close cannot publish its former overlay: {cancelled:?}"
+    );
+    let result = complete_semantic_request(
+        &gateway,
+        &LspRequestId::Number(18),
+        &request,
+        Some(&LspSemanticDocumentSnapshot::from_overlay(&surviving)),
+    )
+    .await;
+    assert!(
+        matches!(result, SemanticResponse::DocumentSymbols(ref symbols)
+        if symbols.first().is_some_and(|symbol| symbol.name == "surviving reopened snapshot"))
     );
 }
 
@@ -2226,6 +2419,379 @@ while True:
             .contains_key("src/b.fake")
     );
     assert_eq!(narrowed.diagnostics, vec![retained.clone()]);
+}
+
+#[tokio::test]
+async fn queued_closed_overlays_preserve_the_analyzer_and_sibling_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("queued_overlay_lsp.py");
+    let events_path = temp.path().join("synchronized.jsonl");
+    let publication = format!(
+        r#"        text = message["params"]["textDocument"].get("text")
+        if text is None:
+            text = message["params"]["contentChanges"][0]["text"]
+        with open({events:?}, "a", encoding="utf-8") as events:
+            events.write(json.dumps({{"uri": uri, "text": text}}) + "\n")
+{FAKE_DIAGNOSTIC_PUBLISH}"#,
+        events = events_path.display().to_string(),
+    );
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble("", &publication),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "saved disk")],
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    let retained = broker.snapshot().diagnostics[0].clone();
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let uri = format!("{root_uri}{FAKE_PATH}");
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let attempt = authority.analyzer_readiness().attempt();
+    let mut overlays = tracedecay_lsp::OverlayStore::default();
+    for include_sibling in [false, true] {
+        let overlay = overlays
+            .open(
+                &AdmittedRoot::new(root_uri.clone()),
+                uri.clone(),
+                "fake",
+                1,
+                "queued closed overlay",
+            )
+            .unwrap();
+        let mut document = fake_document(FAKE_LANGUAGE, FAKE_PATH, &overlay.text);
+        document.snapshot = Some(tracedecay_lsp::LspSemanticDocumentSnapshot::from_overlay(
+            &overlay,
+        ));
+        let mut documents = vec![document];
+        if include_sibling {
+            documents.push(fake_document(
+                FAKE_LANGUAGE,
+                "src/sibling.fake",
+                "live sibling",
+            ));
+        }
+        let prepared = broker
+            .prepare_refresh(FAKE_LANGUAGE, documents)
+            .await
+            .unwrap()
+            .unwrap();
+        overlays.close(&uri).unwrap();
+        let completed = prepared
+            .collect_diagnostics_with_timeouts(recovery_fake_lsp_timeouts())
+            .await;
+        assert!(
+            completed.is_ok(),
+            "closing an overlay is not an analyzer failure"
+        );
+        let refresh = completed.diagnostic_refresh().unwrap();
+        assert_eq!(
+            refresh.coverage.documents[FAKE_PATH],
+            lsp::client::DiagnosticDocumentCoverage::StalePublication
+        );
+        assert!(
+            refresh
+                .diagnostics
+                .iter()
+                .all(|finding| finding.file != FAKE_PATH)
+        );
+        if include_sibling {
+            assert!(matches!(
+                refresh.coverage.documents["src/sibling.fake"],
+                lsp::client::DiagnosticDocumentCoverage::Published { .. }
+            ));
+            assert_eq!(refresh.diagnostics.len(), 1);
+        }
+        broker.finish_refresh(completed).unwrap();
+        let snapshot = broker.snapshot();
+        assert_eq!(
+            snapshot
+                .diagnostics
+                .iter()
+                .filter(|finding| finding.file == FAKE_PATH)
+                .collect::<Vec<_>>(),
+            vec![&retained]
+        );
+        assert_engine_state(&snapshot, FAKE_LANGUAGE, lsp::broker::EngineState::Ready);
+        let readiness = authority.analyzer_readiness();
+        assert_eq!(readiness.state(), AnalyzerState::Ready);
+        assert_eq!(readiness.attempt(), attempt);
+        assert_eq!(readiness.restart_attempts(), 0);
+        assert_eq!(readiness.last_failure(), None);
+    }
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "saved update")],
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authority.analyzer_readiness().attempt(), attempt);
+    let events = std::fs::read_to_string(events_path).unwrap();
+    let texts = events
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        ["saved disk", "live sibling", "saved update"],
+        "queued closed overlay bytes must never reach the analyzer"
+    );
+}
+
+#[tokio::test]
+async fn warm_diagnostic_coverage_requires_current_evidence_after_a_stale_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("warm_coverage_lsp.py");
+    let control = FakeLspPhaseControl::bind().await;
+    let server = r#"
+import json
+import sys
+
+documents = {}
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+def publish(uri, version, message=None):
+    diagnostics = [] if message is None else [{
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+        "severity": 1,
+        "message": message,
+        "source": "fake-ls"
+    }]
+    send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+          "params": {"uri": uri, "version": version, "diagnostics": diagnostics}})
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "textDocument/didOpen":
+        document = message["params"]["textDocument"]
+        uri = document["uri"]
+        documents[uri] = document["version"]
+        publish(uri, document["version"], "retained finding" if uri.endswith("a.fake") else None)
+    elif method == "textDocument/didChange":
+        document = message["params"]["textDocument"]
+        uri = document["uri"]
+        text = message["params"]["contentChanges"][0]["text"]
+        documents[uri] = document["version"]
+        if uri.endswith("a.fake"):
+            if text == "closed overlay finding":
+                tracedecay_maybe_phase("overlay-synchronized")
+            publish(uri, document["version"], text)
+            continue
+        target = next(key for key in documents if key.endswith("a.fake"))
+        if text == "stale":
+            publish(target, documents[target] - 1, "stale replacement")
+        elif text == "repair":
+            publish(target, documents[target], "current finding")
+        elif text == "current then stale":
+            publish(target, documents[target], "new current finding")
+            publish(target, documents[target] - 1, "stale replacement")
+        publish(uri, document["version"])
+"#;
+    std::fs::write(
+        &script_path,
+        format!(
+            "{}\n{server}",
+            control.script_preamble(&["overlay-synchronized"])
+        ),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let mut retained = Vec::new();
+    for (trigger, expected_coverage, expected_message) in [
+        ("initial", "published", "retained finding"),
+        ("stale", "stale_publication", "retained finding"),
+        ("silent", "no_publication", "retained finding"),
+        ("repair", "published", "current finding"),
+        ("current then stale", "published", "new current finding"),
+    ] {
+        broker
+            .refresh_documents_with_timeouts(
+                FAKE_LANGUAGE,
+                vec![
+                    fake_document(FAKE_LANGUAGE, "src/a.fake", "unchanged"),
+                    fake_document(FAKE_LANGUAGE, "src/b.fake", trigger),
+                ],
+                recovery_fake_lsp_timeouts(),
+            )
+            .await
+            .expect("a current sibling makes each refresh useful");
+        let snapshot = broker.snapshot();
+        let coverage =
+            serde_json::to_value(&snapshot.coverage[FAKE_LANGUAGE].documents["src/a.fake"])
+                .unwrap();
+        assert_eq!(coverage["state"], expected_coverage, "trigger: {trigger}");
+        assert_eq!(snapshot.diagnostics.len(), 1, "trigger: {trigger}");
+        assert_eq!(snapshot.diagnostics[0].file, "src/a.fake");
+        if matches!(trigger, "stale" | "silent") {
+            assert_eq!(
+                snapshot.diagnostics, retained,
+                "unverified findings must remain byte-for-byte unchanged"
+            );
+        } else {
+            retained = snapshot.diagnostics.clone();
+        }
+        assert_eq!(
+            snapshot.diagnostics[0].message, expected_message,
+            "trigger: {trigger}"
+        );
+    }
+
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let uri = format!("{root_uri}src/a.fake");
+    let mut overlays = tracedecay_lsp::OverlayStore::default();
+    let overlay = overlays
+        .open(
+            &AdmittedRoot::new(root_uri.clone()),
+            uri.clone(),
+            "fake",
+            42,
+            "closed overlay finding",
+        )
+        .unwrap();
+    let mut document = fake_document(FAKE_LANGUAGE, "src/a.fake", &overlay.text);
+    document.snapshot = Some(tracedecay_lsp::LspSemanticDocumentSnapshot::from_overlay(
+        &overlay,
+    ));
+    let prepared = broker
+        .prepare_refresh(FAKE_LANGUAGE, vec![document])
+        .await
+        .unwrap()
+        .expect("overlay refresh");
+    let collecting = tokio::spawn(async move {
+        prepared
+            .collect_diagnostics_with_timeouts(phase_gated_fake_lsp_timeouts())
+            .await
+    });
+    let synchronized = control.wait_for("overlay-synchronized").await;
+    overlays.close(&uri).unwrap();
+    synchronized.release().await;
+    let completed = collecting.await.unwrap();
+    let refresh = completed
+        .diagnostic_refresh()
+        .expect("closed overlay has partial coverage");
+    assert!(
+        refresh.diagnostics.is_empty(),
+        "closed overlay values cannot append to retained findings"
+    );
+    assert_eq!(
+        refresh.coverage.documents["src/a.fake"],
+        lsp::client::DiagnosticDocumentCoverage::StalePublication
+    );
+    broker.finish_refresh(completed).unwrap();
+    assert_eq!(
+        broker.snapshot().diagnostics,
+        retained,
+        "the broker retains exactly its old findings when the new overlay closes"
+    );
+
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(
+                FAKE_LANGUAGE,
+                "src/a.fake",
+                "saved replacement",
+            )],
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    let saved = broker.snapshot();
+    assert_eq!(saved.diagnostics.len(), 1);
+    assert_eq!(saved.diagnostics[0].file, "src/a.fake");
+    assert_eq!(saved.diagnostics[0].message, "saved replacement");
+
+    for close_previous_lifetime in [false, true] {
+        if close_previous_lifetime {
+            overlays.close(&uri).unwrap();
+        }
+        let reopened = overlays
+            .open(
+                &AdmittedRoot::new(root_uri.clone()),
+                uri.clone(),
+                "fake",
+                1,
+                "saved replacement",
+            )
+            .unwrap();
+        let mut document = fake_document(FAKE_LANGUAGE, "src/a.fake", &reopened.text);
+        document.snapshot = Some(tracedecay_lsp::LspSemanticDocumentSnapshot::from_overlay(
+            &reopened,
+        ));
+        broker
+            .refresh_documents_with_timeouts(
+                FAKE_LANGUAGE,
+                vec![document],
+                recovery_fake_lsp_timeouts(),
+            )
+            .await
+            .unwrap();
+        let unchanged = broker.snapshot();
+        assert_eq!(
+            unchanged.diagnostics, saved.diagnostics,
+            "same-byte reopen can reuse the unchanged wire document without duplicating findings"
+        );
+        assert_eq!(
+            unchanged.coverage[FAKE_LANGUAGE].documents["src/a.fake"],
+            lsp::client::DiagnosticDocumentCoverage::Published {
+                version_verified: true,
+                content_digest: tracedecay_domain::ContentDigest::of_bytes(b"saved replacement"),
+            }
+        );
+    }
 }
 
 #[tokio::test]

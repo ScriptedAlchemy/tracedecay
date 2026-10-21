@@ -196,7 +196,7 @@ mod rustup_proxy {
             language_id: "rust".to_owned(),
             relative_path: "src/lib.rs".to_owned(),
             text: "pub fn lib() {}".to_owned(),
-            snapshot_version: None,
+            snapshot: None,
         }
     }
 
@@ -431,7 +431,7 @@ mod rustup_proxy {
                     language_id: "rust".to_owned(),
                     relative_path: "member/src/lib.rs".to_owned(),
                     text: "pub fn member() {}".to_owned(),
-                    snapshot_version: None,
+                    snapshot: None,
                 },
             ]
         };
@@ -758,7 +758,7 @@ fn refresh_rejects_a_removed_project_root_after_one_canonicalization() {
             language_id: "rust".to_owned(),
             relative_path: "src/lib.rs".to_owned(),
             text: "fn removed_root() {}".to_owned(),
-            snapshot_version: None,
+            snapshot: None,
         }],
     )) else {
         panic!("removed project root must fail closed");
@@ -788,7 +788,7 @@ fn refresh_rejects_root_batch_queue_saturation_before_starting_analyzers() {
             language_id: "rust".to_owned(),
             relative_path: format!("package-{index}/src/lib.rs"),
             text: "fn package() {}".to_owned(),
-            snapshot_version: None,
+            snapshot: None,
         });
     }
     let mut broker = DiagnosticBroker::new_for_test(

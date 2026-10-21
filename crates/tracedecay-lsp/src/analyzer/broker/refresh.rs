@@ -441,10 +441,13 @@ impl RefreshFailure {
 
     fn client(error: &LspRefreshError) -> Self {
         Self {
-            state: if error.is_policy_retirement() {
-                EngineState::Available
-            } else {
-                EngineState::Crashed
+            state: match error {
+                LspRefreshError::TimedOut { .. } | LspRefreshError::NoPublication { .. } => {
+                    EngineState::Available
+                }
+                LspRefreshError::ProcessExited { .. }
+                | LspRefreshError::Transport { .. }
+                | LspRefreshError::InvalidResponse { .. } => EngineState::Crashed,
             },
             message: error.to_string(),
             unstartable_launch_root: None,
@@ -486,6 +489,35 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    #[test]
+    fn refresh_write_deadlines_preserve_timeout_health_and_failure_detail() {
+        let error = LspRefreshError::TimedOut {
+            message: "textDocument/didChange write exceeded the refresh deadline".to_owned(),
+        };
+        let failure = RefreshFailure::client(&error);
+
+        assert_eq!(error.analyzer_event(), AnalyzerEvent::TimedOut);
+        assert_eq!(failure.state, RefreshFailure::timed_out().state);
+        assert_eq!(failure.message, error.to_string());
+        assert_eq!(failure.unstartable_launch_root, None);
+
+        for error in [
+            LspRefreshError::ProcessExited {
+                message: "analyzer exited during refresh".to_owned(),
+            },
+            LspRefreshError::Transport {
+                message: "refresh write failed: broken pipe".to_owned(),
+            },
+            LspRefreshError::InvalidResponse {
+                message: "refresh received an invalid protocol frame".to_owned(),
+            },
+        ] {
+            let failure = RefreshFailure::client(&error);
+            assert_eq!(failure.state, EngineState::Crashed);
+            assert_eq!(failure.message, error.to_string());
+        }
+    }
 
     #[test]
     fn global_queued_batch_reservation_rejects_the_129th_batch() {

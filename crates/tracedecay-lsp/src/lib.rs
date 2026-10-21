@@ -114,8 +114,8 @@ pub use overlay::{
     MAX_OPEN_DOCUMENTS, MAX_OVERLAY_BYTES, MAX_PENDING_OVERLAY_DIAGNOSTICS,
     MAX_TOTAL_OVERLAY_BYTES, ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
     OVERLAY_DIAGNOSTIC_DEBOUNCE_MS, OVERLAY_DIAGNOSTIC_MAX_WAIT_MS, OverlayChange,
-    OverlayDiagnosticDebouncer, OverlayError, OverlayExtractionState, OverlayLimits,
-    OverlayParseState, OverlayParseUnavailable, OverlaySnapshot, OverlayStore,
+    OverlayDiagnosticDebouncer, OverlayError, OverlayExtractionState, OverlayLifetime,
+    OverlayLimits, OverlayParseState, OverlayParseUnavailable, OverlaySnapshot, OverlayStore,
 };
 pub use protocol::{
     ClientFrameAdmission, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession,

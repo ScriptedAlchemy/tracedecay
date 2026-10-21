@@ -429,6 +429,7 @@ pub struct LspSemanticDocumentSnapshot {
     pub version: i64,
     pub content_digest: ContentDigest,
     pub text: Arc<str>,
+    pub lifetime: crate::overlay::OverlayLifetime,
 }
 
 impl LspSemanticDocumentSnapshot {
@@ -439,6 +440,7 @@ impl LspSemanticDocumentSnapshot {
             version: snapshot.version,
             content_digest: snapshot.content_digest.clone(),
             text: Arc::clone(&snapshot.text),
+            lifetime: snapshot.lifetime.clone(),
         }
     }
 }
@@ -493,6 +495,10 @@ pub enum LspSemanticOperationOutcome {
         detail: Option<&'static str>,
     },
     RenameCandidate(RenameCandidateResult),
+    /// The initialized analyzer explicitly does not offer this operation.
+    /// Fan-out may omit this language; an unavailable advertised provider
+    /// must instead leave the overall result unavailable or partial.
+    Unsupported,
     Unavailable,
 }
 
@@ -666,7 +672,9 @@ pub fn project_semantic_outcome(
         LspSemanticOperationOutcome::RenameCandidate(value) => {
             SemanticProviderOutcome::Complete(SemanticResponse::RenameCandidate(value))
         }
-        LspSemanticOperationOutcome::Unavailable => SemanticProviderOutcome::Unavailable,
+        LspSemanticOperationOutcome::Unsupported | LspSemanticOperationOutcome::Unavailable => {
+            SemanticProviderOutcome::Unavailable
+        }
     }
 }
 
