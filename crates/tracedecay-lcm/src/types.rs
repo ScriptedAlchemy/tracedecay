@@ -756,24 +756,20 @@ pub enum LcmCompressionOutcome<'a> {
 
 impl LcmCompressionResponse {
     pub fn outcome(&self) -> Result<LcmCompressionOutcome<'_>, LcmError> {
-        let needs_summary = self.status == NEEDS_SUMMARY_STATUS;
         match (
-            needs_summary,
+            self.status.as_str(),
             self.summary_request.as_ref(),
             self.retry_status.as_deref(),
         ) {
-            (true, Some(summary_request), None) => {
+            (NEEDS_SUMMARY_STATUS, Some(summary_request), None) => {
                 Ok(LcmCompressionOutcome::NeedsSummary(summary_request))
             }
-            (true, Some(_), Some(NEEDS_AUTHORITATIVE_SUMMARY_RETRY)) => {
+            (NEEDS_SUMMARY_STATUS, Some(_), Some(NEEDS_AUTHORITATIVE_SUMMARY_RETRY)) => {
                 Ok(LcmCompressionOutcome::Deferred {
                     reason: &self.reason,
                 })
             }
-            (false, None, None) => Ok(LcmCompressionOutcome::Complete),
-            (false, None, Some(CRITICAL_PRESSURE_CATCH_UP_RETRY))
-                if matches!(self.status.as_str(), "ok" | "best_effort") =>
-            {
+            ("ok" | "best_effort", None, None | Some(CRITICAL_PRESSURE_CATCH_UP_RETRY)) => {
                 Ok(LcmCompressionOutcome::Complete)
             }
             (_, summary_request, retry_status) => Err(LcmError::Db(format!(
@@ -920,6 +916,7 @@ mod tests {
             ),
             compression_response("ok", "done", Some(summary_request()), None),
             compression_response("ok", "done", None, Some("needs_authoritative_summary")),
+            compression_response("future_outcome", "done", None, None),
             compression_response(
                 "unexpected",
                 "done",
