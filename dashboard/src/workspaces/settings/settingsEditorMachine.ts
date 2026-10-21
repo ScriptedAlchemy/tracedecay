@@ -1,23 +1,9 @@
 /**
  * The settings editor as one state machine.
  *
- * The editor used to be six independent `useState` slices, the project draft,
- * the user draft, the pending review, a `confirmed` boolean, the validation
- * errors, and the saved notice, that only added up to a correct screen when
- * they happened to agree. Nothing stopped them disagreeing. A confirmation was
- * a bare boolean beside the review it was supposedly given for, so a refetch
- * could replace the draft underneath a confirmed review and the next apply
- * would send a patch nobody had confirmed against a revision nobody was
- * looking at. A saved notice sat beside a fresh pending change, telling the
- * reader the change was already applied.
- *
- * Here those combinations do not exist to be reached. Every state names one
- * situation and carries exactly what that situation has: only `editing` has
- * rest state, only the review-bearing states have a review, and a confirmation
- * is not a flag beside a review but a state that contains one. A review is
- * identified by the exact change against the exact revision it was planned
- * from (`reviewId`), so replanning is enough to tell whether the thing the
- * user confirmed is still the thing about to be sent.
+ * One editable draft leads directly to a saved, rejected, or pending write.
+ * The exact patch, revision, and idempotency key are captured together only
+ * when Save is requested; retries reuse that submission unchanged.
  *
  * Everything here is pure. No DOM, no transport, no clock.
  */
@@ -26,11 +12,11 @@ import {
   planCodeIndexWorkerChangeAgainst,
   planProjectChangeAgainst,
   planUserChangeAgainst,
+  buildSettingsEditor,
   sameCodeIndexWorkerSelection,
   sameStrings,
   type CodeIndexWorkerSettingsChangeSet,
   type CodeIndexWorkerSettingsValues,
-  settingsRevisionId,
   type ProjectSettingsChangeSet,
   type ProjectSettingsValues,
   type SettingsChangePlan,
@@ -44,7 +30,7 @@ import {
 import type { ReconciliationState } from '../../contracts/generated.ts';
 import type { SettingsMutationRequest, SettingsMutationResult } from './settingsMutation.ts';
 
-/** The two drafts the editor holds, always for the same authority snapshot. */
+/** Each draft belongs to its resource's held authority revision. */
 export interface SettingsDraft {
   readonly project: ProjectSettingsValues;
   readonly user: UserSettingsValues;
@@ -52,25 +38,19 @@ export interface SettingsDraft {
 }
 
 /**
- * A validated change frozen against the revision it was planned from.
- *
- * `reviewId` is the identity of that pairing. Two reviews with the same id are
- * the same change against the same revision; anything else, an edited draft,
- * a moved authority, produces a different id, which is how a confirmation
- * given for one review is refused for another.
+ * One exact change held for submission and any idempotent retry.
  */
-interface SettingsReview {
+export interface SettingsSubmission {
   readonly scope: SettingsScope;
   readonly expectedRevisionId: string;
   readonly patch:
     | ProjectSettingsChangeSet
     | UserSettingsChangeSet
     | CodeIndexWorkerSettingsChangeSet;
-  readonly reviewId: string;
   readonly idempotencyKey: string;
 }
 
-/** A write the authority confirmed, as the authority reported it. */
+/** A write the authority applied, as the authority reported it. */
 interface SettingsAppliedRecord {
   readonly scope: SettingsScope;
   readonly message: string;
@@ -118,33 +98,26 @@ interface SettingsEditable {
   readonly draft: SettingsDraft;
 }
 
-interface SettingsUnderReview extends SettingsEditable {
-  readonly review: SettingsReview;
+interface SettingsWithSubmission extends SettingsEditable {
+  readonly submission: SettingsSubmission;
 }
 
 export type SettingsEditorState =
   /** The read parsed, but it named no revision the editor could hold a write against. */
   | { readonly status: 'editor_unavailable' }
   | (SettingsEditable & { readonly status: 'editing'; readonly resting: SettingsResting })
-  | (SettingsUnderReview & { readonly status: 'reviewing' })
-  | (SettingsUnderReview & { readonly status: 'confirmed' })
-  | (SettingsUnderReview & { readonly status: 'submitting' })
+  | (SettingsWithSubmission & { readonly status: 'submitting' })
   /** The write authority refused: it holds a different revision. Nothing was applied. */
-  | (SettingsUnderReview & {
+  | (SettingsWithSubmission & {
       readonly status: 'conflicted';
       readonly conflict: SettingsRevisionConflict;
     })
   /** The authority for this write is not mounted. Nothing was attempted. */
-  | (SettingsUnderReview & { readonly status: 'authority_withdrawn'; readonly detail: string })
+  | (SettingsWithSubmission & { readonly status: 'authority_withdrawn'; readonly detail: string })
   /** The write was attempted and did not reach a verdict. */
-  | (SettingsUnderReview & {
+  | (SettingsWithSubmission & {
       readonly status: 'submit_failed';
       readonly failure: SettingsSubmitFailure;
-    })
-  /** The resource moved while this change was held. Nothing was attempted. */
-  | (SettingsUnderReview & {
-      readonly status: 'review_superseded';
-      readonly currentRevisionId: string;
     });
 
 export type SettingsEditorAction =
@@ -154,16 +127,14 @@ export type SettingsEditorAction =
   | { readonly type: 'user_drafted'; readonly values: UserSettingsValues }
   | { readonly type: 'code_index_workers_drafted'; readonly values: CodeIndexWorkerSettingsValues }
   | {
-      readonly type: 'review_requested';
+      readonly type: 'save_requested';
       readonly scope: SettingsScope;
       readonly idempotencyKey: string;
     }
-  | { readonly type: 'review_dismissed' }
-  | { readonly type: 'confirmation_set'; readonly confirmed: boolean }
-  | { readonly type: 'submit_started' }
+  | { readonly type: 'retry_requested' }
   | { readonly type: 'submit_settled'; readonly result: SettingsMutationResult }
-  /** Discard the draft and take the authority's current values. */
-  | { readonly type: 'reloaded_from_authority' };
+  /** Discard the draft only after a successful explicit authority read. */
+  | { readonly type: 'reloaded_from_authority'; readonly authority: SettingsEditor };
 
 const EDITOR_UNAVAILABLE: SettingsEditorState = { status: 'editor_unavailable' };
 
@@ -186,27 +157,16 @@ export function reduceSettingsEditor(
       return redraft(state, (draft) => ({ ...draft, user: action.values }));
     case 'code_index_workers_drafted':
       return redraft(state, (draft) => ({ ...draft, codeIndexWorkers: action.values }));
-    case 'review_requested':
-      return requestReview(state, action.scope, action.idempotencyKey);
-    case 'review_dismissed':
-      // A dismissal cannot cancel a write already in flight, and it cannot
-      // clear a verdict the editor is resting on, closing the dialog after a
-      // save must not take the save with it.
-      return state.status === 'editor_unavailable' ||
-        state.status === 'editing' ||
-        state.status === 'submitting'
-        ? state
-        : editing(state.authority, state.draft, CLEAN);
-    case 'confirmation_set':
-      return setConfirmation(state, action.confirmed);
-    case 'submit_started':
-      return startSubmit(state);
+    case 'save_requested':
+      return requestSave(state, action.scope, action.idempotencyKey);
+    case 'retry_requested':
+      return retrySubmit(state);
     case 'submit_settled':
       return settleSubmit(state, action.result);
     case 'reloaded_from_authority':
-      return state.status === 'editor_unavailable'
+      return state.status === 'editor_unavailable' || state.status === 'submitting'
         ? state
-        : editing(state.authority, draftOf(state.authority), CLEAN);
+        : editing(action.authority, draftOf(action.authority), CLEAN);
     default: {
       const exhaustive: never = action;
       return exhaustive;
@@ -217,86 +177,59 @@ export function reduceSettingsEditor(
 /**
  * A fresh read of the resource.
  *
- * The draft always follows the authority, the editor shows what is there, not
- * what was there. A review does not: it is a statement about a specific
- * revision, so when the authority moves past that revision the review is
- * superseded rather than quietly re-aimed at the new one. The one exception is
- * a write already in flight, whose own pre-flight check owns that decision.
+ * A clean draft follows fresh values. An edited draft stays on the revision it
+ * came from so Save's preflight can report a conflict instead of silently
+ * replacing the user's work or re-aiming it at unseen values.
  */
 function observeAuthority(
   state: SettingsEditorState,
   authority: SettingsEditor | null,
 ): SettingsEditorState {
   if (!authority) {
-    return state.status === 'editor_unavailable' ? state : EDITOR_UNAVAILABLE;
+    return state.status === 'editor_unavailable' || state.status !== 'editing'
+      ? state
+      : EDITOR_UNAVAILABLE;
   }
   if (state.status === 'editor_unavailable') {
     return editing(authority, draftOf(authority), CLEAN);
   }
   if (sameAuthority(state.authority, authority)) return state;
-  const draft = draftOf(authority);
-  switch (state.status) {
-    case 'editing':
-      // A completed write stays true across the refetch it triggered; a
-      // refusal judged values the new snapshot has just replaced.
-      return editing(
-        authority,
-        draft,
-        state.resting.rest === 'applied' ? state.resting : CLEAN,
-      );
-    case 'submitting':
-      return { ...state, authority, draft };
-    case 'reviewing':
-    case 'confirmed':
-    case 'conflicted':
-    case 'authority_withdrawn':
-    case 'submit_failed':
-    case 'review_superseded': {
-      const current = settingsRevisionId(authority, state.review.scope);
-      return current === state.review.expectedRevisionId
-        ? { ...state, authority, draft }
-        : superseded(authority, draft, state.review, current);
-    }
-    default: {
-      const exhaustive: never = state;
-      return exhaustive;
+  const submittedScope = settingsSubmissionOf(state)?.scope;
+  let observed: SettingsEditable = state;
+  for (const scope of ['project', 'user', 'code_index_workers'] as const) {
+    // A pending or uncertain write still owns its original CAS resource. A
+    // refresh may advance other clean resources without settling that write.
+    if (scope !== submittedScope && !settingsScopeDirty(state, scope)) {
+      observed = adoptScope(observed, authority, scope);
     }
   }
+  return sameAuthority(state.authority, observed.authority)
+    ? state
+    : { ...state, ...observed };
 }
 
 /**
- * An edit. A review describes a draft; once the draft moves, the review
- * describes nothing, so it goes, along with any confirmation given for it.
- *
- * A write in flight is the exception: leaving `submitting` would make
- * `settleSubmit` discard the verdict when it lands, so the edit waits. A
- * refusal the editor is resting on judged the draft as it was; once the draft
- * moves it is no longer about anything and goes too, while a completed write
- * stays true and stays.
+ * A write owns its immutable patch until it reaches a verdict. Editing becomes
+ * available again only after that verdict or an explicit reload.
  */
 function redraft(
   state: SettingsEditorState,
   next: (draft: SettingsDraft) => SettingsDraft,
 ): SettingsEditorState {
-  if (state.status === 'editor_unavailable' || state.status === 'submitting') return state;
-  if (state.status === 'editing') {
-    return editing(
-      state.authority,
-      next(state.draft),
-      state.resting.rest === 'rejected' ? CLEAN : state.resting,
-    );
-  }
-  return editing(state.authority, next(state.draft), CLEAN);
+  if (state.status !== 'editing') return state;
+  return editing(
+    state.authority,
+    next(state.draft),
+    state.resting.rest === 'rejected' ? CLEAN : state.resting,
+  );
 }
 
-function requestReview(
+function requestSave(
   state: SettingsEditorState,
   scope: SettingsScope,
   idempotencyKey: string,
 ): SettingsEditorState {
-  // A review opened over a write in flight would replace the state that
-  // write's verdict is delivered to. It waits for the verdict.
-  if (state.status === 'editor_unavailable' || state.status === 'submitting') return state;
+  if (state.status !== 'editing') return state;
   const plan = planFor(state.authority, state.draft, scope);
   switch (plan.outcome) {
     case 'invalid':
@@ -305,20 +238,18 @@ function requestReview(
         rejection: { origin: 'client', scope, errors: plan.errors },
       });
     case 'unchanged':
-      return editing(state.authority, state.draft, {
-        rest: 'rejected',
-        rejection: {
-          origin: 'client',
-          scope,
-          errors: [{ field: scope, message: `No ${scope} settings have changed.` }],
-        },
-      });
+      return state;
     case 'ready':
       return {
-        status: 'reviewing',
+        status: 'submitting',
         authority: state.authority,
         draft: state.draft,
-        review: reviewOf(scope, plan, idempotencyKey),
+        submission: {
+          scope,
+          expectedRevisionId: plan.expectedRevisionId,
+          patch: plan.patch,
+          idempotencyKey,
+        },
       };
     default: {
       const exhaustive: never = plan;
@@ -327,81 +258,20 @@ function requestReview(
   }
 }
 
-/**
- * A confirmation is not a flag: it is the state that holds the review. So it
- * can only be given while a review is open, and it can only be withdrawn from
- * a state whose review it was given for.
- */
-function setConfirmation(
-  state: SettingsEditorState,
-  confirmed: boolean,
-): SettingsEditorState {
-  switch (state.status) {
-    case 'reviewing':
-      return confirmed
-        ? {
-            status: 'confirmed',
-            authority: state.authority,
-            draft: state.draft,
-            review: state.review,
-          }
-        : state;
-    case 'confirmed':
-    case 'authority_withdrawn':
-    case 'submit_failed':
-      return confirmed
-        ? state
-        : {
-            status: 'reviewing',
-            authority: state.authority,
-            draft: state.draft,
-            review: state.review,
-          };
-    // A write in flight, a refused revision, and a superseded review are past
-    // the point where a checkbox decides anything.
-    case 'editor_unavailable':
-    case 'editing':
-    case 'submitting':
-    case 'conflicted':
-    case 'review_superseded':
-      return state;
-    default: {
-      const exhaustive: never = state;
-      return exhaustive;
-    }
-  }
-}
-
-/**
- * Entering the write.
- *
- * The confirmation is re-derived rather than trusted: the change is replanned
- * against the authority the editor now holds, and only an identical review id
- * lets the write proceed. The id carries the revision as well as the change,
- * so one comparison catches both a resource that moved and a draft that no
- * longer produces what was confirmed, either way the review is superseded
- * instead of applied.
- */
-function startSubmit(state: SettingsEditorState): SettingsEditorState {
-  // Reachable only from a confirmation: `submit_failed` and
-  // `authority_withdrawn` are themselves only reachable through one, so
-  // retrying from them is retrying a change the user did confirm.
+function retrySubmit(state: SettingsEditorState): SettingsEditorState {
   if (
-    state.status !== 'confirmed' &&
-    state.status !== 'authority_withdrawn' &&
-    state.status !== 'submit_failed'
+    state.status === 'authority_withdrawn' ||
+    (state.status === 'submit_failed' &&
+      (state.failure.kind === 'offline' || state.failure.kind === 'error'))
   ) {
-    return state;
+    return {
+      status: 'submitting',
+      authority: state.authority,
+      draft: state.draft,
+      submission: state.submission,
+    };
   }
-  const { authority, draft, review } = state;
-  const replanned = planFor(authority, draft, review.scope);
-  if (
-    replanned.outcome !== 'ready' ||
-    reviewOf(review.scope, replanned, review.idempotencyKey).reviewId !== review.reviewId
-  ) {
-    return superseded(authority, draft, review, settingsRevisionId(authority, review.scope));
-  }
-  return { status: 'submitting', authority, draft, review };
+  return state;
 }
 
 function settleSubmit(
@@ -409,10 +279,21 @@ function settleSubmit(
   result: SettingsMutationResult,
 ): SettingsEditorState {
   if (state.status !== 'submitting') return state;
-  const { authority, draft, review } = state;
+  const { authority, draft, submission } = state;
   switch (result.outcome) {
-    case 'success':
-      return editing(authority, draft, {
+    case 'success': {
+      const appliedAuthority = buildSettingsEditor(result.payload);
+      if (!appliedAuthority) {
+        return failed(state, {
+          kind: 'protocol_error',
+          authority: 'settings mutation',
+          detail: 'The settings response no longer carries editable values and revisions.',
+        });
+      }
+      // PATCH returns a complete snapshot, but only this resource was saved.
+      // Other proposals retain both their values and their original CAS base.
+      const saved = adoptScope(state, appliedAuthority, submission.scope);
+      return editing(saved.authority, saved.draft, {
         rest: 'applied',
         applied: {
           scope: result.scope,
@@ -423,12 +304,13 @@ function settleSubmit(
           effectReconciliation: result.effectReconciliation,
         },
       });
+    }
     case 'validation':
       return editing(authority, draft, {
         rest: 'rejected',
         rejection: {
           origin: 'server',
-          scope: review.scope,
+          scope: submission.scope,
           detail: result.detail,
           errors: result.errors,
         },
@@ -438,7 +320,7 @@ function settleSubmit(
         status: 'conflicted',
         authority,
         draft,
-        review,
+        submission,
         conflict: {
           expectedRevisionId: result.expectedRevisionId,
           actualRevisionId: result.actualRevisionId,
@@ -451,7 +333,13 @@ function settleSubmit(
     case 'unavailable':
     case 'not_dispatched':
     case 'read_only_scope':
-      return { status: 'authority_withdrawn', authority, draft, review, detail: result.detail };
+      return {
+        status: 'authority_withdrawn',
+        authority,
+        draft,
+        submission,
+        detail: result.detail,
+      };
     case 'offline':
       return failed(state, { kind: 'offline', detail: result.detail });
     case 'error':
@@ -487,56 +375,31 @@ export type SubmittingSettingsState = Extract<SettingsEditorState, { status: 'su
 /**
  * The request a submitting state stands for.
  *
- * Total, and reachable from nowhere else: a request exists only where the
- * machine has already checked the held revision against the authority, so
- * there is no path that sends a patch from a stale review.
+ * Total, and reachable from nowhere else: a request exists only after Save has
+ * captured the exact patch and revision it will ask the authority to compare.
  *
- * Scope writability is deliberately absent. It is not a property of the review
- * this machine holds, it is a property of the dashboard the routes point at,
- * and it can change while a review sits open. The controller supplies it at
- * dispatch so the write refuses on the current reading rather than one captured
- * when the draft was confirmed.
+ * Scope writability is deliberately absent. The controller supplies its current
+ * value at dispatch so a changed permission cannot be bypassed by a stale form.
  */
 export function settingsSubmission(
   state: SubmittingSettingsState,
   routes: SettingsRoutes,
 ): Omit<SettingsMutationRequest, 'writability'> {
   return {
-    scope: state.review.scope,
-    expectedRevisionId: state.review.expectedRevisionId,
-    idempotencyKey: state.review.idempotencyKey,
-    readUrl: readUrlFor(state.review.scope, routes),
-    patchUrl: patchUrlFor(state.review.scope, routes),
-    patch: state.review.patch,
+    scope: state.submission.scope,
+    expectedRevisionId: state.submission.expectedRevisionId,
+    idempotencyKey: state.submission.idempotencyKey,
+    readUrl: readUrlFor(state.submission.scope, routes),
+    patchUrl: patchUrlFor(state.submission.scope, routes),
+    patch: state.submission.patch,
   };
 }
 
-/** The review the dialog is about, if the machine is holding one. */
-export function settingsReviewOf(state: SettingsEditorState): SettingsReview | null {
+/** The immutable write awaiting a verdict or an explicit resolution. */
+export function settingsSubmissionOf(state: SettingsEditorState): SettingsSubmission | null {
   return state.status === 'editor_unavailable' || state.status === 'editing'
     ? null
-    : state.review;
-}
-
-/** Whether the review on screen is one the user has confirmed. */
-export function settingsConfirmationHeld(state: SettingsEditorState): boolean {
-  switch (state.status) {
-    case 'confirmed':
-    case 'submitting':
-    case 'conflicted':
-    case 'authority_withdrawn':
-    case 'submit_failed':
-      return true;
-    case 'editor_unavailable':
-    case 'editing':
-    case 'reviewing':
-    case 'review_superseded':
-      return false;
-    default: {
-      const exhaustive: never = state;
-      return exhaustive;
-    }
-  }
+    : state.submission;
 }
 
 export function settingsRejection(state: SettingsEditorState): SettingsRejection | null {
@@ -561,12 +424,8 @@ export function settingsScopeDirty(
 }
 
 /**
- * The change this scope's draft currently amounts to, replanned live.
- *
- * This is the same plan `review_requested` freezes, computed without freezing
- * it, so a surface can state validity, `ready`, `unchanged`, or `invalid`
- * with the daemon-shaped field errors, while the value is still being typed.
- * `null` while the read names no revision to plan against.
+ * The change this scope's draft currently amounts to, replanned live so the
+ * editor can state validity while the value is still being typed.
  */
 export function settingsScopePlan(
   state: SettingsEditorState,
@@ -588,15 +447,6 @@ function editing(
   return { status: 'editing', authority, draft, resting };
 }
 
-function superseded(
-  authority: SettingsEditor,
-  draft: SettingsDraft,
-  review: SettingsReview,
-  currentRevisionId: string,
-): SettingsEditorState {
-  return { status: 'review_superseded', authority, draft, review, currentRevisionId };
-}
-
 function failed(
   state: SubmittingSettingsState,
   failure: SettingsSubmitFailure,
@@ -605,7 +455,7 @@ function failed(
     status: 'submit_failed',
     authority: state.authority,
     draft: state.draft,
-    review: state.review,
+    submission: state.submission,
     failure,
   };
 }
@@ -616,6 +466,47 @@ function draftOf(authority: SettingsEditor): SettingsDraft {
     user: authority.user,
     codeIndexWorkers: authority.codeIndexWorkers,
   };
+}
+
+function adoptScope(
+  current: SettingsEditable,
+  incoming: SettingsEditor,
+  scope: SettingsScope,
+): SettingsEditable {
+  const { authority, draft } = current;
+  switch (scope) {
+    case 'project':
+      return {
+        authority: {
+          ...authority,
+          projectExpectedRevisionId: incoming.projectExpectedRevisionId,
+          project: incoming.project,
+        },
+        draft: { ...draft, project: incoming.project },
+      };
+    case 'user':
+      return {
+        authority: {
+          ...authority,
+          userExpectedRevisionId: incoming.userExpectedRevisionId,
+          user: incoming.user,
+        },
+        draft: { ...draft, user: incoming.user },
+      };
+    case 'code_index_workers':
+      return {
+        authority: {
+          ...authority,
+          codeIndexWorkerExpectedRevisionId: incoming.codeIndexWorkerExpectedRevisionId,
+          codeIndexWorkers: incoming.codeIndexWorkers,
+        },
+        draft: { ...draft, codeIndexWorkers: incoming.codeIndexWorkers },
+      };
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
 }
 
 type SettingsPlan = SettingsChangePlan<
@@ -639,20 +530,6 @@ function planFor(
       return exhaustive;
     }
   }
-}
-
-function reviewOf(
-  scope: SettingsScope,
-  plan: Extract<SettingsPlan, { outcome: 'ready' }>,
-  idempotencyKey: string,
-): SettingsReview {
-  return {
-    scope,
-    expectedRevisionId: plan.expectedRevisionId,
-    patch: plan.patch,
-    reviewId: `${scope}@${plan.expectedRevisionId}#${stableJson(plan.patch)}`,
-    idempotencyKey,
-  };
 }
 
 function patchUrlFor(scope: SettingsScope, routes: SettingsRoutes): string {
@@ -687,20 +564,6 @@ function savedMessage(scope: SettingsScope): string {
       return exhaustive;
     }
   }
-}
-
-/** Key order never distinguishes two patches, so identity does not depend on it. */
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableJson(item)).join(',')}]`;
-  }
-  if (typeof value === 'object' && value !== null) {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`);
-    return `{${entries.join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'null';
 }
 
 function sameAuthority(left: SettingsEditor, right: SettingsEditor): boolean {

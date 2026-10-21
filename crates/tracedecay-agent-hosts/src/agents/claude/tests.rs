@@ -148,6 +148,43 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             .unwrap()
     );
     copy_rendered_bundle_to_native_cache(home.path(), new_bin);
+    let rendered = rendered_plugin_files(new_bin, &ServeArgs::default()).unwrap();
+    let relatives = rendered
+        .iter()
+        .map(|(relative, _)| (*relative).to_string())
+        .collect::<Vec<_>>();
+    for root in [
+        plugin_deploy_dir(home.path()),
+        claude_current_cached_plugin_root(home.path()),
+    ] {
+        for (relative, expected) in &rendered {
+            let path = root.join(relative);
+            let actual = std::fs::read(&path).unwrap();
+            assert!(
+                actual == expected.as_bytes(),
+                "relocated bundle differs at {}: actual bytes={}, expected bytes={}, first differing byte={:?}",
+                path.display(),
+                actual.len(),
+                expected.len(),
+                actual
+                    .iter()
+                    .zip(expected.as_bytes())
+                    .position(|(actual, expected)| actual != expected)
+            );
+        }
+        assert_eq!(
+            super::super::unexpected_bundle_entrypoints(
+                &root,
+                &relatives,
+                &[".claude-plugin", "agents", "commands", "hooks", "skills"],
+            )
+            .unwrap(),
+            Vec::<String>::new(),
+            "relocation left auto-discovered entries in {}",
+            root.display()
+        );
+    }
+    assert!(claude_plugin_registration_is_active(home.path()).unwrap());
     assert!(
         claude_plugin_is_natively_active(home.path(), Some((new_bin, &ServeArgs::default())))
             .unwrap()
