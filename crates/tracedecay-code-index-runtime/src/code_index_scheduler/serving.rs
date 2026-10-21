@@ -5,7 +5,6 @@ mod family_report;
 use std::{
     collections::{BTreeSet, VecDeque},
     io::Read,
-    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock,
@@ -228,6 +227,29 @@ impl CodeIndexBuildProgressSlotStateV1 {
         let mut snapshot = snapshot.as_ref().clone();
         snapshot.blocked_reason = Some(reason);
         let _ = self.publish(&generation_id, self.owner_epoch, snapshot);
+    }
+
+    /// A text refusal belongs to its pending owner. A caller without the
+    /// projection claim must also identify the progress it observed before
+    /// attempting admission, so a delayed refusal cannot overwrite new work.
+    pub(super) fn block_owned_text(
+        &mut self,
+        generation_id: &CodeGenerationId,
+        owner_epoch: u64,
+        reason: CodeIndexBuildBlockedReasonV1,
+        expected_progress_epoch: Option<u64>,
+    ) -> bool {
+        let Some(current) = self.snapshot() else {
+            return false;
+        };
+        if current.phase == CodeIndexBuildPhaseV1::Ready
+            || expected_progress_epoch.is_some_and(|epoch| current.progress_epoch != epoch)
+        {
+            return false;
+        }
+        let mut snapshot = current.as_ref().clone();
+        snapshot.blocked_reason = Some(reason);
+        self.publish(generation_id, owner_epoch, snapshot)
     }
 
     pub fn snapshot(&self) -> Option<Arc<CodeIndexBuildProgressV1>> {
@@ -947,29 +969,6 @@ pub struct DaemonCodeTextArtifactStoreV1 {
     worktree_id: WorktreeId,
 }
 
-/// The bytes one artifact admission reserves: its ceiling plus the band above
-/// the admission watermark, so the reserve call enforces that watermark
-/// against both the ledger and the measured resident set. The band is not
-/// memory the artifact owns and is released right after the reserve;
-/// retaining it in every overlapping build would charge the same
-/// process-wide margin repeatedly. The process's live set is not charged:
-/// the reserve already compares the request with the measured resident set,
-/// which contains it.
-pub(super) fn text_artifact_resident_memory_charge(
-    requested: NonZeroU64,
-    watermark_headroom: u64,
-) -> Result<NonZeroU64, RetrievalPortError> {
-    requested
-        .get()
-        .checked_add(watermark_headroom)
-        .and_then(NonZeroU64::new)
-        .ok_or_else(|| {
-            RetrievalPortError::Contract(
-                "text-artifact resident-memory accounting overflowed".to_owned(),
-            )
-        })
-}
-
 pub(super) fn text_artifact_admitted_build_budget(
     preferred_bytes: u64,
     minimum_bytes: u64,
@@ -1170,10 +1169,8 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
     }
 
-    /// Reserve one artifact memory ceiling. The atomic reserve also includes
-    /// the process-wide high-watermark headroom, then releases that
-    /// check-only margin before returning while the component ceiling stays
-    /// charged.
+    /// Charge the artifact's ceiling below the process admission watermark.
+    /// Sizing and charging share one measured headroom reading.
     fn reserve_resident_memory(
         &self,
         generation_id: &CodeGenerationId,
@@ -1182,32 +1179,6 @@ impl DaemonCodeTextArtifactStoreV1 {
     ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
         self.reserve_resident_memory_up_to(generation_id, component, bytes, bytes)
             .map(|(reservation, _)| reservation)
-    }
-
-    /// Measure headroom and size the build: `(observed, watermark headroom,
-    /// admitted)` bytes.
-    fn text_artifact_admission(
-        &self,
-        preferred: NonZeroU64,
-        minimum: NonZeroU64,
-    ) -> Result<(u64, u64), RetrievalPortError> {
-        let admission_watermark = self.resident_memory.admission_watermark_bytes();
-        let headroom = self.resident_memory.headroom_below(admission_watermark);
-        let watermark_headroom = self
-            .resident_memory
-            .snapshot()
-            .limit_bytes
-            .saturating_sub(admission_watermark);
-        let admitted_bytes = text_artifact_admitted_build_budget(
-            preferred.get(),
-            minimum.get(),
-            headroom.available_bytes,
-        )
-        .inspect_err(|_| {
-            self.resident_memory
-                .wait_for_headroom(minimum.get(), admission_watermark);
-        })?;
-        Ok((watermark_headroom, admitted_bytes))
     }
 
     fn reserve_resident_memory_up_to(
@@ -1235,57 +1206,59 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
-        let (watermark_headroom, admitted_bytes) =
-            match self.text_artifact_admission(preferred, minimum) {
-                Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
-                    let released = self
-                        .resident_owners
-                        .shed(minimum.get(), std::time::Instant::now());
-                    for release in &released {
-                        log_resident_owner_release_v1(release);
-                    }
-                    // Freed pages sit in the pool workers' allocator heaps
-                    // whether or not an owner was shed.
-                    let trim = release_process_allocator_memory_v1();
-                    tracing::info!(
-                        event = "code_text_artifact_build_shed_retained_state",
-                        released_owners = released.len(),
-                        trimmed_bytes = trim.released_bytes(),
-                        refused = %detail,
-                        "text-artifact build shed retained state before re-measuring headroom"
-                    );
-                    self.text_artifact_admission(preferred, minimum)
+        let admission_watermark = self.resident_memory.admission_watermark_bytes();
+        let reserve = || {
+            let reservation = self
+                .resident_memory
+                .reserve_up_to(
+                    ResidentMemoryKeyV1 {
+                        project_id: self.project_id.clone(),
+                        worktree_id: self.worktree_id.clone(),
+                        generation_id: generation_id.clone(),
+                        component,
+                    },
+                    preferred,
+                    admission_watermark,
+                )
+                .map_err(|error| {
+                    RetrievalPortError::ResidentMemoryRefused(format!(
+                        "text-artifact resident-memory admission was refused: {error}"
+                    ))
+                })?;
+            let admitted = text_artifact_admitted_build_budget(
+                preferred.get(),
+                minimum.get(),
+                reservation.reserved_bytes(),
+            )?;
+            Ok((reservation, admitted))
+        };
+        let (reservation, admitted) = match reserve() {
+            Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
+                let released = self
+                    .resident_owners
+                    .shed(minimum.get(), std::time::Instant::now());
+                for release in &released {
+                    log_resident_owner_release_v1(release);
                 }
-                admission => admission,
-            }?;
-        let admitted = NonZeroU64::new(admitted_bytes).ok_or_else(|| {
-            RetrievalPortError::Contract(
-                "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
-            )
+                let trim = release_process_allocator_memory_v1();
+                tracing::info!(
+                    event = "code_text_artifact_build_shed_retained_state",
+                    released_owners = released.len(),
+                    trimmed_bytes = trim.released_bytes(),
+                    refused = %detail,
+                    "text-artifact build shed retained state before re-measuring headroom"
+                );
+                reserve()
+            }
+            result => result,
+        }
+        .inspect_err(|error| {
+            if matches!(error, RetrievalPortError::ResidentMemoryRefused(_)) {
+                self.resident_memory
+                    .wait_for_headroom(minimum.get(), admission_watermark);
+            }
         })?;
-        let accounted = text_artifact_resident_memory_charge(admitted, watermark_headroom)?;
-        let mut reservation = self
-            .resident_memory
-            .reserve(
-                ResidentMemoryKeyV1 {
-                    project_id: self.project_id.clone(),
-                    worktree_id: self.worktree_id.clone(),
-                    generation_id: generation_id.clone(),
-                    component,
-                },
-                accounted,
-            )
-            .map_err(|error| {
-                RetrievalPortError::ResidentMemoryRefused(format!(
-                    "text-artifact resident-memory admission was refused: {error}"
-                ))
-            })?;
-        reservation.shrink_to(admitted.get()).map_err(|error| {
-            RetrievalPortError::Contract(format!(
-                "text-artifact resident-memory headroom release failed: {error}"
-            ))
-        })?;
-        let admitted = usize::try_from(admitted.get()).map_err(|error| {
+        let admitted = usize::try_from(admitted).map_err(|error| {
             RetrievalPortError::Contract(format!(
                 "text-artifact admitted reservation exceeds the platform limit: {error}"
             ))
@@ -2723,9 +2696,13 @@ impl LatestCodeTextGenerationV1 {
                 // its phase before it re-attempts the work that was refused, so
                 // clearing here erased the reason between two identical refusals
                 // and status reported `blocked_reason: null` throughout a stall.
-                // A committed boundary is the honest clear -- it builds a fresh
-                // snapshot with no blocked reason -- and only that runs after work
-                // actually landed.
+                // A committed boundary clears the refusal. Ready is also a
+                // successful boundary: it is published only after the verified
+                // query owners are installed, even if finalization completed
+                // without another pending boundary in between.
+                if phase == CodeIndexBuildPhaseV1::Ready {
+                    snapshot.blocked_reason = None;
+                }
                 let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
             }
         };
@@ -2742,18 +2719,26 @@ impl LatestCodeTextGenerationV1 {
     fn publish_text_artifact_block(&self, error: &CodeLexicalArtifactErrorV1) {
         match error {
             CodeLexicalArtifactErrorV1::Unreserved(_) => {
-                self.publish_text_progress_blocked(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+                self.publish_text_progress_blocked(
+                    CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                    None,
+                );
             }
             CodeLexicalArtifactErrorV1::Io(_) | CodeLexicalArtifactErrorV1::Missing(_) => {
                 self.publish_text_progress_blocked(
                     CodeIndexBuildBlockedReasonV1::ArtifactStoreUnavailable,
+                    None,
                 );
             }
             _ => {}
         }
     }
 
-    fn publish_text_progress_blocked(&self, reason: CodeIndexBuildBlockedReasonV1) {
+    fn publish_text_progress_blocked(
+        &self,
+        reason: CodeIndexBuildBlockedReasonV1,
+        expected_progress_epoch: Option<u64>,
+    ) {
         let generation_id = &self.metadata.manifest().generation_id;
         {
             let _span = tracing::trace_span!("query.artifact.progress.publish").entered();
@@ -2762,12 +2747,12 @@ impl LatestCodeTextGenerationV1 {
                     .text_progress_slot
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let Some(current) = slot.snapshot() else {
-                    return;
-                };
-                let mut snapshot = current.as_ref().clone();
-                snapshot.blocked_reason = Some(reason);
-                let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
+                let _ = slot.block_owned_text(
+                    generation_id,
+                    self.text_progress_owner_epoch,
+                    reason,
+                    expected_progress_epoch,
+                );
             }
         };
     }
@@ -2811,7 +2796,13 @@ impl LatestCodeTextGenerationV1 {
         maximum_work: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
-        let _workers = self
+        let progress_before_admission = self
+            .text_progress_slot
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .snapshot()
+            .map(|snapshot| snapshot.progress_epoch);
+        let workers = self
             .text_artifact_store
             .worker_runtime
             .enter(&self.text_artifact_store.resident_memory)
@@ -2824,8 +2815,23 @@ impl LatestCodeTextGenerationV1 {
                     ),
                 ) => RetrievalPortError::ResidentMemoryRefused(error.to_string()),
                 other => RetrievalPortError::AuthorityUnavailable(other.to_string()),
-            })?;
-        let result = self.advance_text_serving_inner(maximum_work, control);
+            });
+        let result = match workers {
+            Ok(_workers) => self.advance_text_serving_inner(maximum_work, control),
+            Err(error) => {
+                if matches!(&error, RetrievalPortError::ResidentMemoryRefused(_))
+                    && let Some(epoch) = progress_before_admission
+                {
+                    // Worker admission owns no projection claim. Only the
+                    // unchanged progress it observed can inherit this refusal.
+                    self.publish_text_progress_blocked(
+                        CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                        Some(epoch),
+                    );
+                }
+                Err(error)
+            }
+        };
         if result.as_ref().is_err_and(|error| {
             matches!(
                 error,
@@ -3347,7 +3353,17 @@ impl LatestCodeTextGenerationV1 {
             let outcome = {
                 let _span = tracing::trace_span!("query.artifact.head_open").entered();
                 self.open_published_head_or_begin_build(control)
-            }?;
+            }
+            .inspect_err(|error| {
+                if matches!(error, RetrievalPortError::ResidentMemoryRefused(_)) {
+                    // Keep the claim until this attempt's refusal is visible;
+                    // no later wake can publish progress ahead of this block.
+                    self.publish_text_progress_blocked(
+                        CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                        None,
+                    );
+                }
+            })?;
             match outcome {
                 TextHeadOpenOutcomeV1::Served => return Ok(true),
                 TextHeadOpenOutcomeV1::Build(initialized) => {
@@ -3638,7 +3654,15 @@ impl LatestCodeTextGenerationV1 {
             &content_key,
             build_reservation,
             control,
-        )?;
+        )
+        .inspect_err(|error| {
+            if matches!(error, RetrievalPortError::ResidentMemoryRefused(_)) {
+                self.publish_text_progress_blocked(
+                    CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                    None,
+                );
+            }
+        })?;
         Ok(true)
     }
 
