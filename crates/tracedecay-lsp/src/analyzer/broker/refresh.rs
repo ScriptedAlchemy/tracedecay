@@ -11,7 +11,7 @@ use tracedecay_runtime_core::native_runtime;
 
 use super::super::client::{
     DiagnosticDocumentCoverage, DiagnosticRefreshResult, DiagnosticRootCoverage, LspDocument,
-    LspRefreshError, LspRefreshTimeouts, StdioLspClient,
+    LspRefreshError, LspRefreshTimeouts, StdioLspClientStartup,
 };
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
 use super::super::launch::AnalyzerLaunch;
@@ -311,16 +311,27 @@ async fn collect_refresh_batch(
             )));
         };
         let mut use_of_analyzer = AnalyzerClientUse::new(&shared, client_slot, attempt, None);
-        use_of_analyzer.client = match StdioLspClient::start_with_launch(
-            &launch,
-            &args,
-            &batch.workspace_root,
-            timeouts,
-        )
-        .await
-        {
-            Ok(client) => Some(client),
+        let startup =
+            StdioLspClientStartup::start(launch, args, batch.workspace_root.clone(), timeouts);
+        match startup {
+            Ok(startup) => use_of_analyzer.start(startup),
             Err(error) => {
+                use_of_analyzer.retire(AnalyzerEvent::StartupFailed);
+                return Err(RefreshFailure::unstartable(
+                    &error,
+                    batch.workspace_root.clone(),
+                ));
+            }
+        }
+        match native_runtime::timeout_at(deadline, use_of_analyzer.settle_startup()).await {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                use_of_analyzer.retire(AnalyzerEvent::Cancelled);
+                return Err(RefreshFailure::crashed_message(format!(
+                    "analyzer '{command}' startup was cancelled"
+                )));
+            }
+            Ok(Err(error)) => {
                 if Instant::now() >= deadline {
                     use_of_analyzer.retire(AnalyzerEvent::TimedOut);
                     return Err(RefreshFailure::timed_out());
@@ -331,7 +342,11 @@ async fn collect_refresh_batch(
                     batch.workspace_root.clone(),
                 ));
             }
-        };
+            Err(error) => {
+                use_of_analyzer.retire(AnalyzerEvent::TimedOut);
+                return Err(RefreshFailure::timeout(error));
+            }
+        }
         if shared.mark_ready(attempt).is_none() {
             // Superseded while holding the client lock cannot happen; if it
             // ever does, this client is not the session's analyzer.

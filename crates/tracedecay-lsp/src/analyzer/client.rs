@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 use tracedecay_domain::ContentDigest;
 use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::NativeTask;
 use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, plain_host_path};
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
@@ -399,6 +400,68 @@ pub struct StdioLspClient {
     process: AnalyzerProcess,
 }
 
+/// A startup owned independently from the request that first needed it.
+///
+/// Once admitted, the task runs through process termination on cancellation.
+/// The shared client slot retains this receiver until that settlement finishes,
+/// so dropping a request can never make room for a successor beside the old
+/// process.
+pub(crate) struct StdioLspClientStartup {
+    cancellation: CancellationToken,
+    result: async_channel::Receiver<StdioLspClientStartupSettlement>,
+    _task: NativeTask<()>,
+}
+
+pub(crate) enum StdioLspClientStartupSettlement {
+    Started(StdioLspClient),
+    Cancelled,
+    Failed(TraceDecayError),
+    ReapFailed(TraceDecayError),
+}
+
+impl StdioLspClientStartup {
+    pub(crate) fn start(
+        launch: AnalyzerLaunch,
+        args: Vec<String>,
+        project_root: PathBuf,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<Self> {
+        let cancellation = CancellationToken::new();
+        let startup_cancellation = cancellation.clone();
+        let (sender, result) = async_channel::bounded(1);
+        let task = NativeTask::spawn(async move {
+            let started = StdioLspClient::start_with_launch_until_cancelled(
+                &launch,
+                &args,
+                &project_root,
+                timeouts,
+                &startup_cancellation,
+            )
+            .await;
+            let _ = sender.send(started).await;
+        })
+        .map_err(TraceDecayError::new)?;
+        Ok(Self {
+            cancellation,
+            result,
+            _task: task,
+        })
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    pub(crate) async fn settle(&self) -> StdioLspClientStartupSettlement {
+        match self.result.recv().await {
+            Ok(settlement) => settlement,
+            Err(_) => StdioLspClientStartupSettlement::ReapFailed(TraceDecayError::Config {
+                message: "LSP analyzer startup ended without a settlement".to_owned(),
+            }),
+        }
+    }
+}
+
 impl StdioLspClient {
     /// Resolves `command` for `project_root` (see [`resolve_analyzer_launch`])
     /// and starts it. A rustup proxy whose toolchain lacks the analyzer is a
@@ -440,6 +503,32 @@ impl StdioLspClient {
         project_root: &Path,
         timeouts: LspRefreshTimeouts,
     ) -> Result<Self> {
+        let cancellation = CancellationToken::new();
+        match Self::start_with_launch_until_cancelled(
+            launch,
+            args,
+            project_root,
+            timeouts,
+            &cancellation,
+        )
+        .await
+        {
+            StdioLspClientStartupSettlement::Started(client) => Ok(client),
+            StdioLspClientStartupSettlement::Cancelled => Err(TraceDecayError::Config {
+                message: "LSP analyzer startup was cancelled".to_owned(),
+            }),
+            StdioLspClientStartupSettlement::Failed(error)
+            | StdioLspClientStartupSettlement::ReapFailed(error) => Err(error),
+        }
+    }
+
+    async fn start_with_launch_until_cancelled(
+        launch: &AnalyzerLaunch,
+        args: &[String],
+        project_root: &Path,
+        timeouts: LspRefreshTimeouts,
+        cancellation: &CancellationToken,
+    ) -> StdioLspClientStartupSettlement {
         let timeouts = timeouts.with_deadline(timeouts.operation_deadline());
         let deadline = timeouts.operation_deadline();
         let command = launch.program.to_string_lossy().into_owned();
@@ -449,11 +538,15 @@ impl StdioLspClient {
             .args(args)
             .envs(launch.env.iter().map(|(key, value)| (key, value)))
             .current_dir(project_root);
-        let mut process = AnalyzerProcess::spawn(spawn, command).await?;
+        let mut process = match AnalyzerProcess::spawn(spawn, command).await {
+            Ok(process) => process,
+            Err(error) => return StdioLspClientStartupSettlement::Failed(error),
+        };
 
-        let send_initialize = write_message_until(
-            &process,
-            json!({
+        let initialize = async {
+            let send_initialize = write_message_until(
+                &process,
+                json!({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
@@ -493,53 +586,73 @@ impl StdioLspClient {
                             .unwrap_or("workspace")
                     }]
                 }
-            }),
-            deadline,
-            timeouts.message_io,
-        )
-        .await
-        .map_err(LspMessageWriteError::into_trace_decay_error);
-        // A server that dies immediately can fail the initialize *request*
-        // write (broken pipe, on Windows this races the spawn under load)
-        // just as easily as the initialize *response* wait. Route both
-        // failures through the same stderr-enriched classification so the
-        // crash reason (e.g. a toolchain's "unknown binary" complaint) is
-        // never dropped.
-        let initialize_result = match send_initialize {
-            Ok(()) => {
-                wait_for_initialize(
-                    &process,
-                    deadline.min(Instant::now() + timeouts.initialize_response),
-                    command,
-                    timeouts.initialize_response,
-                    project_root,
-                    timeouts,
-                )
-                .await
-            }
-            Err(err) => Err(err),
-        };
-        let initialize_response = match initialize_result {
-            Ok(response) => response,
-            Err(error) => {
-                let _ = process.terminate().await;
-                return Err(enrich_start_error(command, error, &process.stderr()));
-            }
-        };
-        write_message_until(
-            &process,
-            json!({
+                }),
+                deadline,
+                timeouts.message_io,
+            )
+            .await
+            .map_err(LspMessageWriteError::into_trace_decay_error);
+            // A server that dies immediately can fail the initialize *request*
+            // write (broken pipe, on Windows this races the spawn under load)
+            // just as easily as the initialize *response* wait. Route both
+            // failures through the same stderr-enriched classification so the
+            // crash reason (e.g. a toolchain's "unknown binary" complaint) is
+            // never dropped.
+            let initialize_response = match send_initialize {
+                Ok(()) => {
+                    wait_for_initialize(
+                        &process,
+                        deadline.min(Instant::now() + timeouts.initialize_response),
+                        command,
+                        timeouts.initialize_response,
+                        project_root,
+                        timeouts,
+                    )
+                    .await
+                }
+                Err(err) => Err(err),
+            }?;
+            write_message_until(
+                &process,
+                json!({
                 "jsonrpc": "2.0",
                 "method": "initialized",
                 "params": {}
-            }),
-            deadline,
-            timeouts.message_io,
-        )
-        .await
-        .map_err(LspMessageWriteError::into_trace_decay_error)?;
+                }),
+                deadline,
+                timeouts.message_io,
+            )
+            .await
+            .map_err(LspMessageWriteError::into_trace_decay_error)?;
+            Ok::<_, TraceDecayError>(initialize_response)
+        };
+        let initialize_response = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                return match process.terminate().await {
+                    Ok(_) => StdioLspClientStartupSettlement::Cancelled,
+                    Err(error) => StdioLspClientStartupSettlement::ReapFailed(TraceDecayError::Config {
+                        message: format!("failed to reap cancelled LSP server '{command}': {error}"),
+                    }),
+                };
+            }
+            result = initialize => match result {
+                Ok(response) => response,
+                Err(error) => {
+                    let error = enrich_start_error(command, error, &process.stderr());
+                    return match process.terminate().await {
+                        Ok(_) => StdioLspClientStartupSettlement::Failed(error),
+                        Err(reap_error) => StdioLspClientStartupSettlement::ReapFailed(
+                            TraceDecayError::Config {
+                                message: format!("{error}; failed to reap LSP server '{command}': {reap_error}"),
+                            },
+                        ),
+                    };
+                }
+            },
+        };
 
-        Ok(Self {
+        StdioLspClientStartupSettlement::Started(Self {
             command: command.to_string(),
             workspace_root: project_root.to_path_buf(),
             upstream_capabilities: UpstreamCapabilities::from_initialize_response(

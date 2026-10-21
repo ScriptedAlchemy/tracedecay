@@ -215,6 +215,232 @@ async fn broker_bounds_lsp_initialize_hangs() {
     );
 }
 
+#[cfg(unix)]
+async fn assert_abandoned_start_settles_before_successor(cancel: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let document_path = temp.path().join(FAKE_PATH);
+    std::fs::create_dir_all(document_path.parent().unwrap()).unwrap();
+    std::fs::write(&document_path, "valid").unwrap();
+    let script_path = temp.path().join("startup_settlement_lsp.py");
+    let starts_path = temp.path().join("starts.txt");
+    let overlap_path = temp.path().join("overlap.txt");
+    std::fs::write(
+        &script_path,
+        format!(
+            r#"
+import json
+import os
+import sys
+import time
+
+starts_path = {starts_path:?}
+overlap_path = {overlap_path:?}
+prior = []
+if os.path.exists(starts_path):
+    with open(starts_path, encoding="utf-8") as starts:
+        prior = [int(line) for line in starts if line.strip()]
+for pid in prior:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        continue
+    with open(overlap_path, "w", encoding="utf-8") as overlap:
+        overlap.write(str(pid))
+with open(starts_path, "a", encoding="utf-8") as starts:
+    starts.write(str(os.getpid()) + "\n")
+
+def read_message():
+    headers = {{}}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        if not prior:
+            time.sleep(60)
+        send({{"jsonrpc": "2.0", "id": message["id"], "result": {{"capabilities": {{"documentSymbolProvider": True}}}}}})
+    elif method == "textDocument/documentSymbol":
+        send({{"jsonrpc": "2.0", "id": message["id"], "result": []}})
+"#,
+            starts_path = starts_path.display().to_string(),
+            overlap_path = overlap_path.display().to_string(),
+        ),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            lsp::client::LspRefreshTimeouts::new(
+                std::time::Duration::from_secs(1),
+                FAKE_LSP_START_TIMEOUT * 2,
+                FAKE_LSP_START_TIMEOUT * 2,
+                std::time::Duration::from_millis(50),
+            ),
+        )
+        .await
+        .unwrap()
+        .expect("fake analyzer is executable");
+    let first_id = LspRequestId::Number(901);
+    let first_request = tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+        document_uri: format!("{root_uri}{FAKE_PATH}"),
+    })
+    .unwrap();
+    let first = cancel.then(|| {
+        tokio::spawn({
+            let authority = Arc::clone(&authority);
+            let root = AdmittedRoot::new(root_uri.clone());
+            let first_id = first_id.clone();
+            async move { authority.start(root, first_id, first_request).await }
+        })
+    });
+    struct TokioTask(tokio::task::JoinHandle<()>);
+    impl tracedecay_lsp::LspRuntimeTask for TokioTask {
+        fn abort(&self) {
+            self.0.abort();
+        }
+    }
+    struct TokioSpawner;
+    impl tracedecay_lsp::LspRuntimeSpawner for TokioSpawner {
+        fn spawn(
+            &self,
+            future: tracedecay_lsp::LspRuntimeFuture<()>,
+        ) -> Box<dyn tracedecay_lsp::LspRuntimeTask> {
+            Box::new(TokioTask(tokio::spawn(future)))
+        }
+    }
+    let deadline_adapter = (!cancel).then(|| {
+        let semantic_authority: Arc<dyn tracedecay_lsp::LspSemanticRequestAuthority> =
+            authority.clone();
+        tracedecay_lsp::SemanticProviderAdapter::new(Arc::new(TokioSpawner), semantic_authority)
+    });
+    let semantic_request = SemanticRequest::DocumentSymbols {
+        document_uri: format!("{root_uri}{FAKE_PATH}"),
+    };
+    if let Some(adapter) = deadline_adapter.as_ref() {
+        assert!(matches!(
+            adapter.request_with_document(
+                &AdmittedRoot::new(root_uri.clone()),
+                &first_id,
+                &semantic_request,
+                None,
+                Some(std::time::Instant::now() + FAKE_LSP_START_TIMEOUT),
+            ),
+            tracedecay_lsp::SemanticProviderOutcome::Pending
+        ));
+    }
+    tokio::time::timeout(FAKE_LSP_START_TIMEOUT, async {
+        while std::fs::read_to_string(&starts_path)
+            .map_or(true, |starts| starts.lines().next().is_none())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first analyzer must spawn before abandonment");
+    if cancel {
+        assert!(authority.cancel_request(&AdmittedRoot::new(root_uri.clone()), &first_id));
+    }
+    if let Some(first) = first {
+        let first_outcome = first.await.unwrap();
+        assert!(
+            matches!(
+                first_outcome,
+                tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
+                    if coverage == "analyzer-cancelled"
+            ),
+            "unexpected abandoned startup outcome: {first_outcome:?}"
+        );
+    } else {
+        let adapter = deadline_adapter.as_ref().unwrap();
+        let expired = tokio::time::timeout(FAKE_LSP_START_TIMEOUT * 2, async {
+            loop {
+                match adapter.request_with_document(
+                    &AdmittedRoot::new(root_uri.clone()),
+                    &first_id,
+                    &semantic_request,
+                    None,
+                    None,
+                ) {
+                    tracedecay_lsp::SemanticProviderOutcome::Pending => {
+                        tokio::task::yield_now().await;
+                    }
+                    outcome => return outcome,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            expired,
+            tracedecay_lsp::SemanticProviderOutcome::Partial { ref coverage, .. }
+                if coverage == "analyzer-timeout"
+        ));
+    }
+
+    let second = authority
+        .start(
+            AdmittedRoot::new(root_uri.clone()),
+            LspRequestId::Number(902),
+            tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+                document_uri: format!("{root_uri}{FAKE_PATH}"),
+            })
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        second,
+        tracedecay_lsp::LspSemanticOperationOutcome::Complete(serde_json::json!([]))
+    );
+    assert_eq!(
+        std::fs::read_to_string(starts_path)
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    assert!(
+        !overlap_path.exists(),
+        "a successor spawned while the abandoned analyzer PID was still alive"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_startup_settles_its_spawned_process_before_a_successor() {
+    assert_abandoned_start_settles_before_successor(true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn expired_startup_settles_its_spawned_process_before_a_successor() {
+    assert_abandoned_start_settles_before_successor(false).await;
+}
+
 #[tokio::test]
 async fn broker_bounds_lsp_document_write_hangs() {
     let temp = tempfile::tempdir().unwrap();
@@ -1237,6 +1463,7 @@ async fn an_exhausted_restart_budget_stops_the_refresh_lane_from_respawning() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("never_initialize_lsp.py");
     let starts_path = temp.path().join("starts.txt");
+    std::fs::write(&starts_path, "").unwrap();
     std::fs::write(
         &script_path,
         format!(
@@ -1680,6 +1907,7 @@ def send(payload):
     sys.stdout.buffer.flush()
 
 def record(event):
+    event["pid"] = os.getpid()
     with open({events_path:?}, "a", encoding="utf-8") as output:
         output.write(json.dumps(event) + "\n")
 
@@ -1763,7 +1991,9 @@ while True:
         ..ClientCapabilities::default()
     };
     let capabilities = negotiate_capabilities(&client, &GatewayCapabilities::default(), &upstream);
-    let semantic = SemanticProviderAdapter::new(Arc::new(TokioSpawner), authority);
+    let semantic_authority: Arc<dyn tracedecay_lsp::LspSemanticRequestAuthority> =
+        authority.clone();
+    let semantic = SemanticProviderAdapter::new(Arc::new(TokioSpawner), semantic_authority);
     let gateway = DaemonLspGateway::new(
         AdmittedRoot::new(root_uri.clone()),
         capabilities,
@@ -1936,14 +2166,81 @@ while True:
         ),
         "editor version 1 belongs to the reopened lifetime, not version 42's lifetime"
     );
+    let healthy = authority.analyzer_readiness();
+    assert_eq!(healthy.state(), AnalyzerState::Ready);
+    assert_eq!(healthy.restart_attempts(), 0);
+    assert_eq!(healthy.last_failure(), None);
 
-    let stale_snapshot = LspSemanticDocumentSnapshot::from_overlay(&changed);
+    let mut digest_invalid = reopened_snapshot.clone();
+    digest_invalid.content_digest = tracedecay_domain::ContentDigest::of_bytes(b"wrong bytes");
+    let invalid = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match gateway.semantic_request_with_document(
+                &LspRequestId::Number(141),
+                &request,
+                Some(&digest_invalid),
+                None,
+            ) {
+                GatewayResponse::Pending => tokio::task::yield_now().await,
+                outcome => return outcome,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(invalid, GatewayResponse::Partial { ref coverage, .. }
+            if coverage == "analyzer-invalid-response"),
+        "digest-invalid local work is rejected without reaching the analyzer: {invalid:?}"
+    );
+    let after_invalid = authority.analyzer_readiness();
+    assert_eq!(after_invalid.state(), AnalyzerState::Ready);
+    assert_eq!(after_invalid.attempt(), healthy.attempt());
+    assert_eq!(after_invalid.restart_attempts(), healthy.restart_attempts());
+    assert_eq!(after_invalid.last_failure(), healthy.last_failure());
+    let result = complete_semantic_request(
+        &gateway,
+        &LspRequestId::Number(142),
+        &request,
+        Some(&reopened_snapshot),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        SemanticResponse::DocumentSymbols(ref symbols)
+            if symbols.first().is_some_and(|symbol| symbol.name == "reopened snapshot")
+    ));
+
+    let advanced = overlays
+        .change(
+            &uri,
+            2,
+            &[tracedecay_lsp::OverlayChange {
+                range: None,
+                range_length: None,
+                text: "advanced reopened snapshot".to_owned(),
+            }],
+        )
+        .unwrap();
+    let advanced_snapshot = LspSemanticDocumentSnapshot::from_overlay(&advanced);
+    let result = complete_semantic_request(
+        &gateway,
+        &LspRequestId::Number(143),
+        &request,
+        Some(&advanced_snapshot),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        SemanticResponse::DocumentSymbols(ref symbols)
+            if symbols.first().is_some_and(|symbol| symbol.name == "advanced reopened snapshot")
+    ));
     let stale = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             match gateway.semantic_request_with_document(
-                &LspRequestId::Number(15),
+                &LspRequestId::Number(144),
                 &request,
-                Some(&stale_snapshot),
+                Some(&reopened_snapshot),
                 None,
             ) {
                 GatewayResponse::Pending => tokio::task::yield_now().await,
@@ -1955,21 +2252,79 @@ while True:
     .unwrap();
     assert!(
         matches!(stale, GatewayResponse::Partial { ref coverage, .. }
-        if coverage == "analyzer-cancelled"),
-        "queued work from a closed lifetime cannot overwrite the reopened buffer: {stale:?}"
+            if coverage == "analyzer-invalid-response"),
+        "an older snapshot in the open lifetime is rejected locally: {stale:?}"
     );
+    let after_stale = authority.analyzer_readiness();
+    assert_eq!(after_stale.state(), AnalyzerState::Ready);
+    assert_eq!(after_stale.attempt(), healthy.attempt());
+    assert_eq!(after_stale.restart_attempts(), healthy.restart_attempts());
+    assert_eq!(after_stale.last_failure(), healthy.last_failure());
     let result = complete_semantic_request(
         &gateway,
-        &LspRequestId::Number(16),
+        &LspRequestId::Number(145),
         &request,
-        Some(&reopened_snapshot),
+        Some(&advanced_snapshot),
     )
     .await;
     assert!(matches!(
         result,
         SemanticResponse::DocumentSymbols(ref symbols)
-            if symbols.first().is_some_and(|symbol| symbol.name == "reopened snapshot")
+            if symbols.first().is_some_and(|symbol| symbol.name == "advanced reopened snapshot")
     ));
+
+    let closed_snapshot = LspSemanticDocumentSnapshot::from_overlay(&changed);
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match gateway.semantic_request_with_document(
+                &LspRequestId::Number(15),
+                &request,
+                Some(&closed_snapshot),
+                None,
+            ) {
+                GatewayResponse::Pending => tokio::task::yield_now().await,
+                outcome => return outcome,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(closed, GatewayResponse::Partial { ref coverage, .. }
+        if coverage == "analyzer-cancelled"),
+        "queued work from a closed lifetime cannot overwrite the reopened buffer: {closed:?}"
+    );
+    let after_closed = authority.analyzer_readiness();
+    assert_eq!(after_closed.state(), AnalyzerState::Ready);
+    assert_eq!(after_closed.attempt(), healthy.attempt());
+    assert_eq!(after_closed.restart_attempts(), healthy.restart_attempts());
+    assert_eq!(after_closed.last_failure(), healthy.last_failure());
+    let result = complete_semantic_request(
+        &gateway,
+        &LspRequestId::Number(16),
+        &request,
+        Some(&advanced_snapshot),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        SemanticResponse::DocumentSymbols(ref symbols)
+            if symbols.first().is_some_and(|symbol| symbol.name == "advanced reopened snapshot")
+    ));
+    let events = std::fs::read_to_string(&events_path).unwrap();
+    let pids = events
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["pid"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        pids.len(),
+        1,
+        "local rejection must retain the same analyzer PID"
+    );
 
     overlays.close(&uri).unwrap();
     broker
@@ -2005,7 +2360,11 @@ while True:
             .filter(|event| event["method"] == "change")
             .map(|event| event["text"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["unsaved snapshot two", "reopened snapshot"]
+        [
+            "unsaved snapshot two",
+            "reopened snapshot",
+            "advanced reopened snapshot"
+        ]
     );
     assert_eq!(events.last().unwrap()["text"], "stale disk text");
 
@@ -2575,6 +2934,7 @@ import json
 import sys
 
 documents = {}
+opened_a = False
 
 def read_message():
     headers = {}
@@ -2603,6 +2963,10 @@ def publish(uri, version, message=None):
     send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
           "params": {"uri": uri, "version": version, "diagnostics": diagnostics}})
 
+def synchronize_overlay_before_publication(text):
+    if text == "closed overlay finding":
+        tracedecay_maybe_phase("overlay-synchronized")
+
 while True:
     message = read_message()
     if message is None:
@@ -2613,16 +2977,22 @@ while True:
     elif method == "textDocument/didOpen":
         document = message["params"]["textDocument"]
         uri = document["uri"]
+        reopened_alias = uri.endswith("a.fake") and opened_a
+        if uri.endswith("a.fake"):
+            opened_a = True
         documents[uri] = document["version"]
-        publish(uri, document["version"], "retained finding" if uri.endswith("a.fake") else None)
+        synchronize_overlay_before_publication(document["text"])
+        message = document["text"] if reopened_alias else ("retained finding" if uri.endswith("a.fake") else None)
+        publish(uri, document["version"], message)
+    elif method == "textDocument/didClose":
+        documents.pop(message["params"]["textDocument"]["uri"], None)
     elif method == "textDocument/didChange":
         document = message["params"]["textDocument"]
         uri = document["uri"]
         text = message["params"]["contentChanges"][0]["text"]
         documents[uri] = document["version"]
         if uri.endswith("a.fake"):
-            if text == "closed overlay finding":
-                tracedecay_maybe_phase("overlay-synchronized")
+            synchronize_overlay_before_publication(text)
             publish(uri, document["version"], text)
             continue
         target = next(key for key in documents if key.endswith("a.fake"))
@@ -2754,6 +3124,7 @@ while True:
     assert_eq!(saved.diagnostics[0].file, "src/a.fake");
     assert_eq!(saved.diagnostics[0].message, "saved replacement");
 
+    let mut previous_findings = saved.diagnostics.clone();
     for close_previous_lifetime in [false, true] {
         if close_previous_lifetime {
             overlays.close(&uri).unwrap();
@@ -2780,10 +3151,21 @@ while True:
             .await
             .unwrap();
         let unchanged = broker.snapshot();
-        assert_eq!(
-            unchanged.diagnostics, saved.diagnostics,
-            "same-byte reopen can reuse the unchanged wire document without duplicating findings"
-        );
+        if close_previous_lifetime {
+            assert_eq!(
+                unchanged.diagnostics, previous_findings,
+                "a new lifetime with the retained presentation URI reuses the unchanged wire document"
+            );
+        } else {
+            let mut normalized = unchanged.diagnostics.clone();
+            for (finding, saved_finding) in normalized.iter_mut().zip(&saved.diagnostics) {
+                finding.updated_at = saved_finding.updated_at;
+            }
+            assert_eq!(
+                normalized, saved.diagnostics,
+                "a presentation-URI reopen republishes the same finding without duplicating it"
+            );
+        }
         assert_eq!(
             unchanged.coverage[FAKE_LANGUAGE].documents["src/a.fake"],
             lsp::client::DiagnosticDocumentCoverage::Published {
@@ -2791,6 +3173,7 @@ while True:
                 content_digest: tracedecay_domain::ContentDigest::of_bytes(b"saved replacement"),
             }
         );
+        previous_findings = unchanged.diagnostics;
     }
 }
 
