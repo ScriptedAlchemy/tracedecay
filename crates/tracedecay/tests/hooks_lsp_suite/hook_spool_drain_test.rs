@@ -636,18 +636,14 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
         sequences[0], sequences[1],
         "each linked-worktree edit must have its own committed broker record"
     );
-    assert!(
-        latency_until(
-            completion_deadline.saturating_duration_since(Instant::now()),
-            || bound_worktrees(&data_root) == 3,
-        )
-        .is_some(),
-        "both first edits must bind their worktrees before releasing publication (first={first}, second={second}): {}\n{}",
-        std::fs::read_to_string(&log).unwrap(),
-        std::fs::read_to_string(data_root.join("hook_analytics.jsonl")).unwrap(),
+    // The first open retains process-wide capacity admission through full
+    // publication. The other edit must commit its durable receipt above while
+    // waiting for that admission; its binding follows once the hold releases.
+    assert_eq!(
+        bound_worktrees(&data_root),
+        2,
+        "only the main checkout and the first core-published worktree are bound while publication is held"
     );
-    // Graph admission publishes hook bindings before the core hold. Full
-    // publication is the capability boundary this fixture actually holds.
     let full_markers = canonical_roots.each_ref().map(|root| {
         format_daemon_log_line(
             "project_open_phase",
