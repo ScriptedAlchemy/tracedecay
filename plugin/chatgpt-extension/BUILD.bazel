@@ -1,3 +1,5 @@
+load("@npm//plugin/chatgpt-extension:typescript/package_json.bzl", tsc_bin = "bin")
+load("@npm//plugin/chatgpt-extension:vitest/package_json.bzl", vitest_bin = "bin")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 
 npm_link_all_packages(name = "node_modules")
@@ -5,4 +7,20 @@ filegroup(
     name = "sources",
     srcs = glob(["**/*"]),
     visibility = ["//visibility:public"],
+)
+
+tsc_bin.tsc_test(
+    name = "typecheck",
+    include_types = True,
+    include_transitive_types = True,
+    data = [":sources", ":node_modules", "//sdks/typescript:dist"],
+    args = ["--noEmit"],
+    chdir = package_name(),
+)
+
+vitest_bin.vitest_test(
+    name = "adapter_test",
+    data = [":sources", ":node_modules", "//sdks/typescript:dist"],
+    args = ["run", "test/adapter.test.ts"],
+    chdir = package_name(),
 )
