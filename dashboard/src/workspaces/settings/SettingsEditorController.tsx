@@ -2,16 +2,12 @@
  * The controller: one state machine, and the one place a settings write is
  * issued from.
  *
- * It holds no state of its own beyond the machine. The authority is whatever
- * the last parsed read produced, the draft and the review live in the machine,
- * and a request exists only where the machine has reached `submitting`, which
- * it only does after re-deriving the confirmed change against the revision the
- * editor currently holds. There is no path from a click straight to a PATCH.
+ * It holds no state of its own beyond the machine. Each resource's authority
+ * comes from a parsed read or verified PATCH, the draft lives in the machine,
+ * and Save captures one patch against that revision before any request is issued.
  *
- * It is a hook rather than a panel because the effective-configuration table,
- * the inline review, and the inspector all read the same machine: the row that
- * says `edited`, the panel that shows the frozen patch, and the register that
- * says `review pending` are three views of one state.
+ * It is a hook rather than a panel because the table, inline editor, and
+ * inspector all read the same machine.
  */
 
 import { useMutation } from '@tanstack/react-query';
@@ -34,15 +30,14 @@ import { authorityValue, withFieldValue, type SettingsBinding } from './settings
 
 export interface SettingsEditorHandle {
   readonly state: SettingsEditorState;
-  /** Replace one bound field in the draft. Drops any open review, as the machine does. */
+  /** Replace one bound field in the draft. */
   readonly edit: (binding: SettingsBinding, value: unknown) => void;
   /** Take the authority's value back for one bound field, leaving other edits alone. */
   readonly revert: (binding: SettingsBinding) => void;
-  /** Freeze this scope's change against the held revision. */
-  readonly review: (scope: SettingsScope) => void;
-  readonly setConfirmed: (confirmed: boolean) => void;
-  readonly apply: () => void;
-  readonly dismiss: () => void;
+  /** Save this scope's current draft against its held revision. */
+  readonly save: (scope: SettingsScope) => void;
+  /** Retry the same immutable write with its original idempotency key. */
+  readonly retry: () => void;
   /** Discard every draft and take the authority's current values. */
   readonly reload: () => void;
 }
@@ -51,12 +46,14 @@ export function useSettingsEditor({
   payload,
   routes,
   writability,
-  onApplied,
+  refresh,
+  publishApplied,
 }: {
   payload: SettingsPayloadV1;
   routes: SettingsRoutes;
   writability: ScopeWritability;
-  onApplied: () => void;
+  refresh: () => Promise<SettingsPayloadV1 | null>;
+  publishApplied: (scope: SettingsScope, payload: SettingsPayloadV1) => Promise<void>;
 }): SettingsEditorHandle {
   const authority = useMemo(() => buildSettingsEditor(payload), [payload]);
   const [state, dispatch] = useReducer(
@@ -71,9 +68,12 @@ export function useSettingsEditor({
 
   const { mutate } = useMutation({
     mutationFn: applySettingsMutation,
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      // The table reads the canonical query snapshot. Publish the verified
+      // saved resource before clearing its proposal, even if readback stalls.
+      if (result.outcome === 'success') await publishApplied(result.scope, result.payload);
       dispatch({ type: 'submit_settled', result });
-      if (result.outcome === 'success') onApplied();
+      if (result.outcome === 'success') void refresh();
     },
     onError: (error) => {
       dispatch({
@@ -83,17 +83,16 @@ export function useSettingsEditor({
     },
   });
 
-  // The request is derived from the submitting state, so it cannot be built
-  // from a draft the machine has not checked. The ref keeps one entry into
-  // `submitting` to one PATCH; leaving the state releases it for a retry.
+  // One transition into `submitting` can issue one request. Leaving that state
+  // releases the guard for a retry with the same idempotency key.
   const inFlight = useRef<string | null>(null);
   useEffect(() => {
     if (state.status !== 'submitting') {
       inFlight.current = null;
       return;
     }
-    if (inFlight.current === state.review.reviewId) return;
-    inFlight.current = state.review.reviewId;
+    if (inFlight.current === state.submission.idempotencyKey) return;
+    inFlight.current = state.submission.idempotencyKey;
     // Project and ordinary user writes use the current project gateway reading.
     // The ProfileSessions worker preference is profile-global, so its request
     // never inherits selected-project writability.
@@ -126,27 +125,36 @@ export function useSettingsEditor({
     [state],
   );
 
-  const review = useCallback((scope: SettingsScope) => {
+  const save = useCallback((scope: SettingsScope) => {
     dispatch({
-      type: 'review_requested',
+      type: 'save_requested',
       scope,
       idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
     });
   }, []);
 
-  const setConfirmed = useCallback((confirmed: boolean) => {
-    dispatch({ type: 'confirmation_set', confirmed });
-  }, []);
-  const apply = useCallback(() => dispatch({ type: 'submit_started' }), []);
-  const dismiss = useCallback(() => dispatch({ type: 'review_dismissed' }), []);
-  const reload = useCallback(() => {
-    dispatch({ type: 'reloaded_from_authority' });
-    onApplied();
-  }, [onApplied]);
+  const retry = useCallback(() => dispatch({ type: 'retry_requested' }), []);
+  const reloadPending = useRef(false);
+  const reload = useCallback(async () => {
+    if (reloadPending.current) return;
+    reloadPending.current = true;
+    try {
+      const current = await refresh();
+      const reloadedAuthority = current === null ? null : buildSettingsEditor(current);
+      // A failed or pending read cannot settle an uncertain write. Carry the
+      // successful read explicitly: React Query may reuse a snapshot already
+      // observed while the draft was dirty, so its effect need not run again.
+      if (reloadedAuthority !== null) {
+        dispatch({ type: 'reloaded_from_authority', authority: reloadedAuthority });
+      }
+    } finally {
+      reloadPending.current = false;
+    }
+  }, [refresh]);
 
   return useMemo(
-    () => ({ state, edit, revert, review, setConfirmed, apply, dismiss, reload }),
-    [state, edit, revert, review, setConfirmed, apply, dismiss, reload],
+    () => ({ state, edit, revert, save, retry, reload }),
+    [state, edit, revert, save, retry, reload],
   );
 }
 
