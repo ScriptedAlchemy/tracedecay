@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import settingsWire from '../../test/fixtures/settings-patch.json';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
-import { useScope, type ScopeWritability } from '../../data/scope/store.ts';
+import { scopedQueryKey, useScope, type ScopeWritability } from '../../data/scope/store.ts';
 import { SettingsPage, findConfigSection } from './SettingsPage.tsx';
 import { applySettingsMutation } from './settingsMutation.ts';
 
@@ -104,7 +104,7 @@ function projectPatchResponse(current: unknown) {
 
 /**
  * These suites assert the exact request sequence the settings write protocol
- * performs: read, re-read for the confirmation, patch, refresh. The page also
+ * performs: initial read, preflight read, patch, and refresh. The page also
  * reads `/api/capabilities` and `/api/remote/status` for the inspector, which
  * are neither part of that protocol nor able to affect it, so the recorders
  * below keep only settings traffic.
@@ -125,20 +125,20 @@ async function findRow(key: string): Promise<HTMLElement> {
   return waitFor(() => row(key));
 }
 
-/** Select a row and wait for its review to open under it. */
-async function openReview(user: ReturnType<typeof userEvent.setup>, key: string) {
+/** Select a row and wait for its editor to open under it. */
+async function openEditor(user: ReturnType<typeof userEvent.setup>, key: string) {
   await user.click(await findRow(key));
   return waitFor(() => {
-    const panel = document.querySelector<HTMLElement>(`[data-settings-review="${key}"]`);
-    if (!panel) throw new Error(`no review open for ${key}`);
+    const panel = document.querySelector<HTMLElement>(`[data-settings-editor="${key}"]`);
+    if (!panel) throw new Error(`no editor open for ${key}`);
     return panel;
   });
 }
 
-const proposal = (key: string) => screen.getByLabelText(`Proposed value for ${key}`);
-const reviewReadout = () => document.querySelector('[data-review]')?.getAttribute('data-review');
+const proposal = (key: string) => screen.getByLabelText(`Edit ${key}`);
+const saveReadout = () => document.querySelector('[data-save-status]')?.getAttribute('data-save-status');
 
-describe('SettingsPage effective configuration review', () => {
+describe('SettingsPage direct settings editing', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     useScope.getState().selectAllProjects();
@@ -162,7 +162,7 @@ describe('SettingsPage effective configuration review', () => {
     expect(within(inspection).getByText('reported on apply')).toBeTruthy();
     // Inspecting is not selecting: no review opened, the row is not pressed.
     expect(target.getAttribute('aria-selected')).toBe('false');
-    expect(document.querySelector('[data-settings-review]')).toBeNull();
+    expect(document.querySelector('[data-settings-editor]')).toBeNull();
 
     // Focus is the keyboard's hover.
     act(() => row(POLL_SECS).focus());
@@ -207,7 +207,7 @@ describe('SettingsPage effective configuration review', () => {
     expect(within(row('storage.store_root')).getByText('origin not served')).toBeTruthy();
   });
 
-  it('reviews and applies a project patch with the held revision', async () => {
+  it('saves a project edit directly with its current revision and reports the result', async () => {
     const calls: Array<{ url: string; method: string; body: unknown }> = [];
     let applied = false;
     vi.stubGlobal(
@@ -232,9 +232,8 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    const panel = await openReview(user, MAX_FILE_SIZE);
-    expect(reviewReadout()).toBe('none');
-    expect(within(panel).getByText('rev-42')).toBeTruthy();
+    const panel = await openEditor(user, MAX_FILE_SIZE);
+    expect(saveReadout()).toBe('none');
     expect(within(panel).getByText('applies to the active project')).toBeTruthy();
 
     const input = proposal(MAX_FILE_SIZE);
@@ -245,28 +244,22 @@ describe('SettingsPage effective configuration review', () => {
     expect(within(row(MAX_FILE_SIZE)).getByText('1,048,576')).toBeTruthy();
     expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy();
     expect(document.querySelector('[data-settings-validation]')?.getAttribute('data-settings-validation')).toBe('ready');
-    expect(reviewReadout()).toBe('proposal');
-
-    await user.click(within(panel).getByRole('button', { name: 'Review project change' }));
-    expect(reviewReadout()).toBe('pending');
-    expect(within(panel).getByText(/"max_file_size": 2097152/)).toBeTruthy();
-    expect(within(panel).getByRole('button', { name: 'Apply project settings' }).hasAttribute('disabled')).toBe(true);
-    await user.click(
-      within(panel).getByRole('checkbox', {
-        name: /I confirm this change against configuration revision rev-42/,
-      }),
-    );
-    await user.click(within(panel).getByRole('button', { name: 'Apply project settings' }));
+    expect(saveReadout()).toBe('unsaved');
+    expect(within(panel).queryByRole('checkbox')).toBeNull();
+    expect(within(panel).queryByRole('button', { name: /Review/ })).toBeNull();
+    const save = within(panel).getByRole('button', { name: 'Save' });
+    save.focus();
+    await user.keyboard('{Enter}');
 
     expect(await screen.findByText('Project settings saved')).toBeTruthy();
     expect(screen.getByText('Receipt reconciliation pending')).toBeTruthy();
     expect(screen.getByText('Resync recommended')).toBeTruthy();
-    expect(reviewReadout()).toBe('applied');
+    expect(saveReadout()).toBe('applied');
     // The effective value is the read-back, and the proposal is gone.
     await waitFor(() => expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved'));
     expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy();
     expect(within(panel).getByText('revision now rev-43')).toBeTruthy();
-    // Focus returned to the edited row once the review resolved.
+    // Focus returns to the edited row after the save resolves.
     expect(document.activeElement).toBe(row(MAX_FILE_SIZE));
     expect(calls.map(({ method, url }) => `${method} ${url}`)).toEqual([
       'GET /api/settings',
@@ -281,7 +274,179 @@ describe('SettingsPage effective configuration review', () => {
     });
   });
 
-  it('round trips an exact code-index worker selection through review, PATCH, and refresh', async () => {
+  it('keeps the applied value visible while the follow-up read is pending', async () => {
+    const before = settings();
+    (settingsBody(before)['automation'] as Record<string, unknown>)['configuration_revision_id'] = 'rev-42';
+    const after = updatedSettings('rev-43');
+    (settingsBody(after)['automation'] as Record<string, unknown>)['configuration_revision_id'] = 'rev-43';
+    let applied = false;
+    let finishRead: ((response: Response) => void) | undefined;
+    const readback = new Promise<Response>((resolve) => { finishRead = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/project' && init?.method === 'PATCH') {
+        applied = true;
+        return jsonResponse(projectPatchResponse(after));
+      }
+      if (url === '/api/settings') return applied ? readback : jsonResponse(before);
+      return jsonResponse(FIXTURES[url]);
+    }));
+    const user = userEvent.setup();
+    renderSettings();
+
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('Project settings saved')).toBeTruthy();
+    expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved');
+    expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy();
+    expect(within(row(MAX_FILE_SIZE)).queryByText('1,048,576')).toBeNull();
+    expect(within(row('project.configuration_revision_id')).getByText('rev-43')).toBeTruthy();
+    expect(within(row('automation.configuration_revision_id')).getByText('rev-43')).toBeTruthy();
+    expect(within(row('automation.configuration_revision_id')).queryByText('rev-42')).toBeNull();
+    await act(async () => { finishRead?.(jsonResponse(after)); });
+  });
+
+  it('preserves another scope\'s proposal and original CAS revision after a save and refresh', async () => {
+    const current = settings();
+    const writes: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        writes.push({ url, body });
+        if (url === '/api/settings/project') {
+          settingsBody(current)['project'] = settingsBody(updatedSettings('rev-43'))['project'];
+          return jsonResponse(projectPatchResponse(current));
+        }
+        if (url === '/api/settings/user') {
+          const savedUser = settingsBody(current)['user'] as Record<string, unknown>;
+          savedUser['configuration_revision_id'] = 'user-rev-8';
+          savedUser['watcher_debounce'] = body['watcher_debounce'];
+          return jsonResponse(current);
+        }
+      }
+      if (url === '/api/settings') return jsonResponse(current);
+      return jsonResponse(FIXTURES[url]);
+    }));
+    const user = userEvent.setup();
+    renderSettings();
+
+    await openEditor(user, WATCHER_DEBOUNCE);
+    await user.clear(proposal(WATCHER_DEBOUNCE));
+    await user.type(proposal(WATCHER_DEBOUNCE), '15s');
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Project settings saved')).toBeTruthy();
+    await waitFor(() => expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved'));
+    expect(row(WATCHER_DEBOUNCE).dataset['provenance']).toBe('edited');
+
+    await openEditor(user, WATCHER_DEBOUNCE);
+    expect((proposal(WATCHER_DEBOUNCE) as HTMLInputElement).value).toBe('15s');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('User settings saved')).toBeTruthy();
+    expect(writes).toEqual([
+      { url: '/api/settings/project', body: {
+        expected_revision_id: 'rev-42', idempotency_key: expect.any(String), max_file_size: 2_097_152,
+      } },
+      { url: '/api/settings/user', body: {
+        expected_revision_id: 'user-rev-7', idempotency_key: expect.any(String), watcher_debounce: '15s',
+      } },
+    ]);
+  });
+
+  it('takes fresh values and revision for a clean scope while another scope remains edited', async () => {
+    const current = settings();
+    const writes: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/user' && init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        writes.push(body);
+        const savedUser = settingsBody(current)['user'] as Record<string, unknown>;
+        savedUser['configuration_revision_id'] = 'user-rev-9';
+        savedUser['watcher_debounce'] = body['watcher_debounce'];
+      }
+      return jsonResponse(url.startsWith('/api/settings') ? current : FIXTURES[url]);
+    }));
+    const user = userEvent.setup();
+    const { client } = renderSettings();
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+
+    const refreshedUser = settingsBody(current)['user'] as Record<string, unknown>;
+    refreshedUser['configuration_revision_id'] = 'user-rev-8';
+    refreshedUser['watcher_debounce'] = '20s';
+    await act(() => client.invalidateQueries({ queryKey: ['settings'] }));
+    await openEditor(user, WATCHER_DEBOUNCE);
+    expect((proposal(WATCHER_DEBOUNCE) as HTMLInputElement).value).toBe('20s');
+    await user.clear(proposal(WATCHER_DEBOUNCE));
+    await user.type(proposal(WATCHER_DEBOUNCE), '25s');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('User settings saved')).toBeTruthy();
+    expect(writes).toEqual([{
+      expected_revision_id: 'user-rev-8', idempotency_key: expect.any(String), watcher_debounce: '25s',
+    }]);
+    expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('edited');
+    await openEditor(user, MAX_FILE_SIZE);
+    expect((proposal(MAX_FILE_SIZE) as HTMLInputElement).value).toBe('2097152');
+  });
+
+  it('publishes a completing save only to the project where it was submitted', async () => {
+    const selectedScope = {
+      kind: 'project', projectId: 'proj_other', label: 'Other project', activation: 'selected',
+    } as const;
+    const selected = settings();
+    const selectedProject = settingsBody(selected)['project'] as Record<string, unknown>;
+    selectedProject['configuration_revision_id'] = 'other-rev-1';
+    (selectedProject['config'] as Record<string, unknown>)['max_file_size'] = 4096;
+    let finishPatch: ((response: Response) => void) | undefined;
+    const patch = new Promise<Response>((resolve) => { finishPatch = resolve; });
+    let patchStarted = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/project' && init?.method === 'PATCH') {
+        patchStarted = true;
+        return patch;
+      }
+      if (url === '/api/settings') return jsonResponse(settings());
+      if (url === '/api/projects/proj_other/settings') return jsonResponse(selected);
+      return jsonResponse(FIXTURES[url]);
+    }));
+    const user = userEvent.setup();
+    const { client } = renderSettings();
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(patchStarted).toBe(true));
+
+    await act(async () => {
+      client.setQueryData(scopedQueryKey(selectedScope, ['settings'], '/api/settings'), {
+        outcome: 'ok', data: selected,
+      });
+      useScope.setState({ scope: selectedScope });
+    });
+    expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy();
+    expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved');
+    await act(async () => {
+      finishPatch?.(jsonResponse(projectPatchResponse(updatedSettings('rev-43'))));
+    });
+    await waitFor(() => expect(client.getQueryData(
+      scopedQueryKey({ kind: 'all' }, ['settings'], '/api/settings'),
+    )).toMatchObject({ data: { payload: { project: {
+      configuration_revision_id: 'rev-43', config: { max_file_size: 2_097_152 },
+    } } } }));
+    expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy();
+    expect(screen.queryByText('Project settings saved')).toBeNull();
+  });
+
+  it('saves a worker selection through its profile revision and refreshes it', async () => {
     useScope.setState({
       scope: {
         kind: 'project',
@@ -291,6 +456,12 @@ describe('SettingsPage effective configuration review', () => {
       },
     });
     const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const selected = settings();
+    const selectedProject = settingsBody(selected)['project'] as Record<string, unknown>;
+    (selectedProject['config'] as Record<string, unknown>)['max_file_size'] = 4096;
+    (settingsBody(selected)['user'] as Record<string, unknown>)['watcher_debounce'] = '20s';
+    let finishRead: ((response: Response) => void) | undefined;
+    const readback = new Promise<Response>((resolve) => { finishRead = resolve; });
     let applied = false;
     vi.stubGlobal(
       'fetch',
@@ -300,7 +471,7 @@ describe('SettingsPage effective configuration review', () => {
         const body = init?.body ? JSON.parse(String(init.body)) : null;
         if (url.includes('/settings')) calls.push({ url, method, body });
         if (url === '/api/projects/proj_other/settings' && method === 'GET') {
-          return jsonResponse(applied ? updatedWorkerSettings('profile-worker-rev-8') : settings());
+          return applied ? readback : jsonResponse(selected);
         }
         if (url === '/api/settings' && method === 'GET') {
           return jsonResponse(applied ? updatedWorkerSettings('profile-worker-rev-8') : settings());
@@ -320,7 +491,7 @@ describe('SettingsPage effective configuration review', () => {
     expect(within(row('user.code_index_worker_status.limiting_reason')).getByText('automatic_all_cores')).toBeTruthy();
     expect(within(row(WORKERS)).getByText('automatic')).toBeTruthy();
 
-    const panel = await openReview(user, WORKERS);
+    const panel = await openEditor(user, WORKERS);
     expect(within(panel).getByText('daemon restart')).toBeTruthy();
     expect(within(panel).getByText('applies to your TraceDecay profile')).toBeTruthy();
     await user.click(screen.getByLabelText('Exact number of cores'));
@@ -328,17 +499,16 @@ describe('SettingsPage effective configuration review', () => {
     await user.clear(workers);
     await user.type(workers, '4');
     expect(within(row(WORKERS)).getByText('exact · 4 workers')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Review code-index worker change' }));
-    expect(within(panel).getByText(/"mode": "exact"/)).toBeTruthy();
-    await user.click(
-      screen.getByRole('checkbox', {
-        name: /I confirm this change against configuration revision profile-worker-rev-7/,
-      }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Apply code-index worker selection' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(await screen.findByText('Code-index worker selection saved')).toBeTruthy();
     expect(screen.getByText('Restart recommended')).toBeTruthy();
+    // The profile PATCH returns the active project's snapshot. While the
+    // selected-project read is pending, only its worker resource may advance.
+    expect(row(WORKERS).dataset['provenance']).toBe('unserved');
+    expect(within(row(WORKERS)).getByText('exact · 4 workers')).toBeTruthy();
+    expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy();
+    expect(within(row(WATCHER_DEBOUNCE)).getByText('20s')).toBeTruthy();
     expect(calls).toEqual([
       { method: 'GET', url: '/api/projects/proj_other/settings', body: null },
       { method: 'GET', url: '/api/settings', body: null },
@@ -353,6 +523,10 @@ describe('SettingsPage effective configuration review', () => {
       },
       { method: 'GET', url: '/api/projects/proj_other/settings', body: null },
     ]);
+    const selectedUser = settingsBody(selected)['user'] as Record<string, unknown>;
+    selectedUser['code_index_workers'] = { mode: 'exact', workers: 4 };
+    selectedUser['code_index_worker_configuration_revision_id'] = 'profile-worker-rev-8';
+    await act(async () => { finishRead?.(jsonResponse(selected)); });
   });
 
   it('states when TRACEDECAY_INDEX_WORKERS overrides the persisted worker selection', async () => {
@@ -371,7 +545,7 @@ describe('SettingsPage effective configuration review', () => {
     renderSettings();
 
     expect(within(await findRow('user.code_index_worker_status.environment_override_workers')).getByText('7')).toBeTruthy();
-    await openReview(events, WORKERS);
+    await openEditor(events, WORKERS);
     expect(
       screen.getByText(
         'TRACEDECAY_INDEX_WORKERS=7 overrides the persisted worker selection for this running daemon.',
@@ -387,7 +561,7 @@ describe('SettingsPage effective configuration review', () => {
     const events = userEvent.setup();
     renderSettings();
 
-    await openReview(events, WORKERS);
+    await openEditor(events, WORKERS);
     expect(
       screen.getByText(
         'Current CPU and memory admission limits are unavailable; an exact count is judged when the daemon restarts.',
@@ -409,14 +583,38 @@ describe('SettingsPage effective configuration review', () => {
     vi.stubGlobal('fetch', fetch);
     const user = userEvent.setup();
     renderSettings();
-    await openReview(user, MAX_FILE_SIZE);
+    await openEditor(user, MAX_FILE_SIZE);
     await user.clear(proposal(MAX_FILE_SIZE));
     await user.type(proposal(MAX_FILE_SIZE), '2097152');
-    await user.click(screen.getByRole('button', { name: 'Review project change' }));
-    await user.click(screen.getByRole('checkbox', { name: /I confirm this change against configuration revision rev-42/ }));
-    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
-    expect(await screen.findByText(/Refresh current values before retrying/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/The settings change may have been applied/)).toBeTruthy();
     expect(screen.queryByText('Project settings saved')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry project settings' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Load current values' }));
+    await waitFor(() => expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy());
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === 'PATCH')).toHaveLength(1);
+    expect(screen.queryByText('Project settings saved')).toBeNull();
+  });
+
+  it('requires readback after an incomplete PATCH response without repeating the write', async () => {
+    let applied = false;
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') {
+        applied = true;
+        return jsonResponse({});
+      }
+      return jsonResponse(applied ? updatedSettings('rev-43') : settings());
+    });
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    renderSettings();
+
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(/the change may have been applied/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Retry project settings' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Load current values' }));
     await waitFor(() => expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy());
@@ -448,28 +646,89 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    await openReview(user, MAX_FILE_SIZE);
+    await openEditor(user, MAX_FILE_SIZE);
     const input = proposal(MAX_FILE_SIZE);
     await user.clear(input);
     await user.type(input, '2097152');
-    await user.click(screen.getByRole('button', { name: 'Review project change' }));
-    await user.click(
-      screen.getByRole('checkbox', {
-        name: /I confirm this change against configuration revision rev-42/,
-      }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(
       await screen.findByText(
-        'Another writer saved project settings after this form loaded. Your draft was based on rev-42; the current authority is rev-43. Nothing was applied.',
+        'Settings changed since you loaded them. Your save was not applied. Load the current values, review your changes, and save again.',
       ),
     ).toBeTruthy();
-    expect(reviewReadout()).toBe('conflict');
+    expect(saveReadout()).toBe('conflict');
     await user.click(screen.getByRole('button', { name: 'Load current values' }));
     expect(await screen.findByDisplayValue('4096')).toBeTruthy();
     expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy();
     expect(methods).toEqual(['GET /api/settings', 'GET /api/settings', 'GET /api/settings']);
+  });
+
+  it('loads a conflict revision already observed while the draft was dirty', async () => {
+    let current = settings();
+    const patches: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/project' && init?.method === 'PATCH') {
+        patches.push(JSON.parse(String(init.body)));
+        current = updatedSettings('rev-44');
+        return jsonResponse(projectPatchResponse(current));
+      }
+      return jsonResponse(current);
+    }));
+    const user = userEvent.setup();
+    const { client } = renderSettings();
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+
+    current = updatedSettings('rev-43');
+    const project = settingsBody(current)['project'] as Record<string, unknown>;
+    (project['config'] as Record<string, unknown>)['max_file_size'] = 4096;
+    await act(() => client.invalidateQueries({ queryKey: ['settings'] }));
+    await waitFor(() => expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy());
+    expect((proposal(MAX_FILE_SIZE) as HTMLInputElement).value).toBe('2097152');
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText(/Settings changed since you loaded them/);
+    await user.click(screen.getByRole('button', { name: 'Load current values' }));
+    expect(await screen.findByDisplayValue('4096')).toBeTruthy();
+
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText('Project settings saved');
+    expect(patches).toEqual([expect.objectContaining({ expected_revision_id: 'rev-43' })]);
+  });
+
+  it('keeps an uncertain write locked until its requested reload completes', async () => {
+    let patchAttempted = false;
+    let finishReload!: (response: Response) => void;
+    const reloadResponse = new Promise<Response>((resolve) => { finishReload = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/project' && init?.method === 'PATCH') {
+        patchAttempted = true;
+        throw new TypeError('connection lost');
+      }
+      if (url === '/api/settings' && patchAttempted) return reloadResponse;
+      return jsonResponse(settings());
+    }));
+    const user = userEvent.setup();
+    renderSettings();
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText(/The connection was lost while saving/);
+    await user.click(screen.getByRole('button', { name: 'Load current values' }));
+
+    expect(screen.getByText(/The connection was lost while saving/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    await act(async () => { finishReload(jsonResponse(updatedSettings('rev-43'))); });
+    expect(await screen.findByDisplayValue('2097152')).toBeTruthy();
+    expect(screen.queryByText(/The connection was lost while saving/)).toBeNull();
+    expect(saveReadout()).toBe('none');
   });
 
   it('locks both configuration_batch scopes when the effect is withdrawn, and says why', async () => {
@@ -490,15 +749,16 @@ describe('SettingsPage effective configuration review', () => {
     // The worker resource keeps its distinct ProfileSessions authority.
     expect(row(WORKERS).dataset['write']).toBe('writable');
 
-    const panel = await openReview(user, MAX_FILE_SIZE);
-    expect(within(panel).getByText(/this dashboard is not authorized to apply project settings/)).toBeTruthy();
+    const panel = await openEditor(user, MAX_FILE_SIZE);
+    expect(within(panel).getByText(/cannot change project settings\. Ask an administrator/)).toBeTruthy();
     expect(panel.querySelector('[data-settings-gate="unauthorized"]')).toBeTruthy();
-    expect(screen.queryByLabelText(`Proposed value for ${MAX_FILE_SIZE}`)).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Review project change' })).toBeNull();
+    expect(screen.queryByLabelText(`Edit ${MAX_FILE_SIZE}`)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
     expect(calls).toEqual(['GET /api/settings']);
   });
 
   it('reports a withdrawn authority as unavailable rather than a failed write', async () => {
+    const patchKeys: string[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -506,6 +766,8 @@ describe('SettingsPage effective configuration review', () => {
         const method = init?.method ?? 'GET';
         if (url === '/api/settings' && method === 'GET') return jsonResponse(settings());
         if (url === '/api/settings/project' && method === 'PATCH') {
+          const body = JSON.parse(String(init?.body)) as { idempotency_key: string };
+          patchKeys.push(body.idempotency_key);
           return jsonResponse(
             {
               code: 'configuration_authority_unavailable',
@@ -520,24 +782,22 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    await openReview(user, MAX_FILE_SIZE);
+    await openEditor(user, MAX_FILE_SIZE);
     const input = proposal(MAX_FILE_SIZE);
     await user.clear(input);
     await user.type(input, '2097152');
-    await user.click(screen.getByRole('button', { name: 'Review project change' }));
-    await user.click(
-      screen.getByRole('checkbox', {
-        name: /I confirm this change against configuration revision rev-42/,
-      }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(
       await screen.findByText('Nothing was applied: configuration authority is unavailable.'),
     ).toBeTruthy();
-    expect(reviewReadout()).toBe('withdrawn');
+    expect(saveReadout()).toBe('unavailable');
     expect(screen.getByRole('button', { name: 'Retry project settings' })).toBeTruthy();
     expect(screen.queryByText('Project settings saved')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Retry project settings' }));
+    await waitFor(() => expect(patchKeys).toHaveLength(2));
+    expect(patchKeys[1]).toBe(patchKeys[0]);
   });
 
   it('shows client validation live and never sends an invalid patch', async () => {
@@ -553,7 +813,7 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    await openReview(user, POLL_SECS);
+    await openEditor(user, POLL_SECS);
     const poll = proposal(POLL_SECS);
     await user.clear(poll);
     await user.type(poll, '59');
@@ -566,7 +826,7 @@ describe('SettingsPage effective configuration review', () => {
     expect(document.getElementById(pollError ?? '')?.textContent).toBe(
       'auto_track_pr_poll_secs must be at least 60 seconds',
     );
-    expect(screen.getByRole('button', { name: 'Review project change' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
     expect(calls).toEqual(['GET /api/settings']);
   });
 
@@ -602,31 +862,25 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    await openReview(user, WATCHER_DEBOUNCE);
+    await openEditor(user, WATCHER_DEBOUNCE);
     const debounce = proposal(WATCHER_DEBOUNCE);
     await user.clear(debounce);
     await user.type(debounce, '15s');
-    await user.click(screen.getByRole('button', { name: 'Review user change' }));
-    await user.click(
-      screen.getByRole('checkbox', {
-        name: /I confirm this change against configuration revision user-rev-7/,
-      }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Apply user settings' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(
       (await screen.findAllByText('watcher debounce is denied by the active profile policy')).length,
     ).toBeGreaterThan(0);
     expect(screen.getByText(/The daemon rejected this user settings change/)).toBeTruthy();
-    expect(reviewReadout()).toBe('rejected');
+    expect(saveReadout()).toBe('rejected');
     expect(debounce.getAttribute('aria-invalid')).toBe('true');
     const debounceError = debounce.getAttribute('aria-describedby');
     expect(debounceError).not.toBeNull();
     expect(document.getElementById(debounceError ?? '')?.textContent).toBe(
       'watcher debounce is denied by the active profile policy',
     );
-    // The frozen review is gone; the draft is intact for another attempt.
-    expect(document.querySelector('[data-settings-stage]')).toBeNull();
+    // The draft remains editable after server validation.
+    expect(document.querySelector('[data-settings-save]')).toBeNull();
     expect(calls).toEqual([
       { method: 'GET', url: '/api/settings', body: null },
       { method: 'GET', url: '/api/settings', body: null },
@@ -642,7 +896,7 @@ describe('SettingsPage effective configuration review', () => {
     ]);
   });
 
-  it('keeps a verdict visible after its panel is closed, and lets a locked scope release it', async () => {
+  it('keeps a conflict visible after the editor closes until current values are loaded', async () => {
     let getCount = 0;
     let authorityWithdrawn = false;
     vi.stubGlobal(
@@ -664,45 +918,30 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     const { client } = renderSettings();
 
-    await openReview(user, MAX_FILE_SIZE);
+    await openEditor(user, MAX_FILE_SIZE);
     const input = proposal(MAX_FILE_SIZE);
     await user.clear(input);
     await user.type(input, '2097152');
-    await user.click(screen.getByRole('button', { name: 'Review project change' }));
-    await user.click(
-      screen.getByRole('checkbox', {
-        name: /I confirm this change against configuration revision rev-42/,
-      }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
-    await screen.findByText(/Another writer saved project settings/);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText(/Settings changed since you loaded them/);
 
-    // Closing the panel does not resolve the review; the inspector still
-    // states it, and another scope's row names the real status.
+    // Closing the editor does not hide the conflict from the inspector.
+    row(MAX_FILE_SIZE).focus();
     await user.keyboard('{Escape}');
-    expect(document.querySelector('[data-settings-review]')).toBeNull();
-    const held = document.querySelector('[data-settings-held-review]');
-    expect(held?.getAttribute('data-settings-held-review')).toBe('conflicted');
-    expect(held?.textContent).toContain('in conflict');
-    expect(held?.textContent).toContain('rev-42');
-    await openReview(user, WATCHER_DEBOUNCE);
-    expect(document.querySelector('[data-settings-other-review]')?.textContent).toContain(
-      'A project review is in conflict',
+    expect(document.querySelector('[data-settings-editor]')).toBeNull();
+    expect(document.querySelector('[data-settings-save-status="conflicted"]')?.textContent).toContain(
+      'conflict',
     );
 
-    // The daemon withdraws the configuration effect while the verdict is held:
-    // the refetch moves the authority (the review is superseded) and locks the
-    // scope. The locked panel cannot apply, but it can still let the review go.
+    // The authority may become read-only while the conflict is held. The only
+    // available resolution is to load its current values.
     authorityWithdrawn = true;
     await act(() => client.invalidateQueries({ queryKey: ['settings'] }));
     await waitFor(() => expect(row(MAX_FILE_SIZE).dataset['write']).toBe('locked'));
-    await user.keyboard('{Escape}');
-    const locked = await openReview(user, MAX_FILE_SIZE);
+    const locked = await openEditor(user, MAX_FILE_SIZE);
     expect(locked.querySelector('[data-settings-gate="unauthorized"]')).toBeTruthy();
-    expect(locked.querySelector('[data-settings-stage="review_superseded"]')).toBeTruthy();
-    await user.click(within(locked).getByRole('button', { name: 'Cancel review' }));
-    expect(document.querySelector('[data-settings-held-review]')).toBeNull();
-    expect(document.querySelector('[data-settings-stage]')).toBeNull();
+    await user.click(within(locked).getByRole('button', { name: 'Load current values' }));
+    expect(document.querySelector('[data-settings-save-status]')).toBeNull();
   });
 
   it('lets a fresh proposal take over from the last receipt', async () => {
@@ -725,28 +964,22 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    await openReview(user, MAX_FILE_SIZE);
+    await openEditor(user, MAX_FILE_SIZE);
     const input = proposal(MAX_FILE_SIZE);
     await user.clear(input);
     await user.type(input, '2097152');
-    await user.click(screen.getByRole('button', { name: 'Review project change' }));
-    await user.click(
-      screen.getByRole('checkbox', {
-        name: /I confirm this change against configuration revision rev-42/,
-      }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText('Project settings saved')).toBeTruthy();
     await waitFor(() => expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved'));
 
     await user.clear(proposal(MAX_FILE_SIZE));
     await user.type(proposal(MAX_FILE_SIZE), '4096');
     expect(screen.queryByText('Project settings saved')).toBeNull();
-    expect(reviewReadout()).toBe('proposal');
+    expect(saveReadout()).toBe('unsaved');
     expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('edited');
   });
 
-  it('pins the review while its write is in flight so the verdict cannot be hidden', async () => {
+  it('keeps the pending save visible and prevents edits until it settles', async () => {
     let releasePatch: (() => void) | null = null;
     vi.stubGlobal(
       'fetch',
@@ -769,32 +1002,26 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    await openReview(user, MAX_FILE_SIZE);
+    await openEditor(user, MAX_FILE_SIZE);
     const input = proposal(MAX_FILE_SIZE);
     await user.clear(input);
     await user.type(input, '2097152');
-    await user.click(screen.getByRole('button', { name: 'Review project change' }));
-    await user.click(
-      screen.getByRole('checkbox', {
-        name: /I confirm this change against configuration revision rev-42/,
-      }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
-    await waitFor(() => expect(reviewReadout()).toBe('applying'));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(saveReadout()).toBe('saving'));
 
     // Neither the close control, Escape, nor selecting another row may take
     // the panel away while the write is out.
-    expect(screen.getByRole('button', { name: 'Close review' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close editor' }).hasAttribute('disabled')).toBe(true);
     await user.keyboard('{Escape}');
     await user.click(row(POLL_SECS));
-    expect(document.querySelector(`[data-settings-review="${MAX_FILE_SIZE}"]`)).toBeTruthy();
+    expect(document.querySelector(`[data-settings-editor="${MAX_FILE_SIZE}"]`)).toBeTruthy();
     expect(row(POLL_SECS).getAttribute('aria-selected')).toBe('false');
 
     act(() => releasePatch?.());
     expect(
       await screen.findByText('Nothing was applied: configuration authority is unavailable.'),
     ).toBeTruthy();
-    expect(reviewReadout()).toBe('withdrawn');
+    expect(saveReadout()).toBe('unavailable');
   });
 
   it('states a key without a write path as read-only rather than locked or denied', async () => {
@@ -803,14 +1030,14 @@ describe('SettingsPage effective configuration review', () => {
     renderSettings();
 
     expect((await findRow('storage.store_root')).dataset['write']).toBe('no_write_path');
-    const panel = await openReview(user, 'storage.store_root');
+    const panel = await openEditor(user, 'storage.store_root');
     expect(panel.querySelector('[data-settings-gate="no_write_path"]')).toBeTruthy();
-    expect(within(panel).getByText(/no settings PATCH route addresses it/)).toBeTruthy();
-    expect(within(panel).queryByRole('button', { name: /Review/ })).toBeNull();
+    expect(within(panel).getByText(/not editable here/i)).toBeTruthy();
+    expect(within(panel).queryByRole('button', { name: 'Save' })).toBeNull();
     expect(within(panel).queryByRole('textbox')).toBeNull();
   });
 
-  it('opens a review from the keyboard, closes it with Escape, and returns focus to the row', async () => {
+  it('opens the editor from the keyboard and closes it with Escape', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settings())));
     const user = userEvent.setup();
     renderSettings();
@@ -823,11 +1050,11 @@ describe('SettingsPage effective configuration review', () => {
     expect(second.dataset['key']).not.toBe('project.config.context_scout');
     await user.keyboard('{Enter}');
     const key = second.dataset['key'] ?? '';
-    expect(document.querySelector(`[data-settings-review="${key}"]`)).toBeTruthy();
+    expect(document.querySelector(`[data-settings-editor="${key}"]`)).toBeTruthy();
     expect(second.getAttribute('aria-selected')).toBe('true');
 
     await user.keyboard('{Escape}');
-    expect(document.querySelector('[data-settings-review]')).toBeNull();
+    expect(document.querySelector('[data-settings-editor]')).toBeNull();
     expect(document.activeElement).toBe(row(key));
   });
 
@@ -898,7 +1125,7 @@ describe('Settings scope authority', () => {
     expect(row(WORKERS).dataset['write']).toBe('writable');
     expect(document.querySelector('[data-settings-scope="read_only"]')).toBeTruthy();
 
-    const panel = await openReview(user, MAX_FILE_SIZE);
+    const panel = await openEditor(user, MAX_FILE_SIZE);
     const gate = panel.querySelector('[data-settings-gate="read_only"]');
     expect(gate?.textContent).toContain('is not the active project');
     expect(gate?.textContent).toContain('Switch scope to the active project');
@@ -924,9 +1151,9 @@ describe('Settings scope authority', () => {
 
     expect((await findRow(WATCHER_DEBOUNCE)).dataset['write']).toBe('locked');
     expect(row(WORKERS).dataset['write']).toBe('writable');
-    const panel = await openReview(user, WATCHER_DEBOUNCE);
+    const panel = await openEditor(user, WATCHER_DEBOUNCE);
     expect(panel.querySelector('[data-settings-gate="unauthorized"]')?.textContent).toContain(
-      'not authorized',
+      'cannot change',
     );
   });
 
@@ -944,7 +1171,7 @@ describe('Settings scope authority', () => {
     renderSettings();
 
     expect((await findRow(MAX_FILE_SIZE)).dataset['write']).toBe('locked');
-    const panel = await openReview(user, MAX_FILE_SIZE);
+    const panel = await openEditor(user, MAX_FILE_SIZE);
     const gate = panel.querySelector('[data-settings-gate="unknown"]');
     expect(gate?.textContent).toContain('not known yet');
     expect(gate?.textContent).not.toMatch(/not authorized|read-only project/i);
@@ -964,9 +1191,9 @@ describe('Settings scope authority', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    let panel = await openReview(user, MAX_FILE_SIZE);
+    let panel = await openEditor(user, MAX_FILE_SIZE);
     expect(within(panel).getByText('applies to Active project')).toBeTruthy();
-    panel = await openReview(user, WORKERS);
+    panel = await openEditor(user, WORKERS);
     expect(within(panel).getByText('applies to your TraceDecay profile')).toBeTruthy();
   });
 
@@ -991,7 +1218,7 @@ describe('Settings scope authority', () => {
     );
 
     await waitFor(() => expect(row(MAX_FILE_SIZE).dataset['write']).toBe('writable'));
-    const panel = await openReview(user, MAX_FILE_SIZE);
+    const panel = await openEditor(user, MAX_FILE_SIZE);
     expect(within(panel).getByText('applies to Production')).toBeTruthy();
     expect(document.body.textContent).not.toContain('Scratch sandbox');
   });
@@ -1007,9 +1234,9 @@ describe('Settings scope authority', () => {
     expect((await findRow(WORKERS)).dataset['write']).toBe('locked');
     expect(row(MAX_FILE_SIZE).dataset['write']).toBe('writable');
     expect(row(WATCHER_DEBOUNCE).dataset['write']).toBe('writable');
-    const panel = await openReview(user, WORKERS);
+    const panel = await openEditor(user, WORKERS);
     expect(
-      within(panel).getByText(/this dashboard is not authorized to apply code-index worker settings/),
+      within(panel).getByText(/cannot change code-index worker settings\. Ask an administrator/),
     ).toBeTruthy();
   });
 });
@@ -1146,19 +1373,19 @@ describe('Settings response authority', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    expect(reviewReadout()).toBeUndefined();
+    expect(saveReadout()).toBeUndefined();
     await findRow(MAX_FILE_SIZE);
-    expect(reviewReadout()).toBe('unavailable');
+    expect(saveReadout()).toBe('unavailable');
     // Every bound key is locked, by the read rather than by a scope gate; an
     // unbound key still has no write path.
     expect(row(MAX_FILE_SIZE).dataset['write']).toBe('locked');
     expect(row(WORKERS).dataset['write']).toBe('locked');
     expect(row('storage.store_root').dataset['write']).toBe('no_write_path');
-    const panel = await openReview(user, MAX_FILE_SIZE);
+    const panel = await openEditor(user, MAX_FILE_SIZE);
     expect(panel.querySelector('[data-settings-gate="editor_unavailable"]')?.textContent).toContain(
-      'GET /api/settings named no configuration revision to hold a write against',
+      'Current settings are unavailable, so editing is paused. Reload settings before trying again.',
     );
-    expect(screen.queryByLabelText(`Proposed value for ${MAX_FILE_SIZE}`)).toBeNull();
+    expect(screen.queryByLabelText(`Edit ${MAX_FILE_SIZE}`)).toBeNull();
     // The inspector prints the empty revision as a stated absence.
     expect(screen.getAllByText('not stated').length).toBeGreaterThan(0);
   });
