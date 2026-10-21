@@ -26,6 +26,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 
+import { ContentDigestSchema } from '../../contracts/decoders.ts';
 import { fetchPayloadWrite, type PayloadWriteResult } from './payload.ts';
 import { usePayload } from './usePayload.ts';
 import {
@@ -97,6 +98,24 @@ const Settings = z
   })
   .passthrough();
 
+/** The broker serializes DiagnosticCoverage from analyzer/client.rs directly.
+ * A missing document entry means that the latest refresh did not observe it. */
+const DocumentCoverage = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('published'),
+    version_verified: z.boolean(),
+    content_digest: ContentDigestSchema,
+  }),
+  z.object({ state: z.literal('no_publication') }),
+  z.object({ state: z.literal('stale_publication') }),
+  z.object({ state: z.literal('root_failed') }),
+]);
+
+const Coverage = z.object({
+  documents: z.record(z.string(), DocumentCoverage),
+  roots: z.record(z.string(), z.enum(['completed', 'failed'])),
+});
+
 const SnapshotSchema = z
   .object({
     summary: z
@@ -109,6 +128,7 @@ const SnapshotSchema = z
       .passthrough(),
     engines: z.array(EngineRow),
     diagnostics: z.array(DiagnosticRow),
+    coverage: z.record(z.string(), Coverage),
     settings: Settings,
     /**
      * The compare-and-set token for the settings in the same body.
@@ -126,7 +146,32 @@ const SnapshotSchema = z
 export type DiagnosticsSnapshot = z.infer<typeof SnapshotSchema>;
 export type EngineStatus = z.infer<typeof EngineRow>;
 export type Diagnostic = z.infer<typeof DiagnosticRow>;
+export type DiagnosticDocumentCoverage = z.infer<typeof DocumentCoverage>;
 export type IdleBackfillMode = DiagnosticsSnapshot['settings']['idle_backfill'];
+
+/** A publication belongs to its exact language and document; another row or
+ * a ready engine cannot supply the missing evidence. The broker replaces old
+ * rows only for published documents, so other rows are retained findings. */
+export function diagnosticPublication(snapshot: DiagnosticsSnapshot, row: Diagnostic) {
+  return snapshot.coverage[row.language]?.documents[row.file];
+}
+
+export function verifiedDiagnosticPublication(coverage: DiagnosticDocumentCoverage | undefined): boolean {
+  return coverage?.state === 'published' && coverage.version_verified;
+}
+
+/** This describes the latest admitted scopes, never whole-project coverage. */
+export function completeDiagnosticCoverage(snapshot: DiagnosticsSnapshot): boolean {
+  const enabled = snapshot.engines.filter((engine) => engine.enabled);
+  return enabled.length > 0 && enabled.every((engine) => {
+    const coverage = snapshot.coverage[engine.language];
+    if (engine.state !== 'ready' || !coverage) return false;
+    const documents = Object.values(coverage.documents);
+    const roots = Object.values(coverage.roots);
+    return documents.length > 0 && documents.every(verifiedDiagnosticPublication)
+      && roots.length > 0 && roots.every((root) => root === 'completed');
+  });
+}
 
 export function useCodeDiagnostics() {
   return usePayload(codeDiagnosticsKey, codeDiagnosticsUrl, SnapshotSchema, {

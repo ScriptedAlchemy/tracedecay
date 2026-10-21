@@ -15,7 +15,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{WorkProductAuthorizedRelationScopeV1, WorkProductGraphV1};
 
-use super::{FromStoreFault, fold_graph, load_journal};
+use super::{FromStoreFault, fold_graph_checkpointed};
 
 use crate::work::RegisteredWorkWrite;
 use crate::work_run_control::WorkSqliteJobStorage;
@@ -218,10 +218,14 @@ fn graph_for_product(
     context: &tracedecay_contracts::WorkProductPortContextV1,
     product: &WorkProductEventCommitV1,
 ) -> Result<WorkProductGraphV1, AdmissionError> {
-    let journal = load_journal(transaction, context.authorized_scope())
-        .map_err(AdmissionError::from_fault)?;
-    let graph =
-        fold_graph(&journal, product.event().sequence()).ok_or(AdmissionError::Unavailable)?;
+    let graph = fold_graph_checkpointed(
+        transaction,
+        context.authorized_scope(),
+        product.event().sequence(),
+    )
+    .map_err(AdmissionError::from_fault)?
+    .ok_or(AdmissionError::Unavailable)?
+    .graph;
     if graph.version() != product.verified_graph_version().graph_version() {
         return Err(AdmissionError::VersionConflict);
     }

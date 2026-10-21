@@ -19,13 +19,13 @@ test-helpers = []
 
 [dependencies]
 asupersync.workspace = true
-futures-util = "0.3.33"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
-tracing = "0.1"
+futures-util.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tracing.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false }
@@ -48,11 +48,11 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-application = { path = "../tracedecay-application" }
 
 [dev-dependencies]
-hex = "0.4"
-rusqlite = { version = "0.40.1", default-features = false }
+hex.workspace = true
+rusqlite.workspace = true
 tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tracedecay-configuration = { path = "../tracedecay-configuration", features = ["test-helpers"] }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }

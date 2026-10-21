@@ -326,6 +326,17 @@ ON work_duplicate_adjudications_v1 (
 /// row with a product item would invent a correspondence neither authority
 /// records.
 ///
+/// Checkpoints are a derived cache of the journal fold, written in the same
+/// transaction as the event that reaches a checkpoint boundary. An append
+/// resumes from the latest checkpoint and folds only the events after it, so
+/// its cost is bounded by the checkpoint interval instead of the lifetime
+/// journal. The journal stays the authority: a checkpoint is accepted only when
+/// its digest and version match the canonical publication and recompute from
+/// all ordered payload chunks. Journal and publication mutations invalidate
+/// every checkpoint covering the affected prefix, in that same transaction.
+/// They also retain the earliest affected sequence until a publisher verifies
+/// every affected historical version, including values later events overwrite.
+///
 /// Every measurement the product projections expose, item effort, declared
 /// causal candidates, scheduled_at, deadline, lives inside `event_payload`
 /// exactly as the caller declared it in the event. Nothing in this schema
@@ -361,6 +372,138 @@ CREATE TABLE IF NOT EXISTS work_product_graph_versions_v1 (
     PRIMARY KEY (owner_brain_id, owner_profile_id, graph_version),
     UNIQUE (owner_brain_id, owner_profile_id, event_sequence)
 ) STRICT;
+
+CREATE TABLE IF NOT EXISTS work_product_graph_checkpoints_v1 (
+    owner_brain_id TEXT NOT NULL,
+    owner_profile_id TEXT NOT NULL,
+    event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+    graph_version INTEGER NOT NULL CHECK (graph_version > 0),
+    recovered_graph_digest TEXT NOT NULL,
+    payload_bytes INTEGER NOT NULL CHECK (payload_bytes > 0),
+    chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
+    PRIMARY KEY (owner_brain_id, owner_profile_id, event_sequence)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS work_product_graph_checkpoint_chunks_v1 (
+    owner_brain_id TEXT NOT NULL,
+    owner_profile_id TEXT NOT NULL,
+    event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    chunk_payload BLOB NOT NULL CHECK (length(chunk_payload) BETWEEN 1 AND 1048576),
+    PRIMARY KEY (owner_brain_id, owner_profile_id, event_sequence, chunk_index)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS work_product_journal_invalidations_v1 (
+    owner_brain_id TEXT NOT NULL,
+    owner_profile_id TEXT NOT NULL,
+    from_sequence INTEGER NOT NULL CHECK (from_sequence > 0),
+    PRIMARY KEY (owner_brain_id, owner_profile_id)
+) STRICT;
+
+CREATE TRIGGER IF NOT EXISTS work_product_checkpoint_chunks_delete_v1
+AFTER DELETE ON work_product_graph_checkpoints_v1 BEGIN
+    DELETE FROM work_product_graph_checkpoint_chunks_v1
+    WHERE owner_brain_id = OLD.owner_brain_id AND owner_profile_id = OLD.owner_profile_id
+      AND event_sequence = OLD.event_sequence;
+END;
+
+CREATE TRIGGER IF NOT EXISTS work_product_event_checkpoint_insert_v1
+AFTER INSERT ON work_product_events_v1 BEGIN
+    DELETE FROM work_product_graph_checkpoints_v1
+    WHERE owner_brain_id = NEW.owner_brain_id AND owner_profile_id = NEW.owner_profile_id
+      AND event_sequence >= NEW.sequence;
+    INSERT INTO work_product_journal_invalidations_v1
+    SELECT NEW.owner_brain_id, NEW.owner_profile_id, NEW.sequence
+    WHERE EXISTS (
+        SELECT 1 FROM work_product_events_v1
+        WHERE owner_brain_id = NEW.owner_brain_id AND owner_profile_id = NEW.owner_profile_id
+          AND sequence > NEW.sequence
+    ) OR EXISTS (
+        SELECT 1 FROM work_product_graph_versions_v1
+        WHERE owner_brain_id = NEW.owner_brain_id AND owner_profile_id = NEW.owner_profile_id
+          AND event_sequence >= NEW.sequence
+    )
+    ON CONFLICT (owner_brain_id, owner_profile_id) DO UPDATE
+    SET from_sequence = min(from_sequence, excluded.from_sequence);
+END;
+
+CREATE TRIGGER IF NOT EXISTS work_product_event_checkpoint_update_v1
+AFTER UPDATE ON work_product_events_v1 BEGIN
+    DELETE FROM work_product_graph_checkpoints_v1
+    WHERE owner_brain_id = OLD.owner_brain_id AND owner_profile_id = OLD.owner_profile_id
+      AND event_sequence >= OLD.sequence;
+    DELETE FROM work_product_graph_checkpoints_v1
+    WHERE owner_brain_id = NEW.owner_brain_id AND owner_profile_id = NEW.owner_profile_id
+      AND event_sequence >= NEW.sequence;
+    INSERT INTO work_product_journal_invalidations_v1
+    VALUES (OLD.owner_brain_id, OLD.owner_profile_id, OLD.sequence)
+    ON CONFLICT (owner_brain_id, owner_profile_id) DO UPDATE
+    SET from_sequence = min(from_sequence, excluded.from_sequence);
+    INSERT INTO work_product_journal_invalidations_v1
+    VALUES (NEW.owner_brain_id, NEW.owner_profile_id, NEW.sequence)
+    ON CONFLICT (owner_brain_id, owner_profile_id) DO UPDATE
+    SET from_sequence = min(from_sequence, excluded.from_sequence);
+END;
+
+CREATE TRIGGER IF NOT EXISTS work_product_event_checkpoint_delete_v1
+AFTER DELETE ON work_product_events_v1 BEGIN
+    DELETE FROM work_product_graph_checkpoints_v1
+    WHERE owner_brain_id = OLD.owner_brain_id AND owner_profile_id = OLD.owner_profile_id
+      AND event_sequence >= OLD.sequence;
+    INSERT INTO work_product_journal_invalidations_v1
+    VALUES (OLD.owner_brain_id, OLD.owner_profile_id, OLD.sequence)
+    ON CONFLICT (owner_brain_id, owner_profile_id) DO UPDATE
+    SET from_sequence = min(from_sequence, excluded.from_sequence);
+END;
+
+CREATE TRIGGER IF NOT EXISTS work_product_version_checkpoint_insert_v1
+AFTER INSERT ON work_product_graph_versions_v1 BEGIN
+    DELETE FROM work_product_graph_checkpoints_v1
+    WHERE owner_brain_id = NEW.owner_brain_id AND owner_profile_id = NEW.owner_profile_id
+      AND event_sequence >= NEW.event_sequence;
+    INSERT INTO work_product_journal_invalidations_v1
+    SELECT NEW.owner_brain_id, NEW.owner_profile_id, NEW.event_sequence
+    WHERE EXISTS (
+        SELECT 1 FROM work_product_events_v1
+        WHERE owner_brain_id = NEW.owner_brain_id AND owner_profile_id = NEW.owner_profile_id
+          AND sequence > NEW.event_sequence
+    ) OR EXISTS (
+        SELECT 1 FROM work_product_graph_versions_v1
+        WHERE owner_brain_id = NEW.owner_brain_id AND owner_profile_id = NEW.owner_profile_id
+          AND event_sequence > NEW.event_sequence
+    )
+    ON CONFLICT (owner_brain_id, owner_profile_id) DO UPDATE
+    SET from_sequence = min(from_sequence, excluded.from_sequence);
+END;
+
+CREATE TRIGGER IF NOT EXISTS work_product_version_checkpoint_update_v1
+AFTER UPDATE ON work_product_graph_versions_v1 BEGIN
+    DELETE FROM work_product_graph_checkpoints_v1
+    WHERE owner_brain_id = OLD.owner_brain_id AND owner_profile_id = OLD.owner_profile_id
+      AND event_sequence >= OLD.event_sequence;
+    DELETE FROM work_product_graph_checkpoints_v1
+    WHERE owner_brain_id = NEW.owner_brain_id AND owner_profile_id = NEW.owner_profile_id
+      AND event_sequence >= NEW.event_sequence;
+    INSERT INTO work_product_journal_invalidations_v1
+    VALUES (OLD.owner_brain_id, OLD.owner_profile_id, OLD.event_sequence)
+    ON CONFLICT (owner_brain_id, owner_profile_id) DO UPDATE
+    SET from_sequence = min(from_sequence, excluded.from_sequence);
+    INSERT INTO work_product_journal_invalidations_v1
+    VALUES (NEW.owner_brain_id, NEW.owner_profile_id, NEW.event_sequence)
+    ON CONFLICT (owner_brain_id, owner_profile_id) DO UPDATE
+    SET from_sequence = min(from_sequence, excluded.from_sequence);
+END;
+
+CREATE TRIGGER IF NOT EXISTS work_product_version_checkpoint_delete_v1
+AFTER DELETE ON work_product_graph_versions_v1 BEGIN
+    DELETE FROM work_product_graph_checkpoints_v1
+    WHERE owner_brain_id = OLD.owner_brain_id AND owner_profile_id = OLD.owner_profile_id
+      AND event_sequence >= OLD.event_sequence;
+    INSERT INTO work_product_journal_invalidations_v1
+    VALUES (OLD.owner_brain_id, OLD.owner_profile_id, OLD.event_sequence)
+    ON CONFLICT (owner_brain_id, owner_profile_id) DO UPDATE
+    SET from_sequence = min(from_sequence, excluded.from_sequence);
+END;
 ";
 
 /// `work_events_v1` shipped in `v0.1.0-beta.37`; retirement must therefore be
