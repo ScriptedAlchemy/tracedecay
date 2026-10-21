@@ -742,6 +742,9 @@ fn run_scenario(id: &str) {
         "[{id}] well-behaved phase failed:\n{}",
         format_outcomes(&outcomes)
     );
+    // The violation uses an independent store; retire this daemon before
+    // starting the next one instead of retaining both until the test ends.
+    drop(fixture);
 
     let Some(violation) = &scenario.deterministic.violation else {
         return;
