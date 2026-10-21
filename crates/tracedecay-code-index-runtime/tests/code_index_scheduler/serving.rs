@@ -60,6 +60,7 @@ use tracedecay_runtime_core::resident_memory::{
 
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
+use super::super::memory_tests::ledger_memory;
 use super::{
     ALPHA_LIB_V1, CALLER_PAGE, CALLER_STAR, GitFixture, OwnerSignals, ReadyRetrievalControlV1,
     SERVING_SEAT_FAILURE_CEILING, active_text_artifact_path, application_context,
@@ -2072,9 +2073,9 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::new(
+    scheduler.bind_resident_memory(ledger_memory(
         std::num::NonZeroU64::new(1024 * 1024).expect("tight memory limit"),
-    )));
+    ));
     let latest = scheduler.latest_complete().expect("restored generation");
     assert!(
         matches!(
@@ -2391,9 +2392,7 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
         published(scheduler.reconcile_now().expect("publish"));
-        let tight = Arc::new(ProcessResidentMemoryV1::new(
-            std::num::NonZeroU64::new(1024 * 1024).expect("tight limit"),
-        ));
+        let tight = ledger_memory(std::num::NonZeroU64::new(1024 * 1024).expect("tight limit"));
         scheduler.bind_resident_memory(Arc::clone(&tight));
         let latest = scheduler.latest_complete().expect("latest generation");
         let denied = latest.advance_text_serving(usize::MAX);
@@ -2471,9 +2470,7 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
 
     // An adequate authority admits the build and holds the reader charge
     // for as long as the artifact owners serve.
-    let adequate = Arc::new(ProcessResidentMemoryV1::new(
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
-    ));
+    let adequate = ledger_memory(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1);
     {
         // A fresh scheduler restores the durable generation; the unchanged
         // fixture needs no republish.
