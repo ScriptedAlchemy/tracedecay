@@ -469,6 +469,25 @@ fn approval_for(
     .expect("approval")
 }
 
+struct JourneyCodeIndex {
+    schedulers: CodeIndexSchedulerRegistryV1,
+}
+
+impl JourneyCodeIndex {
+    async fn shutdown(&self) {
+        self.schedulers.shutdown().await;
+    }
+}
+
+impl Drop for JourneyCodeIndex {
+    fn drop(&mut self) {
+        // A failed assertion must also release the fixture's native workers.
+        // The analysis port uses the daemon's scheduler authority; retiring
+        // the transaction registry does not stop that independent authority.
+        self.schedulers.cancel();
+    }
+}
+
 async fn mount(
     database: RegisteredGlobalDbLeaseV1,
     repository_root: std::path::PathBuf,
@@ -476,6 +495,7 @@ async fn mount(
     DaemonNativeIntegrationServiceRegistry,
     super::registry::DaemonNativeIntegrationOwner,
     Arc<DaemonNativeIntegrationAnalysisV1>,
+    JourneyCodeIndex,
 ) {
     let project_id = ProjectId::new("project.native.journey").expect("project id");
     let identity = IndexingIdentityV1::resolve(&repository_root).expect("indexing identity");
@@ -486,7 +506,10 @@ async fn mount(
         identity.head_ref().cloned(),
     )
     .expect("analysis scope");
-    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
+    let code_index = JourneyCodeIndex {
+        schedulers: CodeIndexSchedulerRegistryV1::new(1),
+    };
+    let schedulers = &code_index.schedulers;
     let index_store = repository_root
         .parent()
         .expect("repository parent")
@@ -540,13 +563,10 @@ async fn mount(
     if let Err(error) = initial_generation {
         // The bounded observation was captured inside the original deadline;
         // reporting starts no new reads, admission, or readiness wait.
-        // A failed fixture still owns the worker it mounted. Signal its
-        // canonical cancellation before unwinding out of the temporary root.
-        schedulers.cancel();
         panic!("initial code-index generation seat: {error}; {last_observation}");
     }
     let analysis = Arc::new(DaemonNativeIntegrationAnalysisV1::new(
-        schedulers,
+        schedulers.clone(),
         analysis_scope,
     ));
     let registry = DaemonNativeIntegrationServiceRegistry::default();
@@ -564,7 +584,7 @@ async fn mount(
         )
         .await
         .expect("mount native integration owner");
-    (registry, owner, analysis)
+    (registry, owner, analysis, code_index)
 }
 
 async fn preflight(
@@ -793,7 +813,8 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     let database = runtime
         .registered_database_lease(HostAdmissionScope::Project)
         .expect("registered project database");
-    let (registry, owner, _analysis) = mount(database.clone(), repository_root.clone()).await;
+    let (registry, owner, _analysis, code_index) =
+        mount(database.clone(), repository_root.clone()).await;
     let now = UtcMicros(
         i64::try_from(
             SystemTime::now()
@@ -1038,6 +1059,7 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
 
     drop(stack_runtime);
     registry.shutdown().await.expect("shutdown owner registry");
+    code_index.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1066,7 +1088,8 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
             .registered_database_lease(HostAdmissionScope::Project)
             .expect("registered project database");
 
-        let (registry, owner, analysis) = mount(database.clone(), repository_root.clone()).await;
+        let (registry, owner, analysis, code_index) =
+            mount(database.clone(), repository_root.clone()).await;
         let request_id = format!("request.native.journey.{index}");
         let request = if index == 0 {
             declared_preflight_request(&repository_root, &database, mode, &request_id)
@@ -1410,7 +1433,8 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         }
 
         registry.shutdown().await.expect("shutdown owner registry");
-        let (restarted_registry, restarted_owner, _analysis) =
+        code_index.shutdown().await;
+        let (restarted_registry, restarted_owner, _analysis, restarted_code_index) =
             mount(database, repository_root).await;
         let durable = restarted_owner
             .service()
@@ -1428,6 +1452,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
             .shutdown()
             .await
             .expect("shutdown restarted owner registry");
+        restarted_code_index.shutdown().await;
     }
 }
 
@@ -1447,7 +1472,7 @@ async fn generated_only_change_requires_semantic_review() {
     let database = runtime
         .registered_database_lease(HostAdmissionScope::Project)
         .expect("registered project database");
-    let (registry, owner, _analysis) = mount(database, repository_root.clone()).await;
+    let (registry, owner, _analysis, code_index) = mount(database, repository_root.clone()).await;
 
     let preview = preflight(
         owner,
@@ -1473,6 +1498,7 @@ async fn generated_only_change_requires_semantic_review() {
         vec![NativeIntegrationAnalysisGapV1::WithheldSource]
     );
     registry.shutdown().await.expect("shutdown owner registry");
+    code_index.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1492,7 +1518,7 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
     let database = runtime
         .registered_database_lease(HostAdmissionScope::Project)
         .expect("registered project database");
-    let (registry, owner, _analysis) = mount(database, repository_root.clone()).await;
+    let (registry, owner, _analysis, code_index) = mount(database, repository_root.clone()).await;
     let request = preflight_request(
         &repository_root,
         MechanicalIntegrationModeV1::FastForward,
@@ -1571,6 +1597,7 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
         )
     );
     registry.shutdown().await.expect("shutdown owner registry");
+    code_index.shutdown().await;
 }
 
 /// Cleanup inspection of an owned checkout, asked while another thread walks
