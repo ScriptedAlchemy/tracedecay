@@ -1,3 +1,5 @@
+use tracedecay_lcm::dag::sanitize_summary_draft;
+
 use super::*;
 
 #[tokio::test]
@@ -137,6 +139,8 @@ async fn persisted_summary_metadata(summarizer: LcmSummarizerMode) -> String {
     assert_eq!(response.status, "ok");
     assert_eq!(response.summary_nodes_created, 1);
     let node = &response.summary_nodes[0];
+    assert_eq!(node.source_refs.len(), 1);
+    assert_eq!(node.expand_hint.as_deref(), Some("1 raw messages"));
     let expanded = db
         .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
         .await
@@ -186,6 +190,22 @@ async fn provided_summary_metadata_rows_are_byte_stable() {
         (provided(None, None), NO_ROUTE_METADATA),
     ];
     for (summarizer, expected) in cases {
+        // Pin compression's metadata bytes independently, then pass them
+        // through the same privacy authority every persisted summary requires.
+        // Compare the entire protected value, including all receipt bindings.
+        let mut draft = summary_draft(
+            "cursor",
+            "session-1",
+            0,
+            "summary with extraction",
+            Vec::new(),
+        );
+        draft.expand_hint = Some("1 raw messages".to_owned());
+        draft.metadata_json = Some(expected.to_owned());
+        let expected = sanitize_summary_draft(draft)
+            .expect("canonical summary protection")
+            .metadata_json
+            .expect("protected summary metadata");
         assert_eq!(persisted_summary_metadata(summarizer).await, expected);
     }
 }
