@@ -12,7 +12,8 @@ use tracedecay_code_index::{
     chunks::content_digest,
     graph_projection::CodeGraphInteractiveReader,
     production::{
-        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexPublishedGenerationV1,
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
+        CodeIndexPublishedGenerationV1,
     },
 };
 use tracedecay_domain::{
@@ -22,7 +23,10 @@ use tracedecay_domain::{
 use tracedecay_graph_db::NeverCancelled;
 
 use crate::{
-    production_orchestration::{ActiveControl, applying_owner, request_with_source},
+    production_orchestration::{
+        ActiveControl, SPARSE_FILLERS, SharedPublicationStore, applying_owner, config,
+        request_with_source,
+    },
     support::{cold_generation, id},
     typescript_module_resolution::reader,
 };
@@ -521,6 +525,63 @@ fn ruby_constant_calls_bind_through_require_relative_chains() {
         nested.calls(),
         BTreeSet::from([("run", "helper"), ("run", "normalize")])
     );
+}
+
+#[test]
+fn ruby_constant_calls_bind_through_each_callers_lexical_module() {
+    let tag = "ruby-lexical-scopes";
+    let mut files = fixture_files(&Path::new(FIXTURE_ROOT).join("../ruby-lexical-scopes"));
+    files.extend(SPARSE_FILLERS.map(|(_, path, source)| (path.to_owned(), source.to_owned())));
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
+    let every = files.iter().map(|(path, _)| path.clone()).collect();
+    let full = owner
+        .build_and_publish(fixture_tree_request(tag, 1, &files, &every), &ActiveControl)
+        .expect("full build publishes");
+    let edited = files
+        .iter_mut()
+        .find(|(path, _)| path == "lib/caller.rb")
+        .expect("caller fixture");
+    edited.1.insert_str(0, "\n\n");
+    let changed = BTreeSet::from([edited.0.clone()]);
+    let edit = owner
+        .build_and_publish(
+            fixture_tree_request(tag, 2, &files, &changed),
+            &ActiveControl,
+        )
+        .expect("edit publishes");
+    assert_eq!(edit.cold_reason(), None, "the edit seals over its parent");
+    let bindings = [full, edit].map(|published| {
+        let generation = store.generation(&published);
+        let graph = CallGraphV1 {
+            reader: reader(&generation),
+            generation,
+            roles: BTreeMap::from([
+                ("caller A::run", "lib/caller.rb::A::run"),
+                ("caller B::run", "lib/caller.rb::B::run"),
+                ("reversed A::run", "lib/reversed.rb::A::run"),
+                ("reversed B::run", "lib/reversed.rb::B::run"),
+                ("reversed C::run", "lib/reversed.rb::C::run"),
+                ("A::Util.call", "lib/a_util.rb::A::Util::call"),
+                ("B::Util.call", "lib/b_util.rb::B::Util::call"),
+            ]),
+        };
+        (
+            graph.calls(),
+            disclosed_gaps(&graph.generation, "lib/reversed.rb"),
+        )
+    });
+    let bound = (
+        BTreeSet::from([
+            ("caller A::run", "A::Util.call"),
+            ("caller B::run", "B::Util.call"),
+            ("reversed A::run", "A::Util.call"),
+            ("reversed B::run", "B::Util.call"),
+        ]),
+        BTreeSet::from(["Util.call".to_owned()]),
+    );
+    assert_eq!(bindings, [bound.clone(), bound]);
 }
 
 /// Rust's `main.rs` calls through a grouped crate-name
