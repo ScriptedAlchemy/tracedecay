@@ -321,8 +321,11 @@ fn intent_outcomes(log: &Path, session: &str) -> Vec<String> {
         .collect()
 }
 
-fn wait_for(what: &str, log: &Path, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + WAIT;
+fn wait_for(what: &str, log: &Path, ready: impl FnMut() -> bool) {
+    wait_for_until(what, log, Instant::now() + WAIT, ready);
+}
+
+fn wait_for_until(what: &str, log: &Path, deadline: Instant, mut ready: impl FnMut() -> bool) {
     while !ready() {
         assert!(
             Instant::now() < deadline,
@@ -559,13 +562,41 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
 
     let stop_event = stop(&project, ENABLED_SESSION, &enabled_transcript);
     let delivers = |context: &String| context.contains(&suggestion_text(YES_INTENT));
+    let delivery_deadline = Instant::now() + WAIT;
     let first_stop = run_hook(home, &project, "hook-stop", &stop_event);
     let mut stop_contexts = vec![hook_context(&first_stop)];
     let mut stop_outputs = vec![first_stop];
-    if !stop_contexts.last().is_some_and(delivers) {
-        wait_for(
+    while !stop_contexts.last().is_some_and(delivers) {
+        let evidence = delivery_evidence(home, &project, &stop_contexts);
+        let completions = evidence["enrolled_hook_receipts"]
+            .as_str()
+            .expect("enrolled hook receipts")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid hook receipt"))
+            .filter(|receipt| {
+                receipt["event"] == "hook_completed"
+                    && receipt["hook_name"] == "Stop"
+                    && receipt["session_id"] == ENABLED_SESSION
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            completions.len(),
+            stop_outputs.len(),
+            "each stop attempt must have a completed receipt: {evidence}"
+        );
+        let completion = completions.last().expect("completed stop attempt");
+        assert!(
+            completion["disposition"]["status"] == "accepted_for_replay"
+                && completion["disposition"]["retryable"] == true,
+            "only a retained, retryable stop may be retried without guidance: {evidence}"
+        );
+        // A host retry can also miss the unchanged 25ms admission window.
+        // Observe replay completion before resubmitting the same event, and
+        // spend one overall wait budget across all attempts.
+        wait_for_until(
             "the timed-out stop callback's replay to drain",
             &log,
+            delivery_deadline,
             || {
                 let status = run_tool(home, &project, "tracedecay_status", &json!({}));
                 let replay: StatusHookReplayV1 =
@@ -574,6 +605,10 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
                 replay == StatusHookReplayV1::Drained
                     && intent_outcomes(&log, ENABLED_SESSION).len() > before + 1
             },
+        );
+        assert!(
+            Instant::now() < delivery_deadline,
+            "the retained stop must deliver within the journey budget: {evidence}"
         );
         let next_stop = run_hook(home, &project, "hook-stop", &stop_event);
         stop_contexts.push(hook_context(&next_stop));
