@@ -817,14 +817,14 @@ async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
     resolver.push(seed_db(&root, "profile.db"));
-    let sessions_path = seed_db(&root, "sessions.db");
-    Connection::open(&sessions_path)
+    let project_path = seed_final_graph_db(&root, "project.db").await;
+    Connection::open(&project_path)
         .unwrap()
         .execute_batch(tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL)
         .unwrap();
-    resolver.push(sessions_path.clone());
-    resolver.push(sessions_path.clone());
-    let shard = StoreShardIdV1::project_sessions(
+    resolver.push(project_path.clone());
+    resolver.push(project_path.clone());
+    let shard = StoreShardIdV1::project(
         id::<BrainId>("brain.registry"),
         id::<UserProfileId>("profile.registry"),
         id::<ProjectId>("project.reopen"),
@@ -835,7 +835,7 @@ async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above
         tracedecay_store::StoreAuthorityEpochV1::new(1 << 40).unwrap(),
     );
     let runtime = asupersync::runtime::Runtime::current_handle().unwrap();
-    commit_diagnostics_with_writer(&sessions_path, &ahead, "previous-authority").await;
+    commit_diagnostics_with_writer(&project_path, &ahead, "previous-authority").await;
 
     let registry =
         StoreRuntimeRegistry::new(runtime, resolver, Arc::new(LifecycleShardRuntimePublisher))
@@ -849,22 +849,22 @@ async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above
         ProfileAuthorityPinResult::Pinned(pin) => pin,
         other => panic!("profile was not pinned: {other:?}"),
     };
-    let authority = crate::db::DatabaseAuthority::for_runtime(&sessions_path, "reopen sessions")
-        .expect("sessions database authority");
-    let sessions = open_published(
+    let authority = crate::db::DatabaseAuthority::for_runtime(&project_path, "reopen project")
+        .expect("project database authority");
+    let project_runtime = open_published(
         &registry,
         StoreRuntimeOpenRequest::new_authorized(shard, incarnation(), Some(pin), authority.clone()),
     )
     .await;
 
     assert!(
-        sessions.binding().authority_epoch > ahead.authority_epoch,
+        project_runtime.binding().authority_epoch > ahead.authority_epoch,
         "the reopened runtime publishes above the persisted authority: {:?} vs {:?}",
-        sessions.binding().authority_epoch,
+        project_runtime.binding().authority_epoch,
         ahead.authority_epoch
     );
-    let (request, probe) = diagnostics_submit(sessions.binding(), "converged-authority");
-    let outcome = sessions
+    let (request, probe) = diagnostics_submit(project_runtime.binding(), "converged-authority");
+    let outcome = project_runtime
         .dispatch_submit_authorized(request, Arc::new(probe), authority)
         .await
         .expect("converged runtime accepts writes");
