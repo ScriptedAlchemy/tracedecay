@@ -527,12 +527,41 @@ fn appends_resume_from_a_checkpoint_and_survive_restart_across_checkpoint_bounda
     assert_eq!(store.count("work_product_graph_checkpoints_v1"), 2);
 
     let store = store.restart("work-product-checkpoints");
-    let current = read_current(&store).expect("read current after restart");
+    let current = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(repository_selection(), UtcMicros(1_000)),
+        )
+        .expect("read current after restart at an observation after the journal tail");
     assert_eq!(
         current.entries()[0].verified_version(),
         latest.verified_graph_version()
     );
     assert_eq!(current.entries()[0].graph().items().len(), 600);
+    for sequence in [255, 256, 257, 512, 513] {
+        let historical = reads(&store)
+            .read_graph(
+                &context(),
+                WorkGraphReadRequestV1::as_of(
+                    repository_selection(),
+                    UtcMicros(99 + sequence),
+                    UtcMicros(1_000),
+                )
+                .unwrap(),
+            )
+            .expect("historical reads remain exact on either side of a checkpoint");
+        assert_eq!(
+            historical.entries()[0]
+                .verified_version()
+                .event_sequence()
+                .get(),
+            sequence as u64
+        );
+        assert_eq!(
+            historical.entries()[0].graph().items().len(),
+            sequence as usize
+        );
+    }
 
     store.inspect(|connection| {
         connection
@@ -546,7 +575,7 @@ fn appends_resume_from_a_checkpoint_and_survive_restart_across_checkpoint_bounda
     change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
         verified_version: latest.verified_graph_version().clone(),
     };
-    mutations(&store)
+    let refused = mutations(&store)
         .add_task(
             &context(),
             &binding(),
@@ -557,6 +586,10 @@ fn appends_resume_from_a_checkpoint_and_survive_restart_across_checkpoint_bounda
             },
         )
         .expect_err("a checkpoint that does not recompute is never a fold base");
+    assert_eq!(
+        refused,
+        WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid)
+    );
     assert_eq!(store.count("work_product_events_v1"), EVENTS);
     assert_eq!(store.count("work_product_graph_versions_v1"), EVENTS);
 }
