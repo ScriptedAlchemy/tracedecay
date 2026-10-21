@@ -3,7 +3,11 @@ use std::{
     fmt::Write as _,
     num::NonZeroU64,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock, mpsc},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -2269,6 +2273,78 @@ fn ready_publication_clears_a_finalization_refusal_without_another_pending_bound
     assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
     assert_eq!(ready.blocked_reason, None);
     assert_eq!(ready.committed_pages, before.committed_pages);
+}
+
+#[test]
+fn concurrent_text_admission_refusal_cannot_block_a_ready_owner() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn concurrent_text_owner() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(4 * 1024 * 1024 * 1024).expect("process limit");
+    let (sampling, sampled) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let resumed = Mutex::new(resumed);
+    let paused = AtomicBool::new(false);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let refused = thread::current().name() == Some("refused-text-advance");
+            if refused && !paused.swap(true, Ordering::AcqRel) {
+                sampling.send(()).expect("announce refused sample");
+                resumed
+                    .lock()
+                    .expect("sample resume receiver")
+                    .recv_timeout(SERVING_SEAT_FAILURE_CEILING)
+                    .expect("resume refused sample");
+            }
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: refused.then_some(0),
+            })
+        }),
+    ));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    scheduler.bind_resident_memory(memory);
+    published(scheduler.reconcile_now().expect("seal source generation"));
+    let text = scheduler.latest_complete().expect("text generation");
+    thread::scope(|scope| {
+        let refused_text = text.clone();
+        let refused = thread::Builder::new()
+            .name("refused-text-advance".to_owned())
+            .spawn_scoped(scope, move || refused_text.advance_text_serving(1))
+            .expect("spawn refused advance");
+        sampled
+            .recv_timeout(SERVING_SEAT_FAILURE_CEILING)
+            .expect("first advance reaches memory admission");
+        let ready_text = text.clone();
+        let (starting, started) = mpsc::channel();
+        let ready = scope.spawn(move || {
+            starting.send(()).expect("announce concurrent advance");
+            ready_text.production_query_owners()
+        });
+        started
+            .recv_timeout(SERVING_SEAT_FAILURE_CEILING)
+            .expect("second advance starts while the first is admitted");
+        resume.send(()).expect("release refused sample");
+        assert!(matches!(
+            refused.join().expect("refused advance joins"),
+            Err(RetrievalPortError::ResidentMemoryRefused(_))
+        ));
+        ready
+            .join()
+            .expect("ready advance joins")
+            .expect("concurrent owner serves after the refusal");
+    });
+    let ready = build_progress_snapshot(&scheduler);
+    assert!(text.query_owners_are_ready());
+    assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
+    assert_eq!(ready.blocked_reason, None);
 }
 
 #[test]
