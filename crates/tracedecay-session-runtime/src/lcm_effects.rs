@@ -153,7 +153,7 @@ impl DaemonLcmEffectService {
             }
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
-                return Ok(pending.defer_for_authoritative_summary(reason)?);
+                return pending.defer_for_authoritative_summary(reason);
             }
         };
         self.control.checkpoint()?;
