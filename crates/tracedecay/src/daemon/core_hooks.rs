@@ -16,6 +16,7 @@ use tracedecay_daemon_identity::{
     ResolvedDaemonConnection, client_connection, current_daemon_connection,
 };
 use tracedecay_daemon_protocol::{DaemonClientStream, SOCKET_ENV};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::hook_events::{self, HookEventKind, HookEventPlan};
 use tracedecay_mcp::server::attach_stateless_request_context;
@@ -158,12 +159,16 @@ async fn admit_registered_file_edit(
         })?;
     // The host may have exhausted its acknowledgement budget by now. Retain
     // operator evidence of the exact durable receipt independently of the
-    // response write and the later project/binding publication.
+    // response write and the later project/binding publication. Match the path
+    // set by digest without putting edited filenames in persistent logs.
     log_daemon_event(
         "hook_file_edit_admitted",
         &[
             ("project", root.display().to_string()),
-            ("paths", format!("{:?}", event.rel_paths)),
+            (
+                "paths_digest",
+                sha256_hex(format!("{:?}", event.rel_paths).as_bytes()),
+            ),
             ("seq", admitted.seq.to_string()),
         ],
     );

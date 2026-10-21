@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tracedecay_domain::NativeHostIdentityV1;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_hooks::{
     HOOK_SYNCHRONOUS_BUDGET, HookDeliveryReceiptWriterV1, HookDeliveryRetentionV1,
     HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
@@ -515,7 +516,10 @@ fn admitted_edit_sequence(log: &str, root: &Path) -> Option<u64> {
         "hook_file_edit_admitted",
         &[
             ("project", root.display().to_string()),
-            ("paths", format!("{:?}", ["src/lib.rs"])),
+            (
+                "paths_digest",
+                sha256_hex(format!("{:?}", ["src/lib.rs"]).as_bytes()),
+            ),
         ],
     );
     let prefix = format!("{marker} seq=");
@@ -616,6 +620,15 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
         std::fs::read_to_string(&log).unwrap(),
     );
     let admitted = std::fs::read_to_string(&log).unwrap();
+    for line in admitted
+        .lines()
+        .filter(|line| line.contains("event=hook_file_edit_admitted"))
+    {
+        assert!(
+            !line.contains("src/lib.rs"),
+            "admission evidence must not expose edited filenames: {line}"
+        );
+    }
     let sequences = canonical_roots
         .each_ref()
         .map(|root| admitted_edit_sequence(&admitted, root).unwrap());
