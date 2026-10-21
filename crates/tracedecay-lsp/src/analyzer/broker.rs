@@ -197,7 +197,7 @@ pub struct DiagnosticsSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshCommitOutcome {
-    Applied(DiagnosticsSnapshot),
+    Applied(Box<DiagnosticsSnapshot>),
     Superseded,
 }
 
@@ -737,7 +737,7 @@ impl DiagnosticBroker {
                 if completed.root_failures.is_empty() {
                     self.engine_errors.remove(&language);
                     self.engine_overrides.insert(language, EngineState::Ready);
-                    Ok(RefreshCommitOutcome::Applied(self.snapshot()))
+                    Ok(RefreshCommitOutcome::Applied(Box::new(self.snapshot())))
                 } else {
                     for failure in completed.root_failures.values() {
                         if let Some(workspace_root) = &failure.unstartable_launch_root {
@@ -770,9 +770,19 @@ impl DiagnosticBroker {
                         EngineState::Available
                     };
                     let message = format!(
-                        "{} of {} analyzer workspace root(s) failed",
+                        "{} of {} analyzer workspace root(s) failed: {}",
                         completed.root_failures.len(),
-                        refresh.coverage.roots.len()
+                        refresh.coverage.roots.len(),
+                        completed
+                            .root_failures
+                            .iter()
+                            .map(|(root, failure)| format!(
+                                "{}: {}",
+                                root.display(),
+                                failure.message
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("; ")
                     );
                     self.engine_errors.insert(language.clone(), message.clone());
                     self.engine_overrides.insert(language, state);

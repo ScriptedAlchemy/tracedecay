@@ -302,7 +302,7 @@ where
             .finish_refresh_snapshot(completed)
             .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-refresh-failed"))?
         {
-            RefreshCommitOutcome::Applied(snapshot) => snapshot,
+            RefreshCommitOutcome::Applied(snapshot) => *snapshot,
             RefreshCommitOutcome::Superseded => {
                 return Err(LspRuntimeFailure::new(
                     "diagnostic-broker-refresh-superseded",

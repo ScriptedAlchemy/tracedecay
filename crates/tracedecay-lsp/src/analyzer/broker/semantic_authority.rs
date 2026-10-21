@@ -252,6 +252,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             let document_snapshot = document_snapshot;
             let document = document;
             let outcome = tokio::select! {
+                biased;
                 timer = native_runtime::sleep_until(deadline) => {
                     match timer {
                         Ok(()) => analyzer_event_outcome(AnalyzerEvent::TimedOut),

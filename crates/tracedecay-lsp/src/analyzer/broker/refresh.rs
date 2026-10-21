@@ -441,9 +441,7 @@ impl RefreshFailure {
 
     fn client(error: &LspRefreshError) -> Self {
         Self {
-            state: if error.is_policy_retirement()
-                || matches!(error, LspRefreshError::TimedOut { .. })
-            {
+            state: if error.is_policy_retirement() {
                 EngineState::Available
             } else {
                 EngineState::Crashed

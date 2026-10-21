@@ -30,7 +30,7 @@ fn broker_marks_active_command_available_before_first_refresh() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake_lsp.py");
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
-    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+    let broker = lsp::broker::DiagnosticBroker::new_for_test(
         temp.path(),
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
     );
@@ -1427,6 +1427,7 @@ async fn semantic_eof_is_retired_as_transport_failure_not_timeout() {
         &script_path,
         r#"
 import json
+import os
 import sys
 import time
 
@@ -1455,7 +1456,7 @@ while True:
     if message.get("method") == "initialize":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
     elif message.get("method") == "textDocument/documentSymbol":
-        sys.stdout.close()
+        os.close(sys.stdout.fileno())
         time.sleep(60)
 "#,
     )
@@ -1745,8 +1746,10 @@ while True:
         supports_diagnostics: true,
         semantic: SemanticCapability::ALL.into_iter().collect(),
     };
-    let mut client = ClientCapabilities::default();
-    client.semantic = SemanticCapability::ALL.into_iter().collect();
+    let client = ClientCapabilities {
+        semantic: SemanticCapability::ALL.into_iter().collect(),
+        ..ClientCapabilities::default()
+    };
     let capabilities = negotiate_capabilities(&client, &GatewayCapabilities::default(), &upstream);
     let semantic = SemanticProviderAdapter::new(Arc::new(TokioSpawner), authority);
     let gateway = DaemonLspGateway::new(
@@ -2366,7 +2369,7 @@ async fn semantic_cancellation_reaches_and_releases_the_registered_operation() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("cancelled_lsp.py");
     std::fs::write(&script_path, fake_lsp_script_that_never_initializes()).unwrap();
-    let broker = lsp::broker::DiagnosticBroker::new_for_test(
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
         temp.path(),
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
     );

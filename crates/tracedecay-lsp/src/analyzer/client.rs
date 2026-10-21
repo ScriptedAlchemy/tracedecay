@@ -382,6 +382,7 @@ struct SynchronizedDocument {
     wire_version: i32,
     text: String,
     snapshot_version: Option<i64>,
+    diagnostics: Option<(Vec<CodeDiagnostic>, DiagnosticDocumentCoverage)>,
 }
 
 pub struct StdioLspClient {
@@ -565,7 +566,7 @@ impl StdioLspClient {
                 class: "native runtime unavailable for semantic document read".to_owned(),
             }
         })?;
-        let read = cx
+        let mut read = cx
             .spawn_blocking(move |_| read_semantic_document(&path))
             .map_err(|error| LspSemanticRequestError::InvalidResponse {
                 class: format!("failed to schedule semantic document read: {error}"),
@@ -696,6 +697,7 @@ impl StdioLspClient {
                 wire_version: version,
                 text: text.to_owned(),
                 snapshot_version,
+                diagnostics: None,
             },
         );
         Ok(version)
@@ -1039,7 +1041,6 @@ impl StdioLspClient {
                     .await
                     .map_err(semantic_transport_error)?;
                 }
-                JsonRpcMessage::Notification { .. } => {}
                 JsonRpcMessage::Success { id, result } if id == json!(request_id) => {
                     return serde_json::from_value(result).map_err(|error| {
                         LspSemanticRequestError::InvalidResponse {
@@ -1053,7 +1054,9 @@ impl StdioLspClient {
                         message: error.message,
                     });
                 }
-                JsonRpcMessage::Success { .. } | JsonRpcMessage::Error { .. } => {}
+                JsonRpcMessage::Notification { .. }
+                | JsonRpcMessage::Success { .. }
+                | JsonRpcMessage::Error { .. } => {}
             }
         }
     }
@@ -1121,8 +1124,23 @@ impl StdioLspClient {
         }
         let mut diagnostics_by_uri: BTreeMap<String, Vec<CodeDiagnostic>> = BTreeMap::new();
         let mut coverage_by_uri = BTreeMap::new();
+        // An unchanged document sends no notification, so the server need not
+        // publish again. Its last accepted publication remains authoritative
+        // for this wire version. Synchronizing changed text replaces the
+        // document record and discards that publication.
+        for uri in uri_to_document.keys() {
+            if let Some((diagnostics, coverage)) = self
+                .documents
+                .get(uri)
+                .and_then(|document| document.diagnostics.as_ref())
+            {
+                diagnostics_by_uri.insert(uri.clone(), diagnostics.clone());
+                coverage_by_uri.insert(uri.clone(), coverage.clone());
+            }
+        }
         let refresh_deadline = deadline.min(Instant::now() + timeouts.refresh);
-        let mut quiet_deadline = None;
+        let mut quiet_deadline = (diagnostics_by_uri.len() == uri_to_document.len())
+            .then(|| refresh_deadline.min(Instant::now() + timeouts.diagnostics_quiet));
         loop {
             let now = Instant::now();
             let deadline = quiet_deadline.map_or(refresh_deadline, |deadline: Instant| {
@@ -1177,21 +1195,20 @@ impl StdioLspClient {
                     .or_insert(DiagnosticDocumentCoverage::StalePublication);
                 continue;
             }
-            coverage_by_uri.insert(
-                published.uri.as_str().to_owned(),
-                DiagnosticDocumentCoverage::Published {
-                    version_verified: published.version.is_some(),
-                    content_digest: ContentDigest::of_bytes(document.text.as_bytes()),
-                },
-            );
-            diagnostics_by_uri.insert(
-                published.uri.as_str().to_owned(),
-                published
-                    .diagnostics
-                    .into_iter()
-                    .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
-                    .collect(),
-            );
+            let coverage = DiagnosticDocumentCoverage::Published {
+                version_verified: published.version.is_some(),
+                content_digest: ContentDigest::of_bytes(document.text.as_bytes()),
+            };
+            let diagnostics = published
+                .diagnostics
+                .into_iter()
+                .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
+                .collect::<Vec<_>>();
+            if let Some(current) = self.documents.get_mut(published.uri.as_str()) {
+                current.diagnostics = Some((diagnostics.clone(), coverage.clone()));
+            }
+            coverage_by_uri.insert(published.uri.as_str().to_owned(), coverage);
+            diagnostics_by_uri.insert(published.uri.as_str().to_owned(), diagnostics);
             quiet_deadline = Some(deadline.min(Instant::now() + timeouts.diagnostics_quiet));
         }
         // Servers that suppress empty publishes (only publishing for files WITH
@@ -1342,7 +1359,6 @@ async fn wait_for_initialize(
                 )
                 .await?;
             }
-            JsonRpcMessage::Notification { .. } => {}
             JsonRpcMessage::Success { id, result } if id == json!(1) => return Ok(result),
             JsonRpcMessage::Error { id, error } if id == json!(1) => {
                 let error = LspSemanticRequestError::Remote {
@@ -1353,7 +1369,9 @@ async fn wait_for_initialize(
                     message: format!("LSP server '{command}' rejected initialize: {error}"),
                 });
             }
-            JsonRpcMessage::Success { .. } | JsonRpcMessage::Error { .. } => {}
+            JsonRpcMessage::Notification { .. }
+            | JsonRpcMessage::Success { .. }
+            | JsonRpcMessage::Error { .. } => {}
         }
     }
 }
@@ -1385,10 +1403,13 @@ async fn write_message_until(
             message: format!("failed to encode LSP message: {error}"),
         })
     })?;
-    match process
-        .write_frame(&body, deadline.min(Instant::now() + timeout))
-        .await
-    {
+    let io_deadline = Instant::now() + timeout;
+    match process.write_frame(&body, deadline.min(io_deadline)).await {
+        Err(AsyncContentLengthError::DeadlineElapsed) if io_deadline < deadline => {
+            Err(LspMessageWriteError::Failed(frame_write_error(
+                AsyncContentLengthError::DeadlineElapsed,
+            )))
+        }
         Err(AsyncContentLengthError::DeadlineElapsed) => Err(LspMessageWriteError::DeadlineElapsed),
         Err(error) => Err(LspMessageWriteError::Failed(frame_write_error(error))),
         Ok(()) => Ok(()),
@@ -1435,7 +1456,7 @@ async fn read_refresh_message_until(
     timeouts: LspRefreshTimeouts,
 ) -> std::result::Result<RefreshMessagePoll, LspRefreshError> {
     match process.read_frame_until(deadline).await {
-        Ok(FramePoll::Frame(frame)) => serde_json::from_slice(&frame)
+        Ok(FramePoll::Frame(frame)) => decode_message(&frame)
             .map(RefreshMessagePoll::Message)
             .map_err(|error| LspRefreshError::InvalidResponse {
                 message: format!("failed to parse LSP message: {error}"),
@@ -1504,9 +1525,7 @@ fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
     let value: Value = serde_json::from_slice(body).map_err(|error| TraceDecayError::Config {
         message: format!("failed to parse LSP message: {error}"),
     })?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| invalid_json_rpc_envelope())?;
+    let object = value.as_object().ok_or_else(invalid_json_rpc_envelope)?;
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Err(invalid_json_rpc_envelope());
     }
@@ -1810,8 +1829,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        LspSemanticRequestError, cancel_request_message, decode_semantic_request,
-        encode_semantic_request, file_uri_from_path_text, is_current_diagnostic_publication,
+        JsonRpcMessage, LspSemanticRequestError, cancel_request_message, decode_message,
+        decode_semantic_request, encode_semantic_request, file_uri_from_path_text,
+        is_current_diagnostic_publication,
     };
 
     #[test]
