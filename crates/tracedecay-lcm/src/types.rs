@@ -770,7 +770,10 @@ impl LcmCompressionResponse {
                     reason: &self.reason,
                 })
             }
-            (false, None, None | Some(CRITICAL_PRESSURE_CATCH_UP_RETRY)) => {
+            (false, None, None) => Ok(LcmCompressionOutcome::Complete),
+            (false, None, Some(CRITICAL_PRESSURE_CATCH_UP_RETRY))
+                if matches!(self.status.as_str(), "ok" | "best_effort") =>
+            {
                 Ok(LcmCompressionOutcome::Complete)
             }
             (_, summary_request, retry_status) => Err(LcmError::Db(format!(
@@ -883,23 +886,26 @@ mod tests {
 
     #[test]
     fn completed_outcomes_include_overflow_catch_up_retries() {
-        for retry_status in [None, Some("critical_pressure_catch_up")] {
-            let response = compression_response("ok", "compressed_backlog", None, retry_status);
+        for (status, reason) in [
+            ("ok", "forced_overflow_recovery"),
+            ("best_effort", "forced_overflow_recovery_replay_over_budget"),
+        ] {
+            let mut response =
+                compression_response(status, reason, None, Some("critical_pressure_catch_up"));
+            response.replay_over_budget = status == "best_effort";
+            response.compression_attempts = 2;
+            response.context_recovery_hint = Some("preserve the freshest tail".to_string());
+            let original = serde_json::to_value(&response).expect("response should serialize");
+
             assert_eq!(
                 response.outcome().expect("completed response is valid"),
                 LcmCompressionOutcome::Complete
             );
+            assert_eq!(
+                serde_json::to_value(&response).expect("response should serialize"),
+                original
+            );
         }
-        let response = compression_response(
-            "best_effort",
-            "forced_overflow_recovery_replay_over_budget",
-            None,
-            Some("critical_pressure_catch_up"),
-        );
-        assert_eq!(
-            response.outcome().expect("best-effort response is valid"),
-            LcmCompressionOutcome::Complete
-        );
     }
 
     #[test]
@@ -914,6 +920,12 @@ mod tests {
             ),
             compression_response("ok", "done", Some(summary_request()), None),
             compression_response("ok", "done", None, Some("needs_authoritative_summary")),
+            compression_response(
+                "unexpected",
+                "done",
+                None,
+                Some("critical_pressure_catch_up"),
+            ),
         ];
         for response in inconsistent {
             assert!(
