@@ -30,7 +30,7 @@ async fn committed_save_remains_noncurrent_until_its_broker_handoff() {
     let project =
         canonical_existing_identity(fixture.handshake.project_path.as_deref().unwrap()).unwrap();
     wait_for_host_ingest_publication(&fixture).await;
-    let initial = ready_reading(&fixture, &project, "initial").await;
+    let initial_text = ready_reading(&fixture, &project, "initial text").await;
     let graph = fixture.server.cg_snapshot().await;
     let project_id = graph.store_layout().identity.project_id.as_deref().unwrap();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
@@ -66,11 +66,14 @@ async fn committed_save_remains_noncurrent_until_its_broker_handoff() {
                 std::time::Instant::now() + PHASE_TIMEOUT,
             )
             .await;
-        assert!(owner.is_some(), "initial ready reading: {initial:?}");
+        assert!(owner.is_some(), "initial ready reading: {initial_text:?}");
         owner
     } else {
         None
     };
+    // Complete-owner demand can queue a freshness pass after text readiness.
+    // Settle that setup work before pinning the generation the save must retain.
+    let initial = ready_reading(&fixture, &project, "after initial graph admission").await;
     let replay = broker.begin_replay().await.unwrap();
     assert_eq!(broker.pending_replay_count().await.unwrap(), 0);
     std::fs::write(
