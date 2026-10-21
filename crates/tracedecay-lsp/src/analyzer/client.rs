@@ -457,7 +457,19 @@ impl StdioLspClientStartup {
                     Ok(()) => StdioLspClientStartupSettlement::Cancelled,
                     Err(error) => StdioLspClientStartupSettlement::ReapFailed(error),
                 },
-                settled => settled,
+                // An ordinary failure has already reaped the process. Once
+                // this startup's request owner is gone, that failure belongs
+                // to the abandoned attempt and must not escape to the next
+                // request that settles the retained slot. A reap failure is
+                // different: it is not proof that the old process is gone, so
+                // it remains fail-closed for every successor.
+                StdioLspClientStartupSettlement::Failed(_)
+                | StdioLspClientStartupSettlement::Cancelled => {
+                    StdioLspClientStartupSettlement::Cancelled
+                }
+                StdioLspClientStartupSettlement::ReapFailed(error) => {
+                    StdioLspClientStartupSettlement::ReapFailed(error)
+                }
             };
             *startup_result
                 .lock()
@@ -481,6 +493,13 @@ impl StdioLspClientStartup {
         self.cancellation.cancel();
         match result.take() {
             Some(StdioLspClientStartupSettlement::Started(client)) => Some(client),
+            Some(
+                StdioLspClientStartupSettlement::Failed(_)
+                | StdioLspClientStartupSettlement::Cancelled,
+            ) => {
+                *result = Some(StdioLspClientStartupSettlement::Cancelled);
+                None
+            }
             settlement => {
                 *result = settlement;
                 None
@@ -2198,7 +2217,7 @@ while True:
     }
 
     #[tokio::test]
-    async fn cancellation_preserves_a_completed_startup_failure() {
+    async fn cancellation_discards_a_completed_startup_failure() {
         let temp = tempfile::tempdir().unwrap();
         let startup = StdioLspClientStartup::start(
             AnalyzerLaunch::direct(temp.path().join("missing-analyzer")),
@@ -2217,7 +2236,7 @@ while True:
         assert!(startup.cancel().is_none());
         assert!(matches!(
             startup.settle().await,
-            StdioLspClientStartupSettlement::Failed(_)
+            StdioLspClientStartupSettlement::Cancelled
         ));
     }
 
