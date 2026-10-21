@@ -202,7 +202,7 @@ impl Harness {
             br#"{"jsonrpc":"2.0","id":2,"method":"workspace/symbol","params":{"query":"needle"}}"#,
             10,
         );
-        assert!(self.session.drain_outbound().is_empty());
+        assert_eq!(self.session.drain_outbound(), Vec::<Vec<u8>>::new());
         let started = self.authority.started.lock().unwrap();
         assert_eq!(started.len(), 2);
         let deadline = self.session.semantic.pending[&LspRequestId::Number(2)].deadline;
@@ -240,7 +240,7 @@ impl Harness {
             assert_eq!(response["id"], 2);
             assert_eq!(response["error"]["code"], code);
         } else {
-            assert!(responses.is_empty());
+            assert_eq!(responses, Vec::<Vec<u8>>::new());
         }
         self.complete("file:///left");
         self.complete("file:///right");
@@ -258,7 +258,7 @@ fn workspace_symbols_keep_admitted_deadline_and_completed_roots_across_polls() {
     harness.start_symbols();
     harness.complete("file:///left");
     harness.session.flush_due(11);
-    assert!(harness.session.drain_outbound().is_empty());
+    assert_eq!(harness.session.drain_outbound(), Vec::<Vec<u8>>::new());
     harness.session.flush_due(12);
     assert_eq!(
         harness.authority.started.lock().unwrap().len(),
