@@ -1,10 +1,11 @@
 import { defineConfig } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
+import { pluginPreparedDashboardAssets } from './prepare-assets.ts';
 
 // Canonical dashboard build. build.rs embeds this build's output into the
 // binary served at `/`, including every client-routed workspace.
 export default defineConfig({
-  plugins: [pluginReact()],
+  plugins: [pluginReact(), pluginPreparedDashboardAssets()],
   source: {
     entry: { index: './src/app/main.tsx' },
   },
