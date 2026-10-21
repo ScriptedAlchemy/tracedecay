@@ -302,6 +302,122 @@ class IsolatedLifecycleTest(unittest.TestCase):
                 "transcripts": [],
             }])
 
+    def test_environment_construction_cancellation_removes_unowned_profile(self):
+        original_mkdtemp = tempfile.mkdtemp
+        for operation in ("dict", "EvalEnvironment"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp:
+                allocated = []
+
+                def allocate(*args, **kwargs):
+                    root = Path(original_mkdtemp(*args, **kwargs))
+                    allocated.append(root)
+                    self.addCleanup(run_real_model.shutil.rmtree, root, ignore_errors=True)
+                    return str(root)
+
+                cancellation = KeyboardInterrupt(f"cancelled during {operation}")
+                with (
+                    mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp)),
+                    mock.patch.object(
+                        run_real_model, "load_scenarios", return_value=[
+                            self.scenario(), {**self.scenario(), "id": "must-not-start"}
+                        ]
+                    ),
+                    mock.patch.object(
+                        run_real_model, "resolve_tracedecay_bin", return_value="/unused/tracedecay"
+                    ),
+                    mock.patch.object(run_real_model.tempfile, "mkdtemp", side_effect=allocate),
+                    mock.patch.object(run_real_model, operation, side_effect=cancellation, create=True),
+                    mock.patch.object(run_real_model.subprocess, "Popen") as spawn,
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(
+                        run_real_model.main(["--agent-turn", "--i-understand-model-cost"]), 130
+                    )
+                spawn.assert_not_called()
+                reports = list(Path(tmp).glob("*/report.json"))
+                self.assertEqual(len(reports), 1)
+                report = json.loads(reports[0].read_text())
+                self.assertEqual(report["status"], "cancelled")
+                self.assertEqual(report["scenarios"], [{
+                    "id": "lifecycle",
+                    "contract": "stable",
+                    "status": "cancelled",
+                    "error": str(cancellation),
+                    "assertions": [],
+                    "transcripts": [],
+                }])
+                self.assertEqual(len(allocated), 1)
+                self.assertFalse(allocated[0].exists(), "unclaimed profile must be removed")
+
+    def test_allocation_cleanup_failure_preserves_cancellation_and_inaccessible_profile(self):
+        original_mkdtemp = tempfile.mkdtemp
+        original_remove = run_real_model.shutil.rmtree
+        original_stat = os.stat
+        for operation in ("Path", "EvalEnvironment"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp:
+                allocated = []
+
+                def allocate(*args, **kwargs):
+                    root = Path(original_mkdtemp(*args, **kwargs))
+                    allocated.append(root)
+                    self.addCleanup(original_remove, root, ignore_errors=True)
+                    return str(root)
+
+                def remove(path, *args, **kwargs):
+                    if allocated and Path(path) == allocated[0]:
+                        raise PermissionError("profile removal denied")
+                    return original_remove(path, *args, **kwargs)
+
+                def stat(path, *args, **kwargs):
+                    if (
+                        allocated
+                        and isinstance(path, (str, os.PathLike))
+                        and Path(path) == allocated[0]
+                    ):
+                        raise PermissionError("profile stat denied")
+                    return original_stat(path, *args, **kwargs)
+
+                cancellation = KeyboardInterrupt(f"cancelled during {operation}")
+                with (
+                    mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp)),
+                    mock.patch.object(
+                        run_real_model, "load_scenarios", return_value=[
+                            self.scenario(), {**self.scenario(), "id": "must-not-start"}
+                        ]
+                    ),
+                    mock.patch.object(
+                        run_real_model, "resolve_tracedecay_bin", return_value="/unused/tracedecay"
+                    ),
+                    mock.patch.object(run_real_model.tempfile, "mkdtemp", side_effect=allocate),
+                    mock.patch.object(run_real_model, operation, side_effect=cancellation),
+                    mock.patch.object(run_real_model.shutil, "rmtree", side_effect=remove),
+                    mock.patch.object(os, "stat", side_effect=stat),
+                    mock.patch.object(run_real_model.subprocess, "Popen") as spawn,
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(
+                        run_real_model.main(["--agent-turn", "--i-understand-model-cost"]), 130
+                    )
+                spawn.assert_not_called()
+                self.assertEqual(len(allocated), 1)
+                self.assertTrue(allocated[0].exists())
+                reports = list(Path(tmp).glob("*/report.json"))
+                self.assertEqual(len(reports), 1)
+                report = json.loads(reports[0].read_text())
+                self.assertEqual(report["status"], "cancelled")
+                self.assertEqual(report["scenarios"], [{
+                    "id": "lifecycle",
+                    "contract": "stable",
+                    "status": "cancelled",
+                    "error": str(cancellation),
+                    "cleanup_error": "profile removal denied",
+                    "retained_profile": str(allocated[0]),
+                    "assertions": [],
+                    "transcripts": [],
+                }])
+
     def test_fresh_environment_inits_and_seeds_against_isolated_daemon(self):
         binary = self.make_bin()
         eval_env = run_real_model.create_eval_environment("lifecycle")
@@ -415,13 +531,19 @@ class IsolatedLifecycleTest(unittest.TestCase):
         # Start before injecting stop failure so setup still uses real commands.
         eval_env.start_daemon(args.tracedecay_bin, ready_timeout=15)
         daemon = eval_env.daemon
-        original_stat = Path.stat
+        original_stat = os.stat
         inaccessible = []
 
         def stat(path, *args, **kwargs):
-            if path == eval_env.root or path == eval_env.socket_dir or path.parent == eval_env.root:
-                inaccessible.append(path)
-                raise PermissionError(errno.EACCES, "owned artifact stat denied", str(path))
+            if isinstance(path, (str, os.PathLike)):
+                artifact = Path(path)
+                if (
+                    artifact == eval_env.root
+                    or artifact == eval_env.socket_dir
+                    or artifact.parent == eval_env.root
+                ):
+                    inaccessible.append(artifact)
+                    raise PermissionError(errno.EACCES, "owned artifact stat denied", str(path))
             return original_stat(path, *args, **kwargs)
 
         with (
@@ -431,7 +553,7 @@ class IsolatedLifecycleTest(unittest.TestCase):
             mock.patch.object(run_real_model, "seed_fixture"),
             mock.patch.object(run_real_model, "drive_hermes", side_effect=RuntimeError("agent failed")),
             mock.patch.object(run_real_model, "stop_owned_process", side_effect=OSError("stop failed")),
-            mock.patch.object(Path, "stat", autospec=True, side_effect=stat),
+            mock.patch.object(os, "stat", side_effect=stat),
         ):
             result = run_real_model.run_scenario(args, self.scenario(), Path(run_dir), report)
         self.assertEqual(result, (False, False))

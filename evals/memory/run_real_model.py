@@ -238,6 +238,16 @@ class OwnedProcessCleanupError(EvalSetupError):
         return str(error) or ("interrupted" if self.cancelled else type(error).__name__)
 
 
+class OwnedProfileCleanupError(EvalSetupError):
+    """Retain allocation failures before an environment can own its profile."""
+
+    def __init__(self, root, original_error, cleanup_error):
+        self.root = root
+        self.original_error = original_error
+        self.cleanup_error = cleanup_error
+        super().__init__(f"profile allocation cleanup failed for {root}: {cleanup_error}")
+
+
 def create_eval_environment(scenario_id):
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario_id)
     # Explicit ownership prevents an implicit temporary-directory finalizer
@@ -266,10 +276,15 @@ def create_eval_environment(scenario_id):
             global_db=global_db,
             env=env,
         )
-    except BaseException:
+    except BaseException as original_error:
         # Ownership reaches the caller only after the whole environment has
         # been constructed; cancellation during setup still belongs here.
-        shutil.rmtree(root, ignore_errors=True)
+        try:
+            shutil.rmtree(root)
+        except FileNotFoundError:
+            pass
+        except BaseException as cleanup_error:
+            raise OwnedProfileCleanupError(root, original_error, cleanup_error) from original_error
         raise
 
 
@@ -848,6 +863,8 @@ def run_scenario(args, scenario, run_dir, report):
     ok = False
     cancelled = False
     pending_command = None
+    unclaimed_profile = None
+    cleanup_error = None
 
     def cleanup():
         nonlocal pending_command
@@ -883,6 +900,13 @@ def run_scenario(args, scenario, run_dir, report):
         entry.pop("error")
         entry.update(status=status, assertions=outcomes, transcripts=transcripts)
         ok = not failed
+    except OwnedProfileCleanupError as exc:
+        unclaimed_profile = exc.root
+        cleanup_error = exc.cleanup_error
+        cancelled = isinstance(exc.original_error, KeyboardInterrupt)
+        entry["error"] = str(exc.original_error) or (
+            "interrupted" if cancelled else type(exc.original_error).__name__
+        )
     except OwnedProcessCleanupError as exc:
         pending_command = exc.process
         cancelled = exc.cancelled
@@ -907,20 +931,22 @@ def run_scenario(args, scenario, run_dir, report):
                 entry.setdefault("error", str(exc) or "interrupted")
                 cleanup()
         except BaseException as exc:
+            cleanup_error = exc
+        if cleanup_error is not None:
             ok = False
-            cancelled |= isinstance(exc, KeyboardInterrupt)
-            entry["cleanup_error"] = str(exc) or type(exc).__name__
+            cancelled |= isinstance(cleanup_error, KeyboardInterrupt)
+            entry["cleanup_error"] = str(cleanup_error) or type(cleanup_error).__name__
             if pending_command is not None:
                 entry["command_pid"] = pending_command.pid
             for label, path in (
                 ("retained_fixture", fixture),
-                ("retained_profile", eval_env.root if eval_env is not None else None),
+                ("retained_profile", eval_env.root if eval_env is not None else unclaimed_profile),
                 ("retained_socket_dir", eval_env.socket_dir if eval_env is not None else None),
             ):
                 if path is None:
                     continue
                 try:
-                    path.stat()
+                    os.stat(path)
                 except FileNotFoundError:
                     continue
                 except OSError:
