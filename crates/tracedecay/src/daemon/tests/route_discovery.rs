@@ -225,6 +225,124 @@ async fn concurrent_routes_resolve_one_repository_topology() {
     );
 }
 
+/// A warming request joins the exact route's admitted open without starting
+/// another topology walk that could make the open's no-wait probe refuse it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warming_route_joins_its_open_without_rediscovering_repository() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join("profile");
+    let project = home.path().join("project");
+    std::fs::create_dir_all(&project).expect("non-Git project");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "warming route discovery");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let handshake = handshake_for(&project, &profile_root);
+    let (_, route) = engine.project_route(&handshake).expect("registered route");
+    let tasks = crate::daemon::project_open_tasks(&engine.project_open_gates).await;
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    let state = match tasks.start_cancellable(route, move |cancellation| async move {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                Err(crate::daemon::project_open_cancellation_error())
+            }
+            opened = blocked => {
+                opened.expect("release controlled open");
+                Err(tracedecay_domain::errors::TraceDecayError::project_open(
+                    tracedecay_domain::errors::ProjectOpenFailureKind::IndexMissing,
+                    "the controlled open refused a missing index",
+                ))
+            }
+        }
+    }) {
+        crate::daemon::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::ProjectOpenTaskClaim::Failed(_)
+        | crate::daemon::ProjectOpenTaskClaim::Saturated => {
+            panic!("the controlled open must own its route");
+        }
+    };
+
+    observe_repository_discovery_for_test(&project);
+    let other_scope = DaemonHandshake {
+        scope_prefix: Some("another-scope".to_owned()),
+        ..handshake.clone()
+    };
+    assert!(
+        engine
+            .cached_project_server(&other_scope)
+            .await
+            .expect("another scope remains a separate route")
+            .is_none()
+    );
+    assert!(
+        repository_topology_resolution_count_for_test(&project) > 0,
+        "a pending open must not suppress identity resolution for another route"
+    );
+
+    observe_repository_discovery_for_test(&project);
+    let mut joins = tasks.joins();
+    let next_join = *joins.borrow_and_update() + 1;
+    let request = engine
+        .project_server_for_request(&handshake, crate::daemon::ProjectServerRequirement::Core);
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        joined = joins.wait_for(|joins| *joins >= next_join) => {
+            joined.expect("request must join the controlled open");
+        }
+        answered = &mut request => panic!(
+            "request answered before joining its open: {:?}",
+            answered.err()
+        ),
+    }
+    assert_eq!(
+        repository_topology_resolution_count_for_test(&project),
+        0,
+        "a warming retry must not start a competing repository walk"
+    );
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the request must join instead of starting another project open"
+    );
+
+    release.send(()).expect("release controlled open");
+    let recorded = crate::daemon::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect_err("the controlled open must publish its failure");
+    let refusal = match request.await {
+        Ok(_) => panic!("a failed open must not publish a server"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        refusal.project_open_failure_kind(),
+        Some(tracedecay_domain::errors::ProjectOpenFailureKind::IndexMissing),
+        "the joined request must preserve the open's typed refusal"
+    );
+    assert_eq!(refusal.to_string(), recorded.to_string());
+
+    assert!(tasks.shutdown().await, "the controlled open must retire");
+    assert!(
+        engine
+            .cached_project_server(&handshake)
+            .await
+            .expect("registered route remains valid")
+            .is_none(),
+        "a failed open must leave no mounted server"
+    );
+    let resolutions = repository_topology_resolution_count_for_test(&project);
+    reset_repository_discovery_for_test(&project);
+    assert!(
+        resolutions > 0,
+        "a retired open must no longer suppress normal identity resolution"
+    );
+    engine.shutdown_all().await;
+}
+
 /// A discovery that outlives its budget is deferred, never a hang and never
 /// "this project is not enrolled".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
