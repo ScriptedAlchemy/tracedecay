@@ -128,6 +128,84 @@ describe('settings editor direct Save', () => {
     expect(settingsSubmissionOf(invalid)).toBeNull();
   });
 
+  it('settles each saved scope without discarding the other drafts or their revisions', () => {
+    let state = run(
+      initialSettingsEditorState(AUTHORITY),
+      { type: 'project_drafted', values: draftMaxFileSize('2097152') },
+      { type: 'user_drafted', values: { ...AUTHORITY.user, watcher_debounce: '15s' } },
+      {
+        type: 'code_index_workers_drafted',
+        values: { ...AUTHORITY.codeIndexWorkers, code_index_workers: { mode: 'exact', workers: 3 } },
+      },
+      { type: 'save_requested', scope: 'project', idempotencyKey: IDEMPOTENCY_KEY },
+    );
+    const payload = structuredClone(fixturePayload());
+    payload.project.configuration_revision_id = 'rev-43';
+    payload.project.config.max_file_size = 2_097_152;
+    // A concurrent writer changed both other resources. Their drafts still
+    // belong to the original revisions, even when PATCH/readback sees this.
+    payload.user.configuration_revision_id = 'user-rev-8';
+    payload.user.watcher_debounce = '20s';
+    payload.user.code_index_worker_configuration_revision_id = 'profile-worker-rev-8';
+    payload.user.code_index_workers = { mode: 'exact', workers: 2 };
+    state = settle(state, {
+      outcome: 'success', scope: 'project', payload, revisionId: 'rev-43',
+      resyncRecommended: false, restartRecommended: false,
+      effectReceipt: null, effectReconciliation: null,
+    });
+    state = run(state, { type: 'authority_observed', authority: buildSettingsEditor(payload) });
+
+    expect(settingsScopeDirty(state, 'project')).toBe(false);
+    expect(settingsScopePlan(state, 'user')).toMatchObject({
+      outcome: 'ready', expectedRevisionId: 'user-rev-7', patch: { watcher_debounce: '15s' },
+    });
+    expect(settingsScopePlan(state, 'code_index_workers')).toMatchObject({
+      outcome: 'ready', expectedRevisionId: 'profile-worker-rev-7',
+      patch: { code_index_workers: { mode: 'exact', workers: 3 } },
+    });
+  });
+
+  it('refreshes clean resources independently while an edited resource keeps its base', () => {
+    const drafted = run(initialSettingsEditorState(AUTHORITY), {
+      type: 'project_drafted', values: draftMaxFileSize('2097152'),
+    });
+    const fresh: SettingsEditor = {
+      ...withProjectRevision(AUTHORITY, 'rev-43'),
+      project: draftMaxFileSize('4096'),
+      userExpectedRevisionId: 'user-rev-8',
+      user: { ...AUTHORITY.user, watcher_debounce: '20s' },
+      codeIndexWorkerExpectedRevisionId: 'profile-worker-rev-8',
+      codeIndexWorkers: {
+        ...AUTHORITY.codeIndexWorkers, code_index_workers: { mode: 'exact', workers: 2 },
+      },
+    };
+    const observed = run(drafted, { type: 'authority_observed', authority: fresh });
+
+    expect(settingsScopePlan(observed, 'project')).toMatchObject({
+      outcome: 'ready', expectedRevisionId: 'rev-42', patch: { max_file_size: 2_097_152 },
+    });
+    expect(observed).toMatchObject({
+      authority: {
+        userExpectedRevisionId: 'user-rev-8',
+        codeIndexWorkerExpectedRevisionId: 'profile-worker-rev-8',
+      },
+      draft: { user: fresh.user, codeIndexWorkers: fresh.codeIndexWorkers },
+    });
+    expect(settingsScopeDirty(observed, 'user')).toBe(false);
+    expect(settingsScopeDirty(observed, 'code_index_workers')).toBe(false);
+
+    const submitted = expectSubmitting(run(observed, {
+      type: 'save_requested', scope: 'project', idempotencyKey: IDEMPOTENCY_KEY,
+    }));
+    const refreshed = expectSubmitting(run(submitted, {
+      type: 'authority_observed',
+      authority: { ...fresh, userExpectedRevisionId: 'user-rev-9' },
+    }));
+    expect(refreshed.submission).toBe(submitted.submission);
+    expect(refreshed.authority.userExpectedRevisionId).toBe('user-rev-9');
+    expect(settingsScopePlan(refreshed, 'project')).toMatchObject({ expectedRevisionId: 'rev-42' });
+  });
+
   it('preserves the exact request identity across an uncertain transport retry', () => {
     const first = expectSubmitting(saveProjectChange());
     const original = settingsSubmission(first, ROUTES);

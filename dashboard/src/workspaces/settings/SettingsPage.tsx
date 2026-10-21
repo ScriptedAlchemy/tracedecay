@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Search, X } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   DashboardEnvelopeV1Schema,
   SettingsPayloadV1Schema,
@@ -7,8 +8,10 @@ import {
   type SettingsPayloadV1,
 } from '../../contracts/generated.ts';
 import { usePayload } from '../../data/query/usePayload.ts';
+import type { PayloadResult } from '../../data/query/payload.ts';
 import {
   scopeWritable,
+  scopedQueryKey,
   scopedUrl,
   useScope,
   type ScopeWritability,
@@ -27,7 +30,12 @@ import {
 } from './settingsEditorMachine.ts';
 import { writableScopes } from './settingsGates.ts';
 import { SettingsInspector } from './SettingsInspector.tsx';
-import { buildSettingsModel, type SettingsModel } from './settingsModel.ts';
+import {
+  buildSettingsModel,
+  settingsPayloadWithAppliedScope,
+  type SettingsModel,
+  type SettingsScope,
+} from './settingsModel.ts';
 import { effectiveRows, filterEffectiveRows, type EffectiveRow } from './settingsRows.ts';
 import { SectionsRail } from './SettingsSections.tsx';
 
@@ -49,17 +57,39 @@ import { SectionsRail } from './SettingsSections.tsx';
  *
  * Hover and focus inspect; click selects and opens the editor under the row.
  * The effective value stays authoritative until the write authority validates,
- * persists against the held revision, reports its apply requirement, and the
- * read comes back.
+ * persists against the held revision, and reports its value and apply requirement.
  */
 export function SettingsPage() {
   const scope = useScope((state) => state.scope);
+  const client = useQueryClient();
   const settings = usePayload(
     ['settings'],
     '/api/settings',
     DashboardEnvelopeV1Schema(SettingsPayloadV1Schema),
   );
   const readUrl = scopedUrl(scope, '/api/settings');
+  const queryKey = useMemo(() => scopedQueryKey(scope, ['settings'], '/api/settings'), [scope]);
+  const publishApplied = useCallback(
+    async (savedScope: SettingsScope, payload: SettingsPayloadV1) => {
+      // A read started before PATCH may still carry the prior value. Cancel it
+      // before publishing the response; the normal post-save read follows.
+      await client.cancelQueries({ queryKey, exact: true });
+      client.setQueryData<PayloadResult<DashboardEnvelopeV1<SettingsPayloadV1>>>(
+        queryKey,
+        (current) => {
+          if (current?.outcome !== 'ok') return current;
+          return {
+            ...current,
+            data: {
+              ...current.data,
+              payload: settingsPayloadWithAppliedScope(current.data.payload, payload, savedScope),
+            },
+          };
+        },
+      );
+    },
+    [client, queryKey],
+  );
   // Project and ordinary user writes are addressed through the project gateway.
   // The ProfileSessions worker resource deliberately is not.
   const writability = scopeWritable(scope);
@@ -86,10 +116,12 @@ export function SettingsPage() {
       <PayloadBoundary title="Settings" pending={settings.isPending} result={settings.data}>
         {(envelope) => (
           <SettingsSurface
+            key={readUrl}
             envelope={envelope}
             writability={writability}
             routes={routes}
             refresh={refresh}
+            publishApplied={publishApplied}
           />
         )}
       </PayloadBoundary>
@@ -125,11 +157,13 @@ function SettingsSurface({
   writability,
   routes,
   refresh,
+  publishApplied,
 }: {
   envelope: DashboardEnvelopeV1<SettingsPayloadV1>;
   writability: ScopeWritability;
   routes: SettingsRoutes;
   refresh: () => Promise<SettingsPayloadV1 | null>;
+  publishApplied: (scope: SettingsScope, payload: SettingsPayloadV1) => Promise<void>;
 }) {
   const payload = envelope.payload;
   const model = useMemo(() => buildSettingsModel(payload), [payload]);
@@ -137,7 +171,7 @@ function SettingsSurface({
     () => writableScopes(envelope.legal_actions, writability),
     [envelope.legal_actions, writability],
   );
-  const editor = useSettingsEditor({ payload, routes, writability, refresh });
+  const editor = useSettingsEditor({ payload, routes, writability, refresh, publishApplied });
 
   const [query, setQuery] = useState('');
   const [inspectedKey, setInspectedKey] = useState<string | null>(null);

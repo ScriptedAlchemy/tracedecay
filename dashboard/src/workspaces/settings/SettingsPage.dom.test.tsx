@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import settingsWire from '../../test/fixtures/settings-patch.json';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
-import { useScope, type ScopeWritability } from '../../data/scope/store.ts';
+import { scopedQueryKey, useScope, type ScopeWritability } from '../../data/scope/store.ts';
 import { SettingsPage, findConfigSection } from './SettingsPage.tsx';
 import { applySettingsMutation } from './settingsMutation.ts';
 
@@ -274,6 +274,171 @@ describe('SettingsPage direct settings editing', () => {
     });
   });
 
+  it('keeps the applied value visible while the follow-up read is pending', async () => {
+    let applied = false;
+    let finishRead: ((response: Response) => void) | undefined;
+    const readback = new Promise<Response>((resolve) => { finishRead = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/project' && init?.method === 'PATCH') {
+        applied = true;
+        return jsonResponse(projectPatchResponse(updatedSettings('rev-43')));
+      }
+      if (url === '/api/settings') return applied ? readback : jsonResponse(settings());
+      return jsonResponse(FIXTURES[url]);
+    }));
+    const user = userEvent.setup();
+    renderSettings();
+
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('Project settings saved')).toBeTruthy();
+    expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved');
+    expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy();
+    expect(within(row(MAX_FILE_SIZE)).queryByText('1,048,576')).toBeNull();
+    await act(async () => { finishRead?.(jsonResponse(updatedSettings('rev-43'))); });
+  });
+
+  it('preserves another scope\'s proposal and original CAS revision after a save and refresh', async () => {
+    const current = settings();
+    const writes: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        writes.push({ url, body });
+        if (url === '/api/settings/project') {
+          settingsBody(current)['project'] = settingsBody(updatedSettings('rev-43'))['project'];
+          return jsonResponse(projectPatchResponse(current));
+        }
+        if (url === '/api/settings/user') {
+          const savedUser = settingsBody(current)['user'] as Record<string, unknown>;
+          savedUser['configuration_revision_id'] = 'user-rev-8';
+          savedUser['watcher_debounce'] = body['watcher_debounce'];
+          return jsonResponse(current);
+        }
+      }
+      if (url === '/api/settings') return jsonResponse(current);
+      return jsonResponse(FIXTURES[url]);
+    }));
+    const user = userEvent.setup();
+    renderSettings();
+
+    await openEditor(user, WATCHER_DEBOUNCE);
+    await user.clear(proposal(WATCHER_DEBOUNCE));
+    await user.type(proposal(WATCHER_DEBOUNCE), '15s');
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Project settings saved')).toBeTruthy();
+    await waitFor(() => expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved'));
+    expect(row(WATCHER_DEBOUNCE).dataset['provenance']).toBe('edited');
+
+    await openEditor(user, WATCHER_DEBOUNCE);
+    expect((proposal(WATCHER_DEBOUNCE) as HTMLInputElement).value).toBe('15s');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('User settings saved')).toBeTruthy();
+    expect(writes).toEqual([
+      { url: '/api/settings/project', body: {
+        expected_revision_id: 'rev-42', idempotency_key: expect.any(String), max_file_size: 2_097_152,
+      } },
+      { url: '/api/settings/user', body: {
+        expected_revision_id: 'user-rev-7', idempotency_key: expect.any(String), watcher_debounce: '15s',
+      } },
+    ]);
+  });
+
+  it('takes fresh values and revision for a clean scope while another scope remains edited', async () => {
+    const current = settings();
+    const writes: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/user' && init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        writes.push(body);
+        const savedUser = settingsBody(current)['user'] as Record<string, unknown>;
+        savedUser['configuration_revision_id'] = 'user-rev-9';
+        savedUser['watcher_debounce'] = body['watcher_debounce'];
+      }
+      return jsonResponse(url.startsWith('/api/settings') ? current : FIXTURES[url]);
+    }));
+    const user = userEvent.setup();
+    const { client } = renderSettings();
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+
+    const refreshedUser = settingsBody(current)['user'] as Record<string, unknown>;
+    refreshedUser['configuration_revision_id'] = 'user-rev-8';
+    refreshedUser['watcher_debounce'] = '20s';
+    await act(() => client.invalidateQueries({ queryKey: ['settings'] }));
+    await openEditor(user, WATCHER_DEBOUNCE);
+    expect((proposal(WATCHER_DEBOUNCE) as HTMLInputElement).value).toBe('20s');
+    await user.clear(proposal(WATCHER_DEBOUNCE));
+    await user.type(proposal(WATCHER_DEBOUNCE), '25s');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('User settings saved')).toBeTruthy();
+    expect(writes).toEqual([{
+      expected_revision_id: 'user-rev-8', idempotency_key: expect.any(String), watcher_debounce: '25s',
+    }]);
+    expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('edited');
+    await openEditor(user, MAX_FILE_SIZE);
+    expect((proposal(MAX_FILE_SIZE) as HTMLInputElement).value).toBe('2097152');
+  });
+
+  it('publishes a completing save only to the project where it was submitted', async () => {
+    const selectedScope = {
+      kind: 'project', projectId: 'proj_other', label: 'Other project', activation: 'selected',
+    } as const;
+    const selected = settings();
+    const selectedProject = settingsBody(selected)['project'] as Record<string, unknown>;
+    selectedProject['configuration_revision_id'] = 'other-rev-1';
+    (selectedProject['config'] as Record<string, unknown>)['max_file_size'] = 4096;
+    let finishPatch: ((response: Response) => void) | undefined;
+    const patch = new Promise<Response>((resolve) => { finishPatch = resolve; });
+    let patchStarted = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/settings/project' && init?.method === 'PATCH') {
+        patchStarted = true;
+        return patch;
+      }
+      if (url === '/api/settings') return jsonResponse(settings());
+      if (url === '/api/projects/proj_other/settings') return jsonResponse(selected);
+      return jsonResponse(FIXTURES[url]);
+    }));
+    const user = userEvent.setup();
+    const { client } = renderSettings();
+    await openEditor(user, MAX_FILE_SIZE);
+    await user.clear(proposal(MAX_FILE_SIZE));
+    await user.type(proposal(MAX_FILE_SIZE), '2097152');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(patchStarted).toBe(true));
+
+    await act(async () => {
+      client.setQueryData(scopedQueryKey(selectedScope, ['settings'], '/api/settings'), {
+        outcome: 'ok', data: selected,
+      });
+      useScope.setState({ scope: selectedScope });
+    });
+    expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy();
+    expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved');
+    await act(async () => {
+      finishPatch?.(jsonResponse(projectPatchResponse(updatedSettings('rev-43'))));
+    });
+    await waitFor(() => expect(client.getQueryData(
+      scopedQueryKey({ kind: 'all' }, ['settings'], '/api/settings'),
+    )).toMatchObject({ data: { payload: { project: {
+      configuration_revision_id: 'rev-43', config: { max_file_size: 2_097_152 },
+    } } } }));
+    expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy();
+    expect(screen.queryByText('Project settings saved')).toBeNull();
+  });
+
   it('saves a worker selection through its profile revision and refreshes it', async () => {
     useScope.setState({
       scope: {
@@ -284,6 +449,12 @@ describe('SettingsPage direct settings editing', () => {
       },
     });
     const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const selected = settings();
+    const selectedProject = settingsBody(selected)['project'] as Record<string, unknown>;
+    (selectedProject['config'] as Record<string, unknown>)['max_file_size'] = 4096;
+    (settingsBody(selected)['user'] as Record<string, unknown>)['watcher_debounce'] = '20s';
+    let finishRead: ((response: Response) => void) | undefined;
+    const readback = new Promise<Response>((resolve) => { finishRead = resolve; });
     let applied = false;
     vi.stubGlobal(
       'fetch',
@@ -293,7 +464,7 @@ describe('SettingsPage direct settings editing', () => {
         const body = init?.body ? JSON.parse(String(init.body)) : null;
         if (url.includes('/settings')) calls.push({ url, method, body });
         if (url === '/api/projects/proj_other/settings' && method === 'GET') {
-          return jsonResponse(applied ? updatedWorkerSettings('profile-worker-rev-8') : settings());
+          return applied ? readback : jsonResponse(selected);
         }
         if (url === '/api/settings' && method === 'GET') {
           return jsonResponse(applied ? updatedWorkerSettings('profile-worker-rev-8') : settings());
@@ -325,6 +496,12 @@ describe('SettingsPage direct settings editing', () => {
 
     expect(await screen.findByText('Code-index worker selection saved')).toBeTruthy();
     expect(screen.getByText('Restart recommended')).toBeTruthy();
+    // The profile PATCH returns the active project's snapshot. While the
+    // selected-project read is pending, only its worker resource may advance.
+    expect(row(WORKERS).dataset['provenance']).toBe('unserved');
+    expect(within(row(WORKERS)).getByText('exact · 4 workers')).toBeTruthy();
+    expect(within(row(MAX_FILE_SIZE)).getByText('4,096')).toBeTruthy();
+    expect(within(row(WATCHER_DEBOUNCE)).getByText('20s')).toBeTruthy();
     expect(calls).toEqual([
       { method: 'GET', url: '/api/projects/proj_other/settings', body: null },
       { method: 'GET', url: '/api/settings', body: null },
@@ -339,6 +516,10 @@ describe('SettingsPage direct settings editing', () => {
       },
       { method: 'GET', url: '/api/projects/proj_other/settings', body: null },
     ]);
+    const selectedUser = settingsBody(selected)['user'] as Record<string, unknown>;
+    selectedUser['code_index_workers'] = { mode: 'exact', workers: 4 };
+    selectedUser['code_index_worker_configuration_revision_id'] = 'profile-worker-rev-8';
+    await act(async () => { finishRead?.(jsonResponse(selected)); });
   });
 
   it('states when TRACEDECAY_INDEX_WORKERS overrides the persisted worker selection', async () => {

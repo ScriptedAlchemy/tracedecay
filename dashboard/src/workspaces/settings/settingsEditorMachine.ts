@@ -30,7 +30,7 @@ import {
 import type { ReconciliationState } from '../../contracts/generated.ts';
 import type { SettingsMutationRequest, SettingsMutationResult } from './settingsMutation.ts';
 
-/** The two drafts the editor holds, always for the same authority snapshot. */
+/** Each draft belongs to its resource's held authority revision. */
 export interface SettingsDraft {
   readonly project: ProjectSettingsValues;
   readonly user: UserSettingsValues;
@@ -194,29 +194,18 @@ function observeAuthority(
     return editing(authority, draftOf(authority), CLEAN);
   }
   if (sameAuthority(state.authority, authority)) return state;
-  switch (state.status) {
-    case 'editing': {
-      if ((['project', 'user', 'code_index_workers'] as const).some((scope) =>
-        settingsScopeDirty(state, scope),
-      )) {
-        return state;
-      }
-      return editing(
-        authority,
-        draftOf(authority),
-        state.resting.rest === 'applied' ? state.resting : CLEAN,
-      );
-    }
-    case 'conflicted':
-    case 'authority_withdrawn':
-    case 'submit_failed':
-    case 'submitting':
-      return state;
-    default: {
-      const exhaustive: never = state;
-      return exhaustive;
+  const submittedScope = settingsSubmissionOf(state)?.scope;
+  let observed: SettingsEditable = state;
+  for (const scope of ['project', 'user', 'code_index_workers'] as const) {
+    // A pending or uncertain write still owns its original CAS resource. A
+    // refresh may advance other clean resources without settling that write.
+    if (scope !== submittedScope && !settingsScopeDirty(state, scope)) {
+      observed = adoptScope(observed, authority, scope);
     }
   }
+  return sameAuthority(state.authority, observed.authority)
+    ? state
+    : { ...state, ...observed };
 }
 
 /**
@@ -292,7 +281,7 @@ function settleSubmit(
   if (state.status !== 'submitting') return state;
   const { authority, draft, submission } = state;
   switch (result.outcome) {
-    case 'success':
+    case 'success': {
       const appliedAuthority = buildSettingsEditor(result.payload);
       if (!appliedAuthority) {
         return failed(state, {
@@ -301,7 +290,10 @@ function settleSubmit(
           detail: 'The settings response no longer carries editable values and revisions.',
         });
       }
-      return editing(appliedAuthority, draftOf(appliedAuthority), {
+      // PATCH returns a complete snapshot, but only this resource was saved.
+      // Other proposals retain both their values and their original CAS base.
+      const saved = adoptScope(state, appliedAuthority, submission.scope);
+      return editing(saved.authority, saved.draft, {
         rest: 'applied',
         applied: {
           scope: result.scope,
@@ -312,6 +304,7 @@ function settleSubmit(
           effectReconciliation: result.effectReconciliation,
         },
       });
+    }
     case 'validation':
       return editing(authority, draft, {
         rest: 'rejected',
@@ -473,6 +466,47 @@ function draftOf(authority: SettingsEditor): SettingsDraft {
     user: authority.user,
     codeIndexWorkers: authority.codeIndexWorkers,
   };
+}
+
+function adoptScope(
+  current: SettingsEditable,
+  incoming: SettingsEditor,
+  scope: SettingsScope,
+): SettingsEditable {
+  const { authority, draft } = current;
+  switch (scope) {
+    case 'project':
+      return {
+        authority: {
+          ...authority,
+          projectExpectedRevisionId: incoming.projectExpectedRevisionId,
+          project: incoming.project,
+        },
+        draft: { ...draft, project: incoming.project },
+      };
+    case 'user':
+      return {
+        authority: {
+          ...authority,
+          userExpectedRevisionId: incoming.userExpectedRevisionId,
+          user: incoming.user,
+        },
+        draft: { ...draft, user: incoming.user },
+      };
+    case 'code_index_workers':
+      return {
+        authority: {
+          ...authority,
+          codeIndexWorkerExpectedRevisionId: incoming.codeIndexWorkerExpectedRevisionId,
+          codeIndexWorkers: incoming.codeIndexWorkers,
+        },
+        draft: { ...draft, codeIndexWorkers: incoming.codeIndexWorkers },
+      };
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
 }
 
 type SettingsPlan = SettingsChangePlan<

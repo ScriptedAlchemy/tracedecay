@@ -468,6 +468,50 @@ export function settingsRevisionId(current: SettingsEditor, scope: SettingsScope
 }
 
 /**
+ * Publish the verified PATCH resource into the existing read snapshot. Worker
+ * writes are profile-global, so their response's active project must never
+ * replace the selected project's settings or its other read groups.
+ */
+export function settingsPayloadWithAppliedScope(
+  current: SettingsPayloadV1,
+  applied: SettingsPayloadV1,
+  scope: SettingsScope,
+): SettingsPayloadV1 {
+  switch (scope) {
+    case 'project':
+      return { ...current, project: applied.project };
+    case 'user':
+      return {
+        ...current,
+        user: {
+          ...current.user,
+          configuration_revision_id: applied.user.configuration_revision_id,
+          configuration_snapshot_id: applied.user.configuration_snapshot_id,
+          watcher_debounce: applied.user.watcher_debounce,
+          extraction_timeout_secs: applied.user.extraction_timeout_secs,
+        },
+      };
+    case 'code_index_workers':
+      return {
+        ...current,
+        user: {
+          ...current.user,
+          code_index_worker_configuration_revision_id:
+            applied.user.code_index_worker_configuration_revision_id,
+          code_index_worker_configuration_snapshot_id:
+            applied.user.code_index_worker_configuration_snapshot_id,
+          code_index_workers: applied.user.code_index_workers,
+          code_index_worker_status: applied.user.code_index_worker_status,
+        },
+      };
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
+}
+
+/**
  * The project change a draft represents against a known-current snapshot.
  *
  * Planning against a snapshot keeps edits tied to the values and revision they

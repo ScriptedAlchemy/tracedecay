@@ -2,9 +2,9 @@
  * The controller: one state machine, and the one place a settings write is
  * issued from.
  *
- * It holds no state of its own beyond the machine. The authority is whatever
- * the last parsed read produced, the draft lives in the machine, and Save
- * captures one patch against that revision before any request is issued.
+ * It holds no state of its own beyond the machine. Each resource's authority
+ * comes from a parsed read or verified PATCH, the draft lives in the machine,
+ * and Save captures one patch against that revision before any request is issued.
  *
  * It is a hook rather than a panel because the table, inline editor, and
  * inspector all read the same machine.
@@ -47,11 +47,13 @@ export function useSettingsEditor({
   routes,
   writability,
   refresh,
+  publishApplied,
 }: {
   payload: SettingsPayloadV1;
   routes: SettingsRoutes;
   writability: ScopeWritability;
   refresh: () => Promise<SettingsPayloadV1 | null>;
+  publishApplied: (scope: SettingsScope, payload: SettingsPayloadV1) => Promise<void>;
 }): SettingsEditorHandle {
   const authority = useMemo(() => buildSettingsEditor(payload), [payload]);
   const [state, dispatch] = useReducer(
@@ -66,7 +68,10 @@ export function useSettingsEditor({
 
   const { mutate } = useMutation({
     mutationFn: applySettingsMutation,
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      // The table reads the canonical query snapshot. Publish the verified
+      // saved resource before clearing its proposal, even if readback stalls.
+      if (result.outcome === 'success') await publishApplied(result.scope, result.payload);
       dispatch({ type: 'submit_settled', result });
       if (result.outcome === 'success') void refresh();
     },
