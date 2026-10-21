@@ -96,7 +96,11 @@ async fn shutdown_waits_for_accepted_curator_settlement_and_lock_release() {
         .call_tool(
             &project,
             "tracedecay_fact_store_curate",
-            json!({"fact_review_limit": 7, "min_confidence_millionths": 500_000}),
+            json!({
+                "fact_review_limit": 7,
+                "min_confidence_millionths": 500_000,
+                "format": "json"
+            }),
         )
         .await
         .expect("curator request");

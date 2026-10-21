@@ -97,13 +97,19 @@ async fn execute_native_daemon_invocation(
 ) -> DaemonInvocationResponse {
     let engine = engine.clone();
     let handshake = handshake.clone();
-    let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
-        assert!(
-            tracedecay_runtime_core::native_runtime::Runtime::current_handle().is_some(),
-            "the daemon invocation must run on a native worker"
-        );
-        Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
-    })
+    // Production installs its Tokio handle for native-worker project opens.
+    // Keep this fixture's handle scoped to its task so concurrent tests never
+    // borrow a different fixture's runtime or retain one after shutdown.
+    let runtime = tokio::runtime::Handle::current();
+    let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(
+        tracedecay_runtime_core::native_runtime::in_tokio_context(runtime, async move {
+            assert!(
+                tracedecay_runtime_core::native_runtime::Runtime::current_handle().is_some(),
+                "the daemon invocation must run on a native worker"
+            );
+            Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
+        }),
+    )
     .expect("native daemon invocation");
     match task.wait().await {
         tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(response) => response,
