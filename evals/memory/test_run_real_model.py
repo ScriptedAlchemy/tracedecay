@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -8,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -18,7 +20,8 @@ MODULE_PATH = Path(__file__).with_name("run_real_model.py")
 SPEC = importlib.util.spec_from_file_location("run_real_model", MODULE_PATH)
 run_real_model = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(run_real_model)
-from scripts.lib import portable_process
+
+import portable_process
 
 BENCHMARK_PATH = MODULE_PATH.parent.parent.parent / "benchmark_data" / "run_benchmarks.py"
 BENCHMARK_SPEC = importlib.util.spec_from_file_location("run_benchmarks", BENCHMARK_PATH)
@@ -128,6 +131,7 @@ class BinaryResolutionTest(unittest.TestCase):
             ):
                 run_real_model.resolve_tracedecay_bin(None)
 
+
     def test_build_failure_writes_a_failed_report_before_any_scenario_starts(self):
         with tempfile.TemporaryDirectory() as tmp:
             with (
@@ -141,7 +145,7 @@ class BinaryResolutionTest(unittest.TestCase):
             report = json.loads(next(Path(tmp).glob("*/report.json")).read_text())
         scenario.assert_not_called()
         self.assertEqual(report["status"], "fail")
-        self.assertIn("build-eval-binary.sh exited 2", report["error"])
+        self.assertIn("build-eval-binary.sh exited 2", report["reason"])
         self.assertIsNone(report["tracedecay_bin"])
 
 
@@ -188,15 +192,15 @@ class EvalStorageIsolationTest(unittest.TestCase):
         self.assertNotEqual(env.global_db, Path.home() / ".tracedecay/global.db")
 
     def test_cleanup_removes_fixture_and_isolated_eval_store(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp) / "fixture"
-            fixture.mkdir()
-            eval_env = run_real_model.create_eval_environment("cleanup-store")
+        eval_env = run_real_model.create_eval_environment("cleanup-store")
+        self.addCleanup(eval_env.cleanup)
+        fixture = eval_env.root / "fixture"
+        fixture.mkdir()
 
-            run_real_model.cleanup_eval_artifacts(fixture, eval_env)
+        eval_env.cleanup()
 
-            self.assertFalse(fixture.exists())
-            self.assertFalse(eval_env.root.exists())
+        self.assertFalse(fixture.exists())
+        self.assertFalse(eval_env.root.exists())
 
 
 FAKE_BIN = """#!/usr/bin/env python3
@@ -252,7 +256,7 @@ class IsolatedLifecycleTest(unittest.TestCase):
                     run_real_model, "resolve_tracedecay_bin", return_value="/unused/tracedecay"
                 ),
                 mock.patch.object(
-                    run_real_model.tempfile, "TemporaryDirectory",
+                    run_real_model.tempfile, "mkdtemp",
                     side_effect=OSError("No space left on device"),
                 ),
                 mock.patch.object(run_real_model.EvalEnvironment, "start_daemon") as daemon,
@@ -284,32 +288,56 @@ class IsolatedLifecycleTest(unittest.TestCase):
         binary = self.make_bin()
         eval_env = run_real_model.create_eval_environment("lifecycle")
         try:
+            fixture = eval_env.root / "fixture"
+            fixture.mkdir()
             eval_env.start_daemon(binary, ready_timeout=15)
-            fixture = run_real_model.build_fixture(
-                self.scenario(), binary, eval_env.env, parent=eval_env.root
-            )
+            run_real_model.seed_fixture(self.scenario(), binary, eval_env.env, fixture)
             self.assertTrue(fixture.is_relative_to(eval_env.root))
             pid = int((eval_env.data_dir / "daemon.pid").read_text())
         finally:
-            run_real_model.cleanup_eval_artifacts(None, eval_env)
+            eval_env.cleanup()
         self.assertFalse(eval_env.root.exists())
         self.assertFalse(Path(eval_env.env["TRACEDECAY_DAEMON_SOCKET"]).parent.exists())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
 
-    def test_init_failure_removes_fixture_and_raises_typed_error(self):
+    def test_init_failure_stops_daemon_before_removing_fixture(self):
         binary = self.make_bin()
         eval_env = run_real_model.create_eval_environment("lifecycle")
         self.addCleanup(eval_env.cleanup)
-        eval_env.start_daemon(binary, ready_timeout=15)
         eval_env.env["FAKE_INIT_FAIL"] = "1"
-        with self.assertRaises(run_real_model.EvalSetupError):
-            run_real_model.build_fixture(
-                self.scenario(), binary, eval_env.env, parent=eval_env.root
+        args = argparse.Namespace(tracedecay_bin=binary, driver="hermes")
+        report = {"scenarios": []}
+        removed = []
+        original_remove = run_real_model.shutil.rmtree
+
+        def remove(path, *args, **kwargs):
+            path = Path(path)
+            if path.is_relative_to(eval_env.root) and path.exists():
+                self.assertIsNone(eval_env.daemon, "owned work must stop before deleting inputs")
+                pid = int((eval_env.data_dir / "daemon.pid").read_text())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+                removed.append(path)
+            return original_remove(path, *args, **kwargs)
+
+        with (
+            tempfile.TemporaryDirectory() as run_dir,
+            mock.patch.object(run_real_model, "create_eval_environment", return_value=eval_env),
+            mock.patch.object(run_real_model.shutil, "rmtree", side_effect=remove),
+            mock.patch.object(run_real_model, "drive_hermes") as driver,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            result = run_real_model.run_scenario(
+                args, self.scenario(), Path(run_dir), report
             )
-        self.assertEqual(
-            [p.name for p in eval_env.root.glob("tracedecay-eval-*")], []
-        )
+        self.assertEqual(result, (False, False))
+        driver.assert_not_called()
+        self.assertTrue(removed)
+        self.assertFalse(eval_env.root.exists())
+        self.assertIn("command failed (1)", report["scenarios"][0]["error"])
+        self.assertNotIn("cleanup_error", report["scenarios"][0])
 
     def test_daemon_startup_failure_is_reported_and_cleaned(self):
         binary = self.make_bin()
@@ -348,7 +376,429 @@ class IsolatedLifecycleTest(unittest.TestCase):
                     entry["error"], str(exc) or "interrupted"
                 )
 
-    def test_daemon_cleanup_failure_preserves_report_and_removes_artifacts(self):
+    def test_daemon_cleanup_does_not_need_to_launch_a_helper(self):
+        eval_env = run_real_model.create_eval_environment("cleanup-no-helper")
+        self.addCleanup(eval_env.cleanup)
+        eval_env.start_daemon(self.make_bin(), ready_timeout=15)
+        daemon = eval_env.daemon
+        with mock.patch.object(
+            run_real_model.subprocess, "Popen", side_effect=OSError("cannot spawn helper")
+        ):
+            eval_env.cleanup()
+        self.assertIsNotNone(daemon.returncode)
+        self.assertIsNone(eval_env.daemon)
+        self.assertFalse(eval_env.root.exists())
+
+    def test_cleanup_failure_retains_original_error_when_artifact_stat_is_denied(self):
+        eval_env = run_real_model.create_eval_environment("cleanup-error")
+        self.addCleanup(eval_env.cleanup)
+        args = argparse.Namespace(tracedecay_bin=self.make_bin(), driver="hermes")
+        report = {"scenarios": []}
+        # Start before injecting stop failure so setup still uses real commands.
+        eval_env.start_daemon(args.tracedecay_bin, ready_timeout=15)
+        daemon = eval_env.daemon
+        original_stat = Path.stat
+        inaccessible = []
+
+        def stat(path, *args, **kwargs):
+            if path == eval_env.root or path == eval_env.socket_dir or path.parent == eval_env.root:
+                inaccessible.append(path)
+                raise PermissionError(errno.EACCES, "owned artifact stat denied", str(path))
+            return original_stat(path, *args, **kwargs)
+
+        with (
+            tempfile.TemporaryDirectory() as run_dir,
+            mock.patch.object(run_real_model, "create_eval_environment", return_value=eval_env),
+            mock.patch.object(eval_env, "start_daemon"),
+            mock.patch.object(run_real_model, "seed_fixture"),
+            mock.patch.object(run_real_model, "drive_hermes", side_effect=RuntimeError("agent failed")),
+            mock.patch.object(run_real_model, "stop_owned_process", side_effect=OSError("stop failed")),
+            mock.patch.object(Path, "stat", autospec=True, side_effect=stat),
+        ):
+            result = run_real_model.run_scenario(args, self.scenario(), Path(run_dir), report)
+        self.assertEqual(result, (False, False))
+        self.assertEqual(report["scenarios"][0]["error"], "agent failed")
+        self.assertEqual(report["scenarios"][0]["cleanup_error"], "stop failed")
+        entry = report["scenarios"][0]
+        fixture = Path(entry["retained_fixture"])
+        self.assertEqual(entry["retained_profile"], str(eval_env.root))
+        self.assertEqual(entry["retained_socket_dir"], str(eval_env.socket_dir))
+        self.assertEqual(set(inaccessible), {fixture, eval_env.root, eval_env.socket_dir})
+        self.assertTrue(fixture.exists())
+        self.assertIs(eval_env.daemon, daemon)
+        self.assertIsNone(daemon.poll())
+        self.assertTrue(eval_env.root.exists())
+        eval_env.cleanup()
+        self.assertFalse(eval_env.root.exists())
+
+    def test_socket_cleanup_failure_reports_retained_directory_and_cleans_profile(self):
+        eval_env = run_real_model.create_eval_environment("socket-cleanup-error")
+        self.addCleanup(eval_env.cleanup)
+        binary = self.make_bin()
+        original_remove = run_real_model.shutil.rmtree
+        original_unlink = os.unlink
+        removed = []
+        fixture = None
+        daemon = None
+
+        def drive(_args, _scenario, path, _run_dir, _env):
+            nonlocal fixture, daemon
+            fixture = path
+            daemon = eval_env.daemon
+            return [{"turn_valid": True}]
+
+        def remove(path, *args, **kwargs):
+            path = Path(path)
+            if path in (eval_env.socket_dir, eval_env.root):
+                self.assertIsNone(eval_env.daemon)
+                self.assertIsNotNone(daemon.returncode)
+                removed.append(path)
+            return original_remove(path, *args, **kwargs)
+
+        def unlink(path, *args, **kwargs):
+            if Path(path).name == "daemon.sock":
+                raise PermissionError(errno.EACCES, "socket directory deletion failed", path)
+            return original_unlink(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp)),
+                mock.patch.object(run_real_model, "load_scenarios", return_value=[self.scenario()]),
+                mock.patch.object(run_real_model, "resolve_tracedecay_bin", return_value=binary),
+                mock.patch.object(run_real_model, "create_eval_environment", return_value=eval_env),
+                mock.patch.object(run_real_model, "drive_hermes", side_effect=drive),
+                mock.patch.object(run_real_model, "evaluate_assertions", return_value=[]),
+                mock.patch.object(run_real_model.shutil, "rmtree", side_effect=remove),
+                mock.patch.object(os, "unlink", side_effect=unlink),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                code = run_real_model.main(["--agent-turn", "--i-understand-model-cost"])
+            report_path, = Path(tmp).glob("*/report.json")
+            report = json.loads(report_path.read_text())
+
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(removed, [eval_env.socket_dir, eval_env.root])
+        self.assertFalse(eval_env.root.exists())
+        self.assertFalse(fixture.exists())
+        self.assertTrue(eval_env.socket_dir.exists())
+        entry = report["scenarios"][0]
+        self.assertEqual(entry["status"], "error (cleanup failure)")
+        self.assertIn("socket directory deletion failed", entry["cleanup_error"])
+        self.assertEqual(entry["retained_socket_dir"], str(eval_env.socket_dir))
+        self.assertNotIn("retained_profile", entry)
+        self.assertNotIn("retained_fixture", entry)
+        self.assertNotIn("daemon_pid", entry)
+        eval_env.cleanup()
+        self.assertFalse(eval_env.socket_dir.exists())
+
+    def test_seed_failure_retains_fixture_until_daemon_stop_is_confirmed(self):
+        binary = self.make_bin()
+        eval_env = run_real_model.create_eval_environment("seed-cleanup-error")
+        self.addCleanup(eval_env.cleanup)
+        args = argparse.Namespace(tracedecay_bin=binary, driver="hermes")
+        scenario = self.scenario()
+        # Initialization and the fact write succeed before preload validation
+        # fails, so the daemon has already used the fixture being retained.
+        scenario["setup"]["facts"][0]["preload_searches"] = 1
+        report = {"scenarios": []}
+        fixture = None
+        original_seed = run_real_model.seed_fixture
+        original_stop = run_real_model.stop_owned_process
+
+        def seed(scenario, binary, env, path):
+            nonlocal fixture
+            fixture = path
+            return original_seed(scenario, binary, env, path)
+
+        def stop(process, grace):
+            if process is eval_env.daemon:
+                raise OSError("daemon stop failed")
+            return original_stop(process, grace)
+
+        with (
+            tempfile.TemporaryDirectory() as run_dir,
+            mock.patch.object(run_real_model, "create_eval_environment", return_value=eval_env),
+            mock.patch.object(run_real_model, "seed_fixture", side_effect=seed),
+            mock.patch.object(run_real_model, "stop_owned_process", side_effect=stop),
+            mock.patch.object(run_real_model, "drive_hermes") as driver,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            result = run_real_model.run_scenario(args, scenario, Path(run_dir), report)
+
+        self.assertEqual(result, (False, False))
+        driver.assert_not_called()
+        entry = report["scenarios"][0]
+        self.assertIn("sets preload_searches without preload_query", entry["error"])
+        self.assertEqual(entry["cleanup_error"], "daemon stop failed")
+        self.assertIsNotNone(fixture)
+        self.assertTrue(fixture.exists(), "a live daemon must retain its seeded fixture")
+        self.assertEqual(entry["retained_fixture"], str(fixture))
+        self.assertEqual(entry["retained_profile"], str(eval_env.root))
+        self.assertEqual(entry["daemon_pid"], eval_env.daemon.pid)
+        self.assertIsNone(eval_env.daemon.poll())
+        self.assertEqual(
+            (fixture / "src/lib.rs").read_text(), "pub fn eval_fixture_marker() {}\n"
+        )
+        eval_env.cleanup()
+        self.assertFalse(eval_env.root.exists())
+        self.assertFalse(fixture.exists())
+
+    def test_signals_stop_agent_descendants_and_persist_cancelled_report(self):
+        # A real child and grandchild that ignore SIGTERM exercise forced
+        # process-group teardown rather than a mocked KeyboardInterrupt.
+        script = """
+import json, os, pathlib, signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+ready = pathlib.Path(sys.argv[1] + '.ready')
+child = subprocess.Popen([sys.executable, '-c',
+    'import pathlib,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+    'pathlib.Path(sys.argv[1]).touch(); time.sleep(600)', str(ready)])
+while not ready.exists(): time.sleep(0.01)
+pathlib.Path(sys.argv[1]).write_text(json.dumps([os.getpid(), child.pid]))
+time.sleep(600)
+"""
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=sig), tempfile.TemporaryDirectory() as tmp:
+                pidfile = Path(tmp) / "agent-pids.json"
+                eval_env = run_real_model.create_eval_environment("signal-cleanup")
+                self.addCleanup(eval_env.cleanup)
+                notified = threading.Event()
+
+                def interrupt_agent():
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        if pidfile.exists() and pidfile.stat().st_size:
+                            notified.set()
+                            os.kill(os.getpid(), sig)
+                            return
+                        time.sleep(0.01)
+
+                def drive(*_args):
+                    run_real_model.run([sys.executable, "-c", script, str(pidfile)], timeout=20)
+                    self.fail("the interrupted agent must not complete")
+
+                thread = threading.Thread(target=interrupt_agent, daemon=True)
+                previous_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+                with (
+                    mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp) / "runs"),
+                    mock.patch.object(run_real_model, "load_scenarios", return_value=[self.scenario()]),
+                    mock.patch.object(run_real_model, "resolve_tracedecay_bin", return_value=self.make_bin()),
+                    mock.patch.object(run_real_model, "create_eval_environment", return_value=eval_env),
+                    mock.patch.object(run_real_model, "drive_hermes", side_effect=drive),
+                    mock.patch.object(run_real_model, "PROCESS_STOP_GRACE_SECONDS", 0.2),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    thread.start()
+                    code = run_real_model.main(["--agent-turn", "--i-understand-model-cost"])
+                    thread.join(timeout=1)
+                self.assertTrue(notified.is_set())
+                self.assertEqual(code, 130)
+                report_path, = (Path(tmp) / "runs").glob("*/report.json")
+                report = json.loads(report_path.read_text())
+                self.assertEqual(report["status"], "cancelled")
+                self.assertEqual(report["scenarios"][0]["status"], "cancelled")
+                leader, child = json.loads(pidfile.read_text())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(leader, 0)
+                # Linux can retain an orphaned zombie until PID 1 reaps it;
+                # use the canonical runnable-member check for the descendant.
+                self.assertFalse(portable_process._group_alive(leader), child)
+                self.assertIsNone(eval_env.daemon)
+                self.assertFalse(eval_env.root.exists())
+                self.assertEqual(previous_handlers, {
+                    s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)
+                })
+
+    def test_cancelled_command_stop_failure_retains_its_files_and_primary_error(self):
+        script = """
+import os, pathlib, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+time.sleep(30)
+"""
+        # Exercise main before scenario allocation, fixture seeding, and an
+        # established agent turn with their respective process owners.
+        for phase in ("binary resolution", "fixture setup", "agent turn"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
+                pidfile = Path(tmp) / "command.pid"
+                eval_env = (
+                    None if phase == "binary resolution"
+                    else run_real_model.create_eval_environment("command-stop-failure")
+                )
+                fixture = None
+                command = None
+                stop_attempts = 0
+                notified = threading.Event()
+                finished = threading.Event()
+                original_stop = run_real_model.stop_owned_process
+                original_seed = run_real_model.seed_fixture
+
+                def interrupt_command():
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline and not finished.wait(0.01):
+                        if pidfile.exists() and pidfile.stat().st_size:
+                            notified.set()
+                            os.kill(os.getpid(), signal.SIGTERM)
+                            return
+
+                def run_command():
+                    run_real_model.run(
+                        [sys.executable, "-c", script, str(pidfile)],
+                        cwd=fixture,
+                        timeout=20,
+                    )
+                    self.fail("the interrupted command must not complete")
+
+                def seed(scenario, binary, env, path):
+                    nonlocal fixture
+                    fixture = path
+                    if phase == "fixture setup":
+                        (path / "owned-input").write_text("must survive a failed stop")
+                        run_command()
+                    else:
+                        original_seed(scenario, binary, env, path)
+
+                def fail_command_stop(process, grace):
+                    nonlocal command, stop_attempts
+                    if str(pidfile) in process.args:
+                        command = process
+                        stop_attempts += 1
+                        raise OSError("command stop failed")
+                    return original_stop(process, grace)
+
+                thread = threading.Thread(target=interrupt_command, daemon=True)
+                try:
+                    with (
+                        mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp) / "runs"),
+                        mock.patch.object(run_real_model, "load_scenarios", return_value=[
+                            self.scenario(), {"id": "must-not-run-after-cancellation"},
+                        ]),
+                        mock.patch.object(
+                            run_real_model, "resolve_tracedecay_bin",
+                            side_effect=(
+                                (lambda _explicit: run_command()) if phase == "binary resolution"
+                                else (lambda _explicit: self.make_bin())
+                            ),
+                        ),
+                        mock.patch.object(run_real_model, "create_eval_environment", return_value=eval_env) as create_env,
+                        mock.patch.object(run_real_model, "seed_fixture", side_effect=seed),
+                        mock.patch.object(run_real_model, "drive_hermes", side_effect=lambda *_args: run_command()),
+                        mock.patch.object(run_real_model, "stop_owned_process", side_effect=fail_command_stop),
+                        mock.patch.object(run_real_model, "PROCESS_STOP_GRACE_SECONDS", 0.2),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        thread.start()
+                        code = run_real_model.main(["--agent-turn", "--i-understand-model-cost"])
+                    finished.set()
+                    thread.join(timeout=1)
+                    self.assertTrue(notified.is_set())
+                    self.assertEqual(code, 130)
+                    self.assertEqual(stop_attempts, 2, "the enclosing owner must retry the command stop")
+                    self.assertIsNotNone(command)
+                    self.assertIsNone(command.poll())
+                    report_path, = (Path(tmp) / "runs").glob("*/report.json")
+                    report = json.loads(report_path.read_text())
+                    self.assertEqual(report["status"], "cancelled")
+                    if phase == "binary resolution":
+                        create_env.assert_not_called()
+                        self.assertEqual(report["scenarios"], [])
+                        self.assertEqual(report["phase"], phase)
+                        entry = report
+                        primary_error = entry["reason"]
+                    else:
+                        self.assertEqual(len(report["scenarios"]), 1)
+                        entry = report["scenarios"][0]
+                        self.assertEqual(entry["status"], "cancelled")
+                        primary_error = entry["error"]
+                        self.assertEqual(entry["retained_profile"], str(eval_env.root))
+                        self.assertEqual(entry["retained_fixture"], str(fixture))
+                        self.assertEqual(entry["daemon_pid"], eval_env.daemon.pid)
+                        self.assertTrue(eval_env.root.exists())
+                        self.assertTrue(fixture.exists())
+                        self.assertIsNone(eval_env.daemon.poll())
+                        if phase == "fixture setup":
+                            self.assertEqual(
+                                (fixture / "owned-input").read_text(),
+                                "must survive a failed stop",
+                            )
+                    self.assertIn("cancelled by signal", primary_error)
+                    self.assertEqual(entry["cleanup_error"], "command stop failed")
+                    self.assertEqual(entry["command_pid"], command.pid)
+                finally:
+                    finished.set()
+                    thread.join(timeout=1)
+                    if command is not None:
+                        original_stop(command, 0.2)
+                    if eval_env is not None:
+                        eval_env.cleanup()
+
+    def test_first_signal_during_command_stop_finishes_owned_group_cleanup(self):
+        script = """
+import json, os, pathlib, subprocess, sys, time
+ready = pathlib.Path(sys.argv[1] + '.ready')
+child = subprocess.Popen([sys.executable, '-c',
+    'import pathlib,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+    'pathlib.Path(sys.argv[1]).touch(); time.sleep(30)', str(ready)],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+while not ready.exists(): time.sleep(0.01)
+pathlib.Path(sys.argv[1]).write_text(json.dumps([os.getpid(), child.pid]))
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "agent-pids.json"
+            eval_env = run_real_model.create_eval_environment("signal-during-stop")
+            self.addCleanup(eval_env.cleanup)
+            interrupted = False
+            original_signal_group = portable_process._signal_group
+
+            def interrupt_stop(pid, sig):
+                nonlocal interrupted
+                original_signal_group(pid, sig)
+                if not interrupted and sig == signal.SIGTERM and pidfile.exists():
+                    leader, _child = json.loads(pidfile.read_text())
+                    if pid == leader:
+                        interrupted = True
+                        os.kill(os.getpid(), signal.SIGTERM)
+
+            def drive(*_args):
+                run_real_model.run([sys.executable, "-c", script, str(pidfile)], timeout=20)
+                self.fail("the interrupted command stop must cancel the scenario")
+
+            try:
+                with (
+                    mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp) / "runs"),
+                    mock.patch.object(run_real_model, "load_scenarios", return_value=[self.scenario()]),
+                    mock.patch.object(run_real_model, "resolve_tracedecay_bin", return_value=self.make_bin()),
+                    mock.patch.object(run_real_model, "create_eval_environment", return_value=eval_env),
+                    mock.patch.object(run_real_model, "drive_hermes", side_effect=drive),
+                    mock.patch.object(portable_process, "_signal_group", side_effect=interrupt_stop),
+                    mock.patch.object(run_real_model, "PROCESS_STOP_GRACE_SECONDS", 0.2),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    code = run_real_model.main(["--agent-turn", "--i-understand-model-cost"])
+                self.assertTrue(interrupted)
+                self.assertEqual(code, 130)
+                leader, child = json.loads(pidfile.read_text())
+                self.assertFalse(portable_process._group_alive(leader), child)
+                self.assertIsNone(eval_env.daemon)
+                self.assertFalse(eval_env.root.exists())
+                report_path, = (Path(tmp) / "runs").glob("*/report.json")
+                entry = json.loads(report_path.read_text())["scenarios"][0]
+                self.assertEqual(entry["status"], "cancelled")
+                self.assertIn("cancelled by signal", entry["error"])
+                self.assertNotIn("cleanup_error", entry)
+            finally:
+                if pidfile.exists():
+                    leader, _child = json.loads(pidfile.read_text())
+                    portable_process._stop_group(leader, 0.2)
+
+
+    def test_daemon_cleanup_failure_retains_completed_results_and_owned_artifacts(self):
         binary = self.make_bin()
         for agent_failure, cleanup_failure in (
             (RuntimeError("agent failed"), OSError("cleanup failed")),
@@ -357,14 +807,21 @@ class IsolatedLifecycleTest(unittest.TestCase):
         ):
             with self.subTest(agent=agent_failure, cleanup=cleanup_failure):
                 environment = run_real_model.create_eval_environment("cleanup-failure")
+                self.addCleanup(environment.cleanup)
                 daemon_pid = None
-                outcomes = [{"name": "completed assertion", "passed": True}]
+                outcomes = [{
+                    "name": "completed assertion",
+                    "passed": True,
+                    "actual": 1,
+                    "op": "eq",
+                    "expected": 1,
+                }]
                 transcripts = [{"turn_valid": True}]
 
                 def stop_then_fail(env):
                     nonlocal daemon_pid
                     daemon_pid = env.daemon.pid
-                    run_real_model.stop_process(env.daemon, 5)
+                    run_real_model.stop_owned_process(env.daemon, 5)
                     raise cleanup_failure
 
                 with tempfile.TemporaryDirectory() as tmp:
@@ -386,18 +843,30 @@ class IsolatedLifecycleTest(unittest.TestCase):
                         )
                     report = json.loads(next(Path(tmp).glob("*/report.json")).read_text())
                 self.assertEqual(report["status"], "cancelled" if cancelled else "fail")
+                self.assertNotIn("reason", report)
                 entry = report["scenarios"][0]
                 if agent_failure is not None:
                     self.assertEqual(entry["error"], str(agent_failure))
-                    self.assertIn(str(cleanup_failure), entry["cleanup_error"])
                 else:
-                    self.assertIn(str(cleanup_failure), entry["error"])
+                    if cancelled:
+                        self.assertEqual(entry["error"], str(cleanup_failure))
+                    else:
+                        self.assertNotIn("error", entry)
                     self.assertEqual(entry["assertions"], outcomes)
                     self.assertEqual(entry["transcripts"], transcripts)
-                self.assertFalse(environment.root.exists())
-                self.assertFalse(environment.socket_dir.exists())
+                self.assertIn(str(cleanup_failure), entry["cleanup_error"])
+                # An interrupted/failed stop has not returned confirmation to
+                # its owner, even when this injected failure follows a reap.
+                self.assertTrue(environment.root.exists())
+                self.assertTrue(environment.socket_dir.exists())
+                self.assertEqual(entry["retained_profile"], str(environment.root))
+                self.assertTrue(Path(entry["retained_fixture"]).exists())
+                self.assertIsNotNone(environment.daemon)
                 with self.assertRaises(ProcessLookupError):
                     os.kill(daemon_pid, 0)
+                environment.cleanup()
+                self.assertFalse(environment.root.exists())
+                self.assertFalse(environment.socket_dir.exists())
 
 
 class ProcessCancellationTest(unittest.TestCase):
@@ -409,12 +878,33 @@ class ProcessCancellationTest(unittest.TestCase):
         try:
             with mock.patch.object(portable_process, "_stop_group", side_effect=OSError("stop failed")):
                 with self.assertRaisesRegex(OSError, "stop failed"):
-                    portable_process.stop_process(process, 1)
+                    portable_process.stop_owned_process(process, 1)
             self.assertIsNotNone(process.returncode)
             with self.assertRaises(ProcessLookupError):
                 os.kill(process.pid, 0)
         finally:
-            portable_process.stop_process(process, 1)
+            portable_process.stop_owned_process(process, 1)
+
+    def test_failed_forced_stop_preserves_the_stop_error_and_live_process_owner(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            start_new_session=True,
+        )
+        stop_error = OSError("graceful stop failed")
+        force_error = PermissionError("forced stop denied")
+        try:
+            with (
+                mock.patch.object(portable_process, "_stop_group", side_effect=stop_error),
+                mock.patch.object(portable_process, "_signal_group", side_effect=force_error),
+                self.assertRaises(OSError) as raised,
+            ):
+                portable_process.stop_owned_process(process, 1)
+            self.assertIs(raised.exception, stop_error)
+            self.assertIs(raised.exception.__cause__, force_error)
+            self.assertIsNone(process.poll())
+            os.kill(process.pid, 0)
+        finally:
+            portable_process.stop_owned_process(process, 1)
 
     def test_signals_during_binary_resolution_and_turns_stop_owned_groups_and_write_reports(self):
         workload = """
@@ -484,7 +974,7 @@ with mock.patch.object(runner, 'load_scenarios', return_value=[scenario]):
                         with self.assertRaises(ProcessLookupError):
                             os.kill(group, 0)
                     finally:
-                        run_real_model.stop_process(process, 1)
+                        run_real_model.stop_owned_process(process, 1)
                         if group is not None:
                             try:
                                 os.killpg(group, signal.SIGKILL)
@@ -511,6 +1001,103 @@ with mock.patch.object(runner, 'load_scenarios', return_value=[scenario]):
                 [sys.executable, "-S", str(run_real_model.PROCESS_HELPER),
                  "group-alive", "--pid", str(pid)], check=False,
             ).returncode, 1)
+
+
+class ReportLifecycleTest(unittest.TestCase):
+    def test_command_preserves_captured_stderr_and_closes_both_pipes(self):
+        processes = []
+        original_popen = subprocess.Popen
+
+        def spawn(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with mock.patch.object(run_real_model.subprocess, "Popen", side_effect=spawn):
+            result = run_real_model.run(
+                [sys.executable, "-c", "import sys; print('output'); print('detail', file=sys.stderr)"],
+                stderr=subprocess.PIPE,
+            )
+        self.assertEqual(result.stdout, "output\n")
+        self.assertEqual(result.stderr, "detail\n")
+        process, = processes
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
+    def test_command_cleanup_failure_keeps_the_original_command_error(self):
+        with mock.patch.object(
+            run_real_model, "stop_owned_process", side_effect=OSError("stop failed")
+        ):
+            with self.assertRaises(run_real_model.OwnedProcessCleanupError) as raised:
+                run_real_model.run([sys.executable, "-c", "print('original output'); exit(7)"])
+        error = raised.exception
+        self.assertIsInstance(error.original_error, run_real_model.EvalSetupError)
+        self.assertIn("command failed (7)", error.primary_detail())
+        self.assertIn("original output", error.primary_detail())
+        self.assertEqual(str(error.cleanup_error), "stop failed")
+        self.assertFalse(error.cancelled)
+        self.assertEqual(error.process.returncode, 7)
+        self.assertTrue(error.process.stdout.closed)
+
+    def test_resolution_failure_and_cancellation_always_write_report(self):
+        for error, expected_status, expected_code in (
+            (run_real_model.EvalSetupError("build failed"), "fail", 1),
+            (KeyboardInterrupt("build interrupted"), "cancelled", 130),
+        ):
+            with self.subTest(status=expected_status), tempfile.TemporaryDirectory() as tmp:
+                with (
+                    mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp)),
+                    mock.patch.object(run_real_model, "load_scenarios", return_value=[{"id": "test"}]),
+                    mock.patch.object(run_real_model, "resolve_tracedecay_bin", side_effect=error),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    code = run_real_model.main(["--agent-turn", "--i-understand-model-cost"])
+                self.assertEqual(code, expected_code)
+                report_path, = Path(tmp).glob("*/report.json")
+                report = json.loads(report_path.read_text())
+                self.assertEqual(report["status"], expected_status)
+                self.assertEqual(report["reason"], str(error))
+                self.assertEqual(report["phase"], "binary resolution")
+                self.assertEqual(report["scenarios"], [])
+
+    def test_cancellation_between_scenarios_and_during_report_write(self):
+        class InterruptedScenarios(list):
+            def __iter__(self):
+                yield self[0]
+                raise KeyboardInterrupt("between scenarios")
+
+        for during_write in (False, True):
+            with self.subTest(during_write=during_write), tempfile.TemporaryDirectory() as tmp:
+                scenarios = [{"id": "first"}] if during_write else InterruptedScenarios([{"id": "first"}])
+                original_write = Path.write_text
+                attempted = False
+
+                def write(path, contents, *args, **kwargs):
+                    nonlocal attempted
+                    if during_write and path.name == "report.json" and not attempted:
+                        attempted = True
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return original_write(path, contents, *args, **kwargs)
+
+                def run_scenario(_args, scenario, _run_dir, report):
+                    report["scenarios"].append({"id": scenario["id"], "status": "pass"})
+                    return True, False
+
+                with (
+                    mock.patch.object(run_real_model, "RUNS_DIR", Path(tmp)),
+                    mock.patch.object(run_real_model, "load_scenarios", return_value=scenarios),
+                    mock.patch.object(run_real_model, "resolve_tracedecay_bin", return_value="/unused"),
+                    mock.patch.object(run_real_model, "run_scenario", side_effect=run_scenario),
+                    mock.patch.object(Path, "write_text", new=write),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(run_real_model.main(["--agent-turn", "--i-understand-model-cost"]), 130)
+                report_path, = Path(tmp).glob("*/report.json")
+                report = json.loads(report_path.read_text())
+                self.assertEqual(report["status"], "cancelled")
+                self.assertEqual(report["scenarios"], [{"id": "first", "status": "pass"}])
 
 
 class ExactFactStoreEvaluationTest(unittest.TestCase):
@@ -541,15 +1128,18 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                 ),
             ]
         )
-        with mock.patch.object(
-            run_real_model,
-            "run",
-            side_effect=lambda *args, **kwargs: next(responses),
+        with (
+            tempfile.TemporaryDirectory() as fixture,
+            mock.patch.object(
+                run_real_model,
+                "run",
+                side_effect=lambda *args, **kwargs: next(responses),
+            ),
         ):
             with self.assertRaisesRegex(
                 run_real_model.ExactFactStoreError, "did not return FactId"
             ):
-                run_real_model.build_fixture(scenario, "tracedecay", {})
+                run_real_model.seed_fixture(scenario, "tracedecay", {}, Path(fixture))
 
     def test_non_real_model_assertions_are_skipped_without_a_store_read(self):
         scenario = {

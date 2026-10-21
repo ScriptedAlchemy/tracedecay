@@ -165,23 +165,46 @@ def _stop_group(pid: int, grace_seconds: float) -> bool:
     return forced
 
 
-def stop_process(process: subprocess.Popen, grace_seconds: float) -> None:
-    """Stop an owned session and reap its leader, including on stop errors."""
+def _return_code(status: int) -> int:
+    return status if status >= 0 else 128 + abs(status)
+
+
+def stop_owned_process(process: subprocess.Popen, grace_seconds: float) -> None:
+    """Stop an owned session, including descendants, then reap its leader.
+
+    Callers must create the child with ``start_new_session=True``. This also
+    cleans children left behind by an already-exited leader, so a completed
+    command cannot leave work running against a fixture being removed.
+    """
+    stop_error = None
     try:
         _stop_group(process.pid, grace_seconds)
-    except BaseException:
-        _signal_group(process.pid, signal.SIGKILL)
-        raise
-    finally:
+    except Exception as exc:
+        stop_error = exc
+        # A failed graceful stop must still attempt to stop owned work. Keep
+        # the initial error if forced cleanup also fails; an interrupt remains
+        # a cancellation for the enclosing resource owner to finish.
+        try:
+            _signal_group(process.pid, signal.SIGKILL)
+        except Exception as cleanup_error:
+            raise stop_error from cleanup_error
+    try:
         try:
             process.wait(timeout=grace_seconds)
         except subprocess.TimeoutExpired:
-            _signal_group(process.pid, signal.SIGKILL)
+            process.kill()
             process.wait()
-
-
-def _return_code(status: int) -> int:
-    return status if status >= 0 else 128 + abs(status)
+        deadline = time.monotonic() + grace_seconds
+        while _group_alive(process.pid) and time.monotonic() < deadline:
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        if _group_alive(process.pid):
+            raise RuntimeError(f"owned process group {process.pid} did not stop")
+    except Exception as cleanup_error:
+        if stop_error is not None:
+            raise stop_error from cleanup_error
+        raise
+    if stop_error is not None:
+        raise stop_error
 
 
 def command_exec_session(args: argparse.Namespace) -> int:

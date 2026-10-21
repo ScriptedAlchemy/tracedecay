@@ -25,19 +25,19 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
 import tempfile
-import signal
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-from scripts.lib.portable_process import dies_with_this_process, stop_process
+sys.path.insert(0, str(REPO_ROOT / "scripts/lib"))
+
+from portable_process import dies_with_this_process, stop_owned_process
 
 SCENARIO_DIR = EVAL_DIR / "scenarios"
 RUNS_DIR = EVAL_DIR / "runs"
@@ -130,7 +130,6 @@ class EvalEnvironment:
     data_dir: Path
     global_db: Path
     env: dict[str, str]
-    _temp_dir: tempfile.TemporaryDirectory
     socket_dir: Path | None = None
     daemon: subprocess.Popen | None = None
     daemon_log: Path | None = None
@@ -188,61 +187,71 @@ class EvalEnvironment:
     def stop_daemon(self):
         if self.daemon is None:
             return
-        stop_process(self.daemon, PROCESS_STOP_GRACE_SECONDS)
+        # Teardown must not depend on launching another Python executable.
+        # Retain ownership until the canonical group stop and reap complete.
+        stop_owned_process(self.daemon, PROCESS_STOP_GRACE_SECONDS)
         self.daemon = None
 
     def cleanup(self):
+        self.stop_daemon()
         errors = []
-        try:
-            self.stop_daemon()
-        except (Exception, KeyboardInterrupt) as exc:
-            errors.append(exc)
-        if self.socket_dir is not None:
+        for path in (self.socket_dir, self.root):
+            if path is None:
+                continue
             try:
-                shutil.rmtree(self.socket_dir)
+                shutil.rmtree(path)
             except FileNotFoundError:
                 pass
-            except (Exception, KeyboardInterrupt) as exc:
+            except Exception as exc:
                 errors.append(exc)
-        try:
-            self._temp_dir.cleanup()
-        except (Exception, KeyboardInterrupt) as exc:
-            errors.append(exc)
+        if len(errors) == 1:
+            raise errors[0]
         if errors:
-            raise BaseExceptionGroup("isolated environment cleanup failed", errors)
+            raise ExceptionGroup(
+                "isolated environment cleanup failed: "
+                + "; ".join(str(error) for error in errors),
+                errors,
+            )
 
 
 class EvalSetupError(RuntimeError):
     """An operational failure (daemon, init, install) reported instead of exiting."""
 
 
-def cleanup_eval_artifacts(fixture, eval_env):
-    errors = []
-    if fixture is not None:
-        try:
-            shutil.rmtree(fixture)
-        except FileNotFoundError:
-            pass
-        except (Exception, KeyboardInterrupt) as exc:
-            errors.append(exc)
-    if eval_env is not None:
-        try:
-            eval_env.cleanup()
-        except (Exception, KeyboardInterrupt, BaseExceptionGroup) as exc:
-            errors.append(exc)
-    if errors:
-        raise BaseExceptionGroup("eval artifact cleanup failed", errors)
+class OwnedProcessCleanupError(EvalSetupError):
+    """Transfer an unconfirmed command stop to the enclosing resource owner."""
+
+    def __init__(self, process, original_error, cleanup_error):
+        self.process = process
+        self.original_error = original_error
+        self.cleanup_error = cleanup_error
+        super().__init__(f"owned process group {process.pid} cleanup failed: {cleanup_error}")
+
+    @property
+    def cancelled(self):
+        return isinstance(self.original_error, KeyboardInterrupt) or isinstance(
+            self.cleanup_error, KeyboardInterrupt
+        )
+
+    def primary_detail(self):
+        error = self.original_error if self.original_error is not None else self.cleanup_error
+        return str(error) or ("interrupted" if self.cancelled else type(error).__name__)
 
 
 def create_eval_environment(scenario_id):
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario_id)
-    temp_dir = tempfile.TemporaryDirectory(prefix=f"tracedecay-eval-env-{safe_id}-")
-    root = Path(temp_dir.name)
+    # Explicit ownership prevents an implicit temporary-directory finalizer
+    # from deleting the profile if stopping an owned daemon fails.
+    root = Path(tempfile.mkdtemp(prefix=f"tracedecay-eval-env-{safe_id}-"))
     home = root / "home"
     data_dir = root / ".tracedecay"
     global_db = data_dir / "global.db"
-    home.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
 
     env = dict(os.environ)
     env["HOME"] = str(home)
@@ -258,7 +267,6 @@ def create_eval_environment(scenario_id):
         data_dir=data_dir,
         global_db=global_db,
         env=env,
-        _temp_dir=temp_dir,
     )
 
 
@@ -274,8 +282,8 @@ def resolve_tracedecay_bin(explicit):
     result = run(
         [str(REPO_ROOT / "scripts/build-eval-binary.sh")],
         env=env,
-        stderr=None,
         check=False,
+        stderr=None,
     )
     if result.returncode != 0:
         raise EvalSetupError(
@@ -316,23 +324,34 @@ def run(cmd, cwd=None, env=None, timeout=None, check=True, stderr=subprocess.STD
         start_new_session=True,
         preexec_fn=dies_with_this_process(),
     )
+    original_error = None
     try:
-        stdout, captured_stderr = process.communicate(timeout=timeout)
-    finally:
-        # A turn, setup command, or build owns its descendants even if its
-        # caller is cancelled or the command leader has already exited.
-        try:
-            stop_process(process, PROCESS_STOP_GRACE_SECONDS)
-        finally:
-            if process.stdout is not None:
-                process.stdout.close()
-            if process.stderr is not None:
-                process.stderr.close()
-    result = subprocess.CompletedProcess(cmd, process.returncode, stdout, captured_stderr)
-    if check and result.returncode != 0:
-        raise EvalSetupError(
-            f"command failed ({result.returncode}): {' '.join(map(str, cmd))}\n{result.stdout}"
+        output, captured_stderr = process.communicate(timeout=timeout)
+        result = subprocess.CompletedProcess(
+            cmd, process.returncode, stdout=output, stderr=captured_stderr
         )
+        if check and result.returncode != 0:
+            raise EvalSetupError(
+                f"command failed ({result.returncode}): {' '.join(map(str, cmd))}\n{result.stdout}"
+            )
+    except BaseException as exc:
+        original_error = exc
+    try:
+        # Popen's context manager waits during an exception without stopping
+        # the child. Explicit ownership makes cancellation and timeouts stop
+        # the entire turn, including its MCP children, before fixture cleanup.
+        stop_owned_process(process, PROCESS_STOP_GRACE_SECONDS)
+    except BaseException as exc:
+        # A signal can arrive for the first time during the stop itself. Keep
+        # the Popen reachable so the caller retries before deleting its files.
+        raise OwnedProcessCleanupError(process, original_error, exc) from original_error
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    if original_error is not None:
+        raise original_error
     return result
 
 
@@ -369,23 +388,6 @@ def require_fact_record(response, operation):
             f"{operation} did not return a canonical FactRecordV1 with string fact_id"
         )
     return fact
-
-
-def build_fixture(scenario, tracedecay_bin, env, parent=None):
-    """Creates and seeds the fixture; removes it again if any setup step fails."""
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario["id"])
-    fixture = Path(
-        tempfile.mkdtemp(
-            prefix=f"tracedecay-eval-{safe_id}-",
-            dir=str(parent) if parent is not None else None,
-        )
-    )
-    try:
-        seed_fixture(scenario, tracedecay_bin, env, fixture)
-    except BaseException:
-        shutil.rmtree(fixture, ignore_errors=True)
-        raise
-    return fixture
 
 
 def seed_fixture(scenario, tracedecay_bin, env, fixture):
@@ -833,69 +835,106 @@ def run_scenario(args, scenario, run_dir, report):
     """Runs one scenario in an owned profile/daemon/fixture scope.
 
     Returns (ok, cancelled). Operational failures and cancellation are recorded
-    in the report; the daemon, fixture, and profile are removed on every path.
+    in the report. Cleanup stops owned processes before removing their files;
+    a cleanup failure preserves both its error and the original result.
     """
     eval_env = None
     fixture = None
-    failure = None
+    entry = error_entry(scenario, "error (setup or agent failure)", "scenario did not finish")
+    report["scenarios"].append(entry)
+    ok = False
     cancelled = False
+    pending_command = None
+
+    def cleanup():
+        nonlocal pending_command
+        if pending_command is not None:
+            stop_owned_process(pending_command, PROCESS_STOP_GRACE_SECONDS)
+            pending_command = None
+        if eval_env is not None:
+            eval_env.cleanup()
+
     try:
         eval_env = create_eval_environment(scenario["id"])
-        eval_env.start_daemon(args.tracedecay_bin)
-        fixture = build_fixture(
-            scenario, args.tracedecay_bin, eval_env.env, parent=eval_env.root
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario["id"])
+        # This scope owns the fixture before any daemon or seeding command can
+        # use it. Setup errors therefore follow the same stop-before-delete
+        # order as completed turns and cancellation.
+        fixture = Path(
+            tempfile.mkdtemp(prefix=f"tracedecay-eval-{safe_id}-", dir=eval_env.root)
         )
+        eval_env.start_daemon(args.tracedecay_bin)
+        seed_fixture(scenario, args.tracedecay_bin, eval_env.env, fixture)
         if args.driver == "hermes":
             transcripts = drive_hermes(args, scenario, fixture, run_dir, eval_env.env)
         else:
             transcripts = drive_cursor_agent(args, scenario, fixture, run_dir, eval_env.env)
         outcomes = evaluate_assertions(scenario, args.tracedecay_bin, fixture, eval_env.env)
+        failed = [o for o in outcomes if not o["passed"]]
+        status = "pass" if not failed else "fail"
+        if failed and scenario.get("contract") == "pending-sibling":
+            status = "fail (note: scenario contract is pending-sibling, see contract_notes)"
+        if not all(t["turn_valid"] for t in transcripts):
+            status = "error (agent turn invalid, see transcript logs)"
+            failed = failed or [{"name": "agent-turn", "passed": False}]
+        entry.pop("error")
+        entry.update(status=status, assertions=outcomes, transcripts=transcripts)
+        ok = not failed
+    except OwnedProcessCleanupError as exc:
+        pending_command = exc.process
+        cancelled = exc.cancelled
+        if cancelled:
+            entry["status"] = "cancelled"
+        entry["error"] = exc.primary_detail()
     except KeyboardInterrupt as exc:
-        failure = error_entry(scenario, "cancelled", str(exc) or "interrupted")
+        entry.update(status="cancelled", error=str(exc) or "interrupted")
         cancelled = True
     except Exception as exc:
-        failure = error_entry(scenario, "error (setup or agent failure)", str(exc))
+        entry["error"] = str(exc)
     finally:
         try:
-            cleanup_eval_artifacts(fixture, eval_env)
-        except (Exception, KeyboardInterrupt, BaseExceptionGroup) as exc:
-            detail = "".join(traceback.format_exception(exc))
-            cleanup_cancelled = isinstance(exc, KeyboardInterrupt) or (
-                isinstance(exc, BaseExceptionGroup)
-                and exc.subgroup(KeyboardInterrupt) is not None
-            )
-            cancelled |= cleanup_cancelled
-            if failure is None:
-                status = "cancelled" if cleanup_cancelled else "error (cleanup failure)"
-                failure = error_entry(scenario, status, detail)
-                failure["assertions"] = outcomes
-                failure["transcripts"] = transcripts
-            else:
-                failure["cleanup_error"] = detail
+            try:
+                cleanup()
+            except KeyboardInterrupt as exc:
+                # The first signal may arrive during teardown. main keeps
+                # subsequent signals from interrupting this final cleanup.
+                cancelled = True
+                ok = False
+                entry["status"] = "cancelled"
+                entry.setdefault("error", str(exc) or "interrupted")
+                cleanup()
+        except BaseException as exc:
+            ok = False
+            cancelled |= isinstance(exc, KeyboardInterrupt)
+            entry["cleanup_error"] = str(exc) or type(exc).__name__
+            if pending_command is not None:
+                entry["command_pid"] = pending_command.pid
+            for label, path in (
+                ("retained_fixture", fixture),
+                ("retained_profile", eval_env.root if eval_env is not None else None),
+                ("retained_socket_dir", eval_env.socket_dir if eval_env is not None else None),
+            ):
+                if path is None:
+                    continue
+                try:
+                    path.stat()
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    # An inaccessible owned path may still exist. Preserve
+                    # its location without replacing the cleanup failure.
+                    pass
+                entry[label] = str(path)
+            if eval_env is not None and eval_env.daemon is not None:
+                entry["daemon_pid"] = eval_env.daemon.pid
+            entry["status"] = "cancelled" if cancelled else "error (cleanup failure)"
 
-    if failure is not None:
-        report["scenarios"].append(failure)
-        print(f"[{scenario['id']}] {failure['status']}: {failure['error']}", file=sys.stderr)
-        return False, cancelled
-
-    failed = [o for o in outcomes if not o["passed"]]
-    status = "pass" if not failed else "fail"
-    if failed and scenario.get("contract") == "pending-sibling":
-        status = "fail (note: scenario contract is pending-sibling, see contract_notes)"
-    if not all(t["turn_valid"] for t in transcripts):
-        status = "error (agent turn invalid, see transcript logs)"
-        failed = failed or [{"name": "agent-turn", "passed": False}]
-    report["scenarios"].append(
-        {
-            "id": scenario["id"],
-            "contract": scenario.get("contract", "stable"),
-            "status": status,
-            "assertions": outcomes,
-            "transcripts": transcripts,
-        }
-    )
-    print(f"[{scenario['id']}] {status}")
-    for outcome in outcomes:
+    print(f"[{scenario['id']}] {entry['status']}")
+    if entry.get("error"):
+        print(f"  {entry['error']}", file=sys.stderr)
+    if entry.get("cleanup_error"):
+        print(f"  cleanup: {entry['cleanup_error']}", file=sys.stderr)
+    for outcome in entry["assertions"]:
         marker = "pass" if outcome["passed"] else "FAIL"
         if outcome.get("error"):
             print(f"  [{marker}] {outcome['name']}, {outcome['error']}")
@@ -904,7 +943,7 @@ def run_scenario(args, scenario, run_dir, report):
                 f"  [{marker}] {outcome['name']}, actual {outcome['actual']} "
                 f"{outcome['op']} expected {outcome['expected']}"
             )
-    return not failed, False
+    return ok, cancelled
 
 
 def error_entry(scenario, status, error):
@@ -949,12 +988,11 @@ def main(argv):
         print(f"\nblocked report written to {report_path}", file=sys.stderr)
         return 2
 
-    cancellation_requested = False
-
+    cancel_requested = False
     def raise_cancelled(signum, _frame):
-        nonlocal cancellation_requested
-        if not cancellation_requested:
-            cancellation_requested = True
+        nonlocal cancel_requested
+        if not cancel_requested:
+            cancel_requested = True
             raise KeyboardInterrupt(f"cancelled by signal {signum}")
 
     previous_handlers = {
@@ -963,31 +1001,61 @@ def main(argv):
     }
     overall_ok = True
     cancelled = False
+    phase = "binary resolution"
+    report_path = run_dir / "report.json"
     try:
         try:
             args.tracedecay_bin = resolve_tracedecay_bin(args.tracedecay_bin)
             report["tracedecay_bin"] = args.tracedecay_bin
+            phase = "scenario execution"
             for scenario in scenarios:
                 ok, cancelled = run_scenario(args, scenario, run_dir, report)
                 overall_ok &= ok
+                cancelled |= cancel_requested
                 if cancelled:
                     break
-        except KeyboardInterrupt as exc:
-            cancelled = True
-            report["error"] = str(exc) or "interrupted"
+        except OwnedProcessCleanupError as exc:
+            overall_ok = False
+            cancelled = exc.cancelled
+            report["reason"] = exc.primary_detail()
+            report["phase"] = phase
+            # Binary resolution runs before any environment exists, so main
+            # is the owner of a command whose initial stop did not complete.
+            try:
+                try:
+                    stop_owned_process(exc.process, PROCESS_STOP_GRACE_SECONDS)
+                except KeyboardInterrupt:
+                    cancelled = True
+                    stop_owned_process(exc.process, PROCESS_STOP_GRACE_SECONDS)
+            except BaseException as cleanup_error:
+                cancelled |= isinstance(cleanup_error, KeyboardInterrupt)
+                report["cleanup_error"] = str(cleanup_error) or type(cleanup_error).__name__
+                report["command_pid"] = exc.process.pid
         except Exception as exc:
             overall_ok = False
-            report["error"] = str(exc)
+            report["reason"] = str(exc)
+            report["phase"] = phase
 
-        cancelled |= cancellation_requested
-        report["status"] = "cancelled" if cancelled else "pass" if overall_ok else "fail"
-        report_path = run_dir / "report.json"
+        cancelled |= cancel_requested
+        report["status"] = "cancelled" if cancelled else ("pass" if overall_ok else "fail")
+        phase = "report publication"
         report_path.write_text(json.dumps(report, indent=2) + "\n")
-        print(f"\n{report['status']}; report written to {report_path}")
-        return 130 if cancelled else 0 if overall_ok else 1
+    except KeyboardInterrupt as exc:
+        # This scope covers resolution, gaps between scenarios, and report
+        # publication. Finish the report before restoring signal handlers.
+        cancelled = True
+        report.update(status="cancelled", reason=str(exc) or "interrupted", phase=phase)
+        report_path.write_text(json.dumps(report, indent=2) + "\n")
     finally:
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
+
+    if cancelled:
+        print(f"\ncancelled; report written to {report_path}", file=sys.stderr)
+        return 130
+
+    print(f"\nreport written to {report_path}")
+    return 0 if overall_ok else 1
 
 
 if __name__ == "__main__":
