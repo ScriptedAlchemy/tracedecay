@@ -129,6 +129,7 @@ pub struct StorageReportSizeCoverageV1 {
 impl StorageReportSizeCoverageV1 {
     /// Combine coverage from separate directory pages without hiding an
     /// unavailable page or its unreadable-entry count.
+    #[must_use]
     pub fn merge(self, other: Self) -> Self {
         let state = match (self.state, other.state) {
             (StorageReportSizeStateV1::Complete, StorageReportSizeStateV1::Complete) => {
@@ -348,7 +349,9 @@ fn size_coverage(
     unavailable_entry_count: usize,
 ) -> StorageReportSizeCoverageV1 {
     let (reason, state) = match termination {
-        WalkTerminationV1::Complete if unavailable_entry_count == 0 => return Default::default(),
+        WalkTerminationV1::Complete if unavailable_entry_count == 0 => {
+            return StorageReportSizeCoverageV1::default();
+        }
         WalkTerminationV1::Complete => (
             StorageReportSizeReasonV1::UnreadableEntries,
             if measured_bytes == 0 {
@@ -1063,6 +1066,7 @@ struct ProjectDirectoryPage {
 ///
 /// The cursor is opaque: callers must return it unchanged rather than treating
 /// it as a directory name or assuming lexical ordering.
+#[cfg(test)]
 fn list_project_directories_page(
     profile_root: &Path,
     cursor: &str,
@@ -1589,7 +1593,6 @@ struct UnregisteredDirectorySample {
     directory_count: usize,
     count_is_lower_bound: bool,
     bytes: u64,
-    unavailable_entry_count: usize,
     coverage: StorageReportSizeCoverageV1,
 }
 
@@ -1632,7 +1635,6 @@ fn sample_unregistered_paths(
         directory_count,
         count_is_lower_bound: false,
         bytes,
-        unavailable_entry_count,
         coverage: size_coverage(termination, bytes, unavailable_entry_count),
     }
 }
@@ -1651,7 +1653,6 @@ fn scan_unregistered_dirs(
                 directory_count: 0,
                 count_is_lower_bound: false,
                 bytes: 0,
-                unavailable_entry_count: 0,
                 coverage: StorageReportSizeCoverageV1::default(),
             };
         }
@@ -1660,7 +1661,6 @@ fn scan_unregistered_dirs(
                 directory_count: 0,
                 count_is_lower_bound: true,
                 bytes: 0,
-                unavailable_entry_count: 1,
                 coverage: size_coverage(WalkTerminationV1::Complete, 0, 1),
             };
         }
@@ -1732,7 +1732,6 @@ fn scan_unregistered_dirs(
         directory_count,
         count_is_lower_bound,
         bytes,
-        unavailable_entry_count,
         coverage: size_coverage(termination, bytes, unavailable_entry_count),
     }
 }
@@ -3067,7 +3066,7 @@ mod tests {
 
         assert_eq!(sample.directory_count, 2);
         assert_eq!(sample.bytes, 1);
-        assert_eq!(sample.unavailable_entry_count, 0);
+        assert_eq!(sample.coverage.unavailable_entry_count, 0);
         assert_eq!(remaining, 0);
         assert_eq!(
             sample.coverage.reason,
@@ -3170,7 +3169,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(exact_budget, 0);
-        assert!(plans.is_empty());
+        assert_eq!(plans, []);
         assert_eq!(
             availability[0].reason.as_deref(),
             Some(RETENTION_PROTECTION_UNRESOLVED)
@@ -3215,8 +3214,8 @@ mod tests {
             stores[0].size_coverage.state,
             StorageReportSizeStateV1::Unavailable
         );
-        assert!(plans.is_empty());
-        assert!(availability.is_empty());
+        assert_eq!(plans, []);
+        assert_eq!(availability, []);
     }
 
     #[cfg(unix)]
