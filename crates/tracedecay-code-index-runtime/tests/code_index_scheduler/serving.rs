@@ -3,7 +3,7 @@ use std::{
     fmt::Write as _,
     num::NonZeroU64,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{Arc, RwLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -20,6 +20,7 @@ use tracedecay_contracts::{
     PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResolvedScope, ResultProjection,
     RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
     SourceMetadataRequest, callable_code_operation,
+    code_index_freshness::{CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1},
     retrieval::{
         CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
         CodeImplementationsRequest, CodeNavigationRequest, CodeTimelineRequest,
@@ -49,8 +50,8 @@ use tracedecay_query::retrieval::{
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ProcessResidentSampleV1,
-    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentMemoryPressureV1,
-    resident_memory_watermark_bytes_v1,
+    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentMemoryComponentIdV1,
+    ResidentMemoryPressureV1, resident_memory_watermark_bytes_v1,
 };
 
 use tracedecay_session_temporal_store::SessionTemporalAccess;
@@ -2086,42 +2087,192 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
 }
 
 #[test]
-fn overlapping_text_builds_share_one_admission_watermark_headroom() {
-    let limit_bytes = 1_000_u64;
-    let watermark_headroom = 100_u64;
-    let requested = NonZeroU64::new(300).expect("nonzero build request");
-    let mut used_bytes = 0_u64;
-
-    for _ in 0..3 {
-        let accounted =
-            super::super::text_artifact_resident_memory_charge(requested, watermark_headroom)
-                .expect("bounded admission accounting");
-        assert!(
-            used_bytes + accounted.get() <= limit_bytes,
-            "each overlapping build fits beneath the same 900-byte high watermark"
+fn retained_text_admission_reports_its_block_and_recovers_after_headroom_release() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn reserved_until_release() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(4 * 1024 * 1024 * 1024).expect("test process limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        }),
+    ));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
-        used_bytes += requested.get();
+        scheduler.bind_resident_memory(Arc::clone(&memory));
+        published(scheduler.reconcile_now().expect("seal source generation"));
     }
-
-    assert_eq!(
-        used_bytes, 900,
-        "the retained ledger owns the three build ceilings, not three margins"
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    for overflow in [
-        super::super::text_artifact_resident_memory_charge(
-            NonZeroU64::new(u64::MAX).expect("maximum nonzero request"),
-            1,
-        ),
-        super::super::text_artifact_resident_memory_charge(requested, u64::MAX),
-    ] {
+    scheduler.bind_resident_memory(Arc::clone(&memory));
+    let text = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("retained sealed text generation");
+    let scanned = build_progress_snapshot(&scheduler);
+    assert_eq!(scanned.phase, CodeIndexBuildPhaseV1::SourceScan);
+    assert_eq!(scanned.blocked_reason, None);
+    let build_floor = u64::try_from(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+        .expect("build floor fits u64");
+    let held_bytes = memory.admission_watermark_bytes() - build_floor + 1;
+    let competing = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("held-text-headroom").expect("component"),
+            NonZeroU64::new(held_bytes).expect("competing reservation"),
+        )
+        .expect("hold actual ledger headroom");
+    let mut headroom = pressure.subscribe_headroom();
+
+    for claimed_path in [true, false] {
+        let refused = if claimed_path {
+            text.advance_artifact_text_serving(1, &text.text_execution_control())
+        } else {
+            text.advance_text_serving(1)
+        };
+        assert!(matches!(
+            refused,
+            Err(RetrievalPortError::ResidentMemoryRefused(_))
+        ));
+        let blocked = build_progress_snapshot(&scheduler);
+        assert_eq!(blocked.generation_id, scanned.generation_id);
+        assert_eq!(blocked.phase, CodeIndexBuildPhaseV1::SourceScan);
+        assert_eq!(blocked.committed_pages, 0);
+        assert_eq!(
+            blocked.blocked_reason,
+            Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+        );
+        assert!(text.text_projection_needs_work());
+        assert_eq!(memory.snapshot().used_bytes, held_bytes);
+    }
+
+    drop(headroom.borrow_and_update());
+    drop(competing);
+    assert!(
+        headroom
+            .has_changed()
+            .expect("headroom authority remains live")
+    );
+    assert_eq!(memory.snapshot().used_bytes, 0);
+    text.production_query_owners()
+        .expect("same owner builds after headroom is released");
+    let ready = build_progress_snapshot(&scheduler);
+    assert_eq!(ready.generation_id, scanned.generation_id);
+    assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
+    assert!(ready.committed_pages > 0);
+    assert_eq!(ready.blocked_reason, None);
+    assert!(text.query_owners_are_ready());
+    assert!(active_text_artifact_path(store.path()).is_file());
+}
+
+#[test]
+fn ready_publication_clears_a_finalization_refusal_without_another_pending_boundary() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn ready_after_refusal() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(4 * 1024 * 1024 * 1024).expect("test process limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        }),
+    ));
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit, pressure,
+    )));
+    published(scheduler.reconcile_now().expect("seal source generation"));
+    let _workers = scheduler
+        .ensure_worker_plan()
+        .expect("fixture worker runtime");
+    let text = scheduler.latest_complete().expect("text generation");
+    let control = text.text_execution_control();
+    assert!(
+        !text
+            .advance_text_serving(0)
+            .expect("initialize pending text progress")
+    );
+    let finalization_deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while !matches!(
+        build_progress_snapshot(&scheduler).phase,
+        CodeIndexBuildPhaseV1::IndexBuild | CodeIndexBuildPhaseV1::Verification
+    ) {
         assert!(
-            matches!(
-                overflow,
-                Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
-            ),
-            "overflow must remain a typed contract refusal: {overflow:?}"
+            Instant::now() < finalization_deadline,
+            "text build did not reach finalization"
+        );
+        assert!(
+            !text.advance_text_serving(1).expect("begin finalization"),
+            "the bounded build must expose a pending finalization boundary"
         );
     }
+    {
+        let mut slot = text.text_projection_build.lock_slot();
+        let super::super::CodeTextProjectionSlotV1::Building(build) = &mut *slot else {
+            panic!("resumable text builder");
+        };
+        while !matches!(
+            build
+                .builder
+                .advance_started_finalization(1_000, &control)
+                .expect("finish the durable artifact before publication"),
+            CodeLexicalArtifactFinalizationStepV1::Ready(_)
+        ) {
+            assert!(
+                Instant::now() < finalization_deadline,
+                "durable finalization did not finish"
+            );
+        }
+    }
+    text.publish_text_progress_phase(CodeIndexBuildPhaseV1::Verification, 0, 0);
+    let before = build_progress_snapshot(&scheduler);
+    let progress = scheduler.build_progress_slot();
+    assert!(
+        progress
+            .write()
+            .expect("progress authority")
+            .block_owned_text(
+                &text.metadata().manifest().generation_id,
+                text.text_progress_owner_epoch,
+                CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                Some(before.progress_epoch),
+            )
+    );
+
+    // A resumed finalization can go directly from its prior refusal to
+    // installing query owners. No intervening Pending snapshot clears it.
+    assert!(
+        text.advance_artifact_text_serving(1, &control)
+            .expect("publish the finalized artifact")
+    );
+    let ready = build_progress_snapshot(&scheduler);
+    assert!(text.query_owners_are_ready());
+    assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
+    assert_eq!(ready.blocked_reason, None);
+    assert_eq!(ready.committed_pages, before.committed_pages);
 }
 
 #[test]
@@ -2758,6 +2909,98 @@ fn progress_owner_epoch_rejects_original_a_after_a_b_a_replacement() {
         after_stale_original.progress_epoch, replacement_a.progress_epoch,
         "matching generation identity must not let the original A owner replace the newer A epoch"
     );
+    assert!(!slot.block_owned_text(
+        &generation_a,
+        original_a_owner,
+        CodeIndexBuildBlockedReasonV1::ResidentMemory,
+        Some(after_stale_original.progress_epoch),
+    ));
+    assert_eq!(
+        slot.snapshot().expect("replacement owner").blocked_reason,
+        None
+    );
+}
+
+#[test]
+fn delayed_memory_refusal_cannot_replace_newer_pending_or_ready_progress() {
+    for phase in [
+        CodeIndexBuildPhaseV1::BulkCommit,
+        CodeIndexBuildPhaseV1::Ready,
+    ] {
+        let generation =
+            CodeGenerationId::new("generation.progress-refusal").expect("generation identity");
+        let mut state = super::super::CodeIndexBuildProgressSlotStateV1::default();
+        let owner = state.replace_generation(generation.clone());
+        assert!(state.publish(
+            &generation,
+            owner,
+            progress_snapshot_for_generation(&generation, 1),
+        ));
+        let slot = Arc::new(RwLock::new(state));
+        let (observed_tx, observed_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let delayed_slot = Arc::clone(&slot);
+        let delayed_generation = generation.clone();
+        let delayed = thread::spawn(move || {
+            let observed_epoch = delayed_slot
+                .read()
+                .expect("observe pending progress")
+                .snapshot()
+                .expect("pending snapshot")
+                .progress_epoch;
+            observed_tx.send(()).expect("admission began");
+            resume_rx
+                .recv_timeout(SERVING_SEAT_FAILURE_CEILING)
+                .expect("admission refused after concurrent progress");
+            delayed_slot
+                .write()
+                .expect("publish refusal")
+                .block_owned_text(
+                    &delayed_generation,
+                    owner,
+                    CodeIndexBuildBlockedReasonV1::ResidentMemory,
+                    Some(observed_epoch),
+                )
+        });
+        observed_rx
+            .recv_timeout(SERVING_SEAT_FAILURE_CEILING)
+            .expect("worker observed its admission epoch");
+        let newer = {
+            let mut current = slot.write().expect("publish concurrent progress");
+            let mut next = progress_snapshot_for_generation(&generation, 2);
+            next.phase = phase;
+            assert!(current.publish(&generation, owner, next));
+            current.snapshot().expect("newer progress")
+        };
+        resume_tx.send(()).expect("release delayed refusal");
+        assert!(!delayed.join().expect("delayed worker"));
+
+        let mut current = slot.write().expect("read surviving progress");
+        let after = current.snapshot().expect("current progress");
+        assert_eq!(after.progress_epoch, newer.progress_epoch);
+        assert_eq!(after.phase, phase);
+        assert_eq!(after.committed_pages, 2);
+        assert_eq!(after.blocked_reason, None);
+        let accepts_current_refusal = current.block_owned_text(
+            &generation,
+            owner,
+            CodeIndexBuildBlockedReasonV1::ResidentMemory,
+            Some(after.progress_epoch),
+        );
+        assert_eq!(
+            accepts_current_refusal,
+            phase != CodeIndexBuildPhaseV1::Ready
+        );
+        assert_eq!(
+            current
+                .snapshot()
+                .expect("current refusal verdict")
+                .blocked_reason,
+            (phase != CodeIndexBuildPhaseV1::Ready)
+                .then_some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+            "an unchanged pending owner must still report its genuine wait"
+        );
+    }
 }
 
 #[test]
