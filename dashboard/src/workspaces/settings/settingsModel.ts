@@ -479,7 +479,8 @@ export function settingsPayloadWithAppliedScope(
 ): SettingsPayloadV1 {
   switch (scope) {
     case 'project':
-      return { ...current, project: applied.project };
+      // Automation is derived from the same pinned project configuration.
+      return { ...current, project: applied.project, automation: applied.automation };
     case 'user':
       return {
         ...current,

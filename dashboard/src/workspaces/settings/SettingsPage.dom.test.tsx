@@ -275,6 +275,10 @@ describe('SettingsPage direct settings editing', () => {
   });
 
   it('keeps the applied value visible while the follow-up read is pending', async () => {
+    const before = settings();
+    (settingsBody(before)['automation'] as Record<string, unknown>)['configuration_revision_id'] = 'rev-42';
+    const after = updatedSettings('rev-43');
+    (settingsBody(after)['automation'] as Record<string, unknown>)['configuration_revision_id'] = 'rev-43';
     let applied = false;
     let finishRead: ((response: Response) => void) | undefined;
     const readback = new Promise<Response>((resolve) => { finishRead = resolve; });
@@ -282,9 +286,9 @@ describe('SettingsPage direct settings editing', () => {
       const url = String(input);
       if (url === '/api/settings/project' && init?.method === 'PATCH') {
         applied = true;
-        return jsonResponse(projectPatchResponse(updatedSettings('rev-43')));
+        return jsonResponse(projectPatchResponse(after));
       }
-      if (url === '/api/settings') return applied ? readback : jsonResponse(settings());
+      if (url === '/api/settings') return applied ? readback : jsonResponse(before);
       return jsonResponse(FIXTURES[url]);
     }));
     const user = userEvent.setup();
@@ -299,7 +303,10 @@ describe('SettingsPage direct settings editing', () => {
     expect(row(MAX_FILE_SIZE).dataset['provenance']).toBe('unserved');
     expect(within(row(MAX_FILE_SIZE)).getByText('2,097,152')).toBeTruthy();
     expect(within(row(MAX_FILE_SIZE)).queryByText('1,048,576')).toBeNull();
-    await act(async () => { finishRead?.(jsonResponse(updatedSettings('rev-43'))); });
+    expect(within(row('project.configuration_revision_id')).getByText('rev-43')).toBeTruthy();
+    expect(within(row('automation.configuration_revision_id')).getByText('rev-43')).toBeTruthy();
+    expect(within(row('automation.configuration_revision_id')).queryByText('rev-42')).toBeNull();
+    await act(async () => { finishRead?.(jsonResponse(after)); });
   });
 
   it('preserves another scope\'s proposal and original CAS revision after a save and refresh', async () => {
