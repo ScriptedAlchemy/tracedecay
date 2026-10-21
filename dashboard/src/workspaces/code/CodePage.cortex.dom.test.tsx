@@ -224,6 +224,29 @@ describe('hover inspects, click pins', () => {
 });
 
 describe('typed absences on the inspector', () => {
+  it.each([false, true])('uses exact publication coverage for an empty file reading (verified=%s)', async (verified) => {
+    vi.stubGlobal('fetch', serve((pathname, _search, fixture) =>
+      pathname === '/api/plugins/code-diagnostics'
+        ? { ...fixture, diagnostics: [], coverage: {
+            rust: {
+              documents: { 'src/dashboard/graph_service.rs': verified
+                ? { state: 'published', version_verified: true, content_digest: `sha256:${'ab'.repeat(32)}` }
+                : { state: 'stale_publication' } },
+              roots: { '/project': 'completed' },
+            },
+          } }
+        : fixture,
+    ));
+    renderCode('/code?symbol=sym-0');
+    const inspector = screen.getByRole('complementary', { name: 'Inspector' });
+    const diagnostics = await within(inspector).findByRole('region', { name: 'diagnostics' });
+    expect(await within(diagnostics).findByText(verified
+      ? /the verified publications report no diagnostics in graph_service.rs/i
+      : /no verified publication for graph_service.rs/i,
+    )).toBeTruthy();
+    if (!verified) expect(within(diagnostics).queryByText(/report no diagnostics/i)).toBeNull();
+  });
+
   it('reports a failed neighbours read as its state, never as zero callers', async () => {
     vi.stubGlobal(
       'fetch',

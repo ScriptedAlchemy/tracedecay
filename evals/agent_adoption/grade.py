@@ -28,11 +28,15 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import math
 import os
 import re
+import statistics
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+import stock_check
 
 # Tools that do not count as a "meaningful" action for first-choice/efficiency.
 # Loading a skill is routing, which is scored separately.
@@ -53,7 +57,7 @@ ADOPTION_WEIGHTS = {
 # Discovery-channel attribution
 # --------------------------------------------------------------------------- #
 # Ablation conditions (see run.sh CHANNELS). "full" = every discovery channel on.
-CONDITIONS = ("full", "no-hints", "no-skills", "bare", "cli-only")
+CONDITIONS = ("native", "bare", "full", "no-hints", "no-skills", "cli-only")
 KNOWN_HOSTS = ("claude", "codex")
 
 # Distinctive fragments of the hook-injected tool hints. These MIRROR the
@@ -769,8 +773,10 @@ def repeated_query_hint_next_steps(tr: Transcript) -> list[str]:
 # --------------------------------------------------------------------------- #
 # A scenario's `outcome` block declares what a correct run must establish.
 #   {"kind": "answer",  "answer": CHECKS}                  final answer states conclusions
+#   {"kind": "answer",  "answer": {"json_equals": {...}}}  exact structured facts
 #   {"kind": "effect",  "files": {glob: CHECKS}, "tool_effects": [...]}
 #                                                          resulting state / successful call
+#   {"kind": "effect",  "behavior": "stock_check_rename"} compiled behavior of edited source
 #   {"kind": "ungraded", "reason": "..."}                  no verifiable ground truth
 # CHECKS = {"required": [CHECK...], "forbidden": [CHECK...]} with
 # CHECK = {"id": "<conclusion>", "pattern": "<regex, case-insensitive>"}.
@@ -796,6 +802,25 @@ def _evaluate_checks(text: str, checks: dict) -> dict:
     }
 
 
+def _structured_answer(text: str, expected: dict) -> dict:
+    """Compare complete facts, rejecting contradictory prose and duplicate keys."""
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate answer key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        actual = json.loads(text, object_pairs_hook=unique_keys)
+    except ValueError as error:
+        return {"status": "fail", "score": 0.0, "reason": f"answer is not one unambiguous JSON object: {error}"}
+    matched = actual == expected
+    return {"status": "pass" if matched else "fail", "score": float(matched),
+            "evidence": {"answer": {"expected": expected, "actual": actual}}}
+
+
 def _glob_files(effects: dict, pattern: str) -> str:
     """Concatenate the snapshotted files a glob selects (`*` crosses `/`)."""
     return "\n".join(
@@ -816,12 +841,26 @@ def grade_outcome(scn: dict, tr: Transcript, effects: Optional[dict] = None) -> 
     """Task correctness, independent of which tools the agent chose.
 
     status: pass | fail | ungraded (no ground truth declared) | unverified
-    (an effect scenario whose post-run snapshot was not captured).
+    (the post-run snapshot or its behavioral verification is unavailable).
     """
     outcome = scn.get("outcome") or {"kind": "ungraded", "reason": "scenario declares no outcome"}
     kind = outcome["kind"]
     if kind == "ungraded":
         return {"kind": kind, "status": "ungraded", "score": None, "reason": outcome.get("reason")}
+    if kind == "answer" and "json_equals" in outcome["answer"]:
+        return {"kind": kind, **_structured_answer(tr.final_text, outcome["answer"]["json_equals"])}
+    if kind == "effect" and outcome.get("behavior"):
+        if effects is None:
+            return {"kind": kind, "status": "unverified", "score": None,
+                    "reason": "no post-run file snapshot for the behavior oracle"}
+        if outcome["behavior"] != "stock_check_rename":
+            return {"kind": kind, "status": "unverified", "score": None,
+                    "reason": "unknown behavior oracle"}
+        result = stock_check.verify(effects)
+        status = result["status"]
+        return {"kind": kind, "status": status,
+                "score": None if status == "unverified" else float(status == "pass"),
+                "reason": result["reason"], "evidence": {"behavior": result}}
 
     missing: list[str] = []
     forbidden: list[str] = []
@@ -895,8 +934,19 @@ def lint_outcomes(scenarios: dict) -> list[str]:
             if not outcome.get("reason"):
                 problems.append(f"{sid}: ungraded outcome needs a reason")
         elif kind == "answer":
-            check_checks(sid, "outcome.answer", outcome.get("answer"))
+            answer = outcome.get("answer")
+            if isinstance(answer, dict) and "json_equals" in answer:
+                expected = answer["json_equals"]
+                if (set(answer) != {"json_equals"} or not isinstance(expected, dict)
+                        or not expected or any(not isinstance(v, str) for v in expected.values())):
+                    problems.append(f"{sid}: json_equals must be the sole answer check and contain nonempty string facts")
+            else:
+                check_checks(sid, "outcome.answer", answer)
         else:
+            if "behavior" in outcome:
+                if set(outcome) != {"kind", "behavior"} or outcome["behavior"] != "stock_check_rename":
+                    problems.append(f"{sid}: behavior must be stock_check_rename and the sole effect oracle")
+                continue
             files, tool_effects = outcome.get("files", {}), outcome.get("tool_effects", [])
             if not files and not tool_effects:
                 problems.append(f"{sid}: effect outcome needs files or tool_effects")
@@ -1016,7 +1066,7 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     if "expected_skill" in scn or "allowed_skills" in scn:
         expected = scn.get("expected_skill")
         allowed = scn.get("allowed_skills", [expected] if expected else [])
-        measured = run_meta.get("channel_condition", "full") not in {"no-skills", "bare"}
+        measured = run_meta.get("channel_condition", "full") not in {"native", "no-skills", "bare"}
         unmeasured_reason = None if measured else "skills_unavailable_in_condition"
         selected = invoked_skills(tr) if measured else None
         details["skill_routing"] = {
@@ -1071,6 +1121,7 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         "repeated_query_hint_next_steps": repeated_query_hint_next_steps(tr),
         "final_answer_chars": len(tr.final_text),
         "cost": tr.cost,
+        "runner_elapsed_ms": run_meta.get("duration_ms"),
         "parse_note": tr.parse_note,
         "run_meta": run_meta,
     }
@@ -1197,9 +1248,13 @@ def aggregate(results: list[dict]) -> dict:
     return agg
 
 
-def _prompt_tokens(cost: dict) -> Optional[int]:
+def _prompt_tokens(cost: dict, host: Optional[str] = None) -> Optional[int]:
+    if host == "codex":
+        return cost.get("input_tokens")
     parts = [cost.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
-    return None if parts[0] is None else sum(p or 0 for p in parts)
+    if any(not isinstance(part, (int, float)) for part in parts):
+        return None
+    return sum(parts)
 
 
 def aggregate_cost_and_hints(results: list[dict], by_scenario: bool = False) -> dict:
@@ -1231,13 +1286,249 @@ def aggregate_cost_and_hints(results: list[dict], by_scenario: bool = False) -> 
             "mean_duration_s": _mean([None if u.get("duration_ms") is None else u["duration_ms"] / 1000
                                       for u in costs]),
             "usd_per_pass": usd_per_pass(rs),
-            "mean_prompt_tokens": _mean([_prompt_tokens(u) for u in costs]),
+            "mean_prompt_tokens": _mean([_prompt_tokens(r["cost"], r["host"]) for r in rs]),
             "mean_output_tokens": _mean([u.get("output_tokens") for u in costs]),
             "hints_total": sum(next_steps.values()),
             "runs_with_hint": sum(1 for r in rs if r.get("repeated_query_hint_next_steps")),
             "hint_next_steps": next_steps,
         }
     return out
+
+
+def _sample_summary(values: list[Optional[float]]) -> dict:
+    known = sorted(v for v in values if isinstance(v, (int, float)) and math.isfinite(v))
+    if not known:
+        return {"n": len(values), "observed": 0, "unknown": len(values), "mean": None,
+                "median": None, "range": None}
+
+    def quantile(q: float) -> float:
+        position = (len(known) - 1) * q
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        return known[lower] + (known[upper] - known[lower]) * (position - lower)
+
+    return {
+        "n": len(values),
+        "observed": len(known),
+        "unknown": len(values) - len(known),
+        "mean": round(statistics.mean(known), 4),
+        "median": round(statistics.median(known), 4),
+        "q1": round(quantile(0.25), 4),
+        "q3": round(quantile(0.75), 4),
+        "range": [round(known[0], 4), round(known[-1], 4)],
+    }
+
+
+def _wilson_interval(passed: int, total: int) -> Optional[list[float]]:
+    if total == 0:
+        return None
+    z = 1.96
+    rate = passed / total
+    denominator = 1 + z * z / total
+    center = (rate + z * z / (2 * total)) / denominator
+    margin = z * math.sqrt(rate * (1 - rate) / total + z * z / (4 * total * total)) / denominator
+    return [round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4)]
+
+
+def effectiveness_comparisons(
+    results: list[dict], invalid_runs: Optional[list[dict]] = None
+) -> dict:
+    """Compare verified task outcomes and observed costs without blending adoption.
+
+    Each condition remains grouped by task, host/model, and hint setting. A
+    condition delta is only reported against that exact cell's native-tools run.
+    """
+    groups: dict[tuple[str, str, str, str], list[dict]] = {}
+    invalid_groups: dict[tuple[str, str, str, str], list[dict]] = {}
+    for result in results:
+        host_model = f"{result['host']}/{result['model']}" if result.get("model") else result["host"]
+        key = (
+            result["id"],
+            host_model,
+            result.get("condition", "full"),
+            result.get("repeated_query_hints", "off"),
+        )
+        groups.setdefault(key, []).append(result)
+    for result in invalid_runs or []:
+        model = result.get("model")
+        host_model = f"{result['host']}/{model}" if model else result["host"]
+        key = (
+            result["id"],
+            host_model,
+            result.get("condition", "full"),
+            result.get("repeated_query_hints", "off"),
+        )
+        invalid_groups.setdefault(key, []).append(result)
+
+    cells: dict[str, dict] = {}
+    for scenario, host_model, condition, hints in sorted(set(groups) | set(invalid_groups)):
+        rows = groups.get((scenario, host_model, condition, hints), [])
+        invalid = invalid_groups.get((scenario, host_model, condition, hints), [])
+        graded = [r["correctness"]["status"] for r in rows
+                  if r["correctness"]["status"] in ("pass", "fail")]
+        passed = graded.count("pass")
+        attempts = len(rows) + len(invalid)
+        unknown_outcomes = sum(r["correctness"]["status"] == "ungraded" for r in rows)
+        unknown_outcomes += sum(r.get("outcome_kind") == "ungraded" for r in invalid)
+        scored_attempts = attempts - unknown_outcomes
+        costs = [r["cost"] for r in rows]
+        tool_attempts = [r["tool_success"]["attempted"] for r in rows]
+        tool_failures = [r["tool_success"]["failed"] for r in rows]
+        cell = {
+            "scenario": scenario,
+            "host_model": host_model,
+            "condition": condition,
+            "repeated_query_hints": hints,
+            "correctness": {
+                "n": len(graded),
+                "passed": passed,
+                "failed": graded.count("fail"),
+                "pass_rate": round(passed / len(graded), 4) if graded else None,
+                "wilson_95": _wilson_interval(passed, len(graded)),
+                "ungraded": sum(r["correctness"]["status"] == "ungraded" for r in rows),
+                "unverified": sum(r["correctness"]["status"] == "unverified" for r in rows),
+            },
+            "task_success": {
+                "attempts": attempts,
+                "scored_attempts": scored_attempts,
+                "passed": passed,
+                "unsuccessful_or_unverified": scored_attempts - passed,
+                "unknown_outcomes": unknown_outcomes,
+                "pass_rate": round(passed / scored_attempts, 4) if scored_attempts else None,
+                "wilson_95": _wilson_interval(passed, scored_attempts),
+                "invalid_runs": len(invalid),
+            },
+            "observed": {
+                "input_tokens": _sample_summary([c.get("input_tokens") for c in costs] + [None] * len(invalid)),
+                "cache_read_tokens": _sample_summary(
+                    [c.get("cache_read_input_tokens") for c in costs] + [None] * len(invalid)
+                ),
+                "cache_creation_tokens": _sample_summary(
+                    [c.get("cache_creation_input_tokens") for c in costs] + [None] * len(invalid)
+                ),
+                "prompt_tokens": _sample_summary(
+                    [_prompt_tokens(r["cost"], r["host"]) for r in rows] + [None] * len(invalid)
+                ),
+                "output_tokens": _sample_summary(
+                    [c.get("output_tokens") for c in costs] + [None] * len(invalid)
+                ),
+                "total_tokens": _sample_summary(
+                    [c.get("total_tokens") for c in costs] + [None] * len(invalid)
+                ),
+                "cost_usd": _sample_summary(
+                    [c.get("total_cost_usd") for c in costs] + [None] * len(invalid)
+                ),
+                "elapsed_ms": _sample_summary(
+                    [r.get("runner_elapsed_ms") for r in rows]
+                    + [r.get("runner_elapsed_ms") for r in invalid]
+                ),
+                "tool_attempts": _sample_summary(tool_attempts + [None] * len(invalid)),
+                "tool_failures": _sample_summary(tool_failures + [None] * len(invalid)),
+            },
+        }
+        cells[" / ".join((scenario, host_model, condition, f"hints-{hints}"))] = cell
+
+    for cell in cells.values():
+        if cell["condition"] == "native":
+            cell["comparison_to_native"] = {"status": "reference"}
+            continue
+        key = (
+            cell["scenario"],
+            cell["host_model"],
+            "native",
+            cell["repeated_query_hints"],
+        )
+        baseline = groups.get(key, [])
+        baseline_invalid = invalid_groups.get(key, [])
+        if key not in groups and key not in invalid_groups:
+            cell["comparison_to_native"] = {
+                "status": "missing_native_baseline",
+                "pass_rate_delta": None,
+            }
+            continue
+        baseline_passes = [r["correctness"]["status"] for r in baseline
+                           if r["correctness"]["status"] in ("pass", "fail")]
+        native_attempts = len(baseline) + len(baseline_invalid)
+        native_unknown = sum(r["correctness"]["status"] == "ungraded" for r in baseline)
+        native_unknown += sum(r.get("outcome_kind") == "ungraded" for r in baseline_invalid)
+        native_scored_attempts = native_attempts - native_unknown
+        product_rate = cell["task_success"]["pass_rate"]
+        native_rate = (
+            baseline_passes.count("pass") / native_scored_attempts if native_scored_attempts else None
+        )
+        native_costs = [r["cost"] for r in baseline]
+        native_metrics = {
+            "prompt_tokens": _sample_summary(
+                [_prompt_tokens(r["cost"], r["host"]) for r in baseline]
+            )["median"],
+            "total_tokens": _sample_summary(
+                [c.get("total_tokens") for c in native_costs] + [None] * len(baseline_invalid)
+            )["median"],
+            "cost_usd": _sample_summary(
+                [c.get("total_cost_usd") for c in native_costs] + [None] * len(baseline_invalid)
+            )["median"],
+            "elapsed_ms": _sample_summary([r.get("runner_elapsed_ms") for r in baseline])["median"],
+            "tool_attempts": _sample_summary([r["tool_success"]["attempted"] for r in baseline])["median"],
+        }
+        if baseline_invalid:
+            native_metrics["prompt_tokens"] = _sample_summary(
+                [_prompt_tokens(r["cost"], r["host"]) for r in baseline] + [None] * len(baseline_invalid)
+            )["median"]
+            native_metrics["tool_attempts"] = _sample_summary(
+                [r["tool_success"]["attempted"] for r in baseline] + [None] * len(baseline_invalid)
+            )["median"]
+        if baseline_invalid:
+            native_metrics["elapsed_ms"] = _sample_summary(
+                [r.get("runner_elapsed_ms") for r in baseline]
+                + [r.get("runner_elapsed_ms") for r in baseline_invalid]
+            )["median"]
+        observed_deltas = {}
+        for metric, baseline_median in native_metrics.items():
+            current_median = cell["observed"][metric]["median"]
+            observed_deltas[metric] = (
+                round(current_median - baseline_median, 4)
+                if current_median is not None and baseline_median is not None else None
+            )
+        cell["comparison_to_native"] = {
+            "status": "compared" if product_rate is not None and native_rate is not None else "ungraded",
+            "native_success_rate": round(native_rate, 4) if native_rate is not None else None,
+            "success_rate_delta": round(product_rate - native_rate, 4)
+            if product_rate is not None and native_rate is not None else None,
+            "observed_median_deltas": observed_deltas,
+        }
+    return cells
+
+
+def load_efficiency_scorecard(path: str, run_meta: dict) -> dict:
+    with open(path) as stream:
+        scorecard = json.load(stream)
+    if not scorecard.get("schema", "").startswith("tracedecay.efficiency-scorecard/"):
+        raise ValueError("unsupported efficiency scorecard schema")
+    runs = scorecard.get("runs") or []
+    if scorecard.get("verdict") != "ok" or not runs or any(
+        run.get("status") != "ok" for run in runs
+    ):
+        raise ValueError("efficiency scorecard contains a failed or incomplete run")
+    expected_sha = run_meta.get("binary_sha256")
+    actual_sha = (scorecard.get("binary") or {}).get("sha256")
+    if not expected_sha or expected_sha != actual_sha:
+        raise ValueError("efficiency scorecard binary SHA-256 does not match the agent eval")
+    median = scorecard.get("median") or {}
+    if not isinstance(median, dict) or any(
+        not isinstance(name, str) or isinstance(value, bool)
+        or not isinstance(value, (int, float)) or not math.isfinite(value)
+        for name, value in median.items()
+    ):
+        raise ValueError("efficiency scorecard medians must be finite scalar measurements")
+    return {
+        "binary_sha256": actual_sha,
+        "binary_version": (scorecard.get("binary") or {}).get("version"),
+        "source_git_commit": (scorecard.get("source") or {}).get("git_commit"),
+        "fixture_sha256": (scorecard.get("fixture") or {}).get("tree_sha256"),
+        "runs": len(scorecard.get("runs", [])),
+        "median": median,
+        "attribution": "separate no-model runtime journey; not added to agent token or USD totals",
+    }
 
 
 def usd_per_pass(rs: list[dict]) -> Optional[float]:
@@ -1333,8 +1624,19 @@ def render_report(scoreboard: dict) -> str:
     meta = scoreboard.get("meta", {})
     lines.append(f"- run: `{meta.get('run_id','?')}`")
     lines.append(f"- git: `{meta.get('git_sha','?')}`")
+    lines.append(f"- binary: `{meta.get('binary_version') or 'unknown'}` "
+                 f"(sha256 `{meta.get('binary_sha256') or 'unknown'}`)")
+    lines.append(f"- fixture sha256: `{meta.get('fixture_sha256') or 'unknown'}`")
     lines.append(f"- graded: {len(scoreboard['results'])} transcript(s)")
     lines.append(f"- invalid launches excluded: {len(meta.get('invalid_runs', []))}")
+    setup_ms = meta.get("fixture_setup_elapsed_ms")
+    lines.append(f"- one-time fixture initialization/indexing: "
+                 f"{setup_ms} ms" if setup_ms is not None
+                 else "- one-time fixture initialization/indexing: unknown")
+    scorecard = meta.get("efficiency_scorecard")
+    if scorecard:
+        lines.append(f"- no-model efficiency scorecard: binary SHA matched; "
+                     f"{scorecard['runs']} run(s); fixture `{scorecard.get('fixture_sha256') or 'unknown'}`")
     lines.append("")
     lines.append("## Skill routing (separate from task outcomes)")
     lines.append("")
@@ -1355,7 +1657,8 @@ def render_report(scoreboard: dict) -> str:
     lines.append("")
     lines.append("Pass means every required conclusion or effect was established and no forbidden "
                  "one appeared, whichever tools were used. `ungraded` scenarios declare no "
-                 "verifiable ground truth; `unverified` effect scenarios lack a post-run snapshot. "
+                 "verifiable ground truth; `unverified` effect scenarios lack a post-run snapshot "
+                 "or completed behavioral verification. "
                  "Both are excluded from the pass rate.")
     lines.append("")
     lines.append("| host/model | n | pass | fail | unverified | ungraded | pass rate |")
@@ -1445,13 +1748,99 @@ def render_report(scoreboard: dict) -> str:
 
     lines.append("## Correctness, cost, latency, and repeated-query hints")
     lines.append("")
-    lines.append("Prompt tokens include cache reads and writes. `-` means the host did not report it.")
+    lines.append("Prompt tokens include cache reads and writes when the host reports them; schema/context "
+                 "tokens are included in host-reported input usage, but hosts do not separately "
+                 "attribute tool-schema overhead. `-` means unknown, not zero.")
     lines.append("")
     lines += render_cost_and_hints(scoreboard.get("cost_and_hints", {}))
     if scoreboard.get("repeated_query_scenarios"):
         lines.append("### Per repeated-query scenario")
         lines.append("")
         lines += render_cost_and_hints(scoreboard["repeated_query_scenarios"])
+
+    lines.append("## Matched task effectiveness and observed cost")
+    lines.append("")
+    lines.append("Task outcome is independently graded and native success counts equally. "
+                 "Intervals are 95% Wilson intervals for the per-cell pass rate; cost ranges "
+                 "describe observed run-to-run variability. Timeouts, failed launches, and "
+                 "unverified outcomes count as unsuccessful attempts, not as successful task "
+                 "completions. Prompt tokens include cache reads "
+                 "and writes where reported; tool schema/context overhead is part of host-reported "
+                 "input usage and cannot be separated by these hosts. Missing usage is unknown, "
+                 "never zero. Cold startup/indexing is reported separately and is not converted "
+                 "to dollars or silently amortized.")
+    lines.append("")
+    lines.append("| task / host / condition | successful / scored attempts | 95% interval | verified outcome pass rate | success Δ vs native | median cost Δ (prompt tok / USD / ms) | input tokens | cache read | cache create | output tokens | prompt total | total tokens | USD | elapsed ms | tool attempts / failures |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+
+    def sample_cell(sample: dict, digits=0):
+        if not sample or sample["median"] is None:
+            return "-"
+        lo, hi = sample["range"]
+        return f"{sample['median']:.{digits}f} [{lo:.{digits}f}, {hi:.{digits}f}] (unknown {sample['unknown']})"
+
+    for key, cell in sorted(scoreboard.get("effectiveness", {}).items()):
+        correctness = cell["correctness"]
+        task_success = cell["task_success"]
+        task_success_text = f"{task_success['passed']}/{task_success['scored_attempts']}"
+        if task_success["unknown_outcomes"]:
+            task_success_text += f" ({task_success['unknown_outcomes']} ungraded)"
+        if task_success["invalid_runs"]:
+            task_success_text += f" ({task_success['invalid_runs']} invalid)"
+        interval = task_success["wilson_95"]
+        interval_text = "-" if interval is None else f"[{interval[0]:.2f}, {interval[1]:.2f}]"
+        comparison = cell.get("comparison_to_native", {})
+        delta = comparison.get("success_rate_delta")
+        delta_text = "-" if delta is None else f"{delta:+.2f}"
+        cost_deltas = comparison.get("observed_median_deltas", {})
+        def delta_value(metric, digits):
+            value = cost_deltas.get(metric)
+            return "-" if value is None else f"{value:+.{digits}f}"
+        delta_cost_text = (
+            f"{delta_value('prompt_tokens', 0)} / {delta_value('cost_usd', 4)} / "
+            f"{delta_value('elapsed_ms', 0)}"
+        )
+        observed = cell["observed"]
+        attempts = observed["tool_attempts"]["mean"]
+        failures = observed["tool_failures"]["mean"]
+        tool_unknown = observed["tool_attempts"]["unknown"]
+        tool_text = "-" if attempts is None else f"{attempts:.1f} / {failures:.1f}"
+        if tool_unknown:
+            tool_text += f" ({tool_unknown} unknown)"
+        lines.append(
+            f"| {key} | {task_success_text} | {interval_text} | "
+            f"{fmt(correctness['pass_rate'])} | {delta_text} | "
+            f"{delta_cost_text} | "
+            f"{sample_cell(observed['input_tokens'])} | {sample_cell(observed['cache_read_tokens'])} | "
+            f"{sample_cell(observed['cache_creation_tokens'])} | {sample_cell(observed['output_tokens'])} | "
+            f"{sample_cell(observed['prompt_tokens'])} | {sample_cell(observed['total_tokens'])} | "
+            f"{sample_cell(observed['cost_usd'], 4)} | "
+            f"{sample_cell(observed['elapsed_ms'])} | {tool_text} |"
+        )
+    lines.append("")
+    if scorecard:
+        lines.append("### Startup, indexing, and repeated-use resource baseline")
+        lines.append("")
+        lines.append("The efficiency scorecard is a separate no-model runtime journey. Its artifact "
+                     "SHA-256 must match this agent evaluation. These wall times and resource "
+                     "measurements are not model-token or monetary costs.")
+        lines.append("")
+        lines.append("| metric | median | unit |")
+        lines.append("|---|---:|---|")
+        for metric, value in sorted(scorecard["median"].items()):
+            if metric.endswith("_seconds"):
+                unit = "s"
+            elif metric.endswith("_ms"):
+                unit = "ms"
+            elif any(part == "bytes" or part.endswith("_bytes") for part in metric.split(".")):
+                unit = "B"
+            else:
+                unit = "—"
+            rendered = f"{value:,.3f}"
+            if unit not in ("s", "ms"):
+                rendered = rendered.rstrip("0").rstrip(".")
+            lines.append(f"| `{metric}` | {rendered} | {unit} |")
+        lines.append("")
 
     if scoreboard.get("learned_skill"):
         lines += render_learned_skill(scoreboard["learned_skill"])
@@ -1547,6 +1936,10 @@ def main() -> int:
     ap.add_argument("--run-dir")
     ap.add_argument("--scenarios", default=os.path.join(here, "scenarios"))
     ap.add_argument(
+        "--efficiency-scorecard",
+        help="no-model efficiency-scorecard JSON from the exact same binary artifact",
+    )
+    ap.add_argument(
         "--lint-only",
         action="store_true",
         help="Only run the scenario-prompt neutrality lint; exit non-zero on violations.",
@@ -1627,6 +2020,15 @@ def main() -> int:
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             run_meta_all = json.load(f)
+    efficiency_scorecard = None
+    if args.efficiency_scorecard:
+        try:
+            efficiency_scorecard = load_efficiency_scorecard(
+                args.efficiency_scorecard, run_meta_all
+            )
+        except (OSError, ValueError) as error:
+            print(f"efficiency scorecard rejected: {error}", file=sys.stderr)
+            return 1
 
     results = []
     invalid_runs = []
@@ -1669,6 +2071,9 @@ def main() -> int:
                     "host": host,
                     "model": per_meta.get("model"),
                     "condition": condition,
+                    "repeated_query_hints": per_meta.get("repeated_query_hints", "off"),
+                    "runner_elapsed_ms": per_meta.get("duration_ms"),
+                    "outcome_kind": (scn.get("outcome") or {}).get("kind", "ungraded"),
                     "exit_code": exit_code,
                     "timed_out": bool(per_meta.get("timed_out")),
                     "reason": "timed_out" if per_meta.get("timed_out") else "launch_failed",
@@ -1684,6 +2089,9 @@ def main() -> int:
                     "host": host,
                     "model": per_meta.get("model"),
                     "condition": condition,
+                    "repeated_query_hints": per_meta.get("repeated_query_hints", "off"),
+                    "runner_elapsed_ms": per_meta.get("duration_ms"),
+                    "outcome_kind": (scn.get("outcome") or {}).get("kind", "ungraded"),
                     "exit_code": exit_code,
                     "timed_out": False,
                     "reason": "unparseable_empty",
@@ -1703,11 +2111,18 @@ def main() -> int:
         "meta": {
             "run_id": os.path.basename(os.path.normpath(run_dir)),
             "git_sha": run_meta_all.get("git_sha", "?"),
+            "binary_path": run_meta_all.get("binary_path"),
+            "binary_sha256": run_meta_all.get("binary_sha256"),
+            "binary_version": run_meta_all.get("binary_version"),
+            "fixture_sha256": run_meta_all.get("fixture_sha256"),
+            "fixture_setup_elapsed_ms": run_meta_all.get("fixture_setup_elapsed_ms"),
+            "efficiency_scorecard": efficiency_scorecard,
             "hosts": run_meta_all.get("hosts", {}),
             "invalid_runs": invalid_runs,
         },
         "aggregate": aggregate(results),
         "cost_and_hints": aggregate_cost_and_hints(results),
+        "effectiveness": effectiveness_comparisons(results, invalid_runs),
         "repeated_query_scenarios": aggregate_cost_and_hints(
             [r for r in results if r.get("repeated_query_class")], by_scenario=True),
         "results": results,

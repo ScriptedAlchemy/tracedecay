@@ -8,13 +8,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
+use serde_json::Value;
 use tokio::sync::Mutex;
+use tracedecay_daemon_protocol::MAX_LSP_FRAME_BYTES;
 use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, StdioLspSemanticAuthority};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_lsp::analyzer::{LanguageSemanticRoute, PolyglotSemanticProvider};
 use tracedecay_lsp::{
     AdmittedRoot, LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure,
-    LspRuntimeFuture, SemanticProviderAdapter, SemanticProviderPort, UnavailableSemanticProvider,
+    LspRuntimeFuture, LspSemanticOperationOutcome, LspSemanticRequest, LspSemanticRequestAuthority,
+    SemanticProviderAdapter, SemanticProviderPort, UnavailableSemanticProvider,
     UpstreamCapabilities,
 };
 
@@ -34,9 +39,9 @@ pub struct ProductionSemanticAuthorities {
 /// the production LSP session factory.
 ///
 /// Each installed analyzer remains bound to its declared document extensions.
-/// No analyzer (or an ambiguous extension) resolves through the typed
-/// unavailable fallback, and that fallback serves nothing, so the no-analyzer
-/// route reports no semantic capability at all.
+/// Missing or ambiguous document extensions remain unavailable. Workspace
+/// symbols fan out to the retained language authorities; only an analyzer that
+/// advertises the operation can contribute a complete result.
 ///
 /// Analyzer processes stay unstarted at project open. An actual LSP session
 /// initializes its retained shared client and uses that standard response as
@@ -95,12 +100,123 @@ pub async fn production_semantic_authorities(
         cancellation.push(authority.clone());
         routes.push(LanguageSemanticRoute::new(adapter.extensions, authority));
     }
+    let workspace_symbols = SemanticProviderAdapter::shared(
+        native_lsp_runtime(),
+        Arc::new(WorkspaceSymbolAuthority {
+            authorities: initializers.clone(),
+        }),
+    );
+    cancellation.push(workspace_symbols.clone());
 
     Ok(ProductionSemanticAuthorities {
-        semantics: Arc::new(PolyglotSemanticProvider::new(routes, fallback)),
+        semantics: Arc::new(PolyglotSemanticProvider::new(routes, workspace_symbols)),
         cancellation: Arc::new(CompositeSemanticCancellation { cancellation }),
         upstream_capability_initializer: Arc::new(CompositeUpstreamCapabilities { initializers }),
     })
+}
+
+/// One admitted operation owns all language futures. The existing semantic
+/// adapter retains its single result and supplies capacity/cancellation; this
+/// authority adds no independent request registry or polling cache.
+struct WorkspaceSymbolAuthority {
+    authorities: Vec<Arc<StdioLspSemanticAuthority>>,
+}
+
+impl LspSemanticRequestAuthority for WorkspaceSymbolAuthority {
+    fn start(
+        &self,
+        root: AdmittedRoot,
+        request_id: LspRequestId,
+        request: LspSemanticRequest,
+    ) -> LspRuntimeFuture<LspSemanticOperationOutcome> {
+        // Polyglot routing also reaches this fallback for unknown or ambiguous
+        // document extensions. Never fan a document into unrelated analyzers.
+        if request.method() != "workspace/symbol" {
+            return Box::pin(async { LspSemanticOperationOutcome::Unavailable });
+        }
+        let mut pending: FuturesUnordered<_> = self
+            .authorities
+            .iter()
+            .enumerate()
+            .map(|(index, authority)| {
+                let operation = authority.start(root.clone(), request_id.clone(), request.clone());
+                async move { (index, operation.await) }
+            })
+            .collect();
+        let authorities = self.authorities.clone();
+        Box::pin(async move {
+            // Completion order must not reorder configured language routes.
+            // Keep only one transport frame's worth of aggregate results;
+            // the session also checks the final JSON-RPC envelope size.
+            let mut symbols = vec![Vec::new(); authorities.len()];
+            let mut result_bytes: usize = 0;
+            let mut supported = false;
+            while let Some((index, outcome)) = pending.next().await {
+                let failure = match outcome {
+                    LspSemanticOperationOutcome::Complete(Value::Array(current)) => {
+                        match serde_json::to_vec(&current) {
+                            Ok(encoded) => {
+                                result_bytes = result_bytes.saturating_add(encoded.len());
+                                if result_bytes <= MAX_LSP_FRAME_BYTES {
+                                    supported = true;
+                                    symbols[index] = current;
+                                    continue;
+                                }
+                                LspSemanticOperationOutcome::Partial {
+                                    value: Value::Null,
+                                    coverage: "workspace-symbol-response-too-large".to_owned(),
+                                    detail: None,
+                                }
+                            }
+                            Err(_) => LspSemanticOperationOutcome::Partial {
+                                value: Value::Null,
+                                coverage: "analyzer-invalid-response".to_owned(),
+                                detail: Some(
+                                    LspSemanticOperationOutcome::ANALYZER_INVALID_RESPONSE_DETAIL,
+                                ),
+                            },
+                        }
+                    }
+                    LspSemanticOperationOutcome::Complete(Value::Null) => {
+                        supported = true;
+                        continue;
+                    }
+                    LspSemanticOperationOutcome::Unsupported => continue,
+                    LspSemanticOperationOutcome::Partial { .. }
+                    | LspSemanticOperationOutcome::Unavailable => outcome,
+                    LspSemanticOperationOutcome::Complete(_)
+                    | LspSemanticOperationOutcome::RenameCandidate(_) => {
+                        LspSemanticOperationOutcome::Partial {
+                            value: Value::Null,
+                            coverage: "analyzer-invalid-response".to_owned(),
+                            detail: Some(
+                                LspSemanticOperationOutcome::ANALYZER_INVALID_RESPONSE_DETAIL,
+                            ),
+                        }
+                    }
+                };
+                // A failed member cannot become a successful empty response,
+                // and its peers must not continue after the fan-out settles.
+                for authority in &authorities {
+                    authority.cancel_request(&root, &request_id);
+                }
+                return failure;
+            }
+            if supported {
+                LspSemanticOperationOutcome::Complete(Value::Array(
+                    symbols.into_iter().flatten().collect(),
+                ))
+            } else {
+                LspSemanticOperationOutcome::Unavailable
+            }
+        })
+    }
+
+    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
+        self.authorities.iter().fold(false, |cancelled, authority| {
+            authority.cancel_request(root, request_id) | cancelled
+        })
+    }
 }
 
 struct UnavailableUpstreamCapabilities;
@@ -168,3 +284,6 @@ impl LspAnalyzerCancellationAuthority for CompositeSemanticCancellation {
             })
     }
 }
+
+#[cfg(test)]
+mod tests;

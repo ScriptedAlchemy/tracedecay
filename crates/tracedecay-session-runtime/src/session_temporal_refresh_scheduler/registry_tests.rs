@@ -452,10 +452,11 @@ async fn a_dropped_rekey_keeps_its_route_and_requests_after_the_worker_finished(
         .project_state(&old_owner)
         .await
         .expect("project entry");
-    old_state.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+    let request = tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
         tracedecay_domain::SessionId::new("session.finished-rekey").unwrap(),
         tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
-    ));
+    );
+    old_state.requeue_request(request.clone());
     assert_eq!(old_state.queued_request_count(), 1);
 
     {
@@ -493,6 +494,10 @@ async fn a_dropped_rekey_keeps_its_route_and_requests_after_the_worker_finished(
         "a rekey dropped after its join must leave the route without a live target"
     );
 
+    // Keep the destination's real worker in history while checking the
+    // handoff. Otherwise it can consume the request before the queue is read.
+    let destination_history =
+        mount_held_project(&registry, &harness, &new_owner, HeldHistory::default()).await;
     registry
         .rekey_project(&old_owner, new_owner.clone(), harness.registered.clone())
         .await;
@@ -505,11 +510,18 @@ async fn a_dropped_rekey_keeps_its_route_and_requests_after_the_worker_finished(
         1,
         "a rekey dropped after its join must retain the requests it staged"
     );
+    let transferred = resumed.take_requests(1).pop().expect("transferred request");
+    assert!(
+        transferred.is_equivalent_to(&request),
+        "the parked handoff must preserve the exact request and frontier"
+    );
+    resumed.requeue_request(transferred);
     assert!(
         old_wake.wake(),
         "the old route must reach the new owner once the retry completes"
     );
 
+    destination_history.release.notify_one();
     registry.shutdown().await;
 }
 
@@ -540,10 +552,11 @@ async fn a_rekey_after_a_readmission_lands_every_route_and_request() {
         .project_state(&a_owner)
         .await
         .expect("project entry");
-    a_state.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+    let parked_request = tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
         tracedecay_domain::SessionId::new("session.readmitted-a").unwrap(),
         tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
-    ));
+    );
+    a_state.requeue_request(parked_request.clone());
 
     {
         let mut rekey = std::pin::pin!(registry.rekey_project(
@@ -601,18 +614,35 @@ async fn a_rekey_after_a_readmission_lands_every_route_and_request() {
         !a_wake.wake(),
         "the parked handoff stays owed to its own destination"
     );
+    // Keep both live workers in history while inspecting transferred work.
+    // Otherwise either owner can consume its queue before the handoff assertion.
+    let readmitted_history =
+        mount_held_project(&registry, &harness, &a_owner, HeldHistory::default()).await;
+    let destination_history =
+        mount_held_project(&registry, &harness, &d_owner, HeldHistory::default()).await;
     let readmitted = registry
         .project_state(&a_owner)
         .await
         .expect("readmitted project entry");
-    readmitted.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+    let live_request = tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
         tracedecay_domain::SessionId::new("session.readmitted-live").unwrap(),
         tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
-    ));
+    );
+    readmitted.requeue_request(live_request.clone());
 
-    registry
-        .rekey_project(&a_owner, d_owner.clone(), harness.registered.clone())
-        .await;
+    {
+        let mut rekey = std::pin::pin!(registry.rekey_project(
+            &a_owner,
+            d_owner.clone(),
+            harness.registered.clone(),
+        ));
+        assert!(
+            rekey.as_mut().now_or_never().is_none(),
+            "the readmitted worker must be cancelled before releasing its history pass"
+        );
+        readmitted_history.release.notify_one();
+        rekey.await;
+    }
 
     assert!(registry.project_state(&a_owner).await.is_none());
     let landed = registry
@@ -624,6 +654,18 @@ async fn a_rekey_after_a_readmission_lands_every_route_and_request() {
         2,
         "the parked request and the readmitted entry's request must both reach the final owner"
     );
+    let transferred = landed.take_requests(2);
+    for expected in [&parked_request, &live_request] {
+        assert!(
+            transferred
+                .iter()
+                .any(|request| request.is_equivalent_to(expected)),
+            "the handoff must retain both exact requests and frontiers"
+        );
+    }
+    for request in transferred {
+        landed.requeue_request(request);
+    }
     assert!(
         a_wake.wake(),
         "the parked route must reach the new owner once the rekey completes"
@@ -636,6 +678,7 @@ async fn a_rekey_after_a_readmission_lands_every_route_and_request() {
     // The destination retains the complete route set it absorbed: a later
     // D-to-E rekey must still land both handles, or older callers die at
     // the next move.
+    destination_history.release.notify_one();
     registry
         .rekey_project(&d_owner, e_owner.clone(), harness.registered.clone())
         .await;

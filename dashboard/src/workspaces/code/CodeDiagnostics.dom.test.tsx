@@ -87,11 +87,93 @@ describe('Code diagnostics panel', () => {
   });
 
   it('distinguishes a ready engine with nothing to report from an empty broker', async () => {
-    stubSnapshot(snapshot({ engines: [engine('rust', 'ready')] }));
+    stubSnapshot(snapshot({ engines: [engine('rust', 'ready')], coverage: verifiedCoverage() }));
     renderPanel();
     expect(
-      await screen.findByText(/the mounted engines report no diagnostics/i),
+      await screen.findByText(/the latest verified publications report no diagnostics/i),
     ).toBeTruthy();
+  });
+
+  it('does not call a ready engine clean without publication coverage', async () => {
+    stubSnapshot(snapshot({ engines: [engine('rust', 'ready')] }));
+    renderPanel();
+    expect(await screen.findByText(/publication coverage is incomplete/i)).toBeTruthy();
+    expect(screen.queryByText(/report no diagnostics/i)).toBeNull();
+  });
+
+  it.each([
+    [{ state: 'no_publication' }, 'Retained — no publication'],
+    [{ state: 'stale_publication' }, 'Retained — stale publication'],
+    [{ state: 'root_failed' }, 'Retained — workspace failed'],
+    [{ state: 'published', version_verified: false, content_digest: `sha256:${'ab'.repeat(32)}` }, 'Version unverified'],
+  ])('labels incomplete publication evidence and keeps its diagnostic visible: %j', async (publication, label) => {
+    stubSnapshot(snapshot({
+      engines: [engine('rust', 'ready')],
+      coverage: { rust: { documents: { 'src/lib.rs': publication }, roots: { '/project': 'completed' } } },
+      diagnostics: [diagnostic()],
+    }));
+    renderPanel();
+    expect(await screen.findByText('retained type error')).toBeTruthy();
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(screen.getByRole('list', { name: 'Stored diagnostics' })).toBeTruthy();
+    expect(screen.queryByRole('list', { name: 'Current diagnostics' })).toBeNull();
+    expect(screen.queryByText('Verified publication')).toBeNull();
+  });
+
+  it.each(['other language', 'other document'])('does not borrow publication evidence from %s', async (mismatch) => {
+    stubSnapshot(snapshot({
+      engines: [engine('rust', 'ready')],
+      coverage: mismatch === 'other language'
+        ? { typescript: verifiedCoverage().rust }
+        : verifiedCoverage('other/src/lib.rs'),
+      diagnostics: [diagnostic()],
+    }));
+    renderPanel();
+    expect(await screen.findByText('Retained — outside latest refresh')).toBeTruthy();
+    expect(screen.queryByText('Verified publication')).toBeNull();
+  });
+
+  it('identifies a verified diagnostic without borrowing engine readiness', async () => {
+    stubSnapshot(snapshot({
+      engines: [engine('rust', 'ready')],
+      coverage: verifiedCoverage(),
+      diagnostics: [diagnostic()],
+    }));
+    renderPanel();
+    expect(await screen.findByText('Verified publication')).toBeTruthy();
+    expect(screen.getByText('retained type error')).toBeTruthy();
+  });
+
+  it.each(['document', 'root'])('does not report clean when a requested %s failed', async (failed) => {
+    const coverage = verifiedCoverage();
+    stubSnapshot(snapshot({
+      engines: [engine('rust', 'ready')],
+      coverage: { rust: {
+        documents: failed === 'document'
+          ? { ...coverage.rust.documents, 'src/other.rs': { state: 'no_publication' } }
+          : coverage.rust.documents,
+        roots: failed === 'root' ? { '/project': 'failed' } : { '/project': 'completed' },
+      } },
+    }));
+    renderPanel();
+    expect(await screen.findByText(/publication coverage is incomplete/i)).toBeTruthy();
+    expect(screen.queryByText(/report no diagnostics/i)).toBeNull();
+  });
+
+  it.each(['coverage', 'version', 'digest'])('rejects a snapshot missing canonical %s evidence', async (missing) => {
+    const body = snapshot({
+      engines: [engine('rust', 'ready')], coverage: verifiedCoverage(), diagnostics: [diagnostic()],
+    });
+    if (missing === 'coverage') delete (body as Record<string, unknown>).coverage;
+    else {
+      const publication = (body.coverage as ReturnType<typeof verifiedCoverage>).rust.documents['src/lib.rs']!;
+      delete (publication as Record<string, unknown>)[missing === 'version' ? 'version_verified' : 'content_digest'];
+    }
+    stubSnapshot(body);
+    renderPanel();
+    expect(await screen.findByText(/shape this build does not understand/i)).toBeTruthy();
+    expect(screen.queryByText('retained type error')).toBeNull();
+    expect(screen.queryByText(/report no diagnostics/i)).toBeNull();
   });
 
   it('discloses unread analyzer settings', async () => {
@@ -134,7 +216,7 @@ describe('Code diagnostics controls', () => {
       // panel painted optimistically these two would be indistinguishable.
       const body =
         (init?.method ?? 'GET') === 'GET'
-          ? snapshot({ engines: [engine('rust', 'ready')] })
+          ? snapshot({ engines: [engine('rust', 'ready')], coverage: verifiedCoverage() })
           : snapshot({
               engines: [engine('rust', 'ready')],
               summary: {
@@ -149,7 +231,7 @@ describe('Code diagnostics controls', () => {
     vi.stubGlobal('fetch', fetchMock);
     renderPanel();
 
-    await screen.findByText(/the mounted engines report no diagnostics/i);
+    await screen.findByText(/the latest verified publications report no diagnostics/i);
     await userEvent.click(screen.getByRole('button', { name: /refresh every analyzer engine/i }));
 
     await waitFor(() => expect(screen.getByText('2')).toBeTruthy());
@@ -280,10 +362,25 @@ function snapshot(overrides: Record<string, unknown>) {
     },
     engines: [],
     diagnostics: [],
+    coverage: {},
     backfill: {},
     settings: { idle_backfill: 'idle', languages: {}, custom_adapters: [] },
     settings_revision: 'r1',
     ...overrides,
+  };
+}
+
+function verifiedCoverage(file = 'src/lib.rs') {
+  return { rust: {
+    documents: { [file]: { state: 'published', version_verified: true, content_digest: `sha256:${'ab'.repeat(32)}` } },
+    roots: { '/project': 'completed' },
+  } };
+}
+
+function diagnostic() {
+  return {
+    language: 'rust', source: 'rust-analyzer', file: 'src/lib.rs', line_start: 1,
+    severity: 'error', code: null, message: 'retained type error', enclosing_node: null,
   };
 }
 

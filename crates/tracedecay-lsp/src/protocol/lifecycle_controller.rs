@@ -246,16 +246,8 @@ where
     }
 
     pub(super) fn clear_volatile_state(&mut self) {
-        if let Some(cancellation) = &self.semantic.cancellation {
-            for (request_id, pending) in &self.semantic.pending {
-                if let Some(root) = pending
-                    .request
-                    .document_uri()
-                    .and_then(|uri| self.document_root(uri).ok())
-                {
-                    let _ = cancellation.cancel_upstream(&root, request_id);
-                }
-            }
+        for (request_id, pending) in &self.semantic.pending {
+            self.cancel_semantic_upstream(request_id, pending);
         }
         if let Some(context) = &self.context.port {
             for pending in self.context.pending_requests.values() {
@@ -304,12 +296,7 @@ where
             .semantic
             .pending
             .iter()
-            .filter(|(_, pending)| {
-                pending
-                    .request
-                    .document_uri()
-                    .is_some_and(belongs_to_removed_root)
-            })
+            .filter(|(_, pending)| pending.roots.iter().any(|root| removed.contains(root)))
             .map(|(request_id, _)| request_id.clone())
             .chain(
                 self.context
@@ -385,14 +372,7 @@ where
         let semantic = std::mem::take(&mut self.semantic.pending);
         for (request_id, pending) in semantic {
             let _ = self.lifecycle.control.cancel_request(&request_id);
-            if let Some(cancellation) = &self.semantic.cancellation
-                && let Some(root) = pending
-                    .request
-                    .document_uri()
-                    .and_then(|uri| self.document_root(uri).ok())
-            {
-                let _ = cancellation.cancel_upstream(&root, &request_id);
-            }
+            self.cancel_semantic_upstream(&request_id, &pending);
             self.finish_admitted_request(
                 request_id,
                 pending.response_id,
@@ -677,14 +657,8 @@ where
     }
     pub(super) fn expire_requests(&mut self, now_ms: u64) {
         for id in self.lifecycle.control.expire_deadlines(now_ms) {
-            if let Some(pending) = self.semantic.pending.remove(&id)
-                && let Some(cancellation) = &self.semantic.cancellation
-                && let Some(root) = pending
-                    .request
-                    .document_uri()
-                    .and_then(|uri| self.document_root(uri).ok())
-            {
-                let _ = cancellation.cancel_upstream(&root, &id);
+            if let Some(pending) = self.semantic.pending.remove(&id) {
+                self.cancel_semantic_upstream(&id, &pending);
             }
             if let Some(pending) = self.context.pending_requests.remove(&id)
                 && let Some(context) = &self.context.port
@@ -717,13 +691,8 @@ where
             let semantic = self.semantic.pending.remove(id);
             let context_pending = self.context.pending_requests.remove(id);
             let expansion_pending = self.context.pending_expansions.remove(id);
-            if let Some(cancellation) = &self.semantic.cancellation
-                && let Some(root) = semantic
-                    .as_ref()
-                    .and_then(|pending| pending.request.document_uri())
-                    .and_then(|uri| self.document_root(uri).ok())
-            {
-                let _ = cancellation.cancel_upstream(&root, id);
+            if let Some(pending) = semantic.as_ref() {
+                self.cancel_semantic_upstream(id, pending);
             }
             if let Some(context) = &self.context.port {
                 if let Some(pending) = context_pending.as_ref()
