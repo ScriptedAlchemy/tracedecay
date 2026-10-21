@@ -1,27 +1,14 @@
-/**
- * What the editor machine forbids.
- *
- * Each case below names a combination the six mirrored `useState` slices could
- * hold at once, a confirmation beside a review it was not given for, a saved
- * notice above a change still under review, a submit built from a revision the
- * resource had already moved past, and shows either that the state cannot be
- * built or that the machine refuses it and says why.
- *
- * No DOM, no transport: the machine is a pure function and is exercised as one.
- */
-
 import { describe, expect, it } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
 import {
   initialSettingsEditorState,
   reduceSettingsEditor,
   settingsApplied,
-  settingsConfirmationHeld,
   settingsRejection,
-  settingsReviewOf,
   settingsScopeDirty,
   settingsScopePlan,
   settingsSubmission,
+  settingsSubmissionOf,
   type SettingsEditorAction,
   type SettingsEditorState,
   type SettingsRoutes,
@@ -46,61 +33,14 @@ const ROUTES: SettingsRoutes = {
 const AUTHORITY = fixtureAuthority();
 const IDEMPOTENCY_KEY = 'idempotency.dashboard-settings.fixture';
 
-describe('settings editor: reaching a confirmed change', () => {
-  it('takes a validated change from editing through review to confirmation', () => {
-    const confirmed = run(
-      initialSettingsEditorState(AUTHORITY),
-      { type: 'project_drafted', values: draftMaxFileSize('2097152') },
-      {
-        type: 'review_requested',
-        scope: 'project',
-        idempotencyKey: IDEMPOTENCY_KEY,
-      },
-      { type: 'confirmation_set', confirmed: true },
-    );
-
-    expect(confirmed.status).toBe('confirmed');
-    expect(settingsConfirmationHeld(confirmed)).toBe(true);
-    expect(settingsReviewOf(confirmed)).toMatchObject({
-      scope: 'project',
-      expectedRevisionId: 'rev-42',
-      idempotencyKey: IDEMPOTENCY_KEY,
-      patch: { max_file_size: 2_097_152 },
-    });
-    expect(settingsScopeDirty(confirmed, 'project')).toBe(true);
-    expect(settingsScopeDirty(confirmed, 'user')).toBe(false);
-  });
-
-  /** The inline review states validity while the value is still being typed,
-   * from the same plan `review_requested` would freeze, never a second one. */
-  it('replans a scope live without freezing a review', () => {
-    const untouched = initialSettingsEditorState(AUTHORITY);
-    expect(settingsScopePlan(untouched, 'project')).toMatchObject({ outcome: 'unchanged' });
-    expect(settingsScopePlan(initialSettingsEditorState(null), 'project')).toBeNull();
-
-    const edited = run(untouched, {
-      type: 'project_drafted',
-      values: draftMaxFileSize('2097152'),
-    });
-    expect(edited.status).toBe('editing');
-    expect(settingsScopePlan(edited, 'project')).toMatchObject({
-      outcome: 'ready',
-      expectedRevisionId: 'rev-42',
-      patch: { max_file_size: 2_097_152 },
-    });
-    expect(settingsReviewOf(edited)).toBeNull();
-
-    const invalid = run(untouched, { type: 'project_drafted', values: draftMaxFileSize('0') });
-    expect(settingsScopePlan(invalid, 'project')).toMatchObject({
-      outcome: 'invalid',
-      errors: [{ field: 'max_file_size', message: 'max_file_size must be at least 1 byte' }],
-    });
-    expect(settingsRejection(invalid)).toBeNull();
-  });
-
-  it('issues a submit that names the held revision and the scope authority', () => {
+describe('settings editor direct Save', () => {
+  it('captures the valid patch, revision, and request identity in one Save', () => {
     const submitting = expectSubmitting(
-      run(confirmedProjectChange(), { type: 'submit_started' }),
+      run(
+        initialSettingsEditorState(AUTHORITY),
+        { type: 'project_drafted', values: draftMaxFileSize('2097152') },
+        { type: 'save_requested', scope: 'project', idempotencyKey: IDEMPOTENCY_KEY },
+      ),
     );
 
     expect(settingsSubmission(submitting, ROUTES)).toEqual({
@@ -111,9 +51,15 @@ describe('settings editor: reaching a confirmed change', () => {
       patchUrl: '/api/settings/project',
       patch: { max_file_size: 2_097_152 },
     });
+    expect(settingsSubmissionOf(submitting)).toMatchObject({
+      scope: 'project',
+      expectedRevisionId: 'rev-42',
+      patch: { max_file_size: 2_097_152 },
+      idempotencyKey: IDEMPOTENCY_KEY,
+    });
   });
 
-  it('holds a worker-only change against the independent ProfileSessions revision', () => {
+  it('uses the profile revision and route for worker settings', () => {
     const submitting = expectSubmitting(
       run(
         initialSettingsEditorState(AUTHORITY),
@@ -125,12 +71,10 @@ describe('settings editor: reaching a confirmed change', () => {
           },
         },
         {
-          type: 'review_requested',
+          type: 'save_requested',
           scope: 'code_index_workers',
           idempotencyKey: IDEMPOTENCY_KEY,
         },
-        { type: 'confirmation_set', confirmed: true },
-        { type: 'submit_started' },
       ),
     );
 
@@ -143,218 +87,159 @@ describe('settings editor: reaching a confirmed change', () => {
       patch: { code_index_workers: { mode: 'exact', workers: 4 } },
     });
   });
-});
 
-describe('settings editor: a confirmation cannot outlive its review', () => {
-  // Previously: `confirmed` was a boolean beside `review`. A refetch replaced
-  // the draft through an effect and left both untouched, so the next apply
-  // sent a patch the user had confirmed against a revision that was gone.
-  it('supersedes a confirmation when the resource moves under it', () => {
-    const moved = run(confirmedProjectChange(), {
-      type: 'authority_observed',
-      authority: withProjectRevision(AUTHORITY, 'rev-43'),
-    });
-
-    expect(moved.status).toBe('review_superseded');
-    expect(moved).toMatchObject({ currentRevisionId: 'rev-43' });
-    expect(settingsConfirmationHeld(moved)).toBe(false);
-    // And it stays superseded: there is no path from here to a write.
-    expect(run(moved, { type: 'submit_started' }).status).toBe('review_superseded');
-  });
-
-  // Previously: the review dialog held a patch computed from a draft the
-  // editor had already replaced. Editing behind an open review left the two
-  // describing different changes.
-  it('drops the review entirely when the draft it described is edited', () => {
-    const edited = run(confirmedProjectChange(), {
+  it('keeps an edited draft on its original revision when a newer snapshot arrives', () => {
+    const drafted = run(initialSettingsEditorState(AUTHORITY), {
       type: 'project_drafted',
-      values: draftMaxFileSize('4096'),
+      values: draftMaxFileSize('2097152'),
     });
-
-    expect(edited.status).toBe('editing');
-    expect(settingsReviewOf(edited)).toBeNull();
-    expect(settingsConfirmationHeld(edited)).toBe(false);
-  });
-
-  // The revision alone is not the binding: the confirmation is for one exact
-  // change. A resource whose values moved without moving its revision must not
-  // inherit a confirmation given for the values it used to hold.
-  it('refuses a submit when replanning no longer produces the confirmed change', () => {
-    const restated = run(confirmedProjectChange(), {
+    const observed = run(drafted, {
       type: 'authority_observed',
-      // Same revision, but the authority now already holds the confirmed value.
-      authority: withProjectValues(AUTHORITY, { max_file_size: '2097152' }),
-    });
-    expect(restated.status).toBe('confirmed');
-
-    const attempted = run(restated, { type: 'submit_started' });
-
-    expect(attempted.status).toBe('review_superseded');
-    expect(attempted).toMatchObject({ currentRevisionId: 'rev-42' });
-  });
-
-  it('cannot hold a confirmation without a review to hold it for', () => {
-    const editing = initialSettingsEditorState(AUTHORITY);
-
-    const attempted = run(editing, { type: 'confirmation_set', confirmed: true });
-
-    expect(attempted).toBe(editing);
-    expect(settingsConfirmationHeld(attempted)).toBe(false);
-    expect(settingsReviewOf(attempted)).toBeNull();
-  });
-
-  it('returns to an unconfirmed review when the confirmation is withdrawn', () => {
-    const withdrawn = run(confirmedProjectChange(), {
-      type: 'confirmation_set',
-      confirmed: false,
-    });
-
-    expect(withdrawn.status).toBe('reviewing');
-    expect(settingsConfirmationHeld(withdrawn)).toBe(false);
-    expect(run(withdrawn, { type: 'submit_started' }).status).toBe('reviewing');
-  });
-});
-
-describe('settings editor: a stale revision cannot reach the wire', () => {
-  // Even hand-built, the shape below is the one the mirrored slices produced
-  // routinely, a state whose review names a revision the authority has moved
-  // past yields no request.
-  it('supersedes a submit issued from a review that holds a stale revision', () => {
-    const stale: SettingsEditorState = {
-      ...confirmedProjectChange(),
       authority: withProjectRevision(AUTHORITY, 'rev-43'),
+    });
+
+    expect(observed).toBe(drafted);
+    expect(settingsScopePlan(observed, 'project')).toMatchObject({
+      outcome: 'ready',
+      expectedRevisionId: 'rev-42',
+      patch: { max_file_size: 2_097_152 },
+    });
+  });
+
+  it('does not submit invalid or unchanged values', () => {
+    const untouched = initialSettingsEditorState(AUTHORITY);
+    expect(
+      run(untouched, {
+        type: 'save_requested',
+        scope: 'project',
+        idempotencyKey: IDEMPOTENCY_KEY,
+      }),
+    ).toBe(untouched);
+
+    const invalid = run(
+      untouched,
+      { type: 'project_drafted', values: draftMaxFileSize('0') },
+      { type: 'save_requested', scope: 'project', idempotencyKey: IDEMPOTENCY_KEY },
+    );
+    expect(invalid.status).toBe('editing');
+    expect(settingsRejection(invalid)?.errors).toEqual([
+      { field: 'max_file_size', message: 'max_file_size must be at least 1 byte' },
+    ]);
+    expect(settingsSubmissionOf(invalid)).toBeNull();
+  });
+
+  it('settles each saved scope without discarding the other drafts or their revisions', () => {
+    let state = run(
+      initialSettingsEditorState(AUTHORITY),
+      { type: 'project_drafted', values: draftMaxFileSize('2097152') },
+      { type: 'user_drafted', values: { ...AUTHORITY.user, watcher_debounce: '15s' } },
+      {
+        type: 'code_index_workers_drafted',
+        values: { ...AUTHORITY.codeIndexWorkers, code_index_workers: { mode: 'exact', workers: 3 } },
+      },
+      { type: 'save_requested', scope: 'project', idempotencyKey: IDEMPOTENCY_KEY },
+    );
+    const payload = structuredClone(fixturePayload());
+    payload.project.configuration_revision_id = 'rev-43';
+    payload.project.config.max_file_size = 2_097_152;
+    // A concurrent writer changed both other resources. Their drafts still
+    // belong to the original revisions, even when PATCH/readback sees this.
+    payload.user.configuration_revision_id = 'user-rev-8';
+    payload.user.watcher_debounce = '20s';
+    payload.user.code_index_worker_configuration_revision_id = 'profile-worker-rev-8';
+    payload.user.code_index_workers = { mode: 'exact', workers: 2 };
+    state = settle(state, {
+      outcome: 'success', scope: 'project', payload, revisionId: 'rev-43',
+      resyncRecommended: false, restartRecommended: false,
+      effectReceipt: null, effectReconciliation: null,
+    });
+    state = run(state, { type: 'authority_observed', authority: buildSettingsEditor(payload) });
+
+    expect(settingsScopeDirty(state, 'project')).toBe(false);
+    expect(settingsScopePlan(state, 'user')).toMatchObject({
+      outcome: 'ready', expectedRevisionId: 'user-rev-7', patch: { watcher_debounce: '15s' },
+    });
+    expect(settingsScopePlan(state, 'code_index_workers')).toMatchObject({
+      outcome: 'ready', expectedRevisionId: 'profile-worker-rev-7',
+      patch: { code_index_workers: { mode: 'exact', workers: 3 } },
+    });
+  });
+
+  it('refreshes clean resources independently while an edited resource keeps its base', () => {
+    const drafted = run(initialSettingsEditorState(AUTHORITY), {
+      type: 'project_drafted', values: draftMaxFileSize('2097152'),
+    });
+    const fresh: SettingsEditor = {
+      ...withProjectRevision(AUTHORITY, 'rev-43'),
+      project: draftMaxFileSize('4096'),
+      userExpectedRevisionId: 'user-rev-8',
+      user: { ...AUTHORITY.user, watcher_debounce: '20s' },
+      codeIndexWorkerExpectedRevisionId: 'profile-worker-rev-8',
+      codeIndexWorkers: {
+        ...AUTHORITY.codeIndexWorkers, code_index_workers: { mode: 'exact', workers: 2 },
+      },
     };
+    const observed = run(drafted, { type: 'authority_observed', authority: fresh });
 
-    const attempted = run(stale, { type: 'submit_started' });
-
-    expect(attempted.status).not.toBe('submitting');
-    expect(attempted.status).toBe('review_superseded');
-    expect(attempted).toMatchObject({
-      currentRevisionId: 'rev-43',
-      review: { expectedRevisionId: 'rev-42' },
+    expect(settingsScopePlan(observed, 'project')).toMatchObject({
+      outcome: 'ready', expectedRevisionId: 'rev-42', patch: { max_file_size: 2_097_152 },
     });
+    expect(observed).toMatchObject({
+      authority: {
+        userExpectedRevisionId: 'user-rev-8',
+        codeIndexWorkerExpectedRevisionId: 'profile-worker-rev-8',
+      },
+      draft: { user: fresh.user, codeIndexWorkers: fresh.codeIndexWorkers },
+    });
+    expect(settingsScopeDirty(observed, 'user')).toBe(false);
+    expect(settingsScopeDirty(observed, 'code_index_workers')).toBe(false);
+
+    const submitted = expectSubmitting(run(observed, {
+      type: 'save_requested', scope: 'project', idempotencyKey: IDEMPOTENCY_KEY,
+    }));
+    const refreshed = expectSubmitting(run(submitted, {
+      type: 'authority_observed',
+      authority: { ...fresh, userExpectedRevisionId: 'user-rev-9' },
+    }));
+    expect(refreshed.submission).toBe(submitted.submission);
+    expect(refreshed.authority.userExpectedRevisionId).toBe('user-rev-9');
+    expect(settingsScopePlan(refreshed, 'project')).toMatchObject({ expectedRevisionId: 'rev-42' });
   });
 
-  it('offers the current values instead of a retry once a review is superseded', () => {
-    const superseded = run(
-      { ...confirmedProjectChange(), authority: withProjectRevision(AUTHORITY, 'rev-43') },
-      { type: 'submit_started' },
-      { type: 'reloaded_from_authority' },
-    );
-
-    expect(superseded.status).toBe('editing');
-    expect(settingsReviewOf(superseded)).toBeNull();
-    expect(settingsScopeDirty(superseded, 'project')).toBe(false);
-  });
-
-  it('keeps a write in flight when a fresh read lands underneath it', () => {
-    const inFlight = run(
-      confirmedProjectChange(),
-      { type: 'submit_started' },
-      { type: 'authority_observed', authority: withProjectRevision(AUTHORITY, 'rev-43') },
-    );
-
-    expect(inFlight.status).toBe('submitting');
-    // The request already named rev-42; the pre-flight check owns the verdict.
-    expect(settingsSubmission(expectSubmitting(inFlight), ROUTES).expectedRevisionId).toBe(
-      'rev-42',
-    );
-  });
-
-  /** Leaving `submitting` would make `settleSubmit` drop the verdict when it
-   * lands: a conflict or refusal for scope A would vanish because the reader
-   * touched a scope-B field meanwhile. Edits and new reviews wait instead. */
-  it('cannot be redrafted or re-reviewed out of a write that is already in flight', () => {
-    const submitting = run(confirmedProjectChange(), { type: 'submit_started' });
-    expect(submitting.status).toBe('submitting');
-
-    const redrafted = run(submitting, {
-      type: 'user_drafted',
-      values: { ...AUTHORITY.user, watcher_debounce: '15s' },
-    });
-    expect(redrafted).toBe(submitting);
-
-    const rereviewed = run(submitting, {
-      type: 'review_requested',
-      scope: 'user',
-      idempotencyKey: IDEMPOTENCY_KEY,
-    });
-    expect(rereviewed).toBe(submitting);
-  });
-
-  it('cannot be dismissed out of a write that is already in flight', () => {
-    const submitting = run(confirmedProjectChange(), { type: 'submit_started' });
-
-    expect(run(submitting, { type: 'review_dismissed' })).toBe(submitting);
-  });
-});
-
-describe('settings editor: each verdict is its own state', () => {
-  const submitting = () => run(confirmedProjectChange(), { type: 'submit_started' });
-
-  // A withdrawn authority means nothing was attempted; a failed write means
-  // something was and did not land. The old surface rendered both as red text
-  // from the same mutation result.
-  it('lands a withdrawn authority somewhere a failed write cannot reach', () => {
-    const withdrawn = settle(submitting(), {
-      outcome: 'unavailable',
-      detail: 'Nothing was applied: configuration authority is unavailable.',
-    });
-    const failed = settle(submitting(), {
-      outcome: 'error',
-      detail: 'Settings update failed (HTTP 500).',
-    });
-
-    expect(withdrawn.status).toBe('authority_withdrawn');
-    expect(withdrawn).toMatchObject({
-      detail: 'Nothing was applied: configuration authority is unavailable.',
-    });
-    expect(failed.status).toBe('submit_failed');
-    expect(failed).toMatchObject({ failure: { kind: 'error' } });
-    expect(withdrawn.status).not.toBe(failed.status);
-    // Neither is a save.
-    expect(settingsApplied(withdrawn)).toBeNull();
-    expect(settingsApplied(failed)).toBeNull();
-  });
-
-  it('reuses the held caller key when a response-loss retry resubmits the same intent', () => {
-    const first = expectSubmitting(submitting());
+  it('preserves the exact request identity across an uncertain transport retry', () => {
+    const first = expectSubmitting(saveProjectChange());
+    const original = settingsSubmission(first, ROUTES);
     const failed = settle(first, {
       outcome: 'offline',
       detail: 'The response was lost after dispatch.',
     });
-    const retried = expectSubmitting(run(failed, { type: 'submit_started' }));
+    const retried = expectSubmitting(run(failed, { type: 'retry_requested' }));
 
-    expect(settingsSubmission(first, ROUTES).idempotencyKey).toBe(IDEMPOTENCY_KEY);
-    expect(settingsSubmission(retried, ROUTES).idempotencyKey).toBe(IDEMPOTENCY_KEY);
+    expect(settingsSubmission(retried, ROUTES)).toEqual(original);
   });
 
-  it('keeps server validation as typed field state rather than a generic failure', () => {
-    const rejected = settle(submitting(), {
-      outcome: 'validation',
-      detail: 'settings validation failed',
-      errors: [
-        { field: 'max_file_size', message: 'max_file_size is denied by the active policy' },
-      ],
+  it('does not retry an uncertain effect and requires current values instead', () => {
+    const submitted = expectSubmitting(saveProjectChange());
+    const uncertain = settle(submitted, {
+      outcome: 'unsettled',
+      detail: 'The write may have been applied.',
     });
 
-    expect(rejected.status).toBe('editing');
-    expect(rejected.status).not.toBe('submit_failed');
-    expect(settingsRejection(rejected)).toEqual({
-      origin: 'server',
-      scope: 'project',
-      detail: 'settings validation failed',
-      errors: [
-        { field: 'max_file_size', message: 'max_file_size is denied by the active policy' },
-      ],
+    expect(uncertain.status).toBe('submit_failed');
+    expect(run(uncertain, { type: 'retry_requested' })).toBe(uncertain);
+    expect(settingsSubmissionOf(uncertain)).toMatchObject({
+      idempotencyKey: IDEMPOTENCY_KEY,
+      patch: { max_file_size: 2_097_152 },
     });
-    expect(settingsRejection(rejected)?.errors).toHaveLength(1);
-    expect(settingsApplied(rejected)).toBeNull();
-    expect(settingsReviewOf(rejected)).toBeNull();
+    const authority = withProjectRevision(AUTHORITY, 'rev-43');
+    const reloaded = run(uncertain, { type: 'reloaded_from_authority', authority });
+    expect(reloaded.status).toBe('editing');
+    expect(settingsScopeDirty(reloaded, 'project')).toBe(false);
+    expect(reloaded).toMatchObject({ authority: { projectExpectedRevisionId: 'rev-43' } });
   });
 
-  it('distinguishes a refused revision from a superseded one', () => {
-    const conflicted = settle(submitting(), {
+  it('keeps a stale-revision refusal actionable without overwriting the draft', () => {
+    const conflicted = settle(expectSubmitting(saveProjectChange()), {
       outcome: 'conflict',
       expectedRevisionId: 'rev-42',
       actualRevisionId: 'rev-43',
@@ -363,45 +248,59 @@ describe('settings editor: each verdict is its own state', () => {
     expect(conflicted.status).toBe('conflicted');
     expect(conflicted).toMatchObject({
       conflict: { expectedRevisionId: 'rev-42', actualRevisionId: 'rev-43' },
+      draft: { project: { max_file_size: '2097152' } },
     });
     expect(settingsApplied(conflicted)).toBeNull();
+    expect(run(conflicted, { type: 'retry_requested' })).toBe(conflicted);
+    expect(settingsScopeDirty(conflicted, 'project')).toBe(true);
   });
 
-  it('records a protocol violation against the authority that committed it', () => {
-    const failed = settle(submitting(), {
-      outcome: 'protocol_error',
-      authority: 'PATCH /api/settings/project',
-      detail: 'PATCH /api/settings/project violated the settings contract: expected JSON.',
+  it('keeps authorization refusals distinct and retries the same submission', () => {
+    const denied = settle(expectSubmitting(saveProjectChange()), {
+      outcome: 'not_dispatched',
+      detail: 'Nothing was sent. This scope is read-only.',
+    });
+    expect(denied).toMatchObject({
+      status: 'authority_withdrawn',
+      detail: 'Nothing was sent. This scope is read-only.',
     });
 
-    expect(failed).toMatchObject({
-      status: 'submit_failed',
-      failure: { kind: 'protocol_error', authority: 'PATCH /api/settings/project' },
+    const retried = expectSubmitting(run(denied, { type: 'retry_requested' }));
+    expect(settingsSubmission(retried, ROUTES)).toMatchObject({
+      idempotencyKey: IDEMPOTENCY_KEY,
+      expectedRevisionId: 'rev-42',
+      patch: { max_file_size: 2_097_152 },
     });
   });
 
-  it('ignores a verdict for a write this state did not issue', () => {
-    const editing = initialSettingsEditorState(AUTHORITY);
-
-    const settled = settle(editing, {
-      outcome: 'success',
+  it('keeps server validation attached to the field until the user edits again', () => {
+    const rejected = settle(expectSubmitting(saveProjectChange()), {
+      outcome: 'validation',
+      detail: 'settings validation failed',
+      errors: [
+        { field: 'max_file_size', message: 'max_file_size is denied by the active policy' },
+      ],
+    });
+    expect(settingsRejection(rejected)).toEqual({
+      origin: 'server',
       scope: 'project',
-      payload: fixturePayload(),
-      revisionId: 'rev-43',
-      resyncRecommended: false,
-      restartRecommended: false,
-      effectReceipt: null,
-      effectReconciliation: null,
+      detail: 'settings validation failed',
+      errors: [
+        { field: 'max_file_size', message: 'max_file_size is denied by the active policy' },
+      ],
     });
+    expect(settingsSubmissionOf(rejected)).toBeNull();
 
-    expect(settled).toBe(editing);
-    expect(settingsApplied(settled)).toBeNull();
+    const corrected = run(rejected, {
+      type: 'project_drafted',
+      values: draftMaxFileSize('4096'),
+    });
+    expect(settingsRejection(corrected)).toBeNull();
+    expect(settingsScopeDirty(corrected, 'project')).toBe(true);
   });
-});
 
-describe('settings editor: a save and a pending change cannot be shown at once', () => {
-  const applied = () =>
-    settle(run(confirmedProjectChange(), { type: 'submit_started' }), {
+  it('records successful saves and their server-reported follow-up requirements', () => {
+    const saved = settle(expectSubmitting(saveProjectChange()), {
       outcome: 'success',
       scope: 'project',
       payload: fixturePayload(),
@@ -412,181 +311,55 @@ describe('settings editor: a save and a pending change cannot be shown at once',
       effectReconciliation: null,
     });
 
-  it('records the save the authority reported, and nothing it did not', () => {
-    const state = applied();
-
-    expect(state.status).toBe('editing');
-    expect(settingsApplied(state)).toEqual({
-      scope: 'project',
+    expect(settingsApplied(saved)).toMatchObject({
       message: 'Project settings saved',
       revisionId: 'rev-43',
       resyncRecommended: true,
       restartRecommended: false,
-      effectReconciliation: null,
     });
-    expect(settingsRejection(state)).toBeNull();
-    expect(settingsReviewOf(state)).toBeNull();
+    expect(settingsRejection(saved)).toBeNull();
+    expect(settingsSubmissionOf(saved)).toBeNull();
   });
 
-  // Previously: `notice` survived every subsequent review, so the editor could
-  // say "Project settings saved" directly above an unsent change.
-  it('drops the save notice as soon as another change goes under review', () => {
-    const reviewing = run(
-      applied(),
-      { type: 'project_drafted', values: draftMaxFileSize('4096') },
-      {
-        type: 'review_requested',
-        scope: 'project',
-        idempotencyKey: IDEMPOTENCY_KEY,
-      },
-    );
-
-    expect(reviewing.status).toBe('reviewing');
-    expect(settingsApplied(reviewing)).toBeNull();
-  });
-
-  it('keeps the save across the refetch it triggered', () => {
-    const refetched = run(applied(), {
-      type: 'authority_observed',
-      authority: withProjectRevision(
-        withProjectValues(AUTHORITY, { max_file_size: '2097152' }),
-        'rev-43',
-      ),
-    });
-
-    expect(settingsApplied(refetched)).toMatchObject({ message: 'Project settings saved' });
-    expect(settingsScopeDirty(refetched, 'project')).toBe(false);
-  });
-
-  /** A refusal judged the draft as it was; once the draft moves the refusal
-   * describes nothing, and the live plan takes over. A completed write, by
-   * contrast, stays true across an edit. */
-  it('drops a resting refusal on the next edit but keeps a completed write', () => {
-    const rejected = run(initialSettingsEditorState(AUTHORITY), {
-      type: 'project_drafted',
-      values: draftMaxFileSize('0'),
-    }, {
-      type: 'review_requested',
-      scope: 'project',
-      idempotencyKey: IDEMPOTENCY_KEY,
-    });
-    expect(settingsRejection(rejected)).not.toBeNull();
-    const retyped = run(rejected, { type: 'project_drafted', values: draftMaxFileSize('4096') });
-    expect(settingsRejection(retyped)).toBeNull();
-    expect(settingsScopeDirty(retyped, 'project')).toBe(true);
-
-    const saved = applied();
-    const edited = run(saved, { type: 'project_drafted', values: draftMaxFileSize('4096') });
-    expect(settingsApplied(edited)).not.toBeNull();
-  });
-
-  it('does not carry a refusal across a snapshot that replaced the values it judged', () => {
-    const rejected = run(initialSettingsEditorState(AUTHORITY), {
-      type: 'review_requested',
-      scope: 'project',
-      idempotencyKey: IDEMPOTENCY_KEY,
-    });
-    expect(settingsRejection(rejected)).toMatchObject({ origin: 'client' });
-
-    const refetched = run(rejected, {
+  it('holds the submitted request and verdict while refreshes arrive', () => {
+    const submitted = expectSubmitting(saveProjectChange());
+    const observed = run(submitted, {
       type: 'authority_observed',
       authority: withProjectRevision(AUTHORITY, 'rev-43'),
     });
 
-    expect(settingsRejection(refetched)).toBeNull();
-  });
-
-  it('closing the review does not undo a verdict the editor is resting on', () => {
-    const state = applied();
-
-    expect(run(state, { type: 'review_dismissed' })).toBe(state);
-    expect(settingsApplied(run(state, { type: 'review_dismissed' }))).not.toBeNull();
-  });
-});
-
-describe('settings editor: refusing to review what cannot be sent', () => {
-  it('refuses an unchanged draft as a stated rejection rather than an empty review', () => {
-    const state = run(initialSettingsEditorState(AUTHORITY), {
-      type: 'review_requested',
-      scope: 'user',
-      idempotencyKey: IDEMPOTENCY_KEY,
-    });
-
-    expect(settingsReviewOf(state)).toBeNull();
-    expect(settingsRejection(state)).toEqual({
-      origin: 'client',
-      scope: 'user',
-      errors: [{ field: 'user', message: 'No user settings have changed.' }],
-    });
-  });
-
-  it('refuses values the daemon would reject, without building a review', () => {
-    const state = run(
-      initialSettingsEditorState(AUTHORITY),
-      { type: 'project_drafted', values: draftPollSecs('59') },
-      {
-        type: 'review_requested',
-        scope: 'project',
-        idempotencyKey: IDEMPOTENCY_KEY,
-      },
+    expect(observed).toBe(submitted);
+    expect(settingsSubmission(expectSubmitting(observed), ROUTES).expectedRevisionId).toBe(
+      'rev-42',
     );
-
-    expect(settingsReviewOf(state)).toBeNull();
-    expect(settingsRejection(state)?.errors).toEqual([
-      {
-        field: 'auto_track_pr_poll_secs',
-        message: 'auto_track_pr_poll_secs must be at least 60 seconds',
-      },
-    ]);
+    expect(run(observed, {
+      type: 'project_drafted',
+      values: draftMaxFileSize('4096'),
+    })).toBe(observed);
   });
 
-  it('has no draft, review, or verdict at all while the read names no revision', () => {
+  it('does not dispatch a write without an editable authority', () => {
     const unavailable = initialSettingsEditorState(null);
-
-    expect(unavailable).toEqual({ status: 'editor_unavailable' });
-    expect(settingsReviewOf(unavailable)).toBeNull();
-    expect(settingsApplied(unavailable)).toBeNull();
-    expect(settingsRejection(unavailable)).toBeNull();
-    expect(settingsScopeDirty(unavailable, 'project')).toBe(false);
-    for (const action of [
-      {
-        type: 'review_requested',
+    expect(
+      run(unavailable, {
+        type: 'save_requested',
         scope: 'project',
         idempotencyKey: IDEMPOTENCY_KEY,
-      },
-      { type: 'confirmation_set', confirmed: true },
-      { type: 'submit_started' },
-    ] satisfies SettingsEditorAction[]) {
-      expect(run(unavailable, action)).toBe(unavailable);
-    }
-  });
-
-  it('withdraws the whole editor when a later read names no revision', () => {
-    const withdrawn = run(confirmedProjectChange(), {
-      type: 'authority_observed',
-      authority: null,
-    });
-
-    expect(withdrawn).toEqual({ status: 'editor_unavailable' });
-  });
-
-  it('leaves the draft alone when a read reports the snapshot it already holds', () => {
-    const drafted = run(initialSettingsEditorState(AUTHORITY), {
-      type: 'project_drafted',
-      values: draftMaxFileSize('2097152'),
-    });
-
-    const observed = run(drafted, {
-      type: 'authority_observed',
-      authority: fixtureAuthority(),
-    });
-
-    expect(observed).toBe(drafted);
-    expect(settingsScopeDirty(observed, 'project')).toBe(true);
+      }),
+    ).toBe(unavailable);
+    expect(settingsSubmissionOf(unavailable)).toBeNull();
   });
 });
 
-/* ----------------------------------------------------------------- setup --*/
+function saveProjectChange(): SubmittingSettingsState {
+  return expectSubmitting(
+    run(
+      initialSettingsEditorState(AUTHORITY),
+      { type: 'project_drafted', values: draftMaxFileSize('2097152') },
+      { type: 'save_requested', scope: 'project', idempotencyKey: IDEMPOTENCY_KEY },
+    ),
+  );
+}
 
 function run(
   state: SettingsEditorState,
@@ -608,28 +381,8 @@ function expectSubmitting(state: SettingsEditorState): SubmittingSettingsState {
   return state;
 }
 
-/** Narrowed, so a test can restate one field of it and still hold a real state. */
-function confirmedProjectChange(): Extract<SettingsEditorState, { status: 'confirmed' }> {
-  const state = run(
-    initialSettingsEditorState(AUTHORITY),
-    { type: 'project_drafted', values: draftMaxFileSize('2097152') },
-    {
-      type: 'review_requested',
-      scope: 'project',
-      idempotencyKey: IDEMPOTENCY_KEY,
-    },
-    { type: 'confirmation_set', confirmed: true },
-  );
-  if (state.status !== 'confirmed') throw new Error(`expected confirmed, got ${state.status}`);
-  return state;
-}
-
 function draftMaxFileSize(max_file_size: string): ProjectSettingsValues {
   return { ...AUTHORITY.project, max_file_size };
-}
-
-function draftPollSecs(auto_track_pr_poll_secs: string): ProjectSettingsValues {
-  return { ...AUTHORITY.project, auto_track_pr_poll_secs };
 }
 
 function withProjectRevision(
@@ -639,14 +392,6 @@ function withProjectRevision(
   return { ...authority, projectExpectedRevisionId };
 }
 
-function withProjectValues(
-  authority: SettingsEditor,
-  values: Partial<ProjectSettingsValues>,
-): SettingsEditor {
-  return { ...authority, project: { ...authority.project, ...values } };
-}
-
-/** The authority as the generated contract yields it from the served fixture. */
 function fixtureAuthority(): SettingsEditor {
   const authority = buildSettingsEditor(fixturePayload());
   if (!authority) throw new Error('the /api/settings fixture carries no editable authority');
