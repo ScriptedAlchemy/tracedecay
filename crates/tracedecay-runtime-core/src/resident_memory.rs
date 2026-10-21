@@ -1531,6 +1531,62 @@ impl ProcessResidentMemoryV1 {
         Err(self.refused(self.admission_failure(requested_bytes)))
     }
 
+    /// Size and charge new work from the same measured headroom reading.
+    /// The returned ceiling can be smaller than `preferred_bytes`; consumers
+    /// with a minimum working set must release a reservation below that floor.
+    /// Concurrent ledger charges are checked under the charge's own lock.
+    /// The consumer registers its working-set minimum with `wait_for_headroom`
+    /// when the returned budget cannot support its next operation.
+    #[tracing::instrument(
+        name = "runtime_core.resident.reserve_up_to",
+        level = "trace",
+        skip_all
+    )]
+    pub fn reserve_up_to(
+        self: &Arc<Self>,
+        key: ResidentMemoryKeyV1,
+        preferred_bytes: NonZeroU64,
+        ceiling: u64,
+    ) -> Result<ResidentMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
+        self.pressure.measure_admission_bytes();
+        let ceiling = ceiling.min(self.limit_bytes.get());
+        let mut state = self.lock_state();
+        let headroom = self.headroom_from_state(&state, ceiling);
+        let admitted = preferred_bytes
+            .get()
+            .min(headroom.available_bytes)
+            .min(ceiling.saturating_sub(state.used_bytes));
+        if admitted == 0 {
+            let failure = if self.pressure.state().is_over_budget()
+                || headroom.observed_bytes >= ceiling.min(self.pressure.limit_bytes())
+            {
+                ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
+                    observed_bytes: headroom.observed_bytes,
+                    limit_bytes: self.pressure.limit_bytes(),
+                    high_watermark_bytes: self.pressure.high_watermark_bytes(),
+                    requested_bytes: preferred_bytes.get(),
+                    floor_bytes: RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+                }
+            } else {
+                ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+                    used_bytes: state.used_bytes,
+                    requested_bytes: preferred_bytes.get(),
+                    limit_bytes: ceiling,
+                }
+            };
+            drop(state);
+            return Err(failure);
+        }
+        // `admitted` is at most ceiling - used_bytes, so both ledger sums fit.
+        state.used_bytes += admitted;
+        *state.charges.entry(key.clone()).or_default() += admitted;
+        Ok(ResidentMemoryReservationV1 {
+            authority: Arc::clone(self),
+            key,
+            reserved_bytes: admitted,
+        })
+    }
+
     /// Reserves one process-shared component without fabricating a project,
     /// worktree, or code-generation owner. These reservations use the same
     /// process ceiling and RAII release authority as project generations.
@@ -1596,12 +1652,20 @@ impl ProcessResidentMemoryV1 {
     /// [`Self::reserve`] holds them.
     pub fn headroom_below(&self, ceiling: u64) -> ResidentMemoryHeadroomV1 {
         self.pressure.measure_admission_bytes();
+        self.headroom_from_state(&self.lock_state(), ceiling)
+    }
+
+    fn headroom_from_state(
+        &self,
+        state: &ResidentMemoryStateV1,
+        ceiling: u64,
+    ) -> ResidentMemoryHeadroomV1 {
         let measured_ceiling = ceiling.min(self.pressure.limit_bytes());
         let observed_bytes = self
             .pressure
             .observed_bytes_for_limit(measured_ceiling)
             .unwrap_or(0);
-        let used_bytes = self.lock_state().used_bytes;
+        let used_bytes = state.used_bytes;
         let available_bytes = if self.pressure.state().is_over_budget() {
             0
         } else {
