@@ -19,11 +19,11 @@ use super::{
     test_handshake_defaults,
 };
 use crate::daemon::{
-    DaemonHandshake, execute_daemon_invocation, execute_portable_daemon_invocation,
+    DaemonEngine, DaemonHandshake, execute_daemon_invocation, execute_portable_daemon_invocation,
 };
 use tracedecay_daemon_service::{
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationRequest, parse_daemon_invocation_request,
+    DaemonInvocationRequest, DaemonInvocationResponse, parse_daemon_invocation_request,
 };
 
 fn repository() -> TempDir {
@@ -88,6 +88,32 @@ fn wire_round_trip(request: &DaemonInvocationRequest) -> DaemonInvocationRequest
     parse_daemon_invocation_request(&wire)
         .expect("daemon invocation protocol")
         .expect("valid daemon invocation envelope")
+}
+
+async fn execute_native_daemon_invocation(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    request: DaemonInvocationRequest,
+) -> DaemonInvocationResponse {
+    let engine = engine.clone();
+    let handshake = handshake.clone();
+    let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+        assert!(tracedecay_runtime_core::native_runtime::on_native_thread());
+        Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
+    })
+    .expect("native daemon invocation");
+    match task.wait().await {
+        tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(response) => response,
+        outcome => panic!("native daemon invocation did not settle: {outcome:?}"),
+    }
+}
+
+fn scope_set_native_reader_waits() -> u64 {
+    tracedecay_rusqlite_runtime::exact_sql::native_thread_storage_wait_sites()
+        .into_iter()
+        .filter(|site| site.kind == "reader" && site.call_site.contains("repository/scope_set.rs:"))
+        .map(|site| site.hits)
+        .sum()
 }
 
 #[cfg(unix)]
@@ -253,7 +279,8 @@ async fn run_scope_set_cas_with_registered_cold_root() {
     ];
     let observed_at = now();
     let (deadline, cancellation) = controls("cold-roots-cas", observed_at);
-    let cas = execute_daemon_invocation(
+    let reader_waits = scope_set_native_reader_waits();
+    let cas = execute_native_daemon_invocation(
         &engine,
         &handshake,
         DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
@@ -284,7 +311,7 @@ async fn run_scope_set_cas_with_registered_cold_root() {
 
     let observed_at = now();
     let (deadline, cancellation) = controls("cold-roots-read", observed_at);
-    let read = execute_daemon_invocation(
+    let read = execute_native_daemon_invocation(
         &engine,
         &handshake,
         DaemonInvocationRequest::multi_root_scope_set_read(
@@ -306,7 +333,7 @@ async fn run_scope_set_cas_with_registered_cold_root() {
 
     let observed_at = now();
     let (deadline, cancellation) = controls("cold-roots-stale-cas", observed_at);
-    let stale = execute_daemon_invocation(
+    let stale = execute_native_daemon_invocation(
         &engine,
         &handshake,
         DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
@@ -329,6 +356,13 @@ async fn run_scope_set_cas_with_registered_cold_root() {
     let conflict = packet.payload.expect("stale CAS evidence payload");
     assert_eq!(conflict.status, MultiRootScopeSetCasStatusV1::Conflict);
     assert_eq!(conflict.scope_set.as_ref(), Some(&applied));
+    assert_eq!(
+        scope_set_native_reader_waits(),
+        reader_waits,
+        "scope-set admission and replay reads must not park native workers"
+    );
+    drop(registry);
+    engine.shutdown_all().await;
 }
 
 #[test]
