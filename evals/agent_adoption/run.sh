@@ -596,28 +596,9 @@ claude_extra_for() {
 }
 
 # ---- select scenarios ------------------------------------------------------ #
-python3 - "$EVAL_SCENARIOS_DIR" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" "$LEARNED_SKILL_WORKFLOW" "${EVAL_INCLUDE_BASELINE:-0}" > "$work/selected.tsv" <<'PY'
-import json, os, sys
-sdir, filt, incl_def, workflow, incl_baseline = sys.argv[1], sys.argv[2].split(), sys.argv[3] == "1", sys.argv[4], sys.argv[5] == "1"
-for fn in sorted(os.listdir(sdir)):
-    if not fn.endswith(".json"):
-        continue
-    s = json.load(open(os.path.join(sdir, fn)))
-    if workflow:
-        if (s.get("learned_skill") or {}).get("workflow") != workflow:
-            continue
-    elif (s.get("status") == "learned"
-          or (s.get("status") == "deferred" and not incl_def)
-          or (s.get("status") == "baseline" and not incl_baseline)):
-        continue
-    if filt and s["id"] not in filt:
-        continue
-    for host in s.get("hosts", []):
-        # emit: id \t host \t fixture \t effect(0|1) \t prompt
-        outcome = s.get("outcome", {})
-        effect = "1" if outcome.get("files") or outcome.get("behavior") else "0"
-        print("\t".join([s["id"], host, s.get("fixture", "main"), effect, s["prompt"].replace("\t", " ").replace("\n", " ").replace("\r", " ")]))
-PY
+python3 "$here/select_scenarios.py" "$EVAL_SCENARIOS_DIR" "${SCENARIOS:-}" \
+  "${EVAL_INCLUDE_DEFERRED:-0}" "$LEARNED_SKILL_WORKFLOW" "${EVAL_INCLUDE_BASELINE:-0}" \
+  > "$work/selected.tsv"
 
 # ---- run each scenario x host x condition ---------------------------------- #
 run_claude() {
@@ -676,22 +657,13 @@ PY
 # background subshell when PARALLEL > 1, so it must not mutate shared state.
 run_one() {
   local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7" variant="$8" effect="${9:-0}" rep="${10:-1}"
-  local fdir out err start end duration_ms scenario_sha256 fixture_sha model_settings_json="{}" rc=0 timed_out=false home="$CLAUDE_EVAL_HOME" learned=""
+  local scenario_sha256="${11}" fdir out err start end duration_ms fixture_sha model_settings_json="{}" rc=0 timed_out=false home="$CLAUDE_EVAL_HOME" learned=""
   if [[ -n "$variant" ]]; then
     home="${VARIANT_HOME[$variant]}"
     learned=",\"learned_skill_variant\":\"$variant\",\"learned_skill_id\":\"${VARIANT_SKILL[$variant]}\""
   fi
   [[ "$host" == "codex" ]] && model_settings_json="{\"reasoning_effort\":\"$CODEX_REASONING_EFFORT\"}"
   fdir="$(fixture_dir_for "$fixture")"
-  scenario_sha256="$(python3 - "$EVAL_SCENARIOS_DIR/$sid.json" <<'PY'
-import hashlib, sys
-digest = hashlib.sha256()
-with open(sys.argv[1], "rb") as scenario:
-    for chunk in iter(lambda: scenario.read(1 << 20), b""):
-        digest.update(chunk)
-print(digest.hexdigest())
-PY
-)"
   fixture_sha="$fixture_main_sha256"
   [[ "$fixture" == "broken" ]] && fixture_sha="$fixture_broken_sha256"
   out="$run_dir/${base}.stdout.jsonl"
@@ -717,7 +689,7 @@ JSON
 for cond in $CHANNELS; do
 # Provision each condition once, before any concurrent run could race on it.
 [[ "$have_plugin" == "1" && "$cond" != "native" ]] && provision_variant "$cond"
-while IFS=$'\t' read -r sid host fixture effect prompt; do
+while IFS=$'\t' read -r sid host fixture effect scenario_sha256 prompt; do
   [[ -z "$sid" ]] && continue
   case " $HOSTS " in *" $host "*) : ;; *) continue ;; esac
   # Ablation of hooks/skills is Claude-only (Codex hooks/skills live host-global
@@ -751,12 +723,12 @@ while IFS=$'\t' read -r sid host fixture effect prompt; do
   fi
   if [[ "$effect" == 1 ]]; then
     wait  # nothing else may touch the shared fixture while it is mutated
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 1 "$rep"
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 1 "$rep" "$scenario_sha256"
   elif [[ "$PARALLEL" -gt 1 ]]; then
     while (( $(jobs -rp | wc -l) >= PARALLEL )); do wait -n || true; done
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0 "$rep" &
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0 "$rep" "$scenario_sha256" &
   else
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0 "$rep"
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0 "$rep" "$scenario_sha256"
   fi
   done
   done

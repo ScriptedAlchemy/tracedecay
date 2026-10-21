@@ -1514,20 +1514,19 @@ def load_efficiency_scorecard(path: str, run_meta: dict) -> dict:
     if not expected_sha or expected_sha != actual_sha:
         raise ValueError("efficiency scorecard binary SHA-256 does not match the agent eval")
     median = scorecard.get("median") or {}
-    metric_names = (
-        "daemon_start_empty.spawn_to_socket_seconds",
-        "cold_index.wall_seconds",
-        "cold_index.seal_to_activation_seconds",
-        "cold_index.daemon_build_elapsed_seconds",
-        "incremental_sync.wall_seconds",
-    )
+    if not isinstance(median, dict) or any(
+        not isinstance(name, str) or isinstance(value, bool)
+        or not isinstance(value, (int, float)) or not math.isfinite(value)
+        for name, value in median.items()
+    ):
+        raise ValueError("efficiency scorecard medians must be finite scalar measurements")
     return {
         "binary_sha256": actual_sha,
         "binary_version": (scorecard.get("binary") or {}).get("version"),
         "source_git_commit": (scorecard.get("source") or {}).get("git_commit"),
         "fixture_sha256": (scorecard.get("fixture") or {}).get("tree_sha256"),
         "runs": len(scorecard.get("runs", [])),
-        "median": {name: median.get(name) for name in metric_names},
+        "median": median,
         "attribution": "separate no-model runtime journey; not added to agent token or USD totals",
     }
 
@@ -1658,7 +1657,8 @@ def render_report(scoreboard: dict) -> str:
     lines.append("")
     lines.append("Pass means every required conclusion or effect was established and no forbidden "
                  "one appeared, whichever tools were used. `ungraded` scenarios declare no "
-                 "verifiable ground truth; `unverified` effect scenarios lack a post-run snapshot. "
+                 "verifiable ground truth; `unverified` effect scenarios lack a post-run snapshot "
+                 "or completed behavioral verification. "
                  "Both are excluded from the pass rate.")
     lines.append("")
     lines.append("| host/model | n | pass | fail | unverified | ungraded | pass rate |")
@@ -1825,17 +1825,21 @@ def render_report(scoreboard: dict) -> str:
                      "SHA-256 must match this agent evaluation. These wall times and resource "
                      "measurements are not model-token or monetary costs.")
         lines.append("")
-        lines.append("| phase | median seconds |")
-        lines.append("|---|---:|")
-        for label, metric in (
-            ("daemon start (empty profile)", "daemon_start_empty.spawn_to_socket_seconds"),
-            ("cold index (wall)", "cold_index.wall_seconds"),
-            ("cold index seal to activation", "cold_index.seal_to_activation_seconds"),
-            ("cold index daemon build", "cold_index.daemon_build_elapsed_seconds"),
-            ("incremental sync (wall)", "incremental_sync.wall_seconds"),
-        ):
-            value = scorecard["median"].get(metric)
-            lines.append(f"| {label} | {'-' if value is None else f'{value:.3f}'} |")
+        lines.append("| metric | median | unit |")
+        lines.append("|---|---:|---|")
+        for metric, value in sorted(scorecard["median"].items()):
+            if metric.endswith("_seconds"):
+                unit = "s"
+            elif metric.endswith("_ms"):
+                unit = "ms"
+            elif any(part == "bytes" or part.endswith("_bytes") for part in metric.split(".")):
+                unit = "B"
+            else:
+                unit = "—"
+            rendered = f"{value:,.3f}"
+            if unit not in ("s", "ms"):
+                rendered = rendered.rstrip("0").rstrip(".")
+            lines.append(f"| `{metric}` | {rendered} | {unit} |")
         lines.append("")
 
     if scoreboard.get("learned_skill"):

@@ -6,6 +6,7 @@ py_test(
     srcs = [
         "carry_claude_profile.py",
         "grade.py",
+        "select_scenarios.py",
         "selftest.py",
         "stock_check.py",
     ],

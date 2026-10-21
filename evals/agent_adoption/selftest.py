@@ -12,6 +12,7 @@ Run: evals/agent_adoption/selftest.py   (exit 0 = all pass)
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -789,12 +790,30 @@ def test_product_effectiveness_comparisons():
             "fixture": {"tree_sha256": "fixture"},
             "verdict": "ok",
             "runs": [{"status": "ok"}, {"status": "ok"}],
-            "median": {"cold_index.wall_seconds": 12.5},
+            "median": {
+                "cold_index.wall_seconds": 12.5,
+                "baseline_restart.spawn_to_current_seconds": 1.25,
+                "daemon_restart.spawn_to_current_seconds": 2.5,
+                "incremental_sync.store.generation_physical_growth_bytes": 4096,
+                "rss.peak_bytes.cold_index": 1048576,
+                "tool_calls.search.p95_ms": 42.75,
+            },
         }))
         attached = grade.load_efficiency_scorecard(str(path), {"binary_sha256": "abc"})
         check("effectiveness: cold-index baseline requires matching artifact identity",
               attached["median"]["cold_index.wall_seconds"] == 12.5
               and attached["runs"] == 2)
+        check("effectiveness: scorecard join retains restart, storage, RSS, and tool costs",
+              attached["median"] == json.loads(path.read_text())["median"])
+        resource_report = grade.render_report({
+            "results": [], "aggregate": {},
+            "meta": {"efficiency_scorecard": attached},
+        })
+        check("effectiveness: resource report includes measured units",
+              "baseline_restart.spawn_to_current_seconds` | 1.250 | s" in resource_report
+              and "generation_physical_growth_bytes` | 4,096 | B" in resource_report
+              and "rss.peak_bytes.cold_index` | 1,048,576 | B" in resource_report
+              and "tool_calls.search.p95_ms` | 42.750 | ms" in resource_report)
         try:
             grade.load_efficiency_scorecard(str(path), {"binary_sha256": "other"})
             matched_only = False
@@ -822,6 +841,37 @@ def test_product_effectiveness_comparisons():
         baseline[scenario["id"]] = scenario
     check("effectiveness: baseline tasks are neutral and independently graded",
           not grade.lint_scenarios(baseline) and not grade.lint_outcomes(baseline))
+
+
+def test_scenario_selection():
+    with tempfile.TemporaryDirectory() as work:
+        # The declared id is an artifact identity, not a source filename.
+        scenario = {"id": "custom_case", "hosts": ["claude", "codex"],
+                    "prompt": "Rename the stock check.\nPreserve behavior.",
+                    "status": "baseline", "outcome": {"kind": "effect", "behavior": "stock_check_rename"}}
+        source = json.dumps(scenario, indent=2).encode()
+        path = Path(work) / "experiment.json"
+        path.write_bytes(source)
+        command = [sys.executable, str(Path(HERE) / "select_scenarios.py"),
+                   work, "custom_case", "0", "", "1"]
+        selected = subprocess.run(command, capture_output=True, text=True)
+        rows = [line.split("\t") for line in selected.stdout.splitlines()]
+        check("runner: custom filename selects the declared id for both hosts",
+              selected.returncode == 0 and len(rows) == 2
+              and {row[1] for row in rows} == {"claude", "codex"}, selected.stderr)
+        check("runner: selected prompt and digest use the same source bytes",
+              len(rows) == 2 and all(row == [
+                  "custom_case", host, "main", "1", hashlib.sha256(source).hexdigest(),
+                  "Rename the stock check. Preserve behavior."
+              ] for row, host in zip(rows, ["claude", "codex"])))
+        path.write_bytes(source + b"\n")
+        changed = subprocess.run(command, capture_output=True, text=True)
+        check("runner: scenario byte changes update the selected identity",
+              changed.returncode == 0 and bool(changed.stdout)
+              and changed.stdout.split("\t")[4] == hashlib.sha256(source + b"\n").hexdigest())
+        excluded = subprocess.run(command[:-1] + ["0"], capture_output=True, text=True)
+        check("runner: baseline opt-in remains required",
+              excluded.returncode == 0 and not excluded.stdout)
 
 
 def test_baseline_oracles():
@@ -1251,6 +1301,7 @@ def main() -> int:
     test_skill_routing()
     test_cost_and_corrections()
     test_product_effectiveness_comparisons()
+    test_scenario_selection()
     test_baseline_oracles()
     test_claude_permissions()
     test_learned_skill_routing()
