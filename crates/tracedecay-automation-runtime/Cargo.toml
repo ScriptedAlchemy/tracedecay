@@ -21,23 +21,23 @@ test-helpers = [
 ]
 
 [dependencies]
-cap-fs-ext = "4.0.2"
-cap-std = "4.0.2"
-getrandom = "0.4"
-hex = "0.4"
-rustls = { version = "0.23", default-features = false, features = [
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+rustls = { workspace = true, features = [
     "ring",
     "std",
     "tls12",
 ] }
 schemars.workspace = true
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "sync"] }
-tracing = "0.1"
-url = "2"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "sync"] }
+tracing.workspace = true
+url.workspace = true
 webpki-roots = "1"
 
 tracedecay-contracts = { path = "../tracedecay-contracts" }
@@ -57,8 +57,8 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory" }
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["full", "test-util"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
 # Dev-only cycle: materialization tests bind the production host-config write
 # surface that agent-hosts registers at process start.
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }

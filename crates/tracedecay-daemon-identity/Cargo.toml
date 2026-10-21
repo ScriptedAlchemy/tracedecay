@@ -11,16 +11,16 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [dependencies]
-getrandom = "0.4"
-hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+getrandom.workspace = true
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-tracing = "0.1"
+tracing.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

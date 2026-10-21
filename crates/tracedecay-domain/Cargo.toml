@@ -8,23 +8,23 @@ description = "Pure domain contracts for TraceDecay V2"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
-globset = "0.4"
+globset.workspace = true
 schemars.workspace = true
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
 # `float_roundtrip`: observation identities and payload digests are derived
 # from values before they cross a JSON boundary and re-derived after. Without
 # it serde_json's default float parser does not reproduce every f64 (about
 # one in eight Hermes SQLite REAL timestamps), so the two derivations disagree
 # and the record is refused as an identity mismatch. Every binary that links
 # this crate inherits the feature through unification.
-serde_json = { version = "1", features = ["float_roundtrip"] }
-sha2 = "0.11"
-thiserror = "2"
-tracing = "0.1"
-url = "2"
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 # Canonical serialization must stay byte-identical to `serde_json::to_value`
 # even for the private `RawValue` struct token, which needs the feature on to
 # exercise.
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { workspace = true, features = ["raw_value"] }

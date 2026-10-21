@@ -55,10 +55,10 @@ test-transport = [
 asupersync.workspace = true
 # Only the `test-helpers` LCM fixture opens a raw connection.
 rusqlite = { version = "0.40.1", default-features = false, optional = true }
-serde_json = "1"
-sha2 = "0.11"
-thiserror = "2"
-tracing = "0.1"
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
 tracedecay-api = { path = "../tracedecay-api" }
 tracedecay-application = { path = "../tracedecay-application" }
@@ -90,8 +90,8 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", optional = 
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
-rusqlite = { version = "0.40.1", default-features = false }
-tempfile = "3"
+rusqlite.workspace = true
+tempfile.workspace = true
 tracedecay-application = { path = "../tracedecay-application", features = ["test-helpers"] }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", features = ["test-helpers"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
