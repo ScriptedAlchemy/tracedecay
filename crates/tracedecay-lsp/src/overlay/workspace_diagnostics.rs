@@ -216,6 +216,7 @@ pub(super) fn diagnostic_refresh_is_partial(failure_class: &str) -> bool {
     matches!(
         failure_class,
         "diagnostic-broker-refresh-superseded"
+            | "diagnostic-broker-coverage-incomplete"
             | "document-content-stale"
             | "managed-diagnostic-content-identity-unavailable"
             | "managed-diagnostic-content-stale"
