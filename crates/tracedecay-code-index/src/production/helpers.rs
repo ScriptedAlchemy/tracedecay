@@ -16,7 +16,9 @@ use crate::chunks::{
 };
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::go_satisfaction::go_satisfaction;
-use crate::production::module_resolution::{ModuleImportIndexV1, is_module_import_language};
+use crate::production::module_resolution::{
+    ModuleImportIndexV1, caller_scope, is_module_import_language,
+};
 use crate::production::resolution_view::{FileSymbolsByNameV1, ResolutionFileV1, SymbolsByNameV1};
 use crate::production::typescript_resolution::{
     ImportBindingOutcomeV1, TypeScriptModuleIndexV1, unique_local_import,
@@ -720,6 +722,7 @@ where
             reference.kind,
             reference.argument_count,
             reference.ambiguous_local,
+            caller_scope(files[index].language(), reference),
         );
         let (resolved, ambiguous) = if let Some(resolved) = resolved_references.get(&cache_key) {
             resolved.clone()
@@ -779,7 +782,14 @@ pub(super) fn take_seal_reference_resolutions() -> usize {
 }
 
 type ResolvedReferenceCacheV1<'a> = HashMap<
-    (usize, &'a str, RelationEdgeKindV1, Option<u32>, bool),
+    (
+        usize,
+        &'a str,
+        RelationEdgeKindV1,
+        Option<u32>,
+        bool,
+        Option<&'a SymbolOccurrenceId>,
+    ),
     (Option<ReferenceResolutionV1>, bool),
 >;
 
