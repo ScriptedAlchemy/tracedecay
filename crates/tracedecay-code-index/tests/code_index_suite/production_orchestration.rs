@@ -2837,7 +2837,7 @@ fn partitioned_request(
 
 /// Files no fixture edit touches. With them a one-file edit stays within the
 /// share of a corpus an increment seals over its parent.
-const SPARSE_FILLERS: [(&str, &str, &str); 7] = [
+pub(super) const SPARSE_FILLERS: [(&str, &str, &str); 7] = [
     (
         "file.filler.0",
         "src/filler_0.rs",
