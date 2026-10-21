@@ -754,25 +754,21 @@ pub enum LcmCompressionOutcome {
 
 impl LcmCompressionResponse {
     pub fn take_outcome(&mut self) -> Result<LcmCompressionOutcome, LcmError> {
-        let needs_summary = self.status == "needs_summary";
         match (
-            needs_summary,
+            self.status.as_str(),
             self.summary_request.take(),
             self.retry_status.as_deref(),
         ) {
-            (true, Some(summary_request), None) => {
+            ("needs_summary", Some(summary_request), None) => {
                 Ok(LcmCompressionOutcome::NeedsSummary(summary_request))
             }
-            (true, Some(summary_request), Some("needs_authoritative_summary")) => {
+            ("needs_summary", Some(summary_request), Some("needs_authoritative_summary")) => {
                 Ok(LcmCompressionOutcome::Deferred {
                     summary_request,
                     reason: self.reason.clone(),
                 })
             }
-            (false, None, None) => Ok(LcmCompressionOutcome::Complete),
-            (false, None, Some("critical_pressure_catch_up"))
-                if matches!(self.status.as_str(), "ok" | "best_effort") =>
-            {
+            ("ok" | "best_effort", None, None | Some("critical_pressure_catch_up")) => {
                 Ok(LcmCompressionOutcome::Complete)
             }
             _ => Err(invalid_compression_outcome()),
@@ -909,6 +905,35 @@ mod tests {
     fn compression_outcome_reports_missing_pending_request() {
         let mut response = compression_response("needs_summary", "pending", None, None);
         assert!(response.take_outcome().is_err());
+    }
+
+    #[test]
+    fn compression_outcome_rejects_unknown_decoded_statuses() {
+        for status in ["", "complete", "failed", "future_outcome"] {
+            let wire = serde_json::to_value(compression_response(status, "detail", None, None))
+                .expect("encode response");
+            let mut response: LcmCompressionResponse =
+                serde_json::from_value(wire).expect("decode response boundary");
+            assert!(
+                response.take_outcome().is_err(),
+                "unknown status {status:?} must not become a successful completion"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_completion_preserves_the_entire_wire_response() {
+        for status in ["ok", "best_effort"] {
+            let mut response = compression_response(status, "no_backlog_to_compress", None, None);
+            response.replay_over_budget = status == "best_effort";
+            let original = serde_json::to_value(&response).expect("encode response");
+            let outcome = response.take_outcome().expect("valid completion");
+            assert!(matches!(&outcome, LcmCompressionOutcome::Complete));
+            assert_eq!(
+                serde_json::to_value(outcome.into_response(response)).expect("encode completion"),
+                original
+            );
+        }
     }
 
     #[test]
