@@ -1,13 +1,42 @@
+use flate2::read::MultiGzDecoder;
 use serde_json::Value;
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     error::Error,
     fmt, fs,
+    io::Read,
     path::{Component, Path},
 };
 
 pub const DASHBOARD_ASSET_MANIFEST: &str = "asset-manifest.json";
 const DASHBOARD_ENTRYPOINT: &str = "index.html";
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DashboardManifest {
+    /// The complete producer inventory, including selected gzip payloads.
+    pub asset_paths: Vec<String>,
+    /// Original route -> encoded payload. Payloads are not additional routes.
+    pub gzip: BTreeMap<String, String>,
+}
+
+impl DashboardManifest {
+    pub fn embedded_paths(&self) -> impl Iterator<Item = (&str, &str)> {
+        let payloads = self
+            .gzip
+            .values()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        self.asset_paths
+            .iter()
+            .filter(move |relative| !payloads.contains(relative.as_str()))
+            .map(|relative| {
+                (
+                    relative.as_str(),
+                    self.gzip.get(relative).unwrap_or(relative).as_str(),
+                )
+            })
+    }
+}
 
 #[derive(Debug)]
 pub struct DashboardManifestError {
@@ -30,8 +59,10 @@ impl fmt::Display for DashboardManifestError {
 
 impl Error for DashboardManifestError {}
 
-pub fn dashboard_asset_paths(app_dist: &Path) -> Result<Vec<String>, DashboardManifestError> {
-    dashboard_asset_paths_with(app_dist, false)
+pub fn read_dashboard_manifest(
+    app_dist: &Path,
+) -> Result<DashboardManifest, DashboardManifestError> {
+    read_dashboard_manifest_with(app_dist, false)
 }
 
 /// Same manifest scan, but the source tree may contain symlinks whose targets
@@ -40,16 +71,16 @@ pub fn dashboard_asset_paths(app_dist: &Path) -> Result<Vec<String>, DashboardMa
 /// as symlinks to action outputs and the caller still compares the staged
 /// digest byte-for-byte against the producer's advertised digest. Packaged
 /// and in-tree bundles keep the strict no-symlink rule.
-pub fn dashboard_asset_paths_build_output(
+pub fn read_dashboard_manifest_build_output(
     app_dist: &Path,
-) -> Result<Vec<String>, DashboardManifestError> {
-    dashboard_asset_paths_with(app_dist, true)
+) -> Result<DashboardManifest, DashboardManifestError> {
+    read_dashboard_manifest_with(app_dist, true)
 }
 
-fn dashboard_asset_paths_with(
+fn read_dashboard_manifest_with(
     app_dist: &Path,
     allow_source_symlinks: bool,
-) -> Result<Vec<String>, DashboardManifestError> {
+) -> Result<DashboardManifest, DashboardManifestError> {
     let metadata_of = |path: &Path| {
         if allow_source_symlinks {
             fs::metadata(path)
@@ -161,7 +192,62 @@ fn dashboard_asset_paths_with(
         )));
     }
     paths.sort_unstable();
-    Ok(paths)
+    let mut gzip = BTreeMap::new();
+    if let Some(mapping) = manifest.get("gzip") {
+        let mapping = mapping.as_object().ok_or_else(|| {
+            DashboardManifestError::new("dashboard asset manifest gzip must be an object")
+        })?;
+        for (source, encoded) in mapping {
+            let source = normalize_manifest_path(source)?;
+            let encoded = encoded.as_str().ok_or_else(|| {
+                DashboardManifestError::new("dashboard gzip payload path must be a string")
+            })?;
+            let encoded = normalize_manifest_path(encoded)?;
+            if encoded != format!("{source}.gz")
+                || !seen.contains(&source)
+                || !seen.contains(&encoded)
+                || gzip.insert(source.clone(), encoded).is_some()
+            {
+                return Err(DashboardManifestError::new(format!(
+                    "invalid dashboard gzip mapping for {source:?}"
+                )));
+            }
+        }
+        for (source, encoded) in &gzip {
+            if gzip.contains_key(encoded) {
+                return Err(DashboardManifestError::new(format!(
+                    "dashboard gzip payload {encoded:?} must not be another source"
+                )));
+            }
+            let read = |relative: &str| {
+                fs::read(app_dist.join(relative)).map_err(|error| {
+                    DashboardManifestError::new(format!(
+                        "failed to read dashboard gzip asset {relative:?}: {error}"
+                    ))
+                })
+            };
+            let raw = read(source)?;
+            let compressed = read(encoded)?;
+            let mut roundtrip = Vec::new();
+            MultiGzDecoder::new(compressed.as_slice())
+                .take(raw.len() as u64 + 1)
+                .read_to_end(&mut roundtrip)
+                .map_err(|error| {
+                    DashboardManifestError::new(format!(
+                        "invalid dashboard gzip payload {encoded:?}: {error}"
+                    ))
+                })?;
+            if compressed.len() >= raw.len() || roundtrip != raw {
+                return Err(DashboardManifestError::new(format!(
+                    "dashboard gzip payload does not match {source:?} or is not smaller"
+                )));
+            }
+        }
+    }
+    Ok(DashboardManifest {
+        asset_paths: paths,
+        gzip,
+    })
 }
 
 fn normalize_manifest_path(raw_path: &str) -> Result<String, DashboardManifestError> {
