@@ -2761,7 +2761,7 @@ impl LatestCodeTextGenerationV1 {
         maximum_work: usize,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<bool, RetrievalPortError> {
-        let _workers = self
+        let workers = self
             .text_artifact_store
             .worker_runtime
             .enter(&self.text_artifact_store.resident_memory)
@@ -2774,8 +2774,17 @@ impl LatestCodeTextGenerationV1 {
                     ),
                 ) => RetrievalPortError::ResidentMemoryRefused(error.to_string()),
                 other => RetrievalPortError::AuthorityUnavailable(other.to_string()),
-            })?;
-        let result = self.advance_text_serving_inner(maximum_work, control);
+            });
+        let result = match workers {
+            Ok(_workers) => self.advance_text_serving_inner(maximum_work, control),
+            Err(error) => Err(error),
+        };
+        // A refusal before the builder opens has no batch/finalization error
+        // to classify. Preserve that refusal on the same generation's progress
+        // instead of leaving its completed source scan looking unblocked.
+        if matches!(&result, Err(RetrievalPortError::ResidentMemoryRefused(_))) {
+            self.publish_text_progress_blocked(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+        }
         if result.as_ref().is_err_and(|error| {
             matches!(
                 error,

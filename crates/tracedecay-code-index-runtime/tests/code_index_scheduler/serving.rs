@@ -20,6 +20,7 @@ use tracedecay_contracts::{
     PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResolvedScope, ResultProjection,
     RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
     SourceMetadataRequest, callable_code_operation,
+    code_index_freshness::{CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1},
     retrieval::{
         CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
         CodeImplementationsRequest, CodeNavigationRequest, CodeTimelineRequest,
@@ -49,8 +50,8 @@ use tracedecay_query::retrieval::{
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ProcessResidentSampleV1,
-    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentMemoryPressureV1,
-    resident_memory_watermark_bytes_v1,
+    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1, ResidentMemoryComponentIdV1,
+    ResidentMemoryPressureV1, resident_memory_watermark_bytes_v1,
 };
 
 use tracedecay_session_temporal_store::SessionTemporalAccess;
@@ -2083,6 +2084,96 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
         "reservation refusal must not touch or recreate the missing path"
     );
     assert!(latest.text_projection_needs_work());
+}
+
+#[test]
+fn retained_text_admission_reports_its_block_and_recovers_after_headroom_release() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn reserved_until_release() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(4 * 1024 * 1024 * 1024).expect("test process limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 0,
+                unreclaimable_bytes: 0,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        }),
+    ));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        scheduler.bind_resident_memory(Arc::clone(&memory));
+        published(scheduler.reconcile_now().expect("seal source generation"));
+    }
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    scheduler.bind_resident_memory(Arc::clone(&memory));
+    let text = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("retained sealed text generation");
+    let scanned = build_progress_snapshot(&scheduler);
+    assert_eq!(scanned.phase, CodeIndexBuildPhaseV1::SourceScan);
+    assert_eq!(scanned.blocked_reason, None);
+    let build_floor = u64::try_from(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+        .expect("build floor fits u64");
+    let held_bytes = memory.admission_watermark_bytes() - build_floor + 1;
+    let competing = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("held-text-headroom").expect("component"),
+            NonZeroU64::new(held_bytes).expect("competing reservation"),
+        )
+        .expect("hold actual ledger headroom");
+    let mut headroom = pressure.subscribe_headroom();
+
+    for _ in 0..2 {
+        let refused = text.advance_text_serving(1);
+        assert!(matches!(
+            refused,
+            Err(RetrievalPortError::ResidentMemoryRefused(_))
+        ));
+        let blocked = build_progress_snapshot(&scheduler);
+        assert_eq!(blocked.generation_id, scanned.generation_id);
+        assert_eq!(blocked.phase, CodeIndexBuildPhaseV1::SourceScan);
+        assert_eq!(blocked.committed_pages, 0);
+        assert_eq!(
+            blocked.blocked_reason,
+            Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+        );
+        assert!(text.text_projection_needs_work());
+        assert_eq!(memory.snapshot().used_bytes, held_bytes);
+    }
+
+    drop(headroom.borrow_and_update());
+    drop(competing);
+    assert!(
+        headroom
+            .has_changed()
+            .expect("headroom authority remains live")
+    );
+    assert_eq!(memory.snapshot().used_bytes, 0);
+    text.production_query_owners()
+        .expect("same owner builds after headroom is released");
+    let ready = build_progress_snapshot(&scheduler);
+    assert_eq!(ready.generation_id, scanned.generation_id);
+    assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
+    assert!(ready.committed_pages > 0);
+    assert_eq!(ready.blocked_reason, None);
+    assert!(text.query_owners_are_ready());
+    assert!(active_text_artifact_path(store.path()).is_file());
 }
 
 #[test]

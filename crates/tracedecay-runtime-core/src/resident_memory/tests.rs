@@ -1336,6 +1336,35 @@ fn cgroup_headroom_respects_a_larger_but_fuller_ancestor() {
 }
 
 #[test]
+fn sized_reservations_charge_only_the_measured_cgroup_headroom() {
+    const MIB: u64 = 1024 * 1024;
+    let limit = bytes(800 * MIB);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 100 * MIB,
+                unreclaimable_bytes: 100 * MIB,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: Some(200 * MIB),
+            })
+        }),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let watermark = authority.admission_watermark_bytes();
+    let headroom = authority.headroom_below(watermark);
+    assert_eq!(headroom.available_bytes, 200 * MIB);
+    let owner = key("project-a", "worktree-a", "generation-a", "text-build");
+    let held = authority
+        .reserve_up_to(owner, bytes(headroom.available_bytes + 1), watermark)
+        .expect("the actual allocation fits without charging the 80 MiB watermark band");
+    assert_eq!(held.reserved_bytes(), 200 * MIB);
+    assert_eq!(authority.snapshot().used_bytes, 200 * MIB);
+    drop(held);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
 fn narrowed_budgets_and_waiters_share_cgroup_capacity_without_charging_peers() {
     const MIB: u64 = 1024 * 1024;
     let room = Arc::new(AtomicU64::new(560 * MIB));
