@@ -106,6 +106,41 @@ async fn revert_rollout_the_shipped_v2_binary_read(
     revert
 }
 
+async fn seed_shipped_v2_rewrite_then_restore_thread(
+    home: &Path,
+    db: &ProjectSessionTestRuntime,
+    project: &Path,
+    thread_day: &str,
+    revert_day: &str,
+) {
+    rollout(
+        home,
+        thread_day,
+        THREAD,
+        project,
+        &[LEDGER_MIGRATION, LEDGER_BACKFILL],
+    );
+    ingest(home, db, project).await;
+
+    let rewritten = rollout(
+        home,
+        thread_day,
+        THREAD,
+        project,
+        &[INVOICE_RETRY, INVOICE_ROLLBACK],
+    );
+    ingest(home, db, project).await;
+    std::fs::rename(&rewritten, revert_rollout_path(home, revert_day)).unwrap();
+
+    rollout(
+        home,
+        thread_day,
+        THREAD,
+        project,
+        &[LEDGER_MIGRATION, LEDGER_BACKFILL],
+    );
+}
+
 async fn assert_upgrade_leaves(
     home: &Path,
     db: &ProjectSessionTestRuntime,
@@ -328,27 +363,14 @@ async fn upgrade_keeps_both_rollouts_the_shipped_v2_binary_imported_together() {
 async fn upgrade_revives_a_revert_rollout_the_shipped_v2_binary_retired() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    thread_rollout(&home, &project, &[LEDGER_MIGRATION, LEDGER_BACKFILL]);
     let db = open_project_session_db(&project).await.unwrap();
-    ingest(&home, &db, &project).await;
-    assert_eq!(
-        replies(&db).await,
-        sorted(&[LEDGER_MIGRATION, LEDGER_BACKFILL])
-    );
-    revert_rollout_the_shipped_v2_binary_read(
-        &home,
-        &db,
-        &project,
-        "02",
-        &[INVOICE_RETRY, INVOICE_ROLLBACK],
-    )
-    .await;
+    seed_shipped_v2_rewrite_then_restore_thread(&home, &db, &project, "01", "02").await;
 
     assert_upgrade_leaves(
         &home,
         &db,
         &project,
-        &[],
+        &[INVOICE_RETRY, INVOICE_ROLLBACK],
         &[
             LEDGER_MIGRATION,
             LEDGER_BACKFILL,
@@ -363,22 +385,8 @@ async fn upgrade_revives_a_revert_rollout_the_shipped_v2_binary_retired() {
 async fn upgrade_keeps_a_revert_rollout_the_shipped_v2_binary_read_last() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    rollout(
-        &home,
-        "02",
-        THREAD,
-        &project,
-        &[LEDGER_MIGRATION, LEDGER_BACKFILL],
-    );
     let db = open_project_session_db(&project).await.unwrap();
-    revert_rollout_the_shipped_v2_binary_read(
-        &home,
-        &db,
-        &project,
-        "01",
-        &[INVOICE_RETRY, INVOICE_ROLLBACK],
-    )
-    .await;
+    seed_shipped_v2_rewrite_then_restore_thread(&home, &db, &project, "02", "01").await;
 
     assert_upgrade_leaves(
         &home,
