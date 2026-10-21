@@ -10,6 +10,9 @@ import { createExtensionServer } from "../src/server/main.js";
 import { DaemonFailure, ServeSession } from "../src/server/serve-client.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// MCP deliberately filters child environments; use the declared Node runtime,
+// not Bazel's wrapper, which depends on launcher-only environment variables.
+const NODE_BINARY = process.env.JS_BINARY__NODE_BINARY ?? process.execPath;
 const FAKE_SERVE = path.join(PACKAGE_ROOT, "test", "fake-serve.mjs");
 const ASSETS = { html: "<!doctype html><html></html>", iconSvg: "<svg xmlns='http://www.w3.org/2000/svg'/>" };
 
@@ -19,7 +22,7 @@ afterEach(async () => {
 });
 
 function fakeSession(): ServeSession {
-  const session = new ServeSession({ binary: FAKE_SERVE, projectRoot: null, env: process.env, cwd: PACKAGE_ROOT });
+  const session = new ServeSession({ binary: FAKE_SERVE, projectRoot: null, env: { ...process.env, PATH: `${path.dirname(NODE_BINARY)}${path.delimiter}${process.env.PATH ?? ""}` }, cwd: PACKAGE_ROOT });
   cleanups.push(() => session.close());
   return session;
 }
@@ -41,7 +44,7 @@ describe("embedded server entry", () => {
     await symlink(path.join(PACKAGE_ROOT, "embedded", "server.mjs"), link);
 
     const client = new Client({ name: "symlink-test", version: "0.0.0" });
-    await client.connect(new StdioClientTransport({ command: process.execPath, args: [link], cwd: dir }));
+    await client.connect(new StdioClientTransport({ command: NODE_BINARY, args: [link], cwd: dir }));
     cleanups.push(() => client.close());
 
     expect(client.getServerVersion()?.name).toBe("tracedecay-chatgpt-extension");
