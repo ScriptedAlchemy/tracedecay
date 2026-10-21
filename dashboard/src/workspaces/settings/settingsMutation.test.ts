@@ -70,7 +70,7 @@ describe('settings producer/consumer settlement', () => {
     ]) {
       const response = structuredClone(wire.changed);
       mutate(response.body.application_outcome.value);
-      expect(await apply(response)).toMatchObject({ outcome: 'unsettled', detail: expect.stringContaining('Refresh current values before retrying') });
+      expect(await apply(response)).toMatchObject({ outcome: 'unsettled', detail: expect.stringContaining('The settings change may have been applied') });
     }
   });
 
@@ -102,7 +102,20 @@ describe('settings producer/consumer settlement', () => {
       kind: 'partial_effect',
       committed_receipt: { ...wire.changed.body.application_outcome.value.receipt, outcome: 'partial' },
     });
-    expect(await apply(response)).toMatchObject({ outcome: 'unsettled', detail: expect.stringContaining('Refresh current values before retrying') });
+    expect(await apply(response)).toMatchObject({ outcome: 'unsettled', detail: expect.stringContaining('The settings change may have been applied') });
+  });
+
+  it('treats a lost PATCH response as uncertain and requires readback before another save', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(Response.json(wire.read.body, { status: wire.read.status }))
+      .mockRejectedValueOnce(new Error('connection lost'));
+    vi.stubGlobal('fetch', fetch);
+
+    expect(await applySettingsMutation(request)).toEqual({
+      outcome: 'unsettled',
+      detail: expect.stringContaining('The change may have been applied'),
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('rejects problem/status disagreement and malformed refusals', async () => {
