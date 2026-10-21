@@ -1,5 +1,9 @@
+use std::io::ErrorKind;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -1240,6 +1244,180 @@ fn init_wait_holds_until_first_generation_is_ready() {
             .is_some_and(|count| count > 0),
         "init --wait must serve the fixture's indexed symbol\n{payload}"
     );
+}
+
+/// `init` is brokered through the daemon-owned code-index scheduler, so with
+/// no daemon accepting connections it refuses with the typed
+/// `code_index_scheduler_unavailable` state and writes no enrollment or index
+/// artifacts.
+#[test]
+fn init_without_a_running_daemon_refuses_before_any_index_write() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+    command.args(["init", "."]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        !output.status.success(),
+        "init with no daemon must refuse\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("code_index_scheduler_unavailable"),
+        "the refusal must name the typed no-daemon state\nstderr:\n{stderr}"
+    );
+    assert_namespace_absent(
+        &project_root.join(".tracedecay"),
+        "a refused init must not mint a repo-local store",
+    );
+    let shard_root = profile_sharded_data_root(
+        &profile_root(home.path()),
+        &default_profile_project_id(&project_root),
+    );
+    assert_namespace_absent(
+        &shard_root,
+        "a refused init must not enroll or index a project shard",
+    );
+}
+
+/// Status and `tool` reads are clients of the running daemon, never a local
+/// fallback index: an enrolled project whose daemon is stopped answers the
+/// typed daemon-unreachable refusal, and the reads neither spawn a daemon nor
+/// mint a store.
+#[cfg(unix)]
+#[test]
+fn status_and_query_reads_refuse_typed_daemon_unavailable_without_one() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    let project_arg = project_root.to_string_lossy().to_string();
+    let search_args = r#"{"query":"indexed","limit":5}"#;
+
+    for args in [
+        vec!["status", "--json"],
+        vec![
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "search",
+            "--json",
+            "--args",
+            search_args,
+        ],
+    ] {
+        let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+        command.args(&args);
+        let output = run_with_timeout(command, cli_timeout());
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(
+                tracedecay_daemon_identity::DAEMON_UNREACHABLE_EXIT_CODE
+            )),
+            "{args:?} must exit with the typed daemon-unreachable code, not a local fallback\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    assert_namespace_absent(
+        &project_root.join(".tracedecay"),
+        "read commands must not mint a repo-local store",
+    );
+    assert!(
+        std::os::unix::net::UnixStream::connect(crate::common::daemon_socket_path(home.path()))
+            .is_err(),
+        "read commands must not start or replace the stopped daemon"
+    );
+}
+
+/// Bundled pricing and native usage reads are local-only: an outbound HTTP
+/// attempt honoring the standard proxy environment would reach the controlled
+/// loopback listener, so zero accepted connections is the behavioral proof
+/// that no request was made.
+#[test]
+fn pricing_and_usage_reads_make_no_http_request() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    // The suite's inherited `TRACEDECAY_DISABLE_GLOBAL_DB=1` keeps the daemon's
+    // accounting database unregistered; the savings/cost reads require it.
+    let _daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), |command| {
+        command.env_remove("TRACEDECAY_DISABLE_GLOBAL_DB");
+    });
+    let mut init = tracedecay_command_without_daemon(home.path(), &project_root);
+    init.env_remove("TRACEDECAY_DISABLE_GLOBAL_DB")
+        .args(["init", "."]);
+    let init_output = run_with_timeout(init, cli_timeout());
+    assert!(
+        init_output.status.success(),
+        "fixture init should run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&init_output.stdout),
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let proxy_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let connections = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let accepted = connections.clone();
+    let stopped = stop.clone();
+    let listener_thread = std::thread::spawn(move || {
+        while !stopped.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((_stream, _peer)) => {
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    for args in [
+        vec!["cost", "--export", "json"],
+        vec!["cost", "30d", "--by-model"],
+        vec!["gain", "--all", "--json"],
+        vec!["current-counter"],
+    ] {
+        let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+        command
+            .args(&args)
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("https_proxy", &proxy_url)
+            .env("all_proxy", &proxy_url)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .env_remove("TRACEDECAY_DISABLE_GLOBAL_DB");
+        let output = run_with_timeout(command, cli_timeout());
+        assert!(
+            output.status.success(),
+            "{args:?} must succeed under the controlled proxy\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            0,
+            "{args:?} attempted an outbound HTTP request through the controlled proxy"
+        );
+    }
+    stop.store(true, Ordering::SeqCst);
+    drop(listener_thread);
 }
 
 #[test]
