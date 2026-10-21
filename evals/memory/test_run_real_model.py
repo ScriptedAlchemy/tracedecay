@@ -191,6 +191,24 @@ class EvalStorageIsolationTest(unittest.TestCase):
         self.assertTrue(env.data_dir.is_relative_to(env.root))
         self.assertNotEqual(env.global_db, Path.home() / ".tracedecay/global.db")
 
+    def test_cancellation_before_ownership_removes_the_profile(self):
+        for boundary in ("environment copy", "owner construction"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                cancelled = KeyboardInterrupt(f"cancelled during {boundary}")
+                interrupt = (
+                    mock.patch.object(os.environ, "keys", side_effect=cancelled)
+                    if boundary == "environment copy"
+                    else mock.patch.object(
+                        run_real_model, "EvalEnvironment", side_effect=cancelled
+                    )
+                )
+                with mock.patch.object(tempfile, "tempdir", tmp), interrupt as abort:
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        run_real_model.create_eval_environment("cancelled-setup")
+                self.assertIs(raised.exception, cancelled)
+                abort.assert_called_once()
+                self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def test_cleanup_removes_fixture_and_isolated_eval_store(self):
         eval_env = run_real_model.create_eval_environment("cleanup-store")
         self.addCleanup(eval_env.cleanup)

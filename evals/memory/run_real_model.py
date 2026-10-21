@@ -242,32 +242,35 @@ def create_eval_environment(scenario_id):
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario_id)
     # Explicit ownership prevents an implicit temporary-directory finalizer
     # from deleting the profile if stopping an owned daemon fails.
-    root = Path(tempfile.mkdtemp(prefix=f"tracedecay-eval-env-{safe_id}-"))
-    home = root / "home"
-    data_dir = root / ".tracedecay"
-    global_db = data_dir / "global.db"
+    root = tempfile.mkdtemp(prefix=f"tracedecay-eval-env-{safe_id}-")
     try:
+        root = Path(root)
+        home = root / "home"
+        data_dir = root / ".tracedecay"
+        global_db = data_dir / "global.db"
         home.mkdir(parents=True, exist_ok=True)
         data_dir.mkdir(parents=True, exist_ok=True)
+
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+        env["TRACEDECAY_DATA_DIR"] = str(data_dir)
+        env["TRACEDECAY_GLOBAL_DB"] = str(global_db)
+        env.pop("HERMES_HOME", None)
+        env.pop("HERMES_PROFILE", None)
+        return EvalEnvironment(
+            root=root,
+            home=home,
+            data_dir=data_dir,
+            global_db=global_db,
+            env=env,
+        )
     except BaseException:
+        # Ownership reaches the caller only after the whole environment has
+        # been constructed; cancellation during setup still belongs here.
         shutil.rmtree(root, ignore_errors=True)
         raise
-
-    env = dict(os.environ)
-    env["HOME"] = str(home)
-    env["USERPROFILE"] = str(home)
-    env["XDG_CONFIG_HOME"] = str(home / ".config")
-    env["TRACEDECAY_DATA_DIR"] = str(data_dir)
-    env["TRACEDECAY_GLOBAL_DB"] = str(global_db)
-    env.pop("HERMES_HOME", None)
-    env.pop("HERMES_PROFILE", None)
-    return EvalEnvironment(
-        root=root,
-        home=home,
-        data_dir=data_dir,
-        global_db=global_db,
-        env=env,
-    )
 
 
 def resolve_tracedecay_bin(explicit):
