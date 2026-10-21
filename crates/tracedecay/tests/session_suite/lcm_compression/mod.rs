@@ -218,9 +218,9 @@ fn compress_request(
     }
 }
 
-fn provided_summary(summary_text: impl Into<String>) -> LcmSummarizerMode {
+fn provided_summary(summary_text: String) -> LcmSummarizerMode {
     LcmSummarizerMode::Provided {
-        summary_text: summary_text.into(),
+        summary_text,
         route: None,
         extraction_result: None,
     }

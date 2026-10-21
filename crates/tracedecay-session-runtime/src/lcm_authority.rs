@@ -11,8 +11,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_lcm::{
-    LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmGcConfig, LcmPreflightRequest,
-    LcmStatus, LcmSummarizerMode,
+    LcmCompressionRequest, LcmError, LcmGcConfig, LcmPreflightRequest, LcmStatus, LcmSummarizerMode,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_session_memory::context::{
