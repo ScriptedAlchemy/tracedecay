@@ -97,7 +97,7 @@ async fn join_scope(
     }
     .ok_or_else(&unavailable)?;
     if wake
-        .wake_and_wait_until_idle(LIVE_TRANSCRIPT_REFRESH_DEADLINE)
+        .wake_and_wait_for_projection(LIVE_TRANSCRIPT_REFRESH_DEADLINE)
         .await
     {
         Ok(LiveTranscriptRefreshJoin::PublicationJoined)
@@ -149,7 +149,7 @@ mod tests {
             false
         }
 
-        fn wake_and_wait_until_idle(
+        fn wake_and_wait_for_projection(
             &self,
             _timeout: Duration,
         ) -> SessionTemporalRefreshWakeFuture<'_> {

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tracedecay_domain::{SessionId, UtcMicros};
@@ -7,7 +8,8 @@ use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionTemporalStore};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
-    SessionRefreshStore, SessionTemporalProjectionBatchV1,
+    SessionRefreshReceiptRequestV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
+    SessionTemporalProjectionBatchV1,
 };
 
 use super::history::{
@@ -16,10 +18,13 @@ use super::history::{
 };
 use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy,
-    SessionTemporalRefreshProjectionFuture, SessionTemporalRefreshProjector, zero_refresh_coverage,
+    SessionTemporalRefreshProjectionFuture, SessionTemporalRefreshProjector,
+    SessionTemporalRefreshProjectorError, zero_refresh_coverage,
 };
 use super::registry::SessionTemporalRefreshPassReport;
-use super::wake::{SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState};
+use super::wake::{
+    SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState, enabled_idle_notification,
+};
 use super::worker::{
     apply_refresh_effect, run_session_temporal_refresh_pass, run_session_temporal_refresh_scheduler,
 };
@@ -216,9 +221,9 @@ async fn a_wake_served_by_the_running_pass_joins_that_pass() {
     history.entered.notified().await;
 
     let handle = state.handle();
-    let join = handle.wake_and_wait_until_idle(Duration::from_secs(5));
+    let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
     tokio::pin!(join);
-    // The first poll records the pass count and delivers the wake.
+    // The first poll registers the join and delivers the wake.
     assert!(
         std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
             .await
@@ -232,4 +237,274 @@ async fn a_wake_served_by_the_running_pass_joins_that_pass() {
     );
     state.cancel();
     worker.await.expect("refresh worker exits on cancellation");
+}
+
+/// Every history window advances but waits for the test before returning.
+/// This leaves the next window running after the preceding projection drains.
+struct ContinuingHistory {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl SessionHistoricalIngestor for ContinuingHistory {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            SessionHistoricalIngestOutcome::Pending {
+                made_progress: true,
+            }
+        })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
+    fn cancel(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn a_published_wake_does_not_wait_for_the_next_history_window() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-join-before-next-history").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let history = Arc::new(ContinuingHistory {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history.clone();
+    state.wake_history();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    history.entered.notified().await;
+
+    let handle = state.handle();
+    let join = handle.wake_and_wait_for_projection(Duration::from_secs(1));
+    tokio::pin!(join);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    history.release.notify_one();
+    history.entered.notified().await;
+
+    assert!(
+        join.await,
+        "the published wake must join while the next history window is still running"
+    );
+    state.cancel();
+    history.release.notify_one();
+    worker.await.expect("refresh worker exits on cancellation");
+}
+
+#[tokio::test]
+async fn a_live_wake_publishes_before_waiting_for_summary_admission() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-join-before-summary-admission").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let begun = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            SessionId::new("refresh-before-summary").expect("session id"),
+            SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+        ))
+        .await
+        .expect("running refresh");
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let handle = state.handle();
+    let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+    tokio::pin!(join);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(tokio::sync::Semaphore::new(0)),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+
+    assert!(
+        join.await,
+        "summary admission must not hold a live projection"
+    );
+    let receipt = store
+        .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            begun.session_id().clone(),
+        ))
+        .await
+        .expect("read terminal receipt")
+        .expect("joining the wake must publish a terminal receipt");
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
+}
+
+#[tokio::test]
+async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-join-during-summary-admission").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    state.wake();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let idle = enabled_idle_notification(&state);
+            if state.is_idle() {
+                break;
+            }
+            idle.await;
+        }
+    })
+    .await
+    .expect("worker queues for summary admission before advertising idle");
+
+    // Register another profile behind this worker before the live wake. A
+    // projection must not surrender the existing FIFO turn and queue anew.
+    let later = admission.acquire();
+    tokio::pin!(later);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let begun = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            SessionId::new("refresh-during-summary").expect("session id"),
+            SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+        ))
+        .await
+        .expect("running refresh");
+    assert!(
+        state
+            .handle()
+            .wake_and_wait_for_projection(Duration::from_secs(5))
+            .await,
+        "a new wake must publish while summary admission has no permits"
+    );
+    let receipt = store
+        .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            begun.session_id().clone(),
+        ))
+        .await
+        .expect("read terminal receipt")
+        .expect("joining the wake must publish a terminal receipt");
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+    assert_eq!(admission.available_permits(), 0);
+
+    admission.add_permits(1);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(later.as_mut().poll(cx)))
+            .await
+            .is_pending(),
+        "the worker's original summary admission must retain the first turn"
+    );
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
+}
+
+struct ControlledProjector {
+    reject: AtomicBool,
+}
+
+impl SessionTemporalRefreshProjector for ControlledProjector {
+    fn project<'a>(
+        &'a self,
+        database: &'a RegisteredGlobalDbLeaseV1,
+        recovery: SessionRefreshRecoveryV1,
+    ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        Box::pin(async move {
+            if self.reject.load(Ordering::Acquire) {
+                Err(SessionTemporalRefreshProjectorError::terminal(
+                    "fixture_projection_refused",
+                ))
+            } else {
+                CanonicalSessionTemporalProjector
+                    .project(database, recovery)
+                    .await
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn projection_joins_keep_their_result_when_later_work_settles_differently() {
+    for reject_first in [false, true] {
+        let label = format!("refresh-join-result-reject-first-{reject_first}");
+        let harness = RegisteredGlobalDbHarness::open(&label).await;
+        let store = SessionTemporalStore::new(harness.registered.as_ref());
+        begin_empty_refreshes(&store, ["first-projection"]).await;
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        let history = Arc::new(ContinuingHistory {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let ingestor: SharedSessionHistoricalIngestor = history.clone();
+        let projector = Arc::new(ControlledProjector {
+            reject: AtomicBool::new(reject_first),
+        });
+        state.wake_history();
+        let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+            harness.registered.clone(),
+            Arc::clone(&state),
+            projector.clone(),
+            Arc::new(std::sync::RwLock::new(Some(ingestor))),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            SessionTemporalRefreshPolicy::default(),
+        ));
+        history.entered.notified().await;
+
+        let handle = state.handle();
+        let first = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+        tokio::pin!(first);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        history.release.notify_one();
+        history.entered.notified().await;
+
+        // Do not poll the first join again until a different projection has
+        // settled with the opposite result. Neither result may overwrite the
+        // one already delivered to the earlier request.
+        projector.reject.store(!reject_first, Ordering::Release);
+        begin_empty_refreshes(&store, ["second-projection"]).await;
+        let second = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+        tokio::pin!(second);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        history.release.notify_one();
+        assert_eq!(second.await, reject_first);
+        assert_eq!(first.await, !reject_first);
+
+        state.cancel();
+        history.release.notify_one();
+        worker.await.expect("refresh worker exits on cancellation");
+    }
 }
