@@ -1,7 +1,9 @@
+load("@aspect_rules_js//js:defs.bzl", "js_test")
 load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 load("@npm//dashboard:@rsbuild/core/package_json.bzl", rsbuild_bin = "bin")
 load("@npm//dashboard:vitest/package_json.bzl", vitest_bin = "bin")
+load("@npm//dashboard:typescript/package_json.bzl", tsc_bin = "bin")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -32,6 +34,24 @@ vitest_bin.vitest_test(
     ]),
     # Leave CPU capacity for transforms and the coordinator beside the workers.
     args = ["run", "--maxWorkers=2"],
+    chdir = package_name(),
+    exec_properties = {"cpu_count": "4"},
+    tags = ["cpu:4"],
+)
+
+tsc_bin.tsc_test(
+    name = "typecheck",
+    include_types = True,
+    include_transitive_types = True,
+    data = [":dashboard_sources", ":node_modules", "//:node_modules/@types/react"] + glob(["codegen/**", "e2e/**", "stories/**"]),
+    args = ["--noEmit"],
+    chdir = package_name(),
+)
+
+js_test(
+    name = "bundle_determinism_test",
+    entry_point = "scripts/check-bundle-determinism.mjs",
+    data = [":dashboard_sources", ":node_modules"],
     chdir = package_name(),
     exec_properties = {"cpu_count": "4"},
     tags = ["cpu:4"],
