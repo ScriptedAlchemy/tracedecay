@@ -648,21 +648,43 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
         linked_policy_revision.as_str(),
         "the root-selected delivery recorder must retain root B's policy"
     );
+    assert_eq!(
+        delivery.process_boot_id,
+        first.identity().process_boot_id,
+        "delivery and retrieval must share the linked-root producer stream"
+    );
+    let retrieval_sequences: Vec<u64> = [
+        "alias:first",
+        "alias:linked",
+        "alias:after-quiesce",
+        "alias:remounted",
+    ]
+    .into_iter()
+    .map(|event_id| {
+        page.events
+            .iter()
+            .find(|event| event.event_id == event_id)
+            .expect("every linked-root retrieval emission must persist")
+            .producer_sequence
+    })
+    .collect();
+    assert!(retrieval_sequences.windows(2).all(|pair| pair[0] < pair[1]));
     let mut streams: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
-    for event in &page.events {
+    for event in page.events.iter().chain(&delivery_page.events) {
         streams
             .entry(event.process_boot_id.as_str())
             .or_default()
             .insert(event.producer_sequence);
     }
-    // One shared alias stream carries every linked-root emission in order;
-    // the restart after the last-alias shutdown boots a second stream.
+    // The asynchronous delivery recorder shares the retrieval stream and may
+    // publish before or between retrieval events. All five emissions occupy
+    // that stream; restarting after the last alias boots a separate stream.
     assert_eq!(streams.len(), 2);
     assert_eq!(
         streams
             .get(first.identity().process_boot_id.as_str())
             .expect("shared alias stream"),
-        &BTreeSet::from([1, 2, 3, 4])
+        &BTreeSet::from([1, 2, 3, 4, 5])
     );
     assert_eq!(
         streams

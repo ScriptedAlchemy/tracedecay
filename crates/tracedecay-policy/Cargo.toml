@@ -9,10 +9,10 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 schemars.workspace = true
-serde = { version = "1", features = ["derive"] }
-shell-words = "1.1"
+serde = { workspace = true, features = ["derive"] }
+shell-words.workspace = true
 tracedecay-domain = { path = "../tracedecay-domain" }
-tracing = "0.1"
+tracing.workspace = true
 
 [dev-dependencies]
-serde_json = "1"
+serde_json.workspace = true

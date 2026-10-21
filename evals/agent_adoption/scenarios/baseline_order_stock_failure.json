@@ -1,0 +1,30 @@
+{
+  "id": "baseline_order_stock_failure",
+  "category": "product_effectiveness",
+  "hosts": [
+    "claude"
+  ],
+  "fixture": "main",
+  "status": "baseline",
+  "prompt": "If an order requests more units than a warehouse has, how does order placement fail, and which checks are involved?",
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "names reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        },
+        {
+          "id": "names check_availability",
+          "pattern": "\\bcheck_availability\\b"
+        },
+        {
+          "id": "explains failure",
+          "pattern": "\\b(?:Err|error|fails?|insufficient)\\b"
+        }
+      ]
+    }
+  },
+  "notes": "New held-out answer task with an independently checked failure path; included only by explicit baseline-cohort opt-in."
+}
