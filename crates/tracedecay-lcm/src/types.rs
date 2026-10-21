@@ -770,6 +770,11 @@ impl LcmCompressionResponse {
                 })
             }
             (false, None, None) => Ok(LcmCompressionOutcome::Complete),
+            (false, None, Some("critical_pressure_catch_up"))
+                if matches!(self.status.as_str(), "ok" | "best_effort") =>
+            {
+                Ok(LcmCompressionOutcome::Complete)
+            }
             _ => Err(invalid_compression_outcome()),
         }
     }
@@ -915,6 +920,32 @@ mod tests {
             Some("needs_authoritative_summary"),
         );
         assert!(response.take_outcome().is_err());
+    }
+
+    #[test]
+    fn critical_pressure_completion_preserves_the_entire_wire_response() {
+        for (status, reason) in [
+            ("ok", "forced_overflow_recovery"),
+            ("best_effort", "forced_overflow_recovery_replay_over_budget"),
+        ] {
+            let mut response =
+                compression_response(status, reason, None, Some("critical_pressure_catch_up"));
+            response.replay_over_budget = status == "best_effort";
+            response.compression_attempts = 2;
+            response.context_recovery_hint = Some("preserve the freshest tail".to_string());
+            let original = serde_json::to_value(&response).expect("response should serialize");
+
+            let outcome = response
+                .take_outcome()
+                .expect("pressure recovery completed");
+            assert!(matches!(&outcome, LcmCompressionOutcome::Complete));
+            let restored = outcome.into_response(response);
+
+            assert_eq!(
+                serde_json::to_value(restored).expect("response should serialize"),
+                original
+            );
+        }
     }
 
     #[test]

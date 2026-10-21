@@ -1314,6 +1314,57 @@ async fn interrupted_atomic_summary_settlement_resumes_without_duplicate() {
 }
 
 #[tokio::test]
+async fn retained_pressure_recovery_commits_ok_and_best_effort_summaries() {
+    for (cap, expected_status) in [(1, "best_effort"), (10_000, "ok")] {
+        let harness = RegisteredGlobalDbHarness::open("lcm-retained-pressure-recovery").await;
+        let db = harness.registered.clone();
+        let storage_root = db.db_path().parent().unwrap();
+        let session_id = "retained-pressure-recovery-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=4 {
+            db.lcm_ingest_raw_message(storage_root, &message(session_id, ordinal))
+                .await
+                .unwrap();
+        }
+        let mut request = compression_request(session_id);
+        request.current_tokens = Some(20_000);
+        request.overrides.max_assembly_tokens = Some(cap);
+        let bounded = db
+            .lcm_compress_retained_page_guarded(
+                &request,
+                &execution_control(),
+                || Ok(()),
+                retained_guard(None),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(bounded.response.status, expected_status);
+        assert_eq!(
+            bounded.response.retry_status.as_deref(),
+            Some("critical_pressure_catch_up")
+        );
+        assert!(bounded.response.summary_nodes_created > 0);
+        assert_eq!(
+            bounded.response.replay_over_budget,
+            expected_status == "best_effort"
+        );
+
+        drop(db);
+        let restarted = harness.restart().await;
+        let status = restarted
+            .registered
+            .lcm_status("cursor", Some(session_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            status.summary_node_count,
+            bounded.response.summary_nodes_created as i64
+        );
+    }
+}
+
+#[tokio::test]
 async fn retained_commit_defers_whole_session_replay_and_relation_application() {
     let harness = RegisteredGlobalDbHarness::open("lcm-retained-deferred-maintenance").await;
     let db = harness.registered.clone();
