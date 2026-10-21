@@ -171,6 +171,8 @@ def cquery(source_root: Path) -> tuple[str, str]:
             "--config=ci",
             f"deps({TARGET})",
             "--output=graph",
+            "--nograph:factored",
+            "--graph:node_limit=-1",
         ],
         cwd=source_root,
         env=env,
@@ -201,18 +203,23 @@ def parse_graph(graph: str, kinds: str) -> list[dict[str, str]]:
     for line in kinds.splitlines():
         match = re.match(r"(.+?) rule (.+)$", line.strip())
         if match:
-            target_kinds[label_name(match.group(2))] = match.group(1)
+            target_kinds[match.group(2)] = match.group(1)
 
-    edges = [
-        (label_name(parent), label_name(child))
-        for parent, child in re.findall(r'"([^"]+)"\s*->\s*"([^"]+)"', graph)
-    ]
+    # Configuration is part of a node's identity: a crate used by both the
+    # executable and a proc macro can have different target/exec dependencies.
+    # Collapsing those nodes before traversal would include build-only crates.
+    edges = re.findall(r'"([^"]+)"\s*->\s*"([^"]+)"', graph)
+    nodes = {node for edge in edges for node in edge}
+    if any("\\n" in node or "\n" in node for node in nodes):
+        raise ValueError("Bazel inventory graph must use --nograph:factored")
     adjacency: dict[str, list[str]] = {}
     for parent, child in edges:
         adjacency.setdefault(parent, []).append(child)
 
-    root = label_name(TARGET)
-    pending = [root]
+    roots = [node for node in nodes if label_name(node) == TARGET]
+    if len(roots) != 1:
+        raise ValueError("Bazel query did not expose one configured CLI target")
+    pending = roots.copy()
     visited: set[str] = set()
     included: set[str] = set()
     while pending:
@@ -224,15 +231,16 @@ def parse_graph(graph: str, kinds: str) -> list[dict[str, str]]:
         if kind in {"cargo_build_script", "rust_proc_macro", "rust_test"}:
             continue
         if kind == "rust_library":
-            if current.startswith("@"):
-                included.add(current)
-            elif current.startswith("//crates/") or current.startswith("//patches/"):
-                included.add(current)
+            label = label_name(current)
+            if label.startswith("@"):
+                included.add(label)
+            elif label.startswith("//crates/") or label.startswith("//patches/"):
+                included.add(label)
         pending.extend(adjacency.get(current, ()))
 
-    if root not in visited or not included:
+    if not included:
         raise ValueError("Bazel query did not expose the configured CLI Rust dependency graph")
-    return [{"label": label, "kind": target_kinds.get(label, "")} for label in sorted(included)]
+    return [{"label": label, "kind": "rust_library"} for label in sorted(included)]
 
 
 def lock_package_index(source_root: Path) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:

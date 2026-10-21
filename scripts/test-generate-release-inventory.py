@@ -33,7 +33,51 @@ def make_archive(path: Path, payload: bytes) -> None:
         archive.addfile(entry, __import__("io").BytesIO(payload))
 
 
+def configured_graph_preserves_target_and_exec_dependency_boundaries() -> None:
+    root = "//crates/tracedecay-cli:tracedecay (123abc)"
+    shared_target = "@@c__shared-1.0.0//:shared (123abc)"
+    shared_exec = "@@c__shared-1.0.0//:shared (456def)"
+    macro = "@@c__derive-1.0.0//:derive (456def)"
+    shipped = "@@c__runtime-only-1.0.0//:runtime_only (123abc)"
+    build_only = "@@c__build-only-1.0.0//:build_only (456def)"
+    graph = "\n".join(
+        f'"{parent}" -> "{child}";'
+        for parent, child in (
+            (root, shared_target),
+            (root, macro),
+            (shared_target, shipped),
+            (macro, shared_exec),
+            (shared_exec, build_only),
+        )
+    )
+    kinds = "\n".join(
+        (
+            f"rust_binary rule {root}",
+            f"rust_library rule {shared_target}",
+            f"rust_library rule {shared_exec}",
+            f"rust_proc_macro rule {macro}",
+            f"rust_library rule {shipped}",
+            f"rust_library rule {build_only}",
+        )
+    )
+    assert INVENTORY.parse_graph(graph, kinds) == [
+        {"label": "@@c__runtime-only-1.0.0//:runtime_only", "kind": "rust_library"},
+        {"label": "@@c__shared-1.0.0//:shared", "kind": "rust_library"},
+    ]
+
+    # Bazel's default DOT output combines equivalent nodes. An externally
+    # supplied factored graph must not silently lose all but the first crate.
+    factored = f'"{root}" -> "{shared_target}\\n{shipped}";'
+    try:
+        INVENTORY.parse_graph(factored, kinds)
+    except ValueError as error:
+        assert "--nograph:factored" in str(error)
+    else:
+        raise AssertionError("inventory accepted a factored dependency graph")
+
+
 def main() -> None:
+    configured_graph_preserves_target_and_exec_dependency_boundaries()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         source = root / "source"
