@@ -10,8 +10,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::WorkProductEventV1;
 
 use super::{
-    CHECKPOINT_INTERVAL, FromStoreFault, StoreFault, fold_graph_checkpointed, insert_fault,
-    owner_params, recovered_graph_digest, selection_covers,
+    CHECKPOINT_INTERVAL, FromStoreFault, StoreFault, checkpoint, fold_graph_checkpointed,
+    insert_fault, owner_params, recovered_graph_digest, selection_covers,
 };
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
@@ -118,34 +118,11 @@ pub(super) fn publish_in_transaction(
         .map_err(|error| insert_fault(error, PortError::VersionConflict))?;
 
     if entry.sequence.get().saturating_sub(folded.base_sequence) >= CHECKPOINT_INTERVAL {
-        transaction
-            .work_execute(
-                exact_sql_statement(
-                    "INSERT INTO work_product_graph_checkpoints_v1 (
-                        owner_brain_id, owner_profile_id, event_sequence, graph_version,
-                        recovered_graph_digest, graph_payload
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    owner_params(scope)
-                        .into_iter()
-                        .chain([
-                            ExactSqlValue::Integer(
-                                i64::try_from(entry.sequence.get())
-                                    .map_err(|_| PortError::Unavailable)?,
-                            ),
-                            ExactSqlValue::Integer(
-                                i64::try_from(graph.version().get())
-                                    .map_err(|_| PortError::Unavailable)?,
-                            ),
-                            ExactSqlValue::Text(digest.as_str().to_owned()),
-                            ExactSqlValue::Text(
-                                serde_json::to_string(graph).map_err(|_| PortError::Unavailable)?,
-                            ),
-                        ])
-                        .collect(),
-                )
-                .map_err(PortError::from_fault)?,
-            )
-            .map_err(|error| insert_fault(error, PortError::VersionConflict))?;
+        checkpoint::write(transaction, scope, entry.sequence, graph, &digest)
+            .map_err(PortError::from_fault)?;
+    }
+    if let Some(from) = folded.invalidated_from {
+        checkpoint::clear_invalidation(transaction, scope, from).map_err(PortError::from_fault)?;
     }
 
     VerifiedWorkGraphVersionV1::new(

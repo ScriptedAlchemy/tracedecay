@@ -18,19 +18,25 @@ mod work_product_graph;
 use std::collections::BTreeSet;
 
 use tracedecay_contracts::{
-    AddWorkTaskRequestV1, CreateWorkProductRequestV1, OpaqueCursor, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
+    AddWorkTaskRequestV1, CreateWorkProductRequestV1, DecideWorkProposalRequestV1, OpaqueCursor,
+    PrefetchedWorkGraphReadV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
     WorkProductAuthorizedRelationScopeV1, WorkProductExpectedAuthorityV1,
-    WorkProductMutationIdentityV1, WorkProductSelectionScopeV1, WorkStorageFailureV1,
+    WorkProductMutationIdentityV1, WorkProductMutationRequestV1, WorkProductMutationServiceV1,
+    WorkProductSelectionScopeV1, WorkStorageFailureV1,
 };
 use tracedecay_domain::{
-    CursorBindingMismatchV1, ProjectId, TaskId, UtcMicros, WorkGraphVersionV1,
-    WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkRuntimeProjectionCoverageV1,
+    AcceptanceCriterionId, CursorBindingMismatchV1, MAX_WORK_PRODUCT_TEXT_BYTES, ProjectId,
+    ProposalId, TaskId, UtcMicros, WorkAcceptanceCriterionV1, WorkGraphVersionV1, WorkItemInputV1,
+    WorkItemV1, WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductEventV1,
+    WorkProductGraphV1, WorkProposalDispositionV1, WorkProposalV1, WorkRouteDecisionV1,
+    WorkRuntimeProjectionCoverageV1, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
+    canonical_sha256,
 };
 
 use crate::work_registered_store::RegisteredWorkStore;
 
-use tracedecay_domain::test_fixtures::id;
+use tracedecay_domain::test_fixtures::{digest, id};
 
 use work_product_graph::{
     PROJECT, PROJECTED_AT, REPOSITORY, binding, context, create, graph, item, mutation, mutations,
@@ -563,35 +569,483 @@ fn appends_resume_from_a_checkpoint_and_survive_restart_across_checkpoint_bounda
         );
     }
 
-    store.inspect(|connection| {
-        connection
-            .execute(
-                "UPDATE work_product_graph_checkpoints_v1 SET recovered_graph_digest = 'invalid'",
-                [],
-            )
-            .expect("corrupt every checkpoint");
-    });
     let mut change = mutation("command.work-product.checkpoints.after", UtcMicros(2_000));
     change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
         verified_version: latest.verified_graph_version().clone(),
     };
-    let refused = mutations(&store)
+    let next = AddWorkTaskRequestV1 {
+        selection: repository_selection(),
+        item: item("task.checkpoint.after", &[], 1),
+        mutation: change,
+    };
+    let refuses_checkpoint = || {
+        assert_eq!(
+            mutations(&store)
+                .add_task(&context(), &binding(), next.clone())
+                .expect_err("a damaged checkpoint is never a fold base"),
+            WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid)
+        );
+        assert_eq!(store.count("work_product_events_v1"), EVENTS);
+        assert_eq!(store.count("work_product_graph_versions_v1"), EVENTS);
+    };
+
+    // Even valid JSON with the expected length must match the graph digest.
+    store.inspect(|connection| {
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE work_product_graph_checkpoint_chunks_v1
+                     SET chunk_payload = CAST(replace(CAST(chunk_payload AS TEXT),
+                         'Deliver task.checkpoint.0', 'Xeliver task.checkpoint.0') AS BLOB)
+                     WHERE event_sequence = 512 AND chunk_index = 0
+                       AND instr(CAST(chunk_payload AS TEXT), 'Deliver task.checkpoint.0') > 0",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+    });
+    refuses_checkpoint();
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_graph_checkpoint_chunks_v1
+                 SET chunk_payload = CAST(replace(CAST(chunk_payload AS TEXT),
+                     'Xeliver task.checkpoint.0', 'Deliver task.checkpoint.0') AS BLOB)
+                 WHERE event_sequence = 512 AND chunk_index = 0",
+                [],
+            )
+            .unwrap();
+    });
+
+    // A missing first chunk, a mismatched count, and a truncated payload all
+    // refuse the append without committing its event or publication.
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_graph_checkpoint_chunks_v1 SET chunk_index = 999
+                 WHERE event_sequence = 512 AND chunk_index = 0",
+                [],
+            )
+            .unwrap();
+    });
+    refuses_checkpoint();
+    store.inspect(|connection| {
+        connection
+            .execute_batch(
+                "UPDATE work_product_graph_checkpoint_chunks_v1 SET chunk_index = 0
+                 WHERE event_sequence = 512 AND chunk_index = 999;
+                 UPDATE work_product_graph_checkpoints_v1 SET chunk_count = chunk_count + 1
+                 WHERE event_sequence = 512;",
+            )
+            .unwrap();
+    });
+    refuses_checkpoint();
+    store.inspect(|connection| {
+        connection
+            .execute_batch(
+                "UPDATE work_product_graph_checkpoints_v1
+                 SET chunk_count = chunk_count - 1, payload_bytes = payload_bytes + 1
+                 WHERE event_sequence = 512;",
+            )
+            .unwrap();
+    });
+    refuses_checkpoint();
+    store.inspect(|connection| {
+        connection
+            .execute_batch(
+                "UPDATE work_product_graph_checkpoints_v1 SET payload_bytes = payload_bytes - 1
+                 WHERE event_sequence = 512;
+                 UPDATE work_product_graph_checkpoints_v1 SET recovered_graph_digest = 'invalid';",
+            )
+            .unwrap();
+    });
+    refuses_checkpoint();
+
+    // A cache can be internally consistent without representing the graph
+    // that the journal published. Its header must also match that publication.
+    let canonical = current.entries()[0].graph();
+    let forged = WorkProductGraphV1::new(
+        WorkGraphVersionV1::new(512).unwrap(),
+        canonical.initiatives().to_vec(),
+        canonical.plans().to_vec(),
+        canonical.milestones().to_vec(),
+        vec![item("task.forged", &[], 1)],
+    )
+    .unwrap();
+    let forged_digest =
+        canonical_sha256(&("tracedecay.rusqlite-runtime.work-product-graph.v1", &forged)).unwrap();
+    let payload = serde_json::to_vec(&forged).unwrap();
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "DELETE FROM work_product_graph_checkpoint_chunks_v1 WHERE event_sequence = 512",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO work_product_graph_checkpoint_chunks_v1
+                 SELECT owner_brain_id, owner_profile_id, event_sequence, 0, ?1
+                 FROM work_product_graph_checkpoints_v1 WHERE event_sequence = 512",
+                [&payload],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE work_product_graph_checkpoints_v1
+                 SET recovered_graph_digest = ?1, payload_bytes = ?2, chunk_count = 1
+                 WHERE event_sequence = 512",
+                rusqlite::params![forged_digest.as_str(), payload.len() as i64],
+            )
+            .unwrap();
+    });
+    refuses_checkpoint();
+
+    // The daemon can prepare a valid current read before entering the writer.
+    // Corrupting the prefix after that read must still be caught by the real
+    // writer, even though the application receives its valid pre-read.
+    let request = WorkProductMutationRequestV1::AddTask(Box::new(next));
+    let prefetched = PrefetchedWorkGraphReadV1::for_mutation(store.storage(), &context(), &request);
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_events_v1
+                 SET event_payload = json_set(event_payload, '$.sequence', 99)
+                 WHERE sequence = 1",
+                [],
+            )
+            .unwrap();
+    });
+    assert_eq!(store.count("work_product_graph_checkpoints_v1"), 0);
+    assert_eq!(store.count("work_product_graph_checkpoint_chunks_v1"), 0);
+    assert_eq!(
+        reads(&store)
+            .read_graph(
+                &context(),
+                WorkGraphReadRequestV1::current(repository_selection(), UtcMicros(2_000)),
+            )
+            .expect_err("the full reader rejects the changed historical sequence"),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+    );
+    let revisions = request.mutation_identity().revisions.clone();
+    assert_eq!(
+        WorkProductMutationServiceV1::new(
+            prefetched,
+            store.storage().clone(),
+            store.storage().clone(),
+        )
+        .mutate(&context(), &binding(), request.clone(), &revisions)
+        .expect_err("the writer must independently reject the corrupted prefix"),
+        WorkProductApplicationErrorV1::EventAuthorityUnavailable
+    );
+    assert_eq!(store.count("work_product_events_v1"), EVENTS);
+    assert_eq!(store.count("work_product_graph_versions_v1"), EVENTS);
+
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_events_v1
+                 SET event_payload = json_set(event_payload, '$.sequence', 1)
+                 WHERE sequence = 1",
+                [],
+            )
+            .unwrap();
+    });
+    let prefetched = PrefetchedWorkGraphReadV1::for_mutation(store.storage(), &context(), &request);
+    store.inspect(|connection| {
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE work_product_events_v1
+                     SET event_payload = json_set(event_payload,
+                         '$.payload.graph.items[0].input.title', 'Changed historical title')
+                     WHERE sequence = 1
+                       AND json_extract(event_payload, '$.payload.graph.items[0].input.title')
+                           = 'Deliver task.checkpoint.0'",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+    });
+    assert_eq!(
+        reads(&store)
+            .read_graph(
+                &context(),
+                WorkGraphReadRequestV1::current(repository_selection(), UtcMicros(2_000)),
+            )
+            .expect_err("a valid graph with changed contents does not match its publication"),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+    );
+    assert_eq!(
+        WorkProductMutationServiceV1::new(
+            prefetched,
+            store.storage().clone(),
+            store.storage().clone(),
+        )
+        .mutate(&context(), &binding(), request, &revisions)
+        .expect_err("the writer verifies the recovered head before extending changed history"),
+        WorkProductApplicationErrorV1::EventAuthorityUnavailable
+    );
+    assert_eq!(store.count("work_product_events_v1"), EVENTS);
+    assert_eq!(store.count("work_product_graph_versions_v1"), EVENTS);
+}
+
+#[test]
+fn historical_changes_overwritten_by_later_events_still_block_new_publications() {
+    let store = RegisteredWorkStore::start("work-product-overwritten-history");
+    let created = create(
+        &store,
+        "command.work-product.overwritten.create",
+        UtcMicros(100),
+        vec![item("task.overwritten", &[], 1)],
+    )
+    .unwrap();
+    let mut change = mutation("command.work-product.overwritten.accept", UtcMicros(150));
+    change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+        verified_version: created.verified_graph_version().clone(),
+    };
+    let accepted = mutations(&store)
+        .decide_proposal(
+            &context(),
+            &binding(),
+            DecideWorkProposalRequestV1 {
+                selection: repository_selection(),
+                proposal: WorkProposalV1::new(
+                    id::<ProposalId>("proposal.overwritten"),
+                    id("task.overwritten"),
+                    WorkGraphVersionV1::initial(),
+                    WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).unwrap(),
+                    WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "complete").unwrap(),
+                    Vec::new(),
+                    WorkRouteDecisionV1::abstain("no execution requested").unwrap(),
+                    "accept the task proposal".to_owned(),
+                    digest('a'),
+                    digest('b'),
+                )
+                .unwrap(),
+                disposition: WorkProposalDispositionV1::Accepted,
+                mutation: change,
+            },
+        )
+        .unwrap();
+    let original = read_current(&store).unwrap();
+    assert_eq!(store.count("work_product_graph_checkpoints_v1"), 0);
+    assert_eq!(store.count("work_product_journal_invalidations_v1"), 0);
+    let mut change = mutation("command.work-product.overwritten.after", UtcMicros(200));
+    change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+        verified_version: accepted.verified_graph_version().clone(),
+    };
+    let request = WorkProductMutationRequestV1::AddTask(Box::new(AddWorkTaskRequestV1 {
+        selection: repository_selection(),
+        item: item("task.overwritten.after", &[], 1),
+        mutation: change,
+    }));
+    let prefetched = PrefetchedWorkGraphReadV1::for_mutation(store.storage(), &context(), &request);
+    let altered: WorkProductEventV1 = store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_events_v1
+                 SET event_payload = json_set(event_payload,
+                     '$.payload.graph.items[0].input.updated_at', 11)
+                 WHERE sequence = 1",
+                [],
+            )
+            .unwrap();
+        let payload: String = connection
+            .query_row(
+                "SELECT event_payload FROM work_product_events_v1 WHERE sequence = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&payload).unwrap()
+    });
+    let WorkProductEventPayloadV1::Created { graph } = altered.payload() else {
+        panic!("the first event creates the graph");
+    };
+    let WorkProductEventPayloadV1::Changed { change } = accepted.event().payload() else {
+        panic!("accepting the proposal changes the graph");
+    };
+    let recovered_head = graph.clone().apply(change.as_ref().clone()).unwrap();
+    assert_eq!(
+        &recovered_head,
+        original.entries()[0].graph(),
+        "the later acceptance overwrites updated_at, leaving the exact current graph unchanged"
+    );
+    assert_eq!(store.count("work_product_journal_invalidations_v1"), 1);
+    assert_eq!(
+        read_current(&store).expect_err("a matching head cannot verify the changed first version"),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+    );
+    let revisions = request.mutation_identity().revisions.clone();
+    assert_eq!(
+        WorkProductMutationServiceV1::new(
+            prefetched,
+            store.storage().clone(),
+            store.storage().clone(),
+        )
+        .mutate(&context(), &binding(), request.clone(), &revisions)
+        .expect_err("the writer checks every affected publication, even without a checkpoint"),
+        WorkProductApplicationErrorV1::EventAuthorityUnavailable
+    );
+    assert_eq!(store.count("work_product_events_v1"), 2);
+    assert_eq!(store.count("work_product_graph_versions_v1"), 2);
+    assert_eq!(store.count("work_product_journal_invalidations_v1"), 1);
+
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_events_v1
+                 SET event_payload = json_set(event_payload,
+                     '$.payload.graph.items[0].input.updated_at', 10)
+                 WHERE sequence = 1",
+                [],
+            )
+            .unwrap();
+    });
+    mutations(&store)
+        .mutate(&context(), &binding(), request, &revisions)
+        .expect("restored history is verified before its marker is cleared with the next commit");
+    assert_eq!(store.count("work_product_events_v1"), 3);
+    assert_eq!(store.count("work_product_graph_versions_v1"), 3);
+    assert_eq!(store.count("work_product_journal_invalidations_v1"), 0);
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "DELETE FROM work_product_graph_versions_v1 WHERE event_sequence = 2",
+                [],
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        read_current(&store).expect_err("a missing intermediate publication is not skipped"),
+        WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+    );
+}
+
+#[test]
+fn a_graph_larger_than_the_sql_transport_limit_checkpoints_and_resumes_after_restart() {
+    const CRITERIA: usize = 4_096;
+    let store = RegisteredWorkStore::start("work-product-large-checkpoint");
+    let mut latest = create(
+        &store,
+        "command.work-product.large-checkpoint.create",
+        UtcMicros(100),
+        vec![item("task.large-checkpoint.0", &[], 1)],
+    )
+    .unwrap();
+    // Put the large, individually legal events at the end of the interval so
+    // this checks the real 64 MiB boundary without replaying a large graph for
+    // hundreds of setup mutations.
+    for index in 1..256 {
+        let task = format!("task.large-checkpoint.{index}");
+        let small = item(&task, &[], 1);
+        let next_item = if index >= 252 {
+            WorkItemV1::new(WorkItemInputV1 {
+                task_id: small.task_id().clone(),
+                hierarchy: small.hierarchy().clone(),
+                title: small.title().to_owned(),
+                dependencies: BTreeSet::new(),
+                informational_relations: BTreeSet::new(),
+                causal_candidates: BTreeSet::new(),
+                acceptance_criteria: (0..CRITERIA)
+                    .map(|criterion| {
+                        WorkAcceptanceCriterionV1::new(
+                            id::<AcceptanceCriterionId>(&format!("criterion.{task}.{criterion}")),
+                            "x".repeat(MAX_WORK_PRODUCT_TEXT_BYTES),
+                            true,
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+                effort: 1,
+                scheduled_at: None,
+                deadline: Some(UtcMicros(1_000)),
+                created_at: UtcMicros(10),
+                updated_at: UtcMicros(10),
+            })
+            .unwrap()
+        } else {
+            small
+        };
+        let mut change = mutation(
+            &format!("command.work-product.large-checkpoint.add.{index}"),
+            UtcMicros(100 + index),
+        );
+        change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+            verified_version: latest.verified_graph_version().clone(),
+        };
+        latest = mutations(&store)
+            .add_task(
+                &context(),
+                &binding(),
+                AddWorkTaskRequestV1 {
+                    selection: repository_selection(),
+                    item: next_item,
+                    mutation: change,
+                },
+            )
+            .expect("an individually legal event can cross a large checkpoint boundary");
+    }
+    let (payload_bytes, chunk_count, largest_chunk): (i64, i64, i64) =
+        store.inspect(|connection| {
+            connection
+                .query_row(
+                    "SELECT checkpoint.payload_bytes, checkpoint.chunk_count,
+                        max(length(chunk.chunk_payload))
+                 FROM work_product_graph_checkpoints_v1 AS checkpoint
+                 JOIN work_product_graph_checkpoint_chunks_v1 AS chunk
+                   USING (owner_brain_id, owner_profile_id, event_sequence)
+                 WHERE checkpoint.event_sequence = 256",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap()
+        });
+    assert!(payload_bytes > 64 * 1024 * 1024);
+    assert!(chunk_count > 64);
+    assert!(largest_chunk <= 1024 * 1024);
+    assert_eq!(store.count("work_product_events_v1"), 256);
+    assert_eq!(store.count("work_product_graph_versions_v1"), 256);
+
+    let store = store.restart("work-product-large-checkpoint");
+    let mut change = mutation(
+        "command.work-product.large-checkpoint.after",
+        UtcMicros(356),
+    );
+    change.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+        verified_version: latest.verified_graph_version().clone(),
+    };
+    let appended = mutations(&store)
         .add_task(
             &context(),
             &binding(),
             AddWorkTaskRequestV1 {
                 selection: repository_selection(),
-                item: item("task.checkpoint.after", &[], 1),
+                item: item("task.large-checkpoint.after", &[], 1),
                 mutation: change,
             },
         )
-        .expect_err("a checkpoint that does not recompute is never a fold base");
+        .expect("a large checkpoint resumes through bounded SQL results after restart");
+    let current = read_current(&store).expect("large journal pages remain readable in full");
     assert_eq!(
-        refused,
-        WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid)
+        current.entries()[0].verified_version(),
+        appended.verified_graph_version()
     );
-    assert_eq!(store.count("work_product_events_v1"), EVENTS);
-    assert_eq!(store.count("work_product_graph_versions_v1"), EVENTS);
+    assert_eq!(current.entries()[0].graph().items().len(), 257);
+    for index in 252..256 {
+        assert_eq!(
+            current.entries()[0]
+                .graph()
+                .item(&id(&format!("task.large-checkpoint.{index}")))
+                .unwrap()
+                .acceptance_criteria()
+                .len(),
+            CRITERIA
+        );
+    }
 }
 
 #[test]
