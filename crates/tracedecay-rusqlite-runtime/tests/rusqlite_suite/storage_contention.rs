@@ -1246,7 +1246,12 @@ fn persisted_writer_authority_is_scoped_to_the_shard_and_incarnation() {
             .unwrap();
         let handle = attachment.exact_sql_handle().unwrap();
         assert_eq!(
-            persisted_writer_authority_epoch(&handle, &binding, Duration::ZERO).unwrap(),
+            run(persisted_writer_authority_epoch(
+                &handle,
+                &binding,
+                Duration::ZERO
+            ))
+            .unwrap(),
             expected
         );
         attachment.drain().unwrap();
@@ -1264,7 +1269,11 @@ fn persisted_writer_authority_is_scoped_to_the_shard_and_incarnation() {
         .unwrap();
     let handle = attachment.exact_sql_handle().unwrap();
     assert!(matches!(
-        persisted_writer_authority_epoch(&handle, &current, Duration::ZERO),
+        run(persisted_writer_authority_epoch(
+            &handle,
+            &current,
+            Duration::ZERO
+        )),
         Err(PersistedWriterAuthorityError::Corrupt {
             field: "authority_epoch"
         })

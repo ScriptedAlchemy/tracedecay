@@ -456,15 +456,34 @@ impl StoreRuntimeRegistry {
                             persisted,
                         },
                     ) if !converged_on_persisted_authority => {
-                        converged_on_persisted_authority = true;
                         retain_authority_epoch_floor(persisted);
+                        let retained_graph_is_stale = self
+                            .lock_state()
+                            .graph_publications
+                            .get(request.key())
+                            .is_some_and(|graph| graph.binding.authority_epoch < persisted);
+                        if retained_graph_is_stale {
+                            // Graph owner and operation leases retain this
+                            // exact immutable binding. A retry would reuse the
+                            // same stale epoch, and rebinding here would bypass
+                            // their retirement authority. Fail once; after the
+                            // owners release, the retained floor admits a new
+                            // shared graph/relational binding above the ledger.
+                            return StoreRuntimeOpenResult::Failed(
+                                StoreRuntimeRegistryFailure::WriterAuthorityBehindPersisted {
+                                    binding,
+                                    persisted,
+                                },
+                            );
+                        }
+                        converged_on_persisted_authority = true;
                         tracing::warn!(
-                            event = "store_writer_authority_converged",
+                            event = "store_writer_authority_floor_retained",
                             shard = ?binding.shard_id,
                             incarnation = binding.incarnation.get(),
                             requested_epoch = binding.authority_epoch.get(),
                             persisted_epoch = persisted.get(),
-                            "store ledger holds a newer writer authority; reopening above it"
+                            "store ledger holds a newer writer authority; retrying above its retained epoch floor"
                         );
                     }
                     result => return result,

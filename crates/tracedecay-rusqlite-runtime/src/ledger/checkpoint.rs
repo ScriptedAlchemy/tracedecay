@@ -60,8 +60,9 @@ impl From<ExactSqlError> for PersistedWriterAuthorityError {
 /// incarnation, or `None` for a store no writer of that incarnation has
 /// committed to. Read through the attached runtime's own readers, before the
 /// runtime is published, so a reopen can learn whether its allocated epoch
-/// is already behind the store.
-pub fn persisted_writer_authority_epoch(
+/// is already behind the store. Reader admission and execution are awaited
+/// off the native runtime worker through the existing exact-SQL async port.
+pub async fn persisted_writer_authority_epoch(
     handle: &ExactSqlHandle,
     binding: &StoreRuntimeBindingV1,
     max_wait: Duration,
@@ -73,29 +74,33 @@ pub fn persisted_writer_authority_epoch(
         BindingKey::from_binding(binding).map_err(|_| PersistedWriterAuthorityError::Corrupt {
             field: "shard_json",
         })?;
-    let schema = handle.query(
-        ExactSqlStatement::new(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)"
-                .to_owned(),
-            vec![ExactSqlValue::Text(CHECKPOINT_TABLE.to_owned())],
-        )?,
-        max_wait,
-    )?;
+    let schema = handle
+        .query_async(
+            ExactSqlStatement::new(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)"
+                    .to_owned(),
+                vec![ExactSqlValue::Text(CHECKPOINT_TABLE.to_owned())],
+            )?,
+            max_wait,
+        )
+        .await?;
     match schema.rows.first().and_then(|row| row.values.first()) {
         Some(ExactSqlValue::Integer(0)) => return Ok(None),
         Some(ExactSqlValue::Integer(1)) => {}
         _ => return Err(PersistedWriterAuthorityError::Corrupt { field: "schema" }),
     }
-    let rows = handle.query(
-        ExactSqlStatement::new(
-            SELECT_PERSISTED_AUTHORITY_EPOCH.to_owned(),
-            vec![
-                ExactSqlValue::Text(key.shard_json),
-                ExactSqlValue::Integer(key.incarnation_sql),
-            ],
-        )?,
-        max_wait,
-    )?;
+    let rows = handle
+        .query_async(
+            ExactSqlStatement::new(
+                SELECT_PERSISTED_AUTHORITY_EPOCH.to_owned(),
+                vec![
+                    ExactSqlValue::Text(key.shard_json),
+                    ExactSqlValue::Integer(key.incarnation_sql),
+                ],
+            )?,
+            max_wait,
+        )
+        .await?;
     let Some(row) = rows.rows.first() else {
         return Ok(None);
     };

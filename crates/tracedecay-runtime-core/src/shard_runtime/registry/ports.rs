@@ -178,8 +178,27 @@ async fn publish_lifecycle_runtime(
         && request.access == StoreRuntimeAccessMode::ReadWrite
         && let Err(error) =
             verify_writer_authority_before_existing_publication(&request, attachment.as_physical())
+                .await
     {
-        attachment.abort(request.locator.is_prospective());
+        // This failed attachment must finish closing before the registry can
+        // retry at a new epoch. Joining its physical workers is blocking work.
+        let created = request.locator.is_prospective();
+        crate::native_runtime::spawn_blocking(move || {
+            if created {
+                attachment.0.abort_initialization()
+            } else {
+                attachment.0.drain()?;
+                attachment.0.close_and_join()
+            }
+        })
+        .await
+        .and_then(|closed| closed)
+        .map_err(
+            |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "close runtime after writer authority refusal",
+                message,
+            },
+        )?;
         return Err(error);
     }
     if let Err(error) = runtime.transition(RuntimeMaintenanceStateV1::Ready) {
@@ -200,9 +219,9 @@ async fn publish_lifecycle_runtime(
 
 /// A shard whose ledger already holds a newer writer authority for this
 /// incarnation must not be published at the stale binding: every submit
-/// through it would be fenced. The registry raises its epoch floor past the
-/// persisted authority and opens again.
-fn verify_writer_authority_before_existing_publication(
+/// through it would be fenced. The registry retains the persisted epoch floor
+/// and retries only if no live graph publication still owns the stale binding.
+async fn verify_writer_authority_before_existing_publication(
     request: &ShardRuntimeBuildRequest,
     attachment: &dyn PhysicalRuntimeAttachment,
 ) -> Result<(), StoreRuntimeRegistryFailure> {
@@ -216,8 +235,11 @@ fn verify_writer_authority_before_existing_publication(
     let persisted = tracedecay_rusqlite_runtime::runtime_ledger::persisted_writer_authority_epoch(
         &handle.read_only_clone(),
         &request.binding,
+        // Publication has not exposed this attachment's fresh reader pool to
+        // any clients, so this admission cannot contend with user snapshots.
         Duration::ZERO,
     )
+    .await
     .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
         operation: OPERATION,
         message: error.to_string(),

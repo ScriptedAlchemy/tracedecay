@@ -1191,8 +1191,9 @@ pub enum StoreRuntimeRegistryFailure {
     AuthorityEpochExhausted,
     /// The store's ledger already holds a newer writer authority for this
     /// binding's shard and incarnation, so a writer published at the binding
-    /// could never commit. `open` raises the process epoch floor past
-    /// `persisted` and opens once more before it reports this.
+    /// could never commit. `open` retains `persisted` as the process epoch
+    /// floor and retries once unless a live graph publication still owns the
+    /// stale binding; its owners must release that binding before reopening.
     WriterAuthorityBehindPersisted {
         binding: Box<StoreRuntimeBindingV1>,
         persisted: StoreAuthorityEpochV1,
