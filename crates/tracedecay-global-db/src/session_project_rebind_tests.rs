@@ -974,9 +974,9 @@ async fn check_parked_codex_upgrade(resume_rebuild: bool) {
         projection_checkpoint(&harness.registered).await,
         checkpoint_before
     );
-    for index in 1..sessions.len() {
+    for (index, observation) in parked.iter().enumerate().skip(1) {
         assert_eq!(
-            parked_projection_state(&harness.registered, parked[index].observation_id().as_str())
+            parked_projection_state(&harness.registered, observation.observation_id().as_str())
                 .await,
             (Some(i64::MAX), Some("output_collision".to_owned()), Some(0)),
         );
@@ -1057,9 +1057,9 @@ async fn check_parked_codex_upgrade(resume_rebuild: bool) {
             .text,
         ORIGINAL_TEXT
     );
-    for index in 1..sessions.len() {
+    for observation in parked.iter().skip(1) {
         assert_eq!(
-            parked_projection_state(&harness.registered, parked[index].observation_id().as_str())
+            parked_projection_state(&harness.registered, observation.observation_id().as_str())
                 .await,
             (Some(i64::MAX), Some("output_collision".to_owned()), Some(0)),
         );
