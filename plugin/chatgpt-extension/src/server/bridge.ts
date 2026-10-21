@@ -19,6 +19,7 @@ import type {
 } from "@tracedecay/sdk";
 import type { DaemonState, Failure, ProjectRef } from "../shared/view.js";
 import { httpBaseUrl, probeDaemon, readDaemonAuthority, type AuthorityLookup, type DaemonAuthorityRecord } from "./authority.js";
+import { RegistryClient } from "./registry-client.js";
 import { classifyCode, DaemonFailure, ServeSession, toFailure } from "./serve-client.js";
 
 export type BridgeOptions = {
@@ -90,29 +91,21 @@ export class DaemonBridge {
     return this.#registry;
   }
 
-  #registryClient(): TraceDecayClient {
-    return createClient({
-      baseUrl: "http://127.0.0.1",
-      projectId: "registry",
-      token: "unused-registry-reads-use-mcp",
-      mcp: {
-        callTool: (toolName, request, options) =>
-          this.#registrySession().callJson(toolName, asRecord(request), options.signal),
-      },
-    });
+  #registryClient(): RegistryClient {
+    return new RegistryClient((toolName, request, signal) => this.#registrySession().callJson(toolName, request, signal));
   }
 
   async listProjects(signal?: AbortSignal): Promise<readonly ProjectRef[]> {
     await this.#requireAuthority();
     const client = this.#registryClient();
-    const listed = await runSdk(() => client.operations.project_list({ limit: 10 }, optional(signal)));
+    const listed = await runSdk(() => client.projectList({ limit: 10 }, signal));
     return listed.projects.map(projectRef);
   }
 
   async resolveProject(projectId: string, signal?: AbortSignal): Promise<ProjectRef> {
     await this.#requireAuthority();
     const client = this.#registryClient();
-    const context = await runSdk(() => client.operations.project_context({ project_selector: { project_id: projectId } }, optional(signal)));
+    const context = await runSdk(() => client.projectContext({ project_selector: { project_id: projectId } }, signal));
     if (context.status === "not_found") {
       const cached = this.#projects.get(projectId);
       this.#projects.delete(projectId);

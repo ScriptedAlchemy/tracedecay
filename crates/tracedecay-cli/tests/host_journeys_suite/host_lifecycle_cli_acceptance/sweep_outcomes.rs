@@ -7,6 +7,12 @@ use std::process::Output;
 
 use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
 #[cfg(unix)]
+use tracedecay_daemon_identity::current_daemon_connection;
+#[cfg(unix)]
+use tracedecay_daemon_protocol::DaemonEndpoint;
+#[cfg(target_os = "linux")]
+use tracedecay_daemon_protocol::unix_socket_path_within_limit;
+#[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[cfg(unix)]
@@ -387,13 +393,21 @@ impl ProfileDaemon {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let daemon = Self(command.spawn().unwrap());
-        let socket = cli.profile.join("daemon.sock");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        // Deep worker paths can move the socket outside the profile. Follow
+        // the same profile-owned authority that production clients discover.
+        while !current_daemon_connection(&cli.profile).is_ok_and(|connection| {
+            match connection.endpoint() {
+                DaemonEndpoint::Unix(socket) => {
+                    std::os::unix::net::UnixStream::connect(socket).is_ok()
+                }
+                DaemonEndpoint::Loopback(address) => std::net::TcpStream::connect(address).is_ok(),
+            }
+        }) {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the profile daemon never listened at {}",
-                socket.display()
+                "the registered daemon never listened for profile {}",
+                cli.profile.display()
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
@@ -864,7 +878,12 @@ fn doctor_observes_copilots_vscode_settings_without_failing_on_them() {
 #[cfg(target_os = "linux")]
 #[test]
 fn doctor_warns_on_detected_hosts_without_a_tracedecay_integration() {
-    let cli = IsolatedCli::new();
+    let mut cli = IsolatedCli::new();
+    cli.profile = cli.home.path().join("profile".repeat(20));
+    assert!(
+        !unix_socket_path_within_limit(&cli.profile.join("daemon.sock")),
+        "this journey must exercise production's short endpoint for a deep profile"
+    );
     install_cline(&cli);
     fs::create_dir_all(cli.home.path().join(".config/zed")).unwrap();
     fs::create_dir_all(cli.home.path().join(".gemini/antigravity")).unwrap();

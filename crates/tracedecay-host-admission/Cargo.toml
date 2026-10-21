@@ -19,11 +19,11 @@ test-transport = ["test-helpers", "tracedecay-runtime-core/test-transport"]
 
 [dependencies]
 asupersync.workspace = true
-futures-util = "0.3.33"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tracing = "0.1"
+futures-util.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-global-db = { path = "../tracedecay-global-db" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
@@ -34,7 +34,7 @@ tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-store = { path = "../tracedecay-store" }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 tracedecay-private-fs = { path = "../tracedecay-private-fs", features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
