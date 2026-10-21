@@ -154,6 +154,7 @@ jobs:
             .github/actions/package-release
             .github/actions/setup-bazel
             scripts/generate-release-inventory.py
+          sparse-checkout-cone-mode: false
 
       - name: Set up Bazel for inventory-only recovery
         if: matrix.inventory_only == true

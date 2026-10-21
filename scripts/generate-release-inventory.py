@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -15,6 +16,12 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
+
+# Scope-only generation does not need the dashboard lockfile reader.
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 
 TARGET = "//crates/tracedecay-cli:tracedecay"
@@ -365,8 +372,6 @@ def checksum_from_sri(integrity: str) -> dict[str, str] | None:
         algorithm, separator, encoded = item.partition("-")
         if not separator or algorithm.lower() not in {"sha1", "sha256", "sha384", "sha512"}:
             continue
-        import base64
-
         try:
             digest = base64.b64decode(encoded, validate=True).hex()
         except ValueError:
@@ -401,10 +406,8 @@ def npm_package_identity(key: str) -> tuple[str, str]:
 
 
 def npm_components(source_root: Path, platform: str) -> list[dict[str, object]]:
-    try:
-        import yaml
-    except ImportError as error:
-        raise RuntimeError("PyYAML is required to read the locked dashboard package graph") from error
+    if yaml is None:
+        raise RuntimeError("PyYAML is required to read the locked dashboard package graph")
 
     documents = yaml.safe_load_all(
         (source_root / "pnpm-lock.yaml").read_text(encoding="utf-8")
