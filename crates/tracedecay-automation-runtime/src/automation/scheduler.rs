@@ -1586,7 +1586,96 @@ mod tests {
         let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(leftovers, 1, "staging files must be cleaned up");
         std::fs::write(scheduler_control_path(dir.path()), b"{").unwrap();
-        assert!(load_scheduler_control(dir.path()).await.is_err());
+        assert!(matches!(
+            load_scheduler_control(dir.path()).await,
+            Err(TraceDecayError::Config { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn scheduler_control_readers_observe_complete_states_during_replacement() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempdir().unwrap();
+        save_scheduler_control(dir.path(), &AutomationSchedulerControl { paused: true })
+            .await
+            .unwrap();
+        let ready = tokio::sync::Barrier::new(2);
+        let finished = AtomicBool::new(false);
+        let writer = async {
+            ready.wait().await;
+            let mut result = Ok(());
+            for update in 0..64 {
+                result = save_scheduler_control(
+                    dir.path(),
+                    &AutomationSchedulerControl {
+                        paused: update % 2 != 0,
+                    },
+                )
+                .await;
+                if result.is_err() {
+                    break;
+                }
+            }
+            finished.store(true, Ordering::Release);
+            result
+        };
+        let reader = async {
+            assert!(load_scheduler_control(dir.path()).await.unwrap().paused);
+            ready.wait().await;
+            let mut reads = 0;
+            while !finished.load(Ordering::Acquire) {
+                load_scheduler_control(dir.path())
+                    .await
+                    .expect("a replacement must not expose empty or partial JSON");
+                reads += 1;
+            }
+            reads
+        };
+        let (written, reads) = tokio::join!(writer, reader);
+        written.unwrap();
+        assert!(reads > 0, "the reader must overlap the update sequence");
+        assert!(load_scheduler_control(dir.path()).await.unwrap().paused);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn scheduler_control_staging_failures_preserve_the_committed_pause() {
+        use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
+
+        let dir = tempdir().unwrap();
+        save_scheduler_control(dir.path(), &AutomationSchedulerControl { paused: true })
+            .await
+            .unwrap();
+        let path = scheduler_control_path(dir.path());
+        let committed = std::fs::read(&path).unwrap();
+        // Inject faults at the existing publication primitive used by
+        // atomic_write, without adding a fault hook to the scheduler API.
+        for fail_during_write in [true, false] {
+            let error = with_owned_temp_publish(
+                &path,
+                "scheduler-control",
+                |_, _| Err(std::io::Error::other("injected publication failure")),
+                |staging| {
+                    staging.write_all(b"{")?;
+                    if fail_during_write {
+                        Err(std::io::Error::other("injected partial-write failure"))
+                    } else {
+                        staging.write_all(b"\"paused\": false}")
+                    }
+                },
+                DirectorySyncPolicy::Strict,
+            )
+            .expect_err("failed staging must be reported to the writer");
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert_eq!(std::fs::read(&path).unwrap(), committed);
+            assert!(load_scheduler_control(dir.path()).await.unwrap().paused);
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "failed publication must remove its owned staging file"
+            );
+        }
     }
 
     #[test]
