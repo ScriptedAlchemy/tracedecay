@@ -153,7 +153,7 @@ impl DaemonLcmEffectService {
             }
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
-                return Ok(pending.defer_for_authoritative_summary(reason));
+                return Ok(pending.defer_for_authoritative_summary(reason)?);
             }
         };
         self.control.checkpoint()?;
@@ -215,7 +215,7 @@ impl DaemonLcmEffectService {
                         .source_range
                         .absent_reason()
                         .unwrap_or("authoritative_summary_source_mismatch"),
-                );
+                )?;
                 return Ok(pending);
             }
             Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {
@@ -224,7 +224,7 @@ impl DaemonLcmEffectService {
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
                 let mut pending = pending;
-                pending.response = pending.response.defer_for_authoritative_summary(reason);
+                pending.response = pending.response.defer_for_authoritative_summary(reason)?;
                 return Ok(pending);
             }
         };

@@ -55,8 +55,6 @@ impl PreflightDecision {
 pub struct CompressionPlanInput<'a> {
     pub current_tokens: Option<i64>,
     pub overrides: &'a LcmCompressionOverrides,
-    /// The effective assembly cap from [`effective_assembly_token_cap`].
-    pub assembly_token_cap: Option<i64>,
     pub backlog: &'a [LcmRawMessage],
 }
 
@@ -158,8 +156,10 @@ pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecisio
 }
 
 pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
-    let forced_overflow_recovery =
-        forced_overflow_pressure(input.current_tokens, input.assembly_token_cap);
+    let forced_overflow_recovery = forced_overflow_pressure(
+        input.current_tokens,
+        effective_assembly_token_cap(input.overrides),
+    );
     let leaf_chunk_tokens =
         effective_leaf_chunk_tokens(input.overrides, source_token_count(input.backlog));
     let selected_len = progress_leaf_chunk_len(

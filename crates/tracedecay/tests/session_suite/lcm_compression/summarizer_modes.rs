@@ -137,19 +137,12 @@ async fn persisted_summary_metadata(summarizer: LcmSummarizerMode) -> String {
     assert_eq!(response.status, "ok");
     assert_eq!(response.summary_nodes_created, 1);
     let node = &response.summary_nodes[0];
-    let described = db
-        .lcm_describe(tracedecay_lcm::LcmDescribeRequest {
-            provider: "cursor".into(),
-            session_id: "session-1".into(),
-            target: tracedecay_lcm::LcmDescribeTarget::SummaryNode {
-                node_id: node.node_id.clone(),
-            },
-        })
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
         .await
         .unwrap();
-    let persisted = described
-        .summary_node
-        .expect("persisted summary node")
+    let persisted = expanded
+        .summary
         .metadata_json
         .expect("persisted summary metadata");
     assert_eq!(node.metadata_json.as_deref(), Some(persisted.as_str()));

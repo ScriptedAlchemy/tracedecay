@@ -633,7 +633,6 @@ async fn prepare_compression_context(
     let plan = compression_decision::compression_plan(CompressionPlanInput {
         current_tokens: request.current_tokens,
         overrides: &request.overrides,
-        assembly_token_cap,
         backlog: &window.backlog,
     });
     let overflow_assembly_cap =

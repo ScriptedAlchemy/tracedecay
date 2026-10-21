@@ -782,10 +782,15 @@ impl LcmCompressionResponse {
         }
     }
 
-    pub fn defer_for_authoritative_summary(mut self, reason: &str) -> Self {
+    pub fn defer_for_authoritative_summary(mut self, reason: &str) -> Result<Self, LcmError> {
+        if !matches!(self.outcome()?, LcmCompressionOutcome::NeedsSummary(_)) {
+            return Err(LcmError::Db(
+                "only a pending summary response can be deferred".to_string(),
+            ));
+        }
         self.reason = reason.to_string();
         self.retry_status = Some(NEEDS_AUTHORITATIVE_SUMMARY_RETRY.to_string());
-        self
+        Ok(self)
     }
 }
 
@@ -925,7 +930,8 @@ mod tests {
         let request = summary_request();
         let response =
             compression_response("needs_summary", "pending", Some(request.clone()), None)
-                .defer_for_authoritative_summary("summarizer_configuration_unavailable");
+                .defer_for_authoritative_summary("summarizer_configuration_unavailable")
+                .expect("pending response can be deferred");
 
         let wire = serde_json::to_value(&response).expect("response should serialize");
         assert_eq!(wire["status"], "needs_summary");
@@ -942,6 +948,16 @@ mod tests {
             LcmCompressionOutcome::Deferred {
                 reason: "summarizer_configuration_unavailable"
             }
+        );
+    }
+
+    #[test]
+    fn completed_response_cannot_be_rewritten_as_deferred() {
+        let response = compression_response("ok", "done", None, None);
+        assert!(
+            response
+                .defer_for_authoritative_summary("summarizer_configuration_unavailable")
+                .is_err()
         );
     }
 }
