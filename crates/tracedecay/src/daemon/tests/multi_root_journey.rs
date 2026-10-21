@@ -13,6 +13,9 @@ use tracedecay_contracts::{
     MultiRootScopeSetReadRequestV1, RegisteredRootSelectorV1,
 };
 use tracedecay_domain::{ScopeSetId, UtcMicros};
+use tracedecay_runtime_core::native_runtime::{
+    NativeTask, NativeTaskOutcome, Runtime, in_tokio_context,
+};
 
 use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
@@ -97,13 +100,17 @@ async fn execute_native_daemon_invocation(
 ) -> DaemonInvocationResponse {
     let engine = engine.clone();
     let handshake = handshake.clone();
-    let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
-        assert!(tracedecay_runtime_core::native_runtime::on_native_thread());
+    let tokio_runtime = tokio::runtime::Handle::current();
+    let task = NativeTask::spawn(in_tokio_context(tokio_runtime, async move {
+        assert!(
+            Runtime::current_handle().is_some(),
+            "daemon invocation must be polled on the native runtime"
+        );
         Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
-    })
+    }))
     .expect("native daemon invocation");
     match task.wait().await {
-        tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(response) => response,
+        NativeTaskOutcome::Completed(response) => response,
         outcome => panic!("native daemon invocation did not settle: {outcome:?}"),
     }
 }
