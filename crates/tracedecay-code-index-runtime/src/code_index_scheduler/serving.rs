@@ -5,7 +5,6 @@ mod family_report;
 use std::{
     collections::{BTreeSet, VecDeque},
     io::Read,
-    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, RwLock,
@@ -947,29 +946,6 @@ pub struct DaemonCodeTextArtifactStoreV1 {
     worktree_id: WorktreeId,
 }
 
-/// The bytes one artifact admission reserves: its ceiling plus the band above
-/// the admission watermark, so the reserve call enforces that watermark
-/// against both the ledger and the measured resident set. The band is not
-/// memory the artifact owns and is released right after the reserve;
-/// retaining it in every overlapping build would charge the same
-/// process-wide margin repeatedly. The process's live set is not charged:
-/// the reserve already compares the request with the measured resident set,
-/// which contains it.
-pub(super) fn text_artifact_resident_memory_charge(
-    requested: NonZeroU64,
-    watermark_headroom: u64,
-) -> Result<NonZeroU64, RetrievalPortError> {
-    requested
-        .get()
-        .checked_add(watermark_headroom)
-        .and_then(NonZeroU64::new)
-        .ok_or_else(|| {
-            RetrievalPortError::Contract(
-                "text-artifact resident-memory accounting overflowed".to_owned(),
-            )
-        })
-}
-
 pub(super) fn text_artifact_admitted_build_budget(
     preferred_bytes: u64,
     minimum_bytes: u64,
@@ -1170,10 +1146,8 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
     }
 
-    /// Reserve one artifact memory ceiling. The atomic reserve also includes
-    /// the process-wide high-watermark headroom, then releases that
-    /// check-only margin before returning while the component ceiling stays
-    /// charged.
+    /// Charge the artifact's ceiling below the process admission watermark.
+    /// Sizing and charging share one measured headroom reading.
     fn reserve_resident_memory(
         &self,
         generation_id: &CodeGenerationId,
@@ -1182,32 +1156,6 @@ impl DaemonCodeTextArtifactStoreV1 {
     ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
         self.reserve_resident_memory_up_to(generation_id, component, bytes, bytes)
             .map(|(reservation, _)| reservation)
-    }
-
-    /// Measure headroom and size the build: `(observed, watermark headroom,
-    /// admitted)` bytes.
-    fn text_artifact_admission(
-        &self,
-        preferred: NonZeroU64,
-        minimum: NonZeroU64,
-    ) -> Result<(u64, u64), RetrievalPortError> {
-        let admission_watermark = self.resident_memory.admission_watermark_bytes();
-        let headroom = self.resident_memory.headroom_below(admission_watermark);
-        let watermark_headroom = self
-            .resident_memory
-            .snapshot()
-            .limit_bytes
-            .saturating_sub(admission_watermark);
-        let admitted_bytes = text_artifact_admitted_build_budget(
-            preferred.get(),
-            minimum.get(),
-            headroom.available_bytes,
-        )
-        .inspect_err(|_| {
-            self.resident_memory
-                .wait_for_headroom(minimum.get(), admission_watermark);
-        })?;
-        Ok((watermark_headroom, admitted_bytes))
     }
 
     fn reserve_resident_memory_up_to(
@@ -1235,57 +1183,59 @@ impl DaemonCodeTextArtifactStoreV1 {
                     "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
-        let (watermark_headroom, admitted_bytes) =
-            match self.text_artifact_admission(preferred, minimum) {
-                Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
-                    let released = self
-                        .resident_owners
-                        .shed(minimum.get(), std::time::Instant::now());
-                    for release in &released {
-                        log_resident_owner_release_v1(release);
-                    }
-                    // Freed pages sit in the pool workers' allocator heaps
-                    // whether or not an owner was shed.
-                    let trim = release_process_allocator_memory_v1();
-                    tracing::info!(
-                        event = "code_text_artifact_build_shed_retained_state",
-                        released_owners = released.len(),
-                        trimmed_bytes = trim.released_bytes(),
-                        refused = %detail,
-                        "text-artifact build shed retained state before re-measuring headroom"
-                    );
-                    self.text_artifact_admission(preferred, minimum)
+        let admission_watermark = self.resident_memory.admission_watermark_bytes();
+        let reserve = || {
+            let reservation = self
+                .resident_memory
+                .reserve_up_to(
+                    ResidentMemoryKeyV1 {
+                        project_id: self.project_id.clone(),
+                        worktree_id: self.worktree_id.clone(),
+                        generation_id: generation_id.clone(),
+                        component,
+                    },
+                    preferred,
+                    admission_watermark,
+                )
+                .map_err(|error| {
+                    RetrievalPortError::ResidentMemoryRefused(format!(
+                        "text-artifact resident-memory admission was refused: {error}"
+                    ))
+                })?;
+            let admitted = text_artifact_admitted_build_budget(
+                preferred.get(),
+                minimum.get(),
+                reservation.reserved_bytes(),
+            )?;
+            Ok((reservation, admitted))
+        };
+        let (reservation, admitted) = match reserve() {
+            Err(RetrievalPortError::ResidentMemoryRefused(detail)) => {
+                let released = self
+                    .resident_owners
+                    .shed(minimum.get(), std::time::Instant::now());
+                for release in &released {
+                    log_resident_owner_release_v1(release);
                 }
-                admission => admission,
-            }?;
-        let admitted = NonZeroU64::new(admitted_bytes).ok_or_else(|| {
-            RetrievalPortError::Contract(
-                "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
-            )
+                let trim = release_process_allocator_memory_v1();
+                tracing::info!(
+                    event = "code_text_artifact_build_shed_retained_state",
+                    released_owners = released.len(),
+                    trimmed_bytes = trim.released_bytes(),
+                    refused = %detail,
+                    "text-artifact build shed retained state before re-measuring headroom"
+                );
+                reserve()
+            }
+            result => result,
+        }
+        .inspect_err(|error| {
+            if matches!(error, RetrievalPortError::ResidentMemoryRefused(_)) {
+                self.resident_memory
+                    .wait_for_headroom(minimum.get(), admission_watermark);
+            }
         })?;
-        let accounted = text_artifact_resident_memory_charge(admitted, watermark_headroom)?;
-        let mut reservation = self
-            .resident_memory
-            .reserve(
-                ResidentMemoryKeyV1 {
-                    project_id: self.project_id.clone(),
-                    worktree_id: self.worktree_id.clone(),
-                    generation_id: generation_id.clone(),
-                    component,
-                },
-                accounted,
-            )
-            .map_err(|error| {
-                RetrievalPortError::ResidentMemoryRefused(format!(
-                    "text-artifact resident-memory admission was refused: {error}"
-                ))
-            })?;
-        reservation.shrink_to(admitted.get()).map_err(|error| {
-            RetrievalPortError::Contract(format!(
-                "text-artifact resident-memory headroom release failed: {error}"
-            ))
-        })?;
-        let admitted = usize::try_from(admitted.get()).map_err(|error| {
+        let admitted = usize::try_from(admitted).map_err(|error| {
             RetrievalPortError::Contract(format!(
                 "text-artifact admitted reservation exceeds the platform limit: {error}"
             ))
