@@ -42,9 +42,122 @@ fn producer_bundle(root: &std::path::Path, css: &[u8]) {
     write(root, "static/css/index.css", css);
 }
 
+fn prepared_producer_bundle(root: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+    use std::io::Write;
+
+    producer_bundle(root, INDEX_CSS);
+    let javascript = INDEX_JS.repeat(1_000);
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(&javascript).unwrap();
+    let compressed = encoder.finish().unwrap();
+    write(root, "static/js/index.js", &javascript);
+    write(root, "static/js/index.js.gz", &compressed);
+    write(root, "asset-manifest.json", br#"{
+        "allFiles":["index.html","static/js/index.js","static/css/index.css","static/js/index.js.gz"],
+        "gzip":{"static/js/index.js":"static/js/index.js.gz"}
+    }"#);
+    (javascript, compressed)
+}
+
+#[test]
+fn fresh_build_stores_stage_the_same_prepared_gzip_and_embed_only_original_routes() {
+    let temp = tempfile::tempdir().unwrap();
+    let producer = temp.path().join("app-dist");
+    let (javascript, compressed) = prepared_producer_bundle(&producer);
+    let expected = expected_digest(
+        &[
+            ("index.html", INDEX_HTML),
+            ("static/css/index.css", INDEX_CSS),
+            ("static/js/index.js", &javascript),
+            ("static/js/index.js.gz", &compressed),
+        ],
+        &[("static/js/index.js", "static/js/index.js.gz")],
+    );
+    for build in ["fresh-build-one", "fresh-build-two"] {
+        let store = temp.path().join(build);
+        let staged = stage_copy_build_output(&store, &producer).unwrap();
+        assert_eq!(staged.digest_hex, expected);
+        assert_eq!(
+            staged.manifest.embedded_paths().collect::<Vec<_>>(),
+            [
+                ("index.html", "index.html"),
+                ("static/css/index.css", "static/css/index.css"),
+                ("static/js/index.js", "static/js/index.js.gz"),
+            ],
+        );
+        assert_eq!(
+            std::fs::read(staged.root.join("static/js/index.js.gz")).unwrap(),
+            compressed
+        );
+        assert_eq!(open(&store, &expected).unwrap().unwrap(), staged);
+    }
+}
+
+#[test]
+fn gzip_selection_changes_the_digest_and_tampering_is_refused_on_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let producer = temp.path().join("app-dist");
+    prepared_producer_bundle(&producer);
+    let store = temp.path().join("prepared-store");
+    let prepared = stage_copy(&store, &producer).unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(producer.join("asset-manifest.json")).unwrap())
+            .unwrap();
+    manifest["gzip"] = serde_json::json!({});
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    write(&producer, "asset-manifest.json", &manifest_bytes);
+    let identity = stage_copy(&temp.path().join("identity-store"), &producer).unwrap();
+    assert_eq!(prepared.manifest.asset_paths, identity.manifest.asset_paths);
+    assert_ne!(prepared.digest_hex, identity.digest_hex);
+    assert_eq!(prepared.manifest.embedded_paths().count(), 3);
+    assert_eq!(identity.manifest.embedded_paths().count(), 4);
+
+    write(&prepared.root, "asset-manifest.json", &manifest_bytes);
+    let error = open(&store, &prepared.digest_hex).unwrap_err().to_string();
+    assert!(
+        error.contains("not the digest it is named after"),
+        "{error}"
+    );
+}
+
+#[test]
+fn gzip_payload_must_match_its_identity_bytes_before_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let producer = temp.path().join("app-dist");
+    prepared_producer_bundle(&producer);
+    write(
+        &producer,
+        "static/js/index.js",
+        &b"changed source".repeat(1_000),
+    );
+    let store = temp.path().join("store");
+    let error = stage_copy(&store, &producer).unwrap_err().to_string();
+    assert!(error.contains("gzip payload does not match"), "{error}");
+    assert!(!store.exists());
+}
+
+#[test]
+fn gzip_mapping_cannot_reference_an_unlisted_or_unrelated_payload() {
+    let temp = tempfile::tempdir().unwrap();
+    let producer = temp.path().join("app-dist");
+    prepared_producer_bundle(&producer);
+    for payload in ["../outside.gz", "missing.gz", "static/css/index.css"] {
+        let manifest = serde_json::json!({
+            "allFiles": ["index.html", "static/js/index.js", "static/css/index.css", "static/js/index.js.gz"],
+            "gzip": {"static/js/index.js": payload},
+        });
+        write(
+            &producer,
+            "asset-manifest.json",
+            &serde_json::to_vec(&manifest).unwrap(),
+        );
+        assert!(stage_copy(&temp.path().join("store"), &producer).is_err());
+    }
+}
+
 /// The documented cross-tool digest, spelled out independently of the code
 /// under test.
-fn expected_digest(entries: &[(&str, &[u8])]) -> String {
+fn expected_digest(entries: &[(&str, &[u8])], gzip: &[(&str, &str)]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(BUNDLE_DIGEST_PREFIX);
     for (relative, bytes) in entries {
@@ -52,6 +165,16 @@ fn expected_digest(entries: &[(&str, &[u8])]) -> String {
         hasher.update([0u8]);
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
+    }
+    if !gzip.is_empty() {
+        hasher.update(b"\0tracedecay-dashboard-gzip-v1\0");
+        hasher.update((gzip.len() as u64).to_le_bytes());
+        for (source, encoded) in gzip {
+            hasher.update(source.as_bytes());
+            hasher.update([0u8]);
+            hasher.update((encoded.len() as u64).to_le_bytes());
+            hasher.update(encoded.as_bytes());
+        }
     }
     hex::encode(hasher.finalize())
 }
@@ -64,15 +187,18 @@ fn promoted_bundle_survives_producer_cleanup_and_matches_the_documented_digest()
     producer_bundle(&producer, INDEX_CSS);
 
     let staged = stage_copy(&store, &producer).expect("stage the producer's bundle");
-    let expected = expected_digest(&[
-        ("index.html", INDEX_HTML),
-        ("static/css/index.css", INDEX_CSS),
-        ("static/js/index.js", INDEX_JS),
-    ]);
+    let expected = expected_digest(
+        &[
+            ("index.html", INDEX_HTML),
+            ("static/css/index.css", INDEX_CSS),
+            ("static/js/index.js", INDEX_JS),
+        ],
+        &[],
+    );
     assert_eq!(staged.digest_hex, expected);
     assert_eq!(staged.root, store.join(&expected));
     assert_eq!(
-        staged.asset_paths,
+        staged.manifest.asset_paths,
         ["index.html", "static/css/index.css", "static/js/index.js"]
     );
     assert!(
@@ -129,7 +255,7 @@ fn a_producer_that_writes_directly_into_staging_is_promoted_from_there() {
     let promoted = promote(&store).expect("promote the staged output");
     assert_eq!(promoted.root, store.join(&promoted.digest_hex));
     assert_eq!(
-        bundle_digest(&promoted.root, &promoted.asset_paths).expect("digest promoted bytes"),
+        bundle_digest(&promoted.root, &promoted.manifest).expect("digest promoted bytes"),
         promoted.digest_hex
     );
 }
@@ -280,11 +406,14 @@ fn a_symlinked_build_output_tree_stages_the_advertised_bytes() {
         stage_copy_build_output(&store, &app_dist).expect("stage a symlinked build-output tree");
     assert_eq!(
         staged.digest_hex,
-        expected_digest(&[
-            ("index.html", INDEX_HTML),
-            ("static/css/index.css", INDEX_CSS),
-            ("static/js/index.js", INDEX_JS),
-        ]),
+        expected_digest(
+            &[
+                ("index.html", INDEX_HTML),
+                ("static/css/index.css", INDEX_CSS),
+                ("static/js/index.js", INDEX_JS),
+            ],
+            &[],
+        ),
         "the staged digest is taken over the resolved bytes, not the links"
     );
     assert!(
