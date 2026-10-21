@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use tracedecay_contracts::NativeIntegrationStatusProjectionV1;
 use tracedecay_lsp::{
@@ -15,8 +16,9 @@ use tracedecay_lsp::{
     DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, FeedbackCycleAdapter, FeedbackCyclePort,
     FeedbackCycleRequest, FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayCapabilities,
     LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
-    NativeIntegrationStatusPort, OverlaySnapshot, SemanticProviderOutcome, SemanticProviderPort,
-    SemanticRequest, SemanticResponse, UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
+    LspSemanticDocumentSnapshot, NativeIntegrationStatusPort, OverlaySnapshot,
+    SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
+    UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
 };
 
 /// Supplies exact upstream semantic capabilities when an LSP session is
@@ -420,6 +422,21 @@ struct FederatedSemantics {
 }
 
 impl SemanticProviderPort for FederatedSemantics {
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        self.roots
+            .get(root.uri())
+            .map_or(SemanticProviderOutcome::Unavailable, |port| {
+                port.request_with_document(root, request_id, request, document_snapshot, deadline)
+            })
+    }
+
     fn request(
         &self,
         root: &AdmittedRoot,
@@ -614,6 +631,7 @@ impl ContextProjectionPort for FederatedContext {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
@@ -730,6 +748,85 @@ mod tests {
                 SemanticProviderOutcome::Unavailable
             }
         }
+    }
+
+    #[derive(Default)]
+    struct ForwardedSemanticRequest {
+        snapshot: Option<LspSemanticDocumentSnapshot>,
+        deadline: Option<Instant>,
+    }
+
+    struct CapturingSemantic {
+        forwarded: Arc<Mutex<ForwardedSemanticRequest>>,
+    }
+
+    impl SemanticProviderPort for CapturingSemantic {
+        fn request_with_document(
+            &self,
+            _root: &AdmittedRoot,
+            _request_id: &LspRequestId,
+            _request: &SemanticRequest,
+            document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+            deadline: Option<Instant>,
+        ) -> SemanticProviderOutcome<SemanticResponse> {
+            let mut forwarded = self
+                .forwarded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            forwarded.snapshot = document_snapshot.cloned();
+            forwarded.deadline = deadline;
+            SemanticProviderOutcome::Complete(SemanticResponse::Hover(None))
+        }
+    }
+
+    #[test]
+    fn federated_semantics_forward_the_admitted_snapshot_and_deadline() {
+        let root = AdmittedRoot::new("file:///project");
+        let forwarded = Arc::new(Mutex::new(ForwardedSemanticRequest::default()));
+        let provider = FederatedSemantics {
+            roots: BTreeMap::from([(
+                root.uri().to_owned(),
+                Arc::new(CapturingSemantic {
+                    forwarded: Arc::clone(&forwarded),
+                }) as Arc<dyn SemanticProviderPort + Send + Sync>,
+            )]),
+        };
+        let mut overlays = tracedecay_lsp::OverlayStore::default();
+        let overlay = overlays
+            .open(
+                &root,
+                "file:///project/src/lib.rs",
+                "rust",
+                3,
+                "fn admitted() {}",
+            )
+            .expect("admitted overlay");
+        let snapshot = LspSemanticDocumentSnapshot::from_overlay(&overlay);
+        let deadline = Instant::now();
+
+        let outcome = provider.request_with_document(
+            &root,
+            &LspRequestId::Number(9),
+            &SemanticRequest::Hover {
+                document_uri: snapshot.uri.clone(),
+                position: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            Some(&snapshot),
+            Some(deadline),
+        );
+
+        assert!(matches!(
+            outcome,
+            SemanticProviderOutcome::Complete(SemanticResponse::Hover(None))
+        ));
+        let forwarded = forwarded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(forwarded.snapshot.as_ref(), Some(&snapshot));
+        assert_eq!(forwarded.deadline, Some(deadline));
     }
 
     struct RootWorkspaceDiagnostics;
