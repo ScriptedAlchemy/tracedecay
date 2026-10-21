@@ -16,6 +16,9 @@ copy_to_bin(
         [
             "src/**",
             "public/**",
+            "codegen/**",
+            "e2e/**",
+            "stories/**",
             "*.ts",
             "*.mjs",
             "*.json",
@@ -27,11 +30,7 @@ copy_to_bin(
 
 vitest_bin.vitest_test(
     name = "unit_test",
-    data = [":dashboard_sources", ":node_modules"] + glob([
-        "codegen/**",
-        "e2e/**",
-        "stories/**",
-    ]),
+    data = [":dashboard_sources", ":node_modules"],
     # Leave CPU capacity for transforms and the coordinator beside the workers.
     args = ["run", "--maxWorkers=2"],
     chdir = package_name(),
@@ -43,7 +42,7 @@ tsc_bin.tsc_test(
     name = "typecheck",
     include_types = True,
     include_transitive_types = True,
-    data = [":dashboard_sources", ":node_modules", "//:node_modules/@types/react"] + glob(["codegen/**", "e2e/**", "stories/**"]),
+    data = [":dashboard_sources", ":node_modules", "//:node_modules/@types/react"],
     args = ["--noEmit"],
     chdir = package_name(),
 )
