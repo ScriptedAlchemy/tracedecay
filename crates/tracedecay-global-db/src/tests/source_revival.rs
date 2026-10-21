@@ -6,12 +6,13 @@ use tempfile::TempDir;
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1, SessionId,
 };
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason,
 };
 
-use crate::observation_batch_tests::sequential_writes;
+use crate::observation_batch_tests::{sequential_writes, sequential_writes_with_text};
 use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, RegisteredGlobalDbTestRuntime,
 };
@@ -141,6 +142,115 @@ async fn projected_messages(registered: &RegisteredGlobalDb) -> Vec<String> {
     messages
 }
 
+async fn projected_message_content(registered: &RegisteredGlobalDb, message_id: &str) -> String {
+    let snapshot = registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT COALESCE(content, placeholder_text, '')
+             FROM lcm_raw_messages WHERE message_id = ?1",
+            params![message_id],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap()
+}
+
+async fn temporal_effect(
+    registered: &RegisteredGlobalDb,
+    write: &AnchoredObservationWrite,
+) -> (String, i64) {
+    let snapshot = registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT effect_digest, output_count
+             FROM session_temporal_observation_effects WHERE observation_id = ?1",
+            params![write.observation().observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    (row.get::<String>(0).unwrap(), row.get::<i64>(1).unwrap())
+}
+
+async fn projection_disposition(
+    registered: &RegisteredGlobalDb,
+    write: &AnchoredObservationWrite,
+) -> String {
+    let snapshot = registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT reason FROM observation_projection_dispositions
+             WHERE observation_id = ?1",
+            params![write.observation().observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap()
+}
+
+async fn temporal_reset_requested(
+    registered: &RegisteredGlobalDb,
+    write: &AnchoredObservationWrite,
+) -> bool {
+    let snapshot = registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM session_temporal_resets AS reset
+                 JOIN session_temporal_observation_effects AS effect
+                   ON effect.session_id = reset.session_id
+                 WHERE effect.observation_id = ?1
+             )",
+            params![write.observation().observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap() == 1
+}
+
+async fn source_presence_generation(
+    registered: &RegisteredGlobalDb,
+    write: &AnchoredObservationWrite,
+) -> i64 {
+    let snapshot = registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT generation FROM observation_source_presence
+             WHERE observation_id = ?1",
+            params![write.observation().observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+async fn clear_temporal_reset(registered: &RegisteredGlobalDb, write: &AnchoredObservationWrite) {
+    registered
+        .writer_connection()
+        .unwrap()
+        .execute(
+            "DELETE FROM session_temporal_resets
+             WHERE session_id = (
+                 SELECT session_id FROM session_temporal_observation_effects
+                 WHERE observation_id = ?1
+             )",
+            params![write.observation().observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+}
+
 #[asupersync::test]
 async fn a_reoffered_retired_record_projects_again_across_rebuild_and_restart() {
     let tmp = TempDir::new().unwrap();
@@ -229,6 +339,93 @@ async fn a_newer_layout_retires_a_revived_record_again() {
     assert!(projected_messages(registered).await.is_empty());
     assert_eq!(source.rewrite(4, 5, 0, &[&writes[0]]).await, 0);
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
+}
+
+#[asupersync::test]
+async fn a_reoffered_record_settles_if_another_source_claimed_its_retired_output() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
+        .await
+        .unwrap();
+    let original = sequential_writes_with_text(
+        &SessionId::new("session.source-collision.original").unwrap(),
+        1,
+        |_| "original source body".to_owned(),
+    );
+    let claimant = sequential_writes_with_text(
+        &SessionId::new("session.source-collision.claimant").unwrap(),
+        1,
+        |_| "claimant source body".to_owned(),
+    );
+
+    {
+        let registered = runtime.profile_database();
+        let store = registered.observation_store();
+        let original_source = Source::of(registered, &original);
+        original_source.offer(1, &[&original[0]]).await;
+        persist(&store, &original).await;
+        drain(&store).await;
+        let original_effect = temporal_effect(registered, &original[0]).await;
+        assert_eq!(original_effect.1, 1);
+
+        assert_eq!(original_source.rewrite(1, 2, 0, &[]).await, 1);
+        let claimant_source = Source::of(registered, &claimant);
+        claimant_source.offer(1, &[&claimant[0]]).await;
+        persist(&store, &claimant).await;
+        drain(&store).await;
+        assert_eq!(
+            projected_message_content(registered, "message.batch.0").await,
+            "claimant source body"
+        );
+        clear_temporal_reset(registered, &original[0]).await;
+        assert!(!temporal_reset_requested(registered, &original[0]).await);
+
+        assert_eq!(
+            original_source.rewrite(2, 3, 0, &[&original[0]]).await,
+            0,
+            "the re-offer settles as a live collision instead of rolling back"
+        );
+        assert_eq!(
+            projection_disposition(registered, &original[0]).await,
+            ProjectionSkipReason::OutputCollision.as_str()
+        );
+        assert_eq!(
+            temporal_effect(registered, &original[0]).await,
+            original_effect,
+            "the original positive-output temporal receipt stays immutable"
+        );
+        assert!(
+            temporal_reset_requested(registered, &original[0]).await,
+            "the retained positive receipt still requests a live-state reset"
+        );
+        assert_eq!(
+            projected_message_content(registered, "message.batch.0").await,
+            "claimant source body",
+            "the collided re-offer must not reclaim the live output"
+        );
+        original_source.offer(3, &[&original[0]]).await;
+        assert_eq!(
+            source_presence_generation(registered, &original[0]).await,
+            3
+        );
+    }
+
+    let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
+    let registered = runtime.profile_database();
+    let original_source = Source::of(registered, &original);
+    original_source.offer(3, &[&original[0]]).await;
+    assert_eq!(
+        source_presence_generation(registered, &original[0]).await,
+        3
+    );
+    assert_eq!(
+        projection_disposition(registered, &original[0]).await,
+        ProjectionSkipReason::OutputCollision.as_str()
+    );
+    assert_eq!(
+        projected_message_content(registered, "message.batch.0").await,
+        "claimant source body"
+    );
 }
 
 #[asupersync::test]

@@ -256,7 +256,7 @@ pub(crate) fn sequential_writes(
     sequential_writes_with_text(session_id, count, |ordinal| format!("frame {ordinal}"))
 }
 
-fn sequential_writes_with_text(
+pub(crate) fn sequential_writes_with_text(
     session_id: &SessionId,
     count: usize,
     text: impl Fn(u64) -> String,

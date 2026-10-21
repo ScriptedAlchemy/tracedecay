@@ -36,7 +36,8 @@ use super::transition::{
     message_transition, write_workflow_fact_transition,
 };
 use tracedecay_session_temporal_store::{
-    record_canonical_observation_effect, request_session_temporal_reset,
+    record_canonical_observation_effect,
+    record_live_collision_preserving_canonical_observation_effect, request_session_temporal_reset,
 };
 
 pub(super) const REBUILD_PAGE_SIZE: i64 = 128;
@@ -781,6 +782,18 @@ async fn record_canonical_effect(
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
+    if matches!(
+        effect,
+        ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision)
+    ) {
+        return record_live_collision_preserving_canonical_observation_effect(
+            transaction,
+            sequence,
+            observation,
+            effect,
+        )
+        .await;
+    }
     if matches!(
         effect,
         ObservationProjection::Skipped(

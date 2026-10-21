@@ -111,7 +111,8 @@ pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
 pub use projection::{
-    record_canonical_observation_effect, request_session_temporal_reset,
+    record_canonical_observation_effect,
+    record_live_collision_preserving_canonical_observation_effect, request_session_temporal_reset,
     request_session_temporal_reset_if_materialized,
 };
 pub use refresh::{
