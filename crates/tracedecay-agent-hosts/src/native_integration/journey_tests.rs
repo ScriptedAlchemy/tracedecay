@@ -495,17 +495,56 @@ async fn mount(
         .mount_worktree(project_id.clone(), &repository_root, index_store)
         .await
         .expect("mount canonical code-index scheduler");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let memory = schedulers.process_resident_memory();
+    let mut last_observation = "no owner observation completed".to_owned();
+    let initial_generation = tokio::time::timeout(Duration::from_secs(5), async {
+        let owner_activity = schedulers.subscribe_owner_activity(&repository_root).await;
         while schedulers
             .latest_generation_id(&repository_root)
             .await
             .is_none()
         {
+            let parked = schedulers
+                .convergence_park(&repository_root)
+                .await
+                .map(|parked| {
+                    (
+                        parked.reason.chars().take(200).collect::<String>(),
+                        parked.blocked_reason,
+                        parked.retries_on_wake,
+                        parked.observed_passes,
+                    )
+                });
+            let activity = owner_activity.as_ref().map(|activity| {
+                (
+                    activity.worker_phase(),
+                    activity.passes(),
+                    activity.wake_pending(),
+                )
+            });
+            let pressure = memory.pressure().state();
+            let ledger = memory.snapshot();
+            last_observation = format!(
+                "parked={parked:?}; activity={activity:?}; pressure={pressure:?}; \
+                 ledger_used_bytes={}; ledger_limit_bytes={}; ledger_charge_count={}; \
+                 process_shared_charge_count={}",
+                ledger.used_bytes,
+                ledger.limit_bytes,
+                ledger.charges.len(),
+                ledger.process_shared_charges.len()
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("initial code-index generation seat");
+    .await;
+    if let Err(error) = initial_generation {
+        // The bounded observation was captured inside the original deadline;
+        // reporting starts no new reads, admission, or readiness wait.
+        // A failed fixture still owns the worker it mounted. Signal its
+        // canonical cancellation before unwinding out of the temporary root.
+        schedulers.cancel();
+        panic!("initial code-index generation seat: {error}; {last_observation}");
+    }
     let analysis = Arc::new(DaemonNativeIntegrationAnalysisV1::new(
         schedulers,
         analysis_scope,

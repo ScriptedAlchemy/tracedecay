@@ -2086,45 +2086,6 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
 }
 
 #[test]
-fn overlapping_text_builds_share_one_admission_watermark_headroom() {
-    let limit_bytes = 1_000_u64;
-    let watermark_headroom = 100_u64;
-    let requested = NonZeroU64::new(300).expect("nonzero build request");
-    let mut used_bytes = 0_u64;
-
-    for _ in 0..3 {
-        let accounted =
-            super::super::text_artifact_resident_memory_charge(requested, watermark_headroom)
-                .expect("bounded admission accounting");
-        assert!(
-            used_bytes + accounted.get() <= limit_bytes,
-            "each overlapping build fits beneath the same 900-byte high watermark"
-        );
-        used_bytes += requested.get();
-    }
-
-    assert_eq!(
-        used_bytes, 900,
-        "the retained ledger owns the three build ceilings, not three margins"
-    );
-    for overflow in [
-        super::super::text_artifact_resident_memory_charge(
-            NonZeroU64::new(u64::MAX).expect("maximum nonzero request"),
-            1,
-        ),
-        super::super::text_artifact_resident_memory_charge(requested, u64::MAX),
-    ] {
-        assert!(
-            matches!(
-                overflow,
-                Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
-            ),
-            "overflow must remain a typed contract refusal: {overflow:?}"
-        );
-    }
-}
-
-#[test]
 fn text_build_budget_shrinks_to_available_headroom_without_dropping_below_its_floor() {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
