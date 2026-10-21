@@ -1336,6 +1336,35 @@ fn cgroup_headroom_respects_a_larger_but_fuller_ancestor() {
 }
 
 #[test]
+fn sized_reservations_charge_only_the_measured_cgroup_headroom() {
+    const MIB: u64 = 1024 * 1024;
+    let limit = bytes(800 * MIB);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| {
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: 100 * MIB,
+                unreclaimable_bytes: 100 * MIB,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: Some(200 * MIB),
+            })
+        }),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let watermark = authority.admission_watermark_bytes();
+    let headroom = authority.headroom_below(watermark);
+    assert_eq!(headroom.available_bytes, 200 * MIB);
+    let owner = key("project-a", "worktree-a", "generation-a", "text-build");
+    let held = authority
+        .reserve_up_to(owner, bytes(headroom.available_bytes + 1), watermark)
+        .expect("the actual allocation fits without charging the 80 MiB watermark band");
+    assert_eq!(held.reserved_bytes(), 200 * MIB);
+    assert_eq!(authority.snapshot().used_bytes, 200 * MIB);
+    drop(held);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
 fn narrowed_budgets_and_waiters_share_cgroup_capacity_without_charging_peers() {
     const MIB: u64 = 1024 * 1024;
     let room = Arc::new(AtomicU64::new(560 * MIB));
@@ -1618,4 +1647,102 @@ fn allocator_reclaim_preserves_cgroup_pressure_until_sample_recovers() {
             )
             .is_ok()
     );
+}
+
+#[test]
+fn sized_admission_remeasures_and_charges_the_supported_smaller_budget() {
+    const MIB: u64 = 1024 * 1024;
+    let measured = Arc::new(AtomicU64::new(300 * MIB));
+    let sampled = Arc::clone(&measured);
+    let reads = Arc::new(AtomicU64::new(0));
+    let sampled_reads = Arc::clone(&reads);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        bytes(1000 * MIB),
+        Arc::new(move || {
+            sampled_reads.fetch_add(1, Ordering::SeqCst);
+            let observed = sampled.load(Ordering::SeqCst);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: observed,
+                unreclaimable_bytes: observed,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        }),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(1000 * MIB),
+        Arc::clone(&pressure),
+    ));
+    let watermark = authority.admission_watermark_bytes();
+    assert_eq!(watermark, 900 * MIB);
+    assert_eq!(
+        authority.headroom_below(watermark).available_bytes,
+        600 * MIB
+    );
+    measured.store(700 * MIB, Ordering::SeqCst);
+    let before = reads.load(Ordering::SeqCst);
+    let reservation = authority
+        .reserve_up_to(
+            key("project-a", "worktree-a", "generation-a", "text-build"),
+            bytes(600 * MIB),
+            watermark,
+        )
+        .expect("the smaller build fits despite growth since planning");
+    assert_eq!(reads.load(Ordering::SeqCst), before + 1);
+    assert_eq!(reservation.reserved_bytes(), 200 * MIB);
+    assert_eq!(authority.snapshot().used_bytes, 200 * MIB);
+    drop(reservation);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+
+    measured.store(950 * MIB, Ordering::SeqCst);
+    let refused = authority
+        .reserve_up_to(
+            key("project-a", "worktree-a", "generation-b", "text-build"),
+            bytes(600 * MIB),
+            watermark,
+        )
+        .expect_err("sizing must still refuse measured pressure");
+    assert!(refused.is_observed_over_budget());
+    assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn sized_admissions_share_the_watermark_without_charging_its_margin() {
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        bytes(1000),
+        Arc::new(|| None),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(1000),
+        pressure,
+    ));
+    let watermark = authority.admission_watermark_bytes();
+    let owner = key("project-a", "worktree-a", "generation-a", "text-build");
+    let mut reservations = (0..3)
+        .map(|_| {
+            authority
+                .reserve_up_to(owner.clone(), bytes(300), watermark)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(authority.snapshot().used_bytes, 900);
+    let refused = authority
+        .reserve_up_to(owner.clone(), bytes(300), watermark)
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+            used_bytes: 900,
+            requested_bytes: 300,
+            limit_bytes: 900,
+        }
+    );
+    drop(reservations.pop());
+    let maximum = authority
+        .reserve_up_to(owner, bytes(u64::MAX), watermark)
+        .expect("bounded sizing cannot overflow while reserving available bytes");
+    assert_eq!(maximum.reserved_bytes(), 300);
+    assert_eq!(authority.snapshot().used_bytes, 900);
+    drop((reservations, maximum));
+    assert_eq!(authority.snapshot().used_bytes, 0);
 }
