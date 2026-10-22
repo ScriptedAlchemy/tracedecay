@@ -1,6 +1,6 @@
 use super::*;
 use tracedecay_contracts::{
-    ApplicationProblemKind, EffectId, IdempotencyKey, SourceEditInvocationV1, SourceEditKind,
+    ApplicationProblemKind, EffectId, IdempotencyKey, SourceEditInvocationV1,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1, SourceEditRequest,
 };
 use tracedecay_domain::ManifestDigest;

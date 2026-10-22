@@ -17,7 +17,6 @@ use automation::{
     install_codex_daemon_automation, validate_codex_automation_flags,
     validate_codex_automation_project_path,
 };
-mod feedback_component;
 #[cfg(test)]
 mod mcp_identity_tests;
 

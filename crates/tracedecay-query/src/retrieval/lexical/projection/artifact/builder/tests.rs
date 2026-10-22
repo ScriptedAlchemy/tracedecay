@@ -364,7 +364,7 @@ fn receipt_verification_does_not_read_append_only_base_tables() {
 fn open_serves_the_sealed_clone_census_and_verification_recomputes_it() {
     let directory = tempfile::tempdir().expect("artifact directory");
     let path = directory.path().join("sealed.sqlite");
-    drop(create_private_file_retained(&path).expect("private artifact file"));
+    drop(create_private_file(&path).expect("private artifact file"));
     let metadata = test_metadata();
     let metadata_digest = metadata_digest(&metadata).expect("metadata digest");
     let connection = Connection::open(&path).expect("artifact database");
@@ -938,7 +938,7 @@ fn staging_open_refuses_a_symlink_even_when_its_target_is_private() {
 
     let directory = tempfile::tempdir().expect("private staging directory");
     let target = directory.path().join("target.sqlite");
-    drop(create_private_file_retained(&target).expect("create private target"));
+    drop(create_private_file(&target).expect("create private target"));
     let linked = directory.path().join("linked.sqlite");
     symlink(&target, &linked).expect("link private target");
 
@@ -962,7 +962,7 @@ fn staging_operations_refuse_same_name_replacement_after_open() {
     )
     .expect("open artifact");
     drop(connection);
-    drop(create_private_file_retained(&replacement).expect("create replacement"));
+    drop(create_private_file(&replacement).expect("create replacement"));
     std::fs::rename(&replacement, &artifact).expect("replace staged artifact");
 
     assert!(matches!(

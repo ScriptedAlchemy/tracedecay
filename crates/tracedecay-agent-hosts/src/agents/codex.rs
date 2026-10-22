@@ -356,11 +356,6 @@ impl AgentIntegration for CodexIntegration {
 
     #[tracing::instrument(name = "hosts.agent.codex.plugin_activate", level = "trace", skip_all)]
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        // `~/.codex/agents` is registration surface, not deployed component
-        // assets: `host_component_registration_paths` declares every generated
-        // export plus the ownership manifest for Core. Activation must refresh
-        // current exports and retire previous-bundle stale ones, otherwise
-        // Core install through the receipt-backed lifecycle leaves stale exports.
         tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
             &crate::host_io(),
             &ctx.home,
@@ -413,8 +408,6 @@ impl AgentIntegration for CodexIntegration {
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
             plugin_registry::codex_plugin_remove_with(&codex_cli, &ctx.home, &marketplace_name)?;
         }
-        // Managed agent exports are Core registration surface (not artifacts).
-        // Clear them here so uninstall verification can reach Missing.
         tracedecay_automation_runtime::automation::agent_targets::remove_managed_agents(
             &crate::host_io(),
             &ctx.home.join(".codex/agents"),
