@@ -126,7 +126,8 @@ mod windows_publication {
     use std::os::windows::fs::OpenOptionsExt;
 
     use tracedecay_private_fs::framed_log::{
-        DirectorySyncPolicy, atomic_write, rename_noreplace, replace_via_rename,
+        DirectorySyncPolicy, atomic_write, atomic_write_prepared, rename_noreplace,
+        replace_via_rename,
     };
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
 
@@ -165,6 +166,61 @@ mod windows_publication {
         publish(b"third").unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"third");
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn prepared_readonly_replacement_preserves_readers_and_cleans_failed_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("config.json");
+        let publish = |bytes: &[u8]| {
+            atomic_write_prepared(
+                &destination,
+                "config",
+                bytes,
+                |temporary| {
+                    let mut permissions = fs::metadata(temporary)?.permissions();
+                    permissions.set_readonly(true);
+                    fs::set_permissions(temporary, permissions)
+                },
+                DirectorySyncPolicy::Strict,
+            )
+        };
+
+        atomic_write(
+            &destination,
+            "config",
+            b"first",
+            DirectorySyncPolicy::Strict,
+        )
+        .unwrap();
+        let mut reader = fs::File::open(&destination).unwrap();
+        publish(b"second").expect("publish read-only staging over an open reader");
+        let mut displaced = Vec::new();
+        reader.read_to_end(&mut displaced).unwrap();
+        assert_eq!(displaced, b"first");
+        assert_eq!(fs::read(&destination).unwrap(), b"second");
+        assert!(fs::metadata(&destination).unwrap().permissions().readonly());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        drop(reader);
+
+        let mut permissions = fs::metadata(&destination).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&destination, permissions.clone()).unwrap();
+        let blocker = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&destination)
+            .unwrap();
+        publish(b"blocked").expect_err("a reader denying delete must reject prepared replacement");
+        assert_eq!(fs::read(&destination).unwrap(), b"second");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        drop(blocker);
+
+        publish(b"third").expect("retry prepared publication after the reader closes");
+        assert_eq!(fs::read(&destination).unwrap(), b"third");
+        assert!(fs::metadata(&destination).unwrap().permissions().readonly());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        fs::set_permissions(&destination, permissions).unwrap();
     }
 
     #[test]

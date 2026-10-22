@@ -567,7 +567,11 @@ pub fn with_owned_temp_publish<T>(
 pub fn replace_via_rename(temporary: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        crate::windows::rename_paths_durable(temporary, destination, true)
+        crate::windows::rename_paths_durable(
+            temporary,
+            destination,
+            crate::windows::RenameMode::Replace,
+        )
     }
     #[cfg(not(windows))]
     {

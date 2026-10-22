@@ -46,5 +46,5 @@ pub(crate) fn rename_noreplace_at(
 
 #[cfg(windows)]
 pub(crate) fn rename_noreplace_paths(source: &Path, destination: &Path) -> io::Result<()> {
-    crate::windows::rename_paths_durable(source, destination, false)
+    crate::windows::rename_paths_durable(source, destination, crate::windows::RenameMode::NoReplace)
 }
