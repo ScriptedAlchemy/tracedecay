@@ -3,8 +3,9 @@
 //! preimages or refuses, and exact retries replay that receipt.
 
 use crate::support::{
-    ProductionSourceEditFixture, TestTempDir, handle_real_server_tool_call_raw,
-    init_production_source_edit_project, test_temp_dir, warm_code_index_search,
+    ProductionSourceEditFixture, TestTempDir, close_production_source_edit_fixture,
+    handle_real_server_tool_call_raw, init_production_source_edit_project, test_temp_dir,
+    warm_code_index_search,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -311,6 +312,8 @@ async fn source_edit_rollback_restores_move_preimages_and_replays_the_receipt() 
         "config error: source edit rollback identity does not match the completed original effect",
     );
     assert_original_sources(&moved.project);
+
+    close_production_source_edit_fixture(moved.fixture).await;
 }
 
 #[tokio::test]
@@ -395,6 +398,8 @@ async fn source_edit_rollback_keeps_foreign_bytes_and_replays_the_refusal() {
         read_project_file(&moved.project, "src/source.rs"),
         source_after_move
     );
+
+    close_production_source_edit_fixture(moved.fixture).await;
 }
 
 #[tokio::test]
@@ -463,6 +468,8 @@ async fn source_edit_rollback_refuses_an_edit_without_retained_preimages() {
         read_project_file(&project, "src/main.rs"),
         "fn new_name() {}\n"
     );
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 /// A rollback the daemon refused reaches the host as a tool result carrying

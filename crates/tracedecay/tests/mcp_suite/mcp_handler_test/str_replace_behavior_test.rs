@@ -9,8 +9,9 @@
 //! an apply must present, never as an expected result.
 
 use crate::support::{
-    ProductionSourceEditFixture, TestTempDir, extract_first_json_content,
-    handle_real_server_tool_call, init_production_source_edit_project, test_temp_dir,
+    ProductionSourceEditFixture, TestTempDir, close_production_source_edit_fixture,
+    extract_first_json_content, handle_real_server_tool_call, init_production_source_edit_project,
+    test_temp_dir,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -209,6 +210,8 @@ async fn str_replace_writes_the_unique_span_and_reports_the_completed_edit() {
         "source edit completed; detailed edit output was not retained",
         false,
     );
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -251,6 +254,8 @@ async fn str_replace_dry_run_previews_the_exact_diff_without_writing() {
         "source edit completed; detailed edit output was not retained",
         false,
     );
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -314,6 +319,8 @@ async fn str_replace_reports_a_missing_span_and_leaves_the_file() {
         "source edit completed; detailed edit output was not retained",
         false,
     );
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -347,6 +354,8 @@ async fn str_replace_refuses_an_ambiguous_span_and_leaves_the_file() {
         answer.payload
     );
     assert!(answer.payload.get("diff").is_none(), "{}", answer.payload);
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -371,6 +380,8 @@ async fn str_replace_apply_without_preview_state_is_refused() {
         )
     );
     assert_eq!(fs::read(&file).unwrap(), initial);
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -421,6 +432,8 @@ async fn str_replace_refuses_a_stale_preview_and_keeps_concurrent_bytes() {
         "source edit failed before the effect",
         true,
     );
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -488,6 +501,8 @@ async fn str_replace_replay_does_not_apply_the_same_span_twice() {
         "source edit completed; detailed edit output was not retained",
         false,
     );
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -524,6 +539,8 @@ async fn str_replace_refuses_a_path_outside_the_worktree() {
         "source edit failed before the effect",
         true,
     );
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -562,6 +579,8 @@ async fn str_replace_deletes_a_unique_span_when_the_replacement_is_empty() {
     assert_eq!(answer.payload["replaced_span"], "REMOVE_ME\n");
     assert_eq!(answer.payload["message"], "replacement successful");
     assert_eq!(answer.payload["replayed"], false);
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -598,6 +617,8 @@ async fn str_replace_preserves_crlf_bytes_around_the_span() {
     assert_client_outcome(&answer, true);
     assert_eq!(answer.payload["message"], "replacement successful");
     assert_eq!(answer.payload["replaced_span"], "12");
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -627,6 +648,8 @@ async fn str_replace_identical_replacement_previews_no_changes() {
     assert_eq!(answer.payload["matched_str"], "12");
     assert_eq!(answer.payload["new_str"], "12");
     assert_eq!(answer.payload["replaced_span"], "12");
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -654,6 +677,8 @@ async fn str_replace_empty_old_str_reports_every_match() {
     assert_eq!(answer.payload["matched_str"], "");
     assert_eq!(answer.payload["new_str"], "x");
     assert!(answer.payload.get("diff").is_none(), "{}", answer.payload);
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -676,6 +701,8 @@ async fn str_replace_missing_old_str_is_a_parameter_error() {
         crate::support::application_surface_refusal_error("missing required parameter: old_str")
     );
     assert_eq!(fs::read(&file).unwrap(), initial);
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -704,6 +731,8 @@ async fn str_replace_refuses_project_selectors() {
         Some("tracedecay_str_replace")
     );
     assert_eq!(fs::read(&file).unwrap(), initial);
+
+    close_production_source_edit_fixture(fixture).await;
 }
 
 /// Another process holds the store's writer lock past the admission deadline:
@@ -775,4 +804,7 @@ async fn str_replace_behind_a_held_writer_lock_reports_the_lock_deadline_detail(
         "the text the host reads carries the same record"
     );
     assert_eq!(fs::read(&file).unwrap(), initial);
+
+    drop(server);
+    close_production_source_edit_fixture(fixture).await;
 }
