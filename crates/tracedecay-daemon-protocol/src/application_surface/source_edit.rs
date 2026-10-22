@@ -300,7 +300,11 @@ pub(super) const fn source_edit_kind(
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
-    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+    use tracedecay_contracts::{
+        SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
+    };
+    use tracedecay_domain::ManifestDigest;
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, UseCaseId};
 
     use super::parse_source_edit_arguments;
     use crate::application_surface::ApplicationSurfaceRequest;
@@ -377,6 +381,54 @@ mod tests {
             .expect("valid unchanged state"),
             ApplicationSurfaceRequest::SourceEditReconcile(_)
         ));
+    }
+
+    #[test]
+    fn typed_reconciliation_requests_roundtrip_through_the_public_parser() {
+        let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+        for disposition in [
+            SourceEditReconciliationDispositionV1::Inspect,
+            SourceEditReconciliationDispositionV1::ConfirmCommitted {
+                committed_state: digest.clone(),
+            },
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged,
+            SourceEditReconciliationDispositionV1::AcknowledgePartial {
+                observed_state: digest.clone(),
+            },
+        ] {
+            let request = tracedecay_contracts::SourceEditReconcileSurfaceRequestV1 {
+                original_operation: UseCaseId::new("use-case.application.source-edit.str-replace")
+                    .unwrap(),
+                effect_id: "effect.source-edit.retained".to_owned(),
+                idempotency_key: "source-edit.original".to_owned(),
+                attempt_idempotency_key: "source-edit.reconciliation".to_owned(),
+                input_digest: digest.to_string(),
+                confirm: !matches!(disposition, SourceEditReconciliationDispositionV1::Inspect),
+                disposition: disposition.clone(),
+            };
+            let value = serde_json::to_value(&request).unwrap();
+            let decoded: tracedecay_contracts::SourceEditReconcileSurfaceRequestV1 =
+                serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(decoded, request);
+            let ApplicationSurfaceRequest::SourceEditReconcile(parsed) =
+                parse_source_edit_arguments(
+                    ApplicationSurfaceOperation::SourceEditReconcile,
+                    &value,
+                )
+                .unwrap()
+            else {
+                panic!("reconciliation request");
+            };
+            assert_eq!(parsed.disposition, disposition);
+            assert_eq!(parsed.original_operation, request.original_operation);
+            assert_eq!(parsed.effect_id.as_str(), request.effect_id);
+            assert_eq!(parsed.idempotency_key.as_str(), request.idempotency_key);
+            assert_eq!(
+                parsed.attempt_idempotency_key.as_str(),
+                request.attempt_idempotency_key
+            );
+            assert_eq!(parsed.input_digest, digest);
+        }
     }
 
     #[test]

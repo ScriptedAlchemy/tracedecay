@@ -451,13 +451,16 @@ async fn partial_acknowledgement_rejects_stale_digest_replays_and_admits_next_ed
     .await
     .unwrap();
     let next_authorization = super::test_support::fixture_authorization(&next);
+    let mut preview = next.clone();
+    preview.edit = preview.edit.with_dry_run(true);
+    preview.idempotency_key = IdempotencyKey::new("preview.after.partial.acknowledgement").unwrap();
     let operation = source_edit_operation(next.edit.kind()).unwrap();
     assert!(
         execute_source_edit(
             &fixture.graph,
             &fixture.code_graph,
             &operation,
-            next.clone(),
+            preview.clone(),
             &next_authorization,
         )
         .await
@@ -529,6 +532,18 @@ async fn partial_acknowledgement_rejects_stale_digest_replays_and_admits_next_ed
         .is_err()
     );
 
+    let accepted_preview = execute_source_edit(
+        &fixture.graph,
+        &fixture.code_graph,
+        &operation,
+        preview,
+        &next_authorization,
+    )
+    .await
+    .unwrap();
+    assert!(accepted_preview.outcome.success());
+    assert!(accepted_preview.dry_run);
+    next.expected_state = accepted_preview.expected_state;
     let next_result = execute_source_edit(
         &fixture.graph,
         &fixture.code_graph,
