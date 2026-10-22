@@ -284,7 +284,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: needs.validate.outputs.build_required == 'true'
         with:
-          python-version: "3.15.0"
+          python-version: "3.15.1"
 
       - name: Install the locked-inventory YAML reader
         if: needs.validate.outputs.build_required == 'true'
