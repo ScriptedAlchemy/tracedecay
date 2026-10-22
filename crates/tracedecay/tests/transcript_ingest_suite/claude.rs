@@ -1401,6 +1401,25 @@ async fn claude_atomic_replacement_retires_superseded_messages_until_restored() 
         );
     }
 
+    let mut conflicting = original.clone();
+    conflicting[1]["message"]["content"][0]["text"] =
+        serde_json::json!("claudeprobe refused: a different answer under the retired UUID.");
+    write(&replacement, &conflicting);
+    std::fs::rename(&replacement, &path).unwrap();
+    let refused = ingest().await;
+    assert_eq!(refused.records_rejected, 1);
+    assert!(
+        db.search_session_messages("claude", None, "claudeprobe beta", 10)
+            .await
+            .is_empty(),
+        "a refused identity collision must not revive the retired record's old content"
+    );
+    assert!(
+        db.search_session_messages("claude", None, "claudeprobe refused", 10)
+            .await
+            .is_empty()
+    );
+
     write(&replacement, &original);
     std::fs::rename(&replacement, &path).unwrap();
     ingest().await;
