@@ -842,11 +842,22 @@ mod tests {
             Arc::clone(&capacity_gate).try_lock_owned().is_err(),
             "a cancelled caller cannot release capacity while detached cleanup is pending"
         );
+        let tracked_completion = administration
+            .acquire_project_server_retirement_admission()
+            .await
+            .prior_completions_for_owner(&owner("project-capacity"))
+            .pop()
+            .expect("the cancelled caller must leave a tracked capacity receipt");
         release_capacity.notify_one();
-        let recovered_capacity = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            Arc::clone(&capacity_gate).lock_owned(),
-        )
+        let recovered_capacity = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let recovered_capacity = Arc::clone(&capacity_gate).lock_owned().await;
+            // The guard drops inside the retirement, before its terminal receipt is published.
+            tracked_completion
+                .wait()
+                .await
+                .expect("detached capacity retirement completes cleanly");
+            recovered_capacity
+        })
         .await
         .expect("detached cleanup must release capacity after completion");
 
