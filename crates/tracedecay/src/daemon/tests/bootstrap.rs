@@ -3711,8 +3711,9 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     assert!(message.contains("retry"), "{message}");
 
     // Retry the warming hint the way a client does. Each retry rides the
-    // detached open's own publication, and a retry that had to start a new
-    // open would show up as a second attempt.
+    // detached open's own publication. Its topology walk can still own the
+    // discovery slot, which is another typed retryable response. A retry that
+    // had to start a new open would show up as a second attempt.
     loop {
         match engine
             .project_server_for_request(&handshake, super::super::ProjectServerRequirement::Core)
@@ -3720,7 +3721,11 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         {
             Ok(_) => break,
             Err(error) => assert!(
-                super::super::error_is_project_warming(&error),
+                super::super::error_is_project_warming(&error)
+                    || (super::super::error_is_repository_discovery_deferred(&error)
+                        && error
+                            .project_route_context()
+                            .is_some_and(|(_, retryable, _)| retryable)),
                 "the detached warm-up must publish, not fail: {error:?}"
             ),
         }
