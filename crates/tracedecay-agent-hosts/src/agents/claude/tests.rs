@@ -22,7 +22,8 @@ fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
     for (relative, _) in rendered_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap() {
         let target = cache.join(relative);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::copy(source.join(relative), target).unwrap();
+        let contents = std::fs::read(source.join(relative)).unwrap();
+        std::fs::write(target, contents).unwrap();
     }
 }
 
