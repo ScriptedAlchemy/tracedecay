@@ -10,14 +10,16 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value as SqlV
 use tracedecay_store::{SessionMessageRecord, session_project_fields};
 
 use super::compression_decision::{
-    self, AssemblyCapInput, CompressionPlanInput, CondensationCandidateDecision,
-    CondensationDecision, CondensationDecisionInput, OverflowRecoveryCapInput,
-    PreflightDecisionInput,
+    self, CompressionPlanInput, CondensationCandidateDecision, CondensationDecision,
+    CondensationDecisionInput, OverflowRecoveryCapInput, PreflightDecisionInput,
 };
 use super::compression_policy::{is_policy_anchor_role, source_token_count};
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
-use super::types::{LcmExtractionResult, LcmRelationProjectionStatus, LcmSummarySourceRange};
+use super::types::{
+    CRITICAL_PRESSURE_CATCH_UP_RETRY, LcmExtractionResult, LcmRelationProjectionStatus,
+    LcmSummarySourceRange, NEEDS_SUMMARY_STATUS,
+};
 use super::{
     LCM_DEFAULT_FRESH_TAIL_COUNT, LcmCompressionRequest, LcmCompressionResponse, LcmError,
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
@@ -288,12 +290,8 @@ pub async fn preflight(
     request: LcmPreflightRequest,
 ) -> Result<LcmPreflightResponse, LcmError> {
     let mut request = request;
-    request.max_assembly_tokens =
-        compression_decision::effective_assembly_token_cap(AssemblyCapInput {
-            max_assembly_tokens: request.max_assembly_tokens,
-            context_length: request.context_length,
-            reserve_tokens_floor: request.reserve_tokens_floor,
-        });
+    request.overrides.max_assembly_tokens =
+        compression_decision::effective_assembly_token_cap(&request.overrides);
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
         &request.ignore_session_patterns,
@@ -336,19 +334,20 @@ pub async fn preflight(
     let window = compression_window(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
-        request.fresh_tail_count,
+        request.overrides.fresh_tail_count,
         request.current_tokens,
-        request.threshold_tokens,
+        request.overrides.threshold_tokens,
     );
     let decision = compression_decision::preflight_decision(PreflightDecisionInput {
-        request: &request,
+        current_tokens: request.current_tokens,
+        overrides: &request.overrides,
         frontier: &existing_frontier,
         backlog: &window.backlog,
     });
     Ok(LcmPreflightResponse {
         status: "ok".to_string(),
-        should_compress: decision.should_compress,
-        reason: decision.reason.to_string(),
+        should_compress: decision.should_compress(),
+        reason: decision.reason().to_string(),
         replay_messages: canonical_replay_messages(&raw_messages),
     })
 }
@@ -474,11 +473,7 @@ pub async fn begin_compression_pass(
     payload_rollback: &mut payload::PayloadFileRollback,
     retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<CompressionAdmission, LcmError> {
-    let assembly_token_cap = compression_decision::effective_assembly_token_cap(AssemblyCapInput {
-        max_assembly_tokens: request.max_assembly_tokens,
-        context_length: request.context_length,
-        reserve_tokens_floor: request.reserve_tokens_floor,
-    });
+    let assembly_token_cap = compression_decision::effective_assembly_token_cap(&request.overrides);
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
         &request.ignore_session_patterns,
@@ -631,13 +626,13 @@ async fn prepare_compression_context(
     let window = compression_window(
         &raw_messages,
         existing_frontier.current_frontier_store_id,
-        request.fresh_tail_count,
+        request.overrides.fresh_tail_count,
         request.current_tokens,
-        request.threshold_tokens,
+        request.overrides.threshold_tokens,
     );
     let plan = compression_decision::compression_plan(CompressionPlanInput {
-        request,
-        assembly_token_cap,
+        current_tokens: request.current_tokens,
+        overrides: &request.overrides,
         backlog: &window.backlog,
     });
     let overflow_assembly_cap =
@@ -859,7 +854,7 @@ fn auxiliary_summary_response(
         replay_without_summary(&context.window.pinned_anchors, &context.window.fresh_tail);
 
     Some(compression_response(
-        "needs_summary",
+        NEEDS_SUMMARY_STATUS,
         "hermes_auxiliary_not_available",
         Vec::new(),
         replay_messages,
@@ -950,7 +945,7 @@ async fn persist_and_replay_backlog_compression(
     let retry_status = context
         .plan
         .forced_overflow_recovery
-        .then_some("critical_pressure_catch_up");
+        .then_some(CRITICAL_PRESSURE_CATCH_UP_RETRY);
 
     Ok(compression_response_with_attempt_state(
         CompressionResponseParts {
@@ -991,15 +986,13 @@ async fn persist_compression_transaction_writes<'a>(
 
     while !remaining_backlog.is_empty() && created_summaries.len() < pass_limit {
         let leaf_chunk_tokens = compression_decision::effective_leaf_chunk_tokens(
-            write.request.leaf_chunk_tokens,
-            write.request.dynamic_leaf_chunk_enabled,
-            write.request.dynamic_leaf_chunk_max,
+            &write.request.overrides,
             source_token_count(remaining_backlog),
         );
         let selected_len = compression_decision::progress_leaf_chunk_len(
             remaining_backlog,
             leaf_chunk_tokens,
-            write.request.max_source_messages,
+            write.request.overrides.max_source_messages,
         );
         let (selected_backlog, deferred_backlog) = remaining_backlog.split_at(selected_len);
 
@@ -1798,8 +1791,7 @@ async fn condense_summary_nodes_if_ready(
     let CondensationDecision::QueryCandidates(policy) =
         compression_decision::condensation_policy_decision(CondensationDecisionInput {
             has_backlog: !window.backlog.is_empty(),
-            summary_fan_in: request.summary_fan_in,
-            incremental_max_depth: request.incremental_max_depth,
+            overrides: &request.overrides,
             summarizer,
         })
     else {
