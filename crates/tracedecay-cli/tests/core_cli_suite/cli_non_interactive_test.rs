@@ -1296,8 +1296,16 @@ fn assert_project_storage_absent(home: &Path, project: &Path) {
 /// artifacts.
 #[test]
 fn init_without_a_running_daemon_refuses_before_any_index_write() {
+    let Some(durable) = ephemeral_safe_fixture_base(
+        "cli_non_interactive_test::init_without_a_running_daemon_refuses_before_any_index_write",
+    ) else {
+        return;
+    };
     let home = daemon_contract_home();
-    let project = TempDir::new().unwrap();
+    let project = tempfile::Builder::new()
+        .prefix("no-daemon-init-project-")
+        .tempdir_in(durable)
+        .unwrap();
     let project_root = canonical_temp_path(project.path());
     write_git_fixture(&project_root);
     assert_project_storage_absent(home.path(), &project_root);
@@ -1330,8 +1338,16 @@ fn init_without_a_running_daemon_refuses_before_any_index_write() {
 #[cfg(unix)]
 #[test]
 fn status_and_query_reads_refuse_typed_daemon_unavailable_without_one() {
+    let Some(durable) = ephemeral_safe_fixture_base(
+        "cli_non_interactive_test::status_and_query_reads_refuse_typed_daemon_unavailable_without_one",
+    ) else {
+        return;
+    };
     let home = daemon_contract_home();
-    let project = TempDir::new().unwrap();
+    let project = tempfile::Builder::new()
+        .prefix("no-daemon-read-project-")
+        .tempdir_in(durable)
+        .unwrap();
     let project_root = canonical_temp_path(project.path());
     write_git_fixture(&project_root);
     let project_arg = project_root.to_string_lossy().to_string();
@@ -1460,8 +1476,16 @@ fn http_observation_counts_connections_and_releases_its_listener_on_unwind() {
 /// child shutdown; the final verdict follows its joined backlog drain.
 #[test]
 fn pricing_and_usage_reads_make_no_http_request() {
+    let Some(durable) = ephemeral_safe_fixture_base(
+        "cli_non_interactive_test::pricing_and_usage_reads_make_no_http_request",
+    ) else {
+        return;
+    };
     let home = daemon_contract_home();
-    let project = TempDir::new().unwrap();
+    let project = tempfile::Builder::new()
+        .prefix("local-usage-project-")
+        .tempdir_in(durable)
+        .unwrap();
     let project_root = canonical_temp_path(project.path());
     write_git_fixture(&project_root);
 
