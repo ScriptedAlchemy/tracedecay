@@ -33,18 +33,3 @@ pub struct SourceEditReconciliationInvocationV1 {
     pub input_digest: ManifestDigest,
     pub disposition: SourceEditReconciliationDispositionV1,
 }
-
-/// User-controlled identity of one completed source edit whose retained
-/// preimages the caller asks the daemon to restore.
-///
-/// The preimage bytes never cross this boundary. They stay in the
-/// server-side rollback record and the caller only names public digests.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceEditRollbackInvocationV1 {
-    pub effect_id: EffectId,
-    pub original_idempotency_key: IdempotencyKey,
-    pub idempotency_key: IdempotencyKey,
-    pub original_input_digest: ManifestDigest,
-    pub expected_state: ManifestDigest,
-}

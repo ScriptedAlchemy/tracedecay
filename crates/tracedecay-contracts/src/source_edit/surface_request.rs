@@ -183,15 +183,3 @@ pub struct SourceEditReconcileSurfaceRequestV1 {
     pub disposition: SourceEditReconciliationDispositionV1,
     pub confirm: bool,
 }
-
-/// Exact public input accepted by `tracedecay_source_edit_rollback`.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceEditRollbackSurfaceRequestV1 {
-    pub effect_id: String,
-    pub original_idempotency_key: String,
-    pub idempotency_key: String,
-    pub original_input_digest: String,
-    pub expected_state: String,
-    pub confirm: bool,
-}

@@ -216,8 +216,7 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::InsertAtSymbol
         | ApplicationSurfaceOperation::MoveSymbol
         | ApplicationSurfaceOperation::RenameSymbol
-        | ApplicationSurfaceOperation::SourceEditReconcile
-        | ApplicationSurfaceOperation::SourceEditRollback) => {
+        | ApplicationSurfaceOperation::SourceEditReconcile) => {
             format!("/source-edit/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::FactStoreCurate

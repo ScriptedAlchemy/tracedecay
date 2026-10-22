@@ -42,7 +42,7 @@ pub struct SourceEditEffectUnknownResultV1 {
     pub message: String,
 }
 
-/// Terminal payload returned by explicit reconciliation and rollback.
+/// Terminal payload returned by explicit reconciliation.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SourceEditReconciledResultV1 {
     pub success: bool,
