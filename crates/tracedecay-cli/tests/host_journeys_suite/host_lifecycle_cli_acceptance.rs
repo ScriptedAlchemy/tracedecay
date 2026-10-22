@@ -2181,6 +2181,111 @@ fn update_plugin_with_no_integration_refuses_instead_of_exiting_zero() {
     assert!(stderr.contains("tracedecay install"), "{stderr}");
 }
 
+#[test]
+fn failed_opencode_install_preserves_creation_ownership_through_retry_and_uninstall() {
+    for original in [None, Some(b"{\"theme\":\"dark\"}\n".as_slice())] {
+        let cli = IsolatedCli::new();
+        let case = host_case(HostKindV1::OpenCode);
+        let config_dir = cli.home.path().join(".config/opencode");
+        let config_path = config_dir.join("opencode.json");
+        fs::create_dir_all(&config_dir).unwrap();
+        if let Some(original) = original {
+            fs::write(&config_path, original).unwrap();
+        }
+
+        let failed = cli.run_with_env(&["install", "--agent", case.id], VERIFY_FAILURE_ENV, "1");
+        assert!(
+            !failed.status.success(),
+            "injected verification failure unexpectedly succeeded"
+        );
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        assert!(config.pointer("/mcp/servers/tracedecay").is_some());
+        assert!(
+            latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
+                .unwrap()
+                .is_none()
+        );
+        let ownership = latest_host_component_receipt_at(
+            &cli.lifecycle_root(),
+            case.host,
+            HostComponentV1::Core,
+        )
+        .unwrap()
+        .expect("failed install retains component ownership");
+        let creation = ownership
+            .created_config
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|creation| creation.relative_path == ".config/opencode/opencode.json")
+            .expect("failed install retains config creation facts");
+        assert_eq!(creation.created_file, original.is_none());
+        assert!(
+            creation
+                .created_containers
+                .iter()
+                .any(|path| path == "/mcp")
+        );
+
+        assert_success(
+            case.id,
+            "retry install",
+            cli.run(&["install", "--agent", case.id]),
+        );
+        let installed = latest_receipt(&cli, case.host);
+        assert_receipt_digests(&cli, &installed);
+        let ownership_before_uninstall = latest_host_component_receipt_at(
+            &cli.lifecycle_root(),
+            case.host,
+            HostComponentV1::Core,
+        )
+        .unwrap();
+        let failed = cli.run_with_env(&["uninstall", "--agent", case.id], VERIFY_FAILURE_ENV, "1");
+        assert!(!failed.status.success());
+        assert_eq!(latest_receipt(&cli, case.host), installed);
+        assert_eq!(
+            latest_host_component_receipt_at(
+                &cli.lifecycle_root(),
+                case.host,
+                HostComponentV1::Core,
+            )
+            .unwrap(),
+            ownership_before_uninstall
+        );
+
+        assert_success(
+            case.id,
+            "retry uninstall",
+            cli.run(&["uninstall", "--agent", case.id]),
+        );
+        if let Some(original) = original {
+            assert_eq!(fs::read(&config_path).unwrap(), original);
+        } else {
+            assert!(
+                !config_path.exists(),
+                "retry lost ownership of the created config"
+            );
+        }
+        for artifact in installed
+            .component_receipts
+            .iter()
+            .flat_map(|component| &component.artifacts)
+        {
+            assert!(!cli.home.path().join(&artifact.relative_path).exists());
+        }
+        let remaining = fs::read_dir(config_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remaining.len(),
+            usize::from(original.is_some()),
+            "{remaining:?}"
+        );
+    }
+}
+
 /// A killed install leaves completed writes in place. The next install
 /// converges without a saved copy of the previous host configuration.
 #[test]

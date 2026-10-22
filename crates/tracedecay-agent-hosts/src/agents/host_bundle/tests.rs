@@ -301,17 +301,17 @@ fn component_set_replays_success_and_preserves_publications_on_failure() {
         writer
             .load_receipt(HostKindV1::OpenCode, HostComponentV1::Core)
             .unwrap()
-            .expect("previous core receipt remains published")
+            .expect("published core ownership remains recorded")
             .operation_id,
-        [21; 16]
+        [22; 16]
     );
     assert_eq!(
         writer
             .load_receipt(HostKindV1::OpenCode, HostComponentV1::Agent)
             .unwrap()
-            .expect("previous agent receipt remains published")
+            .expect("published agent ownership remains recorded")
             .operation_id,
-        [21; 16]
+        [22; 16]
     );
     let prior_set_receipt = component_set_receipt_file([21; 16]);
     for entry in fs::read_dir(root.path().join(HOST_BUNDLE_CONTROL_DIR)).unwrap() {
@@ -373,10 +373,33 @@ fn component_set_failure_preserves_foreign_and_published_bytes() {
         writer
             .load_receipt(HostKindV1::OpenCode, HostComponentV1::Core)
             .unwrap()
-            .expect("the prior receipt was never replaced")
-            .operation_id,
-        [41; 16]
+            .expect("the published artifact digest remains recorded")
+            .artifacts[0]
+            .artifact_digest,
+        <[u8; 32]>::from(Sha256::digest(b"core-v2"))
     );
+    assert_eq!(writer.load_component_set_receipt([42; 16]).unwrap(), None);
+    for operation in [
+        HostBundleLifecycleOpV1::Update,
+        HostBundleLifecycleOpV1::Uninstall,
+    ] {
+        let error = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &repaired,
+                &component_set_request(HostKindV1::OpenCode, operation, 43),
+                &ComponentSetVerifier::from_set(&repaired),
+                &mut ArtifactOnlyTestRegistration,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, HostBundleError::OwnershipConflict(_)),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(root.path().join("plugins/core.json")).unwrap(),
+            b"foreign"
+        );
+    }
 }
 
 /// A concurrent writer changes an artifact during registration.
@@ -2100,8 +2123,10 @@ fn migration_failure_preserves_published_artifact_and_prior_receipt() {
     assert_eq!(
         writer
             .load_receipt(HostKindV1::CursorDesktop, HostComponentV1::ContextMcp)
-            .unwrap(),
-        None
+            .unwrap()
+            .expect("the canonical receipt records the published artifact")
+            .operation_id,
+        [44; 16]
     );
     assert_eq!(writer.load_component_set_receipt([44; 16]).unwrap(), None);
 }

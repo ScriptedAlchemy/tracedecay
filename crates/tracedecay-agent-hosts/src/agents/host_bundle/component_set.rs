@@ -151,10 +151,8 @@ impl HostBundleWriterV1 {
         Ok(())
     }
 
-    /// Execute a complete canonical host component set as one operation.
-    /// Every component is preflighted before any owned file changes; receipts
-    /// are published only after all artifacts and the host registration
-    /// authority verify successfully.
+    /// Component receipts retain ownership across failed publication attempts.
+    /// The aggregate receipt records a successfully verified operation.
     pub fn execute_component_set<
         V: HostBundleVerificationAdapterV1,
         R: HostComponentSetRegistrationV1,
@@ -259,10 +257,16 @@ impl HostBundleWriterV1 {
                 request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall,
                 || registration.apply(component_set, request),
             );
-            applied?;
-            self.verify_component_set_artifacts(&prepared)?;
-            registration.verify(component_set, request)?;
-
+            let verification = applied.and_then(|()| {
+                self.verify_component_set_artifacts(&prepared)?;
+                registration.verify(component_set, request)
+            });
+            let verification = match verification {
+                Err(error) if request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall => {
+                    return Err(error);
+                }
+                verification => verification,
+            };
             let mut recorded = self.created_directories(&missing_before);
             recorded.extend(
                 prepared
@@ -286,6 +290,7 @@ impl HostBundleWriterV1 {
             for component_receipt in &receipt.component_receipts {
                 self.write_receipt(component_receipt)?;
             }
+            verification?;
             // Retire superseded receipts before the aggregate receipt, which
             // turns a rerun of this operation id into an early-returning replay.
             for superseded in prepared
