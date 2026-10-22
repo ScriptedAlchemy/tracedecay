@@ -185,7 +185,7 @@ impl SourceEditEffectRequestV1 {
 /// operation. The concrete authority independently recaptures every candidate
 /// file and accepts only an exact matching state digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "disposition")]
+#[serde(rename_all = "snake_case", tag = "disposition", deny_unknown_fields)]
 pub enum SourceEditReconciliationDispositionV1 {
     Inspect,
     ConfirmCommitted { committed_state: ManifestDigest },

@@ -349,8 +349,10 @@ async fn inspect_pending_effect(
     fixture: &EffectUnknownFixture,
     request: SourceEditReconciliationRequestV1,
 ) -> tracedecay_contracts::source_edit::SourceEditDurableEffectPayloadV1 {
-    let control =
-        SourceEditEffectControlV1::for_request(&request.context, CancellationSignal::new());
+    let control = SourceEditEffectControlV1::for_request(
+        &request.context,
+        CancellationSignal::active("cancel.reconcile.inspection").unwrap(),
+    );
     let result = reconcile_source_edit_effect_unknown_with_control(
         &fixture.graph,
         request,
@@ -787,8 +789,10 @@ async fn reconciliation_receipt_gap_survives_process_exit_and_original_replay() 
         );
         request.attempt_idempotency_key = IdempotencyKey::new("gap.acknowledge").unwrap();
         let authorization = super::test_support::fixture_authorization(&original);
-        let control =
-            SourceEditEffectControlV1::for_request(&request.context, CancellationSignal::new());
+        let control = SourceEditEffectControlV1::for_request(
+            &request.context,
+            CancellationSignal::active("cancel.reconcile.receipt-gap").unwrap(),
+        );
         let error = reconcile_source_edit_effect_unknown_with_control(
             &graph,
             request.clone(),
@@ -877,8 +881,10 @@ async fn reconciliation_receipt_gap_survives_process_exit_and_original_replay() 
         EffectTermination::Partial
     );
     assert!(!durability.journal_path().exists());
-    let control =
-        SourceEditEffectControlV1::for_request(&request.context, CancellationSignal::new());
+    let control = SourceEditEffectControlV1::for_request(
+        &request.context,
+        CancellationSignal::active("cancel.reconcile.replay").unwrap(),
+    );
     let replay = reconcile_source_edit_effect_unknown_with_control(
         &fixture.graph,
         request,
