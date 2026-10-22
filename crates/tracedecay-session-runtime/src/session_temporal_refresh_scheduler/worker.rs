@@ -1310,7 +1310,15 @@ async fn reject_staged_completion<'a>(
             &recovery,
             durable_projector_failure_code(REFRESH_COMPLETION_REFUSED),
         ) {
-            Some(request) => apply_fail_effect(store, state, &recovery, request, report).await,
+            Some(request) => {
+                let disposition = match error {
+                    SessionStoreError::RefreshSupersededByReset => {
+                        RefreshFailureDisposition::Rediscover
+                    }
+                    _ => RefreshFailureDisposition::SuppressDiscovery,
+                };
+                apply_fail_effect(store, state, &recovery, request, disposition, report).await;
+            }
             None => report.terminal_errors += 1,
         }
         return;
@@ -1684,7 +1692,15 @@ pub async fn apply_refresh_effect(
                         durable_projector_failure_code(REFRESH_PROGRESS_REFUSED),
                     ) {
                         Some(request) => {
-                            apply_fail_effect(store, state, recovery, request, report).await;
+                            apply_fail_effect(
+                                store,
+                                state,
+                                recovery,
+                                request,
+                                RefreshFailureDisposition::SuppressDiscovery,
+                                report,
+                            )
+                            .await;
                         }
                         None => report.terminal_errors += 1,
                     }
@@ -1699,7 +1715,15 @@ pub async fn apply_refresh_effect(
             }
         }
         SessionTemporalRefreshEffect::Fail(request) => {
-            apply_fail_effect(store, state, recovery, request, report).await;
+            apply_fail_effect(
+                store,
+                state,
+                recovery,
+                request,
+                RefreshFailureDisposition::SuppressDiscovery,
+                report,
+            )
+            .await;
         }
         SessionTemporalRefreshEffect::Deferred => report.deferred += 1,
     }
@@ -1783,7 +1807,15 @@ async fn apply_prepared_refresh_effect(
                         SessionRefreshDispositionV1::Joined => report.joined += 1,
                     }
                     if receipt.operation_id() == prepared.recovery.operation_id() {
-                        apply_fail_effect(store, state, &prepared.recovery, request, report).await;
+                        apply_fail_effect(
+                            store,
+                            state,
+                            &prepared.recovery,
+                            request,
+                            RefreshFailureDisposition::SuppressDiscovery,
+                            report,
+                        )
+                        .await;
                     } else {
                         report.terminal_errors += 1;
                     }
@@ -1803,11 +1835,17 @@ async fn apply_prepared_refresh_effect(
     }
 }
 
+enum RefreshFailureDisposition {
+    SuppressDiscovery,
+    Rediscover,
+}
+
 async fn apply_fail_effect(
     store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
     recovery: &SessionRefreshRecoveryV1,
     request: SessionRefreshFailureRequestV1,
+    disposition: RefreshFailureDisposition,
     report: &mut SessionTemporalRefreshPassReport,
 ) {
     if !state.claim_terminal_attempt(recovery) {
@@ -1825,7 +1863,9 @@ async fn apply_fail_effect(
             );
             report.failed += 1;
             report.failed_sessions.insert(recovery.session_id().clone());
-            state.record_terminal_discovery_failure(recovery);
+            if matches!(disposition, RefreshFailureDisposition::SuppressDiscovery) {
+                state.record_terminal_discovery_failure(recovery);
+            }
         }
         Err(error) if is_retryable_storage(&error) => {
             report.last_error = Some(format!("{error:?}"));
