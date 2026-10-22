@@ -1,0 +1,15 @@
+{
+  "id": "baseline_stock_check_rename",
+  "category": "product_effectiveness",
+  "hosts": [
+    "claude"
+  ],
+  "fixture": "main",
+  "status": "baseline",
+  "prompt": "Rename the warehouse availability check to has_sufficient_stock and update its callers. Keep the existing stock boundary behavior unchanged.",
+  "outcome": {
+    "kind": "effect",
+    "behavior": "stock_check_rename"
+  },
+  "notes": "Held-out mutation task. Trusted Bazel tests compile the captured sources and exercise the renamed API, stock boundaries, reservations, and order totals. Missing execution is unverified, never a pass."
+}

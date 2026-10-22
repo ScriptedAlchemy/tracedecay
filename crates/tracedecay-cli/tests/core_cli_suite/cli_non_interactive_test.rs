@@ -1209,14 +1209,21 @@ fn init_wait_holds_until_first_generation_is_ready() {
     git(project.path(), &["init", "-b", "main"]);
     commit_all(project.path(), "fixture repository");
 
+    let daemon_log = home.path().join("init-wait-daemon.log");
+    let _daemon =
+        crate::common::spawn_tracedecay_daemon_logged(home.path(), &daemon_log, |command| {
+            command.env("RUST_LOG", "info");
+        });
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["init", "--wait"]);
     let output = run_with_timeout(command, cli_timeout());
     assert!(
         output.status.success(),
-        "init --wait should succeed once the first generation is ready\nstdout:\n{}\nstderr:\n{}",
+        "init --wait should succeed once the first generation is ready\nstdout:\n{}\nstderr:\n{}\ndaemon:\n{}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
+        std::fs::read_to_string(&daemon_log)
+            .unwrap_or_else(|error| format!("daemon log unavailable: {error}"))
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -3642,7 +3649,11 @@ fn branch_search_serves_a_committed_generation_behind_dirty_worktree_state() {
     .unwrap();
     init_project_fixture(home.path(), &project_root);
 
-    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let daemon_log = home.path().join("dirty-branch-daemon.log");
+    let _daemon =
+        crate::common::spawn_tracedecay_daemon_logged(home.path(), &daemon_log, |command| {
+            command.env("RUST_LOG", "info");
+        });
     let ready_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut ready = tracedecay_command_without_daemon(home.path(), &project_root);
@@ -3666,9 +3677,11 @@ fn branch_search_serves_a_committed_generation_behind_dirty_worktree_state() {
         }
         assert!(
             Instant::now() < ready_deadline,
-            "dirty worktree generation did not become queryable\nstdout:\n{}\nstderr:\n{}",
+            "dirty worktree generation did not become queryable\nstdout:\n{}\nstderr:\n{}\ndaemon:\n{}",
             String::from_utf8_lossy(&ready.stdout),
-            String::from_utf8_lossy(&ready.stderr)
+            String::from_utf8_lossy(&ready.stderr),
+            std::fs::read_to_string(&daemon_log)
+                .unwrap_or_else(|error| format!("daemon log unavailable: {error}"))
         );
         std::thread::sleep(Duration::from_millis(100));
     }

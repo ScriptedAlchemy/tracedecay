@@ -1,6 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lsp_types::request::{
@@ -18,11 +20,14 @@ use lsp_types::{
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
     WorkspaceSymbolParams,
 };
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
-use tracedecay_runtime_core::path_safety::plain_host_path;
+use tracedecay_domain::ContentDigest;
+use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
+use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, plain_host_path};
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
 use super::error::{
@@ -43,6 +48,7 @@ pub struct LspRefreshTimeouts {
     initialize_response: Duration,
     message_io: Duration,
     diagnostics_quiet: Duration,
+    deadline: Option<Instant>,
 }
 
 impl LspRefreshTimeouts {
@@ -57,7 +63,24 @@ impl LspRefreshTimeouts {
             initialize_response,
             message_io,
             diagnostics_quiet,
+            deadline: None,
         }
+    }
+
+    pub(super) fn operation_deadline(self) -> Instant {
+        self.deadline.unwrap_or_else(|| {
+            Instant::now() + self.initialize_response.saturating_add(self.refresh)
+        })
+    }
+
+    fn request_deadline(self) -> Instant {
+        self.deadline
+            .unwrap_or_else(|| Instant::now() + self.refresh)
+    }
+
+    pub(super) fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(self.operation_deadline().min(deadline));
+        self
     }
 
     pub fn from_diagnostics_quiet_window(diagnostics_quiet: Duration) -> Self {
@@ -69,6 +92,7 @@ impl LspRefreshTimeouts {
             initialize_response,
             message_io,
             diagnostics_quiet,
+            deadline: None,
         }
     }
 }
@@ -79,6 +103,44 @@ pub struct LspDocument {
     pub language_id: String,
     pub relative_path: String,
     pub text: String,
+    /// The exact admitted overlay and its open-document lifetime, when this
+    /// is not a disk sweep.
+    pub snapshot: Option<crate::LspSemanticDocumentSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DiagnosticDocumentCoverage {
+    Published {
+        version_verified: bool,
+        content_digest: ContentDigest,
+    },
+    NoPublication,
+    StalePublication,
+    RootFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticRootCoverage {
+    Completed,
+    Failed,
+}
+
+/// Coverage of the latest admitted refresh scope. A missing document was not
+/// observed by that refresh; any retained findings for it remain unverified.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticCoverage {
+    pub documents: BTreeMap<String, DiagnosticDocumentCoverage>,
+    pub roots: BTreeMap<PathBuf, DiagnosticRootCoverage>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiagnosticRefreshResult {
+    /// Findings backed by `Published` coverage. The broker owns retention of
+    /// older findings for every unverified document.
+    pub diagnostics: Vec<CodeDiagnostic>,
+    pub coverage: DiagnosticCoverage,
 }
 
 /// Standard LSP semantic/navigation requests retained by the analyzer client.
@@ -200,6 +262,7 @@ impl LspSemanticRequest {
 pub enum LspSemanticRequestError {
     Cancelled,
     TimedOut,
+    ProcessExited { status: String },
     Remote { code: Option<i64>, message: String },
     Transport { class: String },
     InvalidResponse { class: String },
@@ -210,6 +273,7 @@ impl LspSemanticRequestError {
         match self {
             Self::Cancelled => AnalyzerEvent::Cancelled,
             Self::TimedOut => AnalyzerEvent::TimedOut,
+            Self::ProcessExited { .. } => AnalyzerEvent::Crashed,
             Self::Remote { .. } => AnalyzerEvent::RemoteError,
             Self::Transport { .. } => AnalyzerEvent::TransportFailed,
             Self::InvalidResponse { .. } => AnalyzerEvent::InvalidResponse,
@@ -228,6 +292,9 @@ impl std::fmt::Display for LspSemanticRequestError {
         match self {
             Self::Cancelled => f.write_str("analyzer request was cancelled"),
             Self::TimedOut => f.write_str("analyzer request timed out"),
+            Self::ProcessExited { status } => {
+                write!(f, "analyzer process exited before responding ({status})")
+            }
             Self::Remote {
                 code: Some(code),
                 message,
@@ -253,6 +320,8 @@ impl std::fmt::Display for LspSemanticRequestError {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum LspRefreshError {
     #[error("{message}")]
+    TimedOut { message: String },
+    #[error("{message}")]
     NoPublication { message: String },
     #[error("{message}")]
     ProcessExited { message: String },
@@ -265,6 +334,7 @@ pub enum LspRefreshError {
 impl LspRefreshError {
     pub fn analyzer_event(&self) -> AnalyzerEvent {
         match self {
+            Self::TimedOut { .. } => AnalyzerEvent::TimedOut,
             Self::NoPublication { .. } => AnalyzerEvent::Retired,
             Self::ProcessExited { .. } => AnalyzerEvent::Crashed,
             Self::Transport { .. } => AnalyzerEvent::TransportFailed,
@@ -291,7 +361,7 @@ pub async fn collect_document_diagnostics(
     project_root: &Path,
     documents: Vec<LspDocument>,
     diagnostics_quiet_timeout: Duration,
-) -> Result<Vec<CodeDiagnostic>> {
+) -> Result<DiagnosticRefreshResult> {
     let timeouts = LspRefreshTimeouts::from_diagnostics_quiet_window(diagnostics_quiet_timeout);
     collect_document_diagnostics_with_timeouts(command, args, project_root, documents, timeouts)
         .await
@@ -303,7 +373,8 @@ pub async fn collect_document_diagnostics_with_timeouts(
     project_root: &Path,
     documents: Vec<LspDocument>,
     timeouts: LspRefreshTimeouts,
-) -> Result<Vec<CodeDiagnostic>> {
+) -> Result<DiagnosticRefreshResult> {
+    let timeouts = timeouts.with_deadline(timeouts.operation_deadline());
     let mut client =
         StdioLspClient::start_with_timeouts(command, args, project_root, timeouts).await?;
     client
@@ -312,13 +383,146 @@ pub async fn collect_document_diagnostics_with_timeouts(
         .map_err(TraceDecayError::from)
 }
 
+struct SynchronizedDocument {
+    uri: String,
+    wire_version: i32,
+    text: String,
+    snapshot: Option<crate::LspSemanticDocumentSnapshot>,
+    diagnostics: Option<(Vec<CodeDiagnostic>, DiagnosticDocumentCoverage)>,
+}
+
 pub struct StdioLspClient {
     command: String,
+    workspace_root: PathBuf,
     upstream_capabilities: UpstreamCapabilities,
-    document_versions: BTreeMap<String, i32>,
+    documents: BTreeMap<PathBuf, SynchronizedDocument>,
     next_request_id: ConnectionLocalRequestSequence,
     /// Killed and reaped when the client drops.
     process: AnalyzerProcess,
+}
+
+/// A startup owned independently from the request that first needed it.
+///
+/// Once admitted, the task runs through process termination on cancellation.
+/// The shared client slot retains this result until that settlement finishes,
+/// so dropping a request can never make room for a successor beside the old
+/// process.
+pub(crate) struct StdioLspClientStartup {
+    cancellation: CancellationToken,
+    result: Arc<Mutex<Option<StdioLspClientStartupSettlement>>>,
+    task: NativeTask<()>,
+}
+
+pub(crate) enum StdioLspClientStartupSettlement {
+    Started(StdioLspClient),
+    Cancelled,
+    Failed(TraceDecayError),
+    ReapFailed(TraceDecayError),
+}
+
+impl StdioLspClientStartup {
+    pub(crate) fn start(
+        launch: AnalyzerLaunch,
+        args: Vec<String>,
+        project_root: PathBuf,
+        timeouts: LspRefreshTimeouts,
+    ) -> Result<Self> {
+        let cancellation = CancellationToken::new();
+        let startup_cancellation = cancellation.clone();
+        let result = Arc::new(Mutex::new(None));
+        let startup_result = Arc::clone(&result);
+        let task = NativeTask::spawn(async move {
+            let started = StdioLspClient::start_with_launch_until_cancelled(
+                &launch,
+                &args,
+                &project_root,
+                timeouts,
+                &startup_cancellation,
+            )
+            .await;
+            {
+                // Publication and cancellation share one handoff. Either the
+                // caller drains an already-started client or this task reaps
+                // it; no successful result can arrive after an empty drain.
+                let mut result = startup_result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !startup_cancellation.is_cancelled() {
+                    *result = Some(started);
+                    return;
+                }
+            }
+            let settled = match started {
+                StdioLspClientStartupSettlement::Started(client) => match client.reap().await {
+                    Ok(()) => StdioLspClientStartupSettlement::Cancelled,
+                    Err(error) => StdioLspClientStartupSettlement::ReapFailed(error),
+                },
+                // An ordinary failure has already reaped the process. Once
+                // this startup's request owner is gone, that failure belongs
+                // to the abandoned attempt and must not escape to the next
+                // request that settles the retained slot. A reap failure is
+                // different: it is not proof that the old process is gone, so
+                // it remains fail-closed for every successor.
+                StdioLspClientStartupSettlement::Failed(_)
+                | StdioLspClientStartupSettlement::Cancelled => {
+                    StdioLspClientStartupSettlement::Cancelled
+                }
+                StdioLspClientStartupSettlement::ReapFailed(error) => {
+                    StdioLspClientStartupSettlement::ReapFailed(error)
+                }
+            };
+            *startup_result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(settled);
+        })
+        .map_err(TraceDecayError::new)?;
+        Ok(Self {
+            cancellation,
+            result,
+            task,
+        })
+    }
+
+    /// Cancels an in-flight start or hands its completed client back to the
+    /// slot for immediate retirement with a retained reap settlement.
+    pub(crate) fn cancel(&self) -> Option<StdioLspClient> {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.cancellation.cancel();
+        match result.take() {
+            Some(StdioLspClientStartupSettlement::Started(client)) => Some(client),
+            Some(
+                StdioLspClientStartupSettlement::Failed(_)
+                | StdioLspClientStartupSettlement::Cancelled,
+            ) => {
+                *result = Some(StdioLspClientStartupSettlement::Cancelled);
+                None
+            }
+            settlement => {
+                *result = settlement;
+                None
+            }
+        }
+    }
+
+    pub(crate) async fn settle(&self) -> StdioLspClientStartupSettlement {
+        if !matches!(self.task.wait().await, NativeTaskOutcome::Completed(())) {
+            return StdioLspClientStartupSettlement::ReapFailed(TraceDecayError::Config {
+                message: "LSP analyzer startup ended without a settlement".to_owned(),
+            });
+        }
+        self.result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| {
+                StdioLspClientStartupSettlement::ReapFailed(TraceDecayError::Config {
+                    message: "LSP analyzer startup ended without a settlement".to_owned(),
+                })
+            })
+    }
 }
 
 impl StdioLspClient {
@@ -331,11 +535,25 @@ impl StdioLspClient {
         project_root: &Path,
         timeouts: LspRefreshTimeouts,
     ) -> Result<Self> {
-        let launch = resolve_analyzer_launch(command, project_root)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: error.engine_error(),
-            })?;
+        let timeouts = timeouts.with_deadline(timeouts.operation_deadline());
+        let launch = native_runtime::timeout_at(
+            timeouts.operation_deadline(),
+            resolve_analyzer_launch(command, project_root),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: match error {
+                native_runtime::TimeoutError::Elapsed => {
+                    "LSP analyzer launch resolution timed out".to_owned()
+                }
+                native_runtime::TimeoutError::TimerUnavailable(error) => {
+                    format!("LSP analyzer launch timer unavailable: {error}")
+                }
+            },
+        })?
+        .map_err(|error| TraceDecayError::Config {
+            message: error.engine_error(),
+        })?;
         Self::start_with_launch(&launch, args, project_root, timeouts).await
     }
 
@@ -348,6 +566,34 @@ impl StdioLspClient {
         project_root: &Path,
         timeouts: LspRefreshTimeouts,
     ) -> Result<Self> {
+        let cancellation = CancellationToken::new();
+        match Self::start_with_launch_until_cancelled(
+            launch,
+            args,
+            project_root,
+            timeouts,
+            &cancellation,
+        )
+        .await
+        {
+            StdioLspClientStartupSettlement::Started(client) => Ok(client),
+            StdioLspClientStartupSettlement::Cancelled => Err(TraceDecayError::Config {
+                message: "LSP analyzer startup was cancelled".to_owned(),
+            }),
+            StdioLspClientStartupSettlement::Failed(error)
+            | StdioLspClientStartupSettlement::ReapFailed(error) => Err(error),
+        }
+    }
+
+    async fn start_with_launch_until_cancelled(
+        launch: &AnalyzerLaunch,
+        args: &[String],
+        project_root: &Path,
+        timeouts: LspRefreshTimeouts,
+        cancellation: &CancellationToken,
+    ) -> StdioLspClientStartupSettlement {
+        let timeouts = timeouts.with_deadline(timeouts.operation_deadline());
+        let deadline = timeouts.operation_deadline();
         let command = launch.program.to_string_lossy().into_owned();
         let command = command.as_str();
         let mut spawn = std::process::Command::new(&launch.program);
@@ -355,11 +601,15 @@ impl StdioLspClient {
             .args(args)
             .envs(launch.env.iter().map(|(key, value)| (key, value)))
             .current_dir(project_root);
-        let mut process = AnalyzerProcess::spawn(spawn, command).await?;
+        let mut process = match AnalyzerProcess::spawn(spawn, command).await {
+            Ok(process) => process,
+            Err(error) => return StdioLspClientStartupSettlement::Failed(error),
+        };
 
-        let send_initialize = write_message_with_timeout(
-            &process,
-            json!({
+        let initialize = async {
+            let send_initialize = write_message_until(
+                &process,
+                json!({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
@@ -399,52 +649,79 @@ impl StdioLspClient {
                             .unwrap_or("workspace")
                     }]
                 }
-            }),
-            timeouts.message_io,
-        )
-        .await;
-        // A server that dies immediately can fail the initialize *request*
-        // write (broken pipe, on Windows this races the spawn under load)
-        // just as easily as the initialize *response* wait. Route both
-        // failures through the same stderr-enriched classification so the
-        // crash reason (e.g. a toolchain's "unknown binary" complaint) is
-        // never dropped.
-        let initialize_result = match send_initialize {
-            Ok(()) => {
-                wait_for_initialize(
-                    &process,
-                    Instant::now() + timeouts.initialize_response,
-                    command,
-                    timeouts.initialize_response,
-                )
-                .await
-            }
-            Err(err) => Err(err),
-        };
-        let initialize_response = match initialize_result {
-            Ok(response) => response,
-            Err(error) => {
-                let _ = process.terminate().await;
-                return Err(enrich_start_error(command, error, &process.stderr()));
-            }
-        };
-        write_message_with_timeout(
-            &process,
-            json!({
+                }),
+                deadline,
+                timeouts.message_io,
+            )
+            .await
+            .map_err(LspMessageWriteError::into_trace_decay_error);
+            // A server that dies immediately can fail the initialize *request*
+            // write (broken pipe, on Windows this races the spawn under load)
+            // just as easily as the initialize *response* wait. Route both
+            // failures through the same stderr-enriched classification so the
+            // crash reason (e.g. a toolchain's "unknown binary" complaint) is
+            // never dropped.
+            let initialize_response = match send_initialize {
+                Ok(()) => {
+                    wait_for_initialize(
+                        &process,
+                        deadline.min(Instant::now() + timeouts.initialize_response),
+                        command,
+                        timeouts.initialize_response,
+                        project_root,
+                        timeouts,
+                    )
+                    .await
+                }
+                Err(err) => Err(err),
+            }?;
+            write_message_until(
+                &process,
+                json!({
                 "jsonrpc": "2.0",
                 "method": "initialized",
                 "params": {}
-            }),
-            timeouts.message_io,
-        )
-        .await?;
+                }),
+                deadline,
+                timeouts.message_io,
+            )
+            .await
+            .map_err(LspMessageWriteError::into_trace_decay_error)?;
+            Ok::<_, TraceDecayError>(initialize_response)
+        };
+        let initialize_response = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                return match process.terminate().await {
+                    Ok(_) => StdioLspClientStartupSettlement::Cancelled,
+                    Err(error) => StdioLspClientStartupSettlement::ReapFailed(TraceDecayError::Config {
+                        message: format!("failed to reap cancelled LSP server '{command}': {error}"),
+                    }),
+                };
+            }
+            result = initialize => match result {
+                Ok(response) => response,
+                Err(error) => {
+                    let error = enrich_start_error(command, error, &process.stderr());
+                    return match process.terminate().await {
+                        Ok(_) => StdioLspClientStartupSettlement::Failed(error),
+                        Err(reap_error) => StdioLspClientStartupSettlement::ReapFailed(
+                            TraceDecayError::Config {
+                                message: format!("{error}; failed to reap LSP server '{command}': {reap_error}"),
+                            },
+                        ),
+                    };
+                }
+            },
+        };
 
-        Ok(Self {
+        StdioLspClientStartupSettlement::Started(Self {
             command: command.to_string(),
+            workspace_root: project_root.to_path_buf(),
             upstream_capabilities: UpstreamCapabilities::from_initialize_response(
                 &initialize_response,
             ),
-            document_versions: BTreeMap::new(),
+            documents: BTreeMap::new(),
             next_request_id: ConnectionLocalRequestSequence::starting_at(2),
             process,
         })
@@ -454,36 +731,164 @@ impl StdioLspClient {
         self.upstream_capabilities.clone()
     }
 
-    /// Opens `path` upstream once, so a semantic request can name it.
-    ///
-    /// The analyzer answers only for documents in its own view. Diagnostics
-    /// already open theirs (`collect_document_diagnostics`), but the semantic
-    /// lane forwarded the bare request, so a document the diagnostics sweep had
-    /// not happened to open yet came back `-32603 file not found`, surfaced to
-    /// the client as `providerUnavailable` for `documentSymbol`/`hover` on a
-    /// file it had just opened. Both lanes share one client and one
-    /// `document_versions` ledger, so this never re-opens what the other lane
-    /// already sent.
-    ///
-    /// ponytail: on-disk text, matching the diagnostics lane. Unsaved buffer
-    /// content would need the gateway's synced document plumbed down here.
+    /// Synchronizes a semantic request admitted without an overlay. This
+    /// explicitly returns the document to disk authority after an overlay closes.
     pub(crate) async fn ensure_document_open(
         &mut self,
         path: &Path,
+        uri: &str,
         language_id: &str,
         timeouts: LspRefreshTimeouts,
-    ) -> Result<()> {
-        let uri = file_uri(path);
-        if self.document_versions.contains_key(&uri) {
-            return Ok(());
+    ) -> std::result::Result<(), LspSemanticRequestError> {
+        let identity = document_identity(path, uri).ok_or_else(|| {
+            LspSemanticRequestError::InvalidResponse {
+                class: "admitted semantic document URI is invalid".to_owned(),
+            }
+        })?;
+        let path = path.to_path_buf();
+        let cx = tracedecay_runtime_core::native_runtime::cx().ok_or_else(|| {
+            LspSemanticRequestError::Transport {
+                class: "native runtime unavailable for semantic document read".to_owned(),
+            }
+        })?;
+        let mut read = cx
+            .spawn_blocking(move |_| read_semantic_document(&path))
+            .map_err(|error| LspSemanticRequestError::InvalidResponse {
+                class: format!("failed to schedule semantic document read: {error}"),
+            })?;
+        let text = native_runtime::timeout_at(timeouts.request_deadline(), read.join(&cx))
+            .await
+            .map_err(|error| match error {
+                native_runtime::TimeoutError::Elapsed => LspSemanticRequestError::TimedOut,
+                native_runtime::TimeoutError::TimerUnavailable(error) => {
+                    LspSemanticRequestError::Transport {
+                        class: format!("semantic document read timer unavailable: {error}"),
+                    }
+                }
+            })?
+            .map_err(|error| LspSemanticRequestError::InvalidResponse {
+                class: format!("semantic document read did not complete: {error}"),
+            })?
+            .map_err(|class| LspSemanticRequestError::InvalidResponse { class })?;
+        self.synchronize_document(&identity, uri, language_id, &text, None, timeouts)
+            .await
+            .map_err(semantic_write_error)?;
+        Ok(())
+    }
+
+    pub(crate) async fn ensure_document_snapshot(
+        &mut self,
+        path: &Path,
+        snapshot: &crate::LspSemanticDocumentSnapshot,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<(), LspSemanticRequestError> {
+        if !snapshot.lifetime.is_open() {
+            return Err(LspSemanticRequestError::Cancelled);
         }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            // Unreadable here is not this lane's refusal to make: let the
-            // analyzer answer for whatever it already knows about the path.
-            return Ok(());
-        };
-        write_message_with_timeout(
-            &self.process,
+        let identity = document_identity(path, &snapshot.uri).ok_or_else(|| {
+            LspSemanticRequestError::InvalidResponse {
+                class: "admitted semantic document URI is invalid".to_owned(),
+            }
+        })?;
+        if ContentDigest::of_bytes(snapshot.text.as_bytes()) != snapshot.content_digest {
+            return Err(LspSemanticRequestError::InvalidResponse {
+                class: "admitted semantic document snapshot is invalid".to_owned(),
+            });
+        }
+        if self.snapshot_is_stale(&identity, snapshot) {
+            return Err(LspSemanticRequestError::InvalidResponse {
+                class: "admitted semantic document snapshot is stale".to_owned(),
+            });
+        }
+        self.synchronize_document(
+            &identity,
+            &snapshot.uri,
+            &snapshot.language_id,
+            &snapshot.text,
+            Some(snapshot),
+            timeouts,
+        )
+        .await
+        .map_err(semantic_write_error)?;
+        if !snapshot.lifetime.is_open() {
+            return Err(LspSemanticRequestError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn snapshot_is_stale(
+        &self,
+        identity: &Path,
+        snapshot: &crate::LspSemanticDocumentSnapshot,
+    ) -> bool {
+        !snapshot.lifetime.is_open()
+            || self.documents.get(identity).is_some_and(|current| {
+                current.snapshot.as_ref().is_some_and(|admitted| {
+                    admitted.lifetime == snapshot.lifetime
+                        && (admitted.version > snapshot.version
+                            || (admitted.version == snapshot.version
+                                && current.text != snapshot.text.as_ref()))
+                })
+            })
+    }
+
+    async fn synchronize_document(
+        &mut self,
+        identity: &Path,
+        uri: &str,
+        language_id: &str,
+        text: &str,
+        snapshot: Option<&crate::LspSemanticDocumentSnapshot>,
+        timeouts: LspRefreshTimeouts,
+    ) -> std::result::Result<i32, LspMessageWriteError> {
+        if let Some(current) = self.documents.get_mut(identity)
+            && current.uri == uri
+            && current.text == text
+        {
+            current.snapshot = snapshot.cloned();
+            return Ok(current.wire_version);
+        }
+        let current_version = self
+            .documents
+            .get(identity)
+            .map_or(0, |current| current.wire_version);
+        let version = current_version.checked_add(1).ok_or_else(|| {
+            LspMessageWriteError::Failed(TraceDecayError::Config {
+                message: "analyzer document version is exhausted".to_owned(),
+            })
+        })?;
+        let previous_uri = self
+            .documents
+            .get(identity)
+            .map(|current| current.uri.clone());
+        let notification = if previous_uri.as_deref() == Some(uri) {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": {
+                        "uri": uri,
+                        "version": version
+                    },
+                    "contentChanges": [{
+                        "text": text,
+                    }]
+                }
+            })
+        } else {
+            if let Some(previous_uri) = previous_uri {
+                write_message_until(
+                    &self.process,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didClose",
+                        "params": { "textDocument": { "uri": previous_uri } }
+                    }),
+                    timeouts.request_deadline(),
+                    timeouts.message_io,
+                )
+                .await?;
+            }
             json!({
                 "jsonrpc": "2.0",
                 "method": "textDocument/didOpen",
@@ -491,16 +896,27 @@ impl StdioLspClient {
                     "textDocument": {
                         "uri": uri,
                         "languageId": language_id,
-                        "version": 1,
+                        "version": version,
                         "text": text,
                     }
                 }
-            }),
-            timeouts.message_io,
-        )
-        .await?;
-        self.document_versions.insert(uri, 1);
-        Ok(())
+            })
+        };
+        let deadline = timeouts
+            .request_deadline()
+            .min(Instant::now() + timeouts.refresh);
+        write_message_until(&self.process, notification, deadline, timeouts.message_io).await?;
+        self.documents.insert(
+            identity.to_path_buf(),
+            SynchronizedDocument {
+                uri: uri.to_owned(),
+                wire_version: version,
+                text: text.to_owned(),
+                snapshot: snapshot.cloned(),
+                diagnostics: None,
+            },
+        );
+        Ok(version)
     }
 
     /// Sends one standard semantic request and returns its standard JSON
@@ -513,6 +929,7 @@ impl StdioLspClient {
         cancellation: &CancellationToken,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<Value, LspSemanticRequestError> {
+        let timeouts = timeouts.with_deadline(timeouts.request_deadline());
         match request {
             LspSemanticRequest::Declaration(params) => {
                 self.declaration(params, cancellation, timeouts).await
@@ -765,6 +1182,9 @@ impl StdioLspClient {
     where
         R: LspRequest,
     {
+        let deadline = timeouts
+            .request_deadline()
+            .min(Instant::now() + timeouts.refresh);
         if cancellation.is_cancelled() {
             return Err(LspSemanticRequestError::Cancelled);
         }
@@ -778,56 +1198,82 @@ impl StdioLspClient {
                 class: error.to_string(),
             }
         })?;
-        write_message_with_timeout(
-            &self.process,
-            json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": R::METHOD,
-                "params": params,
-            }),
-            timeouts.message_io,
-        )
-        .await
-        .map_err(semantic_transport_error)?;
+        let write = tokio::select! {
+            () = cancellation.cancelled() => return Err(LspSemanticRequestError::Cancelled),
+            result = write_message_until(
+                &self.process,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": R::METHOD,
+                    "params": params,
+                }),
+                deadline,
+                timeouts.message_io,
+            ) => result,
+        };
+        write.map_err(|error| match error {
+            LspMessageWriteError::DeadlineElapsed => LspSemanticRequestError::TimedOut,
+            LspMessageWriteError::Failed(error) => semantic_transport_error(error),
+        })?;
 
-        let deadline = Instant::now() + timeouts.refresh;
         loop {
             let message = tokio::select! {
                 () = cancellation.cancelled() => {
                     let _ = self.cancel_request(request_id, timeouts).await;
                     return Err(LspSemanticRequestError::Cancelled);
                 }
-                message = read_message_until(&self.process, deadline, timeouts) => {
+                message = read_message_until(&self.process, deadline) => {
                     match message {
                         Ok(message) => message,
-                        Err(_error) if Instant::now() >= deadline => {
+                        Err(LspSemanticRequestError::TimedOut) => {
                             let _ = self.cancel_request(request_id, timeouts).await;
                             return Err(LspSemanticRequestError::TimedOut);
                         }
-                        Err(error) => return Err(semantic_transport_error(error)),
+                        Err(error) => return Err(error),
                     }
                 }
             };
-            let Some(message) = message else {
-                let _ = self.cancel_request(request_id, timeouts).await;
-                return Err(LspSemanticRequestError::TimedOut);
-            };
-            if message.id != Some(json!(request_id)) {
-                continue;
-            }
-            if let Some(error) = message.error {
-                return Err(LspSemanticRequestError::Remote {
-                    code: error.code,
-                    message: error.message,
-                });
-            }
-            let result = message.result.unwrap_or(Value::Null);
-            return serde_json::from_value(result).map_err(|error| {
-                LspSemanticRequestError::InvalidResponse {
-                    class: error.to_string(),
+            let message = match message {
+                SemanticMessagePoll::Message(message) => message,
+                SemanticMessagePoll::Pending => {
+                    let _ = self.cancel_request(request_id, timeouts).await;
+                    return Err(LspSemanticRequestError::TimedOut);
                 }
-            });
+                SemanticMessagePoll::Closed => {
+                    return Err(self.closed_semantic_error().await);
+                }
+            };
+            match message {
+                JsonRpcMessage::Request { id, method, params } => {
+                    dispatch_server_request(
+                        &self.process,
+                        id,
+                        &method,
+                        params.as_ref(),
+                        &self.workspace_root,
+                        timeouts,
+                    )
+                    .await
+                    .map_err(semantic_transport_error)?;
+                }
+                JsonRpcMessage::Success { id, result } if id == json!(request_id) => {
+                    return serde_json::from_value(result).map_err(|error| {
+                        LspSemanticRequestError::InvalidResponse {
+                            class: error.to_string(),
+                        }
+                    });
+                }
+                JsonRpcMessage::Error { id, error } if id == json!(request_id) => {
+                    return Err(LspSemanticRequestError::Remote {
+                        code: Some(error.code),
+                        message: error.message,
+                    });
+                }
+                JsonRpcMessage::Notification { .. }
+                | JsonRpcMessage::Success { .. }
+                | JsonRpcMessage::Error { .. } => {}
+            }
         }
     }
 
@@ -836,12 +1282,14 @@ impl StdioLspClient {
         request_id: u64,
         timeouts: LspRefreshTimeouts,
     ) -> Result<()> {
-        write_message_with_timeout(
+        write_message_until(
             &self.process,
             cancel_request_message(request_id),
+            timeouts.request_deadline(),
             timeouts.message_io,
         )
         .await
+        .map_err(LspMessageWriteError::into_trace_decay_error)
     }
 
     #[tracing::instrument(name = "lsp_analyzer_client_refresh", level = "trace", skip_all)]
@@ -850,66 +1298,90 @@ impl StdioLspClient {
         project_root: &Path,
         documents: Vec<LspDocument>,
         timeouts: LspRefreshTimeouts,
-    ) -> std::result::Result<Vec<CodeDiagnostic>, LspRefreshError> {
+    ) -> std::result::Result<DiagnosticRefreshResult, LspRefreshError> {
+        let deadline = timeouts.request_deadline();
         let mut uri_to_document = BTreeMap::new();
         let mut expected_versions = BTreeMap::new();
-        for document in documents {
-            let uri = file_uri(&project_root.join(&document.relative_path));
-            let current_version = self.document_versions.get(&uri).copied().unwrap_or(0);
-            let version = if current_version == 0 {
-                write_message_with_timeout(
-                    &self.process,
-                    json!({
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/didOpen",
-                        "params": {
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": document.language_id,
-                                "version": 1,
-                                "text": document.text,
-                            }
-                        }
-                    }),
-                    timeouts.message_io,
+        let mut result = DiagnosticRefreshResult::default();
+        for mut document in documents {
+            let path = project_root.join(&document.relative_path);
+            let mut uri = document
+                .snapshot
+                .as_ref()
+                .map_or_else(|| file_uri(&path), |snapshot| snapshot.uri.clone());
+            let identity =
+                document_identity(&path, &uri).ok_or_else(|| LspRefreshError::InvalidResponse {
+                    message: "admitted diagnostic document URI is invalid".to_owned(),
+                })?;
+            if let Some(snapshot) = document.snapshot.as_ref() {
+                if snapshot.text.as_ref() != document.text
+                    || ContentDigest::of_bytes(document.text.as_bytes()) != snapshot.content_digest
+                {
+                    return Err(LspRefreshError::InvalidResponse {
+                        message: "admitted diagnostic document snapshot is invalid".to_owned(),
+                    });
+                }
+                if self.snapshot_is_stale(&identity, snapshot) {
+                    // A queued editor admission may expire before this client
+                    // is acquired. It is stale caller work, not an analyzer
+                    // protocol failure; do not send its text or retire the
+                    // healthy process serving the other documents.
+                    result.coverage.documents.insert(
+                        document.relative_path.clone(),
+                        DiagnosticDocumentCoverage::StalePublication,
+                    );
+                    continue;
+                }
+            } else if let Some(current) = self.documents.get(&identity)
+                && current
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.lifetime.is_open())
+            {
+                // Only the overlay store can keep this admission alive. Closing
+                // or dropping its session returns a later sweep to disk text.
+                document.text.clone_from(&current.text);
+                document.snapshot = current.snapshot.clone();
+                uri.clone_from(&current.uri);
+            }
+            let version = self
+                .synchronize_document(
+                    &identity,
+                    &uri,
+                    &document.language_id,
+                    &document.text,
+                    document.snapshot.as_ref(),
+                    timeouts.with_deadline(deadline),
                 )
                 .await
-                .map_err(refresh_transport_error)?;
-                1
-            } else {
-                let version = current_version + 1;
-                write_message_with_timeout(
-                    &self.process,
-                    json!({
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/didChange",
-                        "params": {
-                            "textDocument": {
-                                "uri": uri,
-                                "version": version
-                            },
-                            "contentChanges": [{
-                                "text": document.text,
-                            }]
-                        }
-                    }),
-                    timeouts.message_io,
-                )
-                .await
-                .map_err(refresh_transport_error)?;
-                version
-            };
-            self.document_versions.insert(uri.clone(), version);
+                .map_err(refresh_write_error)?;
             expected_versions.insert(uri.clone(), version);
-            uri_to_document.insert(uri, document);
+            uri_to_document.insert(uri, (identity, document));
         }
 
         if uri_to_document.is_empty() {
-            return Ok(Vec::new());
+            return Ok(result);
         }
         let mut diagnostics_by_uri: BTreeMap<String, Vec<CodeDiagnostic>> = BTreeMap::new();
-        let refresh_deadline = Instant::now() + timeouts.refresh;
-        let mut quiet_deadline = None;
+        let mut coverage_by_uri = BTreeMap::new();
+        let mut current_publications = BTreeSet::new();
+        // An unchanged document sends no notification, so the server need not
+        // publish again. Its last accepted publication remains authoritative
+        // for this wire version. Synchronizing changed text replaces the
+        // document record and discards that publication.
+        for (uri, (identity, _)) in &uri_to_document {
+            if let Some((diagnostics, coverage)) = self
+                .documents
+                .get(identity)
+                .and_then(|document| document.diagnostics.as_ref())
+            {
+                diagnostics_by_uri.insert(uri.clone(), diagnostics.clone());
+                coverage_by_uri.insert(uri.clone(), coverage.clone());
+            }
+        }
+        let refresh_deadline = deadline.min(Instant::now() + timeouts.refresh);
+        let mut quiet_deadline = (diagnostics_by_uri.len() == uri_to_document.len())
+            .then(|| refresh_deadline.min(Instant::now() + timeouts.diagnostics_quiet));
         loop {
             let now = Instant::now();
             let deadline = quiet_deadline.map_or(refresh_deadline, |deadline: Instant| {
@@ -924,35 +1396,69 @@ impl StdioLspClient {
                     RefreshMessagePoll::Quiet => break,
                     RefreshMessagePoll::Closed => return Err(self.closed_refresh_error().await),
                 };
-            if message.method.as_deref() != Some("textDocument/publishDiagnostics") {
-                continue;
-            }
-            let params = message
-                .params
-                .ok_or_else(|| LspRefreshError::InvalidResponse {
-                    message: "LSP publishDiagnostics notification omitted params".to_owned(),
-                })?;
+            let params = match message {
+                JsonRpcMessage::Request { id, method, params } => {
+                    dispatch_server_request(
+                        &self.process,
+                        id,
+                        &method,
+                        params.as_ref(),
+                        &self.workspace_root,
+                        timeouts,
+                    )
+                    .await
+                    .map_err(refresh_transport_error)?;
+                    continue;
+                }
+                JsonRpcMessage::Notification { method, params }
+                    if method == "textDocument/publishDiagnostics" =>
+                {
+                    params.ok_or_else(|| LspRefreshError::InvalidResponse {
+                        message: "LSP publishDiagnostics notification omitted params".to_owned(),
+                    })?
+                }
+                JsonRpcMessage::Notification { .. }
+                | JsonRpcMessage::Success { .. }
+                | JsonRpcMessage::Error { .. } => continue,
+            };
             let published =
                 serde_json::from_value::<PublishDiagnosticsParams>(params).map_err(|error| {
                     LspRefreshError::InvalidResponse {
                         message: format!("failed to decode LSP publishDiagnostics params: {error}"),
                     }
                 })?;
-            if !is_current_diagnostic_publication(&published, &expected_versions) {
-                continue;
-            }
-            let Some(document) = uri_to_document.get(published.uri.as_str()) else {
+            let Some((identity, document)) = uri_to_document.get(published.uri.as_str()) else {
                 continue;
             };
-            diagnostics_by_uri.insert(
-                published.uri.as_str().to_owned(),
-                published
-                    .diagnostics
-                    .into_iter()
-                    .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
-                    .collect(),
-            );
-            quiet_deadline = Some(Instant::now() + timeouts.diagnostics_quiet);
+            if !is_current_diagnostic_publication(&published, &expected_versions) {
+                if !current_publications.contains(published.uri.as_str()) {
+                    coverage_by_uri.insert(
+                        published.uri.as_str().to_owned(),
+                        DiagnosticDocumentCoverage::StalePublication,
+                    );
+                    if let Some(current) = self.documents.get_mut(identity) {
+                        current.diagnostics = None;
+                    }
+                }
+                continue;
+            }
+            let coverage = DiagnosticDocumentCoverage::Published {
+                version_verified: published.version.is_some(),
+                content_digest: ContentDigest::of_bytes(document.text.as_bytes()),
+            };
+            let diagnostics = published
+                .diagnostics
+                .into_iter()
+                .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
+                .collect::<Vec<_>>();
+            if let Some(current) = self.documents.get_mut(identity) {
+                current.diagnostics = Some((diagnostics.clone(), coverage.clone()));
+            }
+            current_publications.insert(published.uri.as_str().to_owned());
+            coverage_by_uri.insert(published.uri.as_str().to_owned(), coverage);
+            diagnostics_by_uri.insert(published.uri.as_str().to_owned(), diagnostics);
+            quiet_deadline =
+                Some(refresh_deadline.min(Instant::now() + timeouts.diagnostics_quiet));
         }
         // Servers that suppress empty publishes (only publishing for files WITH
         // problems) never emit for clean files, so a fully-reported batch still
@@ -967,7 +1473,35 @@ impl StdioLspClient {
                 ),
             });
         }
-        Ok(diagnostics_by_uri.into_values().flatten().collect())
+        for (uri, (identity, document)) in &uri_to_document {
+            if document
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.lifetime.is_open())
+            {
+                coverage_by_uri.insert(uri.clone(), DiagnosticDocumentCoverage::StalePublication);
+                if let Some(current) = self.documents.get_mut(identity) {
+                    current.diagnostics = None;
+                }
+            }
+            let coverage = coverage_by_uri
+                .remove(uri)
+                .unwrap_or(DiagnosticDocumentCoverage::NoPublication);
+            // The broker retains its old findings for unverified coverage.
+            // Returning those cached findings as well would duplicate them;
+            // a newly received publication for a closed overlay must likewise
+            // not replace or append to that retained evidence.
+            if matches!(coverage, DiagnosticDocumentCoverage::Published { .. })
+                && let Some(diagnostics) = diagnostics_by_uri.remove(uri)
+            {
+                result.diagnostics.extend(diagnostics);
+            }
+            result
+                .coverage
+                .documents
+                .insert(document.relative_path.clone(), coverage);
+        }
+        Ok(result)
     }
 
     async fn closed_refresh_error(&self) -> LspRefreshError {
@@ -993,17 +1527,43 @@ impl StdioLspClient {
         }
     }
 
+    async fn closed_semantic_error(&self) -> LspSemanticRequestError {
+        match self.process.try_wait().await {
+            Ok(Some(status)) => LspSemanticRequestError::ProcessExited {
+                status: status.to_string(),
+            },
+            Ok(None) => LspSemanticRequestError::Transport {
+                class: format!(
+                    "LSP server '{}' closed its semantic transport",
+                    self.command
+                ),
+            },
+            Err(error) => LspSemanticRequestError::Transport {
+                class: format!(
+                    "failed to inspect LSP server '{}' after its semantic transport closed: {error}",
+                    self.command
+                ),
+            },
+        }
+    }
+
     /// Terminates and waits for a retired process. The shared client slot
     /// stores this future when an in-flight owner is dropped, and no successor
     /// may acquire that slot until the future completes.
-    pub(crate) async fn reap(mut self) -> Result<()> {
-        self.process
-            .terminate()
-            .await
-            .map(drop)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("failed to reap LSP server '{}': {error}", self.command),
-            })
+    pub(crate) fn reap(mut self) -> impl Future<Output = Result<()>> + Send {
+        // The slot retains this future so no successor can overlap the old
+        // process. Start termination before returning it: cancellation may
+        // have no successor to poll the retained settlement future.
+        self.process.begin_terminate();
+        async move {
+            self.process
+                .finish_terminate()
+                .await
+                .map(drop)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("failed to reap LSP server '{}': {error}", self.command),
+                })
+        }
     }
 }
 
@@ -1035,6 +1595,8 @@ async fn wait_for_initialize(
     deadline: Instant,
     command: &str,
     timeout: Duration,
+    workspace_root: &Path,
+    timeouts: LspRefreshTimeouts,
 ) -> Result<Value> {
     loop {
         let frame = match process.read_frame_until(deadline).await {
@@ -1055,51 +1617,72 @@ async fn wait_for_initialize(
             Err(error) => return Err(frame_read_error(error)),
         };
         let message = decode_message(&frame)?;
-        if message.id == Some(json!(1)) {
-            if let Some(error) = message.error {
+        match message {
+            JsonRpcMessage::Request { id, method, params } => {
+                dispatch_server_request(
+                    process,
+                    id,
+                    &method,
+                    params.as_ref(),
+                    workspace_root,
+                    timeouts,
+                )
+                .await?;
+            }
+            JsonRpcMessage::Success { id, result } if id == json!(1) => return Ok(result),
+            JsonRpcMessage::Error { id, error } if id == json!(1) => {
                 let error = LspSemanticRequestError::Remote {
-                    code: error.code,
+                    code: Some(error.code),
                     message: error.message,
                 };
                 return Err(TraceDecayError::Config {
                     message: format!("LSP server '{command}' rejected initialize: {error}"),
                 });
             }
-            return message.result.ok_or_else(|| TraceDecayError::Config {
-                message: format!("LSP server '{command}' initialize response omitted result"),
-            });
+            JsonRpcMessage::Notification { .. }
+            | JsonRpcMessage::Success { .. }
+            | JsonRpcMessage::Error { .. } => {}
         }
     }
 }
 
-/// Send phase of one analyzer round-trip: JSON encoding plus the framed
-/// stdin write, including any backpressure wait, bounded by `timeout`.
-#[tracing::instrument(name = "lsp.analyzer.request_write", level = "trace", skip_all)]
-async fn write_message_with_timeout(
-    process: &AnalyzerProcess,
-    value: Value,
-    timeout: Duration,
-) -> Result<()> {
-    let body = serde_json::to_vec(&value).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to encode LSP message: {e}"),
-    })?;
-    match process.write_frame(&body, Instant::now() + timeout).await {
-        Err(AsyncContentLengthError::DeadlineElapsed) => Err(TraceDecayError::Config {
-            message: format!(
-                "LSP message write timed out after {} ms",
-                timeout.as_millis()
-            ),
-        }),
-        written => written.map_err(frame_write_error),
+enum LspMessageWriteError {
+    DeadlineElapsed,
+    Failed(TraceDecayError),
+}
+
+impl LspMessageWriteError {
+    fn into_trace_decay_error(self) -> TraceDecayError {
+        match self {
+            Self::DeadlineElapsed => TraceDecayError::Config {
+                message: "LSP message write timed out".to_owned(),
+            },
+            Self::Failed(error) => error,
+        }
     }
 }
 
-fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
-            "LSP diagnostics collection timed out after {} ms",
-            timeouts.refresh.as_millis()
-        ),
+async fn write_message_until(
+    process: &AnalyzerProcess,
+    value: Value,
+    deadline: Instant,
+    timeout: Duration,
+) -> std::result::Result<(), LspMessageWriteError> {
+    let body = serde_json::to_vec(&value).map_err(|error| {
+        LspMessageWriteError::Failed(TraceDecayError::Config {
+            message: format!("failed to encode LSP message: {error}"),
+        })
+    })?;
+    let io_deadline = Instant::now() + timeout;
+    match process.write_frame(&body, deadline.min(io_deadline)).await {
+        Err(AsyncContentLengthError::DeadlineElapsed) if io_deadline < deadline => {
+            Err(LspMessageWriteError::Failed(frame_write_error(
+                AsyncContentLengthError::DeadlineElapsed,
+            )))
+        }
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(LspMessageWriteError::DeadlineElapsed),
+        Err(error) => Err(LspMessageWriteError::Failed(frame_write_error(error))),
+        Ok(()) => Ok(()),
     }
 }
 
@@ -1109,9 +1692,25 @@ fn semantic_transport_error(error: TraceDecayError) -> LspSemanticRequestError {
     }
 }
 
+fn semantic_write_error(error: LspMessageWriteError) -> LspSemanticRequestError {
+    match error {
+        LspMessageWriteError::DeadlineElapsed => LspSemanticRequestError::TimedOut,
+        LspMessageWriteError::Failed(error) => semantic_transport_error(error),
+    }
+}
+
 fn refresh_transport_error(error: TraceDecayError) -> LspRefreshError {
     LspRefreshError::Transport {
         message: error.to_string(),
+    }
+}
+
+fn refresh_write_error(error: LspMessageWriteError) -> LspRefreshError {
+    match error {
+        LspMessageWriteError::DeadlineElapsed => LspRefreshError::TimedOut {
+            message: "analyzer refresh timed out while writing a document".to_owned(),
+        },
+        LspMessageWriteError::Failed(error) => refresh_transport_error(error),
     }
 }
 
@@ -1127,7 +1726,7 @@ async fn read_refresh_message_until(
     timeouts: LspRefreshTimeouts,
 ) -> std::result::Result<RefreshMessagePoll, LspRefreshError> {
     match process.read_frame_until(deadline).await {
-        Ok(FramePoll::Frame(frame)) => serde_json::from_slice(&frame)
+        Ok(FramePoll::Frame(frame)) => decode_message(&frame)
             .map(RefreshMessagePoll::Message)
             .map_err(|error| LspRefreshError::InvalidResponse {
                 message: format!("failed to parse LSP message: {error}"),
@@ -1164,21 +1763,101 @@ fn cancel_request_message(request_id: u64) -> Value {
 async fn read_message_until(
     process: &AnalyzerProcess,
     deadline: Instant,
-    timeouts: LspRefreshTimeouts,
-) -> Result<Option<JsonRpcMessage>> {
+) -> std::result::Result<SemanticMessagePoll, LspSemanticRequestError> {
     match process.read_frame_until(deadline).await {
-        Ok(FramePoll::Frame(frame)) => decode_message(&frame).map(Some),
-        Ok(FramePoll::Pending | FramePoll::Closed) => Ok(None),
-        Err(AsyncContentLengthError::DeadlineElapsed) => Err(refresh_timed_out(timeouts)),
-        Err(error) => Err(frame_read_error(error)),
+        Ok(FramePoll::Frame(frame)) => decode_message(&frame)
+            .map(SemanticMessagePoll::Message)
+            .map_err(|error| LspSemanticRequestError::InvalidResponse {
+                class: error.to_string(),
+            }),
+        Ok(FramePoll::Pending) => Ok(SemanticMessagePoll::Pending),
+        Ok(FramePoll::Closed) => Ok(SemanticMessagePoll::Closed),
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(LspSemanticRequestError::TimedOut),
+        Err(AsyncContentLengthError::Io(error)) => Err(LspSemanticRequestError::Transport {
+            class: format!("failed to read LSP frame: {error}"),
+        }),
+        Err(AsyncContentLengthError::Codec(error)) => {
+            Err(LspSemanticRequestError::InvalidResponse {
+                class: format!("failed to decode LSP Content-Length frame: {error:?}"),
+            })
+        }
     }
+}
+
+enum SemanticMessagePoll {
+    Message(JsonRpcMessage),
+    Pending,
+    Closed,
 }
 
 #[tracing::instrument(name = "lsp.analyzer.response_parse", level = "trace", skip_all)]
 fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
-    serde_json::from_slice(body).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to parse LSP message: {e}"),
-    })
+    let value: Value = serde_json::from_slice(body).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to parse LSP message: {error}"),
+    })?;
+    let object = value.as_object().ok_or_else(invalid_json_rpc_envelope)?;
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(invalid_json_rpc_envelope());
+    }
+    let id = object.get("id").cloned();
+    let method = object.get("method");
+    let has_result = object.contains_key("result");
+    let has_error = object.contains_key("error");
+    if let Some(method) = method {
+        if has_result || has_error {
+            return Err(invalid_json_rpc_envelope());
+        }
+        let method = method
+            .as_str()
+            .filter(|method| !method.is_empty())
+            .ok_or_else(invalid_json_rpc_envelope)?
+            .to_owned();
+        let params = object.get("params").cloned();
+        if params
+            .as_ref()
+            .is_some_and(|params| !(params.is_object() || params.is_array()))
+        {
+            return Err(invalid_json_rpc_envelope());
+        }
+        return match id {
+            Some(id) if valid_json_rpc_id(&id) => {
+                Ok(JsonRpcMessage::Request { id, method, params })
+            }
+            None => Ok(JsonRpcMessage::Notification { method, params }),
+            Some(_) => Err(invalid_json_rpc_envelope()),
+        };
+    }
+    if object.contains_key("params") {
+        return Err(invalid_json_rpc_envelope());
+    }
+    let id = id
+        .filter(valid_json_rpc_id)
+        .ok_or_else(invalid_json_rpc_envelope)?;
+    match (has_result, has_error) {
+        (true, false) => Ok(JsonRpcMessage::Success {
+            id,
+            result: object["result"].clone(),
+        }),
+        (false, true) => {
+            let error = serde_json::from_value(object["error"].clone()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("invalid JSON-RPC error response: {error}"),
+                }
+            })?;
+            Ok(JsonRpcMessage::Error { id, error })
+        }
+        _ => Err(invalid_json_rpc_envelope()),
+    }
+}
+
+fn valid_json_rpc_id(id: &Value) -> bool {
+    id.is_string() || id.is_number()
+}
+
+fn invalid_json_rpc_envelope() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: "invalid JSON-RPC 2.0 message envelope".to_owned(),
+    }
 }
 
 fn frame_read_error(error: AsyncContentLengthError) -> TraceDecayError {
@@ -1203,6 +1882,73 @@ fn frame_write_error(error: AsyncContentLengthError) -> TraceDecayError {
     TraceDecayError::Config { message }
 }
 
+async fn dispatch_server_request(
+    process: &AnalyzerProcess,
+    id: Value,
+    method: &str,
+    params: Option<&Value>,
+    workspace_root: &Path,
+    timeouts: LspRefreshTimeouts,
+) -> Result<()> {
+    let response = match method {
+        "workspace/configuration" => {
+            let item_count = params
+                .and_then(|params| params.get("items"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": vec![Value::Null; item_count],
+            })
+        }
+        "workspace/workspaceFolders" => {
+            let name = workspace_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("workspace");
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [{
+                    "uri": file_uri(workspace_root),
+                    "name": name,
+                }],
+            })
+        }
+        "client/registerCapability"
+        | "client/unregisterCapability"
+        | "window/workDoneProgress/create"
+        | "window/showMessageRequest" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": null,
+        }),
+        "workspace/applyEdit" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "applied": false,
+                "failureReason": "workspace edits are not applied by this adapter",
+            },
+        }),
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": format!("unsupported server request: {method}"),
+            },
+        }),
+    };
+    let deadline = timeouts
+        .deadline
+        .unwrap_or_else(|| Instant::now() + timeouts.message_io);
+    write_message_until(process, response, deadline, timeouts.message_io)
+        .await
+        .map_err(LspMessageWriteError::into_trace_decay_error)
+}
+
 pub(crate) fn file_uri(path: &Path) -> String {
     let absolute = if path.is_absolute() {
         PathBuf::from(path)
@@ -1212,6 +1958,33 @@ pub(crate) fn file_uri(path: &Path) -> String {
             .join(path)
     };
     file_uri_from_path_text(&absolute.to_string_lossy())
+}
+
+/// Key the shared ledger by filesystem identity while keeping the admitted
+/// presentation URI on the wire. A disk sweep through the registered root
+/// and an editor request through a root alias must reach the same record.
+fn document_identity(path: &Path, uri: &str) -> Option<PathBuf> {
+    let (_, uri_path) = crate::gateway::strict_file_uri_path(uri)?;
+    let path = canonicalize_existing_prefix(path)?;
+    let uri_path = canonicalize_existing_prefix(&uri_path)?;
+    (path == uri_path).then_some(path)
+}
+
+fn read_semantic_document(path: &Path) -> std::result::Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to read semantic document: {error}"))?;
+    let mut bytes = Vec::with_capacity(crate::overlay::MAX_OVERLAY_BYTES);
+    file.take((crate::overlay::MAX_OVERLAY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read semantic document: {error}"))?;
+    if bytes.len() > crate::overlay::MAX_OVERLAY_BYTES {
+        return Err(format!(
+            "semantic document exceeds the {} byte limit",
+            crate::overlay::MAX_OVERLAY_BYTES
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("semantic document is not valid UTF-8: {error}"))
 }
 
 fn lsp_initialization_options(command: &str) -> Value {
@@ -1265,23 +2038,30 @@ fn percent_encode_file_uri_path(path: &str) -> String {
     encoded
 }
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcMessage {
-    #[serde(default)]
-    id: Option<Value>,
-    #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    params: Option<Value>,
-    #[serde(default)]
-    result: Option<Value>,
-    #[serde(default)]
-    error: Option<JsonRpcError>,
+#[derive(Debug)]
+enum JsonRpcMessage {
+    Request {
+        id: Value,
+        method: String,
+        params: Option<Value>,
+    },
+    Notification {
+        method: String,
+        params: Option<Value>,
+    },
+    Success {
+        id: Value,
+        result: Value,
+    },
+    Error {
+        id: Value,
+        error: JsonRpcError,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcError {
-    code: Option<i64>,
+    code: i64,
     message: String,
 }
 
@@ -1324,14 +2104,141 @@ fn code_to_string(value: NumberOrString) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     use lsp_types::PublishDiagnosticsParams;
     use serde_json::json;
 
     use super::{
-        LspSemanticRequestError, cancel_request_message, decode_semantic_request,
-        encode_semantic_request, file_uri_from_path_text, is_current_diagnostic_publication,
+        AnalyzerLaunch, JsonRpcMessage, LspRefreshTimeouts, LspSemanticRequestError,
+        NativeTaskOutcome, StdioLspClientStartup, StdioLspClientStartupSettlement,
+        cancel_request_message, decode_message, decode_semantic_request, encode_semantic_request,
+        file_uri_from_path_text, is_current_diagnostic_publication,
     };
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_after_startup_completed_reaps_without_a_successor() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("analyzer.pid");
+        let script_path = temp.path().join("initialized_analyzer.py");
+        std::fs::write(
+            &script_path,
+            r#"
+import json
+import os
+import sys
+
+with open(sys.argv[1], "w") as pid_file:
+    pid_file.write(str(os.getpid()))
+
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line == b"\r\n":
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    message = json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+    if message.get("method") == "initialize":
+        body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}}).encode("utf-8")
+        sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+        sys.stdout.buffer.flush()
+"#,
+        )
+        .unwrap();
+        let python = if std::path::Path::new("/usr/bin/python3").is_file() {
+            "/usr/bin/python3"
+        } else {
+            "python3"
+        };
+        let startup = StdioLspClientStartup::start(
+            AnalyzerLaunch::direct(python),
+            vec![
+                script_path.to_string_lossy().into_owned(),
+                pid_path.to_string_lossy().into_owned(),
+            ],
+            temp.path().to_path_buf(),
+            LspRefreshTimeouts::new(
+                Duration::from_secs(1),
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+                Duration::from_millis(50),
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(10), startup.task.wait())
+                .await
+                .expect("startup completes before its caller is abandoned"),
+            NativeTaskOutcome::Completed(())
+        ));
+        let pid = std::fs::read_to_string(pid_path).unwrap();
+        let is_alive = || {
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(
+            is_alive(),
+            "the completed startup still owns a live process"
+        );
+
+        // The startup task has already returned, but no caller has claimed
+        // its successful settlement. Cancellation must transfer that client
+        // to the slot's retained reaper instead of leaving it for a successor.
+        let client = startup
+            .cancel()
+            .expect("cancellation must drain the completed startup's client");
+        let reaper = client.reap();
+        assert!(
+            startup.cancel().is_none(),
+            "the client is retired only once"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while is_alive() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retirement starts termination before any successor polls its reaper");
+        tokio::time::timeout(Duration::from_secs(2), reaper)
+            .await
+            .expect("retain the process settlement after it exits")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_discards_a_completed_startup_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let startup = StdioLspClientStartup::start(
+            AnalyzerLaunch::direct(temp.path().join("missing-analyzer")),
+            Vec::new(),
+            temp.path().to_path_buf(),
+            LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), startup.task.wait())
+                .await
+                .unwrap(),
+            NativeTaskOutcome::Completed(())
+        ));
+
+        assert!(startup.cancel().is_none());
+        assert!(matches!(
+            startup.settle().await,
+            StdioLspClientStartupSettlement::Cancelled
+        ));
+    }
 
     #[test]
     fn semantic_request_codec_round_trips_standard_wire_shape() {
@@ -1424,6 +2331,40 @@ mod tests {
                 "params": { "id": 42 },
             })
         );
+    }
+
+    #[test]
+    fn json_rpc_response_classification_preserves_direction_and_null_results() {
+        assert!(matches!(
+            decode_message(
+                br#"{"jsonrpc":"2.0","id":2,"method":"window/showMessageRequest","params":{"message":"hello"}}"#
+            )
+            .expect("inbound request"),
+            JsonRpcMessage::Request { id, .. } if id == json!(2)
+        ));
+        assert!(matches!(
+            decode_message(br#"{"jsonrpc":"2.0","id":"2","result":null}"#)
+                .expect("explicit null result"),
+            JsonRpcMessage::Success { id, result } if id == json!("2") && result.is_null()
+        ));
+    }
+
+    #[test]
+    fn json_rpc_response_classification_rejects_invalid_envelopes() {
+        for body in [
+            br#"{"jsonrpc":"1.0","id":2,"result":null}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":2}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":2,"result":null,"error":{"code":-1,"message":"bad"}}"#
+                .as_slice(),
+            br#"{"jsonrpc":"2.0","id":null,"result":null}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":2,"method":"request","result":null}"#.as_slice(),
+        ] {
+            assert!(
+                decode_message(body).is_err(),
+                "invalid envelope was accepted: {}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
