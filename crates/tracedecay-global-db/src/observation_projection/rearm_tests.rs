@@ -7,8 +7,13 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
 };
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::schema_version;
 
-use super::{RearmedProjectionRetries, rearm_queued_projection_retries};
+use super::project_path_rearm::rearm_project_path_collision_batch;
+use super::state::query_optional_i64;
+use super::{
+    RearmedProjectionRetries, rearm_project_path_collisions, rearm_queued_projection_retries,
+};
 use crate::tests::harness::RegisteredGlobalDbHarness;
 
 const FAR_FUTURE_MICROS: i64 = 9_000_000_000_000_000;
@@ -211,4 +216,180 @@ async fn daemon_admission_defers_rearm_to_background_convergence() {
         (5, 0, 5),
         "background convergence re-arms the fresh mount's queue"
     );
+}
+
+async fn parked_retry_deadlines(harness: &RegisteredGlobalDbHarness) -> Vec<i64> {
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT next_retry_at_micros FROM projection_queue ORDER BY observation_sequence",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut deadlines = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        deadlines.push(row.get(0).unwrap());
+    }
+    deadlines
+}
+
+#[asupersync::test]
+async fn project_path_collisions_rearm_once_and_genuine_collisions_stay_parked() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-project-path-collisions").await;
+    seed_queue(&harness, 6, 0).await;
+    let errors = [
+        "projection session output collided at codex/s-1: project_path differs",
+        "projection session output collided at codex/s-2: transcript_path differs",
+        "projection session output collided at codex/s-3: project_key differs",
+        "projection session output collided at codex/s-4: parent_session_id differs",
+        "projection session output collided at claude/s-5: project_path differs",
+        "projection session output collided at codex/s-6: project_path differs",
+    ];
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    // Opening a fresh store already converges it. Model an older store whose
+    // parked rows predate the one-time project-path repair.
+    transaction
+        .execute(
+            "DELETE FROM tracedecay_schema_version
+             WHERE component = 'codex-project-path-collision-rearm-v1'",
+            (),
+        )
+        .await
+        .unwrap();
+    for (sequence, error) in (1_i64..).zip(errors) {
+        let deadline = if sequence == 6 {
+            FAR_FUTURE_MICROS
+        } else {
+            i64::MAX
+        };
+        transaction
+            .execute(
+                "UPDATE projection_queue
+                 SET next_retry_at_micros = ?2, last_error = ?3
+                 WHERE observation_sequence = (
+                     SELECT sequence FROM observations ORDER BY sequence LIMIT 1 OFFSET ?1)",
+                params![sequence - 1, deadline, error],
+            )
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    let parked = vec![
+        i64::MAX,
+        i64::MAX,
+        i64::MAX,
+        i64::MAX,
+        i64::MAX,
+        FAR_FUTURE_MICROS,
+    ];
+    assert_eq!(parked_retry_deadlines(&harness).await, parked);
+
+    let database = harness.registered.runtime_database();
+    assert_eq!(rearm_project_path_collisions(database).await.unwrap(), 1);
+    assert_eq!(
+        parked_retry_deadlines(&harness).await,
+        vec![0, i64::MAX, i64::MAX, i64::MAX, i64::MAX, FAR_FUTURE_MICROS],
+        "only a terminal Codex project_path collision is re-armed"
+    );
+
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE projection_queue SET next_retry_at_micros = ?1, last_error = ?2
+             WHERE next_retry_at_micros = 0",
+            params![i64::MAX, errors[0]],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        rearm_project_path_collisions(database).await.unwrap(),
+        0,
+        "the re-arm is recorded and never repeats"
+    );
+    assert_eq!(parked_retry_deadlines(&harness).await, parked);
+}
+
+#[asupersync::test]
+async fn project_path_rearm_commits_bounded_windows_before_recording_completion() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-project-path-windows").await;
+    seed_queue(&harness, 6, 0).await;
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM tracedecay_schema_version
+             WHERE component = 'codex-project-path-collision-rearm-v1'",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE projection_queue
+             SET next_retry_at_micros = ?1,
+                 last_error = 'projection session output collided at codex/s: transcript_path differs'",
+            params![i64::MAX],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE projection_queue
+             SET last_error = 'projection session output collided at codex/s: project_path differs'
+             WHERE rowid = (SELECT MIN(rowid) FROM projection_queue)
+                OR rowid = (SELECT MAX(rowid) FROM projection_queue)",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let database = harness.registered.runtime_database();
+    let last_rowid = query_optional_i64(
+        &database.read_connection(),
+        "SELECT MAX(rowid) FROM projection_queue",
+        params![],
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, rearmed) = rearm_project_path_collision_batch(database, 0, last_rowid, 2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rearmed, 1);
+    assert_eq!(
+        parked_retry_deadlines(&harness).await,
+        vec![0, i64::MAX, i64::MAX, i64::MAX, i64::MAX, i64::MAX],
+        "a window limits rows examined, not just matching collisions"
+    );
+    assert_eq!(
+        schema_version::read_version(
+            &database.read_connection(),
+            "codex-project-path-collision-rearm-v1",
+        )
+        .await
+        .unwrap(),
+        None,
+        "a committed partial repair must not claim completion"
+    );
+
+    // A new walker has no in-memory cursor from the interrupted one. It
+    // preserves that committed first window and repairs the remaining row.
+    assert_eq!(rearm_project_path_collisions(database).await.unwrap(), 1);
+    assert_eq!(
+        parked_retry_deadlines(&harness).await,
+        vec![0, i64::MAX, i64::MAX, i64::MAX, i64::MAX, 0]
+    );
+    assert_eq!(
+        schema_version::read_version(
+            &database.read_connection(),
+            "codex-project-path-collision-rearm-v1",
+        )
+        .await
+        .unwrap(),
+        Some(1)
+    );
+    assert_eq!(rearm_project_path_collisions(database).await.unwrap(), 0);
 }

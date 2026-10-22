@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Result};
 
 use super::rows::audit_read_error;
 
@@ -482,6 +482,12 @@ const SESSION_SUMMARY_AUTHORITY_IMMUTABILITY: &[Trigger] = &[
     },
 ];
 
+pub(crate) const TEMPORAL_OBSERVATION_EFFECT_DELETE_GUARD_SQL: &str =
+    "CREATE TRIGGER session_temporal_observation_effects_immutable_delete_v1
+            BEFORE DELETE ON session_temporal_observation_effects BEGIN
+                SELECT RAISE(ABORT, 'session temporal observation effects are immutable');
+            END";
+
 const SESSION_RECEIPT_IMMUTABILITY: &[Trigger] = &[
     Trigger {
         name: "session_temporal_projection_receipts_insert_guard_v1",
@@ -538,10 +544,7 @@ const SESSION_RECEIPT_IMMUTABILITY: &[Trigger] = &[
     Trigger {
         name: "session_temporal_observation_effects_immutable_delete_v1",
         table: "session_temporal_observation_effects",
-        create_sql: "CREATE TRIGGER session_temporal_observation_effects_immutable_delete_v1
-            BEFORE DELETE ON session_temporal_observation_effects BEGIN
-                SELECT RAISE(ABORT, 'session temporal observation effects are immutable');
-            END",
+        create_sql: TEMPORAL_OBSERVATION_EFFECT_DELETE_GUARD_SQL,
     },
     Trigger {
         name: "session_temporal_projection_receipts_immutable_update_v1",
@@ -1649,6 +1652,15 @@ pub(super) async fn replace_trigger(
 pub(super) async fn trigger_contracts_intact(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
+    first_invalid_trigger(conn)
+        .await
+        .map(|invalid| invalid.is_none())
+        .map_err(audit_read_error)
+}
+
+pub(in crate::schema_contract) async fn first_invalid_trigger(
+    conn: &impl QueryExecutor,
+) -> Result<Option<&'static Trigger>> {
     // SQLite trigger names are unique under ASCII case folding, which is what
     // `COLLATE NOCASE` and `to_ascii_lowercase` both apply.
     let mut rows = conn
@@ -1656,20 +1668,19 @@ pub(super) async fn trigger_contracts_intact(
             "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'",
             (),
         )
-        .await
-        .map_err(audit_read_error)?;
+        .await?;
     let mut actual = HashMap::new();
-    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
-        let name = row.get::<String>(0).map_err(audit_read_error)?;
-        let table = row.get::<String>(1).map_err(audit_read_error)?;
-        let sql = row.get::<String>(2).map_err(audit_read_error)?;
+    while let Some(row) = rows.next().await? {
+        let name = row.get::<String>(0)?;
+        let table = row.get::<String>(1)?;
+        let sql = row.get::<String>(2)?;
         actual.insert(name.to_ascii_lowercase(), (table, sql));
     }
     Ok(INVARIANTS
         .iter()
         .flat_map(|invariant| invariant.triggers)
-        .all(|trigger| {
-            actual
+        .find(|trigger| {
+            !actual
                 .get(&trigger.name.to_ascii_lowercase())
                 .is_some_and(|(table, sql)| {
                     table.eq_ignore_ascii_case(trigger.table)

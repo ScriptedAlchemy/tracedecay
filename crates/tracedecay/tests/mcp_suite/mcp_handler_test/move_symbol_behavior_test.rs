@@ -8,7 +8,8 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::support::{
-    handle_real_server_tool_call_raw, init_production_source_edit_project, test_temp_dir,
+    close_production_source_edit_fixture, handle_real_server_tool_call_raw,
+    init_production_source_edit_project, test_temp_dir,
 };
 
 const LIB_RS: &str = "pub mod pricing;\npub mod orders;\n";
@@ -286,6 +287,9 @@ async fn dry_run_then_apply_moves_compute_grand_total() {
         fs::read_to_string(project.join("src/orders.rs")).unwrap(),
         ORDERS_RS
     );
+
+    drop(server);
+    close_production_source_edit_fixture(fixture).await;
 }
 
 #[tokio::test]
@@ -412,4 +416,7 @@ async fn move_symbol_refuses_unsafe_or_stale_requests() {
         "stale expected_state: {stale_text}"
     );
     assert_pricing_crate_unchanged(project);
+
+    drop(server);
+    close_production_source_edit_fixture(fixture).await;
 }

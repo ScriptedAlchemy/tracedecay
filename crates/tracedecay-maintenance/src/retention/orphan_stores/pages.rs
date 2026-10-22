@@ -133,19 +133,9 @@ pub(crate) fn newest_mtime_secs_controlled(
     walk_store_stats_controlled(dir, control).map(|stats| stats.newest_mtime_secs)
 }
 
-/// Total size in bytes of every file under `dir`. Best-effort: unreadable
-/// entries are skipped.
-///
-/// Symlinks are never followed: one pointing at an ancestor would recurse
-/// until the stack ran out, and one pointing outside the store would bill
-/// another directory's bytes to this one.
-pub fn dir_size_bytes(dir: &Path) -> u64 {
-    walk_store_stats(dir).size_bytes
-}
-
-/// Controlled counterpart of [`dir_size_bytes`]. It preserves the original
-/// best-effort accounting policy for unreadable entries while making the
-/// recursive work bounded by the caller's admission control.
+/// Size-only controlled walk for collection callers. It preserves the
+/// best-effort accounting policy for unreadable entries while bounding
+/// traversal by the caller's admission control.
 pub(crate) fn dir_size_bytes_controlled(
     dir: &Path,
     control: CollectionControl<'_>,

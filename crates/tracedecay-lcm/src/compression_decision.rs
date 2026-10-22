@@ -1,40 +1,60 @@
 pub(super) use super::compression_policy::threshold_pressure;
 pub use super::compression_policy::{
-    AssemblyCapInput, OverflowRecoveryCapInput, bounded_leaf_chunk_len,
-    effective_assembly_token_cap, effective_leaf_chunk_tokens, has_eligible_backlog,
-    overflow_recovery_assembly_cap, progress_leaf_chunk_len,
-};
-pub use super::compression_policy::{
     CondensationCandidateDecision, CondensationDecision, CondensationPolicy,
     CondensationSkipReason, condensation_candidate_decision, incremental_max_depth_limit,
+};
+pub use super::compression_policy::{
+    OverflowRecoveryCapInput, bounded_leaf_chunk_len, effective_assembly_token_cap,
+    effective_leaf_chunk_tokens, has_eligible_backlog, overflow_recovery_assembly_cap,
+    progress_leaf_chunk_len,
 };
 use super::compression_policy::{forced_overflow_pressure, source_token_count};
 use super::summarizer::CompressionSummarizerAdapter;
 use super::{
-    LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_SUMMARY_FAN_IN, LcmCompressionRequest,
-    LcmLifecycleState, LcmMaintenanceDebt, LcmPreflightRequest, LcmRawMessage,
-    LcmSessionBoundaryRequest,
+    LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_SUMMARY_FAN_IN, LcmCompressionOverrides,
+    LcmLifecycleState, LcmMaintenanceDebt, LcmRawMessage, LcmSessionBoundaryRequest,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct PreflightDecisionInput<'a> {
-    pub request: &'a LcmPreflightRequest,
+    pub current_tokens: Option<i64>,
+    pub overrides: &'a LcmCompressionOverrides,
     pub frontier: &'a LcmLifecycleState,
     pub backlog: &'a [LcmRawMessage],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PreflightDecision {
-    pub should_compress: bool,
-    pub reason: &'static str,
+pub enum PreflightDecision {
+    ForcedOverflowPressure,
+    MaintenanceDebtReady,
+    ThresholdBacklogReady,
+    ThresholdNoEligibleBacklog,
+    NoCompressionNeeded,
+}
+
+impl PreflightDecision {
+    pub fn should_compress(self) -> bool {
+        matches!(
+            self,
+            Self::ForcedOverflowPressure | Self::MaintenanceDebtReady | Self::ThresholdBacklogReady
+        )
+    }
+
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::ForcedOverflowPressure => "forced_overflow_pressure",
+            Self::MaintenanceDebtReady => "maintenance_debt_ready",
+            Self::ThresholdBacklogReady => "threshold_backlog_ready",
+            Self::ThresholdNoEligibleBacklog => "threshold_no_eligible_backlog",
+            Self::NoCompressionNeeded => "no_compression_needed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct CompressionPlanInput<'a> {
-    pub request: &'a LcmCompressionRequest,
-    /// The effective assembly cap from [`effective_assembly_token_cap`]; the
-    /// raw `request.max_assembly_tokens` is never read for pressure decisions.
-    pub assembly_token_cap: Option<i64>,
+    pub current_tokens: Option<i64>,
+    pub overrides: &'a LcmCompressionOverrides,
     pub backlog: &'a [LcmRawMessage],
 }
 
@@ -60,8 +80,7 @@ pub enum BoundaryTransitionDecision {
 #[derive(Debug, Clone, Copy)]
 pub struct CondensationDecisionInput<'a> {
     pub has_backlog: bool,
-    pub summary_fan_in: Option<usize>,
-    pub incremental_max_depth: Option<i64>,
+    pub overrides: &'a LcmCompressionOverrides,
     pub summarizer: &'a CompressionSummarizerAdapter,
 }
 
@@ -104,75 +123,49 @@ pub fn condensation_policy_decision(input: CondensationDecisionInput<'_>) -> Con
     }
     CondensationDecision::QueryCandidates(CondensationPolicy {
         fan_in: input
+            .overrides
             .summary_fan_in
             .filter(|fan_in| *fan_in > 1)
             .unwrap_or(LCM_DEFAULT_SUMMARY_FAN_IN),
-        incremental_max_depth: incremental_max_depth_limit(input.incremental_max_depth),
+        incremental_max_depth: incremental_max_depth_limit(input.overrides.incremental_max_depth),
     })
 }
 
 pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecision {
-    if forced_overflow_pressure(
-        input.request.current_tokens,
-        input.request.max_assembly_tokens,
-    ) {
-        return PreflightDecision {
-            should_compress: true,
-            reason: "forced_overflow_pressure",
-        };
+    if forced_overflow_pressure(input.current_tokens, input.overrides.max_assembly_tokens) {
+        return PreflightDecision::ForcedOverflowPressure;
     }
 
     if frontier_has_maintenance_debt(input.frontier) {
-        return PreflightDecision {
-            should_compress: true,
-            reason: "maintenance_debt_ready",
-        };
+        return PreflightDecision::MaintenanceDebtReady;
     }
 
-    if threshold_pressure(input.request.current_tokens, input.request.threshold_tokens) {
+    if threshold_pressure(input.current_tokens, input.overrides.threshold_tokens) {
         if input.backlog.is_empty() {
-            return PreflightDecision {
-                should_compress: false,
-                reason: "threshold_no_eligible_backlog",
-            };
+            return PreflightDecision::ThresholdNoEligibleBacklog;
         }
-        let leaf_chunk_tokens = effective_leaf_chunk_tokens(
-            input.request.leaf_chunk_tokens,
-            input.request.dynamic_leaf_chunk_enabled,
-            input.request.dynamic_leaf_chunk_max,
-            source_token_count(input.backlog),
-        );
+        let leaf_chunk_tokens =
+            effective_leaf_chunk_tokens(input.overrides, source_token_count(input.backlog));
         if has_eligible_backlog(input.backlog, leaf_chunk_tokens) {
-            return PreflightDecision {
-                should_compress: true,
-                reason: "threshold_backlog_ready",
-            };
+            return PreflightDecision::ThresholdBacklogReady;
         }
-        return PreflightDecision {
-            should_compress: false,
-            reason: "threshold_no_eligible_backlog",
-        };
+        return PreflightDecision::ThresholdNoEligibleBacklog;
     }
 
-    PreflightDecision {
-        should_compress: false,
-        reason: "no_compression_needed",
-    }
+    PreflightDecision::NoCompressionNeeded
 }
 
 pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
-    let forced_overflow_recovery =
-        forced_overflow_pressure(input.request.current_tokens, input.assembly_token_cap);
-    let leaf_chunk_tokens = effective_leaf_chunk_tokens(
-        input.request.leaf_chunk_tokens,
-        input.request.dynamic_leaf_chunk_enabled,
-        input.request.dynamic_leaf_chunk_max,
-        source_token_count(input.backlog),
+    let forced_overflow_recovery = forced_overflow_pressure(
+        input.current_tokens,
+        effective_assembly_token_cap(input.overrides),
     );
+    let leaf_chunk_tokens =
+        effective_leaf_chunk_tokens(input.overrides, source_token_count(input.backlog));
     let selected_len = progress_leaf_chunk_len(
         input.backlog,
         leaf_chunk_tokens,
-        input.request.max_source_messages,
+        input.overrides.max_source_messages,
     );
     CompressionPlan {
         selected_len,
@@ -191,6 +184,7 @@ pub fn frontier_has_maintenance_debt(frontier: &LcmLifecycleState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::LcmSummarizerMode;
+    use super::super::types::LcmPreflightRequest;
     use super::*;
 
     fn boundary_request() -> LcmSessionBoundaryRequest {
@@ -273,12 +267,17 @@ mod tests {
         let summarizer = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: "summary".to_string(),
             route: None,
+            extraction_result: None,
         });
+        let overrides = LcmCompressionOverrides {
+            summary_fan_in: Some(6),
+            incremental_max_depth: Some(-1),
+            ..Default::default()
+        };
         assert_eq!(
             condensation_policy_decision(CondensationDecisionInput {
                 has_backlog: false,
-                summary_fan_in: Some(6),
-                incremental_max_depth: Some(-1),
+                overrides: &overrides,
                 summarizer: &summarizer,
             }),
             CondensationDecision::QueryCandidates(CondensationPolicy {
@@ -290,14 +289,16 @@ mod tests {
 
     #[test]
     fn condensation_policy_skips_backlog_and_auxiliary_modes() {
-        let persisted = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Fake {
+        let persisted = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: "summary".to_string(),
+            route: None,
+            extraction_result: None,
         });
+        let overrides = LcmCompressionOverrides::default();
         assert_eq!(
             condensation_policy_decision(CondensationDecisionInput {
                 has_backlog: true,
-                summary_fan_in: None,
-                incremental_max_depth: None,
+                overrides: &overrides,
                 summarizer: &persisted,
             }),
             CondensationDecision::Skip(CondensationSkipReason::BacklogPresent)
@@ -307,8 +308,7 @@ mod tests {
         assert_eq!(
             condensation_policy_decision(CondensationDecisionInput {
                 has_backlog: false,
-                summary_fan_in: None,
-                incremental_max_depth: None,
+                overrides: &overrides,
                 summarizer: &auxiliary,
             }),
             CondensationDecision::Skip(CondensationSkipReason::AuxiliarySummarizer)
@@ -322,17 +322,10 @@ mod tests {
             session_id: "session-1".to_string(),
             messages: Vec::new(),
             current_tokens: Some(12),
-            threshold_tokens: None,
-            max_assembly_tokens: Some(8),
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: crate::LcmCompressionOverrides {
+                max_assembly_tokens: Some(8),
+                ..Default::default()
+            },
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
         };
@@ -364,12 +357,13 @@ mod tests {
         }];
 
         let decision = preflight_decision(PreflightDecisionInput {
-            request: &request,
+            current_tokens: request.current_tokens,
+            overrides: &request.overrides,
             frontier: &frontier,
             backlog: &backlog,
         });
 
-        assert!(decision.should_compress);
-        assert_eq!(decision.reason, "forced_overflow_pressure");
+        assert!(decision.should_compress());
+        assert_eq!(decision.reason(), "forced_overflow_pressure");
     }
 }
