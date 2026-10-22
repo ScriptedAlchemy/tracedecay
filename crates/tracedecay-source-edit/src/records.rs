@@ -29,7 +29,7 @@ pub(super) fn applied_record(
         SourceEditJournalStateV1::Applied {
             verification_state, ..
         } => *verification_state,
-        SourceEditJournalStateV1::Prepared => None,
+        SourceEditJournalStateV1::Prepared | SourceEditJournalStateV1::Reconciled { .. } => None,
     };
     let termination = applied_effect_termination(
         journal.request.verification_requested,
@@ -95,9 +95,11 @@ pub(super) fn unknown_record(journal: &SourceEditJournalV1) -> Result<SourceEdit
     let outcome = SourceEditOutcome::EffectUnknown {
         message: "source edit effect is unknown and requires reconciliation".to_owned(),
     };
+    let mut metadata = SourceEditDurableOutcomeV1::from_live(&journal.request.operation, &outcome);
+    metadata.files.clone_from(&journal.candidate_files);
     durable_record(
         journal,
-        SourceEditDurableOutcomeV1::from_live(&journal.request.operation, &outcome),
+        metadata,
         None,
         now_micros(),
         EffectTermination::EffectUnknown,
@@ -164,17 +166,18 @@ pub(super) fn reconciliation_attempt_record(
     control_observation: Option<CancellationObservation>,
 ) -> Result<SourceEditDurableResultV1> {
     let committed_state = if termination == EffectTermination::Completed {
-        Some(match &request.disposition {
+        match &request.disposition {
+            SourceEditReconciliationDispositionV1::Inspect => committed_state,
             SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } => {
-                committed_state.clone()
+                Some(committed_state.clone())
             }
             SourceEditReconciliationDispositionV1::ConfirmUnchanged => {
-                journal.expected_state.clone()
+                Some(journal.expected_state.clone())
             }
             SourceEditReconciliationDispositionV1::AcknowledgePartial { observed_state } => {
-                observed_state.clone()
+                Some(observed_state.clone())
             }
-        })
+        }
     } else {
         committed_state
     };

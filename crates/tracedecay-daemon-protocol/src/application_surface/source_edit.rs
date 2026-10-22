@@ -160,7 +160,9 @@ fn edit_request(
 }
 
 fn reconcile(args: &Value) -> Result<SourceEditReconciliationInvocationV1, String> {
-    if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+    if args.get("disposition").and_then(Value::as_str) != Some("inspect")
+        && args.get("confirm").and_then(Value::as_bool) != Some(true)
+    {
         return Err("source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human".to_owned());
     }
     let original_operation =
@@ -180,6 +182,12 @@ fn reconcile(args: &Value) -> Result<SourceEditReconciliationInvocationV1, Strin
     let input_digest =
         ManifestDigest::new(required_str(args, "input_digest")?).map_err(identity_error)?;
     let disposition = match required_str(args, "disposition")? {
+        "inspect" => {
+            if args.get("committed_state").is_some() || args.get("observed_state").is_some() {
+                return Err("inspection does not accept a caller-supplied state digest".to_owned());
+            }
+            SourceEditReconciliationDispositionV1::Inspect
+        }
         "confirm_committed" => {
             if args.get("observed_state").is_some() {
                 return Err(
@@ -369,6 +377,37 @@ mod tests {
             .expect("valid unchanged state"),
             ApplicationSurfaceRequest::SourceEditReconcile(_)
         ));
+    }
+
+    #[test]
+    fn inspection_requires_identity_but_no_conclusion_or_caller_digest() {
+        let mut args = json!({
+            "original_operation": "use-case.application.source-edit.rollback",
+            "effect_id": "effect.source-edit.retained",
+            "idempotency_key": "source-edit.original",
+            "attempt_idempotency_key": "source-edit.inspect",
+            "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "disposition": "inspect",
+        });
+        assert!(matches!(
+            parse_source_edit_arguments(ApplicationSurfaceOperation::SourceEditReconcile, &args)
+                .unwrap(),
+            ApplicationSurfaceRequest::SourceEditReconcile(SourceEditReconciliationInvocationV1 {
+                disposition: SourceEditReconciliationDispositionV1::Inspect,
+                ..
+            })
+        ));
+        args["observed_state"] = args["input_digest"].clone();
+        assert!(
+            parse_source_edit_arguments(ApplicationSurfaceOperation::SourceEditReconcile, &args)
+                .is_err()
+        );
+        args.as_object_mut().unwrap().remove("observed_state");
+        args["disposition"] = json!("confirm_unchanged");
+        assert!(
+            parse_source_edit_arguments(ApplicationSurfaceOperation::SourceEditReconcile, &args)
+                .is_err()
+        );
     }
 
     #[test]

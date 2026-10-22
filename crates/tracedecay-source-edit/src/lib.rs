@@ -8,8 +8,7 @@
 //! primitives, journaling, recovery, and reconciliation are owned
 //! here. This crate's only consumer is the composition root.
 //!
-//! Metric names stay `usecases.edit.*` for dashboard continuity. A later
-//! dual-rename to `source_edit.*` can land with the dashboard cutover.
+//! Metric names stay `usecases.edit.*` for dashboard continuity.
 
 use tracedecay_contracts::{
     ApplicationOperation, SourceEditAuthorizationPort, SourceEditEffectRequestV1,

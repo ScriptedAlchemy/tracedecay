@@ -61,6 +61,9 @@ pub struct SourceEditDurableEffectPayloadV1 {
     pub operation: UseCaseId,
     pub success: bool,
     pub files: Vec<String>,
+    /// Exact candidate-file observation from an inspection attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_state: Option<ManifestDigest>,
     pub change_count: Option<usize>,
     pub line: Option<u32>,
     pub before: Option<bool>,
@@ -80,6 +83,7 @@ pub struct SourceEditDurableEffectPayloadV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum SourceEditSurfaceOutcomeV1 {
+    DurableMetadata(SourceEditDurableEffectPayloadV1),
     Edit(EditResult),
     MultiEdit(MultiEditResult),
     Insert(InsertResult),
@@ -91,7 +95,6 @@ pub enum SourceEditSurfaceOutcomeV1 {
     TimedOut(SourceEditTimedOutResultV1),
     EffectUnknown(SourceEditEffectUnknownResultV1),
     Reconciled(SourceEditReconciledResultV1),
-    DurableMetadata(SourceEditDurableEffectPayloadV1),
 }
 
 impl SourceEditSurfaceOutcomeV1 {
@@ -147,7 +150,10 @@ impl SourceEditSurfaceOutcomeV1 {
     }
 
     pub fn touched_files(&self) -> Vec<String> {
-        if self.dry_run() || !self.success() {
+        if self.dry_run()
+            || !self.success()
+            || matches!(self, Self::DurableMetadata(result) if result.observed_state.is_some())
+        {
             return Vec::new();
         }
         match self {
@@ -193,6 +199,9 @@ impl SourceEditSurfaceOutcomeV1 {
 
 impl SourceEditDurableEffectPayloadV1 {
     pub fn from_live(operation: &UseCaseId, outcome: &SourceEditSurfaceOutcomeV1) -> Self {
+        if let SourceEditSurfaceOutcomeV1::DurableMetadata(result) = outcome {
+            return result.clone();
+        }
         let (change_count, line, before, import_count, finding_count) = match outcome {
             SourceEditSurfaceOutcomeV1::MultiEdit(result) => {
                 (Some(result.applied_count), None, None, None, None)
@@ -250,6 +259,7 @@ impl SourceEditDurableEffectPayloadV1 {
             operation: operation.clone(),
             success: outcome.success(),
             files: outcome.candidate_files(),
+            observed_state: None,
             change_count,
             line,
             before,

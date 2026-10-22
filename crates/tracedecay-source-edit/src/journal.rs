@@ -27,6 +27,10 @@ use super::verify::{application_contract_error, config_error, domain_error, io_e
 #[serde(rename_all = "snake_case", tag = "state")]
 pub(super) enum SourceEditJournalStateV1 {
     Prepared,
+    Reconciled {
+        original: Box<SourceEditDurableResultV1>,
+        attempt: Box<SourceEditDurableResultV1>,
+    },
     Applied {
         outcome: SourceEditDurableOutcomeV1,
         committed_state: ManifestDigest,
@@ -64,6 +68,38 @@ impl SourceEditJournalV1 {
             return Err(config_error(
                 "unsupported source edit transaction journal version",
             ));
+        }
+        if let SourceEditJournalStateV1::Reconciled { original, attempt } = &self.state {
+            original.validate_authority()?;
+            attempt.validate_authority()?;
+            if original.input_digest != self.input_digest
+                || original.effect.effect_id != self.effect_id
+                || original.effect.receipt.operation != self.request.operation
+                || original.effect.idempotency_key != self.request.idempotency_key
+                || original.effect.receipt.actor != self.request.actor
+                || original.effect.receipt.scope != self.request.scope
+                || original.authority_proof != self.request.authority_proof
+                || !same_source_edit_authority(&original.effect.authority, &self.request.authority)
+                || original.effect.reconciliation
+                    != tracedecay_contracts::ReconciliationState::Reconciled
+                || original.effect.receipt.outcome
+                    == tracedecay_contracts::EffectTermination::EffectUnknown
+                || attempt.effect.receipt.operation
+                    != *tracedecay_contracts::source_edit_reconciliation_operation()
+                        .map_err(application_contract_error)?
+                        .use_case_id()
+                || attempt.effect.receipt.actor != self.request.actor
+                || attempt.effect.receipt.scope != self.request.scope
+                || attempt.effect.expected_state != self.expected_state
+                || attempt.effect.idempotency_key == self.request.idempotency_key
+                || attempt.effect.receipt.outcome
+                    != tracedecay_contracts::EffectTermination::Completed
+                || attempt.outcome.observed_state.is_some()
+            {
+                return Err(config_error(
+                    "source edit reconciliation journal receipt identity is inconsistent",
+                ));
+            }
         }
         Ok(())
     }

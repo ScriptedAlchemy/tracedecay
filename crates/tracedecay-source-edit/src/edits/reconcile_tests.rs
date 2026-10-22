@@ -345,14 +345,36 @@ async fn restart_preserves_foreign_bytes_and_retains_pending_effect() {
     }
 }
 
+async fn inspect_pending_effect(
+    fixture: &EffectUnknownFixture,
+    request: SourceEditReconciliationRequestV1,
+) -> tracedecay_contracts::source_edit::SourceEditDurableEffectPayloadV1 {
+    let result = crate::reconcile_source_edit_effect_unknown(
+        &fixture.graph,
+        request,
+        &fixture.authorization,
+    )
+    .await
+    .unwrap();
+    let surface: tracedecay_contracts::source_edit::SourceEditSurfaceResultV1 =
+        serde_json::from_value(result.value()).unwrap();
+    assert!(surface.outcome.touched_files().is_empty());
+    let tracedecay_contracts::source_edit::SourceEditSurfaceOutcomeV1::DurableMetadata(metadata) =
+        surface.outcome
+    else {
+        panic!("inspection must retain its typed body-free observation");
+    };
+    assert!(!metadata.reconciled);
+    assert!(!metadata.files.is_empty());
+    assert!(metadata.observed_state.is_some());
+    metadata
+}
+
 #[tokio::test]
 async fn partial_acknowledgement_rejects_stale_digest_replays_and_admits_next_edit() {
     let fixture = effect_unknown_fixture().await;
     let durability = SourceEditDurability::for_graph(&fixture.graph);
     let journal = durability.load_journal().unwrap().unwrap();
-    let observed =
-        crate::digest::source_edit_state_digest(fixture.project.path(), &journal.candidate_files)
-            .unwrap();
     let effect = fixture.result.effect.as_ref().unwrap();
     let mut request = SourceEditReconciliationRequestV1 {
         context: fixture.request.context.clone(),
@@ -362,14 +384,33 @@ async fn partial_acknowledgement_rejects_stale_digest_replays_and_admits_next_ed
         idempotency_key: fixture.request.idempotency_key.clone(),
         attempt_idempotency_key: IdempotencyKey::new("partial.acknowledgement").unwrap(),
         input_digest: effect.receipt.input_digest.clone(),
-        disposition: SourceEditReconciliationDispositionV1::AcknowledgePartial {
-            observed_state: observed,
-        },
+        disposition: SourceEditReconciliationDispositionV1::Inspect,
         proof: fixture.request.proof.clone(),
         observed_at: UtcMicros(4),
     };
+    let inspection_request = request.clone();
+    let inspection = inspect_pending_effect(&fixture, inspection_request.clone()).await;
+    assert_eq!(inspection.files, journal.candidate_files);
+    assert!(durability.journal_path().exists());
+    assert_eq!(
+        recover_by_replaying(&fixture)
+            .await
+            .unwrap()
+            .effect
+            .unwrap()
+            .receipt
+            .outcome,
+        EffectTermination::EffectUnknown
+    );
+    request.attempt_idempotency_key =
+        IdempotencyKey::new("partial.acknowledgement.resolve").unwrap();
+    request.disposition = SourceEditReconciliationDispositionV1::AcknowledgePartial {
+        observed_state: inspection.observed_state.clone().unwrap(),
+    };
     let foreign = "pub fn foreign_change() {}\n";
     fs::write(fixture.destination_path(), foreign).unwrap();
+    let replayed_inspection = inspect_pending_effect(&fixture, inspection_request.clone()).await;
+    assert_eq!(replayed_inspection, inspection);
     let control = SourceEditEffectControlV1::new(
         Deadline::new(UtcMicros(i64::MAX)).unwrap(),
         CancellationSignal::active("partial.acknowledgement.control").unwrap(),
@@ -427,9 +468,14 @@ async fn partial_acknowledgement_rejects_stale_digest_replays_and_admits_next_ed
         foreign
     );
 
-    let current =
-        crate::digest::source_edit_state_digest(fixture.project.path(), &journal.candidate_files)
-            .unwrap();
+    let mut fresh_inspection = inspection_request;
+    fresh_inspection.attempt_idempotency_key =
+        IdempotencyKey::new("partial.inspect.fresh").unwrap();
+    let current = inspect_pending_effect(&fixture, fresh_inspection)
+        .await
+        .observed_state
+        .unwrap();
+    assert_ne!(Some(current.clone()), inspection.observed_state);
     request.disposition = SourceEditReconciliationDispositionV1::AcknowledgePartial {
         observed_state: current.clone(),
     };
@@ -555,9 +601,6 @@ async fn retired_operation_journal_discards_bodies_and_allows_partial_acknowledg
         b"unrelated"
     );
     let journal = durability.load_journal().unwrap().unwrap();
-    let observed =
-        crate::digest::source_edit_state_digest(fixture.project.path(), &journal.candidate_files)
-            .unwrap();
     let pending = durability
         .load_receipt(&fixture.request.idempotency_key)
         .unwrap()
@@ -582,9 +625,7 @@ async fn retired_operation_journal_discards_bodies_and_allows_partial_acknowledg
         idempotency_key: journal.request.idempotency_key.clone(),
         attempt_idempotency_key: IdempotencyKey::new("legacy.partial.acknowledgement").unwrap(),
         input_digest: journal.input_digest.clone(),
-        disposition: SourceEditReconciliationDispositionV1::AcknowledgePartial {
-            observed_state: observed.clone(),
-        },
+        disposition: SourceEditReconciliationDispositionV1::Inspect,
         proof: fixture.request.proof.clone(),
         observed_at: UtcMicros(4),
     };
@@ -606,6 +647,14 @@ async fn retired_operation_journal_discards_bodies_and_allows_partial_acknowledg
     fixture.assert_partial();
 
     request.original_operation = journal.request.operation.clone();
+    let observed = inspect_pending_effect(&fixture, request.clone())
+        .await
+        .observed_state
+        .unwrap();
+    request.attempt_idempotency_key = IdempotencyKey::new("legacy.partial.resolve").unwrap();
+    request.disposition = SourceEditReconciliationDispositionV1::AcknowledgePartial {
+        observed_state: observed.clone(),
+    };
     let result = reconcile_source_edit_effect_unknown_with_control(
         &fixture.graph,
         request,
@@ -687,5 +736,131 @@ async fn malformed_journal_is_preserved_when_obsolete_fields_cannot_be_normalize
     fs::write(durability.journal_path(), truncated).unwrap();
     assert!(durability.lock().await.is_err());
     assert_eq!(fs::read(durability.journal_path()).unwrap(), truncated);
+    fixture.assert_partial();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reconciliation_receipt_gap_survives_process_exit_and_original_replay() {
+    const CHILD_ROOT: &str = "TRACEDECAY_TEST_RECONCILIATION_GAP_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let (graph, _) = super::test_support::fixture_graph(std::path::Path::new(&root)).await;
+        let durability = SourceEditDurability::for_graph(&graph);
+        let journal = durability.load_journal().unwrap().unwrap();
+        let original = super::test_support::fixture_request_for_edit(
+            tracedecay_contracts::SourceEditRequest::MoveSymbol {
+                symbol: "moved".to_owned(),
+                dest_file: "src/b.rs".to_owned(),
+                dry_run: false,
+                update_references: false,
+            },
+            journal.request.idempotency_key.as_str(),
+        );
+        let inspection = durability
+            .load_reconciliation_receipt(&IdempotencyKey::new("gap.inspect").unwrap())
+            .unwrap()
+            .unwrap();
+        let mut request = crate::test_support::fixture_reconciliation(
+            &original,
+            &journal,
+            SourceEditReconciliationDispositionV1::AcknowledgePartial {
+                observed_state: inspection.outcome.observed_state.unwrap(),
+            },
+        );
+        request.attempt_idempotency_key = IdempotencyKey::new("gap.acknowledge").unwrap();
+        let authorization = super::test_support::fixture_authorization(&original);
+        let error =
+            crate::reconcile_source_edit_effect_unknown(&graph, request.clone(), &authorization)
+                .await
+                .err()
+                .expect("second receipt publication must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("persist source edit durable record")
+        );
+        assert_eq!(
+            durability
+                .load_receipt(&request.idempotency_key)
+                .unwrap()
+                .unwrap()
+                .effect
+                .receipt
+                .outcome,
+            EffectTermination::Partial
+        );
+        assert!(
+            durability
+                .load_reconciliation_receipt(&request.attempt_idempotency_key)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            durability.load_journal().unwrap().unwrap().state,
+            SourceEditJournalStateV1::Reconciled { .. }
+        ));
+        std::process::exit(73);
+    }
+
+    let fixture = effect_unknown_fixture().await;
+    let durability = SourceEditDurability::for_graph(&fixture.graph);
+    let journal = durability.load_journal().unwrap().unwrap();
+    let mut request = crate::test_support::fixture_reconciliation(
+        &fixture.request,
+        &journal,
+        SourceEditReconciliationDispositionV1::Inspect,
+    );
+    request.attempt_idempotency_key = IdempotencyKey::new("gap.inspect").unwrap();
+    let observed = inspect_pending_effect(&fixture, request.clone())
+        .await
+        .observed_state
+        .unwrap();
+    request.attempt_idempotency_key = IdempotencyKey::new("gap.acknowledge").unwrap();
+    request.disposition = SourceEditReconciliationDispositionV1::AcknowledgePartial {
+        observed_state: observed,
+    };
+    let receipt_directory = durability.root.join("reconciliation-receipts");
+    let permissions = fs::metadata(&receipt_directory).unwrap().permissions();
+    let mut denied = permissions.clone();
+    denied.set_readonly(true);
+    fs::set_permissions(&receipt_directory, denied).unwrap();
+    let exited = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "edits::reconcile_tests::reconciliation_receipt_gap_survives_process_exit_and_original_replay", "--nocapture"])
+        .env(CHILD_ROOT, fixture.project.path())
+        .output().unwrap();
+    fs::set_permissions(&receipt_directory, permissions).unwrap();
+    assert_eq!(
+        exited.status.code(),
+        Some(73),
+        "{}",
+        String::from_utf8_lossy(&exited.stdout)
+    );
+    let completed = durability.load_journal().unwrap().unwrap();
+    let SourceEditJournalStateV1::Reconciled { attempt, .. } = completed.state else {
+        panic!("receipt pair must remain recoverable after process exit");
+    };
+    assert_eq!(
+        attempt.input_digest,
+        request.attempt_input_digest().unwrap()
+    );
+    let body_free = fs::read_to_string(durability.journal_path()).unwrap();
+    assert!(!body_free.contains("pub fn"));
+    assert!(!body_free.contains("recovery_files"));
+
+    let original = recover_by_replaying(&fixture).await.unwrap();
+    assert_eq!(
+        original.effect.unwrap().receipt.outcome,
+        EffectTermination::Partial
+    );
+    assert!(!durability.journal_path().exists());
+    let replay = crate::reconcile_source_edit_effect_unknown(
+        &fixture.graph,
+        request,
+        &fixture.authorization,
+    )
+    .await
+    .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.effect.as_ref(), Some(&attempt.effect));
     fixture.assert_partial();
 }

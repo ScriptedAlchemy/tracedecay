@@ -135,6 +135,11 @@ fn recover_reconciliation_attempt(
     request: &SourceEditReconciliationRequestV1,
     attempt_input_digest: &ManifestDigest,
 ) -> Result<Option<SourceEditApplicationResult>> {
+    if let Some(journal) = durability.load_journal()?
+        && journal.request.scope == *request.context.scope()
+    {
+        publish_reconciled_receipts(durability, &journal)?;
+    }
     let Some(stored) = durability.load_reconciliation_receipt(&request.attempt_idempotency_key)?
     else {
         return Ok(None);
@@ -151,7 +156,9 @@ fn recover_reconciliation_attempt(
             "source edit reconciliation replay authority changed",
         ));
     }
-    if stored.effect.receipt.outcome == EffectTermination::Completed {
+    if stored.effect.receipt.outcome == EffectTermination::Completed
+        && stored.outcome.observed_state.is_none()
+    {
         let original = durability
             .load_receipt(&request.idempotency_key)?
             .ok_or_else(|| {
@@ -232,7 +239,7 @@ fn reconcile_prepared_source_edit_controlled(
     request: SourceEditReconciliationRequestV1,
     attempt: Option<SourceEditReconciliationAttemptV1<'_>>,
 ) -> Result<SourceEditApplicationResult> {
-    let journal = retained_reconciliation_journal(durability, &request)?;
+    let mut journal = retained_reconciliation_journal(durability, &request)?;
     if let Some(attempt) = &attempt
         && let Some(stop) = attempt
             .control
@@ -254,6 +261,28 @@ fn reconcile_prepared_source_edit_controlled(
     }
     let ended_at = now_micros();
     let (_outcome, record) = match request.disposition.clone() {
+        SourceEditReconciliationDispositionV1::Inspect => {
+            let attempt = attempt
+                .ok_or_else(|| config_error("inspection requires authorized attempt evidence"))?;
+            let outcome =
+                SourceEditOutcome::DurableMetadata(SourceEditDurableOutcomeV1::inspection(
+                    attempt.operation.use_case_id().clone(),
+                    journal.candidate_files.clone(),
+                    observed_state.clone(),
+                ));
+            let record = reconciliation_attempt_record(
+                &journal,
+                &request,
+                &attempt,
+                &outcome,
+                Some(observed_state),
+                ended_at,
+                EffectTermination::Completed,
+                None,
+            )?;
+            durability.persist_reconciliation_receipt(&record)?;
+            return Ok(record.into_live_application_result(outcome, None));
+        }
         SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } => {
             let predicted_state = journal.predicted_state.as_ref().ok_or_else(|| {
                 config_error("source edit committed state cannot be proven without a prediction")
@@ -324,17 +353,12 @@ fn reconcile_prepared_source_edit_controlled(
             (outcome, record)
         }
     };
-    durability.persist_receipt(&record)?;
     let result = if let Some(attempt) = attempt {
-        let after_commit_observation = attempt
-            .control
-            .and_then(|control| control.checkpoint(CancellationStage::AfterCommit))
-            .map(|stop| stop.observation);
         let attempt_outcome = SourceEditOutcome::Reconciled {
             success: true,
             message: "source edit reconciliation attempt completed".to_owned(),
         };
-        let attempt_record = reconciliation_attempt_record(
+        let mut attempt_record = reconciliation_attempt_record(
             &journal,
             &request,
             &attempt,
@@ -342,15 +366,44 @@ fn reconcile_prepared_source_edit_controlled(
             record.effect.receipt.committed_state.clone(),
             ended_at,
             EffectTermination::Completed,
-            after_commit_observation,
+            None,
         )?;
-        durability.persist_reconciliation_receipt(&attempt_record)?;
-        attempt_record.into_live_application_result(attempt_outcome, None)
+        journal.state = SourceEditJournalStateV1::Reconciled {
+            original: Box::new(record),
+            attempt: Box::new(attempt_record.clone()),
+        };
+        durability.persist_journal(&journal)?;
+        if let Some(stop) = attempt
+            .control
+            .and_then(|control| control.checkpoint(CancellationStage::AfterCommit))
+        {
+            attempt_record.effect.execution.cancellation = Some(stop.observation);
+            if let SourceEditJournalStateV1::Reconciled { attempt, .. } = &mut journal.state {
+                **attempt = attempt_record.clone();
+            }
+            durability.persist_journal(&journal)?;
+        }
+        publish_reconciled_receipts(durability, &journal)?;
+        return Ok(attempt_record.into_live_application_result(attempt_outcome, None));
     } else {
+        durability.persist_receipt(&record)?;
         record.into_application_result(true)
     };
     durability.clear_journal()?;
     Ok(result)
+}
+
+fn publish_reconciled_receipts(
+    durability: &SourceEditDurability,
+    journal: &SourceEditJournalV1,
+) -> Result<bool> {
+    let SourceEditJournalStateV1::Reconciled { original, attempt } = &journal.state else {
+        return Ok(false);
+    };
+    durability.persist_receipt(original)?;
+    durability.persist_reconciliation_receipt(attempt)?;
+    durability.clear_journal()?;
+    Ok(true)
 }
 
 #[tracing::instrument(name = "usecases.edit.recover", level = "trace", skip_all)]
@@ -366,6 +419,9 @@ pub(super) async fn recover_source_edit_transaction(
         return Err(config_error(
             "source edit crash recovery must run in the transaction's owning worktree",
         ));
+    }
+    if publish_reconciled_receipts(durability, &journal)? {
+        return Ok(());
     }
     if let Some(stored) = durability.load_receipt(&journal.request.idempotency_key)?
         && stored.effect.effect_id == journal.effect_id
@@ -479,6 +535,10 @@ fn reconcile_journal(
         ));
     }
     let record = match &journal.state {
+        SourceEditJournalStateV1::Reconciled { original, .. } => {
+            publish_reconciled_receipts(durability, &journal)?;
+            return Ok(original.as_ref().clone().into_application_result(true));
+        }
         SourceEditJournalStateV1::Prepared => unknown_record(&journal)?,
         SourceEditJournalStateV1::Applied {
             outcome,

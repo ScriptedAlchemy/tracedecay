@@ -182,5 +182,6 @@ pub struct SourceEditReconcileSurfaceRequestV1 {
     pub attempt_idempotency_key: String,
     pub input_digest: String,
     pub disposition: SourceEditReconciliationDispositionV1,
+    #[serde(default)]
     pub confirm: bool,
 }

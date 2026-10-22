@@ -78,7 +78,7 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512,
-                "description": "A new idempotency key for this reconciliation attempt. It must differ from the original edit key; exact retries replay this attempt's receipt."
+                "description": "A new idempotency key for this reconciliation attempt. It must differ from the original edit key; exact retries replay this attempt's receipt. Use a fresh attempt key to refresh an inspection."
             },
             "input_digest": {
                 "type": "string",
@@ -87,8 +87,8 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
             },
             "disposition": {
                 "type": "string",
-                "enum": ["confirm_committed", "confirm_unchanged", "acknowledge_partial"],
-                "description": "Independent inspection conclusion. Reconciliation verifies the live candidate-file digest."
+                "enum": ["inspect", "confirm_committed", "confirm_unchanged", "acknowledge_partial"],
+                "description": "Inspect returns files and observed_state without concluding the original effect. Conclusions verify the live candidate-file digest."
             },
             "committed_state": {
                 "type": "string",
@@ -98,7 +98,7 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
             "observed_state": {
                 "type": "string",
                 "pattern": "^sha256:[0-9a-f]{64}$",
-                "description": "Exact independently observed partial-state digest; required only for acknowledge_partial."
+                "description": "Exact observed_state returned by inspect; required only for acknowledge_partial."
             },
             "confirm": {
                 "type": "boolean",
@@ -112,10 +112,13 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
             "idempotency_key",
             "attempt_idempotency_key",
             "input_digest",
-            "disposition",
-            "confirm"
+            "disposition"
         ],
         "allOf": [
+            {
+                "if": {"properties": {"disposition": {"const": "inspect"}}, "required": ["disposition"]},
+                "then": {"not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
+            },
             {
                 "if": {"properties": {"disposition": {"const": "confirm_committed"}}, "required": ["disposition"]},
                 "then": {"required": ["committed_state", "confirm"], "not": {"required": ["observed_state"]}}
@@ -126,7 +129,7 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
             },
             {
                 "if": {"properties": {"disposition": {"const": "confirm_unchanged"}}, "required": ["disposition"]},
-                "then": {"not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
+                "then": {"required": ["confirm"], "not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
             }
         ]
     })
@@ -567,29 +570,29 @@ mod tests {
                 "idempotency_key",
                 "attempt_idempotency_key",
                 "input_digest",
-                "disposition",
-                "confirm"
+                "disposition"
             ])
         );
         assert_eq!(schema["properties"]["confirm"]["const"], json!(true));
         assert_eq!(
-            schema["allOf"][0]["then"]["required"],
+            schema["allOf"][1]["then"]["required"],
             json!(["committed_state", "confirm"])
         );
         assert_eq!(
-            schema["allOf"][0]["if"]["properties"]["disposition"]["const"],
+            schema["allOf"][1]["if"]["properties"]["disposition"]["const"],
             json!("confirm_committed")
         );
         assert_eq!(
             schema["properties"]["disposition"]["enum"],
             json!([
+                "inspect",
                 "confirm_committed",
                 "confirm_unchanged",
                 "acknowledge_partial"
             ])
         );
         assert_eq!(
-            schema["allOf"][1]["then"]["required"],
+            schema["allOf"][2]["then"]["required"],
             json!(["observed_state", "confirm"])
         );
         assert_eq!(

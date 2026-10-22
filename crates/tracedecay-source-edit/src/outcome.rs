@@ -18,6 +18,8 @@ pub struct SourceEditDurableOutcomeV1 {
     pub(super) operation: tracedecay_tool_catalog::UseCaseId,
     pub(super) success: bool,
     pub(super) files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) observed_state: Option<ManifestDigest>,
     pub(super) change_count: Option<usize>,
     pub(super) line: Option<u32>,
     pub(super) before: Option<bool>,
@@ -32,10 +34,36 @@ pub struct SourceEditDurableOutcomeV1 {
 }
 
 impl SourceEditDurableOutcomeV1 {
+    pub(super) fn inspection(
+        operation: tracedecay_tool_catalog::UseCaseId,
+        files: Vec<String>,
+        observed_state: ManifestDigest,
+    ) -> Self {
+        Self {
+            operation,
+            success: true,
+            files,
+            observed_state: Some(observed_state),
+            change_count: None,
+            line: None,
+            before: None,
+            import_count: None,
+            finding_count: None,
+            failed: false,
+            cancelled: false,
+            timed_out: false,
+            effect_unknown: false,
+            reconciled: false,
+        }
+    }
+
     pub(super) fn from_live(
         operation: &tracedecay_tool_catalog::UseCaseId,
         outcome: &SourceEditOutcome,
     ) -> Self {
+        if let SourceEditOutcome::DurableMetadata(result) = outcome {
+            return result.clone();
+        }
         let (change_count, line, before, import_count, finding_count) = match outcome {
             SourceEditOutcome::MultiEdit(result) => {
                 (Some(result.applied_count), None, None, None, None)
@@ -73,6 +101,7 @@ impl SourceEditDurableOutcomeV1 {
             operation: operation.clone(),
             success: outcome.success(),
             files: outcome.candidate_files(),
+            observed_state: None,
             change_count,
             line,
             before,
@@ -93,7 +122,9 @@ impl SourceEditDurableOutcomeV1 {
             object.insert(
                 "message".to_owned(),
                 Value::String(
-                    if self.failed {
+                    if self.observed_state.is_some() {
+                        "source edit candidate files inspected; original effect remains pending"
+                    } else if self.failed {
                         "source edit failed"
                     } else if self.cancelled {
                         "source edit was cancelled"
@@ -161,6 +192,9 @@ impl SourceEditOutcome {
             }
             Self::EffectUnknown { message } => message,
             Self::Reconciled { message, .. } => message,
+            Self::DurableMetadata(result) if result.observed_state.is_some() => {
+                "source edit candidate files inspected; original effect remains pending"
+            }
             Self::DurableMetadata(result) if result.failed => "source edit failed",
             Self::DurableMetadata(result) if result.cancelled => "source edit was cancelled",
             Self::DurableMetadata(result) if result.timed_out => "source edit timed out",
@@ -177,7 +211,10 @@ impl SourceEditOutcome {
     }
 
     pub fn touched_files(&self, dry_run: bool) -> Vec<String> {
-        if dry_run || !self.success() {
+        if dry_run
+            || !self.success()
+            || matches!(self, Self::DurableMetadata(result) if result.observed_state.is_some())
+        {
             return Vec::new();
         }
         match self {
