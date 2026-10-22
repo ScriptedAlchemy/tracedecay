@@ -21,14 +21,11 @@ def target_assets(
 ) -> tuple[str, ...]:
     name = target["name"]
     archive = target["archive"]
-    if profile == "beta":
-        return (
-            f"tracedecay-beta-{tag}-{name}.{archive}",
-            f"tracedecay-beta-{tag}-{name}.mcpb",
-        )
+    prefix = "tracedecay-beta" if profile == "beta" else "tracedecay"
     return (
-        f"tracedecay-{tag}-{name}.{archive}",
-        f"tracedecay-{tag}-{name}.mcpb",
+        f"{prefix}-{tag}-{name}.{archive}",
+        f"{prefix}-{tag}-{name}.mcpb",
+        f"{prefix}-{tag}-{name}.spdx.json",
     )
 
 
@@ -55,13 +52,28 @@ def plan(
             "unexpected existing release assets: " + ", ".join(unexpected)
         )
 
-    missing_targets = [
-        target
+    missing_packages = {
+        target["name"]: any(
+            asset not in existing
+            for asset in target_assets(target, tag, profile)[:2]
+        )
         for target in targets
-        if any(asset not in existing for asset in target_assets(target, tag, profile))
+    }
+    missing_targets = [
+        {
+            **target,
+            **(
+                {"inventory_only": True}
+                if not missing_packages[target["name"]]
+                else {}
+            ),
+        }
+        for target in targets
+        if missing_packages[target["name"]]
+        or target_assets(target, tag, profile)[2] not in existing
     ]
     finalized = sorted(existing & fixed)
-    if finalized and missing_targets:
+    if finalized and any(missing_packages[target["name"]] for target in missing_targets):
         raise SystemExit(
             "final release metadata exists before all immutable artifacts "
             f"({', '.join(finalized)}); refusing destructive recovery"
@@ -92,9 +104,15 @@ def main() -> None:
         encoding="utf-8",
     )
     matrix = json.dumps({"include": missing}, separators=(",", ":"))
+    package_build_required = any(
+        not target.get("inventory_only", False) for target in missing
+    )
     with arguments.github_output.open("a", encoding="utf-8") as output:
         output.write(f"matrix={matrix}\n")
         output.write(f"build_required={'true' if missing else 'false'}\n")
+        output.write(
+            f"package_build_required={'true' if package_build_required else 'false'}\n"
+        )
 
 
 if __name__ == "__main__":

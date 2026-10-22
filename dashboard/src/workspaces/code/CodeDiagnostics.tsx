@@ -32,10 +32,14 @@ import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn';
 import {
   controlFailure,
+  completeDiagnosticCoverage,
+  diagnosticPublication,
   sameCommand,
   useCodeDiagnostics,
   useDiagnosticsControl,
+  verifiedDiagnosticPublication,
   type Diagnostic,
+  type DiagnosticDocumentCoverage,
   type DiagnosticsCommand,
   type DiagnosticsSnapshot,
   type EngineStatus,
@@ -109,6 +113,9 @@ export function CodeDiagnostics() {
 function SnapshotBody({ data, controls }: { data: DiagnosticsSnapshot; controls: Controls }) {
   const shown = data.diagnostics.slice(0, SHOWN);
   const rest = data.diagnostics.length - shown.length;
+  const retained = data.diagnostics.some((row) =>
+    !verifiedDiagnosticPublication(diagnosticPublication(data, row)),
+  );
   // A settings write is a compare-and-set against the settings the broker
   // holds. When it could not read them the body still carries values, the
   // built-in defaults, and a patch sent against those would write this
@@ -142,6 +149,11 @@ function SnapshotBody({ data, controls }: { data: DiagnosticsSnapshot; controls:
           * browser's request, which is reported on the buttons. */}
         <Figure label="broker refreshing" value={data.summary.pending_refreshes} />
       </dl>
+      {retained ? (
+        <p className="text-3xs text-text-muted">
+          counts include retained or version-unverified findings
+        </p>
+      ) : null}
       <p className="text-3xs text-text-muted">
         {data.summary.last_refresh_age_seconds === null
           ? 'no refresh has completed since this broker started'
@@ -168,13 +180,21 @@ function SnapshotBody({ data, controls }: { data: DiagnosticsSnapshot; controls:
         </ul>
       )}
       {data.diagnostics.length === 0 ? (
-        data.engines.some((engine) => engine.state === 'ready') ? (
-          <p className="text-2xs text-text-muted">the mounted engines report no diagnostics</p>
+        data.engines.length > 0 ? (
+          <p className="text-2xs text-text-muted">
+            {completeDiagnosticCoverage(data)
+              ? 'the latest verified publications report no diagnostics'
+              : 'no diagnostics are stored; current publication coverage is incomplete'}
+          </p>
         ) : null
       ) : (
-        <ul className="flex flex-col gap-1" aria-label="Current diagnostics">
+        <ul className="flex flex-col gap-1" aria-label="Stored diagnostics">
           {shown.map((row, index) => (
-            <DiagnosticLine key={`${row.file}:${row.line_start}:${index}`} row={row} />
+            <DiagnosticLine
+              key={`${row.file}:${row.line_start}:${index}`}
+              row={row}
+              publication={diagnosticPublication(data, row)}
+            />
           ))}
           {rest > 0 ? (
             <li className="text-3xs leading-relaxed text-text-muted">
@@ -361,7 +381,25 @@ function Figure({
   );
 }
 
-function DiagnosticLine({ row }: { row: Diagnostic }) {
+function publicationLabel(publication: DiagnosticDocumentCoverage | undefined): string {
+  switch (publication?.state) {
+    case 'published':
+      return publication.version_verified ? 'Verified publication' : 'Version unverified';
+    case 'no_publication':
+      return 'Retained — no publication';
+    case 'stale_publication':
+      return 'Retained — stale publication';
+    case 'root_failed':
+      return 'Retained — workspace failed';
+    case undefined:
+      return 'Retained — outside latest refresh';
+  }
+}
+
+function DiagnosticLine({ row, publication }: {
+  row: Diagnostic;
+  publication: DiagnosticDocumentCoverage | undefined;
+}) {
   return (
     <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
       <div className="flex items-baseline gap-1.5 text-3xs text-text-muted">
@@ -378,6 +416,7 @@ function DiagnosticLine({ row }: { row: Diagnostic }) {
         </span>
         {row.code != null ? <span>[{row.code}]</span> : null}
       </div>
+      <p className="text-3xs text-text-muted">{publicationLabel(publication)}</p>
       <p className="text-2xs leading-relaxed text-text-secondary">{row.message}</p>
       {row.enclosing_node != null ? (
         <p className="text-3xs text-text-muted">in {row.enclosing_node}</p>

@@ -6,17 +6,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_domain::ManifestDigest;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::admission::AdmittedRoot;
 use super::dto::{
     CallHierarchyItem, DiagnosticTrigger, DocumentSymbol, FeedbackCyclePort, FeedbackCycleRequest,
     FeedbackCycleResponse, GatewayMethod, GatewayResponse, Hover, IncomingCall, LspLocation,
-    LspSemanticOperationOutcome, LspSemanticRequest, MethodUnavailableReason, OutgoingCall,
-    RenameCandidateResult, SemanticProviderOutcome, SemanticRequest, SemanticResponse,
-    SignatureHelp, TypeHierarchyItem, WorkspaceSymbol, empty_semantic_response,
-    lsp_semantic_request, project_semantic_outcome,
+    LspSemanticDocumentSnapshot, LspSemanticOperationOutcome, LspSemanticRequest,
+    MethodUnavailableReason, OutgoingCall, RenameCandidateResult, SemanticProviderOutcome,
+    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
+    empty_semantic_response, lsp_semantic_request, project_semantic_outcome,
 };
 use crate::capabilities::{
     CapabilityAvailability, ClientCapabilities, EffectiveCapabilities, GatewayCapabilities,
@@ -206,7 +205,29 @@ impl SemanticProviderAdapter {
         request_id: &LspRequestId,
         request: &SemanticRequest,
     ) -> SemanticProviderOutcome<SemanticResponse> {
-        let wire_request = match lsp_semantic_request(request) {
+        self.request_with_document(root, request_id, request, None, None)
+    }
+
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<std::time::Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        // A result can finish before didClose and remain buffered until the
+        // next poll. Its original overlay must still admit publication, even
+        // when the document has reopened at the same editor version.
+        if document_snapshot.is_some_and(|snapshot| !snapshot.lifetime.is_open()) {
+            self.cancel_request(root, request_id);
+            return SemanticProviderOutcome::Partial {
+                value: empty_semantic_response(request),
+                coverage: "analyzer-cancelled".to_owned(),
+                detail: Some(LspSemanticOperationOutcome::ANALYZER_CANCELLED_DETAIL.to_owned()),
+            };
+        }
+        let mut wire_request = match lsp_semantic_request(request) {
             Ok(request) => request,
             Err(coverage) => {
                 return SemanticProviderOutcome::Partial {
@@ -216,6 +237,12 @@ impl SemanticProviderAdapter {
                 };
             }
         };
+        if let Some(snapshot) = document_snapshot {
+            wire_request = wire_request.with_document_snapshot(snapshot.clone());
+        }
+        if let Some(deadline) = deadline {
+            wire_request = wire_request.with_deadline(deadline);
+        }
         let method = wire_request.method();
         let key = Self::key(root, request_id);
         match self
@@ -278,6 +305,24 @@ impl SemanticProviderPort for SemanticProviderAdapter {
         request: &SemanticRequest,
     ) -> SemanticProviderOutcome<SemanticResponse> {
         SemanticProviderAdapter::request(self, root, request_id, request)
+    }
+
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<std::time::Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        SemanticProviderAdapter::request_with_document(
+            self,
+            root,
+            request_id,
+            request,
+            document_snapshot,
+            deadline,
+        )
     }
 }
 
@@ -404,6 +449,17 @@ pub trait SemanticProviderPort {
                 .rename_candidate(root, document_uri, *position)
                 .map(SemanticResponse::RenameCandidate),
         }
+    }
+
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        _document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        _deadline: Option<std::time::Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        self.request(root, request_id, request)
     }
 
     fn declaration(
@@ -556,6 +612,17 @@ where
         request: &SemanticRequest,
     ) -> SemanticProviderOutcome<SemanticResponse> {
         (**self).request(root, request_id, request)
+    }
+
+    fn request_with_document(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<std::time::Instant>,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        (**self).request_with_document(root, request_id, request, document_snapshot, deadline)
     }
     fn declaration(
         &self,
@@ -967,9 +1034,15 @@ where
         }
     }
 
-    /// Multi-root fan-out for `workspace/symbol`. Reached only through
-    /// [`Self::semantic_request`], the single production semantic entry point.
-    fn workspace_symbols(&self, query: &str) -> GatewayResponse<Vec<WorkspaceSymbol>> {
+    /// One admitted root of a workspace-symbol request. The session retains
+    /// terminal root results until the complete fan-out settles or is cancelled.
+    pub(crate) fn workspace_symbols_for_root(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        query: &str,
+        deadline: Option<std::time::Instant>,
+    ) -> GatewayResponse<SemanticResponse> {
         if !self
             .capabilities
             .supports_semantic(SemanticCapability::WorkspaceSymbol)
@@ -979,49 +1052,34 @@ where
                 MethodUnavailableReason::CapabilityNotNegotiated,
             );
         }
-        let mut symbols = Vec::new();
-        let mut completed = 0_usize;
-        let mut partial = false;
-        let mut pending = false;
-        for root in self.workspace.roots() {
-            match self.semantic_provider.workspace_symbols(root, query) {
-                SemanticProviderOutcome::Complete(mut root_symbols) => {
-                    completed += 1;
-                    symbols.append(&mut root_symbols);
-                }
-                SemanticProviderOutcome::Partial {
-                    value: mut root_symbols,
-                    ..
-                } => {
-                    partial = true;
-                    symbols.append(&mut root_symbols);
-                }
-                SemanticProviderOutcome::Pending => pending = true,
-                SemanticProviderOutcome::Unavailable => {}
-            }
+        if !self.workspace.roots().contains(root) {
+            return GatewayResponse::unavailable(
+                GatewayMethod::WorkspaceSymbol,
+                MethodUnavailableReason::OutsideAdmittedRoot,
+            );
         }
-        if completed == self.workspace.roots().len() && !partial {
-            GatewayResponse::Value(symbols)
-        } else if completed > 0 || partial {
-            let scope_set = self
-                .workspace
-                .scope_set_digest()
-                .map_or("single-root", ManifestDigest::as_str);
-            GatewayResponse::Partial {
-                value: symbols,
-                coverage: format!(
-                    "scope-set={scope_set};completed={completed}/{}",
-                    self.workspace.roots().len()
-                ),
-                detail: Some("one or more admitted roots were incomplete".to_owned()),
-            }
-        } else if pending {
-            GatewayResponse::Pending
-        } else {
-            GatewayResponse::unavailable(
+        let request = SemanticRequest::WorkspaceSymbols {
+            query: query.to_owned(),
+        };
+        match self
+            .semantic_provider
+            .request_with_document(root, request_id, &request, None, deadline)
+        {
+            SemanticProviderOutcome::Complete(value) => GatewayResponse::Value(value),
+            SemanticProviderOutcome::Partial {
+                value,
+                coverage,
+                detail,
+            } => GatewayResponse::Partial {
+                value,
+                coverage,
+                detail,
+            },
+            SemanticProviderOutcome::Pending => GatewayResponse::Pending,
+            SemanticProviderOutcome::Unavailable => GatewayResponse::unavailable(
                 GatewayMethod::WorkspaceSymbol,
                 MethodUnavailableReason::ProviderUnavailable,
-            )
+            ),
         }
     }
 
@@ -1031,32 +1089,40 @@ where
         request_id: &LspRequestId,
         request: &SemanticRequest,
     ) -> GatewayResponse<SemanticResponse> {
+        self.semantic_request_with_document(request_id, request, None, None)
+    }
+
+    pub fn semantic_request_with_document(
+        &self,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+        document_snapshot: Option<&LspSemanticDocumentSnapshot>,
+        deadline: Option<std::time::Instant>,
+    ) -> GatewayResponse<SemanticResponse> {
         if let SemanticRequest::WorkspaceSymbols { query } = request {
-            return match self.workspace_symbols(query) {
-                GatewayResponse::Value(value) => {
-                    GatewayResponse::Value(SemanticResponse::WorkspaceSymbols(value))
-                }
-                GatewayResponse::Partial {
-                    value,
-                    coverage,
-                    detail,
-                } => GatewayResponse::Partial {
-                    value: SemanticResponse::WorkspaceSymbols(value),
-                    coverage,
-                    detail,
-                },
-                GatewayResponse::Pending => GatewayResponse::Pending,
-                GatewayResponse::Unavailable(unavailable) => {
-                    GatewayResponse::Unavailable(unavailable)
-                }
-                GatewayResponse::RequestFailed(failure) => GatewayResponse::RequestFailed(failure),
+            // Multi-root work needs the session's retained request lifecycle:
+            // consuming one root's result must not restart it on the next poll.
+            let [root] = self.workspace.roots() else {
+                return GatewayResponse::unavailable(
+                    GatewayMethod::WorkspaceSymbol,
+                    MethodUnavailableReason::AmbiguousAdmittedRoot,
+                );
             };
+            return self.workspace_symbols_for_root(root, request_id, query, deadline);
         }
         self.route_semantic(
             request.method(),
             request.capability(),
             request.document_uri(),
-            |provider, root| provider.request(root, request_id, request),
+            |provider, root| {
+                provider.request_with_document(
+                    root,
+                    request_id,
+                    request,
+                    document_snapshot,
+                    deadline,
+                )
+            },
         )
     }
 

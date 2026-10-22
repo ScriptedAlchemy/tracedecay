@@ -180,7 +180,18 @@ impl AnalyzerProcess {
 
     /// Kills the child, then waits until it is reaped and stderr has closed.
     pub(super) async fn terminate(&mut self) -> io::Result<ExitStatus> {
+        self.begin_terminate();
+        self.finish_terminate().await
+    }
+
+    /// Starts termination synchronously so retaining the settlement future
+    /// cannot keep the analyzer alive until a later caller polls it.
+    pub(super) fn begin_terminate(&mut self) {
         drop(self.lifeline.take());
+    }
+
+    /// Waits for termination started by [`Self::begin_terminate`].
+    pub(super) async fn finish_terminate(&mut self) -> io::Result<ExitStatus> {
         let status = self.exited.recv().await.map_err(|_| supervisor_gone())?;
         let _ = self.stderr_closed.recv().await;
         status
@@ -433,6 +444,29 @@ mod tests {
     fn reap_kills_a_running_child() {
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
         let status = reap_child(&mut child).unwrap();
+        assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn begin_terminate_kills_before_the_settlement_future_is_polled() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let mut process = native_runtime::block_on(AnalyzerProcess::spawn(command, "retained"))
+            .unwrap()
+            .unwrap();
+
+        process.begin_terminate();
+
+        let settled = native_runtime::block_on(until(
+            Instant::now() + Duration::from_secs(2),
+            process.finish_terminate(),
+        ))
+        .unwrap()
+        .unwrap();
+        let Some(Ok(status)) = settled else {
+            panic!("termination did not start until settlement was polled: {settled:?}");
+        };
         assert!(!status.success());
     }
 

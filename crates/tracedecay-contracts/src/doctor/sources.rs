@@ -1740,7 +1740,8 @@ pub struct ResidentMemoryOwnerReadV1 {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ResidentMemoryReadV1 {
     Observed {
-        /// Last sampled process RSS, `None` before the first sample.
+        /// Last sampled admission pressure: process allocations constrained by
+        /// shared cgroup headroom, `None` before the first sample.
         resident_bytes: Option<u64>,
         limit_bytes: u64,
         high_watermark_bytes: u64,
@@ -1782,12 +1783,12 @@ pub fn resident_memory_findings(
         )?]);
     };
     let unmeasured = owners.iter().filter(|owner| owner.bytes.is_none()).count();
-    let resident = resident_bytes.map_or_else(
+    let admission = resident_bytes.map_or_else(
         || "unsampled".to_owned(),
         |bytes| format!("{} MiB", bytes / MIB),
     );
     let summary = format!(
-        "resident {resident} of a {} MiB limit (pressure line {} MiB); {} owners retain {} MiB measured, {unmeasured} unmeasured",
+        "admission pressure {admission} of a {} MiB limit (pressure line {} MiB; process allocations or shared cgroup pressure); {} owners retain {} MiB measured, {unmeasured} unmeasured",
         limit_bytes / MIB,
         high_watermark_bytes / MIB,
         owners.len(),
@@ -2174,7 +2175,7 @@ mod tests {
             [
                 (
                     DoctorEvidenceStateV1::Partial,
-                    "resident 3072 MiB of a 6144 MiB limit (pressure line 5120 MiB); 2 owners retain 300 MiB measured, 1 unmeasured".to_owned()
+                    "admission pressure 3072 MiB of a 6144 MiB limit (pressure line 5120 MiB; process allocations or shared cgroup pressure); 2 owners retain 300 MiB measured, 1 unmeasured".to_owned()
                 ),
                 (
                     DoctorEvidenceStateV1::HealthyCompleteCoverage,

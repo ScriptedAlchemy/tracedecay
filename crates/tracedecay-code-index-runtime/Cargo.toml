@@ -26,7 +26,7 @@ test-helpers = [
 
 [dependencies]
 asupersync.workspace = true
-futures-util = "0.3.33"
+futures-util.workspace = true
 gix = { version = "=0.89.0", default-features = false, features = [
     "revision",
     "blob-diff",
@@ -35,17 +35,17 @@ gix = { version = "=0.89.0", default-features = false, features = [
     "sha256",
     "status",
 ] }
-rayon = "1"
-same-file = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-tempfile = "3"
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
-tracing = "0.1"
-url = "2"
-walkdir = "2"
+rayon.workspace = true
+same-file.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tracing.workspace = true
+url.workspace = true
+walkdir.workspace = true
 
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
@@ -67,12 +67,12 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-application = { path = "../tracedecay-application" }
 
 [target.'cfg(unix)'.dependencies]
-notify = "8"
+notify.workspace = true
 
 [dev-dependencies]
-filetime = "0.2"
-rusqlite = { version = "0.40.1", default-features = false }
-tokio = { version = "1", features = ["full", "test-util"] }
+filetime.workspace = true
+rusqlite.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = [
     "test-helpers",
     "lite",
