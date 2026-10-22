@@ -581,22 +581,22 @@ fn psi_some_avg10_v1(text: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-/// What the last measured RSS sample says about this process.
+/// Admission pressure from the last process sample and shared cgroup headroom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidentMemoryPressureStateV1 {
     /// No sample has been published yet, so admission has nothing measured to
     /// consult and falls back to the reservation ceiling alone. An abstention,
     /// never a claim that the process is small.
     Unobserved,
-    /// Measured RSS is below the pressure watermarks, or between them with the
-    /// latch clear.
+    /// Measured admission pressure is below the watermarks, or between them
+    /// with the latch clear.
     Nominal {
         observed_bytes: u64,
         limit_bytes: u64,
         high_watermark_bytes: u64,
     },
-    /// Measured RSS reached the high watermark and has not yet fallen back to
-    /// the low watermark.
+    /// Measured admission pressure reached the high watermark and has not yet
+    /// fallen back to the low watermark.
     OverBudget {
         observed_bytes: u64,
         limit_bytes: u64,
@@ -611,7 +611,7 @@ impl ResidentMemoryPressureStateV1 {
         matches!(self, Self::OverBudget { .. })
     }
 
-    /// The last measured RSS, or `None` when nothing has been sampled.
+    /// Last sampled admission pressure, or `None` before the first sample.
     #[must_use]
     pub const fn observed_bytes(self) -> Option<u64> {
         match self {
@@ -1285,9 +1285,9 @@ pub struct ResidentMemoryKeyV1 {
 /// Typed refusal after one bounded reclaim pass.
 ///
 /// Two distinct refusals, never collapsed into one: the modeled reservations
-/// are full, or the *measured* process is over budget while the model still
-/// claims room. Both name the exact bytes that produced them so no caller has
-/// to guess, and neither is ever a silent stall.
+/// are full, or measured admission pressure is over budget while the model
+/// still claims room. Both name the exact bytes that produced them so callers
+/// need not guess, and neither is ever a silent stall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ResidentMemoryAdmissionFailureV1 {
     /// Admitted reservations plus this request exceed the configured limit.
@@ -1299,10 +1299,10 @@ pub enum ResidentMemoryAdmissionFailureV1 {
         requested_bytes: u64,
         limit_bytes: u64,
     },
-    /// Measured process RSS is at or above the high watermark. Reservations
-    /// say there is room; the kernel says otherwise, and the measurement wins.
+    /// Measured admission pressure reached the high watermark. Process
+    /// allocations or shared cgroup pressure take precedence over reservations.
     #[error(
-        "resident-memory admission over budget: observed_rss={observed_bytes} configured_limit={limit_bytes} high_watermark={high_watermark_bytes} requested={requested_bytes} floor={floor_bytes}"
+        "resident-memory admission over budget: observed_admission={observed_bytes} configured_limit={limit_bytes} high_watermark={high_watermark_bytes} requested={requested_bytes} floor={floor_bytes}"
     )]
     ObservedOverBudget {
         observed_bytes: u64,
@@ -1334,9 +1334,9 @@ impl ResidentMemoryAdmissionFailureV1 {
         }
     }
 
-    /// Whether this refusal came from measured RSS rather than the modeled
-    /// ceiling. Over-budget refusals clear as pressure falls, so callers retry
-    /// them instead of treating the input as permanently unservable.
+    /// Whether this refusal came from measured admission pressure rather than
+    /// the modeled ceiling. These refusals clear as pressure falls, so callers
+    /// retry them instead of treating the input as permanently unservable.
     #[must_use]
     pub const fn is_observed_over_budget(&self) -> bool {
         matches!(self, Self::ObservedOverBudget { .. })
@@ -1531,6 +1531,62 @@ impl ProcessResidentMemoryV1 {
         Err(self.refused(self.admission_failure(requested_bytes)))
     }
 
+    /// Size and charge new work from the same measured headroom reading.
+    /// The returned ceiling can be smaller than `preferred_bytes`; consumers
+    /// with a minimum working set must release a reservation below that floor.
+    /// Concurrent ledger charges are checked under the charge's own lock.
+    /// The consumer registers its working-set minimum with `wait_for_headroom`
+    /// when the returned budget cannot support its next operation.
+    #[tracing::instrument(
+        name = "runtime_core.resident.reserve_up_to",
+        level = "trace",
+        skip_all
+    )]
+    pub fn reserve_up_to(
+        self: &Arc<Self>,
+        key: ResidentMemoryKeyV1,
+        preferred_bytes: NonZeroU64,
+        ceiling: u64,
+    ) -> Result<ResidentMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
+        self.pressure.measure_admission_bytes();
+        let ceiling = ceiling.min(self.limit_bytes.get());
+        let mut state = self.lock_state();
+        let headroom = self.headroom_from_state(&state, ceiling);
+        let admitted = preferred_bytes
+            .get()
+            .min(headroom.available_bytes)
+            .min(ceiling.saturating_sub(state.used_bytes));
+        if admitted == 0 {
+            let failure = if self.pressure.state().is_over_budget()
+                || headroom.observed_bytes >= ceiling.min(self.pressure.limit_bytes())
+            {
+                ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
+                    observed_bytes: headroom.observed_bytes,
+                    limit_bytes: self.pressure.limit_bytes(),
+                    high_watermark_bytes: self.pressure.high_watermark_bytes(),
+                    requested_bytes: preferred_bytes.get(),
+                    floor_bytes: RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+                }
+            } else {
+                ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+                    used_bytes: state.used_bytes,
+                    requested_bytes: preferred_bytes.get(),
+                    limit_bytes: ceiling,
+                }
+            };
+            drop(state);
+            return Err(failure);
+        }
+        // `admitted` is at most ceiling - used_bytes, so both ledger sums fit.
+        state.used_bytes += admitted;
+        *state.charges.entry(key.clone()).or_default() += admitted;
+        Ok(ResidentMemoryReservationV1 {
+            authority: Arc::clone(self),
+            key,
+            reserved_bytes: admitted,
+        })
+    }
+
     /// Reserves one process-shared component without fabricating a project,
     /// worktree, or code-generation owner. These reservations use the same
     /// process ceiling and RAII release authority as project generations.
@@ -1596,12 +1652,20 @@ impl ProcessResidentMemoryV1 {
     /// [`Self::reserve`] holds them.
     pub fn headroom_below(&self, ceiling: u64) -> ResidentMemoryHeadroomV1 {
         self.pressure.measure_admission_bytes();
+        self.headroom_from_state(&self.lock_state(), ceiling)
+    }
+
+    fn headroom_from_state(
+        &self,
+        state: &ResidentMemoryStateV1,
+        ceiling: u64,
+    ) -> ResidentMemoryHeadroomV1 {
         let measured_ceiling = ceiling.min(self.pressure.limit_bytes());
         let observed_bytes = self
             .pressure
             .observed_bytes_for_limit(measured_ceiling)
             .unwrap_or(0);
-        let used_bytes = self.lock_state().used_bytes;
+        let used_bytes = state.used_bytes;
         let available_bytes = if self.pressure.state().is_over_budget() {
             0
         } else {

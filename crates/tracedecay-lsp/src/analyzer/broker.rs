@@ -8,7 +8,10 @@ use url::Url;
 
 use super::activity::{adapter_workspace_root_from_canonical_root, canonicalize_project_root};
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
-use super::client::{LspDocument, LspRefreshTimeouts, file_uri};
+use super::client::{
+    DiagnosticCoverage, DiagnosticDocumentCoverage, DiagnosticRootCoverage, LspDocument,
+    LspRefreshTimeouts, file_uri,
+};
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
 pub use super::launch::command_available;
 use super::launch::{AnalyzerLaunch, AnalyzerLaunchError, AnalyzerLaunchResolver};
@@ -183,6 +186,9 @@ pub struct DiagnosticsSnapshot {
     pub summary: DiagnosticsSummary,
     pub engines: Vec<EngineStatus>,
     pub diagnostics: Vec<CodeDiagnostic>,
+    /// Per-language coverage of the latest admitted scope. Retained findings
+    /// outside a published document entry have no current publication evidence.
+    pub coverage: BTreeMap<String, DiagnosticCoverage>,
     pub backfill: BTreeMap<String, BackfillProgress>,
     pub settings: CodeDiagnosticsSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,7 +197,7 @@ pub struct DiagnosticsSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshCommitOutcome {
-    Applied(DiagnosticsSnapshot),
+    Applied(Box<DiagnosticsSnapshot>),
     Superseded,
 }
 
@@ -208,6 +214,7 @@ pub struct DiagnosticBroker {
     adapters: Vec<LspAdapterDefinition>,
     settings: CodeDiagnosticsSettings,
     diagnostics: Vec<CodeDiagnostic>,
+    coverage: BTreeMap<String, DiagnosticCoverage>,
     clients: BTreeMap<LspSessionKey, Arc<SharedAnalyzerClient>>,
     /// Launches already resolved, keyed by configured command and the
     /// workspace root the probe ran from. Only successes are retained: a
@@ -242,6 +249,7 @@ impl DiagnosticBroker {
             adapters,
             settings,
             diagnostics: Vec::new(),
+            coverage: BTreeMap::new(),
             clients: BTreeMap::new(),
             launches: BTreeMap::new(),
             launch_resolver: AnalyzerLaunchResolver::new(),
@@ -287,6 +295,7 @@ impl DiagnosticBroker {
             summary: self.summary(),
             engines: self.engine_statuses(),
             diagnostics: self.diagnostics.clone(),
+            coverage: self.coverage.clone(),
             backfill: self.backfill.clone(),
             settings: self.settings.clone(),
             settings_unavailable: self.settings_unavailable.clone(),
@@ -473,6 +482,9 @@ impl DiagnosticBroker {
         language: &str,
         documents: Vec<LspDocument>,
     ) -> Result<Option<PreparedRefresh>> {
+        // A new attempt supersedes the previous scope's publication evidence,
+        // including when preparation fails before any analyzer can run.
+        self.coverage.remove(language);
         if !self.settings.language_enabled(language) {
             self.engine_overrides
                 .insert(language.to_string(), EngineState::Disabled);
@@ -709,15 +721,76 @@ impl DiagnosticBroker {
             return Ok(RefreshCommitOutcome::Superseded);
         }
         match completed.result {
-            Ok(mut diagnostics) => {
-                self.diagnostics
-                    .retain(|diagnostic| diagnostic.language != language);
-                self.diagnostics.append(&mut diagnostics);
-                self.engine_errors.remove(&language);
-                self.engine_overrides.insert(language, EngineState::Ready);
-                Ok(RefreshCommitOutcome::Applied(self.snapshot()))
+            Ok(mut refresh) => {
+                self.diagnostics.retain(|diagnostic| {
+                    diagnostic.language != language
+                        || !matches!(
+                            refresh.coverage.documents.get(&diagnostic.file),
+                            Some(DiagnosticDocumentCoverage::Published { .. })
+                        )
+                });
+                self.diagnostics.append(&mut refresh.diagnostics);
+                // Replace the scope instead of accumulating a historical document
+                // map. Unrequested retained findings must not inherit fresh coverage.
+                self.coverage
+                    .insert(language.clone(), refresh.coverage.clone());
+                if completed.root_failures.is_empty() {
+                    self.engine_errors.remove(&language);
+                    self.engine_overrides.insert(language, EngineState::Ready);
+                    Ok(RefreshCommitOutcome::Applied(Box::new(self.snapshot())))
+                } else {
+                    for failure in completed.root_failures.values() {
+                        if let Some(workspace_root) = &failure.unstartable_launch_root {
+                            self.evict_launch(&completed.command, workspace_root);
+                        }
+                    }
+                    let failed_documents = refresh
+                        .coverage
+                        .documents
+                        .values()
+                        .filter(|coverage| {
+                            matches!(coverage, DiagnosticDocumentCoverage::RootFailed)
+                        })
+                        .count();
+                    let all_roots_failed = !refresh.coverage.roots.is_empty()
+                        && refresh
+                            .coverage
+                            .roots
+                            .values()
+                            .all(|coverage| *coverage == DiagnosticRootCoverage::Failed);
+                    let state = if all_roots_failed
+                        && failed_documents == refresh.coverage.documents.len()
+                    {
+                        completed
+                            .root_failures
+                            .values()
+                            .next()
+                            .map_or(EngineState::Available, |failure| failure.state)
+                    } else {
+                        EngineState::Available
+                    };
+                    let message = format!(
+                        "{} of {} analyzer workspace root(s) failed: {}",
+                        completed.root_failures.len(),
+                        refresh.coverage.roots.len(),
+                        completed
+                            .root_failures
+                            .iter()
+                            .map(|(root, failure)| format!(
+                                "{}: {}",
+                                root.display(),
+                                failure.message
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
+                    self.engine_errors.insert(language.clone(), message.clone());
+                    self.engine_overrides.insert(language, state);
+                    Err(TraceDecayError::Config { message })
+                }
             }
             Err(failure) => {
+                self.coverage.remove(&language);
                 if let Some(workspace_root) = &failure.unstartable_launch_root {
                     self.evict_launch(&completed.command, workspace_root);
                 }
@@ -741,6 +814,7 @@ impl DiagnosticBroker {
         // read at mount time is no longer what it is serving.
         self.settings_unavailable = None;
         self.clients.clear();
+        self.coverage.clear();
         self.clear_launches();
         self.launch_refusals.clear();
         self.engine_overrides.clear();
@@ -841,6 +915,7 @@ impl DiagnosticBroker {
         self.diagnostics
             .retain(|diagnostic| diagnostic.language != language);
         self.backfill.remove(language);
+        self.coverage.remove(language);
     }
 
     fn remove_language_clients(&mut self, language: &str) {

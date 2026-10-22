@@ -19,7 +19,7 @@ async fn ready_reading(
         .await
         .unwrap_or_else(|error| panic!("{phase} readiness read failed: {error:?}"));
     let CodeIndexReadinessWaitReadV1::Reached { reading } = reading else {
-        panic!("exact worktree did not become ready: {reading:?}");
+        panic!("exact worktree did not become ready during {phase}: {reading:?}");
     };
     *reading
 }

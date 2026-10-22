@@ -389,18 +389,17 @@ impl DrainFixture {
     }
 }
 
-/// Compare drain queries at the same WAL phase. A threshold-triggered
+/// Compare read probes at the same WAL phase. A threshold-triggered
 /// checkpoint copies earlier messages' dirty pages, so including it in only
-/// one probe measures periodic maintenance rather than this message's reads.
+/// one probe measures periodic maintenance rather than the queried work.
 /// Ordinary capture/drain writes on a separate session advance the log to its
 /// next generation; checkpoint policy and the probed session stay unchanged.
-pub async fn probe_drain_after_wal_restart(
+pub async fn advance_to_wal_restart(
     facade: &HostAdmissionFacade<'_>,
     fixture: &DrainFixture,
-    probed: &mut SessionCursor,
     padding: &mut SessionCursor,
     timestamp: i64,
-) -> u64 {
+) {
     let (project, scope) = (fixture.project.as_path(), fixture.scope());
     let wal = session_store_path(fixture).with_extension("db-wal");
     let sequence = wal_checkpoint_sequence(&wal);
@@ -421,6 +420,17 @@ pub async fn probe_drain_after_wal_restart(
         restarted,
         "ordinary ingest must restart the WAL before the probe"
     );
+}
+
+pub async fn probe_drain_after_wal_restart(
+    facade: &HostAdmissionFacade<'_>,
+    fixture: &DrainFixture,
+    probed: &mut SessionCursor,
+    padding: &mut SessionCursor,
+    timestamp: i64,
+) -> u64 {
+    advance_to_wal_restart(facade, fixture, padding, timestamp).await;
+    let (project, scope) = (fixture.project.as_path(), fixture.scope());
     let database = fixture
         .runtime
         .registered_database(HostAdmissionScope::Project)
@@ -738,4 +748,17 @@ pub async fn retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
     .await;
     assert!(report.succeeded(), "retention must succeed");
     process_read_bytes() - before
+}
+
+/// Measures retention after aligning the WAL and settling the seeded backlog.
+/// Warm-up ticks may checkpoint; neither measured tick may include that copy.
+pub async fn probe_retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
+    let checkpointed = writer_telemetry(database).wal.checkpointed_frames;
+    let read = retention_tick_read_bytes(database).await;
+    assert_eq!(
+        writer_telemetry(database).wal.checkpointed_frames,
+        checkpointed,
+        "the retention query comparison must not include a periodic checkpoint"
+    );
+    read
 }

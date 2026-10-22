@@ -13,14 +13,14 @@ doctest = false
 [dependencies]
 # The multi-root execute tool derives its input schema from the contracts DTO.
 schemars.workspace = true
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
 tracedecay-api = { path = "../tracedecay-api" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
-tracing = "0.1"
+tracing.workspace = true
 
 [dev-dependencies]
 # The advertised application schemas must round-trip through the shared

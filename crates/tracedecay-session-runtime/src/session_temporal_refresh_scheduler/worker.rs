@@ -39,6 +39,9 @@ use tracedecay_session_temporal_store::{
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
+/// A history refresh's outcome and the release its next pass waits on.
+type HistoryPassReport = (SessionHistoricalIngestOutcome, Option<HistoryRelease>);
+
 fn history_allows_summary_convergence(outcome: Option<SessionHistoricalIngestOutcome>) -> bool {
     !outcome
         .as_ref()
@@ -266,18 +269,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 .take()
                 .filter(|_| history_requested);
             let history_outcome = if history_requested {
-                let history_pass: Pin<
-                    Box<
-                        dyn Future<
-                                Output = (SessionHistoricalIngestOutcome, Option<HistoryRelease>),
-                            > + Send
-                            + '_,
-                    >,
-                > = Box::pin(session_history_refresh(
-                    &history,
-                    &history_admission,
-                    granted,
-                ));
+                let history_pass: Pin<Box<dyn Future<Output = HistoryPassReport> + Send + '_>> =
+                    Box::pin(session_history_refresh(
+                        &history,
+                        &history_admission,
+                        granted,
+                        &state,
+                    ));
                 let (outcome, release) = tracing::Instrument::instrument(
                     history_pass,
                     tracing::trace_span!("daemon.scheduler.session_temporal.history"),
@@ -735,7 +733,8 @@ async fn session_history_refresh(
     history: &Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
     admission: &tokio::sync::Semaphore,
     granted: Option<tokio::sync::SemaphorePermit<'_>>,
-) -> (SessionHistoricalIngestOutcome, Option<HistoryRelease>) {
+    state: &SessionTemporalRefreshWakeState,
+) -> HistoryPassReport {
     let history = history
         .read()
         .unwrap_or_else(PoisonError::into_inner)
@@ -752,10 +751,9 @@ async fn session_history_refresh(
                 );
             };
             let release = history.capacity_release();
-            (
-                history.run_pass().await,
-                Some(HistoryRelease::Capacity(release)),
-            )
+            let pass = history.run_pass().await;
+            state.record_history_pass(&pass);
+            (pass.outcome, Some(HistoryRelease::Capacity(release)))
         }
         None => (
             SessionHistoricalIngestOutcome::Blocked {
