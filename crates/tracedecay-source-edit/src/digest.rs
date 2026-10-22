@@ -15,10 +15,7 @@ use tracedecay_domain::errors::Result;
 use super::file_authority::{SourceEditFileAuthority, read_source_edit_candidate};
 use super::plan::PlannedSourceEditFile;
 use super::verify::{application_contract_error, config_error, domain_error, io_error};
-use super::{
-    MAX_DURABLE_RECORD_BYTES, SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1,
-    SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1,
-};
+use super::{MAX_DURABLE_RECORD_BYTES, SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1};
 
 /// Canonical spelling of every source-edit candidate: `/`-joined normal
 /// components, on every host.
@@ -84,12 +81,6 @@ pub(super) fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<
     canonical_sha256(&(SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1, states)).map_err(domain_error)
 }
 
-pub(super) fn source_edit_recovery_digest(
-    files: &[PlannedSourceEditFile],
-) -> Result<ManifestDigest> {
-    canonical_sha256(&(SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1, files)).map_err(domain_error)
-}
-
 #[tracing::instrument(name = "usecases.edit.planned_state_digest", level = "trace", skip_all)]
 pub(super) fn planned_source_edit_state_digest(
     files: &[String],
@@ -109,17 +100,16 @@ pub(super) fn planned_source_edit_state_digest(
                 "source edit candidate appears more than once in its exact preview plan",
             ));
         }
-        let content = if intended {
-            planned.intended.as_deref()
+        let digest = if intended {
+            Some(hash_source_edit_content(planned.intended.as_bytes())?)
         } else {
-            planned.expected.as_deref()
+            planned
+                .expected_digest
+                .as_ref()
+                .map(|digest| ManifestDigest::from_sha256_bytes(digest).map_err(domain_error))
+                .transpose()?
         };
-        states.push((
-            relative,
-            content
-                .map(|content| hash_source_edit_content(content.as_bytes()))
-                .transpose()?,
-        ));
+        states.push((relative, digest));
     }
     canonical_sha256(&(SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1, states)).map_err(domain_error)
 }

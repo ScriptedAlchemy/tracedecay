@@ -6,7 +6,7 @@ use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, CancellationStage, Deadline, EffectTermination,
     IdempotencyKey, RequestContext, SourceEditAuthorizationAdmissionV1,
     SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditKind, SourceEditRequest,
-    SourceEditRollbackRequestV1, source_edit_operation, source_edit_rollback_operation,
+    source_edit_operation,
 };
 use tracedecay_domain::UtcMicros;
 
@@ -16,8 +16,7 @@ use super::test_support::{
 };
 use crate::{
     SourceEditApplicationResult, SourceEditEffectControlV1, execute_source_edit,
-    execute_source_edit_rollback, execute_source_edit_with_control,
-    preview_source_edit_expected_state,
+    execute_source_edit_with_control, preview_source_edit_expected_state,
 };
 
 #[tokio::test]
@@ -217,7 +216,7 @@ async fn live_cancellation_before_effect_keeps_source_unchanged_and_is_durable()
 }
 
 #[tokio::test]
-async fn move_symbol_rollback_restores_exact_preimages_without_semantic_inverse_drift() {
+async fn move_symbol_publishes_and_replays_without_retaining_source_bodies() {
     let project = tempdir().unwrap();
     fs::create_dir_all(project.path().join("src")).unwrap();
     let original_source = b"pub struct Dependency;\n\npub fn moved(value: Dependency) -> Dependency {\n    value\n}\n\npub fn remains() {}\n";
@@ -293,56 +292,28 @@ async fn move_symbol_rollback_restores_exact_preimages_without_semantic_inverse_
         original_destination
     );
 
-    let rollback_request = SourceEditRollbackRequestV1 {
-        context: move_request.context.clone(),
-        authority: move_request.authority.clone(),
-        effect_id: moved_effect.effect_id.clone(),
-        original_idempotency_key: move_request.idempotency_key.clone(),
-        idempotency_key: IdempotencyKey::new("source-edit.move-exact.rollback").unwrap(),
-        original_input_digest: moved_effect.receipt.input_digest.clone(),
-        expected_state: moved_effect.receipt.committed_state.clone().unwrap(),
-        proof: move_request.proof.clone(),
-        observed_at: move_request.observed_at,
-    };
-    let rollback_authorization = FixtureSourceEditAuthorization(
-        SourceEditAuthorizationAdmissionV1::new(
-            rollback_request.authority.clone(),
-            rollback_request.proof.clone(),
-            rollback_request.context.scope(),
-        )
-        .unwrap(),
-    );
-    let rollback_operation = source_edit_rollback_operation().unwrap();
-    let rolled_back = execute_source_edit_rollback(
+    let replay = execute_source_edit(
         &graph,
-        &rollback_operation,
-        rollback_request.clone(),
-        &rollback_authorization,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        rolled_back.effect.as_ref().unwrap().receipt.outcome,
-        EffectTermination::Completed
-    );
-    assert_eq!(
-        fs::read(project.path().join("src/lib.rs")).unwrap(),
-        original_source
-    );
-    assert_eq!(
-        fs::read(project.path().join("src/relocated.rs")).unwrap(),
-        original_destination
-    );
-    let replay = execute_source_edit_rollback(
-        &graph,
-        &rollback_operation,
-        rollback_request,
-        &rollback_authorization,
+        &code_graph,
+        &move_operation,
+        move_request,
+        &authorization,
     )
     .await
     .unwrap();
     assert!(replay.replayed);
+    assert_eq!(replay.effect.as_ref().unwrap(), &moved_effect);
+    let durability = crate::journal::SourceEditDurability::for_graph(&graph);
+    assert!(!durability.journal_path().exists());
+    assert!(!durability.root.join("rollback-records").exists());
+    let receipt = fs::read_to_string(
+        durability
+            .receipt_path(&moved_effect.idempotency_key)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!receipt.contains("Dependency"));
+    assert!(!receipt.contains("pub fn"));
 }
 
 /// Admits like the fixture authorization, but parks the first admission until

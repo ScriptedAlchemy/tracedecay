@@ -11,8 +11,7 @@ use tracedecay_contracts::source_edit::{
 ///
 /// Receipts intentionally keep no caller-supplied edit text, preview diff,
 /// moved/replaced span, import text, diagnostic text, or impact detail. The
-/// active transaction journal separately retains bounded exact preimages until
-/// commit or rollback so restart recovery can restore the accepted workspace.
+/// active transaction journal also retains only paths, digests, and effect metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEditDurableOutcomeV1 {
@@ -95,7 +94,7 @@ impl SourceEditDurableOutcomeV1 {
                 "message".to_owned(),
                 Value::String(
                     if self.failed {
-                        "source edit failed before the effect"
+                        "source edit failed"
                     } else if self.cancelled {
                         "source edit was cancelled"
                     } else if self.timed_out {
@@ -162,9 +161,7 @@ impl SourceEditOutcome {
             }
             Self::EffectUnknown { message } => message,
             Self::Reconciled { message, .. } => message,
-            Self::DurableMetadata(result) if result.failed => {
-                "source edit failed before the effect"
-            }
+            Self::DurableMetadata(result) if result.failed => "source edit failed",
             Self::DurableMetadata(result) if result.cancelled => "source edit was cancelled",
             Self::DurableMetadata(result) if result.timed_out => "source edit timed out",
             Self::DurableMetadata(result) if result.effect_unknown => {
