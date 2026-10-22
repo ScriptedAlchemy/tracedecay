@@ -582,29 +582,6 @@ fn owned_bytes(
     snapshot
 }
 
-fn assert_snapshot_eq(
-    host: &str,
-    phase: &str,
-    observed: &BTreeMap<PathBuf, Vec<u8>>,
-    expected: &BTreeMap<PathBuf, Vec<u8>>,
-) {
-    assert_eq!(
-        observed.keys().collect::<Vec<_>>(),
-        expected.keys().collect::<Vec<_>>()
-    );
-    for (path, expected) in expected {
-        let observed = &observed[path];
-        assert_eq!(
-            observed,
-            expected,
-            "{host} {phase} changed {} (observed {}, expected {})",
-            path.display(),
-            hex::encode(Sha256::digest(observed)),
-            hex::encode(Sha256::digest(expected))
-        );
-    }
-}
-
 fn packet_request(packet: &str, identity: &str) -> Vec<u8> {
     let packet: serde_json::Value = serde_json::from_str(packet).unwrap();
     let request = packet["events"]
