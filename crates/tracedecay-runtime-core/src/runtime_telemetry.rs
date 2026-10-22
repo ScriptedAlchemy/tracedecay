@@ -856,15 +856,6 @@ pub fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {
     }
 }
 
-/// Size of a store file, treating a missing file as zero bytes.
-pub fn file_size(path: &Path) -> Result<u64> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// Appends a suffix (`-wal`, `-shm`, `.dirty`) to a database path.
 pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s: std::ffi::OsString = path.as_os_str().to_owned();

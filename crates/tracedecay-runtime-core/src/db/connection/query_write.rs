@@ -347,22 +347,6 @@ impl Database {
             .await
     }
 
-    /// [`Self::transact`] for bulk replacement, under the lease that renews on
-    /// progress (see [`Self::begin_bulk_write_transaction`]).
-    pub async fn transact_bulk<R, E, F>(
-        &self,
-        operation: &str,
-        body: F,
-    ) -> Result<std::result::Result<R, E>>
-    where
-        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
-        E: Send + 'static,
-    {
-        self.transact_with_policy(operation, JobPolicy::AuthorizedLongLease, body)
-            .await
-    }
-
     async fn transact_with_policy<R, E, F>(
         &self,
         operation: &str,
