@@ -28,6 +28,8 @@ def run(root: Path, profile: str = "stable") -> subprocess.CompletedProcess[str]
             str(root / "binaries"),
             "--mcpbs",
             str(root / "mcpbs"),
+            "--inventories",
+            str(root / "inventories"),
         ],
         capture_output=True,
         text=True,
@@ -67,7 +69,7 @@ def main() -> int:
             ]
         }
         (root / "targets.json").write_text(json.dumps(manifest), encoding="utf-8")
-        for child in ("binaries", "mcpbs"):
+        for child in ("binaries", "mcpbs", "inventories"):
             (root / child).mkdir()
         expected = {
             "binaries": (
@@ -78,11 +80,22 @@ def main() -> int:
                 "tracedecay-v1.2.3-linux.mcpb",
                 "tracedecay-v1.2.3-windows.mcpb",
             ),
+            "inventories": (
+                "tracedecay-v1.2.3-linux.spdx.json",
+                "tracedecay-v1.2.3-windows.spdx.json",
+            ),
         }
         for child, names in expected.items():
             for name in names:
                 (root / child / name).write_bytes(b"artifact")
         expect(root, 0, "release artifact coverage matches target manifest")
+        (root / "inventories" / expected["inventories"][0]).unlink()
+        expect(
+            root,
+            1,
+            "component inventory coverage mismatch: missing tracedecay-v1.2.3-linux.spdx.json",
+        )
+        (root / "inventories" / expected["inventories"][0]).write_bytes(b"inventory")
         (root / "mcpbs" / expected["mcpbs"][0]).unlink()
         expect(root, 1, "MCPB coverage mismatch: missing tracedecay-v1.2.3-linux.mcpb")
         (root / "mcpbs" / expected["mcpbs"][0]).write_bytes(b"artifact")
@@ -92,6 +105,8 @@ def main() -> int:
             item.unlink()
         for item in (root / "mcpbs").iterdir():
             item.unlink()
+        for item in (root / "inventories").iterdir():
+            item.unlink()
         for target in manifest["include"]:
             (root / "binaries" / (
                 f"tracedecay-beta-v1.2.3-{target['name']}.{target['archive']}"
@@ -99,6 +114,9 @@ def main() -> int:
             (root / "mcpbs" / (
                 f"tracedecay-beta-v1.2.3-{target['name']}.mcpb"
             )).write_bytes(b"artifact")
+            (root / "inventories" / (
+                f"tracedecay-beta-v1.2.3-{target['name']}.spdx.json"
+            )).write_bytes(b"inventory")
         expect(root, 0, "release artifact coverage matches target manifest", profile="beta")
         (root / "binaries" / "tracedecay-beta-v1.2.3-linux.tar.gz").unlink()
         expect(
@@ -118,7 +136,7 @@ def main() -> int:
         )
         # An MCPB that leaked into the binaries directory (a `tracedecay-beta-*`
         # artifact glob did this) is foreign there.
-        for child in ("binaries", "mcpbs"):
+        for child in ("binaries", "mcpbs", "inventories"):
             for item in (root / child).iterdir():
                 item.unlink()
         for target in manifest["include"]:
@@ -128,6 +146,9 @@ def main() -> int:
             (root / "mcpbs" / (
                 f"tracedecay-beta-v1.2.3-{target['name']}.mcpb"
             )).write_bytes(b"artifact")
+            (root / "inventories" / (
+                f"tracedecay-beta-v1.2.3-{target['name']}.spdx.json"
+            )).write_bytes(b"inventory")
         (root / "binaries" / "tracedecay-beta-v1.2.3-linux.mcpb").write_bytes(b"artifact")
         expect(
             root,
