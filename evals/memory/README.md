@@ -30,8 +30,8 @@ python3 evals/memory/run_real_model.py --scenario memory-no-pollution \
 The real-model runner creates a unique temporary user home for each run and
 installs the normal user-level Hermes integration there. It never selects a
 named Hermes profile or uses `HERMES_HOME` as TraceDecay storage.
-Each scenario also owns an isolated `tracedecay daemon run` (private socket,
-started via `scripts/lib/portable_process.py`) that must be ready before
+Each scenario also starts an isolated `tracedecay daemon run` with a private
+socket that must be ready before
 `init`. Setup, daemon, agent, and cancellation failures are written to the
 report as error entries. Cleanup is attempted on every exit path. If owned
 work cannot be stopped or deletion fails, retained paths and cleanup errors

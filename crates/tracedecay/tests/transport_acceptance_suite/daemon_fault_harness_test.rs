@@ -1,9 +1,13 @@
 use crate::common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::mpsc;
+#[cfg(unix)]
+use std::time::Duration;
 
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 use rusqlite::Connection;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
@@ -390,6 +394,47 @@ else:
         !socket_path.exists(),
         "reaping the owner must unlink the socket it bound"
     );
+}
+
+/// A stopped leader may leave an authority handle in a child that is still
+/// closing. Store fixtures must cross the same ownership boundary as restart.
+#[cfg(unix)]
+#[test]
+fn stopped_daemon_waits_for_authority_release_before_fixture_store_access() {
+    let home = tempdir_or_panic();
+    let profile = home.path().join(".tracedecay");
+    std::fs::create_dir_all(&profile).expect("isolated profile");
+    let lock = std::fs::File::create(
+        profile.join(tracedecay_runtime_core::storage::DAEMON_AUTHORITY_LOCK_FILE),
+    )
+    .expect("authority lock file");
+    lock.lock().expect("hold the stopped daemon's authority");
+    let (started, entering) = mpsc::channel();
+    let (finished, completion) = mpsc::channel();
+    let waiting_home = home.path().to_path_buf();
+    let waiter = std::thread::spawn(move || {
+        started.send(()).expect("ownership wait observer");
+        common::wait_for_stopped_daemon(&waiting_home);
+        finished.send(()).expect("ownership completion observer");
+    });
+    entering.recv().expect("ownership wait must start");
+    let while_held = completion.recv_timeout(Duration::from_millis(100));
+    lock.unlock()
+        .expect("release the last inherited authority handle");
+    let after_release = if while_held.is_err() {
+        completion.recv_timeout(Duration::from_secs(5))
+    } else {
+        Ok(())
+    };
+    waiter.join().expect("ownership wait must finish");
+    assert!(
+        matches!(while_held, Err(mpsc::RecvTimeoutError::Timeout)),
+        "a fixture must not access the store while authority is still held"
+    );
+    after_release.expect("releasing authority must unblock fixture access");
+    lock.try_lock()
+        .expect("fixture may acquire the released store authority");
+    lock.unlock().expect("release fixture authority");
 }
 
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]

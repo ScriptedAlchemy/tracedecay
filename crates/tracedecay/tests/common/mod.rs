@@ -1216,6 +1216,29 @@ fn daemon_authority_lock_held(profile_root: &Path) -> bool {
     }
 }
 
+/// Waits for a stopped daemon's inherited endpoint and authority handles to
+/// close before a fixture starts a replacement or opens the store itself.
+/// Reaping the leader does not reap descendants that still hold these handles.
+pub fn wait_for_stopped_daemon(home: &Path) {
+    let profile_root = canonical_existing_path(home).join(".tracedecay");
+    poll_until(
+        Instant::now() + PREDECESSOR_DAEMON_VACATE_TIMEOUT,
+        Duration::from_millis(25),
+        || {
+            let live = daemon_is_connectable(home);
+            #[cfg(unix)]
+            let live = live || daemon_authority_lock_held(&profile_root);
+            (!live).then_some(())
+        },
+        || {
+            format!(
+                "a stopped test daemon still owns an endpoint or authority lock in {}",
+                profile_root.display()
+            )
+        },
+    );
+}
+
 fn spawn_tracedecay_daemon_process(
     home: &Path,
     binary: &Path,
@@ -1252,34 +1275,7 @@ fn spawn_tracedecay_daemon_process(
     // endpoint go quiet; this wait only covers the kernel's leftover. The
     // authority lock has the same tail, and `stop_managed_daemon` unlinks the
     // socket, so only the lock shows such a predecessor's child is still alive.
-    poll_until(
-        Instant::now() + PREDECESSOR_DAEMON_VACATE_TIMEOUT,
-        Duration::from_millis(25),
-        || {
-            #[cfg(unix)]
-            let live = std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
-                || daemon_authority_lock_held(&profile_root);
-            #[cfg(not(unix))]
-            let live = portable_daemon_connectable();
-            (!live).then_some(())
-        },
-        || {
-            #[cfg(unix)]
-            {
-                format!(
-                    "refusing to replace a live test daemon at {} or its authority lock",
-                    socket_path.display()
-                )
-            }
-            #[cfg(not(unix))]
-            {
-                format!(
-                    "refusing to replace a live test daemon recorded at {}",
-                    authority_path.display()
-                )
-            }
-        },
-    );
+    wait_for_stopped_daemon(home);
 
     let mut command = Command::new(binary);
     apply_tracedecay_home_env(&mut command, home);
@@ -1334,7 +1330,7 @@ fn spawn_tracedecay_daemon_process(
             .read_line(&mut startup)
             .expect("daemon stderr should be readable");
         if mirror_stderr {
-            let _ = std::io::stderr().write_all(startup[line_start..].as_bytes());
+            let _ = std::io::stderr().write_all(&startup.as_bytes()[line_start..]);
         }
         if read == 0 {
             let status = daemon
