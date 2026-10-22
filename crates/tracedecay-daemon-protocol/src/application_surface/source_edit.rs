@@ -3,13 +3,14 @@
 //! The messages are the public argument diagnostics every transport reports.
 
 use serde_json::Value;
+use tracedecay_contracts::source_edit::SourceEditReconcileSurfaceRequestV1;
 use tracedecay_contracts::{
     EffectId, IdempotencyKey, RenameSymbolBindingV1, RenameSymbolSurfaceRequestV1,
     SourceEditInvocationV1, SourceEditKind, SourceEditReconciliationDispositionV1,
     SourceEditReconciliationInvocationV1, SourceEditRequest,
 };
 use tracedecay_domain::ManifestDigest;
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, UseCaseId};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::ApplicationSurfaceRequest;
 
@@ -160,80 +161,33 @@ fn edit_request(
 }
 
 fn reconcile(args: &Value) -> Result<SourceEditReconciliationInvocationV1, String> {
-    if args.get("disposition").and_then(Value::as_str) != Some("inspect")
-        && args.get("confirm").and_then(Value::as_bool) != Some(true)
+    let request: SourceEditReconcileSurfaceRequestV1 = serde_json::from_value(args.clone())
+        .map_err(|error| format!("invalid source edit reconciliation request: {error}"))?;
+    if !matches!(
+        request.disposition,
+        SourceEditReconciliationDispositionV1::Inspect {}
+    ) && !request.confirm
     {
         return Err("source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human".to_owned());
     }
-    let original_operation =
-        UseCaseId::new(required_str(args, "original_operation")?).map_err(identity_error)?;
-    let effect_id = EffectId::new(required_str(args, "effect_id")?).map_err(identity_error)?;
-    let idempotency_key =
-        IdempotencyKey::new(required_str(args, "idempotency_key")?).map_err(identity_error)?;
+    let effect_id = EffectId::new(request.effect_id).map_err(identity_error)?;
+    let idempotency_key = IdempotencyKey::new(request.idempotency_key).map_err(identity_error)?;
     let attempt_idempotency_key =
-        IdempotencyKey::new(required_str(args, "attempt_idempotency_key")?)
-            .map_err(identity_error)?;
+        IdempotencyKey::new(request.attempt_idempotency_key).map_err(identity_error)?;
     if attempt_idempotency_key == idempotency_key {
         return Err(
             "reconciliation attempt idempotency key must differ from the original edit key"
                 .to_owned(),
         );
     }
-    let input_digest =
-        ManifestDigest::new(required_str(args, "input_digest")?).map_err(identity_error)?;
-    let disposition = match required_str(args, "disposition")? {
-        "inspect" => {
-            if args.get("committed_state").is_some() || args.get("observed_state").is_some() {
-                return Err("inspection does not accept a caller-supplied state digest".to_owned());
-            }
-            SourceEditReconciliationDispositionV1::Inspect {}
-        }
-        "confirm_committed" => {
-            if args.get("observed_state").is_some() {
-                return Err(
-                    "observed_state is only valid when disposition is acknowledge_partial"
-                        .to_owned(),
-                );
-            }
-            SourceEditReconciliationDispositionV1::ConfirmCommitted {
-                committed_state: ManifestDigest::new(required_str(args, "committed_state")?)
-                    .map_err(identity_error)?,
-            }
-        }
-        "confirm_unchanged" => {
-            if args.get("committed_state").is_some() || args.get("observed_state").is_some() {
-                return Err(
-                    "committed_state and observed_state do not apply to confirm_unchanged"
-                        .to_owned(),
-                );
-            }
-            SourceEditReconciliationDispositionV1::ConfirmUnchanged {}
-        }
-        "acknowledge_partial" => {
-            if args.get("committed_state").is_some() {
-                return Err(
-                    "committed_state is only valid when disposition is confirm_committed"
-                        .to_owned(),
-                );
-            }
-            SourceEditReconciliationDispositionV1::AcknowledgePartial {
-                observed_state: ManifestDigest::new(required_str(args, "observed_state")?)
-                    .map_err(identity_error)?,
-            }
-        }
-        value => {
-            return Err(format!(
-                "invalid source edit reconciliation disposition: {value}"
-            ));
-        }
-    };
+    let input_digest = ManifestDigest::new(request.input_digest).map_err(identity_error)?;
     Ok(SourceEditReconciliationInvocationV1 {
-        original_operation,
+        original_operation: request.original_operation,
         effect_id,
         idempotency_key,
         attempt_idempotency_key,
         input_digest,
-        disposition,
+        disposition: request.disposition,
     })
 }
 
@@ -423,6 +377,15 @@ mod tests {
             else {
                 panic!("reconciliation request");
             };
+            let mut unknown = value.clone();
+            unknown["unexpected"] = json!(true);
+            assert!(
+                parse_source_edit_arguments(
+                    ApplicationSurfaceOperation::SourceEditReconcile,
+                    &unknown,
+                )
+                .is_err()
+            );
             assert_eq!(parsed.disposition, disposition);
             assert_eq!(parsed.original_operation, request.original_operation);
             assert_eq!(parsed.effect_id.as_str(), request.effect_id);
