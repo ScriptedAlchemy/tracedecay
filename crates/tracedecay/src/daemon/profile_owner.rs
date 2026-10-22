@@ -23,8 +23,8 @@ use serde_json::{Map, Value};
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     AdminCliSurfaceRequestV1, AdminProjectResultV1, AdminProjectSurfaceRequestV1,
-    AutomationReconcileScope, HookRuntimeResultV1, ProfileAutomationReconcileReport,
-    UncachedProjectReconcileOutcome,
+    AutomationReconcileScope, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
+    ProfileAutomationReconcileReport, UncachedProjectReconcileOutcome,
 };
 use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, CancellationStage, CancellationState, Deadline,
@@ -197,6 +197,10 @@ async fn profile_hook_runtime(
         user_session_db.clone(),
     ))
     .await;
+    let transcript_session_id = match &request {
+        HookRuntimeSurfaceRequestV1::IngestTranscript(ingest) => ingest.session_id.clone(),
+        _ => None,
+    };
     let result = Box::pin(hook_runtime::compute_projectless_hook_runtime(
         request,
         profile_identity.profile_root(),
@@ -208,7 +212,13 @@ async fn profile_hook_runtime(
     ))
     .await?;
     if let HookRuntimeResultV1::IngestTranscript(ingest) = &result {
-        join_hook_ingest_refresh(ingest.user_scope, None, Some(&refresh_wake)).await?;
+        join_hook_ingest_refresh(
+            transcript_session_id.as_deref(),
+            ingest.user_scope,
+            None,
+            Some(&refresh_wake),
+        )
+        .await?;
     } else {
         refresh_wake.wake();
     }

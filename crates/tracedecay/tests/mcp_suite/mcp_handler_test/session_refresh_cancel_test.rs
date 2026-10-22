@@ -48,6 +48,7 @@ impl SessionTemporalRefreshWakePort for AcceptedIdleSessionRefreshWake {
 
     fn wake_and_wait_for_projection(
         &self,
+        _session_id: Option<tracedecay_domain::SessionId>,
         _timeout: Duration,
     ) -> tracedecay_contracts::SessionTemporalRefreshWakeFuture<'_> {
         Box::pin(async { true })

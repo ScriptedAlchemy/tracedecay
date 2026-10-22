@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use tracedecay_domain::SessionId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
@@ -54,8 +55,19 @@ pub async fn join_required_live_transcript_refresh(
     let Some(scope) = required_refresh_scope(tool_name, arguments) else {
         return Ok(LiveTranscriptRefreshJoin::NotRequired);
     };
-    join_scope(scope, project_wake, user_wake, || TraceDecayError::Config {
-        message: REFRESH_UNAVAILABLE.to_owned(),
+    let session_id = arguments
+        .get("session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "transcript projection requires session_id".to_owned(),
+        })?;
+    let session_id = SessionId::new(session_id).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid transcript session identity: {error}"),
+    })?;
+    join_scope(scope, Some(session_id), project_wake, user_wake, || {
+        TraceDecayError::Config {
+            message: REFRESH_UNAVAILABLE.to_owned(),
+        }
     })
     .await
 }
@@ -64,6 +76,7 @@ pub async fn join_required_live_transcript_refresh(
 /// wrote: the user store's for a `user_scope` ingest, the project's
 /// otherwise.
 pub async fn join_hook_ingest_refresh(
+    session_id: Option<&str>,
     user_scope: bool,
     project_wake: Option<&dyn SessionRefreshWorkerPort>,
     user_wake: Option<&dyn SessionRefreshWorkerPort>,
@@ -73,7 +86,13 @@ pub async fn join_hook_ingest_refresh(
     } else {
         LiveTranscriptRefreshScope::Project
     };
-    join_scope(scope, project_wake, user_wake, || {
+    let session_id = session_id
+        .map(SessionId::new)
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid transcript session identity: {error}"),
+        })?;
+    join_scope(scope, session_id, project_wake, user_wake, || {
         TraceDecayError::hook_runtime_with_status(
             "temporal_refresh_unavailable",
             true,
@@ -87,6 +106,7 @@ pub async fn join_hook_ingest_refresh(
 
 async fn join_scope(
     scope: LiveTranscriptRefreshScope,
+    session_id: Option<SessionId>,
     project_wake: Option<&dyn SessionRefreshWorkerPort>,
     user_wake: Option<&dyn SessionRefreshWorkerPort>,
     unavailable: impl Fn() -> TraceDecayError,
@@ -97,7 +117,7 @@ async fn join_scope(
     }
     .ok_or_else(&unavailable)?;
     if wake
-        .wake_and_wait_for_projection(LIVE_TRANSCRIPT_REFRESH_DEADLINE)
+        .wake_and_wait_for_projection(session_id, LIVE_TRANSCRIPT_REFRESH_DEADLINE)
         .await
     {
         Ok(LiveTranscriptRefreshJoin::PublicationJoined)
@@ -108,11 +128,13 @@ async fn join_scope(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use serde_json::json;
     use tracedecay_contracts::{SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort};
+    use tracedecay_domain::SessionId;
     use tracedecay_sessions::serving::{
         SessionConvergenceStatus, SessionProjectionServingState, SessionProjectionServingStatus,
         SessionProjectionServingStatusPort,
@@ -125,12 +147,14 @@ mod tests {
     /// Refresh owner whose publication is the state after `wake_and_wait`.
     struct PublishingRefresh {
         published: AtomicBool,
+        session_id: Mutex<Option<SessionId>>,
     }
 
     impl PublishingRefresh {
         fn idle() -> Self {
             Self {
                 published: AtomicBool::new(false),
+                session_id: Mutex::new(None),
             }
         }
 
@@ -151,8 +175,10 @@ mod tests {
 
         fn wake_and_wait_for_projection(
             &self,
+            session_id: Option<SessionId>,
             _timeout: Duration,
         ) -> SessionTemporalRefreshWakeFuture<'_> {
+            *self.session_id.lock().unwrap() = session_id;
             let published = self.wake();
             Box::pin(async move { published })
         }
@@ -174,6 +200,7 @@ mod tests {
     #[tokio::test]
     async fn completed_hook_ingest_fails_when_its_refresh_owner_is_unavailable() {
         let error = super::join_hook_ingest_refresh(
+            Some("test-session"),
             false,
             Some(&UnavailableSessionTemporalRefreshWake),
             None,
@@ -197,9 +224,10 @@ mod tests {
     #[tokio::test]
     async fn user_scope_never_falls_back_to_the_project_refresh_owner() {
         let project = PublishingRefresh::idle();
-        let error = super::join_hook_ingest_refresh(true, Some(&project), None)
-            .await
-            .expect_err("user ingest must require the user refresh owner");
+        let error =
+            super::join_hook_ingest_refresh(Some("test-session"), true, Some(&project), None)
+                .await
+                .expect_err("user ingest must require the user refresh owner");
 
         assert_eq!(
             error.hook_runtime_context().map(|context| context.0),
@@ -214,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn project_ingest_does_not_publish_through_the_user_refresh_owner() {
         let user = PublishingRefresh::idle();
-        let error = super::join_hook_ingest_refresh(false, None, Some(&user))
+        let error = super::join_hook_ingest_refresh(Some("test-session"), false, None, Some(&user))
             .await
             .expect_err("project ingest must require the project refresh owner");
 
@@ -232,7 +260,7 @@ mod tests {
     async fn hook_ingest_joins_the_project_refresh_owner() {
         let project = PublishingRefresh::idle();
         let user = PublishingRefresh::idle();
-        super::join_hook_ingest_refresh(false, Some(&project), Some(&user))
+        super::join_hook_ingest_refresh(Some("test-session"), false, Some(&project), Some(&user))
             .await
             .expect("project hook ingest must join its refresh owner");
 
@@ -252,7 +280,7 @@ mod tests {
         let user = PublishingRefresh::idle();
         let joined = super::join_required_live_transcript_refresh(
             "tracedecay_lcm_preflight",
-            &json!({"transcript_projection": true, "storage_scope": "user"}),
+            &json!({"transcript_projection": true, "storage_scope": "user", "session_id": "test-session"}),
             Some(&project),
             Some(&user),
         )
@@ -261,6 +289,30 @@ mod tests {
 
         assert_eq!(joined, LiveTranscriptRefreshJoin::PublicationJoined);
         assert!(user.published());
+        assert_eq!(
+            user.session_id.lock().unwrap().as_ref().unwrap().as_str(),
+            "test-session"
+        );
+        assert!(!project.published());
+    }
+    #[tokio::test]
+    async fn invalid_session_identity_never_wakes_a_refresh_owner() {
+        let project = PublishingRefresh::idle();
+        assert!(
+            super::join_hook_ingest_refresh(Some(""), false, Some(&project), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            super::join_required_live_transcript_refresh(
+                "tracedecay_lcm_preflight",
+                &json!({"transcript_projection": true}),
+                Some(&project),
+                None,
+            )
+            .await
+            .is_err()
+        );
         assert!(!project.published());
     }
 }

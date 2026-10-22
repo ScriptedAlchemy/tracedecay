@@ -445,7 +445,7 @@ mod tests {
                 "action": "ingest_transcript",
                 "provider": "cursor",
                 "user_scope": true,
-                "session_id": null,
+                "session_id": "cursor-budget",
                 "event_json": event,
                 "messages": null,
                 "max_new_bytes": 4_096,

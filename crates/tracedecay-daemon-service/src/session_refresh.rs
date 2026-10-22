@@ -297,6 +297,7 @@ impl SessionTemporalRefreshWakePort for FixedSessionTemporalRefreshWake {
 
     fn wake_and_wait_for_projection(
         &self,
+        _session_id: Option<tracedecay_domain::SessionId>,
         _timeout: Duration,
     ) -> SessionTemporalRefreshWakeFuture<'_> {
         let accepted = self.0;

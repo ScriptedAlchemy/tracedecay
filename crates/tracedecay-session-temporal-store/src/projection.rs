@@ -402,6 +402,58 @@ async fn skip_trailing_history_effects(
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
+    /// Verify one live writer's publication without borrowing other sessions'
+    /// pass outcomes. Pending source effects or a running refresh remain pending;
+    /// terminal generation failures remain failures even beside a successful pass.
+    pub async fn session_projection_publication_result(
+        &self,
+        session_id: &SessionId,
+    ) -> SessionStoreResult<Option<bool>> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        let discovered = discover_session(&snapshot, session_id.as_str()).await?;
+        if matches!(discovered, DiscoveredSession::Running) {
+            return Ok(None);
+        }
+        let mut rows = snapshot
+            .query(
+                "SELECT generation.state, EXISTS (
+                SELECT 1 FROM session_relation_receipts AS receipt
+                WHERE receipt.session_id = generation.session_id
+                  AND receipt.generation = generation.generation
+             )
+             FROM session_temporal_generations AS generation
+             WHERE generation.session_id = ?1
+             ORDER BY generation.generation DESC LIMIT 1",
+                params![session_id.as_str()],
+            )
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        let generation = rows
+            .next()
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        if let Some(row) = generation {
+            let state: String = row
+                .get(0)
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            if matches!(state.as_str(), "failed" | "cancelled") {
+                return Ok(Some(false));
+            }
+            let relations: i64 = row
+                .get(1)
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            return Ok((matches!(discovered, DiscoveredSession::Current)
+                && state == "active"
+                && relations != 0)
+                .then_some(true));
+        }
+        // A no-op ingest can have no effect or generation to publish.
+        Ok(matches!(discovered, DiscoveredSession::Current).then_some(true))
+    }
+
     /// Discovers sessions that need temporal projection: sessions whose
     /// output-producing effects committed past `cursor` left them behind their
     /// projection frontier, plus active generations that lack an applied

@@ -221,7 +221,7 @@ async fn a_wake_served_by_the_running_pass_joins_that_pass() {
     history.entered.notified().await;
 
     let handle = state.handle();
-    let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+    let join = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
     tokio::pin!(join);
     // The first poll registers the join and delivers the wake.
     assert!(
@@ -287,7 +287,7 @@ async fn a_published_wake_does_not_wait_for_the_next_history_window() {
     history.entered.notified().await;
 
     let handle = state.handle();
-    let join = handle.wake_and_wait_for_projection(Duration::from_secs(1));
+    let join = handle.wake_and_wait_for_projection(None, Duration::from_secs(1));
     tokio::pin!(join);
     assert!(
         std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
@@ -319,7 +319,7 @@ async fn a_live_wake_publishes_before_waiting_for_summary_admission() {
         .expect("running refresh");
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
     let handle = state.handle();
-    let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+    let join = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
     tokio::pin!(join);
     assert!(
         std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
@@ -337,7 +337,16 @@ async fn a_live_wake_publishes_before_waiting_for_summary_admission() {
 
     assert!(
         join.await,
-        "summary admission must not hold a live projection"
+        "summary admission must not hold a live projection: status={:?}, passes={}, receipt={:?}",
+        state.handle().status(),
+        state.pass_count.load(Ordering::Acquire),
+        store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                begun.operation_id().clone(),
+                begun.session_id().clone(),
+            ))
+            .await
+            .unwrap()
     );
     let receipt = store
         .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
@@ -399,7 +408,7 @@ async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
     assert!(
         state
             .handle()
-            .wake_and_wait_for_projection(Duration::from_secs(5))
+            .wake_and_wait_for_projection(None, Duration::from_secs(5))
             .await,
         "a new wake must publish while summary admission has no permits"
     );
@@ -477,7 +486,7 @@ async fn projection_joins_keep_their_result_when_later_work_settles_differently(
         history.entered.notified().await;
 
         let handle = state.handle();
-        let first = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+        let first = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
         tokio::pin!(first);
         assert!(
             std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx)))
@@ -492,7 +501,7 @@ async fn projection_joins_keep_their_result_when_later_work_settles_differently(
         // one already delivered to the earlier request.
         projector.reject.store(!reject_first, Ordering::Release);
         begin_empty_refreshes(&store, ["second-projection"]).await;
-        let second = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+        let second = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
         tokio::pin!(second);
         assert!(
             std::future::poll_fn(|cx| std::task::Poll::Ready(second.as_mut().poll(cx)))
@@ -500,7 +509,14 @@ async fn projection_joins_keep_their_result_when_later_work_settles_differently(
                 .is_pending()
         );
         history.release.notify_one();
-        assert_eq!(second.await, reject_first);
+        assert_eq!(
+            second.await,
+            reject_first,
+            "status={:?}, passes={}, running={:?}",
+            state.handle().status(),
+            state.pass_count.load(Ordering::Acquire),
+            store.running_session_refreshes().await.unwrap()
+        );
         assert_eq!(first.await, !reject_first);
 
         state.cancel();

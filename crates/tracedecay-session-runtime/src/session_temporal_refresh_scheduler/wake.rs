@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracedecay_domain::SessionId;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::execution::ExecutionControl;
@@ -17,6 +18,11 @@ use tracedecay_sessions::serving::{
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
     SessionProjectionWorkerRetryClass,
 };
+
+pub(super) struct ProjectionJoin {
+    pub(super) session_id: Option<SessionId>,
+    pub(super) completion: tokio::sync::oneshot::Sender<bool>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionTemporalRefreshRetryClass {
@@ -138,7 +144,7 @@ macro_rules! define_wake_state {
             /// is still unpublished. The next history window waits.
             pub(super) history_after_projection: AtomicBool,
             pub(super) pass_count: std::sync::atomic::AtomicUsize,
-            projection_joins: std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<bool>>>,
+            projection_joins: std::sync::Mutex<Vec<ProjectionJoin>>,
             pub(super) wake: tokio::sync::Notify,
             pub(super) idle: tokio::sync::Notify,
             pub(super) cancelled: AtomicBool,
@@ -342,7 +348,10 @@ impl SessionTemporalRefreshWakeState {
         self.wake.notify_one();
     }
 
-    fn request_projection_join(&self) -> Option<tokio::sync::oneshot::Receiver<bool>> {
+    fn request_projection_join(
+        &self,
+        session_id: Option<SessionId>,
+    ) -> Option<tokio::sync::oneshot::Receiver<bool>> {
         let mut joins = self
             .projection_joins
             .lock()
@@ -352,16 +361,19 @@ impl SessionTemporalRefreshWakeState {
         }
         // Expired callers retain no obligation. The worker owns only live
         // joins, and each result is delivered once even if a later pass fails.
-        joins.retain(|join| !join.is_closed());
+        joins.retain(|join| !join.completion.is_closed());
         let (completion, receiver) = tokio::sync::oneshot::channel();
-        joins.push(completion);
+        joins.push(ProjectionJoin {
+            session_id,
+            completion,
+        });
         self.wake();
         Some(receiver)
     }
 
     /// Take the joins covered by the projection about to start. A join that
     /// arrives during that projection remains queued for the next pass.
-    pub(super) fn take_projection_joins(&self) -> Vec<tokio::sync::oneshot::Sender<bool>> {
+    pub(super) fn take_projection_joins(&self) -> Vec<ProjectionJoin> {
         std::mem::take(
             &mut *self
                 .projection_joins
@@ -698,7 +710,7 @@ impl SessionTemporalRefreshWakeState {
             self.clear_worker_instrumentation();
             self.mark_stopped();
             for join in self.take_projection_joins() {
-                let _ = join.send(false);
+                let _ = join.completion.send(false);
             }
             self.cancellation.notify_waiters();
             self.wake.notify_waiters();
@@ -983,11 +995,15 @@ impl SessionTemporalRefreshWake {
     /// empty/unavailable semantics. Historical discovery and derived summaries
     /// may continue after that publication; their idle/admission state is not
     /// evidence that a temporal generation has committed.
-    pub async fn wake_and_wait_for_projection(&self, timeout: std::time::Duration) -> bool {
+    pub async fn wake_and_wait_for_projection(
+        &self,
+        session_id: Option<SessionId>,
+        timeout: std::time::Duration,
+    ) -> bool {
         let Some(state) = self.target() else {
             return false;
         };
-        let Some(completion) = state.request_projection_join() else {
+        let Some(completion) = state.request_projection_join(session_id) else {
             return false;
         };
         matches!(
@@ -1042,10 +1058,11 @@ impl tracedecay_contracts::SessionTemporalRefreshWakePort for SessionTemporalRef
 
     fn wake_and_wait_for_projection(
         &self,
+        session_id: Option<SessionId>,
         timeout: std::time::Duration,
     ) -> tracedecay_contracts::SessionTemporalRefreshWakeFuture<'_> {
         Box::pin(SessionTemporalRefreshWake::wake_and_wait_for_projection(
-            self, timeout,
+            self, session_id, timeout,
         ))
     }
 }

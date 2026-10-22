@@ -41,6 +41,7 @@ macro_rules! define_pass_report {
             $visibility terminal_errors: usize,
             $visibility deadline_errors: usize,
             $visibility saturated: bool,
+            $visibility discovery_advanced: bool,
             $visibility backlog: Option<usize>,
             $visibility retry_class: Option<SessionTemporalRefreshRetryClass>,
             $visibility last_error: Option<String>,

@@ -169,6 +169,11 @@ impl McpServer {
             application_cancellation: Some(invocation.cancellation),
             ..self.tool_call_registry_options(session_sync_service.as_deref())
         };
+        let transcript_session_id = invocation
+            .arguments
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let computed = compute_graph_tool_for_owner(
             cg.as_ref(),
             invocation.operation,
@@ -190,6 +195,7 @@ impl McpServer {
             // The ingest wrote through this server's session stores; answer
             // only once their refresh owner has published it.
             join_hook_ingest_refresh(
+                transcript_session_id.as_deref(),
                 ingest.user_scope,
                 self.project_session_refresh_wake.as_deref(),
                 self.user_session_refresh_wake.as_deref(),
