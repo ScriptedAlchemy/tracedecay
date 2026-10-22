@@ -151,15 +151,14 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             .unwrap()
     );
     copy_rendered_bundle_to_native_cache(home.path(), new_bin);
+    let source = plugin_deploy_dir(home.path());
+    let cache = claude_current_cached_plugin_root(home.path());
     let rendered = rendered_plugin_files(new_bin, &ServeArgs::default()).unwrap();
     let relatives = rendered
         .iter()
-        .map(|(relative, _)| (*relative).to_string())
+        .map(|(relative, _)| (*relative).to_owned())
         .collect::<Vec<_>>();
-    for root in [
-        plugin_deploy_dir(home.path()),
-        claude_current_cached_plugin_root(home.path()),
-    ] {
+    for root in [&source, &cache] {
         for (relative, expected) in &rendered {
             let path = root.join(relative);
             let actual = std::fs::read(&path).unwrap();
@@ -176,7 +175,7 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             );
         }
         let unexpected = unexpected_bundle_entrypoints(
-            &root,
+            root,
             &relatives,
             &[".claude-plugin", "agents", "commands", "hooks", "skills"],
         )
