@@ -706,7 +706,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[cfg(unix)]
-    use super::{MAX_TEST_RUN_OUTPUT_BYTES, TestRunStream};
+    use super::{
+        MAX_TEST_RUN_OUTPUT_BYTES, ProcessOutcome, TestRunStream, configure_command,
+        wait_for_process,
+    };
     use super::{
         TestProfile, TestRunControl, TestRunFailure, TestRunOutput, cargo_test_build_args,
         run_bounded_test_command, run_cargo_tests,
@@ -1198,12 +1201,29 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp");
         let marker = temp.path().join("child.pid");
         let mut command = fixture_command(&marker, "parent_idle");
-        let result = run_bounded_test_command(
-            &mut command,
-            Duration::from_millis(50),
-            &TestRunControl::default(),
+        configure_command(&mut command);
+        let mut child = command.spawn().expect("fixture parent");
+        let process_group = child.id();
+        let control = TestRunControl::default();
+        control.register(process_group);
+
+        // This assertion needs a live descendant. Process startup is not part
+        // of the 50 ms execution deadline exercised by the production waiter.
+        let startup_deadline = Instant::now() + Duration::from_secs(1);
+        while !marker.exists() && Instant::now() < startup_deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let ready = marker.exists();
+        let outcome = wait_for_process(
+            &mut child,
+            process_group,
+            Instant::now() + Duration::from_millis(50),
+            &control,
         );
-        assert!(matches!(result, Err(TestRunFailure::Timeout { .. })));
+        control.unregister(process_group);
+        // Reap the owned group before a startup assertion can unwind.
+        assert!(ready, "fixture descendant did not finish starting");
+        assert!(matches!(outcome, ProcessOutcome::TimedOut));
         assert_reaped(&marker);
     }
 
