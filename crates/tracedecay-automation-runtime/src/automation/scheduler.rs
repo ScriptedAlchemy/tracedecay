@@ -1560,6 +1560,8 @@ fn windows_process_state(pid: u32) -> ProcessState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::super::backend::{AgentTaskFailureClass, AgentTaskRetryAttempt};
     use super::super::backend_identity::BACKEND_IDENTITY_SUPPRESSED;
     use super::super::config::AutomationTaskSet;
@@ -1568,6 +1570,9 @@ mod tests {
     use tracedecay_automation::evidence_budget::{
         SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
     };
+    use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
+    #[cfg(unix)]
+    use tracedecay_runtime_core::storage::with_durable_namespace_sync_fault_for_test;
 
     #[tokio::test]
     async fn scheduler_control_round_trips_atomically_and_keeps_corruption_typed() {
@@ -1611,8 +1616,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn scheduler_control_does_not_publish_after_an_ancestor_sync_fails() {
-        use tracedecay_runtime_core::storage::with_durable_namespace_sync_fault_for_test;
-
         // The first barrier covers the existing prefix; the following two
         // publish the new profile and dashboard entries, respectively.
         for barrier in [2, 3] {
@@ -1636,8 +1639,6 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_control_readers_observe_complete_states_during_replacement() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         let dir = tempdir().unwrap();
         save_scheduler_control(dir.path(), &AutomationSchedulerControl { paused: true })
             .await
@@ -1683,8 +1684,6 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_control_staging_failures_preserve_the_committed_pause() {
-        use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
-
         let dir = tempdir().unwrap();
         save_scheduler_control(dir.path(), &AutomationSchedulerControl { paused: true })
             .await
