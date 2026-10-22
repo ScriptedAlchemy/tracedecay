@@ -732,7 +732,6 @@ fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErro
 
 const fn lcm_unavailable_reason(reason: LcmAuthorityUnavailableReason) -> &'static str {
     match reason {
-        LcmAuthorityUnavailableReason::StoreAuthorityUnavailable => "store_authority_unavailable",
         LcmAuthorityUnavailableReason::HostProtocolUnavailable => "host_protocol_unavailable",
     }
 }

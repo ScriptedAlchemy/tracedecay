@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::LazyLock;
 
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::QueryExecutor;
 use tracedecay_runtime_core::db::{DatabaseEngineReadConnection, DatabaseEngineReadSnapshot};
 use tracedecay_runtime_core::ports::registered_schema::RegisteredSchemaInstallationV1;
 use tracedecay_rusqlite_runtime::repository::{
@@ -18,7 +18,7 @@ use super::definitions::{
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
 };
-use super::{normalize_trigger_sql, starts_with_ignore_ascii_case};
+use super::starts_with_ignore_ascii_case;
 
 const OPERATION: &str = "validate global database authority schema";
 
@@ -291,45 +291,20 @@ fn validate_indexes_for_table(
     Ok(())
 }
 
-async fn validate_trigger(
-    conn: &impl QueryExecutor,
-    trigger: &super::invariants::Trigger,
-) -> tracedecay_domain::errors::Result<()> {
-    let mut rows = conn
-        .query(
-            "SELECT tbl_name, sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
-            params![trigger.name],
-        )
+async fn validate_triggers(conn: &impl QueryExecutor) -> tracedecay_domain::errors::Result<()> {
+    let invalid = super::invariants::first_invalid_trigger(conn)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let actual = match rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        Some(row) => Some((
-            row.get::<String>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            row.get::<String>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        )),
-        None => None,
-    };
-    if actual.as_ref().is_some_and(|(table, sql)| {
-        table.eq_ignore_ascii_case(trigger.table)
-            && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
-    }) {
-        Ok(())
-    } else {
-        Err(global_db_operation_message(
+    if let Some(trigger) = invalid {
+        return Err(global_db_operation_message(
             OPERATION,
             format!(
                 "required trigger '{}' on table '{}' is missing or incompatible",
                 trigger.name, trigger.table
             ),
-        ))
+        ));
     }
+    Ok(())
 }
 
 async fn validate_observation_autoincrement(
@@ -559,7 +534,7 @@ pub async fn validate_remote_deletion_schema_contract(
 /// schema modules; this validator intentionally neither claims nor validates those domains.
 ///
 /// Each concrete connection implements this instead of one generic async function: nesting
-/// `validate_tables_and_indexes` under the trigger walk overflows the next solver's `Send`
+/// table and trigger validation overflows the next solver's `Send`
 /// proof (rust-lang/rust#159228). The returned future only awaits already-erased children.
 pub(crate) trait AuthoritySchemaContract: Sync {
     fn validate_authority_schema<'a>(
@@ -579,18 +554,10 @@ macro_rules! impl_authority_schema_contract {
                         Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
                     > = Box::pin(validate_tables_and_indexes(self, TABLES));
                     tables.await?;
-                    for invariant in super::invariants::INVARIANTS {
-                        for trigger in invariant.triggers {
-                            let checked: Pin<
-                                Box<
-                                    dyn Future<Output = tracedecay_domain::errors::Result<()>>
-                                        + Send
-                                        + '_,
-                                >,
-                            > = Box::pin(validate_trigger(self, trigger));
-                            checked.await?;
-                        }
-                    }
+                    let triggers: Pin<
+                        Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+                    > = Box::pin(validate_triggers(self));
+                    triggers.await?;
                     let autoincrement: Pin<
                         Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
                     > = Box::pin(validate_observation_autoincrement(self));
@@ -615,9 +582,10 @@ pub(crate) fn validate_authority_schema_contract<'a>(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{normalize_default, validate_tables_and_indexes};
+    use super::{OPERATION, normalize_default, validate_tables_and_indexes, validate_triggers};
     use crate::schema_contract::definitions::TABLES;
     use crate::tests::harness::open_registered_test_database_fixture;
+    use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_runtime_core::db::{
         TestDatabaseRuntimeScope,
         engine::{IntoParams, QueryExecutor, Rows},
@@ -685,5 +653,69 @@ mod tests {
             3,
             "column, foreign-key, and complete index metadata each need one query"
         );
+    }
+
+    #[asupersync::test]
+    async fn trigger_contracts_use_one_query_and_preserve_first_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (database, _owner) = open_registered_test_database_fixture(
+            &directory.path().join("global.db"),
+            TestDatabaseRuntimeScope::Profile,
+        )
+        .await
+        .unwrap();
+        let connection = database.read_connection();
+        let counted = CountingQueryExecutor::new(&connection);
+
+        validate_triggers(&counted).await.unwrap();
+        assert_eq!(
+            counted.queries(),
+            1,
+            "all trigger definitions share one read"
+        );
+
+        let writer = database.writer_connection().unwrap();
+        writer
+            .execute_batch(
+                "DROP TRIGGER observations_immutable_delete;
+                 DROP TRIGGER observations_immutable_update;
+                 CREATE TRIGGER observations_immutable_update
+                     BEFORE UPDATE ON observations BEGIN SELECT 1; END;",
+            )
+            .await
+            .unwrap();
+        let error = validate_triggers(&counted).await.unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                TraceDecayError::Database { operation, message }
+                    if operation == OPERATION
+                        && message == "required trigger 'observations_immutable_update' on table 'observations' is missing or incompatible"
+            ),
+            "the first invalid contract must win over inventory order: {error}"
+        );
+        assert_eq!(counted.queries(), 2);
+
+        writer
+            .execute_batch(
+                "DROP TRIGGER observations_immutable_update;
+                 CREATE TRIGGER OBSERVATIONS_IMMUTABLE_UPDATE
+                     BEFORE UPDATE ON observations BEGIN
+                         SELECT RAISE(ABORT, 'observations are immutable');
+                     END;",
+            )
+            .await
+            .unwrap();
+        let error = validate_triggers(&counted).await.unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                TraceDecayError::Database { operation, message }
+                    if operation == OPERATION
+                        && message == "required trigger 'observations_immutable_delete' on table 'observations' is missing or incompatible"
+            ),
+            "case-folded names must match before the next missing contract is reported: {error}"
+        );
+        assert_eq!(counted.queries(), 3);
     }
 }

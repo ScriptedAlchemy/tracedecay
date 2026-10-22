@@ -503,7 +503,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
             root_uri: root.uri().to_owned(),
             request_id: request_id.clone(),
         };
-        let cancellation = self.inner.operations().get(&key).cloned();
+        let cancellation = self.inner.operations().remove(&key);
         cancellation.is_some_and(|cancellation| {
             cancellation.cancel();
             true
@@ -907,37 +907,36 @@ mod tests {
     }
 
     #[test]
-    fn stale_registration_cannot_remove_its_replacement() {
-        let authority = unspawnable_authority();
-        let key = SemanticOperationKey {
-            root_uri: "file:///project".to_owned(),
-            request_id: LspRequestId::Number(6),
-        };
-        let original = Arc::new(CancellationToken::new());
-        authority
-            .inner
-            .operations()
-            .insert(key.clone(), Arc::clone(&original));
-        let guard = SemanticOperationRegistration {
-            inner: Arc::clone(&authority.inner),
-            key: key.clone(),
-            cancellation: original,
-        };
-        let replacement = Arc::new(CancellationToken::new());
-        authority
-            .inner
-            .operations()
-            .insert(key.clone(), Arc::clone(&replacement));
+    fn cancelled_semantic_request_id_is_reusable_before_its_future_settles() {
+        native_runtime::block_on(async {
+            let authority = unspawnable_authority();
+            let root = AdmittedRoot::new("file:///project");
+            let request_id = LspRequestId::Number(6);
+            let held_client = authority.inner.shared.client().await.unwrap();
+            let mut original =
+                authority.start(root.clone(), request_id.clone(), document_symbol_request());
+            assert!(futures_util::poll!(original.as_mut()).is_pending());
+            assert!(authority.cancel_request(&root, &request_id));
 
-        drop(guard);
-
-        let operations = authority.inner.operations();
-        assert!(
-            operations
-                .get(&key)
-                .is_some_and(|current| Arc::ptr_eq(current, &replacement)),
-            "the stale guard leaves the current registration intact"
-        );
+            let mut replacement =
+                authority.start(root.clone(), request_id.clone(), document_symbol_request());
+            assert!(
+                futures_util::poll!(replacement.as_mut()).is_pending(),
+                "the cancelled request ID admits replacement work before the old future settles"
+            );
+            drop(original);
+            assert!(futures_util::poll!(replacement.as_mut()).is_pending());
+            assert!(authority.cancel_request(&root, &request_id));
+            assert!(!authority.cancel_request(&root, &request_id));
+            assert!(matches!(
+                replacement.await,
+                LspSemanticOperationOutcome::Partial { coverage, .. }
+                    if coverage == "semantic-cancelled"
+            ));
+            assert!(authority.inner.operations().is_empty());
+            drop(held_client);
+        })
+        .expect("native runtime");
     }
 
     /// Another request registering or retiring its operation holds the map
