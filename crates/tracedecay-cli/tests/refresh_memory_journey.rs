@@ -11,7 +11,7 @@ mod common;
 
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -53,12 +53,19 @@ fn write_corpus(project: &Path, edit: usize) {
 }
 
 fn run_cli(home: &Path, project: &Path, args: &[&str]) -> Vec<u8> {
+    let started = Instant::now();
+    eprintln!("heavy_refresh cli_started args={args:?}");
     let output = tracedecay_command_with_home(home)
         .args(args)
         .current_dir(project)
         .stdin(Stdio::null())
         .output()
         .unwrap_or_else(|error| panic!("tracedecay {args:?}: {error}"));
+    eprintln!(
+        "heavy_refresh cli_finished args={args:?} elapsed={:?} status={}",
+        started.elapsed(),
+        output.status
+    );
     assert!(
         output.status.success(),
         "tracedecay {args:?} failed\nstdout:\n{}\nstderr:\n{}",
@@ -104,9 +111,14 @@ fn status(home: &Path, project: &Path) -> Value {
 /// Waits until the index serves a complete generation of `revision` and
 /// returns that generation's id.
 fn wait_for_current(home: &Path, project: &Path, revision: &str) -> String {
-    let deadline = Instant::now() + INDEX_TIMEOUT;
+    let started = Instant::now();
+    let deadline = started + INDEX_TIMEOUT;
     loop {
         let status = status(home, project);
+        eprintln!(
+            "heavy_refresh index_status revision={revision} elapsed={:?} status={status}",
+            started.elapsed()
+        );
         let worktree = &status["code_index_freshness"]["worktree"];
         if status["code_index_freshness"]["status"] == "current"
             && worktree["source_revision"] == revision
@@ -156,6 +168,8 @@ fn assert_within_limit(home: &Path, project: &Path, pid: u32) {
 
 #[test]
 fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
+    let started = Instant::now();
+    eprintln!("heavy_refresh started");
     let home = TempDir::new().expect("isolated home");
     let home = canonical_existing_path(home.path());
     let workspace = TempDir::new().expect("project root");
@@ -167,20 +181,50 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
     git_run(&project, &["commit", "--quiet", "-m", "heavy corpus"]);
     let cold_revision = git_capture(&project, &["rev-parse", "HEAD"]);
 
-    let log = home.join("daemon.log");
+    eprintln!(
+        "heavy_refresh corpus_written elapsed={:?}",
+        started.elapsed()
+    );
+    let log = PathBuf::from(
+        std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
+            .expect("diagnostic run requires Bazel undeclared outputs"),
+    )
+    .join("heavy-refresh-daemon.log");
+    eprintln!(
+        "heavy_refresh daemon_starting elapsed={:?}",
+        started.elapsed()
+    );
     let daemon = spawn_tracedecay_daemon_logged(&home, &log, |command| {
         command
             .env(
                 "TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES",
                 LIMIT_BYTES.to_string(),
             )
-            .env("RUST_LOG", "info");
+            .env("TRACEDECAY_SPAN_TIMINGS", "1")
+            .env(
+                "RUST_LOG",
+                concat!(
+                    "info,",
+                    "tracedecay_code_index_runtime::code_index_scheduler::registry::mount=trace,",
+                    "tracedecay_code_index_runtime::code_index_scheduler::reconcile=trace",
+                ),
+            );
     });
+    eprintln!("heavy_refresh daemon_ready elapsed={:?}", started.elapsed());
+    eprintln!("heavy_refresh init_started elapsed={:?}", started.elapsed());
     initialize_tracedecay_cli_project(&home, &project);
+    eprintln!(
+        "heavy_refresh init_finished elapsed={:?}",
+        started.elapsed()
+    );
     let mut generation = wait_for_current(&home, &project, &cold_revision);
     assert_within_limit(&home, &project, daemon.id());
 
     for edit in 1..=REFRESHES {
+        eprintln!(
+            "heavy_refresh edit_started edit={edit} elapsed={:?}",
+            started.elapsed()
+        );
         write_corpus(&project, edit);
         git_run(&project, &["commit", "--quiet", "-am", "edit every file"]);
         let revision = git_capture(&project, &["rev-parse", "HEAD"]);
@@ -192,6 +236,10 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
         );
         generation = refreshed;
         assert_within_limit(&home, &project, daemon.id());
+        eprintln!(
+            "heavy_refresh edit_finished edit={edit} elapsed={:?}",
+            started.elapsed()
+        );
     }
 
     let log = fs::read_to_string(&log).expect("daemon log");
@@ -206,4 +254,5 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
         "the daemon refused work it had room for:\n{log}"
     );
     drop(daemon);
+    eprintln!("heavy_refresh finished elapsed={:?}", started.elapsed());
 }
