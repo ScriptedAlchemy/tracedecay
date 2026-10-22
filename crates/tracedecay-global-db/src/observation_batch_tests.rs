@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1, FactOwnerV1,
     ObservationCollisionOutcomeV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
@@ -18,8 +18,10 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, FOREGROUND_BATCH_MAX_OPERATIONS, ObservationBatchPersistOutcome,
-    ObservationPersistOutcome, ObservationStore, ObservationStoreError, ObservationWrite,
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
+    FOREGROUND_BATCH_MAX_OPERATIONS, ObservationBatchPersistOutcome, ObservationPersistOutcome,
+    ObservationStore, ObservationStoreError, ObservationWrite, RetrievalAnchorDispositionRecordV1,
+    RetrievalAnchorDispositionStore,
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -838,6 +840,101 @@ async fn non_codex_alias_collision_stays_typed_over_a_corrupt_alias_owner() {
         ),
         "a non-codex write must not decode the alias owner, got {error:?}"
     );
+}
+
+#[asupersync::test]
+async fn codex_sibling_over_a_retention_released_owner_is_a_typed_alias_collision() {
+    const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+
+    let (_tmp, runtime, store) = open_profile_store().await;
+    let thread = THREAD_ROLLOUT.write();
+    assert!(matches!(
+        store.persist_observation(thread.clone()).await.unwrap(),
+        ObservationPersistOutcome::Committed(_)
+    ));
+
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let now = tracedecay_contracts::clock::now_micros();
+    let anchor = thread.retrieval_anchor();
+    let record = RetrievalAnchorDispositionRecordV1::new(
+        "observation-batch:retention-released-owner",
+        anchor.anchor_id().clone(),
+        FactOwnerV1::from(anchor.owner().clone()),
+        AnchorDispositionStateV1::Deleted,
+        None,
+        AnchorDispositionReasonClassV1::Retention,
+        UtcMicros(now.0 - 40 * DAY_MICROS),
+    )
+    .unwrap();
+    database
+        .runtime_database()
+        .append_disposition(record)
+        .await
+        .unwrap();
+    let report = database
+        .run_observation_retention(
+            None,
+            &crate::observation::retention::ObservationRetentionConfig::default(),
+            crate::observation::retention::RetentionMode::Apply,
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            report.anchors_released.acted,
+            report.observations_released.acted
+        ),
+        (1, 1)
+    );
+
+    let unrelated = sequential_writes(
+        &SessionId::new("session.observation-batch.unrelated").unwrap(),
+        1,
+    )
+    .into_iter()
+    .next()
+    .unwrap();
+    let revert = REVERT_ROLLOUT.write();
+    let batch = store
+        .persist_observations(vec![unrelated.clone(), revert.clone()])
+        .await;
+
+    let error = batch.unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ObservationStoreError::RetrievalAnchorAliasCollision {
+                existing_anchor_id,
+                ..
+            } if **existing_anchor_id == *thread.retrieval_anchor_id()
+        ),
+        "expected the released owner's alias collision, got {error:?}"
+    );
+    assert!(
+        store
+            .get_observation(unrelated.observation().observation_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_observation(revert.observation().observation_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        store.persist_observation(revert.clone()).await,
+        Err(ObservationStoreError::RetrievalAnchorAliasCollision { .. })
+    ));
+    assert!(matches!(
+        store.persist_observation(unrelated.clone()).await,
+        Ok(ObservationPersistOutcome::Committed(_))
+    ));
 }
 
 #[asupersync::test]
