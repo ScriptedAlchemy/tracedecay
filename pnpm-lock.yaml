@@ -298,7 +298,7 @@ importers:
         version: 2.3.1
       '@openai/mcp-extensions':
         specifier: ^0.2.0
-        version: 0.2.0(@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)
+        version: 0.2.1(@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)
       '@tracedecay/sdk':
         specifier: workspace:*
         version: link:../../sdks/typescript
@@ -886,8 +886,8 @@ packages:
   '@open-draft/until@3.0.1':
     resolution: {integrity: sha512-s7/9ELP4aP9YZtW7RJaa0Xf3RISaRH9+EFN18FtykJYRHGNrl8f9ymvoNXzjhrjmftFvkQudtuDU9RYhk0xs3A==}
 
-  '@openai/mcp-extensions@0.2.0':
-    resolution: {integrity: sha512-TQ5EtrWETR9vAwT14UHqV1WHYDIhOQCsNk02Q0n+8UeZWdo9xkDpFuTAS5iKxaUpcavdxL2+C8eKZdwt+JU/yQ==}
+  '@openai/mcp-extensions@0.2.1':
+    resolution: {integrity: sha512-z2onrOgTsC0kbe6xtSF+r4+jsEn8x7eKgdUI097nqFq5WfNWyVN4susJPy/Dz+ka4OgOB+zZzYYNonpP0qbLwA==}
     engines: {node: '>=22'}
     peerDependencies:
       '@modelcontextprotocol/ext-apps': ^1.7.5
@@ -3358,7 +3358,7 @@ snapshots:
 
   '@open-draft/until@3.0.1': {}
 
-  '@openai/mcp-extensions@0.2.0(@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)':
+  '@openai/mcp-extensions@0.2.1(@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       '@modelcontextprotocol/core': 2.3.1
