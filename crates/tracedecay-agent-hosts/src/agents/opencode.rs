@@ -1471,7 +1471,7 @@ mod tests {
         pause.resume();
         let error = remover.join().unwrap().unwrap_err();
 
-        assert!(error.contains("failed to conditionally remove"), "{error}");
+        assert!(error.contains("changed since it was read"), "{error}");
         assert!(!prompt.exists());
     }
 }

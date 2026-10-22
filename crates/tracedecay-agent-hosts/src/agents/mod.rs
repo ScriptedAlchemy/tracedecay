@@ -34,7 +34,7 @@ pub mod plugin_bundle;
 pub mod prompt_rules;
 mod text_file_transaction;
 pub(crate) use text_file_transaction::{
-    TextFileMutation, update_text_file_transactionally, update_two_config_files_transactionally,
+    TextFileMutation, update_text_file_transactionally, update_two_config_files_locked,
 };
 pub mod roo_code;
 pub mod serve_args;
@@ -78,25 +78,23 @@ pub use zed::ZedIntegration;
 pub use git_post_commit_hook::{install_git_post_commit_hook, report_git_post_commit_hook_status};
 pub use host_config_io::{
     HostFileMetadataIdentityV1, JsonConfigDialect, capture_host_file_metadata, copilot_cli_dir,
-    host_config_write_intent_path, kiro_data_dir, load_json_file, load_json_file_strict,
-    load_jsonc_file, load_jsonc_file_strict, load_toml_file, parse_jsonc,
-    restore_host_file_metadata, safe_remove_host_file, safe_write_bytes_file,
-    safe_write_bytes_file_with_metadata, safe_write_json_file, safe_write_text_file,
-    vscode_data_dir, vscode_insiders_data_dir, which_tracedecay, which_tracedecay_path,
-    with_host_config_write_intents,
+    kiro_data_dir, load_json_file, load_json_file_strict, load_jsonc_file, load_jsonc_file_strict,
+    load_toml_file, parse_jsonc, restore_host_file_metadata, safe_remove_host_file,
+    safe_write_bytes_file, safe_write_bytes_file_with_metadata, safe_write_json_file,
+    safe_write_text_file, vscode_data_dir, vscode_insiders_data_dir, which_tracedecay,
+    which_tracedecay_path,
 };
 pub(crate) use host_config_io::{
     JsonConfigMutation, collect_regular_files, emptied_text_mutation,
     ensure_project_local_safe_path, ensure_project_local_safe_paths, hook_command,
     host_home_override, lifecycle_created_container, lifecycle_created_file,
-    note_created_container, read_optional_config_bytes, record_host_config_observation_bytes,
-    root_relative_path, update_json_config_transactionally, update_toml_config_transactionally,
+    note_created_container, read_optional_config_bytes, root_relative_path,
+    update_json_config_transactionally, update_toml_config_transactionally,
     with_host_config_creations,
 };
 #[cfg(test)]
 use host_config_io::{
-    TestHostConfigWritePauseController, pause_next_host_config_write_after_validation,
-    pause_next_host_config_write_at_publication,
+    TestHostConfigWritePauseController, pause_next_host_config_write_at_publication,
 };
 #[cfg(test)]
 pub(crate) use host_config_io::{recorded_install_then_uninstall, recorded_lifecycle};
@@ -457,9 +455,8 @@ pub trait AgentIntegration {
     }
 
     /// Every mutable host registration/configuration path participating in an
-    /// aggregate component-set lifecycle. The transaction snapshots all
-    /// returned paths in memory before invoking the host registration
-    /// authority.
+    /// aggregate component-set lifecycle. The lifecycle observes these paths
+    /// before invoking the host registration authority.
     fn host_registration_paths(&self, home: &Path, profile: &ProfileRoot) -> Vec<PathBuf> {
         self.primary_config_path(home, profile)
             .into_iter()
@@ -468,7 +465,7 @@ pub trait AgentIntegration {
 
     /// Mutable registration paths for the exact selected components. Hosts
     /// with disjoint component ownership override this so a companion
-    /// transaction never snapshots or restores another component's state.
+    /// lifecycle observes only the selected component's state.
     fn host_component_registration_paths(
         &self,
         _components: &[host_bundle::HostComponentV1],
@@ -478,10 +475,10 @@ pub trait AgentIntegration {
         self.host_registration_paths(home, profile)
     }
 
-    /// Fallible exact registration inventory used by the transaction snapshot.
+    /// Fallible exact registration inventory used by the lifecycle.
     ///
     /// Hosts whose paths depend on validated profile data override this rather
-    /// than silently dropping files from rollback ownership.
+    /// than silently dropping files from the observed surface.
     fn host_component_registration_paths_checked(
         &self,
         components: &[host_bundle::HostComponentV1],
@@ -492,7 +489,7 @@ pub trait AgentIntegration {
     }
 
     /// Exact project-scoped paths the catalog registration projection may
-    /// create, replace, or remove. The aggregate transaction snapshots this
+    /// create, replace, or remove. The aggregate lifecycle observes this
     /// complete set before invoking the projection.
     fn project_host_component_registration_paths(
         &self,
@@ -554,7 +551,7 @@ pub trait AgentIntegration {
     /// Apply only this host's project-scoped registration projection.
     ///
     /// The component-set transaction calls this boundary after it has
-    /// snapshotted the exact registration paths. Implementations must mutate
+    /// observed the exact registration paths. Implementations must mutate
     /// only bounded project registration paths; they must not install global
     /// assets.
     fn activate_project_host_component_registration(

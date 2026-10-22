@@ -13,8 +13,7 @@
 //! different: `codex plugin add` does not record `[hooks.state]` hashes and
 //! `/hooks` is interactive-only, so activation records trust for TraceDecay's
 //! own managed hooks (`sync_codex_hook_trust`) and deactivation prunes those
-//! records again (`prune_codex_hook_trust_records`), both inside the
-//! component transaction's rollback boundary. Trust is recorded only for hooks
+//! records again (`prune_codex_hook_trust_records`). Trust is recorded only for hooks
 //! whose installed command is byte-for-byte a generated tracedecay command
 //! (`codex_hook_command_invokes_tracedecay`); anything else keeps the manual
 //! `/hooks` review. See `plugin_registry` for the plugin adoption and
@@ -23,11 +22,6 @@
 //! Codex's **MCP registry** remains the path for an MCP-only component set
 //! (`codex mcp add`/`remove`). A `Core`-bearing set must not also register a
 //! standalone server: the plugin bundle already carries `.mcp.json`.
-//!
-//! Note on rollback ownership: `CodexIntegration::host_registration_paths`
-//! already lists `~/.codex/config.toml`, so the component-set transaction
-//! observes that file before the registry command runs and can restore the
-//! pre-command document if the effect is rejected.
 
 use super::serve_args::ServeArgs;
 use std::collections::HashSet;
@@ -366,8 +360,7 @@ impl AgentIntegration for CodexIntegration {
         // assets: `host_component_registration_paths` declares every generated
         // export plus the ownership manifest for Core. Activation must refresh
         // current exports and retire previous-bundle stale ones, otherwise
-        // Core install through the receipt-backed lifecycle never writes them
-        // and never retires them (byte-for-byte rollback then fails).
+        // Core install through the receipt-backed lifecycle leaves stale exports.
         tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
             &crate::host_io(),
             &ctx.home,
@@ -383,7 +376,7 @@ impl AgentIntegration for CodexIntegration {
         )? {
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
             // `codex plugin add` resolves the catalog-deployed source through
-            // this entry; it is a registration path, so rollback restores it.
+            // this marketplace entry.
             install_codex_marketplace_entry(
                 &codex_personal_marketplace_path(&ctx.home),
                 "personal",
@@ -396,10 +389,7 @@ impl AgentIntegration for CodexIntegration {
         // Auto-trust the personal bundle's hooks whenever one is present:
         // `codex plugin add` never writes `[hooks.state]`, and an
         // already-active install may still carry missing or stale trust.
-        // Activation runs inside the component transaction's write-intent
-        // scope, so a rejected install/update rolls this write back with the
-        // rest of `config.toml`. Repo-local-only installs ship no hooks and
-        // have no personal trust surface, so this is a no-op for them.
+        // Repo-local-only installs ship no hooks and have no personal trust surface.
         if codex_plugin_manifest_path(&ctx.home).exists()
             || !codex_plugin_cached_install_dirs(&ctx.home).is_empty()
         {
@@ -424,8 +414,7 @@ impl AgentIntegration for CodexIntegration {
             plugin_registry::codex_plugin_remove_with(&codex_cli, &ctx.home, &marketplace_name)?;
         }
         // Managed agent exports are Core registration surface (not artifacts).
-        // Clear them here so uninstall verification can reach Missing and so
-        // a rolled-back deactivate restores the pre-op exports byte-for-byte.
+        // Clear them here so uninstall verification can reach Missing.
         tracedecay_automation_runtime::automation::agent_targets::remove_managed_agents(
             &crate::host_io(),
             &ctx.home.join(".codex/agents"),
@@ -438,9 +427,7 @@ impl AgentIntegration for CodexIntegration {
         // `codex plugin remove` deliberately never touches `[hooks.state]`,
         // so the managed trust records written at install/update time would
         // otherwise survive as registration residue and hold uninstall
-        // verification at Repairable instead of Missing. Prune them here,
-        // inside the transaction's rollback boundary, preserving foreign
-        // plugins' records.
+        // verification at Repairable instead of Missing. Preserve foreign plugins' records.
         prune_codex_hook_trust_records(&ctx.home)
     }
 
@@ -539,35 +526,6 @@ fn codex_cached_marketplace_name(home: &Path) -> String {
 fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
     codex_plugin_cached_root(home, &codex_cached_marketplace_name(home))
         .join(crate::PRODUCT_VERSION)
-}
-
-/// Attribute Codex CLI cache mutations to the active host-config write-intent
-/// scope so registration rollback can restore the pre-command surface.
-///
-/// `host_registration_paths` inventories every managed file under the versioned
-/// cache. `codex plugin add`/`remove` create or delete those files outside
-/// [`super::safe_write_text_file`], and without a recorded intent
-/// `restore_registration` treats the live cache as foreign drift (`StalePreview`)
-/// and aborts before restoring any other registration path, including the
-/// managed-agent ownership manifest that byte-for-byte rollback demands.
-fn record_codex_cached_plugin_registration_intents(home: &Path) -> Result<()> {
-    let cache_dir = codex_plugin_current_cached_install_dir(home);
-    for path in codex_plugin_managed_paths(&cache_dir) {
-        let contents = match std::fs::read(&path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "failed to read Codex plugin cache registration path {}: {error}",
-                        path.display()
-                    ),
-                });
-            }
-        };
-        super::record_host_config_observation_bytes(&path, contents.as_deref())?;
-    }
-    Ok(())
 }
 
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {

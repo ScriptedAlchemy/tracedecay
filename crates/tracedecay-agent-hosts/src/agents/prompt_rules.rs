@@ -375,34 +375,7 @@ mod tests {
 
     use super::{PROMPT_RULE_MARKER, reconcile_prompt_rules};
 
-    const ORIGINAL: &[u8] = b"operator-owned instructions\n";
     const BLOCK: &str = "## Prefer tracedecay MCP tools\n\nmanaged instructions";
-
-    #[test]
-    fn failed_write_intent_leaves_existing_prompt_rules_byte_identical() {
-        let root = tempfile::tempdir().expect("prompt-rules fixture");
-        let prompt = root.path().join("AGENTS.md");
-        fs::write(&prompt, ORIGINAL).expect("original prompt rules");
-        let blocked_intent_root = root.path().join("blocked-intent-root");
-        fs::write(&blocked_intent_root, b"not a directory").expect("blocked intent root");
-
-        let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
-            reconcile_prompt_rules(&prompt, PROMPT_RULE_MARKER, BLOCK)
-        })
-        .expect_err("an unpersisted write intent must refuse the prompt-rules write");
-
-        assert!(
-            error
-                .to_string()
-                .contains("could not create host config write intent directory"),
-            "unexpected error: {error}"
-        );
-        assert_eq!(
-            fs::read(&prompt).expect("prompt rules after refused write"),
-            ORIGINAL,
-            "intent failure must not expose unowned prompt-rule bytes"
-        );
-    }
 
     #[test]
     fn foreign_edit_after_refresh_read_is_refused_without_overwrite() {
@@ -412,7 +385,7 @@ mod tests {
             "operator-owned instructions\n\n{PROMPT_RULE_MARKER}\n\nstale managed instructions\n"
         );
         fs::write(&prompt, &original).expect("original prompt rules");
-        let pause = crate::agents::pause_next_host_config_write_after_validation(&prompt);
+        let pause = crate::agents::pause_next_host_config_write_at_publication(&prompt);
         let writer_prompt = prompt.clone();
         let writer = std::thread::spawn(move || {
             reconcile_prompt_rules(&writer_prompt, PROMPT_RULE_MARKER, BLOCK)

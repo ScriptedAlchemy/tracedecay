@@ -1,14 +1,11 @@
 //! Host configuration file IO shared by every agent integration: lenient and
-//! strict JSON/JSONC/TOML loaders, atomic-replace writers with
-//! durable write intents, host file metadata capture, and the binary and
+//! strict JSON/JSONC/TOML loaders, atomic-replace writers,
+//! host file metadata capture, and the binary and
 //! host-directory probes installers embed into generated config.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::text_file_transaction::{self, TextFileMutation, update_text_file_transactionally};
@@ -404,25 +401,13 @@ pub fn safe_write_bytes_file_with_metadata(
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum TestHostConfigWriteBoundary {
-    Validation,
-    Publication,
-    Published,
-}
-
-#[cfg(test)]
 struct TestHostConfigWritePause {
     state: std::sync::Mutex<(bool, bool)>,
     changed: std::sync::Condvar,
 }
 
 #[cfg(test)]
-type TestHostConfigWritePauseEntry = (
-    PathBuf,
-    TestHostConfigWriteBoundary,
-    std::sync::Weak<TestHostConfigWritePause>,
-);
+type TestHostConfigWritePauseEntry = (PathBuf, std::sync::Weak<TestHostConfigWritePause>);
 
 #[cfg(test)]
 static TEST_HOST_CONFIG_WRITE_PAUSES: std::sync::LazyLock<
@@ -470,30 +455,8 @@ impl Drop for TestHostConfigWritePauseController {
 }
 
 #[cfg(test)]
-pub(super) fn pause_next_host_config_write_after_validation(
-    path: &Path,
-) -> TestHostConfigWritePauseController {
-    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Validation)
-}
-
-#[cfg(test)]
 pub(super) fn pause_next_host_config_write_at_publication(
     path: &Path,
-) -> TestHostConfigWritePauseController {
-    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Publication)
-}
-
-#[cfg(test)]
-fn pause_next_host_config_write_after_publication(
-    path: &Path,
-) -> TestHostConfigWritePauseController {
-    pause_next_host_config_write(path, TestHostConfigWriteBoundary::Published)
-}
-
-#[cfg(test)]
-fn pause_next_host_config_write(
-    path: &Path,
-    boundary: TestHostConfigWriteBoundary,
 ) -> TestHostConfigWritePauseController {
     let pause = std::sync::Arc::new(TestHostConfigWritePause {
         state: std::sync::Mutex::new((false, false)),
@@ -502,31 +465,22 @@ fn pause_next_host_config_write(
     TEST_HOST_CONFIG_WRITE_PAUSES
         .lock()
         .expect("host write pause registry")
-        .push((
-            path.to_path_buf(),
-            boundary,
-            std::sync::Arc::downgrade(&pause),
-        ));
+        .push((path.to_path_buf(), std::sync::Arc::downgrade(&pause)));
     TestHostConfigWritePauseController(pause)
 }
 
 #[cfg(test)]
-pub(super) fn test_pause_host_config_write(path: &Path, boundary: TestHostConfigWriteBoundary) {
+pub(super) fn test_pause_host_config_write(path: &Path) {
     let pause = {
         let mut pauses = TEST_HOST_CONFIG_WRITE_PAUSES
             .lock()
             .expect("host write pause registry");
-        let Some(index) = pauses
-            .iter()
-            .position(|(candidate, candidate_boundary, pause)| {
-                candidate == path
-                    && *candidate_boundary == boundary
-                    && std::sync::Weak::strong_count(pause) > 0
-            })
-        else {
+        let Some(index) = pauses.iter().position(|(candidate, pause)| {
+            candidate == path && std::sync::Weak::strong_count(pause) > 0
+        }) else {
             return;
         };
-        pauses.remove(index).2.upgrade()
+        pauses.remove(index).1.upgrade()
     };
     let Some(pause) = pause else {
         return;
@@ -552,72 +506,12 @@ pub(super) fn test_abort_after_host_config_write(path: &Path) {
     }
 }
 
-thread_local! {
-    static HOST_CONFIG_WRITE_INTENT_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-pub fn with_host_config_write_intents<T>(root: PathBuf, effect: impl FnOnce() -> T) -> T {
-    struct ResetIntentRoot(Option<PathBuf>);
-
-    impl Drop for ResetIntentRoot {
-        fn drop(&mut self) {
-            HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| {
-                current.replace(self.0.take());
-            });
-        }
-    }
-
-    let previous = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.replace(Some(root)));
-    let _reset = ResetIntentRoot(previous);
-    effect()
-}
-
-pub fn host_config_write_intent_path(root: &Path, path: &Path) -> Result<PathBuf> {
-    let path_bytes = serde_json::to_vec(path).map_err(|error| TraceDecayError::Config {
-        message: format!("could not bind host config write intent: {error}"),
-    })?;
-    Ok(root.join(format!("{}.intent", sha256_hex(&path_bytes))))
-}
-
-/// Persist an already-read native-host observation without reading the file a
-/// second time. A host CLI runs outside this process, so the caller snapshots
-/// its bytes first, checks peer ownership, and then records exactly those
-/// bytes. If a foreign writer races after the snapshot, rollback compares the
-/// recorded digest to the live state and refuses instead of restoring over it.
-#[tracing::instrument(
-    name = "agent_hosts.agents.host_config.observe",
-    level = "trace",
-    skip_all
-)]
-pub(crate) fn record_host_config_observation_bytes(
-    path: &Path,
-    contents: Option<&[u8]>,
-) -> Result<()> {
-    if HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().is_none()) {
-        return Ok(());
-    }
-    match contents {
-        Some(contents) => {
-            let metadata =
-                capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to capture metadata for {} after host CLI: {error}",
-                        path.display()
-                    ),
-                })?;
-            persist_host_config_write_intent(path, contents, Some(&metadata))
-        }
-        None => persist_host_config_remove_intent(path),
-    }
-}
-
 #[tracing::instrument(
     name = "agent_hosts.agents.host_config.remove",
     level = "trace",
     skip_all
 )]
 pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
-    persist_host_config_remove_intent(path).map_err(std::io::Error::other)?;
     std::fs::remove_file(path)?;
     #[cfg(feature = "test-transport")]
     if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_REMOVE_PATH")
@@ -626,85 +520,6 @@ pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
         std::process::abort();
     }
     Ok(())
-}
-
-#[derive(Serialize)]
-struct HostConfigWriteIntentV2<'a> {
-    schema_version: u16,
-    digest: [u8; 32],
-    metadata: Option<&'a HostFileMetadataIdentityV1>,
-}
-
-#[tracing::instrument(
-    name = "agent_hosts.agents.host_config.persist",
-    level = "trace",
-    skip_all
-)]
-pub(super) fn persist_host_config_write_intent(
-    path: &Path,
-    contents: &[u8],
-    metadata: Option<&HostFileMetadataIdentityV1>,
-) -> Result<()> {
-    let Some(root) = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().clone()) else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not create host config write intent directory {}: {error}",
-            root.display()
-        ),
-    })?;
-    let intent_path = host_config_write_intent_path(&root, path)?;
-    let intent = serde_json::to_vec(&HostConfigWriteIntentV2 {
-        schema_version: 2,
-        digest: Sha256::digest(contents).into(),
-        metadata,
-    })
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("could not serialize host config write intent: {error}"),
-    })?;
-    tracedecay_private_fs::framed_log::atomic_write(
-        &intent_path,
-        "host-config-intent",
-        &intent,
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not persist host config write intent {}: {error}",
-            intent_path.display()
-        ),
-    })
-}
-
-#[tracing::instrument(
-    name = "agent_hosts.agents.host_config.persist_remove",
-    level = "trace",
-    skip_all
-)]
-pub(super) fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
-    let Some(root) = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().clone()) else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not create host config remove intent directory {}: {error}",
-            root.display()
-        ),
-    })?;
-    let intent_path = host_config_write_intent_path(&root, path)?;
-    tracedecay_private_fs::framed_log::atomic_write(
-        &intent_path,
-        "host-config-remove-intent",
-        &[0],
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not persist host config remove intent {}: {error}",
-            intent_path.display()
-        ),
-    })
 }
 
 // Shared MCP server registration
