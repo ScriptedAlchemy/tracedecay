@@ -22,7 +22,7 @@ inputs:
     description: Whether this setup may save Bazelisk and repository caches.
     default: "true"
   tailscale-client-id:
-    description: OIDC client for trusted Linux CI; empty keeps the hosted-only build.
+    description: OIDC client for trusted Linux/macOS CI; empty keeps the hosted-only build.
     default: ""
 
 outputs:
@@ -99,6 +99,24 @@ runs:
         key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}
 
+    - name: Preserve the runner network environment for Tailscale
+      if: runner.os == 'Linux' && inputs.tailscale-client-id != ''
+      shell: bash
+      run: |
+        # Ubuntu's sudo-rs ignores -E. Tailscale's action uses sudo for both
+        # the token exchange and daemon, which must retain any runner proxy
+        # and CA settings. Keep only these variables, scoped to its binaries.
+        network_env="HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR"
+        for name in $network_env; do
+          if [[ -v "$name" ]]; then
+            echo "Preserving runner network variable: $name"
+          fi
+        done
+        printf 'Defaults!/usr/local/bin/tailscale,/usr/local/bin/tailscaled env_keep += "%s"\n' "$network_env" |
+          sudo tee /etc/sudoers.d/tailscale-ci-network >/dev/null
+        sudo chmod 0440 /etc/sudoers.d/tailscale-ci-network
+        sudo visudo -cf /etc/sudoers.d/tailscale-ci-network
+
     - name: Connect to the private Bazel fleet
       if: inputs.tailscale-client-id != ''
       uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4
@@ -112,15 +130,21 @@ runs:
       if: inputs.tailscale-client-id != ''
       shell: bash
       run: |
-        if [[ $RUNNER_OS != Linux || $RUNNER_ARCH != X64 ]]; then
-          echo 'The CI fleet configuration requires a Linux x86_64 runner.' >&2
-          exit 1
-        fi
-        mkdir -p /tmp/zig-cache
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64)
+            profile=rbe-linux
+            mkdir -p /tmp/zig-cache
+            ;;
+          macOS/ARM64) profile=rbe-macos ;;
+          *)
+            echo "No compatible fleet worker for $RUNNER_OS/$RUNNER_ARCH" >&2
+            exit 1
+            ;;
+        esac
         # Use the checkout's existing local rc import for fleet settings.
         # Tests carry their tools in runfiles, so both branches use identical inputs.
-        cat > .bazelrc.local <<'RC'
-        build --config=rbe-linux
+        printf 'build --config=%s\n' "$profile" > .bazelrc.local
+        cat >> .bazelrc.local <<'RC'
         build --remote_executor=grpc://ubuntu-main:50051
         build --remote_cache=grpc://ubuntu-main:50051
         build --remote_instance_name=main
