@@ -3,7 +3,9 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
-use tracedecay_maintenance::retention::orphan_stores::dir_size_bytes;
+use tracedecay_maintenance::retention::footprint::{
+    MAX_FOOTPRINT_ENTRIES, WalkTerminationV1, WalkedEntryV1, walk_regular_files_with_budget,
+};
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::storage::{USER_MEMORY_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
 
@@ -658,6 +660,7 @@ fn handle_list_inner(
         };
         let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
         let mut token_errors: Vec<String> = Vec::new();
+        let mut remaining_entries = MAX_FOOTPRINT_ENTRIES;
 
         for path in &project_paths {
             let mut location = global::classify_project_storage(profile, path)?;
@@ -687,7 +690,7 @@ fn handle_list_inner(
                 }
             }
             let has_data = location.data_root.exists();
-            let size = list_store_size_bytes(all, has_data, &location.data_root);
+            let size = list_store_size_bytes(all, &location.data_root, &mut remaining_entries);
             let project_key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(path);
             let token_row = token_rows.iter().find(|row| {
                 tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(&row.project)
@@ -712,7 +715,12 @@ fn handle_list_inner(
         }
 
         if all {
-            append_orphan_manifest_rows(&mut rows, &project_paths, home_tracedecay.as_deref());
+            append_orphan_manifest_rows(
+                &mut rows,
+                &project_paths,
+                home_tracedecay.as_deref(),
+                &mut remaining_entries,
+            );
         }
 
         if rows.is_empty() {
@@ -793,14 +801,29 @@ fn handle_list_inner(
     })
 }
 
-fn list_store_size_bytes(all: bool, has_data: bool, data_root: &Path) -> Option<u64> {
+fn list_store_size_bytes(
+    all: bool,
+    data_root: &Path,
+    remaining_entries: &mut usize,
+) -> Option<u64> {
     if !all {
         return None;
     }
-    if !has_data {
-        return Some(0);
+    match std::fs::symlink_metadata(data_root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(0),
+        _ => return None,
     }
-    Some(dir_size_bytes(data_root))
+    let mut size = 0u64;
+    let mut unavailable = false;
+    let termination =
+        walk_regular_files_with_budget(data_root, remaining_entries, &|| None, &mut |_, entry| {
+            match entry {
+                WalkedEntryV1::File { bytes } => size = size.saturating_add(bytes),
+                WalkedEntryV1::Unavailable => unavailable = true,
+            }
+        });
+    (termination == WalkTerminationV1::Complete && !unavailable).then_some(size)
 }
 
 #[derive(Debug)]
@@ -808,8 +831,8 @@ struct ListRow {
     path: std::path::PathBuf,
     status_label: &'static str,
     has_data: bool,
-    /// `None` when this run did not measure the store. Default `list`
-    /// skips the recursive size walk.
+    /// `None` when this run did not completely measure the store. Default
+    /// `list` skips sizing; `list --all` shares one bounded entry census.
     size: Option<u64>,
     /// `None` when this run could not read the project's saved-token total.
     tokens: Option<u64>,
@@ -819,6 +842,7 @@ fn append_orphan_manifest_rows(
     rows: &mut Vec<ListRow>,
     project_paths: &[std::path::PathBuf],
     profile_root: Option<&Path>,
+    remaining_entries: &mut usize,
 ) {
     let Some(profile_root) = profile_root else {
         return;
@@ -845,7 +869,7 @@ fn append_orphan_manifest_rows(
         }
         let data_root = profile_root.join(&plan.store.store_relpath);
         let has_data = data_root.exists();
-        let size = list_store_size_bytes(true, has_data, &data_root);
+        let size = list_store_size_bytes(true, &data_root, remaining_entries);
         rows.push(ListRow {
             path: plan.project.project_root,
             status_label: "orphan manifest-reconstructable",
@@ -909,9 +933,77 @@ mod wipe_safety_tests {
 
     #[test]
     fn default_list_omits_recursive_store_size() {
-        let missing = Path::new("/definitely/missing-tracedecay-store");
-        assert_eq!(list_store_size_bytes(false, true, missing), None);
-        assert_eq!(list_store_size_bytes(true, false, missing), Some(0));
+        let temporary = tempfile::TempDir::new().expect("temporary stores");
+        let missing = temporary.path().join("missing-store");
+        let mut remaining_entries = 1;
+        assert_eq!(
+            list_store_size_bytes(false, &missing, &mut remaining_entries),
+            None
+        );
+        assert_eq!(
+            list_store_size_bytes(true, &missing, &mut remaining_entries),
+            Some(0)
+        );
+        assert_eq!(remaining_entries, 1);
+    }
+
+    #[test]
+    fn all_list_shares_its_size_budget_and_omits_partial_measurements() {
+        let temporary = tempfile::TempDir::new().expect("temporary stores");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        std::fs::create_dir(&first).expect("first store");
+        std::fs::create_dir(&second).expect("second store");
+        std::fs::write(first.join("payload"), [1u8; 7]).expect("first payload");
+        std::fs::write(second.join("one"), [2u8; 5]).expect("second payload");
+        std::fs::write(second.join("two"), [3u8; 11]).expect("third payload");
+        let mut remaining_entries = 2;
+
+        assert_eq!(
+            list_store_size_bytes(true, &first, &mut remaining_entries),
+            Some(7)
+        );
+        assert_eq!(remaining_entries, 1);
+        assert_eq!(
+            list_store_size_bytes(true, &second, &mut remaining_entries),
+            None,
+            "an incomplete store walk cannot contribute an exact total"
+        );
+        assert_eq!(remaining_entries, 0);
+    }
+
+    #[test]
+    fn all_list_omits_a_store_that_cannot_be_enumerated() {
+        let temporary = tempfile::TempDir::new().expect("temporary stores");
+        let file_root = temporary.path().join("not-a-directory");
+        std::fs::write(&file_root, [1u8]).expect("non-directory store");
+        let mut remaining_entries = 1;
+
+        assert_eq!(
+            list_store_size_bytes(true, &file_root, &mut remaining_entries),
+            None,
+            "unavailable entries cannot be reported as an empty store"
+        );
+        assert_eq!(remaining_entries, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_list_keeps_failed_root_metadata_unknown() {
+        let temporary = tempfile::TempDir::new().expect("temporary stores");
+        let file_parent = temporary.path().join("not-a-directory");
+        std::fs::write(&file_parent, [1u8]).expect("non-directory parent");
+        let data_root = file_parent.join("store");
+        assert!(!data_root.exists());
+        assert!(data_root.try_exists().is_err());
+        let mut remaining_entries = 1;
+
+        assert_eq!(
+            list_store_size_bytes(true, &data_root, &mut remaining_entries),
+            None,
+            "a failed root inspection does not prove an absent store"
+        );
+        assert_eq!(remaining_entries, 1);
     }
 
     #[test]
