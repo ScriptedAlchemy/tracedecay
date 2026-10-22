@@ -455,7 +455,7 @@ impl RegisteredGlobalDb {
             tracing::trace_span!("sessions.lcm.compress"),
         );
         let bounded = compressed.await?;
-        if bounded.response.status != "needs_summary"
+        if bounded.response.outcome()? == tracedecay_lcm::LcmCompressionOutcome::Complete
             && let Some(candidate) = convergence_candidate
         {
             let state = if bounded.has_more {
