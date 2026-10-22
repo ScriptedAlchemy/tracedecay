@@ -17,9 +17,8 @@ pub(crate) const GITHUB_API_URL: &str = "https://api.github.com";
 const GITHUB_OWNER: &str = "ScriptedAlchemy";
 const GITHUB_REPOSITORY: &str = "tracedecay";
 
-/// Timeout for opportunistic advisory reads (the background / `doctor`
-/// version probe). Keep this short so a stalled GitHub never blocks those
-/// paths.
+/// Bound the advisory `doctor` probe so a stalled GitHub lookup does not
+/// delay local diagnostics.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Bound for each GitHub release-metadata read of an explicit `tracedecay
@@ -232,9 +231,9 @@ fn transport_failure(error: ureq::Error) -> ReleaseLookupError {
 /// Releases whose CI hasn't yet uploaded the current-platform binary are
 /// skipped, see `release_has_current_platform_asset`.
 ///
-/// This is the opportunistic advisory probe (`doctor`, post-start version
-/// notice). It keeps [`FETCH_TIMEOUT`]. Operator-initiated install/upgrade
-/// uses [`fetch_latest_channel_version`].
+/// This is the opportunistic advisory probe used by `doctor`. It keeps
+/// [`FETCH_TIMEOUT`]. Operator-initiated install/upgrade uses
+/// [`fetch_latest_channel_version`].
 pub fn fetch_latest_version() -> Result<String, ReleaseLookupError> {
     latest_release_version(
         GITHUB_API_URL,
@@ -299,13 +298,6 @@ fn latest_release_version(
 /// dashboard-api helper so there is one prerelease-detection rule.
 pub fn is_beta() -> bool {
     tracedecay_dashboard_api::cloud::is_beta(env!("CARGO_PKG_VERSION"))
-}
-
-/// Admits the ureq release lookup into the composition library so MCP version
-/// checks can run after the binary starts. An unregistered lookup stays
-/// `None` (already best-effort).
-pub fn admit_sync_probes() {
-    tracedecay_dashboard_api::cloud::admit_sync_cloud_probes(fetch_latest_version);
 }
 
 pub fn doctor_network_probes() -> tracedecay::doctor::AdmittedDoctorNetworkProbes {
