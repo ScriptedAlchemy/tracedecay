@@ -923,6 +923,7 @@ struct SessionTemporalRefreshWakeRoute {
     target: std::sync::RwLock<std::sync::Weak<SessionTemporalRefreshWakeState>>,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub(super) fn enabled_idle_notification(
     state: &SessionTemporalRefreshWakeState,
 ) -> std::pin::Pin<Box<tokio::sync::futures::Notified<'_>>> {
