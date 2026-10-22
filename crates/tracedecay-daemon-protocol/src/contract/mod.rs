@@ -2214,8 +2214,12 @@ impl DaemonInvocationRequest {
                 deadline,
                 cancellation,
                 ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
             }
-            | DaemonInvocationPayload::PrimitiveRead {
+            DaemonInvocationPayload::PrimitiveRead {
                 surface_operation,
                 request,
                 observed_at,

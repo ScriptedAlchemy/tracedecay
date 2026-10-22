@@ -31,8 +31,7 @@ pub struct HostComponentSetEntryV1 {
     pub contents: Vec<HostBundleArtifactContentV1>,
 }
 
-/// The complete, host-specific component set that must be committed or rolled
-/// back as one lifecycle boundary.
+/// The complete, host-specific component set verified by one lifecycle operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostComponentSetV1 {
     pub host: HostKindV1,

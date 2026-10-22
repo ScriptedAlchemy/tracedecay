@@ -10,6 +10,8 @@ use std::io;
 
 #[cfg(windows)]
 use cap_fs_ext::DirExt;
+#[cfg(not(windows))]
+use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_std::fs::{Dir, File, OpenOptions};
 
 /// How many times a create-or-open that reports the entry missing is asked
@@ -173,7 +175,11 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        directory.try_clone()?.into_std_file().sync_all()
+        let mut options = OpenOptions::new();
+        options.read(true).maybe_dir(true);
+        directory
+            .open_with(".", &options)
+            .and_then(|file| file.sync_all())
     }
 }
 
