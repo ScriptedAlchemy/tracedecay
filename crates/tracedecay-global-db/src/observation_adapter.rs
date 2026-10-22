@@ -984,7 +984,8 @@ async fn load_observation_preflight(
         }
     }
     let (retrieval_aliases, alias_owners) =
-        read_retrieval_aliases_from_snapshot(&snapshot, writes, OPERATION).await?;
+        read_retrieval_aliases_from_snapshot(&snapshot, writes, &admission_refusals, OPERATION)
+            .await?;
     let mut sibling_candidate_anchors = HashSet::new();
     for write in writes {
         let observation = write.observation();
@@ -1255,6 +1256,7 @@ fn retrieval_alias_key(
 async fn read_retrieval_aliases_from_snapshot(
     snapshot: &DatabaseEngineReadSnapshot,
     writes: &[AnchoredObservationWrite],
+    admission_refusals: &HashMap<(String, String), PayloadDigestV1>,
     operation: &'static str,
 ) -> ObservationStoreResult<(
     HashMap<(String, String, String), RetrievalAnchorId>,
@@ -1262,6 +1264,13 @@ async fn read_retrieval_aliases_from_snapshot(
 )> {
     let mut requested = HashSet::new();
     for write in writes {
+        let observation = write.observation();
+        if admission_refusals.contains_key(&(
+            observation.observation_id().as_str().to_owned(),
+            observation.payload_reference().digest().as_str().to_owned(),
+        )) {
+            continue;
+        }
         for alias in write.retrieval_anchor().aliases() {
             requested.insert(retrieval_alias_key(write.observation().scope(), alias)?);
         }
@@ -1285,10 +1294,13 @@ async fn read_retrieval_aliases_from_snapshot(
     let mut rows = snapshot
         .query(
             "SELECT alias.owner_json, alias.alias_kind, alias.locator_digest,
-                    alias.anchor_id, binding.observation_id
+                    alias.anchor_id, owner.observation_id
              FROM retrieval_anchor_aliases AS alias
              LEFT JOIN observation_retrieval_anchors AS binding
                ON binding.anchor_id = alias.anchor_id
+             LEFT JOIN observations AS owner
+               ON owner.observation_id = binding.observation_id
+              AND json_extract(owner.observation_json, '$.__retention_released') IS NULL
              JOIN json_each(?1) AS requested
                ON alias.owner_json =
                     json_extract(requested.value, '$.scope_json')

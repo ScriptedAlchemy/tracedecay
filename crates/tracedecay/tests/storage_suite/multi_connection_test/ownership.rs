@@ -207,19 +207,40 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_profile_store_owner() {
     let project_id = tracedecay_runtime_core::storage::default_profile_project_id(&project_path);
     let data_root =
         tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, &project_id);
-    let host = tracedecay_domain::NativeHostIdentityV1::CursorDesktop;
-    let (_, capture_report) = tracedecay_hooks::HookSpoolV1::open(
-        data_root.join("hook-v2-spool").join(host.hook_key()),
-        tracedecay_hooks::HookSpoolConfigV1::stock(host),
-        tracedecay_contracts::now_micros(),
-    )
-    .expect("open native capture receipt");
-    // Sequence survives daemon replay/acknowledgement, so this proves each
-    // callback was captured even if the owner already drained its envelope.
+    // A commit-lock timeout can stage an envelope whose first spool frame
+    // the daemon already acknowledged. Importing it appends a duplicate
+    // frame, so the sequence counts attempts rather than distinct callbacks.
+    // Each callback's completed receipt instead proves that its own capture
+    // landed, including one safely staged for replay, rather than returning
+    // the same transport response for an unbound hook.
+    let analytics = std::fs::read_to_string(data_root.join("hook_analytics.jsonl"))
+        .expect("read native capture outcomes");
+    let mut captured_sessions = analytics
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("hook analytics row"))
+        .filter(|row| {
+            row["event"] == "hook_completed"
+                && row["agent"] == "cursor"
+                && row["hook_name"] == "afterFileEdit"
+        })
+        .map(|row| {
+            assert_eq!(
+                row["disposition"]["status"], "accepted_for_replay",
+                "native callback must be durably captured: {row}"
+            );
+            row["session_id"]
+                .as_str()
+                .expect("capture names the callback session")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    captured_sessions.sort();
     assert_eq!(
-        capture_report.next_sequence,
-        1 + CONCURRENT_CLIENTS_PER_PATH as u64,
-        "every native callback must be captured, not merely accepted as unbound"
+        captured_sessions,
+        (0..CONCURRENT_CLIENTS_PER_PATH)
+            .map(|ordinal| format!("session-{ordinal}"))
+            .collect::<Vec<_>>(),
+        "every native callback must have exactly one successful capture outcome"
     );
     let daemon_stderr = std::fs::read_to_string(&daemon_stderr_path).expect("read daemon stderr");
     assert!(
