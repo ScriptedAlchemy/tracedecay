@@ -135,7 +135,7 @@ jobs:
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.15.1"
 
@@ -324,7 +324,7 @@ jobs:
           ref: ${{ needs.validate-release.outputs.source_sha }}
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: needs.validate-release.outputs.build_required == 'true'
         with:
           python-version: "3.15.1"
@@ -670,7 +670,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "26.12.0"
+          node-version: "26.12.1"
 
       - name: Install reviewed npm
         run: npm install -g npm@12.2.0
@@ -703,8 +703,8 @@ jobs:
         run: |
           set -euo pipefail
           json="$(npm pack --json --ignore-scripts)"
-          filename="$(node -e 'console.log(JSON.parse(process.argv[1])[0].filename)' "$json")"
-          test -f "$filename"
+          filename="$(printf '%s' "$json" | python3 ../../scripts/extract-npm-pack-filename.py)"
+          test -s "$filename"
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
 
       - name: Stage the reviewed npm publish tool
@@ -768,7 +768,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "26.12.0"
+          node-version: "26.12.1"
 
       # Prerelease SDK versions mirror the beta release convention: they take
       # the beta dist-tag and never take latest. Recovery re-runs are

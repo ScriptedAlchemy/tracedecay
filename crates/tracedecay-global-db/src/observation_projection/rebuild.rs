@@ -33,7 +33,9 @@ use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
     message_transition, write_workflow_fact_transition,
 };
-use tracedecay_session_temporal_store::record_canonical_observation_effect;
+use tracedecay_session_temporal_store::{
+    record_canonical_observation_effect, request_session_temporal_reset,
+};
 
 pub(super) const REBUILD_PAGE_SIZE: i64 = 128;
 const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
@@ -587,6 +589,117 @@ async fn project_observation_in_transaction(
         .map(|(outcome, _)| outcome)
 }
 
+/// The one-time project-path repair has verified the empty temporal effect and
+/// retired this observation's obsolete collision disposition. Its sequence
+/// may already be behind the checkpoint, so write the recovered effect without
+/// rewinding the frontier or replaying unrelated observations. The ordinary
+/// collision guard still parks a real conflict uncovered by the repair.
+pub(super) async fn reproject_project_path_collision(
+    transaction: &DatabaseWriteTransaction<'_>,
+    sequence: u64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let mut effect = derive_projection_with_alias(transaction, observation).await?;
+    Box::pin(write_effect_converging_collisions(
+        transaction,
+        &CollisionGuardedWrite::Drain,
+        sequence,
+        observation,
+        &mut effect,
+    ))
+    .await?;
+    if effect.message().is_some() {
+        // The bounded migration transaction temporarily lifts only this
+        // delete guard. A still-colliding observation keeps its original
+        // zero-output effect, including its original recording timestamp.
+        transaction
+            .execute(
+                "DELETE FROM session_temporal_observation_effects
+                 WHERE observation_id = ?1 AND output_count = 0",
+                params![observation.observation_id().as_str()],
+            )
+            .await
+            .map_err(|error| storage("retire obsolete empty temporal effect", error))?;
+    }
+    record_canonical_observation_effect(transaction, sequence, observation, &effect).await?;
+    Box::pin(restage_recovered_collision(
+        transaction,
+        sequence,
+        observation,
+    ))
+    .await?;
+    // A temporal generation may already cover the old zero-output effect.
+    // Rebuilding that session makes the newly recovered message visible there
+    // as well as in the raw message read path.
+    request_session_temporal_reset(transaction, observation.observation_id().as_str()).await?;
+    if !queue_row_is_terminal_collision(transaction, observation.observation_id()).await? {
+        consume_projection_queue_item(transaction, observation.observation_id()).await?;
+    }
+    Ok(())
+}
+
+/// A rebuild suspended after this observation staged the obsolete skip.
+/// Replace that one staged effect in the same transaction as the live repair,
+/// so resuming the rebuild cannot remove the recovered message again.
+async fn restage_recovered_collision(
+    transaction: &DatabaseWriteTransaction<'_>,
+    sequence: u64,
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<()> {
+    let Some(job) = read_optional_rebuild_job(transaction).await? else {
+        return Ok(());
+    };
+    if sequence_i64(sequence)? > job.staged_through {
+        return Ok(());
+    }
+    let removed = transaction
+        .execute(
+            "DELETE FROM observation_projection_rebuild_dispositions
+             WHERE projector_version = ?1 AND generation = ?2
+               AND observation_id = ?3 AND reason = ?4",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                job.generation.as_str(),
+                observation.observation_id().as_str(),
+                ProjectionSkipReason::OutputCollision.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("retire staged project path collision", error))?;
+    if removed != 1 {
+        return Err(ProjectionStoreError::ProvenanceCollision);
+    }
+    let mut effect =
+        derive_projection_for_rebuild(transaction, observation, &job.generation).await?;
+    Box::pin(write_effect_converging_collisions(
+        transaction,
+        &CollisionGuardedWrite::Stage {
+            generation: &job.generation,
+        },
+        sequence,
+        observation,
+        &mut effect,
+    ))
+    .await?;
+    record_canonical_observation_effect(transaction, sequence, observation, &effect).await?;
+    transaction
+        .execute(
+            "UPDATE observation_projection_rebuilds
+             SET projected_rows = projected_rows + ?3,
+                 skipped_observations = skipped_observations - 1 + ?4
+             WHERE projector_version = ?1 AND generation = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                job.generation.as_str(),
+                usize_i64(effect.output_count())?,
+                i64::from(matches!(effect, ObservationProjection::Skipped(_))),
+            ],
+        )
+        .await
+        .map_err(|error| storage("update repaired projection rebuild counts", error))?;
+    Ok(())
+}
+
 /// Like [`project_observation_in_transaction`], also returning the
 /// observation's session identity so batched drains need no follow-up point
 /// read per projected item.
@@ -973,8 +1086,9 @@ async fn activate_projection_rebuild_transaction(
         .map_err(|error| storage("requeue observations past rebuild frontier", error))?;
     transaction
         .execute(
-            "DELETE FROM projection_queue WHERE observation_sequence <= ?1",
-            params![job.frontier],
+            "DELETE FROM projection_queue
+             WHERE observation_sequence <= ?1 AND next_retry_at_micros < ?2",
+            params![job.frontier, PROJECTION_TERMINAL_RETRY_MICROS],
         )
         .await
         .map_err(|error| storage("consume rebuilt projection queue", error))?;

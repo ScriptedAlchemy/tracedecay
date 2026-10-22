@@ -427,7 +427,7 @@ async fn run_foreground_loopback(
                 owner_phases,
                 move |project_server_deadline| async move {
                     shutdown_project_servers(
-                        tokio::time::Instant::from_std(project_server_deadline),
+                        project_server_deadline,
                         &server_store_administration,
                         &http_application_registry,
                     )

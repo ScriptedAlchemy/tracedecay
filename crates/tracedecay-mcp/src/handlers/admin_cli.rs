@@ -432,16 +432,20 @@ async fn dispatch_admin_cli(
                         &project_root,
                         global_db,
                         context.code_index_schedulers,
+                        context.cancellation.clone(),
+                        context.deadline.clone(),
                     )
                     .await?
                 }
                 (None, None) => {
-                    tracedecay_maintenance::retention::storage_report::build_storage_report_page_from_registered_global_db(
+                    tracedecay_maintenance::retention::storage_report::build_storage_report_page_from_registered_global_db_controlled(
                         profile_root,
                         global_db,
                         context.code_index_schedulers,
                         cursor.as_deref(),
                         limit,
+                        context.cancellation.clone(),
+                        context.deadline.clone(),
                     )
                     .await?
                 }
@@ -979,7 +983,12 @@ mod tests {
         assert_eq!(typed.unregistered_bytes, 4096);
         assert_eq!(
             typed.coverage,
-            serde_json::json!({"state": "complete", "next_cursor": null})
+            serde_json::json!({
+                "state": "complete",
+                "next_cursor": null,
+                "unregistered_size": {"state": "complete", "unavailable_entry_count": 0},
+                "unregistered_count_is_lower_bound": false
+            })
         );
     }
 }
