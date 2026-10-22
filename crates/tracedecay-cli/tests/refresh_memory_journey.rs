@@ -11,9 +11,10 @@ mod common;
 
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Write as _;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -31,6 +32,172 @@ const FILES: usize = 300;
 const FUNCTIONS_PER_FILE: usize = 160;
 const INDEX_TIMEOUT: Duration = Duration::from_secs(900);
 const STATUS_POLL: Duration = Duration::from_secs(5);
+
+struct TemporaryWorkerResources {
+    output: fs::File,
+    daemon_pid: u32,
+    started: Instant,
+}
+
+fn record_raw_resource(output: &mut fs::File, path: &Path) -> std::io::Result<String> {
+    let result = fs::read_to_string(path);
+    writeln!(output, "resource_begin path={}", path.display()).expect("resource artifact");
+    match &result {
+        Ok(raw) if path.ends_with("status") => {
+            for field in [
+                "Threads:",
+                "Cpus_allowed_list:",
+                "Mems_allowed_list:",
+                "VmRSS:",
+                "VmHWM:",
+            ] {
+                match raw.lines().find(|line| line.starts_with(field)) {
+                    Some(line) => writeln!(output, "{line}"),
+                    None => writeln!(output, "unavailable field={field}"),
+                }
+                .expect("resource artifact");
+            }
+        }
+        Ok(raw) if path == Path::new("/proc/cpuinfo") => {
+            for field in ["processor", "vendor_id", "model name", "cpu MHz"] {
+                match raw.lines().find(|line| line.starts_with(field)) {
+                    Some(line) => writeln!(output, "{line}"),
+                    None => writeln!(output, "unavailable field={field}"),
+                }
+                .expect("resource artifact");
+            }
+        }
+        Ok(raw) if path == Path::new("/proc/stat") => {
+            match raw.lines().find(|line| line.starts_with("cpu ")) {
+                Some(line) => writeln!(output, "{line}"),
+                None => writeln!(output, "unavailable aggregate cpu line"),
+            }
+            .expect("resource artifact");
+        }
+        Ok(raw) => writeln!(output, "{raw}").expect("resource artifact"),
+        Err(error) => writeln!(output, "unavailable error={error:?}").expect("resource artifact"),
+    }
+    writeln!(output, "resource_end path={}", path.display()).expect("resource artifact");
+    result
+}
+
+impl TemporaryWorkerResources {
+    fn sample(&mut self, event: &str) {
+        let sample_started = Instant::now();
+        writeln!(
+            self.output,
+            "TEMPORARY_DIAGNOSTIC_MUST_NOT_MERGE sample_begin event={event} unix_time={:?} elapsed={:?} test_pid={} daemon_pid={} available_parallelism={:?}",
+            SystemTime::now().duration_since(UNIX_EPOCH),
+            self.started.elapsed(),
+            std::process::id(),
+            self.daemon_pid,
+            std::thread::available_parallelism(),
+        )
+        .expect("resource artifact");
+        let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if clock_ticks > 0 {
+            writeln!(
+                self.output,
+                "proc_stat_clock_ticks_per_second={clock_ticks}"
+            )
+            .expect("resource artifact");
+        } else {
+            writeln!(self.output, "proc_stat_clock_ticks_per_second=unavailable sysconf_result={clock_ticks}; proc_stat_cpu_times_are_raw_ticks")
+                .expect("resource artifact");
+        }
+        for path in [
+            "/proc/loadavg",
+            "/proc/stat",
+            "/proc/pressure/cpu",
+            "/proc/pressure/io",
+            "/proc/pressure/memory",
+        ] {
+            let _ = record_raw_resource(&mut self.output, Path::new(path));
+        }
+        let root = Path::new("/sys/fs/cgroup");
+        writeln!(
+            self.output,
+            "cgroup_scope=visible_namespace_root effective_daemon_quota=unproven"
+        )
+        .expect("resource artifact");
+        for name in [
+            "cpu.max",
+            "cpu.stat",
+            "cpu.pressure",
+            "cpuset.cpus.effective",
+        ] {
+            let _ = record_raw_resource(&mut self.output, &root.join(name));
+        }
+        for pid in [std::process::id(), self.daemon_pid] {
+            for name in ["stat", "schedstat", "io", "status"] {
+                let _ = record_raw_resource(
+                    &mut self.output,
+                    &PathBuf::from(format!("/proc/{pid}/{name}")),
+                );
+            }
+            let membership = record_raw_resource(
+                &mut self.output,
+                &PathBuf::from(format!("/proc/{pid}/cgroup")),
+            );
+            let Ok(membership) = membership else {
+                continue;
+            };
+            let Some(relative) = membership
+                .lines()
+                .find_map(|line| line.strip_prefix("0::/"))
+            else {
+                writeln!(
+                    self.output,
+                    "cgroup_v2_unavailable pid={pid} reason=no_unified_membership"
+                )
+                .expect("resource artifact");
+                continue;
+            };
+            if !Path::new(relative)
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+            {
+                writeln!(
+                    self.output,
+                    "cgroup_v2_unavailable pid={pid} reason=membership_outside_visible_root"
+                )
+                .expect("resource artifact");
+                continue;
+            }
+            let mut directory = root.join(relative);
+            for depth in 0..32 {
+                if directory == root {
+                    break;
+                }
+                for name in [
+                    "cpu.max",
+                    "cpu.stat",
+                    "cpu.pressure",
+                    "cpuset.cpus.effective",
+                ] {
+                    let _ = record_raw_resource(&mut self.output, &directory.join(name));
+                }
+                if depth == 31 {
+                    writeln!(
+                        self.output,
+                        "cgroup_v2_ancestors_truncated pid={pid} limit=32"
+                    )
+                    .expect("resource artifact");
+                    break;
+                }
+                directory.pop();
+            }
+        }
+        writeln!(
+            self.output,
+            "sample_end event={event} elapsed={:?} observation_elapsed={:?}\n",
+            self.started.elapsed(),
+            sample_started.elapsed()
+        )
+        .expect("resource artifact");
+        self.output.flush().expect("flush resource artifact");
+    }
+}
 
 /// Every function of every file changes with `edit`, so each refresh
 /// reparses the whole corpus.
@@ -110,10 +277,16 @@ fn status(home: &Path, project: &Path) -> Value {
 
 /// Waits until the index serves a complete generation of `revision` and
 /// returns that generation's id.
-fn wait_for_current(home: &Path, project: &Path, revision: &str) -> String {
+fn wait_for_current(
+    home: &Path,
+    project: &Path,
+    revision: &str,
+    resources: &mut TemporaryWorkerResources,
+) -> String {
     let started = Instant::now();
     let deadline = started + INDEX_TIMEOUT;
     loop {
+        resources.sample("status_poll");
         let status = status(home, project);
         eprintln!(
             "heavy_refresh index_status revision={revision} elapsed={:?} status={status}",
@@ -208,10 +381,25 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
                     "tracedecay_code_index_runtime::code_index_scheduler::registry=trace,",
                     "tracedecay_code_index_runtime::code_index_scheduler::reconcile=trace,",
                     "tracedecay_code_index_runtime::code_index_scheduler::serving=trace,",
-                    "tracedecay_query::retrieval::lexical::projection::artifact::builder=trace",
+                    "tracedecay_query::retrieval::lexical::projection::artifact::builder=trace,",
+                    "tracedecay_code_index::production::lexical_page_source=trace,",
+                    "tracedecay_query::retrieval::lexical::projection::artifact::reader=trace",
                 ),
             );
     });
+    let mut resources = TemporaryWorkerResources {
+        output: fs::File::create(log.with_file_name("heavy-refresh-worker-resources.log"))
+            .expect("temporary worker resource artifact"),
+        daemon_pid: daemon.id(),
+        started,
+    };
+    writeln!(
+        resources.output,
+        "cpu_identity_scope=first_visible_processor cpu_mhz_scope=instantaneous"
+    )
+    .expect("resource artifact");
+    let _ = record_raw_resource(&mut resources.output, Path::new("/proc/cpuinfo"));
+    resources.sample("daemon_ready");
     eprintln!("heavy_refresh daemon_ready elapsed={:?}", started.elapsed());
     eprintln!("heavy_refresh init_started elapsed={:?}", started.elapsed());
     initialize_tracedecay_cli_project(&home, &project);
@@ -219,10 +407,13 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
         "heavy_refresh init_finished elapsed={:?}",
         started.elapsed()
     );
-    let mut generation = wait_for_current(&home, &project, &cold_revision);
+    resources.sample("init_finished");
+    let mut generation = wait_for_current(&home, &project, &cold_revision, &mut resources);
+    resources.sample("cold_current");
     assert_within_limit(&home, &project, daemon.id());
 
     for edit in 1..=REFRESHES {
+        resources.sample(&format!("edit_{edit}_started"));
         eprintln!(
             "heavy_refresh edit_started edit={edit} elapsed={:?}",
             started.elapsed()
@@ -230,8 +421,10 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
         write_corpus(&project, edit);
         git_run(&project, &["commit", "--quiet", "-am", "edit every file"]);
         let revision = git_capture(&project, &["rev-parse", "HEAD"]);
+        resources.sample(&format!("edit_{edit}_sync_started"));
         run_cli(&home, &project, &["sync"]);
-        let refreshed = wait_for_current(&home, &project, &revision);
+        let refreshed = wait_for_current(&home, &project, &revision, &mut resources);
+        resources.sample(&format!("edit_{edit}_current"));
         assert_ne!(
             refreshed, generation,
             "refresh {edit} published a generation"
@@ -255,6 +448,7 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
             && !log.contains("code_index_text_projection_waiting_for_memory"),
         "the daemon refused work it had room for:\n{log}"
     );
+    resources.sample("daemon_stopping");
     drop(daemon);
     eprintln!("heavy_refresh finished elapsed={:?}", started.elapsed());
 }
