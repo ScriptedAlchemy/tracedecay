@@ -24,6 +24,9 @@ concurrency:
 
 jobs:
   test:
+    permissions:
+      contents: read
+      id-token: write
     name: Hermetic evaluation regressions
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -32,6 +35,10 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           cache-key: hermetic-eval-tests
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
       - name: Check runner syntax
         run: |
           bash -n evals/hermetic/run.sh
