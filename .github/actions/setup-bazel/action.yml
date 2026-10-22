@@ -18,6 +18,9 @@ inputs:
       prefix misses. Use when two jobs share rustc flags and runner image so
       Clippy can reuse Test Linux action outputs.
     default: ""
+  cache-save:
+    description: Whether this setup may save Bazelisk and repository caches.
+    default: "true"
   tailscale-client-id:
     description: OIDC client for trusted Linux CI; empty keeps the hosted-only build.
     default: ""
@@ -79,7 +82,7 @@ runs:
         disk-cache: false
         bazelrc: >-
           build --disk_cache=${{ steps.disk-cache-config.outputs.path }}
-        cache-save: ${{ github.ref == 'refs/heads/master' }}
+        cache-save: ${{ github.ref == 'refs/heads/master' && inputs.cache-save == 'true' }}
         # Windows build-script runfiles nest each vendored crate's sources
         # under its repository name twice; a short output base (default
         # D:/_bazel) keeps MSVC's header paths under MAX_PATH.

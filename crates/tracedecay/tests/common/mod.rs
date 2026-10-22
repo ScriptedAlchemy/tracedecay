@@ -1296,9 +1296,10 @@ fn spawn_tracedecay_daemon_process(
     #[cfg(unix)]
     daemon.release_socket_on_stop(socket_path.clone());
 
-    // Startup has no product deadline. The daemon logs `daemon_listening`
-    // once its endpoint is bound and published, so that line is readiness;
-    // stderr closing first means it exited.
+    // Startup has no product deadline. The daemon logs `daemon_ready`
+    // after bootstrap, immediately before polling its accept loop.
+    // `daemon_listening` only proves bind: setup can still hold connections
+    // in the backlog. Stderr closing before readiness means it exited.
     let Some(stderr) = daemon.child.stderr.take() else {
         // A caller redirected stderr, so only the endpoint can show readiness.
         loop {
@@ -1342,7 +1343,7 @@ fn spawn_tracedecay_daemon_process(
                 startup.trim()
             );
         }
-        if startup[line_start..].starts_with("[tracedecay] event=daemon_listening ") {
+        if startup[line_start..].starts_with("[tracedecay] event=daemon_ready ") {
             break;
         }
     }

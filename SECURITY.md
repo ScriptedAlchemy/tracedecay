@@ -144,7 +144,20 @@ consistency, not independent publisher authenticity. Other distribution/update
 paths have their own verification; do not assume installer checks apply to all
 paths.
 
-**Windows:** Authenticode code signing via the [SignPath.io Foundation](https://signpath.io/foundation) program is being rolled out so Windows binaries are signed as part of the release workflow (addresses the Smart App Control block reported in #79). Until that lands in a published release, Windows binaries remain unsigned.
+**Release component inventory:** Each native archive and MCPB is accompanied by a
+platform-specific SPDX 2.3 inventory asset. The inventory names and SHA-256 hashes
+both final package files; `SHA256SUMS` and the release build-provenance attestation
+cover the downloaded inventory asset itself. `NOASSERTION` licenses or unknown
+sources are explicitly annotated for review. The inventory is a traceability report,
+not a license scan or a claim that all components have been legally reviewed.
+
+**Windows:** Windows release binaries are currently unsigned. The repository contains a
+SignPath artifact-configuration example, but no release-workflow signing integration or
+verified SignPath project/certificate provisioning. Signing is not enforced by the release
+workflow; consumers must not assume an Authenticode signature or Smart App Control
+acceptance. Enabling signing remains blocked on external signing-service and certificate
+provisioning, followed by workflow and published-artifact verification. The previously cited
+PR #79 was unrelated and does not provide evidence for a Smart App Control report.
 
 ### Required daemon authority; optional service installation
 
