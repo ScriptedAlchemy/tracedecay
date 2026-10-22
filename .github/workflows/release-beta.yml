@@ -321,9 +321,11 @@ jobs:
           archives=(new-binaries/tracedecay-beta-*)
           bundles=(new-mcpbs/*.mcpb)
           inventories=(new-inventories/*.spdx.json)
-          echo "archives=${#archives[@]}" >>"$GITHUB_OUTPUT"
-          echo "bundles=${#bundles[@]}" >>"$GITHUB_OUTPUT"
-          echo "inventories=${#inventories[@]}" >>"$GITHUB_OUTPUT"
+          {
+            echo "archives=${#archives[@]}"
+            echo "bundles=${#bundles[@]}"
+            echo "inventories=${#inventories[@]}"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Attest newly built prerelease archives
         if: steps.built.outputs.archives != '0'
@@ -413,7 +415,7 @@ jobs:
             --mcpbs verified-mcpbs \
             --inventories verified-inventories
           for inventory in verified-inventories/*.spdx.json; do
-            platform="${inventory#verified-inventories/tracedecay-beta-${RELEASE_TAG}-}"
+            platform="${inventory#verified-inventories/tracedecay-beta-"${RELEASE_TAG}"-}"
             platform="${platform%.spdx.json}"
             archive_format="$(jq -r --arg platform "$platform" \
               '.include[] | select(.name == $platform) | .archive' .github/release-targets.json)"
