@@ -150,7 +150,6 @@ where
     completion
 }
 
-/// Spawns `retirement` on the native runtime and returns its receipt.
 fn spawn_native_retirement(
     retirement: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> impl std::future::Future<Output = ProjectServerRetirementStatus> + Send + 'static {
@@ -298,7 +297,6 @@ pub(super) async fn track_retirement_task(
     track_project_server_retirement(retirements, owner, tokio_retirement_status(task)).await;
 }
 
-/// Spawns `retirement` on the native runtime and tracks its receipt.
 pub(super) async fn track_native_retirement(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     owner: StoreOwnerKey,

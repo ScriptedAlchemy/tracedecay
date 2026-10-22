@@ -225,8 +225,6 @@ async fn concurrent_routes_resolve_one_repository_topology() {
     );
 }
 
-/// A warming request joins the exact route's admitted open without starting
-/// another topology walk that could make the open's no-wait probe refuse it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warming_route_joins_its_open_without_rediscovering_repository() {
     let home = TempDir::new().expect("isolated home");
