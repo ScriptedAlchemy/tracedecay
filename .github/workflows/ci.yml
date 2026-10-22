@@ -532,7 +532,11 @@ jobs:
           prebuild=true
           if [[ $SHARD == workspace-* ]]; then
             resources=--default_test_resources=cpu=1
-            prebuild=false
+            # workspace-c's filesystem durability timing tests require
+            # compilation to finish before they run.
+            if [[ $SHARD != workspace-c ]]; then
+              prebuild=false
+            fi
           fi
           if [[ $SHARD == fleet ]]; then
             # Keep test binaries and intermediate outputs in the remote CAS.

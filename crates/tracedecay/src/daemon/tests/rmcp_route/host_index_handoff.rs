@@ -73,9 +73,30 @@ async fn committed_save_remains_noncurrent_until_its_broker_handoff() {
     };
     // Complete-owner demand can queue a freshness pass after text readiness.
     // Settle that setup work before pinning the generation the save must retain.
-    let initial = ready_reading(&fixture, &project, "after initial graph admission").await;
+    ready_reading(&fixture, &project, "after initial graph admission").await;
     let replay = broker.begin_replay().await.unwrap();
     assert_eq!(broker.pending_replay_count().await.unwrap(), 0);
+    // Every source-proof renewal takes the mounted scheduler mutex. Hold it
+    // across the save and durable admission so an independent source observer
+    // cannot publish the edit before the broker records its handoff debt.
+    let scheduler = registry.scheduler_handle(&project).await.unwrap();
+    let (release_scheduler, scheduler_released) = tokio::sync::oneshot::channel::<()>();
+    let (scheduler_acquired, scheduler_held) = tokio::sync::oneshot::channel();
+    let held_scheduler = tokio::task::spawn_blocking(move || {
+        let _scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        scheduler_acquired.send(()).unwrap();
+        let _ = scheduler_released.blocking_recv();
+    });
+    scheduler_held.await.unwrap();
+    // Graph demand may have advanced the initial owner. Read the transition's
+    // identity only after that demand and the scheduler hold are established.
+    let initial = registry
+        .dashboard_freshness_read(&project)
+        .await
+        .unwrap()
+        .unwrap();
     std::fs::write(
         project.join("src/main.rs"),
         "fn main() { let saved = 42; }\n",
@@ -97,6 +118,21 @@ async fn committed_save_remains_noncurrent_until_its_broker_handoff() {
         .unwrap()
         .unwrap();
     assert_eq!(owed.latest_generation_id, initial.latest_generation_id);
+    assert_eq!(
+        owed.hook_hint_count,
+        Some(0),
+        "broker debt is not a scheduler hint"
+    );
+    drop(release_scheduler);
+    held_scheduler.await.unwrap();
+    // Pending broker debt fences currency, not immutable publication. Read
+    // again after releasing and joining the holder so these assertions cannot
+    // pass merely because a held scheduler makes verification unknown.
+    let owed = registry
+        .dashboard_freshness_read(&project)
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(
         owed.readiness(CodeIndexReadinessTargetV1::Ready),
         CodeIndexReadinessV1::Reached
@@ -104,11 +140,6 @@ async fn committed_save_remains_noncurrent_until_its_broker_handoff() {
     assert_ne!(
         owed.readiness(CodeIndexReadinessTargetV1::Fresh),
         CodeIndexReadinessV1::Reached
-    );
-    assert_eq!(
-        owed.hook_hint_count,
-        Some(0),
-        "broker debt is not a scheduler hint"
     );
     assert!(!registry.has_current_ready_decoded_for_root_scope(&project, &scope));
     assert!(

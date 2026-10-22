@@ -1714,6 +1714,74 @@ mod recent_first_discovery_tests {
     }
 
     #[tokio::test]
+    async fn a_late_consumer_whose_durable_frontier_covers_the_corpus_replays_nothing() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let rollouts = (0..21)
+            .map(|index| {
+                write_dated_rollout(home, ("2026", "08", "23"), &format!("covered-{index:03}"))
+            })
+            .collect::<Vec<_>>();
+        let settled = rollouts
+            .iter()
+            .all(|path| spin_until_jsonl_change_settled(path));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+
+        let previous_process = CodexDiscoveryHub::default();
+        previous_process.register("project", Some(home));
+        previous_process.register("profile", Some(home));
+        let (_, project_frontier) = drain_hub_consumer(
+            &previous_process,
+            "project",
+            &source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        let (_, profile_frontier) = drain_hub_consumer(
+            &previous_process,
+            "profile",
+            &source,
+            bounds,
+            CodexDiscoveryFrontier::initial(),
+        )
+        .await;
+        assert_eq!(project_frontier, profile_frontier);
+
+        let restarted = CodexDiscoveryHub::default();
+        restarted.register("project", Some(home));
+        let (project_paths, _) =
+            drain_hub_consumer(&restarted, "project", &source, bounds, project_frontier).await;
+        restarted.register("profile", Some(home));
+        let (profile_paths, profile_after_restart) =
+            drain_hub_consumer(&restarted, "profile", &source, bounds, profile_frontier).await;
+
+        if settled {
+            assert!(project_paths.is_empty());
+            assert!(
+                profile_paths.is_empty(),
+                "a consumer whose complete frontier matches the corpus epoch was re-offered {} \
+                 rollouts",
+                profile_paths.len()
+            );
+            assert_eq!(profile_after_restart, profile_frontier);
+        }
+
+        let added = write_dated_rollout(home, ("2026", "08", "24"), "after-restart");
+        let (grown, _) = drain_hub_consumer(
+            &restarted,
+            "profile",
+            &source,
+            bounds,
+            profile_after_restart,
+        )
+        .await;
+        assert!(grown.contains(&added));
+    }
+
+    #[tokio::test]
     async fn completed_secondary_source_rebuilds_after_add_and_delete() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
         let primary = TempDir::new().unwrap();
