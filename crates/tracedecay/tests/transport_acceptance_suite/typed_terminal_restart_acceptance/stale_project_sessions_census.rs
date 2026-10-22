@@ -352,14 +352,17 @@ fn census_opens_only_project_sessions_stores_with_a_stale_admission_stamp() {
     let doctor_project = projects[0].1.as_path();
     let stale_id = projects[1].2.as_str();
 
-    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    // The census observes persisted stores. Release each setup project's
+    // background owners before admitting the next one, so preparing the
+    // profile does not require all twenty indexing runtimes to stay resident.
     for (_, path, _) in &projects {
+        let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
         super::initialize_project(&home_path, path, "census-stamp");
         wait_for_code_index_hit(&home_path, path, "probe");
+        daemon
+            .kill_and_wait()
+            .expect("stop the daemon that wrote the project store");
     }
-    daemon
-        .kill_and_wait()
-        .expect("stop the daemon that wrote every store");
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     assert_eq!(
         doctor_store_resets(&home_path, doctor_project).1,
