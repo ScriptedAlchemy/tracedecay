@@ -217,6 +217,164 @@ async fn live_cancellation_before_effect_keeps_source_unchanged_and_is_durable()
 }
 
 #[tokio::test]
+async fn move_symbol_rollback_preserves_preexisting_empty_destination_ancestors_through_recovery_and_follow_up_edit() {
+    let project = tempdir().unwrap();
+    let source_directory = project.path().join("src/locked");
+    let destination_directory = project.path().join("reserved/empty-module");
+    fs::create_dir_all(&source_directory).unwrap();
+    fs::create_dir_all(&destination_directory).unwrap();
+    let original_source = b"pub fn moved() {}\n";
+    fs::write(source_directory.join("a.rs"), original_source).unwrap();
+    fs::write(project.path().join("src/lib.rs"), b"pub mod locked;\n").unwrap();
+    fs::write(source_directory.join("mod.rs"), b"pub mod a;\n").unwrap();
+    git(
+        project.path(),
+        &["init", "--quiet", "--initial-branch=main"],
+    );
+    git(project.path(), &["add", "src"]);
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+
+    let (graph, _) = fixture_graph(project.path()).await;
+    let code_graph = fixture_symbol_code_graph(
+        "src/locked/a.rs",
+        std::str::from_utf8(original_source).unwrap(),
+        "pub fn moved() {}",
+        "moved",
+        "locked::a::moved",
+    );
+    let edit = SourceEditRequest::MoveSymbol {
+        symbol: "moved".to_owned(),
+        dest_file: "reserved/empty-module/moved.rs".to_owned(),
+        dry_run: false,
+        update_references: false,
+    };
+    let mut request = fixture_request_for_edit(edit, "source-edit.move-empty-parent-recovery");
+    request.expected_state = preview_source_edit_expected_state(
+        &graph,
+        &code_graph,
+        &request.context,
+        request.observed_at,
+        request.edit.clone(),
+    )
+    .await
+    .unwrap();
+    let authorization = fixture_authorization(&request);
+    let operation = source_edit_operation(SourceEditKind::MoveSymbol).unwrap();
+
+    #[cfg(not(windows))]
+    let original_permissions = fs::metadata(&source_directory).unwrap().permissions();
+    #[cfg(not(windows))]
+    {
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        fs::set_permissions(&source_directory, read_only_permissions).unwrap();
+    }
+    #[cfg(windows)]
+    let held_source = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(source_directory.join("a.rs"))
+            .unwrap()
+    };
+    let execution = execute_source_edit(
+        &graph,
+        &code_graph,
+        &operation,
+        request.clone(),
+        &authorization,
+    )
+    .await;
+    #[cfg(not(windows))]
+    fs::set_permissions(&source_directory, original_permissions).unwrap();
+    #[cfg(windows)]
+    drop(held_source);
+    let interrupted = execution.unwrap();
+
+    assert_eq!(
+        interrupted.effect.as_ref().unwrap().receipt.outcome,
+        EffectTermination::EffectUnknown
+    );
+    assert_eq!(fs::read(source_directory.join("a.rs")).unwrap(), original_source);
+    assert!(!project.path().join("reserved/empty-module/moved.rs").exists());
+    assert!(destination_directory.is_dir());
+    assert!(project.path().join("reserved").is_dir());
+
+    let recovered = execute_source_edit(
+        &graph,
+        &code_graph,
+        &operation,
+        request,
+        &authorization,
+    )
+    .await
+    .unwrap();
+    assert!(recovered.replayed);
+    assert_eq!(
+        recovered.effect.as_ref().unwrap().receipt.outcome,
+        EffectTermination::Failed
+    );
+    assert_eq!(fs::read(source_directory.join("a.rs")).unwrap(), original_source);
+    assert!(!project.path().join("reserved/empty-module/moved.rs").exists());
+    assert!(destination_directory.is_dir());
+    assert!(project.path().join("reserved").is_dir());
+
+    let unrelated_edit = SourceEditRequest::StrReplace {
+        path: "src/lib.rs".to_owned(),
+        old_str: "pub mod locked;".to_owned(),
+        new_str: "pub mod locked;\npub mod reserved;".to_owned(),
+        dry_run: false,
+        verify: false,
+    };
+    let mut unrelated_request = fixture_request_for_edit(
+        unrelated_edit,
+        "source-edit.move-empty-parent-follow-up",
+    );
+    unrelated_request.expected_state = preview_source_edit_expected_state(
+        &graph,
+        &code_graph,
+        &unrelated_request.context,
+        unrelated_request.observed_at,
+        unrelated_request.edit.clone(),
+    )
+    .await
+    .unwrap();
+    let unrelated_authorization = fixture_authorization(&unrelated_request);
+    let unrelated_operation = source_edit_operation(SourceEditKind::StrReplace).unwrap();
+    let unrelated = execute_source_edit(
+        &graph,
+        &code_graph,
+        &unrelated_operation,
+        unrelated_request,
+        &unrelated_authorization,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        unrelated.effect.as_ref().unwrap().receipt.outcome,
+        EffectTermination::Completed
+    );
+    assert_eq!(
+        fs::read(project.path().join("src/lib.rs")).unwrap(),
+        b"pub mod locked;\npub mod reserved;\n"
+    );
+}
+
+#[tokio::test]
 async fn move_symbol_rollback_restores_exact_preimages_without_semantic_inverse_drift() {
     let project = tempdir().unwrap();
     fs::create_dir_all(project.path().join("src")).unwrap();
