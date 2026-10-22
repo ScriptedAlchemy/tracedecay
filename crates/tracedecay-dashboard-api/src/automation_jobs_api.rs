@@ -376,10 +376,9 @@ mod tests {
     #[tokio::test]
     async fn malformed_sibling_refuses_every_crud_write_without_reconcile() {
         for operation in ["create", "update", "delete"] {
-            let (_project, mut state) = crate::events_api::dashboard_state_fixture(
-                "project.dashboard-jobs-lossless-crud",
-            )
-            .await;
+            let (_project, mut state) =
+                crate::events_api::dashboard_state_fixture("project.dashboard-jobs-lossless-crud")
+                    .await;
             let reconciles = Arc::new(AtomicUsize::new(0));
             let reconcile_count = Arc::clone(&reconciles);
             state.automation_scheduler_reconciler = Some(Arc::new(move || {
@@ -415,10 +414,16 @@ mod tests {
             let (status, body) = result.expect_err("CRUD must refuse a partial stored list");
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{operation}");
             assert!(
-                !body["detail"].as_str().unwrap_or_default().contains("private-job-payload"),
+                !body["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("private-job-payload"),
                 "{operation} leaked stored data: {body:?}"
             );
-            assert_eq!(fs::read(&path).expect("stored document remains readable"), raw);
+            assert_eq!(
+                fs::read(&path).expect("stored document remains readable"),
+                raw
+            );
             assert_eq!(reconciles.load(Ordering::SeqCst), 0, "{operation}");
         }
     }

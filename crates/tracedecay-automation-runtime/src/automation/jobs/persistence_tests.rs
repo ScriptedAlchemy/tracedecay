@@ -21,7 +21,10 @@ async fn assert_load_refused(root: &std::path::Path, document: Value, context: &
     };
     assert!(message.contains(context), "{message}");
     assert!(!message.contains("private-job-payload"), "{message}");
-    assert_eq!(fs::read(jobs_path(root)).expect("document remains readable"), original);
+    assert_eq!(
+        fs::read(jobs_path(root)).expect("document remains readable"),
+        original
+    );
 }
 
 #[tokio::test]
@@ -58,9 +61,36 @@ async fn unsupported_and_incomplete_envelopes_are_not_current_empty_files() {
         (json!({"schema_version": 9, "jobs": []}), "schema_version"),
         (json!({"schema_version": 1}), "jobs"),
         (json!({"jobs": []}), "schema_version"),
+        (
+            json!({"schema_version": "private-job-payload", "jobs": []}),
+            "envelope",
+        ),
+        (json!({"schema_version": 1, "jobs": {}}), "envelope"),
+        (
+            json!({
+                "schema_version": 1,
+                "jobs": [],
+                "private-job-payload": "private-job-payload"
+            }),
+            "envelope",
+        ),
     ] {
         assert_load_refused(root.path(), document, context).await;
     }
+}
+
+#[tokio::test]
+async fn all_invalid_rows_are_not_reported_as_an_empty_configuration() {
+    let root = tempfile::tempdir().expect("temporary dashboard root");
+    assert_load_refused(
+        root.path(),
+        json!({
+            "schema_version": 1,
+            "jobs": [{"name":"missing id and prompt"}]
+        }),
+        "index 0",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -74,10 +104,10 @@ async fn malformed_delivery_refuses_the_whole_document() {
                 "id":"job-a",
                 "name":"A",
                 "prompt":"Do A",
-                "delivery":{"mode":"sms", "private":"private-job-payload"}
+                "delivery":{"mode":"private-job-payload", "url":"private-job-payload"}
             }]
         }),
-        "index 0",
+        "invalid delivery at index 0",
     )
     .await;
 }
@@ -99,7 +129,9 @@ async fn valid_job_extension_fields_survive_load_and_save() {
     )
     .await;
 
-    let jobs = load_jobs(root.path()).await.expect("valid current jobs load");
+    let jobs = load_jobs(root.path())
+        .await
+        .expect("valid current jobs load");
     assert_eq!(jobs.len(), 1);
     save_jobs(root.path(), &jobs)
         .await

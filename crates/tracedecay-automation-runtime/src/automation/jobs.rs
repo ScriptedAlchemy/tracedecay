@@ -107,10 +107,11 @@ struct AutomationJobsFile {
     jobs: Vec<AutomationJob>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AutomationJobsRawFile {
-    #[serde(default)]
-    jobs: Vec<Value>,
+    schema_version: Option<u32>,
+    jobs: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -195,22 +196,54 @@ pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     let read_path = path.clone();
     match crate::automation::blocking_fs(move || std::fs::read(read_path)).await {
         Ok(bytes) => {
-            let file = serde_json::from_slice::<AutomationJobsRawFile>(&bytes).map_err(|e| {
+            let file = serde_json::from_slice::<AutomationJobsRawFile>(&bytes).map_err(|_| {
                 TraceDecayError::Config {
-                    message: format!("failed to parse automation jobs '{}': {e}", path.display()),
+                    message: format!("invalid automation jobs envelope '{}'", path.display()),
                 }
             })?;
-            let mut loaded = Vec::with_capacity(file.jobs.len());
-            for (index, entry) in file.jobs.into_iter().enumerate() {
-                match serde_json::from_value::<AutomationJob>(entry) {
-                    Ok(job) => loaded.push(job),
-                    Err(error) => tracing::warn!(
-                        index,
-                        path = %path.display(),
-                        %error,
-                        "skipped corrupt automation job entry"
+            let schema_version = file.schema_version.ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "automation jobs envelope '{}' is missing schema_version",
+                    path.display()
+                ),
+            })?;
+            let jobs = file.jobs.ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "automation jobs envelope '{}' is missing jobs",
+                    path.display()
+                ),
+            })?;
+            if schema_version != JOBS_SCHEMA_VERSION {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "automation jobs envelope '{}' uses unsupported schema_version {}",
+                        path.display(),
+                        schema_version
                     ),
-                }
+                });
+            }
+            let mut loaded = Vec::with_capacity(jobs.len());
+            for (index, entry) in jobs.into_iter().enumerate() {
+                let delivery = entry.get("delivery").cloned();
+                let job = match serde_json::from_value::<AutomationJob>(entry) {
+                    Ok(job) => job,
+                    Err(_) => {
+                        let issue = if delivery.is_some_and(|delivery| {
+                            serde_json::from_value::<JobDelivery>(delivery).is_err()
+                        }) {
+                            "invalid delivery"
+                        } else {
+                            "invalid job"
+                        };
+                        return Err(TraceDecayError::Config {
+                            message: format!(
+                                "automation jobs envelope '{}' contains {issue} at index {index}",
+                                path.display()
+                            ),
+                        });
+                    }
+                };
+                loaded.push(job);
             }
             Ok(loaded)
         }
@@ -1056,6 +1089,10 @@ async fn run_pre_run_command(
     ))
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "jobs/persistence_tests.rs"]
+mod persistence_tests;
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[path = "jobs/pre_run_command_tests.rs"]
@@ -1064,10 +1101,6 @@ mod pre_run_command_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "jobs/scheduler_config_tests.rs"]
 mod scheduler_config_tests;
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-#[path = "jobs/persistence_tests.rs"]
-mod persistence_tests;
 #[path = "jobs/scheduler_gate.rs"]
 mod scheduler_gate;
 pub use scheduler_gate::evaluate_and_record_scheduler_skip;
