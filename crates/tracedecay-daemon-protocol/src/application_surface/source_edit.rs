@@ -300,6 +300,7 @@ pub(super) const fn source_edit_kind(
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+    use tracedecay_contracts::source_edit::SourceEditReconcileSurfaceRequestV1;
     use tracedecay_contracts::{
         SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
     };
@@ -396,7 +397,7 @@ mod tests {
                 observed_state: digest.clone(),
             },
         ] {
-            let request = tracedecay_contracts::SourceEditReconcileSurfaceRequestV1 {
+            let request = SourceEditReconcileSurfaceRequestV1 {
                 original_operation: UseCaseId::new("use-case.application.source-edit.str-replace")
                     .unwrap(),
                 effect_id: "effect.source-edit.retained".to_owned(),
@@ -407,7 +408,7 @@ mod tests {
                 disposition: disposition.clone(),
             };
             let value = serde_json::to_value(&request).unwrap();
-            let decoded: tracedecay_contracts::SourceEditReconcileSurfaceRequestV1 =
+            let decoded: SourceEditReconcileSurfaceRequestV1 =
                 serde_json::from_value(value.clone()).unwrap();
             assert_eq!(decoded, request);
             let ApplicationSurfaceRequest::SourceEditReconcile(parsed) =

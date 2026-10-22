@@ -489,6 +489,15 @@ fn safe_write_bytes_file_from_snapshot(
             super::host_config_io::test_pause_host_config_write(path);
             verify_host_file_snapshot(path, observed)
         },
+        |temporary, destination| {
+            if matches!(observed, HostFileSnapshot::Missing) {
+                tracedecay_private_fs::framed_log::rename_noreplace(temporary, destination)?;
+                super::host_config_io::note_created_file(destination);
+                Ok(())
+            } else {
+                tracedecay_private_fs::framed_log::replace_via_rename(temporary, destination)
+            }
+        },
         tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
     )
     .map_err(|error| TraceDecayError::Config {
@@ -497,9 +506,6 @@ fn safe_write_bytes_file_from_snapshot(
             path.display()
         ),
     })?;
-    if matches!(observed, HostFileSnapshot::Missing) {
-        super::host_config_io::note_created_file(path);
-    }
     #[cfg(feature = "test-transport")]
     super::host_config_io::test_abort_after_host_config_write(path);
     Ok(())

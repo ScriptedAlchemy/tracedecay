@@ -399,8 +399,7 @@ pub(super) fn plan_artifact_action(
 /// cannot prove. Observations derived from receipts or orphan paths never
 /// carry the cataloged marker, so they can never reach this branch, and a
 /// receipt-backed artifact keeps the unmodified marker equality check as the
-/// security boundary. Adoption itself never destroys anything: byte-identical
-/// files become `Noop`, everything else is backed up before it is replaced.
+/// security boundary.
 fn adopts_pre_receipt_artifact(
     operation: HostBundleLifecycleOpV1,
     artifact: &HostBundleArtifactV1,

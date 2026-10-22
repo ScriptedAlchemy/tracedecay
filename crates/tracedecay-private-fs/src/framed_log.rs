@@ -641,6 +641,7 @@ pub fn atomic_write_prepared(
     kind: &str,
     bytes: &[u8],
     prepare: impl FnOnce(&Path) -> io::Result<()>,
+    publish: impl FnOnce(&Path, &Path) -> io::Result<()>,
     directory_policy: DirectorySyncPolicy,
 ) -> io::Result<()> {
     validate_regular_or_missing(destination)?;
@@ -654,7 +655,7 @@ pub fn atomic_write_prepared(
         // applied destination permissions that prevent a writable reopen.
         sync_owned_file(&temporary, &output)?;
         drop(output);
-        replace_via_rename(&temporary, destination)?;
+        publish(&temporary, destination)?;
         sync_parent_directory(destination, directory_policy)
     })();
     if result.is_err() {
@@ -736,7 +737,7 @@ mod tests {
 
     use super::{
         DIRECTORY_SYNC_CALLS, DirectorySyncPolicy, append_durable, atomic_write_accelerator,
-        atomic_write_prepared,
+        atomic_write_prepared, rename_noreplace, replace_via_rename,
     };
 
     #[test]
@@ -798,6 +799,25 @@ mod tests {
     }
 
     #[test]
+    fn prepared_creation_preserves_a_destination_created_before_publication() {
+        let root = tempfile::tempdir().expect("publish fixture root");
+        let destination = root.path().join("config.json");
+        let error = atomic_write_prepared(
+            &destination,
+            "fixture",
+            b"replacement",
+            |_| fs::write(&destination, b"foreign"),
+            rename_noreplace,
+            DirectorySyncPolicy::TolerateUnsupported,
+        )
+        .expect_err("foreign destination must survive");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&destination).unwrap(), b"foreign");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn a_prepared_publish_survives_a_staging_file_that_denies_writes() {
         let root = tempfile::tempdir().expect("publish fixture root");
         let destination = root.path().join("config.json");
@@ -810,6 +830,7 @@ mod tests {
                 deny_writes(temporary);
                 Ok(())
             },
+            replace_via_rename,
             DirectorySyncPolicy::TolerateUnsupported,
         )
         .expect("prepared publish over a write-denied staging file");

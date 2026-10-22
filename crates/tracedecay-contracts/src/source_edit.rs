@@ -690,11 +690,11 @@ mod tests {
         let contribution = source_edit_catalog_contribution().unwrap();
         assert_eq!(
             contribution.capabilities().len(),
-            SOURCE_EDIT_KINDS.len() + 2
+            SOURCE_EDIT_KINDS.len() + 1
         );
         assert_eq!(
             contribution.bindings().len(),
-            (SOURCE_EDIT_KINDS.len() + 2) * SOURCE_EDIT_SURFACES.len()
+            (SOURCE_EDIT_KINDS.len() + 1) * SOURCE_EDIT_SURFACES.len()
         );
         for capability in contribution.capabilities() {
             assert!(
