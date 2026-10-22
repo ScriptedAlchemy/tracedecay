@@ -274,6 +274,8 @@ pub enum SessionStoreError {
     },
     #[error("session temporal idempotency conflict in {context}")]
     IdempotencyConflict { context: &'static str },
+    #[error("refresh candidate was superseded by a requested session reset")]
+    RefreshSupersededByReset,
     #[error("invalid session temporal state transition in {context}")]
     InvalidStateTransition { context: &'static str },
     #[error("session temporal capability {capability:?} is unsupported")]

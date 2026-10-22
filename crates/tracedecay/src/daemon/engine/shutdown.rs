@@ -288,7 +288,7 @@ impl DaemonEngine {
         deadline: std::time::Instant,
     ) -> ShutdownTaskReceipt {
         shutdown_project_servers(
-            tokio::time::Instant::from_std(deadline),
+            deadline,
             &self.store_administration,
             &self.http_application_registry,
         )
