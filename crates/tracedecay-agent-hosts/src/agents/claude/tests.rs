@@ -24,8 +24,8 @@ fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
     let cache = claude_current_cached_plugin_root(home);
     for (relative, _) in rendered_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap() {
         let target = cache.join(relative);
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::copy(source.join(relative), target).unwrap();
+        let contents = std::fs::read_to_string(source.join(relative)).unwrap();
+        safe_write_text_file(&target, &contents).unwrap();
     }
 }
 
