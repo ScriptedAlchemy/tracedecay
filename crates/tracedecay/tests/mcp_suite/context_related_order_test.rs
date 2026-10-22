@@ -80,4 +80,7 @@ async fn context_ranks_related_symbols_before_the_cut_and_reports_the_omission()
         json!({"state": "ran", "budget": 3, "admitted": 3, "truncated": true}),
         "{payload}"
     );
+
+    drop(server);
+    production.shutdown().await;
 }

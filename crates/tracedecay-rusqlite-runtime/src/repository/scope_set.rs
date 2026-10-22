@@ -168,6 +168,21 @@ impl AuthorizedScopeSetSqliteStorage {
         decode_registered_rows(rows.rows)
     }
 
+    /// Await reader admission and the query without parking a runtime worker.
+    pub async fn read_async(
+        &self,
+        scope_set_id: &ScopeSetId,
+    ) -> Result<Option<AuthorizedScopeSet>, AuthorizedScopeSetStoreError> {
+        let rows = self
+            .handle()
+            .query_async(
+                registered_read_statement(scope_set_id)?,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+        decode_registered_rows(rows.rows)
+    }
+
     pub fn compare_and_swap(
         &self,
         expected_revision: Option<ScopeSetRevision>,
