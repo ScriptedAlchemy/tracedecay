@@ -102,8 +102,8 @@ async fn authoritative_summary_journey_owns_the_message_corpus_once() {
 
     let mut request = daemon_summary_request("claude", session_id);
     request.messages = (0..CORPUS_MESSAGES).map(corpus_message).collect();
-    request.leaf_chunk_tokens = Some(1);
-    request.fresh_tail_count = Some(1);
+    request.overrides.leaf_chunk_tokens = Some(1);
+    request.overrides.fresh_tail_count = Some(1);
     for message in &request.messages {
         assert_eq!(
             message["content"].as_str().map(str::len),

@@ -21,27 +21,24 @@ pub enum CompressionSummarizerAdapter {
 
 impl CompressionSummarizerAdapter {
     pub fn from_mode(mode: LcmSummarizerMode) -> Self {
+        let has_nonempty_provided_summary = mode.has_nonempty_provided_summary();
         match mode {
             LcmSummarizerMode::Noop => Self::Noop,
             LcmSummarizerMode::HermesAuxiliary => Self::HermesAuxiliary,
-            LcmSummarizerMode::Fake { summary_text } => {
-                Self::Persisted(PersistedSummaryInvocation {
-                    summary_text,
-                    route: None,
-                    extraction_result: None,
-                })
-            }
             LcmSummarizerMode::Provided {
                 summary_text,
                 route,
+                extraction_result,
             } => {
-                if summary_text.trim().is_empty() {
+                if !has_nonempty_provided_summary {
                     return Self::HermesAuxiliary;
                 }
-                let (route, extraction_result) = extraction::split_summary_route(route.as_deref());
                 Self::Persisted(PersistedSummaryInvocation {
                     summary_text,
-                    route,
+                    route: route
+                        .as_deref()
+                        .and_then(extraction::non_empty)
+                        .map(str::to_string),
                     extraction_result,
                 })
             }
@@ -150,21 +147,23 @@ mod tests {
     }
 
     #[test]
-    fn provided_mode_selects_persisted_summary_and_splits_route_envelope() {
-        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
+    fn provided_mode_preserves_typed_route_and_extraction() {
+        let mode = LcmSummarizerMode::Provided {
             summary_text: "provided summary".into(),
-            route: Some(
-                json!({
-                    "route": "backup",
-                    "pre_compaction_extraction": {
-                        "status": "ok",
-                        "items": ["Decision: keep nightly backups"],
-                        "model": "openai/gpt-5.4-mini"
-                    }
-                })
-                .to_string(),
-            ),
-        });
+            route: Some(" backup {🧭} ".into()),
+            extraction_result: Some(LcmExtractionResult {
+                status: "ok".into(),
+                items: vec!["Decision: keep nightly backups".into()],
+                text: None,
+                model: Some("openai/gpt-5.4-mini".into()),
+                output_path: None,
+                error: None,
+            }),
+        };
+        let encoded = serde_json::to_value(&mode).expect("provided mode should serialize");
+        let mode: LcmSummarizerMode =
+            serde_json::from_value(encoded).expect("provided mode should deserialize");
+        let adapter = CompressionSummarizerAdapter::from_mode(mode);
 
         assert_eq!(
             adapter
@@ -172,7 +171,7 @@ mod tests {
                 .expect("provided mode should persist a summary"),
             &PersistedSummaryInvocation {
                 summary_text: "provided summary".into(),
-                route: Some("backup".into()),
+                route: Some("backup {🧭}".into()),
                 extraction_result: Some(LcmExtractionResult {
                     status: "ok".into(),
                     items: vec!["Decision: keep nightly backups".into()],
@@ -190,6 +189,7 @@ mod tests {
         let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: " \n ".into(),
             route: Some("obsolete_empty_route".into()),
+            extraction_result: None,
         });
 
         assert!(adapter.persisted_summary_invocation().is_none());
@@ -205,6 +205,50 @@ mod tests {
         assert_eq!(request.session_id, "session-1");
         assert_eq!(request.source_range.from_store_id, 11);
         assert_eq!(request.source_range.to_store_id, 11);
+    }
+
+    #[test]
+    fn provided_routes_are_trimmed_opaque_text() {
+        let persisted_route = |route: Option<&str>| {
+            CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
+                summary_text: "summary".into(),
+                route: route.map(str::to_string),
+                extraction_result: None,
+            })
+            .persisted_summary_invocation()
+            .expect("nonempty provided summary should persist")
+            .route
+            .clone()
+        };
+
+        assert_eq!(persisted_route(None), None);
+        assert_eq!(persisted_route(Some(" \t ")), None);
+        assert_eq!(
+            persisted_route(Some(" route {with braces} and 雪 ")),
+            Some("route {with braces} and 雪".to_string())
+        );
+        let json_text = r#"{"route":"backup","pre_compaction_extraction":{"status":"ok"}}"#;
+        assert_eq!(
+            persisted_route(Some(json_text)),
+            Some(json_text.to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_extraction_input_is_rejected_at_deserialization() {
+        let malformed = json!({
+            "mode": "provided",
+            "summary_text": "summary",
+            "route": "{\"route\":\"not parsed\"}",
+            "extraction_result": {"status": "ok", "items": "not a list"}
+        });
+        assert!(serde_json::from_value::<LcmSummarizerMode>(malformed).is_err());
+    }
+
+    #[test]
+    fn retired_fake_mode_is_rejected_at_deserialization() {
+        let fake = json!({"mode": "fake", "summary_text": "canned summary"});
+        assert!(serde_json::from_value::<LcmSummarizerMode>(fake).is_err());
     }
 
     #[test]
