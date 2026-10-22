@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
+      id-token: write
       actions: write
       contents: write
       issues: write
@@ -149,6 +150,10 @@ jobs:
         if: steps.release.outputs.prs_created == 'true'
         with:
           cache-key: release-metadata-ubuntu-latest
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Update release PR generated metadata
         if: steps.release.outputs.prs_created == 'true'

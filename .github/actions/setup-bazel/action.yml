@@ -22,7 +22,7 @@ inputs:
     description: Whether this setup may save Bazelisk and repository caches.
     default: "true"
   tailscale-client-id:
-    description: OIDC client for trusted Linux CI; empty keeps the hosted-only build.
+    description: OIDC client for trusted Linux/macOS CI; empty keeps the hosted-only build.
     default: ""
 
 outputs:
@@ -112,15 +112,21 @@ runs:
       if: inputs.tailscale-client-id != ''
       shell: bash
       run: |
-        if [[ $RUNNER_OS != Linux || $RUNNER_ARCH != X64 ]]; then
-          echo 'The CI fleet configuration requires a Linux x86_64 runner.' >&2
-          exit 1
-        fi
-        mkdir -p /tmp/zig-cache
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64)
+            profile=rbe-linux
+            mkdir -p /tmp/zig-cache
+            ;;
+          macOS/ARM64) profile=rbe-macos ;;
+          *)
+            echo "No compatible fleet worker for $RUNNER_OS/$RUNNER_ARCH" >&2
+            exit 1
+            ;;
+        esac
         # Use the checkout's existing local rc import for fleet settings.
         # Tests carry their tools in runfiles, so both branches use identical inputs.
-        cat > .bazelrc.local <<'RC'
-        build --config=rbe-linux
+        printf 'build --config=%s\n' "$profile" > .bazelrc.local
+        cat >> .bazelrc.local <<'RC'
         build --remote_executor=grpc://ubuntu-main:50051
         build --remote_cache=grpc://ubuntu-main:50051
         build --remote_instance_name=main
