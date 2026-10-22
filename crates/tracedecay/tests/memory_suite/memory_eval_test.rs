@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -133,47 +132,16 @@ fn load_scenario(id: &str) -> Scenario {
     scenario
 }
 
-/// Drains one child pipe on its own thread so a child blocked on a full pipe
-/// cannot be mistaken for a hang (see the same harness in the CLI suite).
-fn drain_pipe<R: std::io::Read + Send + 'static>(mut pipe: R) -> JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        pipe.read_to_end(&mut buf)
-            .unwrap_or_else(|error| panic!("failed to drain child pipe: {error}"));
-        buf
-    })
-}
-
 fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
-    let mut child = command
+    let child = command
         .spawn()
         .unwrap_or_else(|error| panic!("failed to spawn tracedecay: {error}"));
-    let stdout = child.stdout.take().map(drain_pipe);
-    let stderr = child.stderr.take().map(drain_pipe);
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .unwrap_or_else(|error| panic!("failed to poll tracedecay: {error}"))
-        {
-            let join = |handle: Option<JoinHandle<Vec<u8>>>| {
-                handle.map_or_default(|handle| {
-                    handle.join().expect("child pipe drain thread panicked")
-                })
-            };
-            return Output {
-                status,
-                stdout: join(stdout),
-                stderr: join(stderr),
-            };
-        }
-        assert!(
-            started.elapsed() < timeout,
-            "tracedecay hung after {:?}",
-            started.elapsed()
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // Arm the canonical owner before starting either pipe reader. A thread
+    // admission panic or wait failure must reap the command before its
+    // fixture is removed.
+    common::TestChildProcess::new(child)
+        .wait_with_output(timeout)
+        .unwrap_or_else(|error| panic!("failed to collect tracedecay output: {error}"))
 }
 
 fn run_ok(fixture: &Fixture, args: &[&str]) -> Output {
@@ -774,6 +742,9 @@ fn run_scenario(id: &str) {
         "[{id}] well-behaved phase failed:\n{}",
         format_outcomes(&outcomes)
     );
+    // The violation uses an independent store; retire this daemon before
+    // starting the next one instead of retaining both until the test ends.
+    drop(fixture);
 
     let Some(violation) = &scenario.deterministic.violation else {
         return;
