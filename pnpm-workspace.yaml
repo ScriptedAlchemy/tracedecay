@@ -3,24 +3,6 @@ packages:
   - sdks/typescript
   - plugin/cursor-native-extension
   - plugin/chatgpt-extension
-  # pnpm's Cargo inventory walks every directory not pruned by a negated
-  # pattern and treats each Cargo.toml it finds as a workspace to install.
-  # Test fixtures, eval corpora, mockups, vendored crates, and local git
-  # worktrees are not install targets. Worktree checkouts
-  # (`.worktrees`, `.codex-worktrees`, `.claude-worktrees`, and
-  # `.claude/worktrees`) sit inside the repo and carry their own Cargo.toml.
-  - "!crates/*/fixtures/**"
-  - "!crates/*/tests/fixtures/**"
-  - "!benchmark_data/**/fixtures/**"
-  - "!evals/**"
-  - "!mockups/**"
-  - "!tests/fixtures/**"
-  - "!vendor/**"
-  - "!patches/**"
-  - "!.worktrees/**"
-  - "!.codex-worktrees/**"
-  - "!.claude-worktrees/**"
-  - "!.claude/worktrees/**"
 
 onlyBuiltDependencies:
   - esbuild
@@ -35,18 +17,7 @@ overrides:
 
 minimumReleaseAge: 0
 
-# `pnpm run` refuses to execute against npm packages that no longer match
-# pnpm-lock.yaml. It does not check Cargo.lock. The CLI build script relies on
-# this instead of installing from inside a Cargo build, which would rewrite
-# the Cargo sources it compiles.
 verifyDepsBeforeRun: error
-
-# Installs the root Cargo workspace sources into `.pnpm/crates`, writes their
-# source replacement to `.pnpm/crates/config.toml` (included from
-# `.cargo/config.toml`), and links the rust-toolchain.toml toolchain into
-# `.pnpm/rust`.
-cargo:
-  enabled: true
 
 # Use the manifest chunk's ESM exports: Bazel may resolve its shared runtime
 # through a different symlink path than the importing Rsbuild module.

@@ -118,21 +118,8 @@ fn dashboard_content_type(relative: &str) -> &'static str {
     }
 }
 
-/// Prepares and embeds the dashboard bundle.
-///
-/// Checkout mode embeds an immutable, digest-named copy under `OUT_DIR`, never
-/// the checkout-global `dashboard/app-dist` that `rsbuild dev` and other
-/// target directories rewrite. The frontend is rebuilt, straight into the
-/// store's staging directory, only when the fingerprint of its inputs
-/// differs from the recorded one. This script never installs dependencies.
-/// `pnpm install` owns them, together with the Cargo sources this build
-/// compiles, and `pnpm run` (`verifyDepsBeforeRun: error`) refuses to build
-/// against a `node_modules` tree that no longer matches `pnpm-lock.yaml`. When
-/// `TRACEDECAY_SKIP_DASHBOARD_BUILD` is set the prebuilt `dashboard/app-dist`
-/// is staged instead and must match the digest
-/// `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` names, so a skip can never embed
-/// unproven bytes. A missing or invalid bundle always fails the build;
-/// there is no empty-assets fallback.
+// Immutable bundles keep concurrent checkout builds from embedding each other's
+// output. A prebuilt bundle must match the supplied digest.
 fn embed_dashboard(
     manifest_dir: &Path,
     out_dir: &Path,

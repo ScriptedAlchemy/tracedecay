@@ -120,13 +120,3 @@ test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpe
 # acceptance suites, …) under the same cargo profile, with the
 # default nextest policy (no retries).
 test-all = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"
-
-# `pnpm install` writes the block below and generates the included file from
-# Cargo.lock: the source replacement for the sources it vendors under
-# `.pnpm/crates` (see `cargo` in pnpm-workspace.yaml). Do not edit it by hand;
-# rerun `pnpm install` when Cargo.lock changes.
-# >>> pnpm-managed cargo sources >>>
-[[include]]
-path = "../.pnpm/crates/config.toml"
-optional = true
-# <<< pnpm-managed cargo sources <<<

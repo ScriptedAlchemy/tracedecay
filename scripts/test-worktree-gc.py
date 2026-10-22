@@ -252,18 +252,18 @@ class WorktreeGcTest(unittest.TestCase):
         )
         lane = fx.lane("pnpm")
         fx.write(lane, "src.txt", "uncommitted edit\n")
-        store = fx.tmp / "pnpm-store/crates-io/serde-1.0.0"
-        fx.write(store.parent.parent, "crates-io/serde-1.0.0/Cargo.toml", "[package]\n")
+        store = fx.tmp / "pnpm-store/react"
+        fx.write(store, "package.json", '{"name":"react"}\n')
         fx.write(lane, "dashboard/node_modules/react/index.js", "module.exports = 1;\n")
-        (lane / ".pnpm/crates/crates-io").mkdir(parents=True)
-        (lane / ".pnpm/crates/crates-io/serde-1.0.0").symlink_to(store)
+        (lane / ".pnpm/react/node_modules").mkdir(parents=True)
+        (lane / ".pnpm/react/node_modules/react").symlink_to(store)
         fx.backdate(lane)
 
         proc = fx.gc("--delete", "--reclaim-builds", "--idle-hours", "1", "--stale-age-hours", "1")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertFalse((lane / "dashboard/node_modules").exists())
         self.assertFalse((lane / ".pnpm").exists())
-        self.assertEqual((store / "Cargo.toml").read_text(), "[package]\n")
+        self.assertEqual((store / "package.json").read_text(), '{"name":"react"}\n')
         self.assertIn(" reclaimed=2 ", proc.stdout)
 
     def test_active_lane_is_untouched_while_idle_twin_is_collected(self) -> None:
