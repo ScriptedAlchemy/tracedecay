@@ -12,10 +12,31 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_sessions::ProviderPassUnits;
 use tracedecay_sessions::observation::ObservationCancellation;
 
 pub type SessionHistoricalIngestPass<'a> =
-    Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = SessionHistoricalPass> + Send + 'a>>;
+
+/// One historical pass: its scheduling outcome and the unit dispositions of
+/// each provider it admitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionHistoricalPass {
+    pub outcome: SessionHistoricalIngestOutcome,
+    /// Committed ingest progress, including the pass that finishes the backlog.
+    pub made_progress: bool,
+    pub provider_units: BTreeMap<&'static str, ProviderPassUnits>,
+}
+
+impl From<SessionHistoricalIngestOutcome> for SessionHistoricalPass {
+    fn from(outcome: SessionHistoricalIngestOutcome) -> Self {
+        Self {
+            made_progress: outcome.made_progress(),
+            outcome,
+            provider_units: BTreeMap::new(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionHistoricalIngestOutcome {
@@ -185,7 +206,7 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
                 pass,
             )
             .await;
-            classify_transcript_ingest_outcome(outcome, &self.cancellation)
+            historical_pass(outcome, &self.cancellation)
         })
     }
 
@@ -309,7 +330,7 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
                 pass,
             )
             .await;
-            classify_transcript_ingest_outcome(outcome, &self.cancellation)
+            historical_pass(outcome, &self.cancellation)
         })
     }
 
@@ -328,6 +349,19 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
 impl Drop for ProfileSessionHistoricalIngestor {
     fn drop(&mut self) {
         self.deregister_codex_once();
+    }
+}
+
+fn historical_pass(
+    mut outcome: tracedecay_sessions::runtime::TranscriptIngestOutcome,
+    cancellation: &ObservationCancellation,
+) -> SessionHistoricalPass {
+    let made_progress = outcome.made_progress();
+    let provider_units = std::mem::take(&mut outcome.provider_units);
+    SessionHistoricalPass {
+        outcome: classify_transcript_ingest_outcome(outcome, cancellation),
+        made_progress,
+        provider_units,
     }
 }
 
@@ -399,11 +433,44 @@ fn pass_reason_code(
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionHistoricalIngestOutcome, classify_transcript_ingest_outcome};
+    use std::sync::Arc;
+
+    use super::{
+        SessionHistoricalIngestOutcome, classify_transcript_ingest_outcome, historical_pass,
+    };
+    use crate::session_temporal_refresh_scheduler::wake::SessionTemporalRefreshWakeState;
     use tracedecay_sessions::observation::ObservationCancellation;
     use tracedecay_sessions::runtime::{
         IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestOutcome,
     };
+    use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
+
+    #[test]
+    fn completed_history_records_committed_progress_but_idle_passes_do_not() {
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        let cancellation = ObservationCancellation::default();
+        let mut ingested = ingest_outcome_with_failures(Vec::new());
+        ingested.stats.messages_upserted = 2;
+        let completed = historical_pass(ingested, &cancellation);
+        assert_eq!(completed.outcome, SessionHistoricalIngestOutcome::Complete);
+        state.record_history_pass(&completed);
+
+        let progress = state.handle().serving_status().history.unwrap();
+        assert_eq!(progress.passes, 1);
+        assert!(
+            progress.last_progress_at_unix_micros.is_some(),
+            "a backlog imported in one pass must report when it last advanced"
+        );
+
+        let idle = historical_pass(ingest_outcome_with_failures(Vec::new()), &cancellation);
+        state.record_history_pass(&idle);
+        let after_idle = state.handle().serving_status().history.unwrap();
+        assert_eq!(after_idle.passes, 2);
+        assert_eq!(
+            after_idle.last_progress_at_unix_micros, progress.last_progress_at_unix_micros,
+            "an unchanged scan must not fabricate a new progress time"
+        );
+    }
 
     fn ingest_outcome_with_failure(
         reason_code: &'static str,
@@ -421,6 +488,7 @@ mod tests {
             coverage: IngestPassCoverage::Complete,
             scheduling_state_written: false,
             coverage_advanced: false,
+            provider_units: std::collections::BTreeMap::new(),
         }
     }
 
@@ -480,6 +548,7 @@ mod tests {
                 coverage: IngestPassCoverage::Complete,
                 scheduling_state_written: false,
                 coverage_advanced: false,
+                provider_units: std::collections::BTreeMap::new(),
             },
             &ObservationCancellation::default(),
         );
@@ -506,6 +575,7 @@ mod tests {
             coverage: IngestPassCoverage::Complete,
             scheduling_state_written: false,
             coverage_advanced: false,
+            provider_units: std::collections::BTreeMap::new(),
         }
     }
 

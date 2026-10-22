@@ -216,6 +216,7 @@ jobs:
           python3 scripts/test-package-release-archive.py
           python3 scripts/test-plan-release-recovery.py
           python3 scripts/test-check-release-artifacts.py
+          python3 scripts/test-generate-release-inventory.py
           python3 scripts/test-update-release-checksums.py
           python3 scripts/test-neutralize-release-pr-closing-keywords.py
           bash tests/macos_stable_codesign_test.sh
