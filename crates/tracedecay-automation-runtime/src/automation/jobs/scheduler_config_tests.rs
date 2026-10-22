@@ -1,5 +1,6 @@
 use serde_json::json;
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::{
     AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery, job_schedule_decision,
@@ -16,14 +17,20 @@ use crate::automation::run_ledger::{
 async fn corrupt_jobs_file_surfaces_error_instead_of_no_work() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
-    std::fs::write(jobs_path(root), b"{ this is not valid json").unwrap();
+    let path = jobs_path(root);
+    let original = b"{ this is not valid json";
+    std::fs::write(&path, original).unwrap();
     let err = jobs_configured_for_scheduler(root)
         .await
         .expect_err("corrupt jobs file must surface an error");
-    assert!(
-        err.to_string().contains("failed to parse automation jobs"),
-        "error should carry the parse cause: {err}"
+    let TraceDecayError::Config { message } = err else {
+        panic!("corrupt jobs must fail as a typed configuration error");
+    };
+    assert_eq!(
+        message,
+        format!("invalid automation jobs envelope '{}'", path.display())
     );
+    assert_eq!(std::fs::read(path).unwrap(), original);
 }
 
 #[tokio::test]
