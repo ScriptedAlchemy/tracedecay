@@ -60,17 +60,7 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: Default::default(),
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
