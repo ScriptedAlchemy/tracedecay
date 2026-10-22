@@ -12,6 +12,7 @@ Run: evals/agent_adoption/selftest.py   (exit 0 = all pass)
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -125,6 +127,8 @@ def test_channels():
     # unprompted: bare condition, adoption with nothing to credit.
     tr = transcript([claude_tool(TD, {}), claude_result("done")])
     check("channel: unprompted under bare", grade.attribute_channel(tr, "bare") == grade.CH_UNPROMPTED)
+    check("channel: native run has no TraceDecay adoption",
+          grade.attribute_channel(transcript([claude_result("done")]), "native") == grade.CH_NONE)
 
     # CLI-only: the plugin has agents/skills but no MCP registration. A Bash
     # call to the TraceDecay CLI is still adoption and must retain tool identity.
@@ -383,6 +387,14 @@ def test_end_to_end():
         os.makedirs(rdir)
         with open(os.path.join(sdir, "explore_reserve_stock.json"), "w") as f:
             json.dump(scn, f)
+        with open(os.path.join(rdir, "meta.json"), "w") as f:
+            json.dump({
+                "git_sha": "source-revision",
+                "binary_sha256": "artifact-digest",
+                "binary_version": "tracedecay test",
+                "fixture_sha256": "fixture-digest",
+                "fixture_setup_elapsed_ms": 1250,
+            }, f)
 
         # full condition, steering-driven, correct answer.
         answer = "The reserve_stock function decrements on-hand stock."
@@ -430,8 +442,17 @@ def test_end_to_end():
         agg = sb["aggregate"]["claude"]
         check("e2e: adoption_rate 1.0", agg["adoption_rate"] == 1.0)
         check("e2e: per-condition present", set(agg["conditions"]) == {"full", "bare"})
+        check("e2e: no native baseline is reported as missing",
+              all(cell["comparison_to_native"]["status"] == "missing_native_baseline"
+                  for cell in sb["effectiveness"].values()))
+        check("e2e: artifact and one-time setup identity preserved",
+              sb["meta"]["binary_sha256"] == "artifact-digest"
+              and sb["meta"]["fixture_setup_elapsed_ms"] == 1250)
         report = open(os.path.join(rdir, "report.md")).read()
         check("e2e: report has channel table", "Channel efficacy" in report)
+        check("e2e: report includes effectiveness and unknown setup attribution",
+              "Matched task effectiveness and observed cost" in report
+              and "1250 ms" in report)
         check("e2e: run meta hint setting reaches the scoreboard",
               by_cond["bare"].get("repeated_query_hints") == "on"
               and by_cond["full"].get("repeated_query_hints") == "off")
@@ -667,6 +688,262 @@ def test_cost_and_corrections():
           (d["tool_errors"], d["repeated_calls"], d["corrections"]) == (1, 1, 2), str(d))
     check("corrections: review words counted", d["review_words"] == 3)
     check("cost: scored result carries cost", scored["cost"] == tr.cost)
+
+
+def test_product_effectiveness_comparisons():
+    scenario = {
+        "id": "baseline_sample",
+        "category": "product_effectiveness",
+        "outcome": answer_outcome("correct"),
+    }
+
+    def scored(condition, answer, usage, elapsed):
+        event = {"type": "result", "result": answer}
+        if usage is not None:
+            event["usage"] = usage
+        return grade.score_scenario(
+            scenario,
+            transcript([json.dumps(event)]),
+            {},
+            {
+                "model": "sonnet",
+                "channel_condition": condition,
+                "duration_ms": elapsed,
+                "repeated_query_hints": "off",
+            },
+        )
+
+    rows = [
+        scored("native", "correct answer", {
+            "input_tokens": 100, "output_tokens": 20,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        }, 1000),
+        scored("native", "wrong answer", {
+            "input_tokens": 120, "output_tokens": 30,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        }, 1100),
+        scored("bare", "correct answer", None, 900),
+        scored("full", "correct answer", {"input_tokens": 80, "output_tokens": 10}, 800),
+    ]
+    for row in rows:
+        row["tool_success"] = {"attempted": 0, "failed": 0}
+    invalid = [{
+        "id": "baseline_sample",
+        "host": "claude",
+        "model": "sonnet",
+        "condition": "native",
+        "repeated_query_hints": "off",
+        "runner_elapsed_ms": 1200,
+        "outcome_kind": "answer",
+    }]
+    cells = grade.effectiveness_comparisons(rows, invalid)
+    native = cells["baseline_sample / claude/sonnet / native / hints-off"]
+    bare = cells["baseline_sample / claude/sonnet / bare / hints-off"]
+    full = cells["baseline_sample / claude/sonnet / full / hints-off"]
+    check("effectiveness: task success is grouped independently of adoption",
+          native["correctness"]["pass_rate"] == 0.5 and native["correctness"]["wilson_95"] is not None)
+    check("effectiveness: condition effect is compared on the same task/model",
+          full["comparison_to_native"]["success_rate_delta"] == round(2 / 3, 4)
+          and bare["comparison_to_native"]["success_rate_delta"] == round(2 / 3, 4))
+    check("effectiveness: invalid launches count as unsuccessful attempts",
+          native["task_success"]["attempts"] == 3
+          and native["task_success"]["invalid_runs"] == 1
+          and native["task_success"]["pass_rate"] == round(1 / 3, 4))
+    check("effectiveness: missing usage remains unknown",
+          bare["observed"]["total_tokens"]["unknown"] == 1
+          and bare["observed"]["total_tokens"]["mean"] is None)
+    check("effectiveness: repeated-run variability is reported",
+          native["observed"]["elapsed_ms"]["range"] == [1000, 1200]
+          and native["observed"]["prompt_tokens"]["range"] == [100, 120])
+    check("effectiveness: cache usage remains separately observable",
+          native["observed"]["cache_read_tokens"]["unknown"] == 1
+          and native["observed"]["cache_creation_tokens"]["unknown"] == 1
+          and grade._prompt_tokens({"input_tokens": 100}, "claude") is None
+          and grade._prompt_tokens(
+              {"input_tokens": 1000, "cache_read_input_tokens": 800}, "codex"
+          ) == 1000)
+    ungraded_scenario = {
+        "id": "baseline_ungraded",
+        "category": "product_effectiveness",
+        "outcome": {"kind": "ungraded", "reason": "no independent checker"},
+    }
+    ungraded = grade.score_scenario(
+        ungraded_scenario,
+        transcript([claude_result("an answer")]),
+        {},
+        {"channel_condition": "native"},
+    )
+    ungraded["tool_success"] = {"attempted": 0, "failed": 0}
+    ungraded_cell = grade.effectiveness_comparisons([ungraded])[
+        "baseline_ungraded / claude / native / hints-off"
+    ]
+    check("effectiveness: ungraded outcomes remain unknown, not failures",
+          ungraded_cell["task_success"]["pass_rate"] is None
+          and ungraded_cell["task_success"]["unknown_outcomes"] == 1)
+
+    with tempfile.TemporaryDirectory() as work:
+        path = Path(work) / "scorecard.json"
+        path.write_text(json.dumps({
+            "schema": "tracedecay.efficiency-scorecard/v1",
+            "binary": {"sha256": "abc", "version": "tracedecay 1"},
+            "source": {"git_commit": "commit"},
+            "fixture": {"tree_sha256": "fixture"},
+            "verdict": "ok",
+            "runs": [{"status": "ok"}, {"status": "ok"}],
+            "median": {
+                "cold_index.wall_seconds": 12.5,
+                "baseline_restart.spawn_to_current_seconds": 1.25,
+                "daemon_restart.spawn_to_current_seconds": 2.5,
+                "incremental_sync.store.generation_physical_growth_bytes": 4096,
+                "rss.peak_bytes.cold_index": 1048576,
+                "tool_calls.search.p95_ms": 42.75,
+            },
+        }))
+        attached = grade.load_efficiency_scorecard(str(path), {"binary_sha256": "abc"})
+        check("effectiveness: cold-index baseline requires matching artifact identity",
+              attached["median"]["cold_index.wall_seconds"] == 12.5
+              and attached["runs"] == 2)
+        check("effectiveness: scorecard join retains restart, storage, RSS, and tool costs",
+              attached["median"] == json.loads(path.read_text())["median"])
+        resource_report = grade.render_report({
+            "results": [], "aggregate": {},
+            "meta": {"efficiency_scorecard": attached},
+        })
+        check("effectiveness: resource report includes measured units",
+              "baseline_restart.spawn_to_current_seconds` | 1.250 | s" in resource_report
+              and "generation_physical_growth_bytes` | 4,096 | B" in resource_report
+              and "rss.peak_bytes.cold_index` | 1,048,576 | B" in resource_report
+              and "tool_calls.search.p95_ms` | 42.750 | ms" in resource_report)
+        try:
+            grade.load_efficiency_scorecard(str(path), {"binary_sha256": "other"})
+            matched_only = False
+        except ValueError:
+            matched_only = True
+        check("effectiveness: scorecard from another artifact is rejected", matched_only)
+        value = json.loads(path.read_text())
+        value["runs"][0]["status"] = "failed"
+        path.write_text(json.dumps(value))
+        failed_scorecard_rejected = False
+        try:
+            grade.load_efficiency_scorecard(str(path), {"binary_sha256": "abc"})
+        except ValueError:
+            failed_scorecard_rejected = True
+        check("effectiveness: incomplete efficiency scorecard is rejected",
+              failed_scorecard_rejected)
+
+    baseline = {}
+    for name in (
+        "baseline_order_stock_failure.json",
+        "baseline_stock_check_rename.json",
+        "baseline_currency_decision.json",
+    ):
+        scenario = json.loads((Path(HERE) / "scenarios" / name).read_text())
+        baseline[scenario["id"]] = scenario
+    check("effectiveness: baseline tasks are neutral and independently graded",
+          not grade.lint_scenarios(baseline) and not grade.lint_outcomes(baseline))
+
+
+def test_scenario_selection():
+    with tempfile.TemporaryDirectory() as work:
+        # The declared id is an artifact identity, not a source filename.
+        scenario = {"id": "custom_case", "hosts": ["claude", "codex"],
+                    "prompt": "Rename the stock check.\nPreserve behavior.",
+                    "status": "baseline", "outcome": {"kind": "effect", "behavior": "stock_check_rename"}}
+        source = json.dumps(scenario, indent=2).encode()
+        path = Path(work) / "experiment.json"
+        path.write_bytes(source)
+        command = [sys.executable, str(Path(HERE) / "select_scenarios.py"),
+                   work, "custom_case", "0", "", "1"]
+        selected = subprocess.run(command, capture_output=True, text=True)
+        rows = [line.split("\t") for line in selected.stdout.splitlines()]
+        check("runner: custom filename selects the declared id for both hosts",
+              selected.returncode == 0 and len(rows) == 2
+              and {row[1] for row in rows} == {"claude", "codex"}, selected.stderr)
+        check("runner: selected prompt and digest use the same source bytes",
+              len(rows) == 2 and all(row == [
+                  "custom_case", host, "main", "1", hashlib.sha256(source).hexdigest(),
+                  "Rename the stock check. Preserve behavior."
+              ] for row, host in zip(rows, ["claude", "codex"])))
+        path.write_bytes(source + b"\n")
+        changed = subprocess.run(command, capture_output=True, text=True)
+        check("runner: scenario byte changes update the selected identity",
+              changed.returncode == 0 and bool(changed.stdout)
+              and changed.stdout.split("\t")[4] == hashlib.sha256(source + b"\n").hexdigest())
+        excluded = subprocess.run(command[:-1] + ["0"], capture_output=True, text=True)
+        check("runner: baseline opt-in remains required",
+              excluded.returncode == 0 and not excluded.stdout)
+
+
+def test_baseline_oracles():
+    currency = json.loads((Path(HERE) / "scenarios/baseline_currency_decision.json").read_text())
+    expected = {"multi_currency_decision": "rejected", "review_month": "2026-05",
+                "order_total_units": "USD cents"}
+    answers = {
+        "valid structured facts": (json.dumps(expected), "pass"),
+        "reordered structured facts": (json.dumps(dict(reversed(list(expected.items())))), "pass"),
+        "contradictory prose containing all keywords": (
+            "Multi-currency was not rejected in the 2026-05 review; totals are not USD cents.", "fail"),
+        "wrong decision": (json.dumps({**expected, "multi_currency_decision": "accepted"}), "fail"),
+        "wrong units": (json.dumps({**expected, "order_total_units": "EUR cents"}), "fail"),
+        "missing date": (json.dumps({key: value for key, value in expected.items()
+                                    if key != "review_month"}), "fail"),
+        "extra contradictory explanation": (json.dumps({**expected, "explanation": "Actually accepted"}), "fail"),
+        "trailing contradiction": (json.dumps(expected) + " But that rejection was reversed.", "fail"),
+        "duplicate contradictory decision": (
+            '{"multi_currency_decision":"accepted","multi_currency_decision":"rejected",'
+            '"review_month":"2026-05","order_total_units":"USD cents"}', "fail"),
+    }
+    for name, (answer, status) in answers.items():
+        got = grade.grade_outcome(currency, transcript([claude_result(answer)]))
+        check("currency oracle: " + name, got["status"] == status, str(got))
+
+    edit = json.loads((Path(HERE) / "scenarios/baseline_stock_check_rename.json").read_text())
+    destructive = {
+        "src/inventory.rs": "pub fn has_sufficient_stock(&self, sku: &str, qty: u32) -> bool { self.on_hand.get(sku).copied().unwrap_or(0) >= qty }",
+        "src/orders.rs": "// has_sufficient_stock\npub fn place_order() {}",
+    }
+    got = grade.grade_outcome(edit, transcript([claude_result("done")]), destructive)
+    check("stock oracle: deleting the order implementation cannot pass", got["status"] != "pass", str(got))
+    missing = grade.grade_outcome(edit, transcript([claude_result("done")]))
+    check("stock oracle: missing snapshot is unverified",
+          missing["status"] == "unverified" and missing["score"] is None)
+    with patch.object(grade.stock_check.shutil, "which", return_value=None):
+        unavailable = grade.grade_outcome(edit, transcript([claude_result("done")]), {"src/lib.rs": ""})
+    check("stock oracle: unavailable execution is never a pass",
+          unavailable["status"] == "unverified" and unavailable["score"] is None)
+    unsafe = grade.grade_outcome(edit, transcript([claude_result("done")]),
+                                 {"src/lib.rs": "", "src/../../escape.rs": ""})
+    check("stock oracle: captured paths cannot escape temporary staging",
+          unsafe["status"] == "unverified" and unsafe["score"] is None)
+    mixed_answer = {"kind": "answer", "answer": {
+        "json_equals": expected, "required": [{"id": "keyword", "pattern": "rejected"}],
+    }}
+    check("schema: structured facts cannot silently bypass other answer checks",
+          bool(grade.lint_outcomes({"mixed": {"outcome": mixed_answer}})))
+    check("schema: unknown behavior oracles are rejected",
+          bool(grade.lint_outcomes({"unknown": {"outcome": {"kind": "effect", "behavior": "unknown"}}})))
+    check("schema: behavioral checks cannot silently bypass other effect checks",
+          bool(grade.lint_outcomes({"mixed": {"outcome": {
+              **edit["outcome"], "tool_effects": [{"id": "call", "tools": ["Edit"]}],
+          }}})))
+
+
+def test_claude_permissions():
+    native = {"Read", "Write", "Edit", "Glob", "Grep", "Task", "Agent", "Skill"}
+    for condition in grade.CONDITIONS:
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1" && claude_allowed_tools "$2" "$3"',
+             "permissions", str(Path(HERE) / "claude_tools.sh"), condition, "/tmp/eval binary"],
+            capture_output=True, text=True,
+        )
+        allowed = set(result.stdout.strip().split(","))
+        check(f"permissions: {condition} retains identical native editing capabilities",
+              result.returncode == 0 and allowed.intersection(native) == native, result.stderr)
+        check(f"permissions: {condition} controls product capabilities only",
+              allowed == native if condition == "native" else
+              allowed == native | {"mcp__tracedecay__*", "mcp__plugin_tracedecay_graph__*",
+                                    "Bash(tracedecay tool *)", "Bash(/tmp/eval binary tool *)"},
+              str(allowed))
 
 
 LEARNED_SKILL = "pricing-change-review"
@@ -1023,6 +1300,10 @@ def main() -> int:
     test_repeated_query_hints_and_usage()
     test_skill_routing()
     test_cost_and_corrections()
+    test_product_effectiveness_comparisons()
+    test_scenario_selection()
+    test_baseline_oracles()
+    test_claude_permissions()
     test_learned_skill_routing()
     test_learned_skill_lint()
     test_learned_skill_end_to_end()

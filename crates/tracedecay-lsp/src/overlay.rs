@@ -6,7 +6,7 @@
 //! receive an overlay only through its explicitly admitted session adapter.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
 use tracedecay_daemon_protocol::ProcessLocalRequestSequence;
@@ -78,10 +78,32 @@ pub struct OverlaySnapshot {
     pub version: i64,
     pub content_digest: ContentDigest,
     pub text: Arc<str>,
+    pub lifetime: OverlayLifetime,
     pub ephemeral: bool,
     pub parse_state: OverlayParseState,
     pub extraction_state: OverlayExtractionState,
 }
+
+/// Admission to one open-document lifetime. Snapshots hold only a weak
+/// reference, so queued analyzer work cannot keep a closed session overlay
+/// alive. Reopening the same URI creates a different lifetime even when its
+/// editor version or text is unchanged.
+#[derive(Clone, Debug)]
+pub struct OverlayLifetime(Weak<()>);
+
+impl OverlayLifetime {
+    pub fn is_open(&self) -> bool {
+        self.0.strong_count() != 0
+    }
+}
+
+impl PartialEq for OverlayLifetime {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
+impl Eq for OverlayLifetime {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OverlayLimits {
@@ -131,6 +153,7 @@ pub enum OverlayError {
 }
 
 struct DocumentOverlay {
+    lifetime: Arc<()>,
     scope_identity: ManifestDigest,
     document_identity: ManifestDigest,
     language_id: String,
@@ -206,6 +229,7 @@ impl OverlayStore {
         let retained_parse = RetainedOverlayParse::open(identity, &language_id, &text);
         let text: Arc<str> = text.into();
         let document = DocumentOverlay {
+            lifetime: Arc::new(()),
             scope_identity,
             document_identity,
             language_id,
@@ -318,6 +342,7 @@ fn snapshot(uri: &str, document: &DocumentOverlay) -> OverlaySnapshot {
         version: document.version,
         content_digest: document.content_digest.clone(),
         text: document.text.clone(),
+        lifetime: OverlayLifetime(Arc::downgrade(&document.lifetime)),
         ephemeral: true,
         parse_state: document.retained_parse.parse_state().clone(),
         extraction_state: document.retained_parse.extraction_state().clone(),
@@ -729,6 +754,27 @@ mod tests {
         );
         assert_eq!(overlays.close("file:///root/a.rs").unwrap().version, 7);
         assert!(overlays.snapshot("file:///root/a.rs").is_none());
+    }
+
+    #[test]
+    fn snapshots_do_not_extend_closed_or_reopened_document_lifetimes() {
+        let uri = "file:///root/a.rs";
+        let mut overlays = OverlayStore::default();
+        let old = overlays.open(&test_root(), uri, "rust", 42, "old").unwrap();
+        assert!(old.lifetime.is_open());
+        let closed = overlays.close(uri).unwrap();
+        assert!(!closed.lifetime.is_open());
+        assert!(!old.lifetime.is_open());
+
+        let reopened = overlays.open(&test_root(), uri, "rust", 1, "new").unwrap();
+        assert!(reopened.lifetime.is_open());
+        assert_ne!(old.lifetime, reopened.lifetime);
+        overlays.clear();
+        assert!(!reopened.lifetime.is_open());
+
+        let last = overlays.open(&test_root(), uri, "rust", 1, "last").unwrap();
+        drop(overlays);
+        assert!(!last.lifetime.is_open());
     }
 
     #[test]

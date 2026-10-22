@@ -452,10 +452,11 @@ async fn a_dropped_rekey_keeps_its_route_and_requests_after_the_worker_finished(
         .project_state(&old_owner)
         .await
         .expect("project entry");
-    old_state.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+    let request = tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
         tracedecay_domain::SessionId::new("session.finished-rekey").unwrap(),
         tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
-    ));
+    );
+    old_state.requeue_request(request.clone());
     assert_eq!(old_state.queued_request_count(), 1);
 
     {
@@ -493,6 +494,10 @@ async fn a_dropped_rekey_keeps_its_route_and_requests_after_the_worker_finished(
         "a rekey dropped after its join must leave the route without a live target"
     );
 
+    // Keep the destination's real worker in history while checking the
+    // handoff. Otherwise it can consume the request before the queue is read.
+    let destination_history =
+        mount_held_project(&registry, &harness, &new_owner, HeldHistory::default()).await;
     registry
         .rekey_project(&old_owner, new_owner.clone(), harness.registered.clone())
         .await;
@@ -505,11 +510,18 @@ async fn a_dropped_rekey_keeps_its_route_and_requests_after_the_worker_finished(
         1,
         "a rekey dropped after its join must retain the requests it staged"
     );
+    let transferred = resumed.take_requests(1).pop().expect("transferred request");
+    assert!(
+        transferred.is_equivalent_to(&request),
+        "the parked handoff must preserve the exact request and frontier"
+    );
+    resumed.requeue_request(transferred);
     assert!(
         old_wake.wake(),
         "the old route must reach the new owner once the retry completes"
     );
 
+    destination_history.release.notify_one();
     registry.shutdown().await;
 }
 
