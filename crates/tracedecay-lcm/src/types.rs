@@ -585,13 +585,8 @@ pub enum LcmMaintenanceDebt {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmPreflightRequest {
-    pub provider: String,
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub messages: Vec<serde_json::Value>,
-    pub current_tokens: Option<i64>,
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmCompressionOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -614,6 +609,17 @@ pub struct LcmPreflightRequest {
     pub context_length: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reserve_tokens_floor: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPreflightRequest {
+    pub provider: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<serde_json::Value>,
+    pub current_tokens: Option<i64>,
+    #[serde(flatten)]
+    pub overrides: LcmCompressionOverrides,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -737,10 +743,110 @@ pub struct LcmCompressionResponse {
     pub summary_request: Option<LcmSummaryRequest>,
 }
 
+pub(crate) const NEEDS_SUMMARY_STATUS: &str = "needs_summary";
+const NEEDS_AUTHORITATIVE_SUMMARY_RETRY: &str = "needs_authoritative_summary";
+pub(crate) const CRITICAL_PRESSURE_CATCH_UP_RETRY: &str = "critical_pressure_catch_up";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LcmCompressionOutcome<'a> {
+    Complete,
+    NeedsSummary(&'a LcmSummaryRequest),
+    Deferred { reason: &'a str },
+}
+
+impl LcmCompressionResponse {
+    pub fn outcome(&self) -> Result<LcmCompressionOutcome<'_>, LcmError> {
+        match (
+            self.status.as_str(),
+            self.summary_request.as_ref(),
+            self.retry_status.as_deref(),
+        ) {
+            (NEEDS_SUMMARY_STATUS, Some(summary_request), None) => {
+                Ok(LcmCompressionOutcome::NeedsSummary(summary_request))
+            }
+            (NEEDS_SUMMARY_STATUS, Some(_), Some(NEEDS_AUTHORITATIVE_SUMMARY_RETRY)) => {
+                Ok(LcmCompressionOutcome::Deferred {
+                    reason: &self.reason,
+                })
+            }
+            ("ok" | "best_effort", None, None | Some(CRITICAL_PRESSURE_CATCH_UP_RETRY)) => {
+                Ok(LcmCompressionOutcome::Complete)
+            }
+            (_, summary_request, retry_status) => Err(LcmError::Db(format!(
+                "invalid LCM compression outcome: status {:?}, summary request present {}, retry status {:?}",
+                self.status,
+                summary_request.is_some(),
+                retry_status
+            ))),
+        }
+    }
+
+    pub fn defer_for_authoritative_summary(mut self, reason: &str) -> Result<Self, LcmError> {
+        if !matches!(self.outcome()?, LcmCompressionOutcome::NeedsSummary(_)) {
+            return Err(LcmError::Db(
+                "only a pending summary response can be deferred".to_string(),
+            ));
+        }
+        self.reason = reason.to_string();
+        self.retry_status = Some(NEEDS_AUTHORITATIVE_SUMMARY_RETRY.to_string());
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn summary_request() -> LcmSummaryRequest {
+        LcmSummaryRequest {
+            provider: "cursor".to_string(),
+            session_id: "session-1".to_string(),
+            focus_topic: None,
+            prompt: "summarize".to_string(),
+            source_range: LcmSummarySourceRange {
+                from_store_id: 1,
+                to_store_id: 2,
+            },
+            source_messages: vec![LcmSummarySourceMessage {
+                store_id: 1,
+                role: "user".to_string(),
+                content: "source".to_string(),
+            }],
+            extraction_request: None,
+        }
+    }
+
+    fn compression_response(
+        status: &str,
+        reason: &str,
+        summary_request: Option<LcmSummaryRequest>,
+        retry_status: Option<&str>,
+    ) -> LcmCompressionResponse {
+        LcmCompressionResponse {
+            status: status.to_string(),
+            reason: reason.to_string(),
+            summary_nodes_created: 0,
+            summary_nodes: Vec::new(),
+            replay_messages: Vec::new(),
+            replay_token_estimate: 0,
+            replay_over_budget: false,
+            compression_attempts: 0,
+            context_recovery_hint: None,
+            retry_status: retry_status.map(str::to_string),
+            relation_projection_status: LcmRelationProjectionStatus::NotApplicable,
+            frontier: LcmLifecycleState {
+                provider: "cursor".to_string(),
+                conversation_id: "session-1".to_string(),
+                current_session_id: "session-1".to_string(),
+                current_frontier_store_id: None,
+                last_finalized_session_id: None,
+                last_finalized_frontier_store_id: None,
+                maintenance_debt: Vec::new(),
+            },
+            summary_request,
+        }
+    }
 
     #[test]
     fn gc_config_clamps_grace_floor_from_serde() {
@@ -760,5 +866,107 @@ mod tests {
 
         assert!(config.reap_missing_enabled);
         assert_eq!(config.reap_missing_after, 0);
+    }
+
+    #[test]
+    fn pending_summary_outcome_borrows_its_required_request() {
+        let request = summary_request();
+        let response =
+            compression_response("needs_summary", "pending", Some(request.clone()), None);
+
+        assert_eq!(
+            response.outcome().expect("pending response is valid"),
+            LcmCompressionOutcome::NeedsSummary(&request)
+        );
+    }
+
+    #[test]
+    fn completed_outcomes_include_overflow_catch_up_retries() {
+        for (status, reason) in [
+            ("ok", "forced_overflow_recovery"),
+            ("best_effort", "forced_overflow_recovery_replay_over_budget"),
+        ] {
+            let mut response =
+                compression_response(status, reason, None, Some("critical_pressure_catch_up"));
+            response.replay_over_budget = status == "best_effort";
+            response.compression_attempts = 2;
+            response.context_recovery_hint = Some("preserve the freshest tail".to_string());
+            let original = serde_json::to_value(&response).expect("response should serialize");
+
+            assert_eq!(
+                response.outcome().expect("completed response is valid"),
+                LcmCompressionOutcome::Complete
+            );
+            assert_eq!(
+                serde_json::to_value(&response).expect("response should serialize"),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn inconsistent_outcomes_are_contract_failures() {
+        let inconsistent = [
+            compression_response("needs_summary", "pending", None, None),
+            compression_response(
+                "needs_summary",
+                "pending",
+                Some(summary_request()),
+                Some("critical_pressure_catch_up"),
+            ),
+            compression_response("ok", "done", Some(summary_request()), None),
+            compression_response("ok", "done", None, Some("needs_authoritative_summary")),
+            compression_response("future_outcome", "done", None, None),
+            compression_response(
+                "unexpected",
+                "done",
+                None,
+                Some("critical_pressure_catch_up"),
+            ),
+        ];
+        for response in inconsistent {
+            assert!(
+                matches!(response.outcome(), Err(LcmError::Db(_))),
+                "{} / {:?} must not read as a valid outcome",
+                response.status,
+                response.retry_status
+            );
+        }
+    }
+
+    #[test]
+    fn deferral_keeps_the_request_and_round_trips_through_the_wire() {
+        let request = summary_request();
+        let response =
+            compression_response("needs_summary", "pending", Some(request.clone()), None)
+                .defer_for_authoritative_summary("summarizer_configuration_unavailable")
+                .expect("pending response can be deferred");
+
+        let wire = serde_json::to_value(&response).expect("response should serialize");
+        assert_eq!(wire["status"], "needs_summary");
+        assert_eq!(wire["reason"], "summarizer_configuration_unavailable");
+        assert_eq!(wire["retry_status"], "needs_authoritative_summary");
+        assert_eq!(
+            wire["summary_request"],
+            serde_json::to_value(&request).expect("request should serialize")
+        );
+        let decoded: LcmCompressionResponse =
+            serde_json::from_value(wire).expect("response should deserialize");
+        assert_eq!(
+            decoded.outcome().expect("deferred response is valid"),
+            LcmCompressionOutcome::Deferred {
+                reason: "summarizer_configuration_unavailable"
+            }
+        );
+    }
+
+    #[test]
+    fn completed_response_cannot_be_rewritten_as_deferred() {
+        let response = compression_response("ok", "done", None, None);
+        assert!(
+            response
+                .defer_for_authoritative_summary("summarizer_configuration_unavailable")
+                .is_err()
+        );
     }
 }
