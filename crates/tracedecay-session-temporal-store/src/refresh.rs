@@ -3225,14 +3225,8 @@ async fn complete_session_refresh_in_transaction(
         COMPLETE_REFRESH,
     )
     .await?;
-    // A begin applies any pending reset, so one pending now arrived while
-    // this refresh ran: its candidate covers effects the reset retired and can
-    // never match the live frontier. Refusing it terminally ends the operation
-    // so the next begin can apply the reset.
     if session_reset_is_pending(transaction, request.session_id()).await? {
-        return Err(SessionStoreError::InvalidStateTransition {
-            context: "refresh candidate was superseded by a requested session reset",
-        });
+        return Err(SessionStoreError::RefreshSupersededByReset);
     }
     let progress = require_exact_terminal_progress(
         transaction,
