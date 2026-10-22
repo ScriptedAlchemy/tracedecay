@@ -396,8 +396,9 @@ pub(super) struct ProfileDaemon {
 #[cfg(unix)]
 impl ProfileDaemon {
     pub(super) fn start(cli: &IsolatedCli) -> Self {
-        // Claim a freshly created fallback directory before the daemon starts;
-        // cleanup must never remove a directory owned by an earlier fixture.
+        // The daemon relocates sockets that exceed the platform path limit.
+        // Readiness must use that same authority, including on remote workers
+        // whose TMPDIR makes an otherwise ordinary profile path too long.
         let socket = default_socket_path(&cli.profile).unwrap();
         let mut daemon = Self {
             child: None,
@@ -429,8 +430,8 @@ impl ProfileDaemon {
                 .unwrap_or_else(|error| format!("could not read daemon stderr: {error}"))
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        // Readiness follows the registered endpoint, including loopback
-        // fallback, while directory ownership stays limited to fixture setup.
+        // Follow the exact isolated profile's published endpoint, retaining
+        // child ownership and startup diagnostics if admission fails.
         while !current_daemon_connection(&cli.profile).is_ok_and(|connection| {
             match connection.endpoint() {
                 DaemonEndpoint::Unix(socket) => {
@@ -441,7 +442,7 @@ impl ProfileDaemon {
         }) {
             if let Some(status) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
                 panic!(
-                    "profile daemon exited before listening for profile {}: {status}; stderr:\n{}",
+                    "profile daemon exited before listening for {}: {status}; stderr:\n{}",
                     cli.profile.display(),
                     stderr()
                 );
