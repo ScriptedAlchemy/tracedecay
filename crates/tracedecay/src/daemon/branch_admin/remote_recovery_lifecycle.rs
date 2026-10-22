@@ -278,7 +278,7 @@ pub(super) async fn retire_runtime_work(
             }
             super::super::project_server_lifecycle::retire_project_servers_now(servers).await;
         };
-        super::project_retirement::track_tokio_retirement(tracked_retirements, owner, retirement)
+        super::project_retirement::track_native_retirement(tracked_retirements, owner, retirement)
             .await;
     }
     let deadline = std::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;

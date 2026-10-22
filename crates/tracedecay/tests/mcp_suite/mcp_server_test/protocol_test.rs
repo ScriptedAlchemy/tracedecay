@@ -260,6 +260,7 @@ async fn test_tools_list() {
             "content": "items"
         })
     );
+    drop(server);
     fixture.shutdown().await;
 }
 
@@ -303,6 +304,7 @@ async fn test_tools_call_search() {
         .iter()
         .any(|c| c["text"].as_str().is_some_and(|t| t.contains("helper")));
     assert!(has_helper, "search results should contain 'helper'");
+    drop(server);
     fixture.harness.shutdown().await;
 }
 
@@ -346,6 +348,7 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
         .expect("tool result text");
     let payload: Value = serde_json::from_str(text).expect("tool result JSON");
     assert_eq!(payload["success"], false);
+    drop(server);
     fixture.harness.shutdown().await;
 }
 
@@ -388,6 +391,7 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
         text.contains("## error") && text.contains("**kind:** git"),
         "expected rendered changelog git failure, got: {text}"
     );
+    drop(server);
     fixture.harness.shutdown().await;
 }
 
@@ -510,6 +514,7 @@ async fn cancellable_tool_call_is_answered_after_client_half_close() {
         extract_tool_text(&resp["result"]).contains("helper"),
         "expected search results, got: {resp}"
     );
+    drop(server);
     fixture.harness.shutdown().await;
 }
 
@@ -572,6 +577,7 @@ async fn cancellable_tool_call_is_dropped_on_full_peer_close() {
         "full peer close must drop the in-flight handler, got {:?}",
         transport.written
     );
+    drop(server);
     fixture.harness.shutdown().await;
 }
 
@@ -687,6 +693,7 @@ async fn cancellable_tool_call_is_cancelled_on_peer_read_failure() {
         "peer-loss cancellation must not write a tools/call response, got {:?}",
         transport.written
     );
+    drop(server);
     fixture.harness.shutdown().await;
 }
 
@@ -737,6 +744,7 @@ async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
         err.to_string().contains("peer write half gone"),
         "unexpected error: {err}"
     );
+    drop(server);
     fixture.harness.shutdown().await;
 }
 
@@ -1174,6 +1182,8 @@ async fn test_server_stats_include_response_handle_metrics() {
         assert_eq!(payload["fact"]["status"]["payload_access"], "deleted");
         assert_eq!(payload["commit"]["fact_id"], fact_id);
     }
+    drop(cg);
+    drop(server);
     fixture.harness.shutdown().await;
 }
 #[tokio::test]

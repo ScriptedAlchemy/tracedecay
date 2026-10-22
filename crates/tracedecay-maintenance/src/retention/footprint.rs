@@ -185,6 +185,20 @@ pub enum WalkedEntryV1 {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkInterruptionV1 {
+    Cancelled,
+    DeadlineExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkTerminationV1 {
+    Complete,
+    EntryBudgetExceeded,
+    Cancelled,
+    DeadlineExceeded,
+}
+
 /// Visit every regular file under `root` with its byte length, without
 /// following symlinks or reading contents. Stops after `entry_ceiling`
 /// directory entries and returns whether it did, which makes any total built
@@ -194,18 +208,44 @@ pub fn walk_regular_files(
     entry_ceiling: usize,
     visit: &mut dyn FnMut(&Path, WalkedEntryV1),
 ) -> bool {
-    let mut visited = 0usize;
+    let mut remaining_entries = entry_ceiling;
+    walk_regular_files_with_budget(root, &mut remaining_entries, &|| None, visit)
+        == WalkTerminationV1::EntryBudgetExceeded
+}
+
+/// Walk one subtree using a caller-owned entry budget. Sharing
+/// `remaining_entries` across roots bounds the whole request rather than
+/// restarting the limit for each project. The interruption callback is checked
+/// on the blocking worker before every directory entry is inspected.
+pub fn walk_regular_files_with_budget(
+    root: &Path,
+    remaining_entries: &mut usize,
+    interruption: &dyn Fn() -> Option<WalkInterruptionV1>,
+    visit: &mut dyn FnMut(&Path, WalkedEntryV1),
+) -> WalkTerminationV1 {
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
+        if let Some(interruption) = interruption() {
+            return match interruption {
+                WalkInterruptionV1::Cancelled => WalkTerminationV1::Cancelled,
+                WalkInterruptionV1::DeadlineExceeded => WalkTerminationV1::DeadlineExceeded,
+            };
+        }
         let Ok(entries) = std::fs::read_dir(&directory) else {
             visit(&directory, WalkedEntryV1::Unavailable);
             continue;
         };
         for entry in entries {
-            if visited >= entry_ceiling {
-                return true;
+            if let Some(interruption) = interruption() {
+                return match interruption {
+                    WalkInterruptionV1::Cancelled => WalkTerminationV1::Cancelled,
+                    WalkInterruptionV1::DeadlineExceeded => WalkTerminationV1::DeadlineExceeded,
+                };
             }
-            visited += 1;
+            if *remaining_entries == 0 {
+                return WalkTerminationV1::EntryBudgetExceeded;
+            }
+            *remaining_entries -= 1;
             let Ok(entry) = entry else {
                 visit(&directory, WalkedEntryV1::Unavailable);
                 continue;
@@ -223,21 +263,21 @@ pub fn walk_regular_files(
             if file_type.is_dir() {
                 pending.push(path);
             } else if file_type.is_file() {
-                match entry.metadata() {
-                    Ok(metadata) => visit(
+                match std::fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => visit(
                         &path,
                         WalkedEntryV1::File {
                             bytes: metadata.len(),
                         },
                     ),
-                    Err(_) => visit(&path, WalkedEntryV1::Unavailable),
+                    _ => visit(&path, WalkedEntryV1::Unavailable),
                 }
             } else {
                 visit(&path, WalkedEntryV1::Unavailable);
             }
         }
     }
-    false
+    WalkTerminationV1::Complete
 }
 
 /// Census of every regular file under `profile_root`, bucketed by footprint
@@ -251,11 +291,12 @@ pub fn census_profile_footprint(
     registered_roots: &BTreeMap<String, String>,
     bound_overrides: &BTreeMap<String, u64>,
 ) -> ProfileFootprintV1 {
-    census_with_entry_ceiling(
+    let mut remaining_entries = MAX_FOOTPRINT_ENTRIES;
+    census_profile_footprint_with_budget(
         profile_root,
         registered_roots,
         bound_overrides,
-        MAX_FOOTPRINT_ENTRIES,
+        &mut remaining_entries,
     )
 }
 
@@ -273,41 +314,49 @@ struct FootprintKeys {
     project: Option<(String, PathBuf)>,
 }
 
-fn census_with_entry_ceiling(
+/// Charge the profile census to the same entry budget as its caller's other
+/// filesystem observations.
+pub(crate) fn census_profile_footprint_with_budget(
     profile_root: &Path,
     registered_roots: &BTreeMap<String, String>,
     bound_overrides: &BTreeMap<String, u64>,
-    entry_ceiling: usize,
+    remaining_entries: &mut usize,
 ) -> ProfileFootprintV1 {
     let mut tallies: BTreeMap<(String, ProfileFamilyV1), EntryTally> = BTreeMap::new();
     let mut total_bytes = 0u64;
     let mut unavailable_entry_count = 0usize;
-    let truncated = walk_regular_files(profile_root, entry_ceiling, &mut |path, walked| {
-        if let WalkedEntryV1::File { bytes } = walked {
-            total_bytes = total_bytes.saturating_add(bytes);
-        } else {
-            unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-        }
-        let Some(keys) = path
-            .strip_prefix(profile_root)
-            .ok()
-            .and_then(footprint_keys)
-        else {
-            return;
-        };
-        let primary = tallies.entry(keys.primary).or_default();
-        tally(primary, walked);
-        if let (Some((_, store_relative)), WalkedEntryV1::File { bytes }) = (&keys.project, walked)
-        {
-            primary
-                .kinds
-                .get_or_insert_with(StoreKindBytesV1::default)
-                .add(store_relative, bytes);
-        }
-        if let Some(overlay) = keys.overlay {
-            tally(tallies.entry(overlay).or_default(), walked);
-        }
-    });
+    let termination = walk_regular_files_with_budget(
+        profile_root,
+        remaining_entries,
+        &|| None,
+        &mut |path, walked| {
+            if let WalkedEntryV1::File { bytes } = walked {
+                total_bytes = total_bytes.saturating_add(bytes);
+            } else {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+            }
+            let Some(keys) = path
+                .strip_prefix(profile_root)
+                .ok()
+                .and_then(footprint_keys)
+            else {
+                return;
+            };
+            let primary = tallies.entry(keys.primary).or_default();
+            tally(primary, walked);
+            if let (Some((_, store_relative)), WalkedEntryV1::File { bytes }) =
+                (&keys.project, walked)
+            {
+                primary
+                    .kinds
+                    .get_or_insert_with(StoreKindBytesV1::default)
+                    .add(store_relative, bytes);
+            }
+            if let Some(overlay) = keys.overlay {
+                tally(tallies.entry(overlay).or_default(), walked);
+            }
+        },
+    );
     let entries = tallies
         .into_iter()
         .map(|((key, family), tally)| {
@@ -337,7 +386,7 @@ fn census_with_entry_ceiling(
         entries,
         total_bytes,
         unavailable_entry_count,
-        truncated,
+        truncated: termination == WalkTerminationV1::EntryBudgetExceeded,
         total_bound_bytes: bound_overrides
             .get(PROFILE_TOTAL_KEY)
             .copied()
@@ -887,10 +936,16 @@ mod tests {
     #[test]
     fn a_walk_stopped_at_its_entry_ceiling_reports_a_floor() {
         let fixture = profile_fixture();
-        let footprint =
-            census_with_entry_ceiling(&fixture.profile, &fixture.registered, &BTreeMap::new(), 3);
+        let mut remaining_entries = 3;
+        let footprint = census_profile_footprint_with_budget(
+            &fixture.profile,
+            &fixture.registered,
+            &BTreeMap::new(),
+            &mut remaining_entries,
+        );
 
         assert!(footprint.truncated);
+        assert_eq!(remaining_entries, 0);
         assert_eq!(
             footprint.full_profile_size().state,
             ProfileTotalCoverageStateV1::Partial
@@ -901,5 +956,111 @@ mod tests {
             DoctorEvidenceStateV1::Partial,
             "a within-bound floor cannot claim health"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn controlled_walk_counts_zero_byte_entries_and_never_follows_symlink_trees() {
+        let temporary = tempfile::tempdir().expect("walk fixture");
+        let root = temporary.path().join("store");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&root).expect("store root");
+        std::fs::create_dir_all(&outside).expect("outside root");
+        std::fs::write(root.join("zero"), []).expect("zero-byte entry");
+        sized(&outside.join("private"), 900);
+        std::os::unix::fs::symlink(&outside, root.join("other-store")).expect("store symlink");
+        let mut deep = root.clone();
+        for _ in 0..64 {
+            deep.push("d");
+            std::fs::create_dir(&deep).expect("deep directory");
+        }
+        sized(&deep.join("payload"), 12);
+
+        let mut remaining = 100;
+        let mut bytes = 0u64;
+        let mut unavailable = 0usize;
+        let termination =
+            walk_regular_files_with_budget(&root, &mut remaining, &|| None, &mut |_, entry| {
+                match entry {
+                    WalkedEntryV1::File { bytes: size } => bytes += size,
+                    WalkedEntryV1::Unavailable => unavailable += 1,
+                }
+            });
+
+        assert_eq!(termination, WalkTerminationV1::Complete);
+        assert_eq!(bytes, 12, "the outside store is not followed");
+        assert_eq!(unavailable, 1, "the symlink is explicit unavailable data");
+        assert_eq!(remaining, 100 - 1 - 64 - 1 - 1);
+    }
+
+    #[test]
+    fn one_entry_budget_is_shared_across_walk_roots() {
+        let temporary = tempfile::tempdir().expect("walk fixture");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        std::fs::create_dir_all(&first).expect("first root");
+        std::fs::create_dir_all(&second).expect("second root");
+        std::fs::write(first.join("payload"), [1]).expect("first payload");
+        std::fs::write(second.join("payload"), [2]).expect("second payload");
+        let mut remaining = 1;
+        let mut visits = 0usize;
+        let mut visit = |_: &Path, _: WalkedEntryV1| visits += 1;
+
+        assert_eq!(
+            walk_regular_files_with_budget(&first, &mut remaining, &|| None, &mut visit),
+            WalkTerminationV1::Complete
+        );
+        assert_eq!(
+            walk_regular_files_with_budget(&second, &mut remaining, &|| None, &mut visit),
+            WalkTerminationV1::EntryBudgetExceeded
+        );
+        assert_eq!(visits, 1);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn cancellation_stops_a_blocking_walk_at_the_next_checkpoint() {
+        use std::cell::Cell;
+
+        let temporary = tempfile::tempdir().expect("walk fixture");
+        for name in ["one", "two", "three"] {
+            std::fs::write(temporary.path().join(name), [1]).expect("payload");
+        }
+        let visits = Cell::new(0usize);
+        let mut remaining = 10;
+        let termination = walk_regular_files_with_budget(
+            temporary.path(),
+            &mut remaining,
+            &|| (visits.get() == 1).then_some(WalkInterruptionV1::Cancelled),
+            &mut |_, _| visits.set(visits.get() + 1),
+        );
+
+        assert_eq!(termination, WalkTerminationV1::Cancelled);
+        assert_eq!(visits.get(), 1);
+        assert_eq!(remaining, 9);
+    }
+
+    #[test]
+    fn an_unreadable_walk_root_is_accounted_as_unavailable() {
+        let temporary = tempfile::tempdir().expect("walk fixture");
+        let file_root = temporary.path().join("not-a-directory");
+        std::fs::write(&file_root, [1u8]).expect("fixture file");
+        let mut remaining = 10;
+        let mut unavailable = 0usize;
+
+        let termination = walk_regular_files_with_budget(
+            &file_root,
+            &mut remaining,
+            &|| None,
+            &mut |_, entry| {
+                if entry == WalkedEntryV1::Unavailable {
+                    unavailable += 1;
+                }
+            },
+        );
+
+        assert_eq!(termination, WalkTerminationV1::Complete);
+        assert_eq!(unavailable, 1);
+        assert_eq!(remaining, 10);
     }
 }

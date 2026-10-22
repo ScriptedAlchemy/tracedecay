@@ -310,7 +310,7 @@ async fn rearm_projection_retry_batch(
     Ok(Some((batch_end, rows)))
 }
 
-async fn query_optional_i64(
+pub(super) async fn query_optional_i64(
     conn: &impl QueryExecutor,
     sql: &str,
     params: impl IntoParams,

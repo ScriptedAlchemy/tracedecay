@@ -12,6 +12,7 @@ import {
   admitNativeWorkspace,
   createNativeDiagnosticsPayload,
   batchAdmittedNativeDiagnosticDocuments,
+  nativeDiagnosticsDocumentSelector,
   resolveInstalledTraceDecayBinary,
   traceDecayInitializationOptions,
   toLspDiagnosticSeverity,
@@ -143,12 +144,9 @@ class CursorNativeDiagnosticsSession implements vscode.Disposable {
       },
     };
     const clientOptions: LanguageClientOptions = {
-      documentSelector: [
-        {
-          scheme: "file",
-          pattern: `${workspaceFolder.uri.fsPath.replaceAll("\\", "/")}/**`,
-        },
-      ],
+      documentSelector: nativeDiagnosticsDocumentSelector(
+        workspaceFolder.uri.toString(),
+      ),
       initializationOptions: traceDecayInitializationOptions,
       workspaceFolder,
     };

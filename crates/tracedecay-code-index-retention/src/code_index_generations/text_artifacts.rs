@@ -28,10 +28,11 @@ use super::{
     MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1, MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1,
     MAX_TRANSACTION_BYTES, TEXT_ARTIFACT_QUARANTINE_DIRECTORY, TEXT_ARTIFACT_RECEIPT_SCHEMA,
     TEXT_ARTIFACT_RECEIPTS_DIRECTORY, TEXT_ARTIFACT_TRANSACTION_FILE,
-    TEXT_ARTIFACT_TRANSACTION_SCHEMA, code_text_artifact_staging_root, code_text_artifacts_root,
-    durable_generation_index_digest, generation_file_digest, open_file_sha256_hex_cancellable,
-    path_still_names_open_file, read_active_pointer, read_optional_active_pointer,
-    regular_file_exists, retain_bounded_generation_index_with_text_head, sha256_file_component,
+    TEXT_ARTIFACT_TRANSACTION_SCHEMA, charge_entry_budget, code_text_artifact_staging_root,
+    code_text_artifacts_root, durable_generation_index_digest, generation_file_digest,
+    open_file_sha256_hex_cancellable, path_still_names_open_file, read_active_pointer,
+    read_optional_active_pointer, regular_file_exists,
+    retain_bounded_generation_index_with_text_head, segment_scope_roots, sha256_file_component,
     storage, validate_durable_generation_index, validate_sealed_generation_identity,
     validate_text_artifact_descriptor,
 };
@@ -224,10 +225,28 @@ pub fn withdraw_verified_text_artifact_under_lock(
 /// builder names its staging database, in this scope's staging directory,
 /// with the sealed generation digest, so the active generation's staging is
 /// preserved rather than guessed dead by wall-clock age.
+#[cfg(test)]
 pub(super) fn plan_collectable_text_artifacts_cancellable(
     store_root: &Path,
     active_pointer: Option<&DurablePublicationPointerV1>,
     verification: GenerationDigestVerificationV1,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
+    let mut remaining_entries = usize::MAX;
+    plan_collectable_text_artifacts_budgeted_cancellable(
+        store_root,
+        active_pointer,
+        verification,
+        &mut remaining_entries,
+        is_cancelled,
+    )
+}
+
+pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
+    store_root: &Path,
+    active_pointer: Option<&DurablePublicationPointerV1>,
+    verification: GenerationDigestVerificationV1,
+    remaining_entries: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
@@ -254,7 +273,8 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
             }
         }
     }
-    let marked = scope_text_artifact_marks(store_root)?;
+    let marked =
+        scope_text_artifact_marks(store_root, &mut Some(&mut *remaining_entries), is_cancelled)?;
     let active_staging_source = active_pointer
         .map(|pointer| {
             generation_file_digest(&pointer.generation_file).ok_or_else(|| {
@@ -285,6 +305,10 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
+        if *remaining_entries == 0 {
+            return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+        }
+        *remaining_entries -= 1;
         verify_completed_text_artifact(
             &root.join(&descriptor.artifact_file),
             descriptor,
@@ -303,6 +327,10 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
     });
     let mut active_text_replacement_in_flight = false;
     if let Some(active_staging_source) = active_staging_source {
+        if *remaining_entries == 0 {
+            return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+        }
+        *remaining_entries -= 1;
         let active_staging_file = format!(".text-artifact-{active_staging_source}.staging");
         let active_staging_path = staging_root.join(&active_staging_file);
         match std::fs::symlink_metadata(&active_staging_path) {
@@ -329,13 +357,17 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
         }
         let mut entries = std::fs::read_dir(directory).map_err(storage)?;
         while remaining > 0 && candidates.len() < MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
-            remaining -= 1;
             if is_cancelled() {
                 return Err(CodeGenerationRetentionErrorV1::Cancelled);
             }
             let Some(entry) = entries.next() else {
                 break;
             };
+            if *remaining_entries == 0 {
+                return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+            }
+            *remaining_entries -= 1;
+            remaining -= 1;
             let entry = entry.map_err(storage)?;
             let file_name = entry.file_name().into_string().map_err(|_| {
                 CodeGenerationRetentionErrorV1::UnsafeState(
@@ -448,7 +480,7 @@ pub fn find_shared_text_artifact(
     content_key: &tracedecay_domain::ManifestDigest,
 ) -> Result<Option<DurableCodeTextArtifactDescriptorV1>, CodeGenerationRetentionErrorV1> {
     let root = code_text_artifacts_root(store_root);
-    for scope in super::segment_scope_roots(store_root)? {
+    for scope in segment_scope_roots(store_root, &mut None, &|| false)? {
         let Some(pointer) = read_optional_active_pointer(&scope)? else {
             continue;
         };
@@ -472,9 +504,17 @@ pub fn find_shared_text_artifact(
 /// restore. A store outside a shared project marks only itself.
 fn scope_text_artifact_marks(
     store_root: &Path,
+    remaining_entries: &mut Option<&mut usize>,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<BTreeSet<String>, CodeGenerationRetentionErrorV1> {
     let mut marked = BTreeSet::new();
-    for scope in super::segment_scope_roots(store_root)? {
+    for scope in segment_scope_roots(store_root, remaining_entries, is_cancelled)? {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
+        // Enumerating a scope and observing its publication pointer are
+        // separate filesystem work; neither may restart the caller's budget.
+        charge_entry_budget(remaining_entries)?;
         let Some(pointer) = read_optional_active_pointer(&scope)? else {
             continue;
         };
@@ -924,7 +964,7 @@ pub(super) fn ensure_text_artifact_transaction_liveness(
     // may have landed since the transaction was staged, in this scope or in
     // a sibling that shares the completed artifact, and no durable
     // descriptor target any of them names may be removed.
-    let marked = scope_text_artifact_marks(store_root)?;
+    let marked = scope_text_artifact_marks(store_root, &mut None, &|| false)?;
     if transaction
         .receipt
         .deleted_artifacts

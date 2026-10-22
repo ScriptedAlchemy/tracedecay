@@ -6,12 +6,14 @@
 
 use super::*;
 use std::collections::HashSet;
+use std::time::Instant;
 use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
 use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_daemon_service::shutdown::ShutdownStatus;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_store_runtime::{
     ShutdownTaskOutcome, ShutdownTaskReceipt, join_shutdown_tasks_until,
 };
@@ -32,7 +34,7 @@ pub(super) async fn cancel_retained_session_history(store_administration: &Store
 /// those owners; typed failures are replayed into every subsequent receipt.
 #[tracing::instrument(name = "daemon.project.lifecycle.shutdown", level = "trace", skip_all)]
 pub(super) async fn shutdown_project_servers(
-    deadline: tokio::time::Instant,
+    deadline: Instant,
     store_administration: &StoreAdministration,
     http_application_registry: &super::http_application::DaemonHttpApplicationRegistry,
 ) -> ShutdownTaskReceipt {
@@ -40,12 +42,22 @@ pub(super) async fn shutdown_project_servers(
         .drain_project_routes_for_shutdown()
         .await;
     let (detached, mut receipt) =
-        match tokio::time::timeout_at(deadline, detach_project_servers(store_administration)).await
+        match native_runtime::timeout_at(deadline, detach_project_servers(store_administration))
+            .await
         {
             Ok(servers) => (servers, ShutdownTaskReceipt::default()),
-            Err(_) => (
+            Err(TimeoutError::Elapsed) => (
                 Vec::new(),
                 ShutdownTaskReceipt::timed_out("project_server_detach"),
+            ),
+            Err(error @ TimeoutError::TimerUnavailable(_)) => (
+                Vec::new(),
+                ShutdownTaskReceipt {
+                    outcomes: vec![ShutdownTaskOutcome {
+                        owner: "project_server_detach".to_owned(),
+                        status: ShutdownStatus::Failed(error.to_string()),
+                    }],
+                },
             ),
         };
     let mut retained = {
@@ -156,7 +168,7 @@ pub(super) async fn detach_project_servers(
     skip_all
 )]
 pub(super) async fn shutdown_detached_project_servers(
-    deadline: tokio::time::Instant,
+    deadline: Instant,
     servers: Vec<Arc<crate::mcp::McpServer>>,
 ) -> ShutdownTaskReceipt {
     join_shutdown_tasks_until(
@@ -199,30 +211,30 @@ pub(in crate::daemon) async fn retire_project_servers(
     servers: Vec<Arc<crate::mcp::McpServer>>,
     route_registered: Option<Arc<AtomicBool>>,
 ) {
-    if tokio::time::timeout(
+    if let Err(error) = native_runtime::timeout(
         PROJECT_SERVER_REQUEST_DRAIN_DEADLINE,
         wait_for_project_server_request_drains(&servers),
     )
     .await
-    .is_err()
     {
         tracing::warn!(
             deadline_secs = PROJECT_SERVER_REQUEST_DRAIN_DEADLINE.as_secs(),
+            %error,
             server_count = servers.len(),
             "retired project requests exceeded their drain deadline; cancelling them"
         );
         for server in &servers {
             server.abort_project_server_requests();
         }
-        if tokio::time::timeout(
+        if let Err(error) = native_runtime::timeout(
             PROJECT_SERVER_ABORT_DRAIN_DEADLINE,
             wait_for_project_server_request_drains(&servers),
         )
         .await
-        .is_err()
         {
             tracing::warn!(
                 deadline_secs = PROJECT_SERVER_ABORT_DRAIN_DEADLINE.as_secs(),
+                %error,
                 server_count = servers.len(),
                 "cancelled project requests have not yielded; retaining safe shutdown ownership"
             );
@@ -439,7 +451,7 @@ mod shutdown_owner_tests {
 
         for _ in 0..2 {
             let receipt = shutdown_project_servers(
-                tokio::time::Instant::now() + Duration::from_secs(5),
+                Instant::now() + Duration::from_secs(5),
                 &administration,
                 &super::super::http_application::DaemonHttpApplicationRegistry::default(),
             )
