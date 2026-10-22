@@ -365,9 +365,16 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
         json!({ "status": "current", "watermark": project.head })
     );
     assert_eq!(detailed["session_ingest"], empty_cursor_session_ingest());
+    let (history_passes, codex_parked, last_progress) =
+        empty_host_history_progress(&detailed["session_history_catch_up"])
+            .expect("historical progress reports pass counts and its frontier timestamp");
+    assert!(
+        history_passes > codex_parked,
+        "the empty-host sweep has completed a Codex visit"
+    );
     assert_eq!(
         detailed["session_history_catch_up"],
-        empty_host_session_history()
+        empty_host_session_history(history_passes, codex_parked, last_progress)
     );
     assert_eq!(detailed["tracked_branch_count"], 1);
     assert_eq!(
@@ -417,6 +424,8 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
              **session_projection:** current\n"
         )
     );
+
+    project.harness.shutdown().await;
 }
 
 /// One daemon serving two projects: each project's status lists only its own
@@ -582,8 +591,13 @@ async fn opted_in_status(project: &StatusProject) -> Value {
         let text = call_status(&project.harness, &project.project_root, arguments.clone()).await;
         let detailed =
             parse_status(&stored_body(&project.harness, &project.project_root, text).await);
+        let history_progress = empty_host_history_progress(&detailed["session_history_catch_up"]);
         if detailed["session_ingest"] == empty_cursor_session_ingest()
-            && detailed["session_history_catch_up"] == empty_host_session_history()
+            && history_progress.is_some_and(|(passes, codex_parked, last_progress)| {
+                passes > codex_parked
+                    && detailed["session_history_catch_up"]
+                        == empty_host_session_history(passes, codex_parked, last_progress)
+            })
         {
             return detailed;
         }
@@ -610,13 +624,58 @@ fn empty_cursor_session_ingest() -> Value {
     })
 }
 
+/// Timing-dependent counters from completed empty-home sweeps. The expected
+/// status below checks how every provider accounts for those passes.
+fn empty_host_history_progress(history: &Value) -> Option<(u64, u64, Option<i64>)> {
+    let progress = &history["progress"];
+    let codex = progress["providers"]
+        .as_array()?
+        .iter()
+        .find(|provider| provider["provider"] == "codex")?;
+    let codex_parked = codex["units_parked"].as_u64()?;
+    let last_progress = progress.get("last_progress_at_unix_micros")?;
+    let last_progress = if codex_parked == 0 {
+        if !last_progress.is_null() {
+            return None;
+        }
+        None
+    } else {
+        // A deferred Codex scan advances the persisted provider rotation
+        // frontier, so the worker must retain a real progress timestamp.
+        Some(
+            last_progress
+                .as_i64()
+                .filter(|time| *time > 1_000_000_000_000_000)?,
+        )
+    };
+    Some((progress["passes"].as_u64()?, codex_parked, last_progress))
+}
+
 /// Historical catch-up after every empty-home sweep has reported.
 ///
 /// Kimi and Pi publish a discovery frontier even when `~/.kimi-code` and
 /// `~/.pi` are absent, so they are the only observed providers. OpenCode has
 /// no database, so its coverage stays unavailable. The other admitted hosts
 /// finish with nothing pending.
-fn empty_host_session_history() -> Value {
+fn empty_host_session_history(passes: u64, codex_parked: u64, last_progress: Option<i64>) -> Value {
+    // Each empty-home sweep visits every admitted provider once. Scheduling can
+    // add a second sweep before status is read, so compare each cumulative
+    // disposition to the worker's observed pass count. Codex can temporarily
+    // park behind the profile's discovery scan; its cumulative dispositions
+    // must still account for every pass after that scan finishes.
+    let provider_units = [
+        "claude", "cline", "codex", "cursor", "hermes", "kilo", "kimi", "kiro", "opencode", "pi",
+        "roo-code", "vibe",
+    ]
+    .map(|provider| {
+        let parked = if provider == "codex" { codex_parked } else { 0 };
+        json!({
+            "provider": provider,
+            "units_projected": passes - parked,
+            "units_refused": 0,
+            "units_parked": parked,
+        })
+    });
     json!({
         "status": "warming",
         "coverage": "partial",
@@ -635,6 +694,14 @@ fn empty_host_session_history() -> Value {
         "max_transcript_pending_bytes": 0,
         "pending_bytes": 0,
         "pending_transcripts": 0,
+        "progress": {
+            "state": "advancing",
+            "passes": passes,
+            "passes_without_progress": 0,
+            "stalled_after_passes": 3,
+            "last_progress_at_unix_micros": last_progress,
+            "providers": provider_units,
+        },
         "message": "Historical session recall is partially available while the daemon continues bounded background catch-up.",
     })
 }
