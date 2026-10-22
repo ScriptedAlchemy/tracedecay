@@ -116,6 +116,7 @@ async fn observe(write: fn(&Path)) -> Vec<(Value, u64)> {
         } = call(&fixture, tool, arguments).await;
         observed.push((payload, catalog_symbols));
     }
+    drop(server);
     fixture.harness.shutdown().await;
     observed
 }
