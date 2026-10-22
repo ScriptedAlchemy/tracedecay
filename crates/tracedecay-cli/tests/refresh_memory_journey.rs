@@ -213,19 +213,7 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
                 LIMIT_BYTES.to_string(),
             )
             .env("TRACEDECAY_TEST_DAEMON_LOG_STDERR", "1")
-            .env("TRACEDECAY_SPAN_TIMINGS", "1")
-            .env(
-                "RUST_LOG",
-                concat!(
-                    "info,",
-                    "tracedecay_code_index_runtime::code_index_scheduler::reconcile=trace,",
-                    "tracedecay_code_index_runtime::code_index_scheduler::registry=trace,",
-                    // Keep registry submodules at info: only its phase-level spans
-                    // should be timed, not per-file/page or serving-read work.
-                    "tracedecay_code_index_runtime::code_index_scheduler::registry::=info,",
-                    "tracedecay::daemon::project_open_admission=trace",
-                ),
-            );
+            .env("RUST_LOG", "info");
     });
     report_phase(started, "initialize_project", 0);
     initialize_tracedecay_cli_project(&home, &project);
