@@ -19,6 +19,7 @@ mod production_daemon;
 mod remote_journey;
 mod remote_redirect;
 mod semantic_replay;
+mod tls_fixture;
 
 fn production_binary() -> std::path::PathBuf {
     let path = std::env::var_os("TRACEDECAY_TEST_BIN").map_or_else(

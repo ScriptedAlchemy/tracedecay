@@ -41,7 +41,10 @@ pub(super) fn request(stream: &mut impl Read) -> String {
     let mut request = String::new();
     loop {
         let mut line = String::new();
-        assert!(reader.read_line(&mut line).unwrap() > 0, "request header ended early");
+        assert!(
+            reader.read_line(&mut line).unwrap() > 0,
+            "request header ended early"
+        );
         request.push_str(&line);
         if line == "\r\n" {
             break;

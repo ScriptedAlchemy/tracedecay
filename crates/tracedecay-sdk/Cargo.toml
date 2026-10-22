@@ -22,6 +22,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing.workspace = true
 
 [dev-dependencies]
+rcgen = "0.14.10"
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 tempfile.workspace = true
 
