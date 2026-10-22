@@ -470,7 +470,10 @@ impl DaemonEngine {
             }
             self.ensure_registered_project_route(&project_path, handshake.allow_init)
                 .await?;
-            // Converging opens already own identity resolution for this exact route.
+            // The admitted open owns identity resolution for this exact route.
+            // Re-probing on a warming retry can contend with that open on a
+            // non-Git root, whose absent topology is intentionally not retained.
+            // Join its publication; terminal tasks still use normal resolution.
             if project_open_tasks(&self.project_open_gates)
                 .await
                 .status(&route)

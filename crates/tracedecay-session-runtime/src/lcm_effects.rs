@@ -6,7 +6,10 @@ use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_lcm::{LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode};
+use tracedecay_lcm::{
+    LcmCompressionOutcome, LcmCompressionRequest, LcmCompressionResponse, LcmError,
+    LcmSummarizerMode,
+};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
@@ -120,11 +123,7 @@ impl DaemonLcmEffectService {
                 )),
             )
             .await?;
-        if matches!(
-            &request.summarizer,
-            LcmSummarizerMode::Provided { summary_text, .. } if !summary_text.trim().is_empty()
-        ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
-        {
+        if request.summarizer.has_nonempty_provided_summary() {
             return self.commit_compression(&request).await;
         }
 
@@ -132,11 +131,11 @@ impl DaemonLcmEffectService {
         // changes between the planning pass and the final commit.
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
         let pending = self.commit_compression(&request).await?;
-        if pending.status != "needs_summary" {
-            return Ok(pending);
-        }
-        let Some(summary_request) = pending.summary_request.as_ref() else {
-            return Ok(pending);
+        let summary_request = match pending.outcome()? {
+            LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
+            LcmCompressionOutcome::Complete | LcmCompressionOutcome::Deferred { .. } => {
+                return Ok(pending);
+            }
         };
         let summary = match super::lcm_summarization::resolve_authoritative_summary(
             &self.db,
@@ -154,13 +153,14 @@ impl DaemonLcmEffectService {
             }
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
-                return Ok(summary_unavailable(pending, reason));
+                return pending.defer_for_authoritative_summary(reason);
             }
         };
         self.control.checkpoint()?;
         request.summarizer = LcmSummarizerMode::Provided {
             summary_text: summary.text,
             route: Some(summary.route),
+            extraction_result: None,
         };
         self.commit_compression(&request).await
     }
@@ -170,11 +170,7 @@ impl DaemonLcmEffectService {
         mut request: LcmCompressionRequest,
         convergence_candidate: &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
     ) -> Result<tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-        if matches!(
-            &request.summarizer,
-            LcmSummarizerMode::Provided { summary_text, .. } if !summary_text.trim().is_empty()
-        ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
-        {
+        if request.summarizer.has_nonempty_provided_summary() {
             return self
                 .commit_retained_compression(&request, Some(convergence_candidate), None)
                 .await;
@@ -184,11 +180,11 @@ impl DaemonLcmEffectService {
         let pending = self
             .commit_retained_compression(&request, Some(convergence_candidate), None)
             .await?;
-        if pending.response.status != "needs_summary" {
-            return Ok(pending);
-        }
-        let Some(summary_request) = pending.response.summary_request.as_ref() else {
-            return Ok(pending);
+        let summary_request = match pending.response.outcome()? {
+            LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
+            LcmCompressionOutcome::Complete | LcmCompressionOutcome::Deferred { .. } => {
+                return Ok(pending);
+            }
         };
         // Host-native compaction text is usable for retained convergence only
         // when its evidence binds the exact raw source range selected by this
@@ -214,13 +210,12 @@ impl DaemonLcmEffectService {
                 let mut pending = pending;
                 // An absent interval is its own typed state; only a present
                 // interval that binds a different range is a mismatch.
-                pending.response = summary_unavailable(
-                    pending.response,
+                pending.response = pending.response.defer_for_authoritative_summary(
                     summary
                         .source_range
                         .absent_reason()
                         .unwrap_or("authoritative_summary_source_mismatch"),
-                );
+                )?;
                 return Ok(pending);
             }
             Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {
@@ -229,7 +224,7 @@ impl DaemonLcmEffectService {
             Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
                 self.control.checkpoint()?;
                 let mut pending = pending;
-                pending.response = summary_unavailable(pending.response, reason);
+                pending.response = pending.response.defer_for_authoritative_summary(reason)?;
                 return Ok(pending);
             }
         };
@@ -237,6 +232,7 @@ impl DaemonLcmEffectService {
         request.summarizer = LcmSummarizerMode::Provided {
             summary_text: summary.text,
             route: Some(summary.route),
+            extraction_result: None,
         };
         let mut committed = self
             .commit_retained_compression(
@@ -389,15 +385,6 @@ pub async fn lcm_session_boundary_for_test(
     DaemonLcmEffectService::new(db, None, None)
         .session_boundary(request)
         .await
-}
-
-fn summary_unavailable(
-    mut response: LcmCompressionResponse,
-    reason: &'static str,
-) -> LcmCompressionResponse {
-    response.reason = reason.to_string();
-    response.retry_status = Some("needs_authoritative_summary".to_string());
-    response
 }
 
 #[cfg(test)]
