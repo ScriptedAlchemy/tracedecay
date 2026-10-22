@@ -858,7 +858,7 @@ exit 0"#
 
     #[cfg(unix)]
     #[test]
-    fn refused_mcp_only_install_keeps_host_effects_without_a_current_receipt() {
+    fn refused_mcp_only_install_keeps_host_effects_without_completion() {
         use crate::agents::host_bundle::HostBundleLifecycleOpV1;
 
         let operator = "[mcp_servers.other]\ncommand = \"other\"\n\n\
@@ -903,8 +903,16 @@ exit 0"#
                 "{region}"
             );
             assert!(
-                live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_none(),
+                live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_some(),
                 "{region}"
+            );
+            assert!(
+                crate::agents::host_bundle::latest_host_component_set_receipt_at(
+                    lifecycle.path(),
+                    crate::agents::host_bundle::HostKindV1::Codex,
+                )
+                .unwrap()
+                .is_none()
             );
         }
     }
@@ -957,7 +965,15 @@ exit 0"#
         assert_eq!(tracedecay_servers(&config_path), ["other"]);
         let remaining = read_config_table(&config_path).unwrap();
         assert_eq!(server_command(&remaining, "other"), Some("other"));
-        assert!(live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_none());
-        assert!(live_receipt(lifecycle.path(), HostComponentV1::Core).is_none());
+        assert!(live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_some());
+        assert!(live_receipt(lifecycle.path(), HostComponentV1::Core).is_some());
+        assert!(
+            crate::agents::host_bundle::latest_host_component_set_receipt_at(
+                lifecycle.path(),
+                crate::agents::host_bundle::HostKindV1::Codex,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 }
