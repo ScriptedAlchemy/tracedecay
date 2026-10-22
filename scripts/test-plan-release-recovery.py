@@ -106,29 +106,60 @@ def main() -> None:
 
         build_required, matrix, retained = run(root, (linux_binary, linux_mcpb))
         assert build_required == "true"
-        assert matrix == {"include": [TARGETS["include"][1]]}
+        assert matrix == {
+            "include": [
+                {**TARGETS["include"][0], "inventory_only": True},
+                TARGETS["include"][1],
+            ]
+        }
         assert retained == sorted((linux_binary, linux_mcpb))
 
         stable_assets = (
             linux_binary,
             linux_mcpb,
+            "tracedecay-v1.2.3-linux.spdx.json",
             "tracedecay-v1.2.3-windows.zip",
             "tracedecay-v1.2.3-windows.mcpb",
+            "tracedecay-v1.2.3-windows.spdx.json",
             "SHA256SUMS",
             "install.sh",
         )
         build_required, matrix, retained = run(root, stable_assets)
         assert build_required == "false"
         assert matrix == {"include": []}
-        assert retained == [
-            linux_mcpb,
-            linux_binary,
-            "tracedecay-v1.2.3-windows.mcpb",
-            "tracedecay-v1.2.3-windows.zip",
-        ]
+        assert retained == sorted(
+            (
+                linux_mcpb,
+                linux_binary,
+                "tracedecay-v1.2.3-linux.spdx.json",
+                "tracedecay-v1.2.3-windows.mcpb",
+                "tracedecay-v1.2.3-windows.zip",
+                "tracedecay-v1.2.3-windows.spdx.json",
+            )
+        )
 
         refuses(root, (linux_binary, "SHA256SUMS"), premature_metadata("SHA256SUMS"))
         refuses(root, (linux_binary, "install.sh"), premature_metadata("install.sh"))
+        build_required, matrix, retained = run(
+            root,
+            (
+                linux_binary,
+                linux_mcpb,
+                "tracedecay-v1.2.3-windows.zip",
+                "tracedecay-v1.2.3-windows.mcpb",
+                "SHA256SUMS",
+                "install.sh",
+            ),
+        )
+        assert build_required == "true"
+        assert matrix == {
+            "include": [
+                {**TARGETS["include"][0], "inventory_only": True},
+                {**TARGETS["include"][1], "inventory_only": True},
+            ]
+        }
+        assert retained == sorted((linux_binary, linux_mcpb,
+            "tracedecay-v1.2.3-windows.zip", "tracedecay-v1.2.3-windows.mcpb"))
         refuses(
             root, ("unexpected.tar.gz",), "unexpected existing release assets: unexpected.tar.gz"
         )
@@ -141,26 +172,37 @@ def main() -> None:
             profile="beta",
         )
         assert build_required == "true"
-        assert matrix == {"include": [TARGETS["include"][1]]}
+        assert matrix == {
+            "include": [
+                {**TARGETS["include"][0], "inventory_only": True},
+                TARGETS["include"][1],
+            ]
+        }
         assert retained == sorted((beta_linux, beta_linux_mcpb))
 
         beta_assets = (
             beta_linux,
             beta_linux_mcpb,
+            "tracedecay-beta-v1.2.3-linux.spdx.json",
             "tracedecay-beta-v1.2.3-windows.zip",
             "tracedecay-beta-v1.2.3-windows.mcpb",
+            "tracedecay-beta-v1.2.3-windows.spdx.json",
             "SHA256SUMS",
             "install.sh",
         )
         build_required, matrix, retained = run(root, beta_assets, profile="beta")
         assert build_required == "false"
         assert matrix == {"include": []}
-        assert retained == [
-            beta_linux_mcpb,
-            beta_linux,
-            "tracedecay-beta-v1.2.3-windows.mcpb",
-            "tracedecay-beta-v1.2.3-windows.zip",
-        ]
+        assert retained == sorted(
+            (
+                beta_linux_mcpb,
+                beta_linux,
+                "tracedecay-beta-v1.2.3-linux.spdx.json",
+                "tracedecay-beta-v1.2.3-windows.mcpb",
+                "tracedecay-beta-v1.2.3-windows.zip",
+                "tracedecay-beta-v1.2.3-windows.spdx.json",
+            )
+        )
 
         refuses(root, (beta_linux, "install.sh"), premature_metadata("install.sh"), profile="beta")
 
