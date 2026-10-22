@@ -360,6 +360,8 @@ async fn shutdown_joins_a_worker_suppressing_a_terminal_publication_park() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let registry = mounted_registry(&fixture, &store).await;
+    // Seating precedes the worker tail that can replace its park state.
+    super::settle_text_projection(&registry, fixture.path()).await;
     assert!(
         registry
             .plant_terminal_publication_authority_park_for_test(

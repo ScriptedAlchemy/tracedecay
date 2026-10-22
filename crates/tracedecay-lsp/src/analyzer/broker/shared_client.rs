@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex as SyncMutex};
 
 use tokio::sync::{Mutex, MutexGuard};
 
-use super::super::client::StdioLspClient;
+use super::super::client::{
+    StdioLspClient, StdioLspClientStartup, StdioLspClientStartupSettlement,
+};
 use super::super::error::{AnalyzerResult, AnalyzerRuntimeError};
 use crate::{AdmittedRoot, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor};
 
@@ -25,6 +27,7 @@ pub(crate) struct SharedAnalyzerClientSlot {
 
 enum SharedAnalyzerClientSlotState {
     Vacant,
+    Starting(Box<StdioLspClientStartup>),
     Live(Box<StdioLspClient>),
     Reaping(ClientReaper),
     ReapFailed(AnalyzerRuntimeError),
@@ -41,6 +44,7 @@ impl SharedAnalyzerClientSlot {
         match &self.state {
             SharedAnalyzerClientSlotState::Live(client) => Some(client.as_ref()),
             SharedAnalyzerClientSlotState::Vacant
+            | SharedAnalyzerClientSlotState::Starting(_)
             | SharedAnalyzerClientSlotState::Reaping(_)
             | SharedAnalyzerClientSlotState::ReapFailed(_) => None,
         }
@@ -50,6 +54,10 @@ impl SharedAnalyzerClientSlot {
         match std::mem::replace(&mut self.state, SharedAnalyzerClientSlotState::Vacant) {
             SharedAnalyzerClientSlotState::Live(client) => Some(*client),
             SharedAnalyzerClientSlotState::Vacant => None,
+            SharedAnalyzerClientSlotState::Starting(startup) => {
+                self.state = SharedAnalyzerClientSlotState::Starting(startup);
+                None
+            }
             SharedAnalyzerClientSlotState::Reaping(reaping) => {
                 self.state = SharedAnalyzerClientSlotState::Reaping(reaping);
                 None
@@ -63,6 +71,45 @@ impl SharedAnalyzerClientSlot {
 
     pub(crate) fn replace(&mut self, client: StdioLspClient) {
         self.state = SharedAnalyzerClientSlotState::Live(Box::new(client));
+    }
+
+    pub(crate) fn start(&mut self, startup: StdioLspClientStartup) {
+        self.state = SharedAnalyzerClientSlotState::Starting(Box::new(startup));
+    }
+
+    pub(crate) fn cancel_startup(&mut self) {
+        if let SharedAnalyzerClientSlotState::Starting(startup) = &self.state
+            && let Some(client) = startup.cancel()
+        {
+            // Startup may already have finished before its caller was
+            // abandoned. Retire that queued client now, retaining its reaper
+            // just as if cancellation happened after the caller took it.
+            self.retire(client);
+        }
+    }
+
+    pub(crate) async fn settle_startup(&mut self) -> AnalyzerResult<Option<StdioLspClient>> {
+        let SharedAnalyzerClientSlotState::Starting(startup) = &self.state else {
+            return Ok(None);
+        };
+        match startup.settle().await {
+            StdioLspClientStartupSettlement::Started(client) => {
+                self.state = SharedAnalyzerClientSlotState::Vacant;
+                Ok(Some(client))
+            }
+            StdioLspClientStartupSettlement::Cancelled => {
+                self.state = SharedAnalyzerClientSlotState::Vacant;
+                Ok(None)
+            }
+            StdioLspClientStartupSettlement::Failed(error) => {
+                self.state = SharedAnalyzerClientSlotState::Vacant;
+                Err(error)
+            }
+            StdioLspClientStartupSettlement::ReapFailed(error) => {
+                self.state = SharedAnalyzerClientSlotState::ReapFailed(error.clone());
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn retire(&mut self, client: StdioLspClient) {
@@ -90,6 +137,13 @@ impl SharedAnalyzerClient {
     pub(crate) async fn client(&self) -> AnalyzerResult<MutexGuard<'_, SharedAnalyzerClientSlot>> {
         let mut slot = self.client.lock().await;
         let reap_result = match &mut slot.state {
+            SharedAnalyzerClientSlotState::Starting(_) => {
+                let started = slot.settle_startup().await?;
+                if let Some(client) = started {
+                    slot.state = SharedAnalyzerClientSlotState::Live(Box::new(client));
+                }
+                None
+            }
             SharedAnalyzerClientSlotState::Reaping(reaper) => Some(reaper.as_mut().await),
             SharedAnalyzerClientSlotState::ReapFailed(error) => return Err(error.clone()),
             SharedAnalyzerClientSlotState::Vacant | SharedAnalyzerClientSlotState::Live(_) => None,
@@ -196,6 +250,80 @@ impl SharedAnalyzerClient {
         self.supervisor
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// One operation's use of the shared analyzer, concluded exactly once.
+///
+/// Either lane can be aborted at any await while it holds the client out of
+/// the slot, which drops the process with it. Without this guard the supervisor
+/// would keep describing that incarnation as live, and the next caller would
+/// serve its replacement on the retired attempt.
+pub(crate) struct AnalyzerClientUse<'a> {
+    shared: &'a SharedAnalyzerClient,
+    client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+    pub(crate) client: Option<StdioLspClient>,
+    attempt: u32,
+    concluded: bool,
+}
+
+impl<'a> AnalyzerClientUse<'a> {
+    pub(crate) fn new(
+        shared: &'a SharedAnalyzerClient,
+        client_slot: MutexGuard<'a, SharedAnalyzerClientSlot>,
+        attempt: u32,
+        client: Option<StdioLspClient>,
+    ) -> Self {
+        Self {
+            shared,
+            client_slot,
+            client,
+            attempt,
+            concluded: false,
+        }
+    }
+
+    pub(crate) fn start(&mut self, startup: StdioLspClientStartup) {
+        self.client_slot.start(startup);
+    }
+
+    pub(crate) async fn settle_startup(&mut self) -> AnalyzerResult<bool> {
+        self.client = self.client_slot.settle_startup().await?;
+        Ok(self.client.is_some())
+    }
+
+    pub(crate) fn restore(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+        if let Some(client) = self.client.take() {
+            self.client_slot.replace(client);
+        }
+    }
+
+    /// Returns a healthy client after rejecting caller-owned work before any
+    /// analyzer I/O. Local validation cannot change process health evidence.
+    pub(crate) fn restore_healthy(mut self) {
+        self.concluded = true;
+        if let Some(client) = self.client.take() {
+            self.client_slot.replace(client);
+        }
+    }
+
+    pub(crate) fn retire(mut self, event: AnalyzerEvent) {
+        self.concluded = true;
+        self.shared.record(self.attempt, event);
+    }
+}
+
+impl Drop for AnalyzerClientUse<'_> {
+    fn drop(&mut self) {
+        self.client_slot.cancel_startup();
+        if !self.concluded {
+            self.shared.record(self.attempt, AnalyzerEvent::Retired);
+        }
+        if let Some(client) = self.client.take() {
+            self.client_slot.retire(client);
+        }
     }
 }
 

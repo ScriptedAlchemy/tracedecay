@@ -175,6 +175,7 @@ npm.npm_translate_lock(
         "//:pnpm-workspace.yaml",
         "//dashboard:package.json",
     ],
+    npmrc = "//:.npmrc",
     pnpm_lock = "//:pnpm-lock.yaml",
     # React Router imports React types from the shared npm store, outside
     # dashboard/node_modules. Make that peer declaration resolvable there.

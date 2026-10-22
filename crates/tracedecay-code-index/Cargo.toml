@@ -65,31 +65,31 @@ lang-lean = ["tracedecay-code-extraction/lang-lean"]
 
 [dependencies]
 ast-grep-core = "0.50"
-flate2 = "1"
-base64 = "0.23"
-hex = "0.4"
+flate2.workspace = true
+base64.workspace = true
+hex.workspace = true
 ignore = "0.4"
-rayon = "1"
+rayon.workspace = true
 regex = "1"
-serde = { version = "1", features = ["derive", "rc"] }
-serde_json = { version = "1", features = ["raw_value"] }
-sha2 = "0.11"
-thiserror = "2"
-toml = "1"
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json = { workspace = true, features = ["raw_value"] }
+sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
-tracing = "0.1"
-tree-sitter = "0.27"
+tracing.workspace = true
+tree-sitter.workspace = true
 
 [dev-dependencies]
 # Self dev-dependency: the integration suite forces indexing width through
 # the `test-helpers` hooks; production builds never select them.
 tracedecay-code-index = { path = ".", default-features = false, features = ["test-helpers"] }
-criterion = "0.8"
-tempfile = "3"
+criterion.workspace = true
+tempfile.workspace = true
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
