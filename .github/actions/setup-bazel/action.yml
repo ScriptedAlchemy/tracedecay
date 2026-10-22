@@ -99,6 +99,24 @@ runs:
         key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}
 
+    - name: Preserve the runner network environment for Tailscale
+      if: runner.os == 'Linux' && inputs.tailscale-client-id != ''
+      shell: bash
+      run: |
+        # Ubuntu's sudo-rs ignores -E. Tailscale's action uses sudo for both
+        # the token exchange and daemon, which must retain any runner proxy
+        # and CA settings. Keep only these variables, scoped to its binaries.
+        network_env="HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR"
+        for name in $network_env; do
+          if [[ -v "$name" ]]; then
+            echo "Preserving runner network variable: $name"
+          fi
+        done
+        printf 'Defaults!/usr/local/bin/tailscale,/usr/local/bin/tailscaled env_keep += "%s"\n' "$network_env" |
+          sudo tee /etc/sudoers.d/tailscale-ci-network >/dev/null
+        sudo chmod 0440 /etc/sudoers.d/tailscale-ci-network
+        sudo visudo -cf /etc/sudoers.d/tailscale-ci-network
+
     - name: Connect to the private Bazel fleet
       if: inputs.tailscale-client-id != ''
       uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4

@@ -513,7 +513,7 @@ jobs:
             --mcpbs remote-assets/mcpbs \
             --inventories remote-assets/inventories
           for inventory in remote-assets/inventories/*.spdx.json; do
-            platform="${inventory#remote-assets/inventories/tracedecay-${TAG}-}"
+            platform="${inventory#remote-assets/inventories/tracedecay-"${TAG}"-}"
             platform="${platform%.spdx.json}"
             archive_format="$(jq -r --arg platform "$platform" \
               '.include[] | select(.name == $platform) | .archive' .github/release-targets.json)"
