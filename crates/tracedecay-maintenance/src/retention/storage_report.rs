@@ -948,9 +948,10 @@ async fn build_storage_report_page_with_walk_budget(
         .filter(|(name, _)| !registered.contains(name))
         .map(|(_, path)| path.clone())
         .collect::<Vec<_>>();
+    // Inventory enumeration and subtree sizing belong to the same request.
+    let mut remaining_entries = walk_entry_budget.saturating_sub(directory_page.entries_scanned);
     let (unregistered_dir_count, unregistered_bytes, unregistered_size) =
         native_runtime::spawn_blocking(move || {
-            let mut remaining_entries = walk_entry_budget;
             let sampled =
                 sample_unregistered_paths(unregistered, &mut remaining_entries, &walk_control);
             (sampled.directory_count, sampled.bytes, sampled.coverage)
@@ -1058,7 +1059,6 @@ async fn project_storage_report_page(
 struct ProjectDirectoryPage {
     directories: Vec<(String, PathBuf)>,
     next_cursor: Option<String>,
-    #[cfg_attr(not(test), allow(dead_code))]
     entries_scanned: usize,
 }
 
@@ -3012,6 +3012,66 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[asupersync::test]
+    async fn directory_page_sizing_charges_its_inventory_enumeration() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            &profile_root,
+        )
+        .await
+        .unwrap();
+        let db = runtime.profile_database_arc();
+        for name in ["proj_budget_a", "proj_budget_b"] {
+            let data_root = profile_root.join("projects").join(name);
+            std::fs::create_dir_all(&data_root).unwrap();
+            for file in ["one", "two", "three"] {
+                std::fs::write(data_root.join(file), [1u8]).unwrap();
+            }
+        }
+
+        let first = list_project_directories_page(&profile_root, "", 1).unwrap();
+        let after = first.next_cursor.unwrap();
+        // Replaying this inventory position performs the same bounded work as
+        // the report below, without assuming a fixed cost for the pager.
+        let inventory = list_project_directories_page(&profile_root, &after, 1).unwrap();
+        assert_eq!(inventory.directories.len(), 1);
+        assert!(inventory.entries_scanned > 0);
+        let cursor = storage_report_cursor(
+            &storage_report_binding(1).unwrap(),
+            &StorageReportPosition::Directories { after: Some(after) },
+        )
+        .unwrap();
+
+        for (sizing_budget, expected_bytes, expected_state) in [
+            (1, 1, StorageReportSizeStateV1::Partial),
+            (3, 3, StorageReportSizeStateV1::Complete),
+        ] {
+            let report = build_storage_report_page_with_walk_budget(
+                &profile_root,
+                &db,
+                None,
+                Some(&cursor),
+                1,
+                inventory.entries_scanned + sizing_budget,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(report.unregistered_dir_count, 1);
+            assert_eq!(report.unregistered_bytes, expected_bytes);
+            assert_eq!(report.coverage.unregistered_size.state, expected_state);
+            assert_eq!(report.coverage.unregistered_size.unavailable_entry_count, 0);
+            assert_eq!(
+                report.coverage.unregistered_size.reason,
+                (expected_state == StorageReportSizeStateV1::Partial)
+                    .then_some(StorageReportSizeReasonV1::EntryBudgetExceeded),
+            );
+        }
     }
 
     #[test]
