@@ -6889,6 +6889,11 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         .expect("remove restore witness to reproduce a cold preserved-profile mount");
 
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let status_poll_admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold text projection while establishing its first committed slice");
     registry
         .mount_worktree_with_graph_policy(
             test_project_id(),
@@ -6902,46 +6907,48 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         .mount_query_authority(fixture.path(), &scope, query_authority(privacy_domain))
         .await
         .expect("mount query authority");
-    let scheduler = {
+    let (scheduler, text_generation) = {
         let mounted = registry.mounted.lock().await;
-        Arc::clone(
-            &mounted
-                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
-                .expect("mounted worktree")
-                .scheduler,
+        let worktree = mounted
+            .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
+            .expect("mounted worktree");
+        (
+            Arc::clone(&worktree.scheduler),
+            Arc::clone(&worktree.text_generation),
         )
     };
-
-    let progress_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let (owner_epoch_before_overflow, progress_before_overflow) = loop {
-        let observed = {
-            let scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let progress = scheduler.build_progress_slot();
-            let progress = progress
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (progress.owner_epoch, progress.snapshot())
-        };
-        if let (owner_epoch, Some(progress)) = observed
-            && progress.committed_pages > 0
-            && progress.phase
-                != tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
-        {
-            break (owner_epoch, progress);
-        }
-        assert!(
-            std::time::Instant::now() <= progress_deadline,
-            "text projection completed before exposing bounded live progress"
+    // Establish the real retained owner and advance one bounded page while
+    // background admission is held. Polling a running worker can miss every
+    // intermediate slice when a fast build finishes between observations.
+    let text = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .servable_retained_text_generation()
+        .expect("restore retained text owner")
+        .expect("retained text owner is servable");
+    assert!(
+        !text.advance_text_serving(1).expect("commit one text page"),
+        "the fixture must retain work after its first bounded page"
+    );
+    *text_generation
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
+    let (owner_epoch_before_overflow, progress_before_overflow) = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let progress = scheduler.build_progress_slot();
+        let progress = progress
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = progress.snapshot().expect("committed text progress");
+        assert!(snapshot.committed_pages > 0);
+        assert_ne!(
+            snapshot.phase,
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         );
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        (progress.owner_epoch, snapshot)
     };
-    let status_poll_admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
-        .await
-        .expect("pause text projection after a bounded committed slice");
     let (last_reconciled_before_status_polls, original_staleness_threshold) = {
         let mut scheduler = scheduler
             .lock()
