@@ -1476,14 +1476,6 @@ fn ledger_leaving_one_mib(
         .expect("the held memory fits the ledger")
 }
 
-fn sixteen_gib_authority() -> Arc<ProcessResidentMemoryV1> {
-    let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).unwrap();
-    Arc::new(ProcessResidentMemoryV1::with_pressure(
-        limit,
-        Arc::new(ResidentMemoryPressureV1::new(limit)),
-    ))
-}
-
 /// A 16 GiB authority reading a fixed process size, so a held ledger refuses
 /// a refresh however much memory the tests beside it hold.
 fn fixed_reading_authority() -> Arc<ProcessResidentMemoryV1> {
@@ -1510,7 +1502,7 @@ async fn a_refresh_refused_for_memory_publishes_when_an_idle_owner_releases_it()
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
-    let resident_memory = sixteen_gib_authority();
+    let resident_memory = fixed_reading_authority();
     let (registry, _) = mounted_core_query_worktree_in(
         CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
             .with_resident_owners(Arc::clone(&owners)),
@@ -1576,7 +1568,7 @@ async fn a_refresh_refused_by_the_ledger_publishes_when_the_blocking_reservation
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
-    let resident_memory = sixteen_gib_authority();
+    let resident_memory = fixed_reading_authority();
     let (registry, _) = mounted_core_query_worktree_in(
         CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
             .with_resident_owners(Arc::clone(&owners)),
