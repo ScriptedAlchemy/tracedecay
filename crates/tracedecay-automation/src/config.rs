@@ -747,6 +747,48 @@ mod tests {
     }
 
     #[test]
+    fn cron_steps_stay_within_the_declared_field() {
+        for (field, min, max, selected) in [
+            ("31/4294967295", 1, 31, vec![31]),
+            ("30-31/4294967294", 1, 31, vec![30]),
+            ("*/4294967295", 1, 31, vec![1]),
+            ("*/4294967295", 0, 59, vec![0]),
+            ("1/4294967295,31/4294967294", 1, 31, vec![1, 31]),
+            ("1-31/30", 1, 31, vec![1, 31]),
+            ("1-31/31", 1, 31, vec![1]),
+            ("0-59/15", 0, 59, vec![0, 15, 30, 45]),
+            ("7/4294967295", 0, 7, vec![7]),
+        ] {
+            let (bits, _) = parse_cron_field(field, min, max, field).unwrap();
+            let actual: Vec<_> = (0..64).filter(|value| bits & (1 << value) != 0).collect();
+            assert_eq!(actual, selected, "{field}");
+        }
+        for field in ["*/0", "31/4294967296", "4294967296", "0", "32"] {
+            assert!(parse_cron_field(field, 1, 31, field).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn large_cron_steps_preserve_fixed_task_validation_and_dates() {
+        let schedule = "0 0 31/4294967295 * *";
+        let patch = AutomationConfigPatch {
+            skill_writer: AutomationTaskPatch {
+                schedule: Some(Some(schedule.to_owned())),
+                ..AutomationTaskPatch::default()
+            },
+            ..AutomationConfigPatch::default()
+        };
+        effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
+        let AutomationSchedule::Cron(cron) = parse_schedule(Some(schedule)).unwrap() else {
+            panic!("expected cron schedule");
+        };
+        for day in 1..=31 {
+            assert_eq!(cron.matches((day - 1) * 86_400), day == 31);
+        }
+        assert_eq!(cron.previous_occurrence(30 * 86_400), Some(30 * 86_400));
+    }
+
+    #[test]
     fn public_schedule_parser_preserves_interval_and_cron_behavior() {
         assert_eq!(
             parse_schedule(Some("hourly")).unwrap(),
