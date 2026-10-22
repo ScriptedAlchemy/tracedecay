@@ -189,7 +189,8 @@ impl SourceEditEffectRequestV1 {
 #[serde(rename_all = "snake_case", tag = "disposition")]
 pub enum SourceEditReconciliationDispositionV1 {
     ConfirmCommitted { committed_state: ManifestDigest },
-    ConfirmRolledBack,
+    ConfirmUnchanged,
+    AcknowledgePartial { observed_state: ManifestDigest },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -234,10 +235,14 @@ impl SourceEditReconciliationRequestV1 {
             });
         }
         self.proof.validate_for(&self.authority)?;
-        if let SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } =
-            &self.disposition
-        {
-            committed_state.validate()?;
+        match &self.disposition {
+            SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } => {
+                committed_state.validate()?;
+            }
+            SourceEditReconciliationDispositionV1::AcknowledgePartial { observed_state } => {
+                observed_state.validate()?;
+            }
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged => {}
         }
         let operation = source_edit_reconciliation_operation()?;
         if self.context.admission_at(self.observed_at) != RequestAdmission::Admitted
