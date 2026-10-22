@@ -1645,11 +1645,136 @@ while True:
 
 #[tokio::test]
 async fn semantic_eof_is_retired_as_transport_failure_not_timeout() {
+    assert_semantic_eof_outcome(false).await;
+}
+
+#[tokio::test]
+async fn semantic_cancellation_after_eof_releases_the_registered_operation() {
+    assert_semantic_eof_outcome(true).await;
+}
+
+async fn assert_semantic_eof_outcome(cancel_after_eof: bool) {
     let temp = tempfile::tempdir().unwrap();
     let document_path = temp.path().join(FAKE_PATH);
     std::fs::create_dir_all(document_path.parent().unwrap()).unwrap();
     std::fs::write(&document_path, "let value = 1;").unwrap();
     let script_path = temp.path().join("closed_stdout_lsp.py");
+    std::fs::write(
+        &script_path,
+        r#"
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    if message.get("method") == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif message.get("method") == "textDocument/documentSymbol":
+        os.close(sys.stdout.fileno())
+        Path(__file__).with_suffix(".closed").write_text("closed")
+        time.sleep(60)
+"#,
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            recovery_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap()
+        .expect("fake analyzer is executable");
+
+    let operation = authority.start(
+        AdmittedRoot::new(root_uri.clone()),
+        LspRequestId::Number(3),
+        tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+            document_uri: format!("{root_uri}{FAKE_PATH}"),
+        })
+        .unwrap(),
+    );
+    let outcome = if cancel_after_eof {
+        let operation = tokio::spawn(operation);
+        tokio::time::timeout(FAKE_LSP_RECOVERY_TIMEOUT, async {
+            while !script_path.with_extension("closed").exists() {
+                tokio::task::yield_now().await;
+            }
+            assert!(authority.cancel_request(
+                &AdmittedRoot::new(root_uri.clone()),
+                &LspRequestId::Number(3),
+            ));
+            operation.await.unwrap()
+        })
+        .await
+        .expect("cancellation after EOF must not wait for the response deadline")
+    } else {
+        operation.await
+    };
+    if cancel_after_eof {
+        assert_eq!(
+            outcome,
+            tracedecay_lsp::LspSemanticOperationOutcome::Partial {
+                value: serde_json::Value::Null,
+                coverage: "analyzer-cancelled".to_owned(),
+                detail: Some(
+                    tracedecay_lsp::LspSemanticOperationOutcome::ANALYZER_CANCELLED_DETAIL,
+                ),
+            },
+        );
+        assert!(!authority.cancel_request(&AdmittedRoot::new(root_uri), &LspRequestId::Number(3),));
+        return;
+    }
+
+    assert!(matches!(
+        outcome,
+        tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
+            if coverage == "analyzer-transport-failed"
+    ));
+    assert_eq!(
+        authority.analyzer_readiness().last_failure(),
+        Some(AnalyzerEvent::TransportFailed)
+    );
+}
+
+#[tokio::test]
+async fn semantic_process_exit_is_classified_before_the_response_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let document_path = temp.path().join(FAKE_PATH);
+    std::fs::create_dir_all(document_path.parent().unwrap()).unwrap();
+    std::fs::write(&document_path, "let value = 1;").unwrap();
+    let script_path = temp.path().join("exit_during_semantic_lsp.py");
     std::fs::write(
         &script_path,
         r#"
@@ -1684,88 +1809,7 @@ while True:
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
     elif message.get("method") == "textDocument/documentSymbol":
         os.close(sys.stdout.fileno())
-        time.sleep(60)
-"#,
-    )
-    .unwrap();
-    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
-        temp.path(),
-        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
-    );
-    let root_uri = url::Url::from_directory_path(temp.path())
-        .unwrap()
-        .to_string();
-    let authority = broker
-        .semantic_authority_if_available(
-            FAKE_LANGUAGE,
-            temp.path().to_path_buf(),
-            root_uri.clone(),
-            recovery_fake_lsp_timeouts(),
-        )
-        .await
-        .unwrap()
-        .expect("fake analyzer is executable");
-
-    let outcome = authority
-        .start(
-            AdmittedRoot::new(root_uri.clone()),
-            LspRequestId::Number(3),
-            tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
-                document_uri: format!("{root_uri}{FAKE_PATH}"),
-            })
-            .unwrap(),
-        )
-        .await;
-
-    assert!(matches!(
-        outcome,
-        tracedecay_lsp::LspSemanticOperationOutcome::Partial { ref coverage, .. }
-            if coverage == "analyzer-transport-failed"
-    ));
-    assert_eq!(
-        authority.analyzer_readiness().last_failure(),
-        Some(AnalyzerEvent::TransportFailed)
-    );
-}
-
-#[tokio::test]
-async fn semantic_process_exit_is_classified_before_the_response_deadline() {
-    let temp = tempfile::tempdir().unwrap();
-    let document_path = temp.path().join(FAKE_PATH);
-    std::fs::create_dir_all(document_path.parent().unwrap()).unwrap();
-    std::fs::write(&document_path, "let value = 1;").unwrap();
-    let script_path = temp.path().join("exit_during_semantic_lsp.py");
-    std::fs::write(
-        &script_path,
-        r#"
-import json
-import sys
-
-def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        name, value = line.decode("ascii").split(":", 1)
-        headers[name.lower()] = value.strip()
-    length = int(headers["content-length"])
-    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
-
-def send(payload):
-    body = json.dumps(payload).encode("utf-8")
-    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
-    sys.stdout.buffer.flush()
-
-while True:
-    message = read_message()
-    if message is None:
-        break
-    if message.get("method") == "initialize":
-        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
-    elif message.get("method") == "textDocument/documentSymbol":
+        time.sleep(0.1)
         sys.exit(17)
 "#,
     )
