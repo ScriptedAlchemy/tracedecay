@@ -21,6 +21,9 @@ jobs:
   # Catch Bazel 10's default flag flips on the pinned 9.3.0 (they exist there
   # precisely so workspaces can migrate early) before the next LTS lands.
   bazel-10-readiness:
+    permissions:
+      contents: read
+      id-token: write
     name: Bazel 10 readiness (flipped-flag build on 9.3.0)
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -30,6 +33,10 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           cache-key: upstream-compat-bazel10
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
       - name: Build the Rust workspace with Bazel 10 default flags
         run: |
           bazel build --config=ci \
