@@ -1566,8 +1566,8 @@ fn a_replacement_daemon_waits_for_its_predecessors_authority_lock() {
         refusal.downcast_ref::<String>().map(String::as_str),
         Some(
             format!(
-                "refusing to replace a live test daemon at {} or its authority lock",
-                common::daemon_socket_path(&home_path).display()
+                "a stopped test daemon still owns an endpoint or authority lock in {}",
+                home_path.join(".tracedecay").display()
             )
             .as_str()
         )
