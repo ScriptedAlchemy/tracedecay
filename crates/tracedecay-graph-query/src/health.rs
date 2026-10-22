@@ -851,6 +851,23 @@ mod panel_tests {
     }
 
     #[test]
+    fn bridge_between_cyclic_components_is_not_counted_as_a_cycle_edge() {
+        let snapshot = health_snapshot_from_inputs(&scope(
+            &[
+                ("a.rs", &["b.rs"]),
+                ("b.rs", &["a.rs", "c.rs"]),
+                ("c.rs", &["d.rs"]),
+                ("d.rs", &["c.rs"]),
+            ],
+            &[],
+        ));
+
+        assert_eq!(snapshot.total_edges, 5);
+        assert_eq!(snapshot.edges_in_cycles, 4);
+        assert!((snapshot.acyclicity - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn the_health_definition_pins_its_scores() {
         let aggregate =
             |file: &str, complexity, functions, skipped, dead| VerifiedHealthFileAggregateV1 {
