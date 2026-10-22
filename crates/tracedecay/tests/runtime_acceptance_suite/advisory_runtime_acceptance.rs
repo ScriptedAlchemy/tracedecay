@@ -1,12 +1,14 @@
 //! Strict advisory runtime acceptance over authentic provider response captures.
 
 use std::collections::{BTreeSet, VecDeque};
+use std::io::SeekFrom;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracedecay_application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_application::advisory::ci_runtime::{
@@ -1216,6 +1218,26 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     // client protocol; only a non-retryable failure is a test failure.
     let advisory_deadline = std::time::Instant::now() + Duration::from_secs(60);
     let advisory = loop {
+        let daemon_log_before_invocation =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(advisory_deadline), async {
+                const MAX_LOG_BYTES: u64 = 16 * 1024;
+                let mut file = tokio::fs::File::open(&daemon_log).await?;
+                let end = file.seek(SeekFrom::End(0)).await?;
+                file.seek(SeekFrom::Start(end.saturating_sub(MAX_LOG_BYTES)))
+                    .await?;
+                let mut bytes = Vec::new();
+                file.take(MAX_LOG_BYTES).read_to_end(&mut bytes).await?;
+                Ok::<_, std::io::Error>(String::from_utf8_lossy(&bytes).into_owned())
+            })
+            .await
+            .map_or_else(
+                |_| "daemon log snapshot exceeded the registration deadline".to_owned(),
+                |result| result.unwrap_or_else(|error| format!("daemon log unavailable: {error}")),
+            );
+        assert!(
+            std::time::Instant::now() < advisory_deadline,
+            "advisory registration deadline elapsed before invocation\ndaemon log captured before invocation (up to 16 KiB):\n{daemon_log_before_invocation}",
+        );
         let advisory = common::tracedecay_command_with_home(environment.home())
             .args([
                 "tool",
@@ -1243,13 +1265,13 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
                 });
         assert!(
             retryable_unavailable,
-            "registered advisory cycle failed\nstdout:\n{stdout}\nstderr:\n{}",
+            "registered advisory cycle failed\nstdout:\n{stdout}\nstderr:\n{}\ndaemon log captured before this invocation (up to 16 KiB):\n{daemon_log_before_invocation}",
             String::from_utf8_lossy(&advisory.stderr),
         );
         assert!(
             std::time::Instant::now() < advisory_deadline,
-            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}\ndaemon log:\n{}",
-            std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
+            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}\nstderr:\n{}\ndaemon log captured before this invocation (up to 16 KiB):\n{daemon_log_before_invocation}",
+            String::from_utf8_lossy(&advisory.stderr),
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };

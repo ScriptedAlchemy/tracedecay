@@ -1,3 +1,5 @@
+import type { LanguageClientOptions } from "vscode-languageclient/node";
+
 export const MAX_NATIVE_DIAGNOSTICS_PER_DOCUMENT = 100;
 export const MAX_NATIVE_DIAGNOSTIC_MESSAGE_BYTES = 512;
 export const MAX_NATIVE_DIAGNOSTIC_DOCUMENTS_PER_EVENT = 32;
@@ -38,6 +40,20 @@ export interface NativeDiagnosticsPayload {
   uri: string;
   version: number;
   diagnostics: NativeDiagnostic[];
+}
+
+export function nativeDiagnosticsDocumentSelector(
+  workspaceUri: string,
+): NonNullable<LanguageClientOptions["documentSelector"]> {
+  return [
+    {
+      scheme: "file",
+      pattern: {
+        baseUri: workspaceUri,
+        pattern: "**/*",
+      },
+    },
+  ];
 }
 
 export type NativeWorkspaceAdmission<Root> =

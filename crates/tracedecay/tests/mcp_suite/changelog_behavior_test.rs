@@ -123,6 +123,8 @@ async fn changelog_rejects_missing_and_non_object_arguments() {
             "invalid arguments: tracedecay_changelog expects a JSON object"
         )
     );
+
+    repo.harness.shutdown().await;
 }
 
 fn assert_changelog_refusal(response: &JsonRpcResponse, message: &str) {
@@ -170,6 +172,8 @@ async fn changelog_unknown_ref_is_a_typed_git_error() {
         message.starts_with("cannot resolve 'no-such-changelog-ref':"),
         "unresolvable ref must name itself in the git error: {message}"
     );
+
+    repo.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -228,6 +232,8 @@ symbols_modified: none
 symbols_removed: none
 "
     );
+
+    repo.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -253,6 +259,8 @@ async fn changelog_deleted_subtree_lists_only_the_removed_file() {
         json_text(result),
         r#"{"changed_file_count":1,"changed_files":["crates/sub/keep.rs"],"from_ref":"HEAD~1","status":"partial","symbol_changes_coverage":{"reason":"exact_local_branch_required","retryable":false,"status":"unavailable"},"symbols_added":[],"symbols_modified":[],"symbols_removed":[],"to_ref":"HEAD"}"#
     );
+
+    repo.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -295,6 +303,8 @@ async fn changelog_same_branch_tip_reports_no_changes() {
         .as_str()
         .unwrap_or_else(|| panic!("identical tips must name the head generation: {body}"));
     assert_eq!(base, head, "the same tip is one generation: {body}");
+
+    repo.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -377,4 +387,6 @@ async fn changelog_between_local_branches_names_added_removed_and_modified_symbo
         })],
         "{body}"
     );
+
+    repo.harness.shutdown().await;
 }
