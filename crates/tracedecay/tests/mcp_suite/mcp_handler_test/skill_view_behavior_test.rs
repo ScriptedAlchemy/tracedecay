@@ -20,6 +20,8 @@ use crate::mcp_server_test::support::{
 use crate::support::{TestTraceDecay, open_active_project_scoped_runtime, refusal_problem};
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
+use super::affected_tests_behavior_test::ReadFlightOverlap;
+
 const PROBE_ID: &str = "probe-skill";
 const OTHER_ID: &str = "other-skill";
 const PROBE_BODY: &str = "Read the checklist, then stop.";
@@ -368,6 +370,66 @@ async fn skill_view_denies_missing_id_and_unknown_skill() {
     assert_eq!(unknown["jsonrpc"], "2.0");
     assert_eq!(unknown["id"], 12);
     assert_skill_view_refusal(&unknown, "managed skill 'no-such-skill' not found");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_skill_views_each_record_usage_for_their_request() {
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_handler_test::skill_view_behavior_test::concurrent_skill_views_each_record_usage_for_their_request",
+            &[],
+        );
+        return;
+    }
+    let overlap = ReadFlightOverlap::install();
+    let fixture = open_skill_view_server().await;
+    create_managed_skill(&fixture.profile_root, probe_draft())
+        .await
+        .expect("probe skill");
+    let before = fixture.server.server_stats_json().await;
+
+    overlap.hold_next_read();
+    let leader_server = Arc::clone(&fixture.server);
+    let first = tokio::spawn(async move {
+        call_skill_view(
+            &leader_server,
+            701,
+            json!({"id": PROBE_ID, "format": "json"}),
+        )
+        .await
+    });
+    overlap.wait_for_leader().await;
+    let (first, second) = tokio::join!(
+        first,
+        call_skill_view(
+            &fixture.server,
+            702,
+            json!({"id": PROBE_ID, "format": "json"}),
+        )
+    );
+    let first = first.expect("held skill view must finish");
+    for (response, id) in [(&first, 701), (&second, 702)] {
+        assert_eq!(response["id"], id);
+        let viewed = successful_json(response);
+        assert_eq!(viewed["status"], "ok", "{response}");
+        assert_eq!(viewed["skill"]["metadata"]["id"], PROBE_ID);
+    }
+    let usage = load_skill_usage_record(&fixture.profile_root, PROBE_ID)
+        .await
+        .expect("probe usage ledger")
+        .expect("both views must persist usage");
+    assert_eq!(usage.view_count, 2, "each caller records its own view");
+    assert_eq!(usage.use_count, 0);
+    assert_eq!(
+        usage.imported_analytics_events.len(),
+        2,
+        "each request retains its own analytics import identity"
+    );
+    let after = fixture.server.server_stats_json().await;
+    assert_eq!(
+        after["identical_read_coalescing"], before["identical_read_coalescing"],
+        "skill views execute their per-call usage writes without joining a read flight"
+    );
 }
 
 fn assert_skill_view_refusal(response: &Value, message: &str) {
