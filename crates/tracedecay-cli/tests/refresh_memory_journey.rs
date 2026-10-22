@@ -205,8 +205,10 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
                 "RUST_LOG",
                 concat!(
                     "info,",
-                    "tracedecay_code_index_runtime::code_index_scheduler::registry::mount=trace,",
-                    "tracedecay_code_index_runtime::code_index_scheduler::reconcile=trace",
+                    "tracedecay_code_index_runtime::code_index_scheduler::registry=trace,",
+                    "tracedecay_code_index_runtime::code_index_scheduler::reconcile=trace,",
+                    "tracedecay_code_index_runtime::code_index_scheduler::serving=trace,",
+                    "tracedecay_query::retrieval::lexical::projection::artifact::builder=trace",
                 ),
             );
     });
