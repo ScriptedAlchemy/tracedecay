@@ -96,13 +96,15 @@ pub(super) fn init_project(home: &Path, project: &Path, socket_path: &Path) -> P
         );
     }
 
+    // Establish a ready generation before the client burst: ordinary init only
+    // queues reconciliation, while the later Doctor probe requires it complete.
     let output = common::tracedecay_command_with_home(home)
         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
-        .arg("init")
+        .args(["init", "--wait"])
         .current_dir(project)
         .output()
-        .expect("tracedecay init should run");
-    assert_command_success("tracedecay init", &output);
+        .expect("tracedecay init --wait should run");
+    assert_command_success("tracedecay init --wait", &output);
 
     home.join(".tracedecay").join("global.db")
 }

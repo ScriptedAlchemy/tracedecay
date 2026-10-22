@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -6,6 +7,7 @@ use tracedecay_runtime_core::erase_send;
 use asupersync::channel::watch;
 
 use super::authority::SessionIngestAuthority;
+use crate::ProviderPassUnits;
 use crate::observation::ObservationCancellation;
 use crate::runtime::hosts::codex::CodexDiscoveryHub;
 use crate::runtime::jsonl_observation_admission::shared_jsonl_memory_headroom;
@@ -27,6 +29,8 @@ pub struct TranscriptIngestOutcome {
     pub scheduling_state_written: bool,
     /// The pass durably advanced source coverage beyond its upserts.
     pub coverage_advanced: bool,
+    /// Each admitted provider's unit dispositions in this pass.
+    pub provider_units: BTreeMap<&'static str, ProviderPassUnits>,
 }
 
 impl TranscriptIngestOutcome {
@@ -40,6 +44,7 @@ impl TranscriptIngestOutcome {
             coverage: IngestPassCoverage::Complete,
             scheduling_state_written: false,
             coverage_advanced: false,
+            provider_units: BTreeMap::new(),
         }
     }
 
@@ -50,6 +55,7 @@ impl TranscriptIngestOutcome {
             coverage: outcome.coverage,
             scheduling_state_written: outcome.scheduling_state_written,
             coverage_advanced: outcome.coverage_advanced,
+            provider_units: outcome.provider_units,
         }
     }
 
@@ -209,6 +215,7 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
                 coverage: IngestPassCoverage::Partial { deferred_units: 1 },
                 scheduling_state_written: false,
                 coverage_advanced: false,
+                provider_units: BTreeMap::new(),
             };
         }
         StartupUserIngestClaim::RecentlyCompleted => {
