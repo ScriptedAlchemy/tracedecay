@@ -76,8 +76,7 @@ impl JsonConfigDialect {
     /// Replacement text for a config whose observed contents are `existing`
     /// and whose intended value is `value`. Only members whose values differ
     /// are rewritten; the operator's comments, key order and formatting
-    /// around them are kept byte-for-byte, so removing what an install added
-    /// restores the original file exactly. Blank contents are a fresh file.
+    /// around them are kept byte-for-byte. Blank contents are a fresh file.
     pub(super) fn render_edit(
         self,
         path: &Path,
@@ -228,8 +227,7 @@ pub(crate) fn update_json_config_transactionally<T>(
 /// TOML sibling of [`update_json_config_transactionally`]. The transform
 /// edits the document parsed from the exact bytes the write lock observed;
 /// every table, key, comment and blank line it leaves alone publishes
-/// byte-for-byte, so removing what an install added restores the original
-/// file. A document edited down to nothing removes a file the running
+/// byte-for-byte. A document edited down to nothing removes a file the running
 /// lifecycle created and keeps one the operator had.
 pub(crate) fn update_toml_config_transactionally<T>(
     path: &Path,

@@ -13,7 +13,7 @@ const identity = {
 
 function decode(value: unknown): unknown {
   const operation = OPERATIONS.find(
-    (entry) => entry.operation === "application_source_edit_reconcile",
+    (entry) => entry.operation === "source_edit_reconcile",
   );
   if (!operation) throw new Error("source edit reconciliation operation missing");
   return operation.decodeRequest(value);
