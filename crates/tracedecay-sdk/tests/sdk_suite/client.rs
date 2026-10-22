@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -36,12 +36,12 @@ impl McpToolTransport for RecordingMcpTransport {
     }
 }
 
-fn request(stream: &mut TcpStream) -> String {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
+pub(super) fn request(stream: &mut impl Read) -> String {
+    let mut reader = BufReader::new(stream);
     let mut request = String::new();
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
+        assert!(reader.read_line(&mut line).unwrap() > 0, "request header ended early");
         request.push_str(&line);
         if line == "\r\n" {
             break;

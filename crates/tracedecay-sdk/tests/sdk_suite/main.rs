@@ -17,6 +17,7 @@ mod client;
 mod facade;
 mod production_daemon;
 mod remote_journey;
+mod remote_redirect;
 mod semantic_replay;
 
 fn production_binary() -> std::path::PathBuf {
