@@ -158,22 +158,19 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
         .iter()
         .map(|(relative, _)| (*relative).to_owned())
         .collect::<Vec<_>>();
+    for (relative, expected) in rendered {
+        assert_eq!(
+            std::fs::read_to_string(source.join(relative)).unwrap(),
+            expected,
+            "relocated marketplace bytes differ at {relative}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cache.join(relative)).unwrap(),
+            expected,
+            "refreshed native cache bytes differ at {relative}"
+        );
+    }
     for root in [&source, &cache] {
-        for (relative, expected) in &rendered {
-            let path = root.join(relative);
-            let actual = std::fs::read(&path).unwrap();
-            assert!(
-                actual == expected.as_bytes(),
-                "relocated bundle differs at {}: actual bytes={}, expected bytes={}, first differing byte={:?}",
-                path.display(),
-                actual.len(),
-                expected.len(),
-                actual
-                    .iter()
-                    .zip(expected.as_bytes())
-                    .position(|(actual, expected)| actual != expected)
-            );
-        }
         let unexpected = unexpected_bundle_entrypoints(
             root,
             &relatives,

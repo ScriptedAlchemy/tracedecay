@@ -12,7 +12,7 @@ use tracedecay_store::{
 
 use super::history::{
     SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
-    SessionHistoricalIngestor, SharedSessionHistoricalIngestor,
+    SessionHistoricalIngestor, SessionHistoricalPass, SharedSessionHistoricalIngestor,
 };
 use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy,
@@ -22,6 +22,10 @@ use super::registry::SessionTemporalRefreshPassReport;
 use super::wake::{SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState};
 use super::worker::{
     apply_refresh_effect, run_session_temporal_refresh_pass, run_session_temporal_refresh_scheduler,
+};
+use tracedecay_sessions::ProviderPassUnits;
+use tracedecay_sessions::serving::{
+    SessionHistoryProgressState, SessionProjectionServingStatusPort,
 };
 
 async fn begin_empty_refreshes(
@@ -180,7 +184,7 @@ impl SessionHistoricalIngestor for GatedHistory {
         Box::pin(async move {
             self.entered.notify_one();
             self.release.notified().await;
-            SessionHistoricalIngestOutcome::Complete
+            SessionHistoricalIngestOutcome::Complete.into()
         })
     }
 
@@ -229,6 +233,109 @@ async fn a_wake_served_by_the_running_pass_joins_that_pass() {
     assert!(
         join.await,
         "the pass that served the wake must end the join"
+    );
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
+}
+
+/// Replays scripted passes, each with its own provider unit tallies.
+struct TalliedHistory {
+    passes: std::sync::Mutex<std::collections::VecDeque<SessionHistoricalPass>>,
+}
+
+impl SessionHistoricalIngestor for TalliedHistory {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        let pass = self
+            .passes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| SessionHistoricalIngestOutcome::Complete.into());
+        Box::pin(async move { pass })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
+    fn cancel(&self) {}
+}
+
+/// Status reads catch-up progress from the worker that ran the passes: each
+/// provider's dispositions sum across passes, and a pass that commits work
+/// keeps the stall count at zero.
+#[tokio::test]
+async fn the_worker_reports_provider_units_summed_over_its_history_passes() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-history-progress").await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let units = |units_projected, units_parked| ProviderPassUnits {
+        units_projected,
+        units_parked,
+        ..ProviderPassUnits::default()
+    };
+    let history = Arc::new(TalliedHistory {
+        passes: std::sync::Mutex::new(
+            [
+                SessionHistoricalPass {
+                    outcome: SessionHistoricalIngestOutcome::Pending {
+                        made_progress: true,
+                    },
+                    made_progress: true,
+                    provider_units: [("codex", units(1, 0)), ("cursor", units(0, 1))].into(),
+                },
+                SessionHistoricalPass {
+                    outcome: SessionHistoricalIngestOutcome::Complete,
+                    made_progress: true,
+                    provider_units: [("cursor", units(1, 0))].into(),
+                },
+            ]
+            .into(),
+        ),
+    });
+    let ingestor: SharedSessionHistoricalIngestor = history;
+    let handle = state.handle();
+    assert_eq!(
+        handle
+            .serving_status()
+            .history
+            .expect("a mounted worker reports catch-up progress")
+            .state(),
+        SessionHistoryProgressState::AwaitingFirstPass
+    );
+    state.wake_history();
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(CanonicalSessionTemporalProjector),
+        Arc::new(std::sync::RwLock::new(Some(ingestor))),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while handle
+        .serving_status()
+        .history
+        .is_none_or(|history| history.passes < 2)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the worker must record both history passes, saw {:?}",
+            handle.serving_status().history
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let progress = handle
+        .serving_status()
+        .history
+        .expect("a mounted worker reports catch-up progress");
+    assert_eq!(progress.passes, 2);
+    assert_eq!(progress.passes_without_progress, 0);
+    assert!(progress.last_progress_at_unix_micros.is_some());
+    assert_eq!(progress.state(), SessionHistoryProgressState::Advancing);
+    assert_eq!(
+        progress.provider_units.into_iter().collect::<Vec<_>>(),
+        vec![("codex", units(1, 0)), ("cursor", units(1, 1))]
     );
     state.cancel();
     worker.await.expect("refresh worker exits on cancellation");

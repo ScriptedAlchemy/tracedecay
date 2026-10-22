@@ -144,6 +144,13 @@ consistency, not independent publisher authenticity. Other distribution/update
 paths have their own verification; do not assume installer checks apply to all
 paths.
 
+**Release component inventory:** Each native archive and MCPB is accompanied by a
+platform-specific SPDX 2.3 inventory asset. The inventory names and SHA-256 hashes
+both final package files; `SHA256SUMS` and the release build-provenance attestation
+cover the downloaded inventory asset itself. `NOASSERTION` licenses or unknown
+sources are explicitly annotated for review. The inventory is a traceability report,
+not a license scan or a claim that all components have been legally reviewed.
+
 **Windows:** Release executables are unsigned. Archive checksums and build-provenance attestations do not provide an executable code signature.
 
 ### Required daemon authority; optional service installation
