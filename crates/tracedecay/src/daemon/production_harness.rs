@@ -1393,7 +1393,7 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
     .await;
     tracing::Instrument::instrument(
         shutdown_detached_project_servers(
-            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+            std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
             servers,
         ),
         tracing::trace_span!("daemon.harness.shutdown_detached"),
