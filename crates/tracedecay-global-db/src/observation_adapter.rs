@@ -532,7 +532,33 @@ impl GlobalDbObservationStore {
                     retained.observation().receipt() == observation.receipt()
                 }));
         if existed_exact {
-            return Ok(PreparedObservationPersist::ExactDuplicate(Box::new(write)));
+            // An exact retry retains its first accepted derived authority;
+            // later projection clocks or Git captures cannot replace it. The
+            // writer still serializes source revival against retirement.
+            let (anchor, provenance) = if let Some(retained) = pending.as_ref() {
+                (&retained.retrieval_anchor, &retained.repository_provenance)
+            } else if let Some(retained) = existing {
+                (
+                    retained.retrieval_anchor(),
+                    retained.repository_provenance_attachment(),
+                )
+            } else {
+                return Err(runtime_storage_error(
+                    "persist exact observation retry",
+                    "exact duplicate has no retained observation authority",
+                ));
+            };
+            let replay = AnchoredObservationWrite::new(
+                write.write().clone(),
+                anchor.clone(),
+                anchor.projection_generation().clone(),
+            )?
+            .with_repository_provenance_attachment(
+                provenance.availability().clone(),
+                provenance.anchor().cloned(),
+            )?
+            .with_identity_collision_disposition(write.identity_collision_disposition());
+            return Ok(PreparedObservationPersist::ExactDuplicate(Box::new(replay)));
         }
         if pending.is_none() && existing.is_none() {
             batch_state.register_pending(&write)?;
@@ -764,6 +790,8 @@ struct PendingObservationAuthority {
     payload_reference: PayloadReferenceV1,
     identity: ObservationIdentityMaterialV1,
     receipt: SanitizationReceiptV1,
+    retrieval_anchor: RetrievalAnchorRecord,
+    repository_provenance: RepositoryProvenanceAttachmentV1,
 }
 
 #[derive(Clone)]
@@ -830,6 +858,8 @@ impl ObservationBatchState {
                 payload_reference: write.observation().payload_reference().clone(),
                 identity: write.observation().identity().clone(),
                 receipt: write.observation().receipt().clone(),
+                retrieval_anchor: write.retrieval_anchor().clone(),
+                repository_provenance: write.repository_provenance_attachment().clone(),
             },
         );
         self.pending_receipts.insert(
