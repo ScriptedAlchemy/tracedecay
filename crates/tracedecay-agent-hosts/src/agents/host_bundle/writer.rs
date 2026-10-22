@@ -15,8 +15,7 @@ use tracedecay_host_integration::host_bundle_storage_failure;
 
 use super::control::{
     HOST_BUNDLE_CONTROL_DIR, HOST_BUNDLE_LOCK_FILE, MAX_CONTROL_FILE_BYTES,
-    component_set_receipt_file, component_slug, is_safe_component,
-    latest_host_component_set_receipt_at, parse_receipt, receipt_file,
+    component_set_receipt_file, component_slug, is_safe_component, parse_receipt, receipt_file,
     receipt_identity_from_file_name, receipt_schema_probe, superseded_identities,
     validate_component_set_receipt, validate_receipt, writer_lock_file,
 };
@@ -624,13 +623,6 @@ impl HostBundleWriterV1 {
             &bytes,
             false,
         )
-    }
-
-    pub(super) fn remove_component_set_receipt(
-        &self,
-        operation_id: [u8; 16],
-    ) -> Result<(), HostBundleError> {
-        self.remove_control_file(&component_set_receipt_file(operation_id))
     }
 
     fn remove_control_file(&self, name: &str) -> Result<(), HostBundleError> {
