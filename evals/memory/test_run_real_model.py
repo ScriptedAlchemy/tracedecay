@@ -245,6 +245,33 @@ elif args[:1] == ["tool"]:
 
 
 class IsolatedLifecycleTest(unittest.TestCase):
+    def test_no_agent_turns_cannot_pass_even_when_store_assertions_pass(self):
+        for driver in ("hermes", "cursor-agent"):
+            with self.subTest(driver=driver):
+                eval_env = run_real_model.create_eval_environment("empty-agent-turns")
+                self.addCleanup(eval_env.cleanup)
+                report = {"scenarios": []}
+                args = argparse.Namespace(driver=driver, tracedecay_bin="tracedecay")
+                with (
+                    mock.patch.object(run_real_model, "create_eval_environment", return_value=eval_env),
+                    mock.patch.object(eval_env, "start_daemon"),
+                    mock.patch.object(run_real_model, "seed_fixture"),
+                    mock.patch.object(run_real_model, "drive_hermes", return_value=[]),
+                    mock.patch.object(run_real_model, "drive_cursor_agent", return_value=[]),
+                    mock.patch.object(run_real_model, "evaluate_assertions", return_value=[
+                        {"name": "no-pollution", "passed": True, "actual": 0, "expected": 0, "op": "eq"},
+                    ]),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    result = run_real_model.run_scenario(args, self.scenario(), Path("."), report)
+                self.assertEqual(result, (False, False))
+                entry = report["scenarios"][0]
+                self.assertEqual(entry["status"], "error (agent turn invalid, see transcript logs)")
+                self.assertEqual(entry["transcripts"], [])
+                self.assertTrue(entry["assertions"][0]["passed"])
+                self.assertFalse(eval_env.root.exists())
+
     def make_bin(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -510,13 +537,22 @@ class IsolatedLifecycleTest(unittest.TestCase):
                     entry["error"], str(exc) or "interrupted"
                 )
 
-    def test_daemon_cleanup_does_not_need_to_launch_a_helper(self):
+    def test_daemon_cleanup_does_not_need_to_launch_a_python_helper(self):
         eval_env = run_real_model.create_eval_environment("cleanup-no-helper")
         self.addCleanup(eval_env.cleanup)
         eval_env.start_daemon(self.make_bin(), ready_timeout=15)
         daemon = eval_env.daemon
+        popen = subprocess.Popen
+
+        def process_state_only(command, *args, **kwargs):
+            # macOS has no /proc: canonical process-group teardown uses ps
+            # to distinguish exited zombies from descendants still running.
+            if command[0] == "ps":
+                return popen(command, *args, **kwargs)
+            raise OSError("cannot spawn cleanup helper")
+
         with mock.patch.object(
-            run_real_model.subprocess, "Popen", side_effect=OSError("cannot spawn helper")
+            run_real_model.subprocess, "Popen", side_effect=process_state_only
         ):
             eval_env.cleanup()
         self.assertIsNotNone(daemon.returncode)

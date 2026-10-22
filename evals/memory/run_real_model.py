@@ -894,7 +894,7 @@ def run_scenario(args, scenario, run_dir, report):
         status = "pass" if not failed else "fail"
         if failed and scenario.get("contract") == "pending-sibling":
             status = "fail (note: scenario contract is pending-sibling, see contract_notes)"
-        if not all(t["turn_valid"] for t in transcripts):
+        if not transcripts or not all(t["turn_valid"] for t in transcripts):
             status = "error (agent turn invalid, see transcript logs)"
             failed = failed or [{"name": "agent-turn", "passed": False}]
         entry.pop("error")
