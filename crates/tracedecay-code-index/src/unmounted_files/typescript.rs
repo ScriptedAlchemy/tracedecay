@@ -219,25 +219,20 @@ fn audit_with_reader(
         .collect::<Vec<_>>();
 
     let entry_point_count = packages.iter().map(|package| package.entries.len()).sum();
-    let walks = packages
+    let mounted = packages
         .iter_mut()
-        .map(|package| walk_imports(files.root(), package, &owned_files, reader))
+        .flat_map(|package| walk_imports(files.root(), package, &owned_files, reader))
+        .collect::<HashSet<_>>();
+    let omissions = packages
+        .iter()
+        .flat_map(|package| {
+            package
+                .coverage
+                .omissions
+                .iter()
+                .map(|reason| format!("{}: {reason}", package.manifest))
+        })
         .collect::<Vec<_>>();
-    let mut dependent_omissions = vec![BTreeSet::new(); packages.len()];
-    for (package, reached) in packages.iter().zip(&walks) {
-        if package.coverage.omissions.is_empty() {
-            continue;
-        }
-        for file in reached {
-            if let Some(owner) = file.ancestors().find_map(|dir| package_indices.get(dir)) {
-                dependent_omissions[*owner].extend(package.coverage.omissions.iter().cloned());
-            }
-        }
-    }
-    for (package, omissions) in packages.iter_mut().zip(dependent_omissions) {
-        package.coverage.omissions.extend(omissions);
-    }
-    let mounted = walks.into_iter().flatten().collect::<HashSet<_>>();
 
     let mut scanned_file_count = 0usize;
     let mut unclaimed_file_count = 0usize;
@@ -249,7 +244,7 @@ fn audit_with_reader(
         };
         let package = &packages[index];
         scanned_file_count += 1;
-        if mounted.contains(&normalized(absolute)) || !package.coverage.omissions.is_empty() {
+        if mounted.contains(&normalized(absolute)) || !omissions.is_empty() {
             continue;
         }
         unmounted.push(UnmountedFile {
@@ -266,16 +261,6 @@ fn audit_with_reader(
     }
 
     unmounted.sort_by(|left, right| left.file.cmp(&right.file));
-    let omissions = packages
-        .iter()
-        .flat_map(|package| {
-            package
-                .coverage
-                .omissions
-                .iter()
-                .map(|reason| format!("{}: {reason}", package.manifest))
-        })
-        .collect::<Vec<_>>();
     EcosystemAudit {
         ecosystem: "typescript",
         status: if omissions.is_empty() {
@@ -292,7 +277,7 @@ fn audit_with_reader(
         blind_spots: TYPESCRIPT_BLIND_SPOTS.to_vec(),
         note: (!omissions.is_empty()).then(|| {
             format!(
-                "Negative reachability findings withheld for packages with missing inputs: {}",
+                "TypeScript negative reachability findings withheld because missing inputs may reference any package: {}",
                 omissions.join("; ")
             )
         }),
@@ -882,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_manifest_withholds_affected_findings_and_keeps_independent_package() {
+    fn malformed_manifest_withholds_findings_across_package_boundaries() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
         write(root, "broken/package.json", "{");
@@ -895,7 +880,7 @@ mod tests {
 
         let audit = audit_typescript(root);
         assert_eq!(audit.status.as_str(), "partial");
-        assert_eq!(unmounted_paths(&audit), vec!["healthy/src/orphan.ts"]);
+        assert_eq!(unmounted_paths(&audit), Vec::<&str>::new());
         assert_eq!(audit.mounted_file_count, 3);
         let note = audit.note.expect("missing-input explanation");
         assert!(note.contains("broken/package.json"), "{note}");
@@ -904,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_inputs_withhold_package_findings_and_preserve_proven_mounts() {
+    fn unreadable_inputs_withhold_findings_and_preserve_proven_mounts() {
         for unreadable in [
             "package.json",
             "tsconfig.json",
@@ -936,11 +921,7 @@ mod tests {
                 }
             });
             assert_eq!(audit.status.as_str(), "partial", "{unreadable}");
-            assert_eq!(
-                unmounted_paths(&audit),
-                vec!["healthy/src/orphan.ts"],
-                "{unreadable}"
-            );
+            assert_eq!(unmounted_paths(&audit), Vec::<&str>::new(), "{unreadable}");
             let expected_mounted = match unreadable {
                 "src/index.ts" => 3,
                 "src/intermediate.ts" => 4,
@@ -955,7 +936,96 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_cross_package_source_withholds_descendants_in_its_own_package() {
+    fn unreadable_entry_declarations_withhold_unknown_cross_package_targets() {
+        for (declaration, contents) in [
+            (
+                "package.json",
+                r#"{"name":"app","main":"../shared/src/used.ts"}"#,
+            ),
+            ("tsconfig.json", r#"{"files":["../shared/src/used.ts"]}"#),
+            (
+                "rsbuild.config.ts",
+                "export default { entry: '../shared/src/used.ts' };",
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let root = temp.path();
+            write(root, "app/package.json", r#"{"name":"app"}"#);
+            write(root, &format!("app/{declaration}"), contents);
+            write(root, "shared/package.json", r#"{"name":"shared"}"#);
+            write(root, "shared/src/used.ts", "export const used = 1;");
+            write(root, "shared/src/orphan.ts", "export const orphan = 1;");
+
+            let complete = audit_typescript(root);
+            assert_eq!(complete.status.as_str(), "audited", "{declaration}");
+            assert_eq!(
+                unmounted_paths(&complete),
+                vec!["shared/src/orphan.ts"],
+                "{declaration}"
+            );
+
+            let failed_path = root.join("app").join(declaration);
+            let partial = audit_with_reader(&project(root), &|path| {
+                if path == failed_path {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "fixture read denied",
+                    ))
+                } else {
+                    std::fs::read_to_string(path)
+                }
+            });
+            assert_eq!(partial.status.as_str(), "partial", "{declaration}");
+            assert_eq!(
+                unmounted_paths(&partial),
+                Vec::<&str>::new(),
+                "{declaration}"
+            );
+            let note = partial.note.expect("read omission");
+            assert!(note.contains(&format!("app/{declaration}")), "{note}");
+        }
+    }
+
+    #[test]
+    fn unreadable_importer_withholds_unknown_cross_package_targets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        write(root, "app/package.json", r#"{"name":"app"}"#);
+        write(root, "app/src/index.ts", "import '../../shared/src/used';");
+        write(root, "shared/package.json", r#"{"name":"shared"}"#);
+        write(root, "shared/src/used.ts", "export const used = 1;");
+        write(root, "shared/src/orphan.ts", "export const orphan = 1;");
+
+        let complete = audit_typescript(root);
+        assert_eq!(complete.status.as_str(), "audited");
+        assert_eq!(unmounted_paths(&complete), vec!["shared/src/orphan.ts"]);
+        assert_eq!(complete.mounted_file_count, 2);
+
+        let failed_path = root.join("app/src/index.ts");
+        let partial = audit_with_reader(&project(root), &|path| {
+            if path == failed_path {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "fixture read denied",
+                ))
+            } else {
+                std::fs::read_to_string(path)
+            }
+        });
+        assert_eq!(partial.status.as_str(), "partial");
+        assert!(
+            partial.unmounted.is_empty(),
+            "unknown outgoing imports cannot prove these files unmounted: {:?}",
+            unmounted_paths(&partial)
+        );
+        assert_eq!(partial.mounted_file_count, 1);
+        let note = partial.note.expect("read omission");
+        assert!(note.contains("app/src/index.ts"), "{note}");
+        assert!(note.contains("fixture read denied"), "{note}");
+    }
+
+    #[test]
+    fn unreadable_cross_package_source_withholds_unknown_descendants() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
         write(root, "app/package.json", r#"{"name":"app"}"#);
@@ -982,7 +1052,7 @@ mod tests {
             }
         });
         assert_eq!(audit.status.as_str(), "partial");
-        assert_eq!(unmounted_paths(&audit), vec!["healthy/src/orphan.ts"]);
+        assert_eq!(unmounted_paths(&audit), Vec::<&str>::new());
         assert_eq!(audit.mounted_file_count, 3);
     }
 

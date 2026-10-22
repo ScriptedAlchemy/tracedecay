@@ -243,6 +243,7 @@ async fn unmounted_files_reports_partial_input_coverage_in_json_and_markdown() {
             "[package]\nname = \"complete\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         );
         write(root, "src/lib.rs", "pub fn entry() {}\n");
+        write(root, "src/orphan.rs", "pub fn orphan() {}\n");
         write(root, "broken/package.json", "{");
         write(root, "broken/src/index.ts", "import './used';");
         write(root, "broken/src/used.ts", "export const used = 1;");
@@ -257,11 +258,14 @@ async fn unmounted_files_reports_partial_input_coverage_in_json_and_markdown() {
     assert_eq!(payload["omitted_count"], 0, "{payload}");
     assert_eq!(payload["unmounted_file_count"], 1, "{payload}");
     assert_eq!(
-        payload["unmounted"][0]["file"], "healthy/src/orphan.ts",
+        payload["unmounted"][0]["file"], "src/orphan.rs",
         "{payload}"
     );
+    assert_eq!(payload["unmounted"][0]["ecosystem"], "rust", "{payload}");
+    assert_eq!(census(&payload, "rust")["status"], "audited", "{payload}");
     let typescript = census(&payload, "typescript");
     assert_eq!(typescript["status"], "partial", "{payload}");
+    assert_eq!(typescript["mounted_file_count"], 3, "{payload}");
     let note = typescript["note"].as_str().expect("omission reason");
     assert!(note.contains("broken/package.json"), "{note}");
     assert!(note.contains("EOF"), "{note}");
