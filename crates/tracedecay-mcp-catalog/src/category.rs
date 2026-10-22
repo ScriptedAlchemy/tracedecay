@@ -147,8 +147,7 @@ impl ToolCategory {
             | "ast_grep_rewrite"
             | "move_symbol"
             | "rename_symbol"
-            | "source_edit_reconcile"
-            | "source_edit_rollback" => Self::Edit,
+            | "source_edit_reconcile" => Self::Edit,
             "memory_status"
             | "fact_feedback"
             | "fact_store_add"

@@ -148,7 +148,10 @@ fn reconciliation_requires_its_distinct_current_capability() {
     let request = SourceEditReconciliationRequestV1 {
         authority: common::authority(&context),
         context,
-        kind: SourceEditKind::StrReplace,
+        original_operation: source_edit_operation(SourceEditKind::StrReplace)
+            .unwrap()
+            .use_case_id()
+            .clone(),
         effect_id: EffectId::new("effect.source-edit.fixture").unwrap(),
         idempotency_key: effect.idempotency_key.clone(),
         attempt_idempotency_key: IdempotencyKey::new("reconcile-attempt.fixture").unwrap(),
@@ -211,7 +214,10 @@ fn source_edit_invocation_shapes_are_user_controlled_and_round_trip() {
         expected_state: Some(common::digest(common::SHA256_A)),
     };
     let reconcile = SourceEditReconciliationInvocationV1 {
-        kind: SourceEditKind::StrReplace,
+        original_operation: source_edit_operation(SourceEditKind::StrReplace)
+            .unwrap()
+            .use_case_id()
+            .clone(),
         effect_id: EffectId::new("effect.source-edit.invoke.fixture").unwrap(),
         idempotency_key: IdempotencyKey::new("source-edit.invoke.original").unwrap(),
         attempt_idempotency_key: IdempotencyKey::new("source-edit.invoke.attempt").unwrap(),

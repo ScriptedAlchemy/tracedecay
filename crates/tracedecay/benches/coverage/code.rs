@@ -514,7 +514,7 @@ fn verify_literal_symbol(symbol: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Disk verification runs before rollback cleanup, outside dispatch timing.
+/// Disk verification runs outside dispatch timing.
 pub(crate) fn verify_code_fixture_effect(
     root: &std::path::Path,
     tool: &str,
@@ -529,7 +529,6 @@ pub(crate) fn verify_code_fixture_effect(
                 | "tracedecay_replace_symbol"
                 | "tracedecay_insert_at_symbol"
                 | "tracedecay_move_symbol"
-                | "tracedecay_source_edit_rollback"
         )
     {
         return None;
@@ -546,6 +545,17 @@ pub(crate) fn verify_code_fixture_effect(
         let actual_main =
             std::fs::read_to_string(root.join("src/main.py")).map_err(|error| error.to_string())?;
         let moved = "def total_quantity(items: tuple[CatalogItem, ...]) -> int:\n    return sum(item.quantity for item in items)";
+        if tool == "tracedecay_move_symbol" && payload["dry_run"] == true {
+            if payload["success"] != true
+                || payload["source_file"] != "src/catalog.py"
+                || payload["dest_file"] != "src/main.py"
+                || actual_catalog != catalog
+                || actual_main != main
+            {
+                return Err("move preview changed fixture bytes or omitted its plan".to_owned());
+            }
+            return Ok(());
+        }
         if tool == "tracedecay_rename_preview" {
             let node = &payload["node"];
             if payload["read_only"] != true
@@ -602,18 +612,6 @@ pub(crate) fn verify_code_fixture_effect(
                     );
                 }
             }
-            "tracedecay_source_edit_rollback" => {
-                if payload["reconciled"] != true
-                    || payload.pointer("/effect/reconciliation") != Some(&json!("reconciled"))
-                    || actual_catalog != catalog
-                    || actual_main != main
-                {
-                    return Err(
-                        "journaled rollback did not restore both exact fixture preimages"
-                            .to_owned(),
-                    );
-                }
-            }
             "tracedecay_rename_symbol" => {
                 let sites = payload["sites"]
                     .as_array()
@@ -666,10 +664,7 @@ pub(crate) fn verify_code_fixture_effect(
             }
             _ => return Err("unexpected fixture edit operation".to_owned()),
         }
-        if !matches!(
-            tool,
-            "tracedecay_move_symbol" | "tracedecay_source_edit_rollback"
-        ) {
+        if !matches!(tool, "tracedecay_move_symbol") {
             if args["dry_run"] != true
                 || payload["dry_run"] != true
                 || actual_catalog != catalog
@@ -805,7 +800,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             queries: five(|_i| {
                 super::eq(
                     "tracedecay_source_edit_reconcile",
-                    "reconcile_rolled_back",
+                    "reconcile_unchanged",
                     json!({}),
                     super::no_primes,
                 )
@@ -1047,8 +1042,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
         }),
     });
 
-    // Symbol operations plan against fresh claims. Move is applied and rolled
-    // back through the retained journal; other symbol lanes measure previews.
+    // Symbol operations plan against fresh claims.
     out.push(ToolGroup {
         tool: "tracedecay_rename_preview",
         queries: five(|i| {
@@ -1086,8 +1080,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             }),
         });
     }
-    // Symbol-edit apply lanes: each runs only against the symbol seed time
-    // proved unblocked + small; absence is reported via seeds.skipped.
+    // Symbol-edit preview lanes run only when seed probing finds a target.
     if ctx.seeds.replace_target.is_some() {
         out.push(ToolGroup {
             tool: "tracedecay_replace_symbol",
@@ -1139,36 +1132,10 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     json!({
                         "symbol": "{{sym}}",
                         "dest_file": "{{dest_file}}",
-                        "dry_run": false,
+                        "dry_run": true,
                         "update_references": false,
-                        "expected_state": "{{expected_state}}",
-                        "idempotency_key": "bench-move-src-{{iter}}",
                     }),
                     p_move,
-                    rollback_cleanup("bench-move"),
-                )
-            }),
-        });
-        // source_edit_rollback itself: a fresh journaled move per iteration
-        // mints the receipt identity the timed rollback consumes. Only
-        // move_symbol retains rollback material, so this pair is also the
-        // sole real-apply coverage in the family.
-
-        out.push(ToolGroup {
-            tool: "tracedecay_source_edit_rollback",
-            queries: five(|_i| {
-                eqc(
-                    "tracedecay_source_edit_rollback",
-                    "rollback_apply",
-                    json!({
-                        "effect_id": "{{jr_effect_id}}",
-                        "original_idempotency_key": "bench-jr-src-{{iter}}",
-                        "idempotency_key": "bench-jr-rollback-{{iter}}",
-                        "original_input_digest": "{{jr_input_digest}}",
-                        "expected_state": "{{jr_committed_state}}",
-                        "confirm": true,
-                    }),
-                    p_journaled_move,
                     no_cleanup(),
                 )
             }),
@@ -1248,9 +1215,9 @@ pub(crate) async fn prepare_source_reconciliation(
         .and_then(Value::as_str)
         .ok_or("retained effect omitted input digest")?;
     Ok((
-        json!({"kind": "str_replace", "effect_id": effect_id,
+        json!({"original_operation": "use-case.application.source-edit.str-replace", "effect_id": effect_id,
         "idempotency_key": original_key, "attempt_idempotency_key": format!("bench.reconcile.attempt.{iteration}"),
-        "input_digest": input_digest, "disposition": "confirm_rolled_back",
+        "input_digest": input_digest, "disposition": "confirm_unchanged",
         "confirm": true, "format": "json"}),
         json!(relative),
     ))
@@ -1366,75 +1333,6 @@ fn p_move(ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
             "format": "json",
         }),
         capture: &[("dig:expected_state", "expected_state")],
-    }]
-}
-
-fn p_journaled_move(ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
-    vec![
-        PrimeStep {
-            inject: sym_inject(ctx, &ctx.seeds.move_target),
-            tool: "tracedecay_move_symbol",
-            args: json!({
-                "symbol": "{{sym}}",
-                "dest_file": "{{dest_file}}",
-                "dry_run": true,
-                "format": "json",
-            }),
-            capture: &[("dig:expected_state", "jr_expected_state")],
-        },
-        PrimeStep {
-            inject: Vec::new(),
-            tool: "tracedecay_move_symbol",
-            args: json!({
-                "symbol": "{{sym}}",
-                "dest_file": "{{dest_file}}",
-                "dry_run": false,
-                "update_references": false,
-                "expected_state": "{{jr_expected_state}}",
-                "idempotency_key": "bench-jr-src-{{iter}}",
-                "format": "json",
-            }),
-            capture: &[
-                ("dig:effect_id", "jr_effect_id"),
-                ("dig:input_digest", "jr_input_digest"),
-                ("dig:committed_state", "jr_committed_state"),
-            ],
-        },
-    ]
-}
-
-/// Journaled restore after a timed source-edit apply: the timed response's
-/// receipt mints every identity the rollback consumes.
-fn rollback_cleanup(key_prefix: &'static str) -> EffectCleanup {
-    let _ = key_prefix;
-    EffectCleanup {
-        capture: &[
-            ("dig:effect_id", "rb_effect_id"),
-            ("dig:input_digest", "rb_input_digest"),
-            ("dig:committed_state", "rb_committed_state"),
-        ],
-        steps: rb_move,
-    }
-}
-
-fn rb_args(prefix: &str) -> Value {
-    json!({
-        "effect_id": "{{rb_effect_id}}",
-        "original_idempotency_key": format!("{prefix}-src-{{{{iter}}}}"),
-        "idempotency_key": format!("{prefix}-rollback-{{{{iter}}}}"),
-        "original_input_digest": "{{rb_input_digest}}",
-        "expected_state": "{{rb_committed_state}}",
-        "confirm": true,
-        "format": "json",
-    })
-}
-
-fn rb_move(_ctx: &QueryContext, _iter: u64) -> Vec<PrimeStep> {
-    vec![PrimeStep {
-        inject: Vec::new(),
-        tool: "tracedecay_source_edit_rollback",
-        args: rb_args("bench-move"),
-        capture: &[],
     }]
 }
 
