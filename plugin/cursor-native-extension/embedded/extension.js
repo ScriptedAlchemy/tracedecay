@@ -26102,6 +26102,17 @@ const SAFE_DIAGNOSTIC_DATA_FIELDS = [
     "url"
 ];
 const PACKAGED_TRACEDECAY_BINARY = "__TRACEDECAY_BIN__";
+function nativeDiagnosticsDocumentSelector(workspaceUri) {
+    return [
+        {
+            scheme: "file",
+            pattern: {
+                baseUri: workspaceUri,
+                pattern: "**/*"
+            }
+        }
+    ];
+}
 function admitNativeWorkspace(trusted, roots) {
     if (!trusted) {
         return {
@@ -26349,12 +26360,7 @@ class CursorNativeDiagnosticsSession {
             }
         };
         const clientOptions = {
-            documentSelector: [
-                {
-                    scheme: "file",
-                    pattern: `${workspaceFolder.uri.fsPath.replaceAll("\\", "/")}/**`
-                }
-            ],
+            documentSelector: nativeDiagnosticsDocumentSelector(workspaceFolder.uri.toString()),
             initializationOptions: traceDecayInitializationOptions,
             workspaceFolder
         };

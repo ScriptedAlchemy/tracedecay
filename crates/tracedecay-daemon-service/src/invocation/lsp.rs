@@ -189,7 +189,12 @@ impl DaemonInvocationService {
     ) -> Option<AuthorizedScopeSet> {
         let owner = self.lsp_owner(Some(project_root)).await?;
         let grant = owner.scope_grant?;
-        let scope_set = owner.scope_set_storage?.read(scope_set_id).ok().flatten()?;
+        let scope_set = owner
+            .scope_set_storage?
+            .read_async(scope_set_id)
+            .await
+            .ok()
+            .flatten()?;
         // Persisted scope routes are actor-sealed: an admission on the active
         // root authorizes reading only the scope sets its own actor persisted,
         // never another actor's mounted routes.
@@ -221,7 +226,10 @@ impl DaemonInvocationService {
         let active_owner = self.lsp_owner(Some(active_project_root)).await?;
         let active_scope = active_owner.scope_grant.as_ref()?.scope.clone();
         let active_storage = active_owner.scope_set_storage?;
-        let current = active_storage.read(&request.scope_set_id).ok()?;
+        let current = active_storage
+            .read_async(&request.scope_set_id)
+            .await
+            .ok()?;
         let next_revision = match (request.expected_revision, current.as_ref()) {
             (None, None) => ScopeSetRevision::new(1).ok()?,
             (Some(expected), Some(current)) if current.revision() == expected => {

@@ -1,3 +1,5 @@
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
+
 use super::*;
 
 const OMITTED_LINEAGE_REFUSAL: &str = "session-temporal storage operation activate session temporal generation failed: candidate omits canonical typed assertion lineage through the frozen frontier";
@@ -315,11 +317,6 @@ async fn activation_is_pinned_to_the_generation_the_refresh_extends() {
     );
 }
 
-/// A source rewrite that retires an observation a running refresh already
-/// projected asks for a session reset. That refresh can never prove its
-/// frontier again, so completion refuses it as a terminal state transition
-/// (never a retryable storage fault that would block the reset forever), and
-/// the next refresh applies the reset and activates the rewritten history.
 #[tokio::test]
 async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
     let tmp = TempDir::new().unwrap();
@@ -343,8 +340,6 @@ async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
             ],
         )
         .unwrap();
-    // The reset request `request_session_temporal_reset` records for a
-    // retired observation that produced session output.
     let requested = rusqlite::Connection::open(&path)
         .unwrap()
         .execute(
@@ -359,36 +354,42 @@ async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
         .unwrap();
     assert_eq!(requested, 1, "the retired observation requests one reset");
 
-    let store = runtime
-        .session_temporal_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let refused = complete_candidate(&store, &stale).await;
-    assert!(
-        matches!(
-            refused,
-            Err(SessionStoreError::InvalidStateTransition {
-                context: "refresh candidate was superseded by a requested session reset"
-            })
-        ),
-        "{refused:?}"
-    );
-    assert_eq!(active_generations(&path).await, vec!["1:active"]);
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    registry
+        .ensure_profile(
+            path.clone(),
+            runtime
+                .registered_database_arc(HostAdmissionScope::Profile)
+                .unwrap(),
+        )
+        .await;
+    registry.wait_profile_idle(&path).await;
+    registry.shutdown().await;
 
-    fail_candidate(&store, &stale).await;
-    let rebuilt = begin_candidate(&store, &session_id, 2).await;
-    assert_ne!(rebuilt.operation_id(), stale.operation_id());
-    let first = occurrence(&session_id, &observation(&session_id, 0, "one"));
-    persist_batch(
-        &store,
-        &rebuilt,
-        batch(&rebuilt, vec![first], vec![], vec![]),
-    )
-    .await
-    .unwrap();
-    complete_candidate(&store, &rebuilt).await.unwrap();
     assert_eq!(
-        active_generations(&path).await,
-        vec![format!("{}:active", rebuilt.candidate_generation().value())]
+        rows(
+            &path,
+            "SELECT state FROM session_refresh_operations ORDER BY created_at, operation_id"
+        )
+        .await,
+        vec!["failed", "complete"]
+    );
+    let replacement_generation = rows(
+        &path,
+        "SELECT binding.generation || ':active'
+         FROM session_refresh_bindings AS binding
+         JOIN session_refresh_operations AS operation
+           ON operation.session_id = binding.session_id
+          AND operation.operation_id = binding.operation_id
+         WHERE operation.state = 'complete'",
+    )
+    .await;
+    assert_eq!(replacement_generation.len(), 1);
+    assert_ne!(replacement_generation, vec!["1:active"]);
+    assert_eq!(active_generations(&path).await, replacement_generation);
+    assert_eq!(
+        rows(&path, "SELECT CAST(MAX(observation_sequence) AS TEXT) FROM session_temporal_observation_effects").await,
+        vec!["2"]
     );
     assert_eq!(
         rows(
@@ -399,6 +400,80 @@ async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
         .await,
         vec!["1"]
     );
+    assert_eq!(
+        rows(
+            &path,
+            "SELECT occurrence.message_id FROM session_occurrences AS occurrence
+             JOIN session_temporal_generations AS generation
+               ON generation.session_id = occurrence.session_id
+              AND generation.generation = occurrence.generation
+             WHERE generation.state = 'active' ORDER BY occurrence.message_id"
+        )
+        .await,
+        vec![format!("message.temporal.{}.0", session_id.as_str())]
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_candidate_failure_does_not_repeat_for_an_unchanged_frontier() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let session_id = session("session.temporal.ambiguous-discovery");
+    let observation_store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let duplicate = "message.temporal.duplicate";
+    let mut occurrences = Vec::new();
+    for ordinal in 0..2 {
+        let observation = persist_custom_observation(
+            &observation_store,
+            observation_with_message_ids(&session_id, ordinal, "duplicate", duplicate, None),
+        )
+        .await;
+        occurrences.push(occurrence_with_message_id(
+            &session_id,
+            &observation,
+            duplicate,
+        ));
+    }
+    let candidate = begin_candidate(&store, &session_id, 2).await;
+    persist_batch(
+        &store,
+        &candidate,
+        batch(&candidate, occurrences, vec![], vec![]),
+    )
+    .await
+    .unwrap();
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let wake = registry
+        .ensure_profile(
+            path.clone(),
+            runtime
+                .registered_database_arc(HostAdmissionScope::Profile)
+                .unwrap(),
+        )
+        .await;
+    registry.wait_profile_idle(&path).await;
+    assert_eq!(
+        rows(&path, "SELECT state FROM session_refresh_operations").await,
+        vec!["failed"]
+    );
+
+    wake.wake();
+    registry.wait_profile_idle(&path).await;
+    registry.shutdown().await;
+    assert_eq!(
+        rows(&path, "SELECT state FROM session_refresh_operations").await,
+        vec!["failed"]
+    );
+    assert_eq!(active_generations(&path).await, vec!["1:active"]);
 }
 
 /// Persists observations `one` and `two` in a fresh profile and projects the
