@@ -1655,9 +1655,6 @@ pub(super) async fn trigger_contracts_intact(
         .map_err(audit_read_error)
 }
 
-/// Reads the trigger inventory once, preserving contract order when naming a
-/// failure. Admission and post-install validation use the same comparisons;
-/// callers retain their own operation context for storage failures.
 pub(in crate::schema_contract) async fn first_invalid_trigger(
     conn: &impl QueryExecutor,
 ) -> Result<Option<&'static Trigger>> {
