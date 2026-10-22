@@ -5,6 +5,9 @@ startup --windows_enable_symlinks
 common --enable_bzlmod
 common --announce_rc
 common --show_progress_rate_limit=15
+# The shared fleet CAS uses size-based eviction, so it cannot guarantee
+# Bazel's default three-hour retention. Revalidate remote outputs before reuse.
+build --experimental_remote_cache_ttl=0s
 # crate_universe re-fetches git dependencies into an empty CARGO_HOME on every
 # splice. libgit2 indexes asupersync's ~1 GB history on one thread for over 25
 # minutes; the git CLI indexes it in about 2.
