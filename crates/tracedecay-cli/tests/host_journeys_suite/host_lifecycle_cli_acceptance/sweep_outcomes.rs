@@ -7,7 +7,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Output;
 #[cfg(unix)]
-use std::process::{Child, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
 #[cfg(unix)]
@@ -476,6 +476,19 @@ impl Drop for ProfileDaemon {
 #[cfg(unix)]
 #[test]
 fn doctor_reaches_the_canonical_daemon_socket_for_a_long_profile_path() {
+    if std::env::var_os(SOCKET_ENV).is_some() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host_lifecycle_cli_acceptance::sweep_outcomes::doctor_reaches_the_canonical_daemon_socket_for_a_long_profile_path",
+            ])
+            .env_remove(SOCKET_ENV)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the isolated Doctor journey failed");
+        return;
+    }
+
     let mut cli = IsolatedCli::new();
     cli.profile = cli.home.path().join("p".repeat(120)).join("profile");
     install_cline(&cli);
