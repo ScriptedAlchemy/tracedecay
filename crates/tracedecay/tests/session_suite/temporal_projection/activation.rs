@@ -315,6 +315,92 @@ async fn activation_is_pinned_to_the_generation_the_refresh_extends() {
     );
 }
 
+/// A source rewrite that retires an observation a running refresh already
+/// projected asks for a session reset. That refresh can never prove its
+/// frontier again, so completion refuses it as a terminal state transition
+/// (never a retryable storage fault that would block the reset forever), and
+/// the next refresh applies the reset and activates the rewritten history.
+#[tokio::test]
+async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
+    let tmp = TempDir::new().unwrap();
+    let (runtime, path, stale) = frontier_digest_fixture(&tmp, true).await;
+    let session_id = stale.session_id().clone();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO observation_projection_dispositions
+                 (projector_version, observation_id, receipt_id, reason)
+             SELECT ?1, observation_id, receipt_id, ?2
+             FROM observations
+             WHERE observation_id = (
+                 SELECT observation_id FROM session_temporal_observation_effects
+                 WHERE session_id = ?3 AND observation_sequence = 2
+             )",
+            rusqlite::params![
+                tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
+                tracedecay_store::ProjectionSkipReason::SourceRecordRetired.as_str(),
+                session_id.as_str(),
+            ],
+        )
+        .unwrap();
+    // The reset request `request_session_temporal_reset` records for a
+    // retired observation that produced session output.
+    let requested = rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO session_temporal_resets (session_id, requested_at)
+             SELECT effect.session_id, unixepoch() * 1000000
+             FROM session_temporal_observation_effects AS effect
+             JOIN observation_projection_dispositions AS retired
+               ON retired.observation_id = effect.observation_id
+             WHERE effect.output_count > 0",
+            [],
+        )
+        .unwrap();
+    assert_eq!(requested, 1, "the retired observation requests one reset");
+
+    let store = runtime
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let refused = complete_candidate(&store, &stale).await;
+    assert!(
+        matches!(
+            refused,
+            Err(SessionStoreError::InvalidStateTransition {
+                context: "refresh candidate was superseded by a requested session reset"
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(active_generations(&path).await, vec!["1:active"]);
+
+    fail_candidate(&store, &stale).await;
+    let rebuilt = begin_candidate(&store, &session_id, 2).await;
+    assert_ne!(rebuilt.operation_id(), stale.operation_id());
+    let first = occurrence(&session_id, &observation(&session_id, 0, "one"));
+    persist_batch(
+        &store,
+        &rebuilt,
+        batch(&rebuilt, vec![first], vec![], vec![]),
+    )
+    .await
+    .unwrap();
+    complete_candidate(&store, &rebuilt).await.unwrap();
+    assert_eq!(
+        active_generations(&path).await,
+        vec![format!("{}:active", rebuilt.candidate_generation().value())]
+    );
+    assert_eq!(
+        rows(
+            &path,
+            "SELECT CAST(reset_generation IS NOT NULL AND requested_at IS NULL AS TEXT)
+             FROM session_temporal_resets"
+        )
+        .await,
+        vec!["1"]
+    );
+}
+
 /// Persists observations `one` and `two` in a fresh profile and projects the
 /// refresh candidate through the frozen frontier of 2: both occurrences when
 /// `complete`, otherwise only `one`.

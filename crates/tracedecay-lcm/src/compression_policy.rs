@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::contracts::LcmRawMessage;
 use super::replay_transactions;
+use super::types::LcmCompressionOverrides;
 
 pub const DEFAULT_INCREMENTAL_MAX_DEPTH: i64 = 1;
 
@@ -20,13 +21,6 @@ pub(crate) fn policy_anchor_role_sql_in_list() -> String {
         .map(|role| format!("'{role}'"))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AssemblyCapInput {
-    pub max_assembly_tokens: Option<i64>,
-    pub context_length: Option<i64>,
-    pub reserve_tokens_floor: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,11 +73,11 @@ pub fn incremental_max_depth_limit(configured: Option<i64>) -> i64 {
     }
 }
 
-pub fn effective_assembly_token_cap(input: AssemblyCapInput) -> Option<i64> {
-    let explicit_cap = input.max_assembly_tokens.filter(|cap| *cap > 0);
+pub fn effective_assembly_token_cap(overrides: &LcmCompressionOverrides) -> Option<i64> {
+    let explicit_cap = overrides.max_assembly_tokens.filter(|cap| *cap > 0);
     let reserve_cap = match (
-        input.context_length.filter(|length| *length > 0),
-        input.reserve_tokens_floor.filter(|floor| *floor > 0),
+        overrides.context_length.filter(|length| *length > 0),
+        overrides.reserve_tokens_floor.filter(|floor| *floor > 0),
     ) {
         (Some(context_length), Some(reserve_tokens_floor)) => {
             Some(context_length - reserve_tokens_floor).filter(|cap| *cap > 0)
@@ -127,16 +121,14 @@ pub fn has_eligible_backlog(backlog: &[LcmRawMessage], leaf_chunk_tokens: Option
 }
 
 pub fn effective_leaf_chunk_tokens(
-    leaf_chunk_tokens: Option<i64>,
-    dynamic_leaf_chunk_enabled: Option<bool>,
-    dynamic_leaf_chunk_max: Option<i64>,
+    overrides: &LcmCompressionOverrides,
     raw_tokens_outside_tail: i64,
 ) -> Option<i64> {
-    if !dynamic_leaf_chunk_enabled.unwrap_or(false) {
-        return leaf_chunk_tokens;
+    if !overrides.dynamic_leaf_chunk_enabled.unwrap_or(false) {
+        return overrides.leaf_chunk_tokens;
     }
-    let base = leaf_chunk_tokens.unwrap_or(1).max(1);
-    let ceiling = dynamic_leaf_chunk_max.unwrap_or(base).max(base);
+    let base = overrides.leaf_chunk_tokens.unwrap_or(1).max(1);
+    let ceiling = overrides.dynamic_leaf_chunk_max.unwrap_or(base).max(base);
     let mut working = base;
     while working < ceiling && raw_tokens_outside_tail > working.saturating_mul(2) {
         working = ceiling.min(working.saturating_mul(2));
