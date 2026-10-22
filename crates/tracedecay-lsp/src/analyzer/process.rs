@@ -178,8 +178,7 @@ impl AnalyzerProcess {
         status.recv().await.map_err(|_| supervisor_gone())?
     }
 
-    /// EOF can precede the OS publishing the child's exit status. Observe that
-    /// status within the caller's existing deadline without killing the child.
+    /// EOF can precede the OS publishing the child's exit status.
     pub(super) async fn exit_status_until(
         &self,
         deadline: Instant,
