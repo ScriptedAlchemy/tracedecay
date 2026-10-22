@@ -122,7 +122,9 @@ runs:
         build --remote_cache=grpc://ubuntu-main:50051
         build --remote_instance_name=main
         build --remote_timeout=600
-        build --remote_local_fallback
+        # Fleet compilation must not fall back onto the smaller hosted VM.
+        # Dynamic tests still have their explicitly scheduled local branch.
+        build --noremote_local_fallback
         build --remote_download_outputs=toplevel
         build --jobs=40
         build --local_resources=cpu=HOST_CPUS
@@ -130,7 +132,10 @@ runs:
         build --internal_spawn_scheduler
         build --dynamic_local_strategy=sandboxed
         build --dynamic_remote_strategy=remote
-        build --strategy=Rustc=dynamic
+        # Large Rust links raced on the hosted VM while the same actions ran
+        # remotely. local_resources only schedules estimates; it does not cap
+        # rustc memory. Keep compilation on the fleet and tests hybrid.
+        build --strategy=Rustc=remote
         build --strategy=TestRunner=dynamic
         build --bes_backend=grpc://ubuntu-main:1985
         build --bes_results_url=https://ubuntu-main.tail039078.ts.net/invocation/
