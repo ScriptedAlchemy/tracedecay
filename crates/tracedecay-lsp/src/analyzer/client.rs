@@ -1241,7 +1241,10 @@ impl StdioLspClient {
                     return Err(LspSemanticRequestError::TimedOut);
                 }
                 SemanticMessagePoll::Closed => {
-                    return Err(self.closed_semantic_error().await);
+                    return Err(tokio::select! {
+                        () = cancellation.cancelled() => LspSemanticRequestError::Cancelled,
+                        error = self.closed_semantic_error(deadline) => error,
+                    });
                 }
             };
             match message {
@@ -1394,7 +1397,9 @@ impl StdioLspClient {
                 match read_refresh_message_until(&self.process, deadline, timeouts).await? {
                     RefreshMessagePoll::Message(message) => message,
                     RefreshMessagePoll::Quiet => break,
-                    RefreshMessagePoll::Closed => return Err(self.closed_refresh_error().await),
+                    RefreshMessagePoll::Closed => {
+                        return Err(self.closed_refresh_error(deadline).await);
+                    }
                 };
             let params = match message {
                 JsonRpcMessage::Request { id, method, params } => {
@@ -1504,8 +1509,8 @@ impl StdioLspClient {
         Ok(result)
     }
 
-    async fn closed_refresh_error(&self) -> LspRefreshError {
-        match self.process.try_wait().await {
+    async fn closed_refresh_error(&self, deadline: Instant) -> LspRefreshError {
+        match self.process.exit_status_until(deadline).await {
             Ok(Some(status)) => LspRefreshError::ProcessExited {
                 message: format!(
                     "LSP server '{}' exited while collecting diagnostics ({status})",
@@ -1527,8 +1532,8 @@ impl StdioLspClient {
         }
     }
 
-    async fn closed_semantic_error(&self) -> LspSemanticRequestError {
-        match self.process.try_wait().await {
+    async fn closed_semantic_error(&self, deadline: Instant) -> LspSemanticRequestError {
+        match self.process.exit_status_until(deadline).await {
             Ok(Some(status)) => LspSemanticRequestError::ProcessExited {
                 status: status.to_string(),
             },

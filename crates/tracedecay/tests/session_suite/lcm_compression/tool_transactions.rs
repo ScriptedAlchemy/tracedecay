@@ -16,17 +16,15 @@ async fn fresh_tail_boundary_keeps_multi_tool_transaction_atomic_and_shrinking()
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-tail",
-        LcmSummarizerMode::Fake {
-            summary_text: "compact summary".into(),
-        },
+        provided_summary("compact summary"),
         None,
         None,
         Some(400),
     );
     request.messages = with_authoritative_timestamps(messages);
     request.current_tokens = Some(107);
-    request.threshold_tokens = Some(80);
-    request.fresh_tail_count = Some(3);
+    request.overrides.threshold_tokens = Some(80);
+    request.overrides.fresh_tail_count = Some(3);
 
     let response = db.lcm_compress(request).await.unwrap();
     let assistant = response
@@ -68,15 +66,13 @@ async fn bounded_leaf_chunk_backs_off_before_multi_tool_transaction() {
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-leaf",
-        LcmSummarizerMode::Fake {
-            summary_text: "transaction summary".into(),
-        },
+        provided_summary("transaction summary"),
         None,
         Some(2),
         None,
     );
     request.messages = with_authoritative_timestamps(messages);
-    request.fresh_tail_count = Some(1);
+    request.overrides.fresh_tail_count = Some(1);
 
     let response = db.lcm_compress(request).await.unwrap();
     assert_eq!(response.summary_nodes_created, 1);
@@ -106,16 +102,14 @@ async fn budget_and_overflow_replay_never_split_tool_transaction() {
     let mut request = limited_compress_request(
         "cursor",
         "session-atomic-budget",
-        LcmSummarizerMode::Fake {
-            summary_text: "summary".into(),
-        },
+        provided_summary("summary"),
         None,
         None,
         Some(8),
     );
     request.messages = with_authoritative_timestamps(messages);
     request.current_tokens = Some(107);
-    request.fresh_tail_count = Some(3);
+    request.overrides.fresh_tail_count = Some(3);
 
     let response = db.lcm_compress(request).await.unwrap();
     let assistant_count = response
@@ -169,15 +163,10 @@ async fn legacy_partial_tool_transaction_drops_invalid_group_and_repairs_orphans
         "role": "user",
         "content": "the unmatched call is now a closed legacy group",
     }));
-    let mut request = compress_request(
-        "cursor",
-        "session-legacy-tools",
-        LcmSummarizerMode::Fake {
-            summary_text: "unused".into(),
-        },
-    );
+    let mut request =
+        compress_request("cursor", "session-legacy-tools", provided_summary("unused"));
     request.messages = transaction;
-    request.fresh_tail_count = Some(10);
+    request.overrides.fresh_tail_count = Some(10);
 
     let response = db.lcm_compress(request).await.unwrap();
     assert!(

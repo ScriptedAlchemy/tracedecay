@@ -9,6 +9,8 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 #[cfg(unix)]
+use tracedecay_contracts::project_open::ProjectOpenStatusStateV1;
+#[cfg(unix)]
 use tracedecay_daemon_identity::profile_identity;
 #[cfg(unix)]
 use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
@@ -468,6 +470,17 @@ impl DaemonEngine {
             }
             self.ensure_registered_project_route(&project_path, handshake.allow_init)
                 .await?;
+            // The admitted open owns identity resolution for this exact route.
+            // Re-probing on a warming retry can contend with that open on a
+            // non-Git root, whose absent topology is intentionally not retained.
+            // Join its publication; terminal tasks still use normal resolution.
+            if project_open_tasks(&self.project_open_gates)
+                .await
+                .status(&route)
+                .is_some_and(|status| status.state == ProjectOpenStatusStateV1::Converging)
+            {
+                return Ok(None);
+            }
             let Some(key) =
                 resolved_project_server_key(&self.store_administration, &project_path, handshake)
                     .await?

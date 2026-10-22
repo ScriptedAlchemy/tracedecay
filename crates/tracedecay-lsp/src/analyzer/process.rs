@@ -13,7 +13,7 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitSta
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::Poll;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio_util::bytes::BytesMut;
 use tokio_util::codec::Decoder;
@@ -170,12 +170,34 @@ impl AnalyzerProcess {
         }
     }
 
-    /// The child's exit status if it has exited, without reaping it.
+    /// The child's exit status, reaped and cached by the supervisor if it exited.
     pub(super) async fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
         let lifeline = self.lifeline.as_ref().ok_or_else(supervisor_gone)?;
         let (reply, status) = async_channel::bounded(1);
         lifeline.send(reply).map_err(|_| supervisor_gone())?;
         status.recv().await.map_err(|_| supervisor_gone())?
+    }
+
+    /// EOF can precede the OS publishing the child's exit status.
+    pub(super) async fn exit_status_until(
+        &self,
+        deadline: Instant,
+    ) -> io::Result<Option<ExitStatus>> {
+        loop {
+            match until(deadline, self.try_wait()).await? {
+                Some(Ok(Some(status))) => return Ok(Some(status)),
+                Some(Err(error)) => return Err(error),
+                None => return Ok(None),
+                Some(Ok(None)) => {}
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            // std::process has no portable async exit notification.
+            native_runtime::sleep_until(deadline.min(Instant::now() + Duration::from_millis(10)))
+                .await
+                .map_err(io::Error::other)?;
+        }
     }
 
     /// Kills the child, then waits until it is reaped and stderr has closed.
@@ -348,7 +370,6 @@ async fn until<F: Future>(deadline: Instant, work: F) -> io::Result<Option<F::Ou
 #[cfg(test)]
 mod tests {
     use std::io::Read;
-    use std::time::Duration;
 
     use super::*;
 
@@ -427,6 +448,69 @@ mod tests {
 
         drop(send);
         assert_eq!(read(settled).unwrap(), FramePoll::Closed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_status_wait_observes_exit_after_stdout_closes() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec 1>&-; read line; exit 17"]);
+        native_runtime::block_on(async {
+            let mut process = AnalyzerProcess::spawn(command, "delayed-exit")
+                .await
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            assert_eq!(
+                process.read_frame_until(deadline).await.unwrap(),
+                FramePoll::Closed
+            );
+            assert!(process.try_wait().await.unwrap().is_none());
+            {
+                let mut waiting = pin!(process.exit_status_until(deadline));
+                assert!(
+                    until(Instant::now() + Duration::from_millis(20), waiting.as_mut())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                process.write_frame(b"{}", deadline).await.unwrap();
+                assert_eq!(waiting.await.unwrap().unwrap().code(), Some(17));
+            }
+            assert_eq!(process.terminate().await.unwrap().code(), Some(17));
+        })
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_exit_observation_leaves_a_live_child_terminable() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec 1>&-; read line"]);
+        native_runtime::block_on(async {
+            let mut process = AnalyzerProcess::spawn(command, "live-eof").await.unwrap();
+            assert_eq!(
+                process
+                    .read_frame_until(Instant::now() + Duration::from_secs(5))
+                    .await
+                    .unwrap(),
+                FramePoll::Closed
+            );
+            assert!(
+                process
+                    .exit_status_until(Instant::now() + Duration::from_millis(20))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(process.try_wait().await.unwrap().is_none());
+            let terminated = until(Instant::now() + Duration::from_secs(2), process.terminate())
+                .await
+                .unwrap()
+                .expect("status observation must not block termination")
+                .unwrap();
+            assert!(!terminated.success());
+        })
+        .unwrap();
     }
 
     #[cfg(unix)]

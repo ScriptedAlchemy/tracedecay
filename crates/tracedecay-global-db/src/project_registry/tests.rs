@@ -3,9 +3,9 @@
 
 use std::cell::Cell;
 use std::collections::HashSet;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::ffi::OsString;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 
@@ -971,7 +971,8 @@ async fn anchors_do_not_keep_a_missing_project_alive_but_its_store_does() {
     );
 }
 
-#[cfg(unix)]
+// APFS rejects the non-UTF-8 directory name before registry admission.
+#[cfg(target_os = "linux")]
 #[asupersync::test]
 async fn native_path_aliases_protect_roots_from_lossy_registry_reaping() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-native-reap").await;
