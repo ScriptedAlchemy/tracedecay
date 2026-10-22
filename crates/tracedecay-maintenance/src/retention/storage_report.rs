@@ -1646,7 +1646,15 @@ fn scan_unregistered_dirs(
     walk_control: &StorageReportWalkControl,
 ) -> UnregisteredDirectorySample {
     let projects_dir = profile_root.join("projects");
-    let entries = match std::fs::read_dir(&projects_dir) {
+    let entries = match std::fs::symlink_metadata(&projects_dir).and_then(|metadata| {
+        if !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "storage report projects path is not a directory",
+            ));
+        }
+        std::fs::read_dir(&projects_dir)
+    }) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return UnregisteredDirectorySample {
@@ -2590,6 +2598,30 @@ mod tests {
             report.coverage.unregistered_size.state,
             StorageReportSizeStateV1::Partial
         );
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn offline_unregistered_sizing_refuses_a_symlinked_projects_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[]).await;
+        let outside_projects = tmp.path().join("outside-projects");
+        std::fs::create_dir_all(outside_projects.join("proj_outside")).unwrap();
+        std::fs::write(outside_projects.join("proj_outside/payload"), [7; 2048]).unwrap();
+        std::os::unix::fs::symlink(&outside_projects, profile_root.join("projects")).unwrap();
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+
+        assert_eq!(report.unregistered_bytes, 0);
+        assert_eq!(report.unregistered_dir_count, 0);
+        assert!(report.coverage.unregistered_count_is_lower_bound);
+        assert_eq!(
+            report.coverage.unregistered_size.state,
+            StorageReportSizeStateV1::Unavailable
+        );
+        assert_eq!(report.coverage.unregistered_size.unavailable_entry_count, 1);
     }
 
     /// Each store row sizes every family under its project directory, and the
