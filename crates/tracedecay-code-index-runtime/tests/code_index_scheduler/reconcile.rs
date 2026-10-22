@@ -30,9 +30,11 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentHoldingV1,
     ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1,
-    ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1, sampled_process_resident_bytes_v1,
+    ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
+    detected_process_resident_memory_limit_v1, sampled_process_resident_bytes_v1,
 };
 
+use super::super::memory_tests::ledger_memory;
 #[cfg(unix)]
 use super::stage_raw_git_path;
 use super::{
@@ -1437,12 +1439,17 @@ fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_waterma
     let fixture = GitFixture::new(&sources);
     let store = TempDir::new().expect("store root");
 
+    // This scale journey measures real process pressure through admission
+    // as well as its RSS assertions, so retain the production pressure cell.
+    let memory_limit = detected_process_resident_memory_limit_v1();
+
     {
         let mut seed = scheduler(
             &fixture,
             store.path().to_path_buf(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
+        seed.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::new(memory_limit)));
         published(seed.reconcile_now().expect("seed retained generation"));
     }
 
@@ -1455,6 +1462,7 @@ fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_waterma
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::new(memory_limit)));
     assert_eq!(scheduler.publication.sealed_decode_count(), 0);
     assert!(matches!(
         scheduler
@@ -11410,7 +11418,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
         ) > tight_limit.get(),
         "the fixture limit must deny the installed worker plan"
     );
-    let tight = Arc::new(ProcessResidentMemoryV1::new(tight_limit));
+    let tight = ledger_memory(tight_limit);
     scheduler.bind_resident_memory(Arc::clone(&tight));
     let denied = scheduler.reconcile_retained_text_generation_with(&metadata_a, true);
     assert!(
@@ -11435,9 +11443,7 @@ fn graph_off_changed_source_worker_memory_denial_retries_without_decode() {
         "a denied worker reservation must not leak a charge"
     );
 
-    let adequate = Arc::new(ProcessResidentMemoryV1::new(
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
-    ));
+    let adequate = ledger_memory(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1);
     scheduler.bind_resident_memory(Arc::clone(&adequate));
     let outcome = scheduler
         .reconcile_retained_text_generation_with(&metadata_a, true)

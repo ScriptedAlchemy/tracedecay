@@ -48,7 +48,9 @@ pub use authorization::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionRetrievalScope,
 };
 pub use ingest::{StoredCursor, TranscriptIngestStats};
-pub use orchestration::{ProviderRunFailure, ProviderRunFold, ProviderRunOutcome};
+pub use orchestration::{
+    ProviderPassUnits, ProviderRunFailure, ProviderRunFold, ProviderRunOutcome,
+};
 pub use provider::{
     EXPECTED_MESSAGE_SEARCH_PROVIDER, MESSAGE_SEARCH_PROVIDER_IDS, ProviderScope, SessionProvider,
     decode_kiro_workspace_path,
