@@ -25,26 +25,26 @@ test-transport = [
 ]
 
 [dependencies]
-cap-fs-ext = "4.0.2"
-cap-std = "4.0.2"
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 same-file = "1.0.6"
-getrandom = "0.4"
-hex = "0.4"
-jsonc-parser = { version = "0.34.0", features = ["serde_json"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-shell-words = "1.1"
-thiserror = "2"
-flate2 = "1"
+getrandom.workspace = true
+hex.workspace = true
+jsonc-parser = { workspace = true, features = ["serde_json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+shell-words.workspace = true
+thiserror.workspace = true
+flate2.workspace = true
 tracedecay-tokenizer = { path = "../tracedecay-tokenizer", optional = true }
 asupersync.workspace = true
-tokio = { version = "1", features = ["macros", "sync"] }
+tokio = { workspace = true, features = ["macros", "sync"] }
 gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
-toml = "1"
+toml.workspace = true
 toml_edit = "0.25"
-tracing = "0.1"
-ureq = { version = "3", features = ["json"] }
+tracing.workspace = true
+ureq = { workspace = true, features = ["json"] }
 yaml-edit = { version = "0.3.2", default-features = false }
 
 tracedecay-contracts = { path = "../tracedecay-contracts" }
@@ -72,19 +72,19 @@ tracedecay-query = { path = "../tracedecay-query" }
 
 # `kimi web` shutdown sends SIGTERM to the exact child it spawned.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 # Linux-only extended-attribute probe in `agents::mod` (host install provenance).
 [target.'cfg(target_os = "linux")'.dependencies]
-xattr = "1"
+xattr.workspace = true
 
 [build-dependencies]
-flate2 = "1"
+flate2.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 tracedecay-private-fs = { path = "../tracedecay-private-fs", features = ["test-helpers"] }
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
