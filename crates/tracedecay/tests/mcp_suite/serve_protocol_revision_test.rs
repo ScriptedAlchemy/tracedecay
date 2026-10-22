@@ -17,7 +17,7 @@ const REVISION_FIELDS: [&str; 3] = ["resultType", "ttlMs", "cacheScope"];
 
 /// Every request a host on `2026-07-28` can send this server, with whether
 /// the revision makes its result cacheable.
-fn requests() -> [(&'static str, Value, bool); 6] {
+fn requests() -> [(&'static str, Value, bool); 7] {
     [
         ("tools/list", json!({}), true),
         ("resources/list", json!({}), true),
@@ -27,6 +27,11 @@ fn requests() -> [(&'static str, Value, bool); 6] {
             "resources/read",
             json!({ "uri": "tracedecay://schema" }),
             true,
+        ),
+        (
+            "tools/call",
+            json!({ "name": "tracedecay_status", "arguments": { "format": "json" } }),
+            false,
         ),
         (
             "tools/call",
@@ -108,6 +113,23 @@ async fn results_carry_the_fields_the_negotiated_revision_requires() {
                 result.get("ttlMs").is_none() && result.get("cacheScope").is_none(),
                 "{method} is not cacheable: {result}"
             );
+        }
+        if method == "tools/call" {
+            let content = result["content"]
+                .as_array()
+                .unwrap_or_else(|| panic!("tools/call must return content: {result}"));
+            assert_eq!(
+                content.len(),
+                1,
+                "tools/call returns its requested result: {result}"
+            );
+            let status_text = content[0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("status result must be text: {result}"));
+            let status: Value = serde_json::from_str(status_text).unwrap_or_else(|error| {
+                panic!("status result must remain JSON: {error}: {result}")
+            });
+            assert!(status["project_root"].as_str().is_some(), "{result}");
         }
     }
     drop(current);
