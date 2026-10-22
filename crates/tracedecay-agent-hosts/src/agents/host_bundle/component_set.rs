@@ -430,7 +430,8 @@ impl HostBundleWriterV1 {
     ) -> Result<(), HostBundleError> {
         for component in prepared {
             for mutation in &component.plan.mutations {
-                let expected = (mutation.action != HostArtifactActionV1::Remove)
+                let expected = (component.plan.operation != HostBundleLifecycleOpV1::Uninstall
+                    && mutation.action != HostArtifactActionV1::Remove)
                     .then(|| {
                         component
                             .manifest

@@ -244,7 +244,7 @@ impl IsolatedCli {
         } else {
             TempDir::new().unwrap()
         };
-        let project = TempDir::new().unwrap();
+        let project = TempDir::new_in(home.path().parent().unwrap()).unwrap();
         let profile = home.path().join(".tracedecay-test-profile");
         let bin_dir = home.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -278,9 +278,7 @@ impl IsolatedCli {
             .args(args)
             .current_dir(self.project.path())
             .env("PATH", hermetic_path(&[&self.bin_dir]))
-            // Python stand-ins must not mutate the home with interpreter
-            // caches during exact host install/uninstall restoration checks.
-            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("TMPDIR", self.home.path().parent().unwrap())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -812,12 +810,12 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             .flat_map(|component| &component.artifacts)
             .next()
             .expect("managed artifact for interrupted repair");
+        let expected_after_repair = owned_bytes(&cli, &repaired_receipt, &originals);
         fs::write(
             cli.home.path().join(&pending_mutation.relative_path),
-            b"operator state that the failed repair must restore",
+            b"operator-corrupted managed artifact",
         )
         .unwrap();
-        let before_interruption = owned_bytes(&cli, &repaired_receipt, &originals);
         let receipt_before_interruption =
             serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
         let mut interrupted = cli.command(&["reinstall"]);
@@ -830,8 +828,8 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         );
         assert_eq!(
             owned_bytes(&cli, &repaired_receipt, &originals),
-            before_interruption,
-            "{} interrupted repair changed already-current configs/artifacts",
+            expected_after_repair,
+            "{} interrupted repair did not preserve its published files",
             case.id
         );
         assert_eq!(

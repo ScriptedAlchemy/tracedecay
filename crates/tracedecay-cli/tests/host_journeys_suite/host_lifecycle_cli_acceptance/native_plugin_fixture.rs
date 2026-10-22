@@ -11,7 +11,7 @@ pub fn install_current_claude_cli(home: &Path, bin_dir: &Path) -> PathBuf {
     let cli = bin_dir.join("claude");
     write_executable_script(
         &cli,
-        r##"#!/usr/bin/env python3
+        r##"#!/usr/bin/env -S python3 -B
 import json
 import os
 import pathlib
@@ -120,7 +120,7 @@ pub fn install_current_codex_cli(bin_dir: &Path) {
     let cli = bin_dir.join("codex");
     write_executable_script(
         &cli,
-        r##"#!/usr/bin/env python3
+        r##"#!/usr/bin/env -S python3 -B
 import json
 import os
 import pathlib
@@ -164,7 +164,7 @@ pub fn install_current_droid_cli(bin_dir: &Path) {
     let cli = bin_dir.join("droid");
     write_executable_script(
         &cli,
-        r##"#!/usr/bin/env python3
+        r##"#!/usr/bin/env -S python3 -B
 import json
 import os
 import pathlib
