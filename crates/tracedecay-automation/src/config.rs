@@ -493,6 +493,9 @@ fn parse_cron_field(field: &str, min: u32, max: u32, raw: &str) -> Result<(u64, 
         let mut value = start;
         while value <= end {
             bits |= 1 << value;
+            if step > end - value {
+                break;
+            }
             value += step;
         }
     }
