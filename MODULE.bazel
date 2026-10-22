@@ -18,6 +18,8 @@ single_version_override(
         "//scripts:bazel/patches/rules-rust-windows-file-url-path-deps.patch",
         # Genrule tools must include Rustfmt's compiler runtime libraries.
         "//scripts:bazel/patches/rules-rust-rustfmt-runtime-inputs.patch",
+        # No-link lint actions can use Rust metadata for executable targets.
+        "//scripts:bazel/patches/rules-rust-clippy-metadata-inputs.patch",
     ],
     patch_strip = 1,
 )
