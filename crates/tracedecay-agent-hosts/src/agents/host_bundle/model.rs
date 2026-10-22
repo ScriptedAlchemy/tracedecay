@@ -114,9 +114,8 @@ pub trait HostBundleLifecycleStorageV1 {
 }
 
 /// Host-native registration boundary coordinated with an artifact component
-/// set. Implementations snapshot their bounded registration state in memory
-/// during `stage`; the aggregate writer invokes these hooks in reverse when the
-/// running operation fails.
+/// set. Implementations observe registration state during `stage` and verify
+/// the applied state before the aggregate receipt is published.
 pub trait HostComponentSetRegistrationV1 {
     /// Exact revision of the host registration state that this adapter may
     /// mutate. Concrete host adapters hash their bounded native config;

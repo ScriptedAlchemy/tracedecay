@@ -137,18 +137,14 @@ const OPENCODE_CONFIGS: &[(&str, &[u8])] = &[(
 "#,
 )];
 /// Gemini's shared settings file is host-owned under the extension model:
-/// TraceDecay only observes it so a lifecycle can roll back whatever the host
-/// CLI changed there. It is seeded with a foreign server so a run that started
-/// merging it again would be caught.
+/// A foreign server detects unintended changes by the host CLI.
 const GEMINI_CONFIGS: &[(&str, &[u8])] = &[(
     ".gemini/settings.json",
     br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}},"theme":"dark"}
 "#,
 )];
 /// Copilot's MCP registry is host-owned: `copilot mcp add|remove` is its only
-/// writer. TraceDecay reads it to guard operator-owned peers and to record the
-/// bytes rollback restores. Seeding a foreign server means a run that started
-/// merging the document itself would be caught.
+/// writer. A foreign server detects unintended changes to operator-owned peers.
 const COPILOT_CONFIGS: &[(&str, &[u8])] = &[(
     ".copilot/mcp-config.json",
     br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}}}
@@ -2185,9 +2181,8 @@ fn update_plugin_with_no_integration_refuses_instead_of_exiting_zero() {
     assert!(stderr.contains("tracedecay install"), "{stderr}");
 }
 
-/// Rollback bytes live only in the process that staged them, so a killed
-/// install leaves whatever it wrote and nothing to recover from: no journal,
-/// backup, or copy of any host config. The next install converges over it.
+/// A killed install leaves completed writes in place. The next install
+/// converges without a saved copy of the previous host configuration.
 #[test]
 fn killed_install_keeps_no_rollback_state_and_the_next_install_converges() {
     let cli = IsolatedCli::new();

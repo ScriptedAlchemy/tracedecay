@@ -763,14 +763,6 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
         if mode == CatalogRegistrationMode::ArtifactOnly {
             return Ok(());
         }
-        // `apply` runs *after* the transaction wrote its declared artifacts,
-        // so the drift check here is scoped to the registration paths this
-        // transaction did not claim. Comparing the full revision against the
-        // confirmed base at this point would make every host whose
-        // registration file is also a managed artifact (Kiro) invalidate its
-        // own write and reject every run. Foreign edits to a *declared*
-        // path are not lost: `verify_component_set_artifacts` re-digests
-        // exactly those files immediately after this step.
         match self.staged_foreign_registration_revision {
             Some(expected) => {
                 if self.registration_revision_excluding(
@@ -781,9 +773,6 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                     return Err(host_bundle_stale_preview!());
                 }
             }
-            // No staged observation (a caller driving the adapter directly
-            // rather than through the transaction): fall back to the confirmed
-            // base, which is the pre-write value.
             None => {
                 if let Some(expected) = self.confirmed_registration_revision
                     && self.current_registration_revision(component_set)? != expected
