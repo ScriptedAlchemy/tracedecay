@@ -250,12 +250,12 @@ Common fixes:
 
 ## Build
 
-Building from a source checkout requires Node.js 22+ and pnpm in addition to
-Rust. Run `pnpm install` at the repository root first. It installs the
-dashboard's npm packages and the crates that the committed `.cargo/config.toml`
-builds against; `build.rs` then runs `pnpm run build` in `dashboard/` before
-embedding the UI. Release users should install the prebuilt, checksummed GitHub archive;
-workspace Cargo packages are private.
+Building from a source checkout uses Bazel for Rust dependencies and builds.
+Node.js 22+ and pnpm handle the JavaScript workspace. Run `pnpm install` at the
+repository root to install those packages. Bazel builds the dashboard bundle
+and passes it to the CLI build script for embedding. Release users should
+install the prebuilt, checksummed GitHub archive; workspace Cargo packages
+are private.
 
 ```bash
 pnpm install
