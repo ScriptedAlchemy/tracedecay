@@ -22,7 +22,7 @@ apply fields.
   candidate paths and `observed_state`. Pass the original receipt's `operation`
   as `original_operation`. Inspect those files, then confirm committed state
   with `committed_state`, confirm unchanged state, or acknowledge a partial
-  state with the returned `observed_state`. Use a fresh `reconciliation_key`
+  state with the returned `observed_state`. Use a fresh `attempt_idempotency_key`
   for each fresh inspection or conclusion; exact retries replay the prior
   attempt. Reconciliation checks the live digest and never writes source files.
 

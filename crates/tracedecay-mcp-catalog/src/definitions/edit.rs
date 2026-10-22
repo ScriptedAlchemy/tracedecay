@@ -102,7 +102,6 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
             },
             "confirm": {
                 "type": "boolean",
-                "const": true,
                 "description": "Caller attestation that this concludes a retained uncertain effect without retrying it. Set true after your own inspection; do not ask a human to confirm the observed file state."
             }
         },
@@ -121,15 +120,15 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
             },
             {
                 "if": {"properties": {"disposition": {"const": "confirm_committed"}}, "required": ["disposition"]},
-                "then": {"required": ["committed_state", "confirm"], "not": {"required": ["observed_state"]}}
+                "then": {"properties": {"confirm": {"const": true}}, "required": ["committed_state", "confirm"], "not": {"required": ["observed_state"]}}
             },
             {
                 "if": {"properties": {"disposition": {"const": "acknowledge_partial"}}, "required": ["disposition"]},
-                "then": {"required": ["observed_state", "confirm"], "not": {"required": ["committed_state"]}}
+                "then": {"properties": {"confirm": {"const": true}}, "required": ["observed_state", "confirm"], "not": {"required": ["committed_state"]}}
             },
             {
                 "if": {"properties": {"disposition": {"const": "confirm_unchanged"}}, "required": ["disposition"]},
-                "then": {"required": ["confirm"], "not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
+                "then": {"properties": {"confirm": {"const": true}}, "required": ["confirm"], "not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
             }
         ]
     })
@@ -573,7 +572,13 @@ mod tests {
                 "disposition"
             ])
         );
-        assert_eq!(schema["properties"]["confirm"]["const"], json!(true));
+        assert!(schema["properties"]["confirm"].get("const").is_none());
+        for conclusion in &schema["allOf"].as_array().unwrap()[1..] {
+            assert_eq!(
+                conclusion["then"]["properties"]["confirm"]["const"],
+                json!(true)
+            );
+        }
         assert_eq!(
             schema["allOf"][1]["then"]["required"],
             json!(["committed_state", "confirm"])

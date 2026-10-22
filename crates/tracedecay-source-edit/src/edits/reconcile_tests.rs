@@ -349,10 +349,13 @@ async fn inspect_pending_effect(
     fixture: &EffectUnknownFixture,
     request: SourceEditReconciliationRequestV1,
 ) -> tracedecay_contracts::source_edit::SourceEditDurableEffectPayloadV1 {
-    let result = crate::reconcile_source_edit_effect_unknown(
+    let control =
+        SourceEditEffectControlV1::for_request(&request.context, CancellationSignal::new());
+    let result = reconcile_source_edit_effect_unknown_with_control(
         &fixture.graph,
         request,
         &fixture.authorization,
+        &control,
     )
     .await
     .unwrap();
@@ -784,11 +787,17 @@ async fn reconciliation_receipt_gap_survives_process_exit_and_original_replay() 
         );
         request.attempt_idempotency_key = IdempotencyKey::new("gap.acknowledge").unwrap();
         let authorization = super::test_support::fixture_authorization(&original);
-        let error =
-            crate::reconcile_source_edit_effect_unknown(&graph, request.clone(), &authorization)
-                .await
-                .err()
-                .expect("second receipt publication must fail");
+        let control =
+            SourceEditEffectControlV1::for_request(&request.context, CancellationSignal::new());
+        let error = reconcile_source_edit_effect_unknown_with_control(
+            &graph,
+            request.clone(),
+            &authorization,
+            &control,
+        )
+        .await
+        .err()
+        .expect("second receipt publication must fail");
         assert!(
             error
                 .to_string()
@@ -868,10 +877,13 @@ async fn reconciliation_receipt_gap_survives_process_exit_and_original_replay() 
         EffectTermination::Partial
     );
     assert!(!durability.journal_path().exists());
-    let replay = crate::reconcile_source_edit_effect_unknown(
+    let control =
+        SourceEditEffectControlV1::for_request(&request.context, CancellationSignal::new());
+    let replay = reconcile_source_edit_effect_unknown_with_control(
         &fixture.graph,
         request,
         &fixture.authorization,
+        &control,
     )
     .await
     .unwrap();
