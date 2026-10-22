@@ -24,17 +24,7 @@ async fn ingest_only_compress_stores_messages_without_summary_nodes() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: Default::default(),
             summarizer: LcmSummarizerMode::Noop,
         })
         .await
@@ -144,17 +134,7 @@ async fn replay_assembly_terminates_when_existing_summary_sources_contain_cycle(
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: Default::default(),
             summarizer: LcmSummarizerMode::Noop,
         }),
     )
@@ -204,17 +184,12 @@ async fn threshold_pressure_summarizes_short_huge_active_context() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: Some(1_000),
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: Some(100),
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: Some(64),
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: tracedecay_lcm::LcmCompressionOverrides {
+                threshold_tokens: Some(1_000),
+                leaf_chunk_tokens: Some(100),
+                fresh_tail_count: Some(64),
+                ..Default::default()
+            },
             summarizer: LcmSummarizerMode::HermesAuxiliary,
         })
         .await
@@ -331,9 +306,7 @@ async fn idless_compression_replay_does_not_reingest_existing_raw_messages() {
     let mut request = compress_request(
         "cursor",
         "session-idless-replay",
-        LcmSummarizerMode::Fake {
-            summary_text: "condensed old context".into(),
-        },
+        provided_summary("condensed old context"),
     );
     request.messages = initial.replay_messages;
     let compressed = db.lcm_compress(request).await.unwrap();
@@ -420,20 +393,8 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "unused".into(),
-            },
+            overrides: Default::default(),
+            summarizer: provided_summary("unused"),
         })
         .await
         .unwrap();
@@ -495,9 +456,7 @@ async fn raw_replay_strips_disposable_provider_reasoning_sidecars() {
         .lcm_compress(compress_request(
             "cursor",
             "session-sidecars",
-            LcmSummarizerMode::Fake {
-                summary_text: "unused".into(),
-            },
+            provided_summary("unused"),
         ))
         .await
         .unwrap();
@@ -559,20 +518,8 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "unused".into(),
-            },
+            overrides: Default::default(),
+            summarizer: provided_summary("unused"),
         })
         .await
         .unwrap();
@@ -659,9 +606,7 @@ async fn active_replay_tool_calls_apply_ingest_protection_and_externalize_media_
         .lcm_compress(compress_request(
             "cursor",
             "session-tool-calls-protection",
-            LcmSummarizerMode::Fake {
-                summary_text: "unused".into(),
-            },
+            provided_summary("unused"),
         ))
         .await
         .unwrap();
@@ -786,9 +731,7 @@ async fn no_backlog_compress_replays_persisted_uncondensed_summaries() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "old summary".into(),
-            },
+            provided_summary("old summary"),
         ))
         .await
         .unwrap();
@@ -798,9 +741,7 @@ async fn no_backlog_compress_replays_persisted_uncondensed_summaries() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "unused".into(),
-            },
+            provided_summary("unused"),
         ))
         .await
         .unwrap();

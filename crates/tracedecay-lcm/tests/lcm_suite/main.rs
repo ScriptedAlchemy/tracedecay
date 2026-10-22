@@ -8,3 +8,4 @@
 mod compression_policy;
 mod lcm_contracts;
 mod lcm_security;
+mod request_wire;

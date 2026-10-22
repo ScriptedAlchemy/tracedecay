@@ -187,7 +187,6 @@ pub enum LcmAuthorityPayload {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LcmAuthorityUnavailableReason {
-    StoreAuthorityUnavailable,
     HostProtocolUnavailable,
 }
 
