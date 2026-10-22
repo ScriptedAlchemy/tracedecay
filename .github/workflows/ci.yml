@@ -59,11 +59,22 @@ jobs:
           tailscale-client-id: ${{ env.FLEET_CLIENT_ID }}
           extra-restore-keys: ci-linux-test,ci-linux-workspace-test
 
-      - name: Build the heavy refresh test binary
-        run: bazel build --config=ci //crates/tracedecay-cli:refresh_memory_journey
+      - name: Build workspace test binaries
+        run: bazel build --config=ci //...
 
-      - name: Measure the heavy refresh journey
-        run: bazel test --config=ci --default_test_resources=cpu=HOST_CPUS --nocache_test_results --test_output=all --test_arg=--nocapture //crates/tracedecay-cli:refresh_memory_journey
+      - name: Measure heavy refresh during workspace tests
+        run: >-
+          bazel test --config=ci --default_test_resources=cpu=HOST_CPUS
+          --nocache_test_results --test_output=all
+          --test_env=RUST_TEST_NOCAPTURE=1
+          --profile="${{ runner.temp }}/heavy-refresh-profile.json.gz"
+          --experimental_profile_include_target_label
+          --experimental_profile_include_target_configuration
+          --experimental_profile_include_primary_output
+          --build_event_json_file="${{ runner.temp }}/heavy-refresh-events.json"
+          --execution_log_json_file="${{ runner.temp }}/heavy-refresh-exec.json"
+          --noexecution_log_sort
+          //...
 
       - name: Upload heavy refresh diagnostics
         if: always()
@@ -71,6 +82,9 @@ jobs:
         with:
           name: heavy-refresh-measurement
           path: |
+            ${{ runner.temp }}/heavy-refresh-profile.json.gz
+            ${{ runner.temp }}/heavy-refresh-exec.json
+            ${{ runner.temp }}/heavy-refresh-events.json
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.log
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.xml
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.outputs/**

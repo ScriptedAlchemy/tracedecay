@@ -32,6 +32,16 @@ const FILES: usize = 300;
 const FUNCTIONS_PER_FILE: usize = 160;
 const INDEX_TIMEOUT: Duration = Duration::from_secs(900);
 const STATUS_POLL: Duration = Duration::from_secs(5);
+const TEMPORARY_CGROUP_RESOURCES: [&str; 8] = [
+    "cpu.max",
+    "cpu.stat",
+    "cpu.pressure",
+    "cpuset.cpus.effective",
+    "memory.current",
+    "memory.max",
+    "memory.events",
+    "memory.pressure",
+];
 
 struct TemporaryWorkerResources {
     output: fs::File,
@@ -120,12 +130,7 @@ impl TemporaryWorkerResources {
             "cgroup_scope=visible_namespace_root effective_daemon_quota=unproven"
         )
         .expect("resource artifact");
-        for name in [
-            "cpu.max",
-            "cpu.stat",
-            "cpu.pressure",
-            "cpuset.cpus.effective",
-        ] {
+        for name in TEMPORARY_CGROUP_RESOURCES {
             let _ = record_raw_resource(&mut self.output, &root.join(name));
         }
         for pid in [std::process::id(), self.daemon_pid] {
@@ -169,12 +174,7 @@ impl TemporaryWorkerResources {
                 if directory == root {
                     break;
                 }
-                for name in [
-                    "cpu.max",
-                    "cpu.stat",
-                    "cpu.pressure",
-                    "cpuset.cpus.effective",
-                ] {
+                for name in TEMPORARY_CGROUP_RESOURCES {
                     let _ = record_raw_resource(&mut self.output, &directory.join(name));
                 }
                 if depth == 31 {
