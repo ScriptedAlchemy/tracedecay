@@ -210,29 +210,6 @@ impl SourceEditOutcome {
         }
     }
 
-    pub fn touched_files(&self, dry_run: bool) -> Vec<String> {
-        if dry_run
-            || !self.success()
-            || matches!(self, Self::DurableMetadata(result) if result.observed_state.is_some())
-        {
-            return Vec::new();
-        }
-        match self {
-            Self::Edit(result) => vec![result.file_path.clone()],
-            Self::MultiEdit(result) => vec![result.file_path.clone()],
-            Self::Insert(result) => vec![result.file_path.clone()],
-            Self::AstGrep(result) => vec![result.file_path.clone()],
-            Self::Move(result) => vec![result.source_file.clone(), result.dest_file.clone()],
-            Self::Rename(result) => result.files.iter().map(|file| file.file.clone()).collect(),
-            Self::Failed { .. }
-            | Self::Cancelled { .. }
-            | Self::TimedOut { .. }
-            | Self::EffectUnknown { .. } => Vec::new(),
-            Self::Reconciled { .. } => Vec::new(),
-            Self::DurableMetadata(result) => result.files.clone(),
-        }
-    }
-
     pub(super) fn candidate_files(&self) -> Vec<String> {
         match self {
             Self::Edit(result) => vec![result.file_path.clone()],
@@ -247,33 +224,6 @@ impl SourceEditOutcome {
             | Self::EffectUnknown { .. } => Vec::new(),
             Self::Reconciled { .. } => Vec::new(),
             Self::DurableMetadata(result) => result.files.clone(),
-        }
-    }
-
-    pub fn file_path(&self) -> Option<&str> {
-        match self {
-            Self::Edit(result) => Some(&result.file_path),
-            Self::MultiEdit(result) => Some(&result.file_path),
-            Self::Insert(result) => Some(&result.file_path),
-            Self::AstGrep(result) => Some(&result.file_path),
-            Self::Move(_)
-            | Self::Rename(_)
-            | Self::Failed { .. }
-            | Self::Cancelled { .. }
-            | Self::TimedOut { .. }
-            | Self::EffectUnknown { .. }
-            | Self::Reconciled { .. } => None,
-            Self::DurableMetadata(result) if result.files.len() == 1 => {
-                result.files.first().map(String::as_str)
-            }
-            Self::DurableMetadata(_) => None,
-        }
-    }
-
-    pub fn as_move(&self) -> Option<&MoveResult> {
-        match self {
-            Self::Move(result) => Some(result),
-            _ => None,
         }
     }
 

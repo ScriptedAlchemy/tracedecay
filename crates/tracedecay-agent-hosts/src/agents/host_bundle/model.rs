@@ -9,8 +9,7 @@ use tracedecay_host_integration::host_bundle_stale_preview;
 
 use super::planner::{HostBundleLifecycleRequestV1, HostBundleMutationPlanV1};
 use super::{
-    HostBundleArtifactContentV1, HostBundleError, HostBundleInstallReceiptV1,
-    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
+    HostBundleArtifactContentV1, HostBundleError, HostBundleLifecycleOpV1, HostBundleManifestV1,
     HostCapabilityV1, HostComponentV1, HostKindV1,
 };
 
@@ -97,19 +96,6 @@ pub struct HostBundleLifecyclePreviewV1 {
     pub plan: HostBundleMutationPlanV1,
     pub confirmation_required: bool,
     pub competing_extension_claims: Vec<CompetingHostExtensionClaimV1>,
-}
-
-/// Injected lifecycle storage boundary. The concrete no-follow writer below
-/// implements this trait, while daemon wiring can provide its opened authority
-/// without exposing a filesystem path or mutation capability to callers.
-pub trait HostBundleLifecycleStorageV1 {
-    fn execute_lifecycle<V: HostBundleVerificationAdapterV1>(
-        &mut self,
-        manifest: &HostBundleManifestV1,
-        request: &HostBundleExecutionRequestV1,
-        contents: &[HostBundleArtifactContentV1],
-        verifier: &V,
-    ) -> Result<HostBundleInstallReceiptV1, HostBundleError>;
 }
 
 /// Host-native registration boundary coordinated with an artifact component

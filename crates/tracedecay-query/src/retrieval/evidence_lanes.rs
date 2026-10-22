@@ -6,15 +6,15 @@
 //! Payload hydration remains with the source authority and is deliberately
 //! absent from these pre-ranking contracts.
 
-use std::collections::BTreeSet;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::CancellationSignal;
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId,
-    ManifestDigest, RetrievalAnchorId, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest,
-    RetrieverBatch, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, TemporalLaneEvidenceV1,
+    ManifestDigest, ProviderId, RetrievalAnchorId, RetrievalBudgetUsage, RetrievalFailure,
+    RetrievalRequest, RetrieverBatch, RetrieverKind, RetrieverOutcome, SourceOccurrenceId,
+    TemporalLaneEvidenceV1,
 };
 use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::execution::TemporalPortError;

@@ -19,7 +19,7 @@ use super::control::{
     receipt_identity_from_file_name, receipt_schema_probe, superseded_identities,
     validate_component_set_receipt, validate_receipt, writer_lock_file,
 };
-use super::model::{HostBundleExecutionRequestV1, HostBundleLifecycleStorageV1};
+use super::model::HostBundleExecutionRequestV1;
 use super::planner::{
     HostArtifactActionV1, HostArtifactMutationV1, ObservedArtifactKindV1, ObservedHostArtifactV1,
     plan_verified_complete_lifecycle_mutation, validate_artifact_contents_for_operation,
@@ -636,18 +636,6 @@ impl HostBundleWriterV1 {
 
     pub fn lifecycle_root_path(&self) -> &Path {
         &self.lifecycle_root_path
-    }
-}
-
-impl HostBundleLifecycleStorageV1 for HostBundleWriterV1 {
-    fn execute_lifecycle<V: HostBundleVerificationAdapterV1>(
-        &mut self,
-        manifest: &HostBundleManifestV1,
-        request: &HostBundleExecutionRequestV1,
-        contents: &[HostBundleArtifactContentV1],
-        verifier: &V,
-    ) -> Result<HostBundleInstallReceiptV1, HostBundleError> {
-        self.execute(manifest, request, contents, verifier)
     }
 }
 

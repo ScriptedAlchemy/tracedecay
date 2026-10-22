@@ -42,7 +42,6 @@ mod control;
 mod doctor;
 mod model;
 mod planner;
-mod runtime;
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -60,7 +59,7 @@ pub use doctor::{
 };
 pub use model::{
     CompetingHostExtensionClaimV1, HostBundleExecutionRequestV1, HostBundleLifecyclePreviewV1,
-    HostBundleLifecycleStorageV1, HostComponentSetEntryV1, HostComponentSetExecutionRequestV1,
+    HostComponentSetEntryV1, HostComponentSetExecutionRequestV1,
     HostComponentSetLifecyclePreviewV1, HostComponentSetLifecycleRequestV1,
     HostComponentSetRegistrationV1, HostComponentSetV1,
 };
@@ -72,7 +71,6 @@ pub use planner::{
     plan_complete_lifecycle_mutation, plan_lifecycle_mutation,
     plan_verified_complete_lifecycle_mutation,
 };
-pub use runtime::HostBundleLifecycleRuntimeV1;
 pub use writer::HostBundleWriterV1;
 
 /// The lifecycle authority of the `TraceDecay` profile whose data directory
