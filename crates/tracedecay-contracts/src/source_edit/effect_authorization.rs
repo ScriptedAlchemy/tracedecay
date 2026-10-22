@@ -10,13 +10,12 @@ use tracedecay_domain::{
     ManifestDigest, PrivacyDomainId, RetrievalAnchorId, UtcMicros, canonical_sha256,
 };
 
-use super::{
-    SourceEditKind, SourceEditRequest, source_edit_operation, source_edit_reconciliation_operation,
-};
+use super::{SourceEditRequest, source_edit_operation, source_edit_reconciliation_operation};
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{ApplicationProblem, AuthorityReceipt, EffectId, IdempotencyKey};
 use crate::{RequestAdmission, RequestContext, ResolvedScope};
+use tracedecay_tool_catalog::UseCaseId;
 
 const SOURCE_EDIT_EFFECT_REQUEST_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.source-edit-effect-request.v1";
@@ -198,7 +197,7 @@ pub enum SourceEditReconciliationDispositionV1 {
 pub struct SourceEditReconciliationRequestV1 {
     pub context: RequestContext,
     pub authority: AuthorityReceipt,
-    pub kind: SourceEditKind,
+    pub original_operation: UseCaseId,
     pub effect_id: EffectId,
     pub idempotency_key: IdempotencyKey,
     pub attempt_idempotency_key: IdempotencyKey,
@@ -215,7 +214,7 @@ impl SourceEditReconciliationRequestV1 {
             SOURCE_EDIT_RECONCILIATION_ATTEMPT_DIGEST_DOMAIN_V1,
             self.context.actor(),
             self.context.scope(),
-            self.kind,
+            &self.original_operation,
             &self.effect_id,
             &self.idempotency_key,
             &self.attempt_idempotency_key,
