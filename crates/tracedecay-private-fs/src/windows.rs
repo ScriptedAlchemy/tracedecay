@@ -279,29 +279,16 @@ pub fn open_or_create_private_lock_file(path: &Path) -> io::Result<File> {
 }
 
 /// Create a new empty regular file with an exact private ACL.
-pub fn create_private_file(path: &Path) -> io::Result<File> {
-    create_private_file_retained(path).map_err(crate::PrivateFileCreationFailure::into_error)
-}
-
-/// Create a new empty regular file while retaining its exact handle if
-/// post-creation ACL validation fails.
 #[tracing::instrument(name = "private_fs.create_file", level = "trace", skip_all)]
-pub fn create_private_file_retained(
-    path: &Path,
-) -> Result<File, crate::PrivateFileCreationFailure> {
+pub fn create_private_file(path: &Path) -> io::Result<File> {
     let file = open_with_private_creation_acl(
         path,
         PathKind::File,
         CREATE_NEW,
         SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
         SHARE_READ_WRITE_DELETE,
-    )
-    .map_err(crate::PrivateFileCreationFailure::before_creation)?;
-    if let Err(error) = validate_private_handle(&file, path, PathKind::File) {
-        return Err(crate::PrivateFileCreationFailure::after_creation(
-            error, file,
-        ));
-    }
+    )?;
+    validate_private_handle(&file, path, PathKind::File)?;
     Ok(file)
 }
 

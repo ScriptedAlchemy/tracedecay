@@ -1079,21 +1079,20 @@ fn prepare_task_lock_publication(
         "automation task-lock staging",
     )?;
     #[cfg(windows)]
-    let mut file = match tracedecay_runtime_core::windows_security::create_private_file_retained(
-        &staging_path,
-    ) {
-        Ok(file) => file,
-        Err(error) => {
-            return if staging_path.try_exists().unwrap_or(true) {
-                Err(TaskLockStagingCreationError::CommitUncertain {
-                    error: error.into_error(),
-                    staging_path,
-                })
-            } else {
-                Err(TaskLockStagingCreationError::Definite(error.into_error()))
-            };
-        }
-    };
+    let mut file =
+        match tracedecay_runtime_core::windows_security::create_private_file(&staging_path) {
+            Ok(file) => file,
+            Err(error) => {
+                return if staging_path.try_exists().unwrap_or(true) {
+                    Err(TaskLockStagingCreationError::CommitUncertain {
+                        error,
+                        staging_path,
+                    })
+                } else {
+                    Err(TaskLockStagingCreationError::Definite(error))
+                };
+            }
+        };
     #[cfg(not(windows))]
     let mut file = {
         let mut options = cap_std::fs::OpenOptions::new();

@@ -6,7 +6,7 @@
 //! daemon lifecycle, product semantics, or host-specific business authority.
 //!
 //! The lifecycle is split along its seams: `planner` observes and plans,
-//! `writer` and `component_set` mutate with in-memory rollback,
+//! `writer` and `component_set` publish forward changes,
 //! `doctor` discovers installed state, `control` owns the control
 //! directory layout and validators, and `runtime` composes injected
 //! verifier and storage authorities. Every public item is re-exported here so
@@ -60,9 +60,9 @@ pub use doctor::{
 };
 pub use model::{
     CompetingHostExtensionClaimV1, HostBundleExecutionRequestV1, HostBundleLifecyclePreviewV1,
-    HostBundleLifecycleStorageV1, HostBundleRollbackSeamV1, HostComponentSetEntryV1,
-    HostComponentSetExecutionRequestV1, HostComponentSetLifecyclePreviewV1,
-    HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1, HostComponentSetV1,
+    HostBundleLifecycleStorageV1, HostComponentSetEntryV1, HostComponentSetExecutionRequestV1,
+    HostComponentSetLifecyclePreviewV1, HostComponentSetLifecycleRequestV1,
+    HostComponentSetRegistrationV1, HostComponentSetV1,
 };
 pub use planner::{
     HOST_BUNDLE_STAGE_ROOT_RELATIVE, HostArtifactActionV1, HostArtifactMutationV1,
@@ -72,10 +72,7 @@ pub use planner::{
     plan_complete_lifecycle_mutation, plan_lifecycle_mutation,
     plan_verified_complete_lifecycle_mutation,
 };
-pub use runtime::{
-    FeedbackPathRestoreReceiptV1, FeedbackPathRollbackReceiptV1, FeedbackPathRollbackSwitchV1,
-    HostBundleLifecycleRuntimeV1,
-};
+pub use runtime::HostBundleLifecycleRuntimeV1;
 pub use writer::HostBundleWriterV1;
 
 /// The lifecycle authority of the `TraceDecay` profile whose data directory

@@ -102,7 +102,7 @@ use tracedecay_code_index::production::{
 };
 use tracedecay_domain::ManifestDigest;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
-use tracedecay_private_fs::{create_private_file_retained, open_private_file};
+use tracedecay_private_fs::{create_private_file, open_private_file};
 
 const SQLITE_HEADER_HISTORY_OFFSETS: [u64; 3] = [24, 40, 92];
 const SEALED_HEADER_HISTORY: u32 = 1;
@@ -1214,8 +1214,7 @@ impl CodeLexicalArtifactBuilderV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(private_staging_error(error)),
         }
-        let compacted = create_private_file_retained(&compacting)
-            .map_err(|failure| private_staging_error(failure.into_error()))?;
+        let compacted = create_private_file(&compacting).map_err(private_staging_error)?;
         let target = compacting.to_str().ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract(
                 "lexical artifact staging path is not UTF-8".to_owned(),
@@ -1393,8 +1392,7 @@ fn copy_sealed_parent(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(private_staging_error(error)),
     }
-    let mut target = create_private_file_retained(&initializing)
-        .map_err(|failure| private_staging_error(failure.into_error()))?;
+    let mut target = create_private_file(&initializing).map_err(private_staging_error)?;
     let copied = (|| {
         let mut copied_bytes = 0u64;
         let digest = hash_artifact_file(&mut parent, control, |bytes| {
@@ -1482,8 +1480,7 @@ fn create_private_builder_connection(
     path: &Path,
     memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
-    let private_file = create_private_file_retained(path)
-        .map_err(|failure| private_staging_error(failure.into_error()))?;
+    let private_file = create_private_file(path).map_err(private_staging_error)?;
     open_bound_builder_connection(
         path,
         private_file,

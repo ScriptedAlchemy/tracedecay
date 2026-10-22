@@ -1,4 +1,4 @@
-//! Atomic, capability-rooted single-component writer with in-memory rollback,
+//! Atomic, capability-rooted single-component writer,
 //! and the no-follow filesystem primitives.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,21 +56,12 @@ impl Drop for HostWriterLock {
     }
 }
 
-/// Pre-mutation state of one artifact path, held only for the running
-/// operation so a failure can put the path back.
-pub(super) struct ArtifactUndo {
-    relative_path: String,
-    previous: Option<Vec<u8>>,
-    written_digest: Option<[u8; 32]>,
-}
-
 /// Atomic, capability-rooted host-bundle writer. Every descendant directory
 /// is opened without following symlinks; files are staged, fsynced, renamed,
 /// and followed by a directory sync before receipt publication.
 ///
-/// Rollback bytes live only in memory for the running operation. A process
-/// killed mid-operation leaves whatever it wrote; the next install or repair
-/// converges from the observed state. Mutation acquires
+/// A failed operation leaves completed publications in place; the next install
+/// or repair converges from the observed state. Mutation acquires
 /// `writer.{slug}.v1.lock` for the host being written and holds it until the
 /// writer switches hosts or drops.
 pub struct HostBundleWriterV1 {
@@ -160,7 +151,7 @@ impl HostBundleWriterV1 {
             };
         }
         // Only the component-set transaction can retire another identity's
-        // receipt inside its rollback boundary; writing here would leave two
+        // receipt during publication; writing here would leave two
         // owners of one route.
         for identity in superseded_identities(manifest.component) {
             if self
@@ -228,15 +219,8 @@ impl HostBundleWriterV1 {
             &orphan_observed,
             verifier,
         )?;
-        let mut undo = Vec::new();
-        let applied = plan.mutations.iter().try_for_each(|mutation| {
-            if let Some(record) = self.apply_artifact_mutation(mutation, &content_by_path)? {
-                undo.push(record);
-            }
-            Ok(())
-        });
-        if let Err(error) = applied {
-            return Err(self.undo_after_failure(error, &undo, &missing_before));
+        for mutation in &plan.mutations {
+            self.apply_artifact_mutation(mutation, &content_by_path)?;
         }
         let mut recorded = self.created_directories(&missing_before);
         recorded.extend(
@@ -260,10 +244,10 @@ impl HostBundleWriterV1 {
                     ),
             ));
         }
-        let created_directories = match self.prune_created_directories(&recorded) {
-            Ok(kept) => kept.into_iter().collect(),
-            Err(error) => return Err(self.undo_after_failure(error, &undo, &missing_before)),
-        };
+        let created_directories = self
+            .prune_created_directories(&recorded)?
+            .into_iter()
+            .collect();
 
         let receipt = HostBundleInstallReceiptV1 {
             schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
@@ -293,107 +277,40 @@ impl HostBundleWriterV1 {
                 (_, Some(previous)) => previous.created_config.clone().unwrap_or_default(),
             }),
         };
-        if let Err(error) = self.write_receipt(&receipt) {
-            return Err(self.undo_after_failure(error, &undo, &missing_before));
-        }
+        self.write_receipt(&receipt)?;
         Ok(receipt)
     }
 
-    /// Apply one planned mutation, returning what the path held before when
-    /// the mutation changed it.
     pub(super) fn apply_artifact_mutation(
         &self,
         mutation: &HostArtifactMutationV1,
         content_by_path: &BTreeMap<String, Vec<u8>>,
-    ) -> Result<Option<ArtifactUndo>, HostBundleError> {
+    ) -> Result<(), HostBundleError> {
+        if mutation.action == HostArtifactActionV1::Noop {
+            return Ok(());
+        }
         let (parent, name) = self.open_parent_nofollow(Path::new(&mutation.relative_path))?;
-        let content = || {
-            content_by_path
-                .get(&mutation.relative_path)
-                .ok_or(HostBundleError::ArtifactContentMismatch)
-        };
-        let (previous, written_digest) = match mutation.action {
-            HostArtifactActionV1::Noop => return Ok(None),
-            HostArtifactActionV1::WriteNew => {
-                let bytes = content()?;
-                atomic_write_nofollow(&parent, &name, bytes, false)?;
-                (None, Some(Sha256::digest(bytes).into()))
-            }
-            HostArtifactActionV1::Replace => {
-                let previous = read_regular_nofollow(&parent, &name)?
-                    .ok_or(HostBundleError::InvalidObservedState)?;
-                let bytes = content()?;
-                atomic_write_nofollow(&parent, &name, bytes, true)?;
-                (Some(previous), Some(Sha256::digest(bytes).into()))
+        match mutation.action {
+            HostArtifactActionV1::Noop => Ok(()),
+            HostArtifactActionV1::WriteNew | HostArtifactActionV1::Replace => {
+                let bytes = content_by_path
+                    .get(&mutation.relative_path)
+                    .ok_or(HostBundleError::ArtifactContentMismatch)?;
+                atomic_write_nofollow(
+                    &parent,
+                    &name,
+                    bytes,
+                    mutation.action == HostArtifactActionV1::Replace,
+                )
             }
             HostArtifactActionV1::Remove => {
-                let previous = read_regular_nofollow(&parent, &name)?
+                read_regular_nofollow(&parent, &name)?
                     .ok_or(HostBundleError::InvalidObservedState)?;
                 parent
                     .remove_file(&name)
                     .map_err(|_| host_bundle_storage_failure!())?;
-                sync_cap_dir(&parent)?;
-                (Some(previous), None)
+                sync_cap_dir(&parent)
             }
-        };
-        Ok(Some(ArtifactUndo {
-            relative_path: mutation.relative_path.clone(),
-            previous,
-            written_digest,
-        }))
-    }
-
-    /// Put every recorded path back in reverse order. A path that holds
-    /// neither its prior bytes nor this operation's output was changed by
-    /// another writer: it is left alone and reported once every other path has
-    /// been put back.
-    pub(super) fn undo_artifact_mutations(
-        &self,
-        undo: &[ArtifactUndo],
-    ) -> Result<(), HostBundleError> {
-        let mut conflict = None;
-        for record in undo.iter().rev() {
-            let (parent, name) = self.open_parent_nofollow(Path::new(&record.relative_path))?;
-            let live = read_regular_nofollow(&parent, &name)?;
-            if live == record.previous {
-                continue;
-            }
-            let live_digest = live
-                .as_ref()
-                .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
-            if live.is_some() && live_digest != record.written_digest {
-                conflict.get_or_insert_with(|| {
-                    HostBundleError::OwnershipConflict(format!(
-                        "{}: changed by another writer while this operation rolled back",
-                        record.relative_path
-                    ))
-                });
-                continue;
-            }
-            match &record.previous {
-                Some(bytes) => atomic_write_nofollow(&parent, &name, bytes, live.is_some())?,
-                None => {
-                    parent
-                        .remove_file(&name)
-                        .map_err(|_| host_bundle_storage_failure!())?;
-                    sync_cap_dir(&parent)?;
-                }
-            }
-        }
-        conflict.map_or(Ok(()), Err)
-    }
-
-    fn undo_after_failure(
-        &self,
-        error: HostBundleError,
-        undo: &[ArtifactUndo],
-        missing_before: &BTreeSet<String>,
-    ) -> HostBundleError {
-        match self.undo_artifact_mutations(undo).and_then(|()| {
-            self.prune_created_directories(&self.created_directories(missing_before))
-        }) {
-            Ok(_) => error,
-            Err(undo_error) => undo_error,
         }
     }
 
@@ -719,48 +636,6 @@ impl HostBundleWriterV1 {
     fn remove_control_file(&self, name: &str) -> Result<(), HostBundleError> {
         remove_regular_if_exists(&self.control, name)?;
         sync_cap_dir(&self.control)
-    }
-
-    pub fn publish_feedback_component_set_receipt(
-        &mut self,
-        manifest: &HostBundleManifestV1,
-        component_receipt: &HostBundleInstallReceiptV1,
-    ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
-        if manifest.host != component_receipt.host
-            || manifest.component != component_receipt.component
-            || manifest.canonical_digest()? != component_receipt.manifest_digest
-        {
-            return Err(HostBundleError::WrongTarget);
-        }
-        self.ensure_host_lock(component_receipt.host)?;
-        let previous = latest_host_component_set_receipt_at(
-            &self.lifecycle_root_path,
-            component_receipt.host,
-        )?;
-        let mut component_manifests = previous
-            .as_ref()
-            .map_or_default(|receipt| receipt.component_manifests.clone());
-        component_manifests.retain(|previous| previous.component != manifest.component);
-        component_manifests.push(manifest.clone());
-        component_manifests.sort_by_key(|manifest| manifest.component);
-        let mut component_receipts = previous.map_or_default(|receipt| receipt.component_receipts);
-        component_receipts.retain(|previous| previous.component != component_receipt.component);
-        component_receipts.push(component_receipt.clone());
-        component_receipts.sort_by_key(|receipt| receipt.component);
-        let receipt = HostComponentSetReceiptV1 {
-            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
-            operation_id: component_receipt.operation_id,
-            host: component_receipt.host,
-            operation: component_receipt.operation,
-            component_manifests,
-            component_receipts,
-            confirmed_plan_digest: None,
-            base_registration_revision: None,
-            current_registration_revision: None,
-            artifact_state_revision: None,
-        };
-        self.write_component_set_receipt(&receipt)?;
-        Ok(receipt)
     }
 
     pub fn root_path(&self) -> &Path {

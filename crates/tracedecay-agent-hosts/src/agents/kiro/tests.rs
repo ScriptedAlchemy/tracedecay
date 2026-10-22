@@ -429,7 +429,7 @@ fn kiro_component_request(
 }
 
 #[test]
-fn rollback_refuses_a_foreign_registry_write_after_apply() {
+fn verification_refuses_a_foreign_registry_write_after_apply() {
     use crate::agents::host_bundle::{
         HostBundleLifecycleOpV1, HostBundleWriterV1, HostComponentSetRegistrationV1,
         HostComponentSetTransactionV1,
@@ -484,8 +484,8 @@ fn rollback_refuses_a_foreign_registry_write_after_apply() {
     let foreign = br#"{"mcpServers":{"foreign":{"command":"operator"}}}"#;
     std::fs::write(&mcp_path, foreign).unwrap();
     let error = registration
-        .rollback(&component_set.component_set, &request)
-        .expect_err("rollback must refuse to overwrite a later foreign edit");
+        .verify(&component_set.component_set, &request)
+        .expect_err("verification must reject a later foreign edit");
     assert!(
         matches!(
             error,
@@ -496,7 +496,7 @@ fn rollback_refuses_a_foreign_registry_write_after_apply() {
     assert_eq!(
         std::fs::read(&mcp_path).unwrap(),
         foreign,
-        "a refused rollback must leave the later foreign bytes untouched"
+        "verification must leave the later foreign bytes untouched"
     );
 }
 

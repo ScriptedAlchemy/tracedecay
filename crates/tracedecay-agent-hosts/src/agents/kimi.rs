@@ -859,7 +859,6 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let original_config = std::fs::read(kimi_user_mcp_path(&code_home)).unwrap();
         let install = InstallContext {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
@@ -923,12 +922,8 @@ mod tests {
         assert_eq!(config["mcpServers"]["foreign"]["command"], "foreign-server");
 
         registration
-            .rollback(&component_set.component_set, &request)
+            .commit(&component_set.component_set, &request)
             .unwrap();
-        assert_eq!(
-            std::fs::read(kimi_user_mcp_path(&code_home)).unwrap(),
-            original_config
-        );
 
         let uninstall_request = HostComponentSetExecutionRequestV1 {
             lifecycle: HostComponentSetLifecycleRequestV1 {

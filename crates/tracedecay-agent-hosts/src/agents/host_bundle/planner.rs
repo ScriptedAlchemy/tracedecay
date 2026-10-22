@@ -20,8 +20,8 @@ use super::control::{
 };
 use super::model::{
     CompetingHostExtensionClaimV1, HostBundleExecutionRequestV1, HostBundleLifecyclePreviewV1,
-    HostBundleRollbackSeamV1, HostComponentSetExecutionRequestV1,
-    HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
+    HostComponentSetExecutionRequestV1, HostComponentSetLifecyclePreviewV1,
+    HostComponentSetRegistrationV1, HostComponentSetV1,
 };
 use super::{
     HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleError, HostBundleInstallReceiptV1,
@@ -147,7 +147,6 @@ pub struct HostBundleMutationPlanV1 {
     pub host: HostKindV1,
     pub component: HostComponentV1,
     pub mutations: Vec<HostArtifactMutationV1>,
-    pub rollback_required: bool,
 }
 
 /// Validate the compiled catalog entry before producing a mutation-only plan.
@@ -193,18 +192,11 @@ pub fn plan_lifecycle_mutation(
             action,
         });
     }
-    let rollback_required = mutations.iter().any(|mutation| {
-        matches!(
-            mutation.action,
-            HostArtifactActionV1::Replace | HostArtifactActionV1::Remove
-        )
-    });
     Ok(HostBundleMutationPlanV1 {
         operation: request.operation,
         host: manifest.host,
         component: manifest.component,
         mutations,
-        rollback_required,
     })
 }
 
@@ -279,12 +271,6 @@ pub fn plan_complete_lifecycle_mutation(
             });
         }
     }
-    plan.rollback_required = plan.mutations.iter().any(|mutation| {
-        matches!(
-            mutation.action,
-            HostArtifactActionV1::Replace | HostArtifactActionV1::Remove
-        )
-    });
     Ok(plan)
 }
 
@@ -690,27 +676,10 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
         &orphan_observed,
         verifier,
     )?;
-    let replaced_relative_paths = plan
-        .mutations
-        .iter()
-        .filter(|mutation| {
-            matches!(
-                mutation.action,
-                HostArtifactActionV1::Replace | HostArtifactActionV1::Remove
-            )
-        })
-        .map(|mutation| mutation.relative_path.clone())
-        .collect();
     Ok(HostBundleLifecyclePreviewV1 {
         confirmation_required: !request.lifecycle.explicit_confirmation
             || !competing_extension_claims.is_empty(),
         competing_extension_claims: competing_extension_claims.to_vec(),
-        rollback: HostBundleRollbackSeamV1 {
-            operation_id: request.operation_id,
-            host: manifest.host,
-            component: manifest.component,
-            replaced_relative_paths,
-        },
         plan,
     })
 }

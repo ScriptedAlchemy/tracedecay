@@ -11,7 +11,7 @@
 //!    a stable marketplace dir (`~/.claude/plugins/marketplaces/tracedecay/`),
 //!    stamping the plugin version and substituting the resolved binary path.
 //! 2. Its activation step then drives Claude Code's native `claude plugin`
-//!    commands against that source, inside the same rollback boundary.
+//!    commands against that source.
 
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
