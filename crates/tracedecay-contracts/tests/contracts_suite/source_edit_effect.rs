@@ -156,7 +156,7 @@ fn reconciliation_requires_its_distinct_current_capability() {
         idempotency_key: effect.idempotency_key.clone(),
         attempt_idempotency_key: IdempotencyKey::new("reconcile-attempt.fixture").unwrap(),
         input_digest,
-        disposition: SourceEditReconciliationDispositionV1::ConfirmUnchanged,
+        disposition: SourceEditReconciliationDispositionV1::ConfirmUnchanged {},
         proof: SourceEditEffectProofV1 {
             policy_digest: common::digest(common::SHA256_B),
             configuration_revision_id: common::id::<ConfigurationRevisionId>(

@@ -134,7 +134,7 @@ async fn reconciliation_before_admission_cancellation_is_durable_and_replayable(
         attempt_idempotency_key: IdempotencyKey::new("source-edit-reconciliation-attempt.fixture")
             .unwrap(),
         input_digest: effect.receipt.input_digest.clone(),
-        disposition: SourceEditReconciliationDispositionV1::ConfirmUnchanged,
+        disposition: SourceEditReconciliationDispositionV1::ConfirmUnchanged {},
         proof: fixture.request.proof.clone(),
         observed_at: UtcMicros(4),
     };
@@ -349,8 +349,8 @@ async fn inspect_pending_effect(
     fixture: &EffectUnknownFixture,
     request: SourceEditReconciliationRequestV1,
 ) -> tracedecay_contracts::source_edit::SourceEditDurableEffectPayloadV1 {
-    let control = SourceEditEffectControlV1::for_request(
-        &request.context,
+    let control = SourceEditEffectControlV1::new(
+        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
         CancellationSignal::active("cancel.reconcile.inspection").unwrap(),
     );
     let result = reconcile_source_edit_effect_unknown_with_control(
@@ -389,7 +389,7 @@ async fn partial_acknowledgement_rejects_stale_digest_replays_and_admits_next_ed
         idempotency_key: fixture.request.idempotency_key.clone(),
         attempt_idempotency_key: IdempotencyKey::new("partial.acknowledgement").unwrap(),
         input_digest: effect.receipt.input_digest.clone(),
-        disposition: SourceEditReconciliationDispositionV1::Inspect,
+        disposition: SourceEditReconciliationDispositionV1::Inspect {},
         proof: fixture.request.proof.clone(),
         observed_at: UtcMicros(4),
     };
@@ -525,7 +525,7 @@ async fn partial_acknowledgement_rejects_stale_digest_replays_and_admits_next_ed
     .unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.effect, resolved.effect);
-    request.disposition = SourceEditReconciliationDispositionV1::ConfirmUnchanged;
+    request.disposition = SourceEditReconciliationDispositionV1::ConfirmUnchanged {};
     assert!(
         reconcile_source_edit_effect_unknown_with_control(
             &fixture.graph,
@@ -645,7 +645,7 @@ async fn retired_operation_journal_discards_bodies_and_allows_partial_acknowledg
         idempotency_key: journal.request.idempotency_key.clone(),
         attempt_idempotency_key: IdempotencyKey::new("legacy.partial.acknowledgement").unwrap(),
         input_digest: journal.input_digest.clone(),
-        disposition: SourceEditReconciliationDispositionV1::Inspect,
+        disposition: SourceEditReconciliationDispositionV1::Inspect {},
         proof: fixture.request.proof.clone(),
         observed_at: UtcMicros(4),
     };
@@ -789,8 +789,8 @@ async fn reconciliation_receipt_gap_survives_process_exit_and_original_replay() 
         );
         request.attempt_idempotency_key = IdempotencyKey::new("gap.acknowledge").unwrap();
         let authorization = super::test_support::fixture_authorization(&original);
-        let control = SourceEditEffectControlV1::for_request(
-            &request.context,
+        let control = SourceEditEffectControlV1::new(
+            Deadline::new(UtcMicros(i64::MAX)).unwrap(),
             CancellationSignal::active("cancel.reconcile.receipt-gap").unwrap(),
         );
         let error = reconcile_source_edit_effect_unknown_with_control(
@@ -836,7 +836,7 @@ async fn reconciliation_receipt_gap_survives_process_exit_and_original_replay() 
     let mut request = crate::test_support::fixture_reconciliation(
         &fixture.request,
         &journal,
-        SourceEditReconciliationDispositionV1::Inspect,
+        SourceEditReconciliationDispositionV1::Inspect {},
     );
     request.attempt_idempotency_key = IdempotencyKey::new("gap.inspect").unwrap();
     let observed = inspect_pending_effect(&fixture, request.clone())
@@ -881,8 +881,8 @@ async fn reconciliation_receipt_gap_survives_process_exit_and_original_replay() 
         EffectTermination::Partial
     );
     assert!(!durability.journal_path().exists());
-    let control = SourceEditEffectControlV1::for_request(
-        &request.context,
+    let control = SourceEditEffectControlV1::new(
+        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
         CancellationSignal::active("cancel.reconcile.replay").unwrap(),
     );
     let replay = reconcile_source_edit_effect_unknown_with_control(

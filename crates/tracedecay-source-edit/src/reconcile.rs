@@ -261,7 +261,7 @@ fn reconcile_prepared_source_edit_controlled(
     }
     let ended_at = now_micros();
     let (_outcome, record) = match request.disposition.clone() {
-        SourceEditReconciliationDispositionV1::Inspect => {
+        SourceEditReconciliationDispositionV1::Inspect {} => {
             let attempt = attempt
                 .ok_or_else(|| config_error("inspection requires authorized attempt evidence"))?;
             let outcome =
@@ -299,7 +299,7 @@ fn reconcile_prepared_source_edit_controlled(
             let record = applied_record(&journal, &outcome, committed_state, ended_at, None)?;
             (outcome, record)
         }
-        SourceEditReconciliationDispositionV1::ConfirmUnchanged => {
+        SourceEditReconciliationDispositionV1::ConfirmUnchanged {} => {
             if observed_state != journal.expected_state {
                 return Err(config_error(
                     "source edit unchanged-state inspection does not match the admitted expected state",
@@ -759,7 +759,7 @@ mod tests {
         let reconciliation = fixture_reconciliation(
             &request,
             &journal,
-            SourceEditReconciliationDispositionV1::ConfirmUnchanged,
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged {},
         );
         let attempt_input = digest(SHA256_B);
         let operation = source_edit_reconciliation_operation().unwrap();
@@ -829,7 +829,7 @@ mod tests {
         let reconciliation = fixture_reconciliation(
             &request,
             &journal,
-            SourceEditReconciliationDispositionV1::ConfirmUnchanged,
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged {},
         );
         let original_outcome = SourceEditOutcome::Reconciled {
             success: false,

@@ -39,7 +39,7 @@ fn source_edit_reconcile_invocation() -> SourceEditReconciliationInvocationV1 {
         idempotency_key: IdempotencyKey::new("source-edit.dispatch.original").unwrap(),
         attempt_idempotency_key: IdempotencyKey::new("source-edit.dispatch.attempt").unwrap(),
         input_digest: fixture_digest(),
-        disposition: SourceEditReconciliationDispositionV1::ConfirmUnchanged,
+        disposition: SourceEditReconciliationDispositionV1::ConfirmUnchanged {},
     }
 }
 

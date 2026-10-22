@@ -186,7 +186,7 @@ fn reconcile(args: &Value) -> Result<SourceEditReconciliationInvocationV1, Strin
             if args.get("committed_state").is_some() || args.get("observed_state").is_some() {
                 return Err("inspection does not accept a caller-supplied state digest".to_owned());
             }
-            SourceEditReconciliationDispositionV1::Inspect
+            SourceEditReconciliationDispositionV1::Inspect {}
         }
         "confirm_committed" => {
             if args.get("observed_state").is_some() {
@@ -207,7 +207,7 @@ fn reconcile(args: &Value) -> Result<SourceEditReconciliationInvocationV1, Strin
                         .to_owned(),
                 );
             }
-            SourceEditReconciliationDispositionV1::ConfirmUnchanged
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged {}
         }
         "acknowledge_partial" => {
             if args.get("committed_state").is_some() {
@@ -388,11 +388,11 @@ mod tests {
     fn typed_reconciliation_requests_roundtrip_through_the_public_parser() {
         let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
         for disposition in [
-            SourceEditReconciliationDispositionV1::Inspect,
+            SourceEditReconciliationDispositionV1::Inspect {},
             SourceEditReconciliationDispositionV1::ConfirmCommitted {
                 committed_state: digest.clone(),
             },
-            SourceEditReconciliationDispositionV1::ConfirmUnchanged,
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged {},
             SourceEditReconciliationDispositionV1::AcknowledgePartial {
                 observed_state: digest.clone(),
             },
@@ -404,7 +404,10 @@ mod tests {
                 idempotency_key: "source-edit.original".to_owned(),
                 attempt_idempotency_key: "source-edit.reconciliation".to_owned(),
                 input_digest: digest.to_string(),
-                confirm: !matches!(disposition, SourceEditReconciliationDispositionV1::Inspect),
+                confirm: !matches!(
+                    disposition,
+                    SourceEditReconciliationDispositionV1::Inspect {}
+                ),
                 disposition: disposition.clone(),
             };
             let value = serde_json::to_value(&request).unwrap();
@@ -446,7 +449,7 @@ mod tests {
             parse_source_edit_arguments(ApplicationSurfaceOperation::SourceEditReconcile, &args)
                 .unwrap(),
             ApplicationSurfaceRequest::SourceEditReconcile(SourceEditReconciliationInvocationV1 {
-                disposition: SourceEditReconciliationDispositionV1::Inspect,
+                disposition: SourceEditReconciliationDispositionV1::Inspect {},
                 ..
             })
         ));

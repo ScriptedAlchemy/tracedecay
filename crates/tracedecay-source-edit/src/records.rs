@@ -167,11 +167,11 @@ pub(super) fn reconciliation_attempt_record(
 ) -> Result<SourceEditDurableResultV1> {
     let committed_state = if termination == EffectTermination::Completed {
         match &request.disposition {
-            SourceEditReconciliationDispositionV1::Inspect => committed_state,
+            SourceEditReconciliationDispositionV1::Inspect {} => committed_state,
             SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } => {
                 Some(committed_state.clone())
             }
-            SourceEditReconciliationDispositionV1::ConfirmUnchanged => {
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged {} => {
                 Some(journal.expected_state.clone())
             }
             SourceEditReconciliationDispositionV1::AcknowledgePartial { observed_state } => {

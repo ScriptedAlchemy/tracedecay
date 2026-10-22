@@ -252,17 +252,20 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .extend(fields.as_object().unwrap().clone());
+            let disposition = fields["disposition"].as_str().unwrap();
             let decoded: SourceEditReconcileSurfaceRequestV1 =
                 serde_json::from_value(request.clone()).unwrap();
             assert_eq!(
                 serde_json::to_value(decoded).unwrap()["disposition"],
-                fields["disposition"]
+                fields["disposition"],
+                "{disposition} should round-trip"
             );
 
             let mut unknown = request.clone();
             unknown["unexpected"] = json!(true);
             assert!(
-                serde_json::from_value::<SourceEditReconcileSurfaceRequestV1>(unknown).is_err()
+                serde_json::from_value::<SourceEditReconcileSurfaceRequestV1>(unknown).is_err(),
+                "{disposition} should reject unknown request fields"
             );
 
             let wrong_field = if fields.get("committed_state").is_some() {
@@ -272,7 +275,8 @@ mod tests {
             };
             request[wrong_field] = json!(digest);
             assert!(
-                serde_json::from_value::<SourceEditReconcileSurfaceRequestV1>(request).is_err()
+                serde_json::from_value::<SourceEditReconcileSurfaceRequestV1>(request).is_err(),
+                "{disposition} should reject the other variant's {wrong_field} field"
             );
         }
     }
