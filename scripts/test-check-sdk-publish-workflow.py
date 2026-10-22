@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +40,23 @@ class SdkPublishBoundaryTests(unittest.TestCase):
             if "run" in step:
                 step["run"] = "./scripts/check-and-pack-sdk.sh"
         CHECKER.validate(self.workflow)
+
+    def test_npm_pack_object_output_yields_the_package_filename(self) -> None:
+        pack_output = json.dumps({
+            "@tracedecay/sdk": {
+                "id": "@tracedecay/sdk@0.15.0",
+                "filename": "tracedecay-sdk-0.15.0.tgz",
+            },
+        })
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/extract-npm-pack-filename.py")],
+            input=pack_output,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "tracedecay-sdk-0.15.0.tgz")
 
     def test_dispatch_requires_an_explicit_string_release_tag(self) -> None:
         triggers = self.workflow.get("on", self.workflow.get(True))

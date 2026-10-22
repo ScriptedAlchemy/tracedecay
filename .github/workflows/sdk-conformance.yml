@@ -20,6 +20,7 @@ on:
       - "pnpm-workspace.yaml"
       - "scripts/check-sdk-publish-workflow.py"
       - "scripts/test-check-sdk-publish-workflow.py"
+      - "scripts/extract-npm-pack-filename.py"
       - "scripts/check-github-hosted-runners.py"
       - "scripts/test-check-github-hosted-runners.py"
       - "scripts/package-release-archive.py"
