@@ -263,6 +263,7 @@ async fn context_lexical_anchors_admit_every_exact_import_site() {
         "markdown must name the unmatched anchor:\n{markdown}"
     );
 
+    drop(server);
     production.harness.shutdown().await;
 }
 
@@ -473,6 +474,7 @@ async fn context_returns_a_rare_anchor_site_over_an_exact_word_neighborhood() {
         "markdown must name the dropped anchor sites:\n{markdown}"
     );
 
+    drop(server);
     production.harness.shutdown().await;
 }
 
@@ -527,5 +529,6 @@ async fn an_identifier_named_in_the_task_leads_plan_and_explore_context() {
         );
     }
 
+    drop(server);
     production.harness.shutdown().await;
 }
