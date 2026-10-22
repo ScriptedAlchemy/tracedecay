@@ -25,8 +25,8 @@ use super::projector::{
 };
 use super::registry::{SessionTemporalRefreshPassReport, session_refresh_retry_delay};
 use super::wake::{
-    PendingBeginRequestGuard, RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
-    SessionTemporalRefreshWakeState, TerminalAttemptGuard,
+    PendingBeginRequestGuard, RecoverySelectionGuard, SessionProjectionJoin,
+    SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::engine::Error as EngineError;
@@ -235,7 +235,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     let mut history_priority_passes = 0u32;
     let mut history_release = None;
     let mut granted_history_admission = None;
-    let mut projection_joins: Vec<tokio::sync::oneshot::Sender<bool>> = Vec::new();
+    let mut projection_joins: Vec<SessionProjectionJoin> = Vec::new();
     let live_projection = LiveProjectionDuringSummary {
         database: &database,
         state: &state,
@@ -791,10 +791,12 @@ async fn session_projection_refresh(
     state: &Arc<SessionTemporalRefreshWakeState>,
     projector: &dyn SessionTemporalRefreshProjector,
     policy: SessionTemporalRefreshPolicy,
-    joins: &mut Vec<tokio::sync::oneshot::Sender<bool>>,
+    joins: &mut Vec<SessionProjectionJoin>,
 ) -> SessionTemporalRefreshPassReport {
-    joins.retain(|join| !join.is_closed());
+    joins.retain(|join| !join.completion.is_closed());
     joins.extend(state.take_projection_joins());
+    let access = SessionTemporalAccess::new(database.as_ref());
+    capture_projection_targets(&access, joins).await;
     let report = run_session_temporal_refresh_pass(database, state, projector, policy).await;
     if state.cancelled.load(Ordering::Acquire) {
         return report;
@@ -813,12 +815,93 @@ async fn session_projection_refresh(
     } else {
         None
     };
-    if let Some(published) = result {
-        for join in joins.drain(..) {
-            let _ = join.send(published);
+    settle_projection_joins(&access, joins, &report, result).await;
+    report
+}
+
+async fn capture_projection_targets(
+    access: &SessionTemporalAccess<'_, RegisteredGlobalDb>,
+    joins: &mut Vec<SessionProjectionJoin>,
+) {
+    let mut frontiers = HashMap::new();
+    for mut join in std::mem::take(joins) {
+        if let Some(session_id) = &join.session_id
+            && join.observed_through.is_none()
+        {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                frontiers.entry(session_id.clone())
+            {
+                let frontier = access
+                    .session_temporal_publication_result(session_id)
+                    .await
+                    .map(|publication| publication.observed_through())
+                    .map_err(|error| {
+                        tracing::warn!(%session_id, %error, "session publication target unavailable");
+                    })
+                    .ok();
+                entry.insert(frontier);
+            }
+            let Some(frontier) = frontiers.get(session_id).copied().flatten() else {
+                let _ = join.completion.send(false);
+                continue;
+            };
+            join.observed_through = Some(frontier);
+        }
+        joins.push(join);
+    }
+}
+
+async fn settle_projection_joins(
+    access: &SessionTemporalAccess<'_, RegisteredGlobalDb>,
+    joins: &mut Vec<SessionProjectionJoin>,
+    report: &SessionTemporalRefreshPassReport,
+    aggregate: Option<bool>,
+) {
+    let mut publications = HashMap::new();
+    for join in std::mem::take(joins) {
+        if join.completion.is_closed() {
+            continue;
+        }
+        let result = if let Some(session_id) = &join.session_id {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                publications.entry(session_id.clone())
+            {
+                let publication = access
+                    .session_temporal_publication_result(session_id)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(%session_id, %error, "session publication proof unavailable");
+                    })
+                    .ok();
+                entry.insert(publication);
+            }
+            match publications.get(session_id).and_then(Option::as_ref) {
+                Some(publication)
+                    if join
+                        .observed_through
+                        .is_some_and(|target| publication.covers(target)) =>
+                {
+                    Some(true)
+                }
+                Some(_)
+                    if report.failed_sessions.contains(session_id) || aggregate == Some(true) =>
+                {
+                    // The named session must prove its own frontier. A drained
+                    // scope or another session's successful receipt is not proof.
+                    Some(false)
+                }
+                Some(_) => None,
+                None => Some(false),
+            }
+        } else {
+            aggregate
+        };
+        if let Some(published) = result {
+            let _ = join.completion.send(published);
+        } else {
+            joins.push(join);
         }
     }
-    report
 }
 
 /// Keeps one fair summary admission or in-flight summary page alive while the
@@ -835,7 +918,7 @@ impl LiveProjectionDuringSummary<'_> {
     async fn wait_for<F>(
         &self,
         stage: F,
-        joins: &mut Vec<tokio::sync::oneshot::Sender<bool>>,
+        joins: &mut Vec<SessionProjectionJoin>,
         report: &mut SessionTemporalRefreshPassReport,
         idle_between_projections: bool,
     ) -> Option<F::Output>
@@ -1740,6 +1823,7 @@ async fn apply_fail_effect(
                 "session temporal refresh failed durably"
             );
             report.failed += 1;
+            report.failed_sessions.insert(recovery.session_id().clone());
             state.record_terminal_discovery_failure(recovery);
         }
         Err(error) if is_retryable_storage(&error) => {

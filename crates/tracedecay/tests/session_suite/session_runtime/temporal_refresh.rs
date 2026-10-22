@@ -1081,7 +1081,7 @@ async fn hook_ingest_join_runs_the_bound_refresh_worker() {
     let wake = authority.ensure_profile(&registry).await;
     let before = registry.profile_pass_count(db.db_path()).await;
 
-    tracedecay_mcp::server::join_hook_ingest_refresh(false, Some(&wake), None)
+    tracedecay_mcp::server::join_hook_ingest_refresh(false, None, Some(&wake), None)
         .await
         .expect("hook ingest must join the refresh worker that owns the written store");
 

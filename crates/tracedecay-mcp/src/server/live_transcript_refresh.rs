@@ -1,7 +1,8 @@
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
+use tracedecay_domain::SessionId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
@@ -54,8 +55,10 @@ pub async fn join_required_live_transcript_refresh(
     let Some(scope) = required_refresh_scope(tool_name, arguments) else {
         return Ok(LiveTranscriptRefreshJoin::NotRequired);
     };
-    join_scope(scope, project_wake, user_wake, || TraceDecayError::Config {
-        message: REFRESH_UNAVAILABLE.to_owned(),
+    join_scope(scope, None, project_wake, user_wake, || {
+        TraceDecayError::Config {
+            message: REFRESH_UNAVAILABLE.to_owned(),
+        }
     })
     .await
 }
@@ -65,6 +68,7 @@ pub async fn join_required_live_transcript_refresh(
 /// otherwise.
 pub async fn join_hook_ingest_refresh(
     user_scope: bool,
+    session_id: Option<&SessionId>,
     project_wake: Option<&dyn SessionRefreshWorkerPort>,
     user_wake: Option<&dyn SessionRefreshWorkerPort>,
 ) -> Result<()> {
@@ -73,7 +77,7 @@ pub async fn join_hook_ingest_refresh(
     } else {
         LiveTranscriptRefreshScope::Project
     };
-    join_scope(scope, project_wake, user_wake, || {
+    join_scope(scope, session_id, project_wake, user_wake, || {
         TraceDecayError::hook_runtime_with_status(
             "temporal_refresh_unavailable",
             true,
@@ -85,8 +89,33 @@ pub async fn join_hook_ingest_refresh(
     .map(|_| ())
 }
 
+/// Hermes inline capture preserves this exact public session identity. Source
+/// sweeps may write several sessions, and other providers can normalize their
+/// native IDs, so those calls keep the aggregate publication contract.
+/// Capture still owns request validation and admission before the join runs.
+pub fn hook_ingest_refresh_session(arguments: &Map<String, Value>) -> Result<Option<SessionId>> {
+    if arguments.get("action").and_then(Value::as_str) != Some("ingest_transcript")
+        || arguments.get("provider").and_then(Value::as_str) != Some("hermes")
+        || !arguments.get("messages").is_some_and(Value::is_array)
+    {
+        return Ok(None);
+    }
+    let session_id = arguments
+        .get("session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "Hermes turn callback requires a session_id".to_owned(),
+        })?;
+    SessionId::new(session_id)
+        .map(Some)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid Hermes turn session: {error}"),
+        })
+}
+
 async fn join_scope(
     scope: LiveTranscriptRefreshScope,
+    session_id: Option<&SessionId>,
     project_wake: Option<&dyn SessionRefreshWorkerPort>,
     user_wake: Option<&dyn SessionRefreshWorkerPort>,
     unavailable: impl Fn() -> TraceDecayError,
@@ -96,10 +125,17 @@ async fn join_scope(
         LiveTranscriptRefreshScope::User => user_wake,
     }
     .ok_or_else(&unavailable)?;
-    if wake
-        .wake_and_wait_for_projection(LIVE_TRANSCRIPT_REFRESH_DEADLINE)
-        .await
-    {
+    let published = match session_id {
+        Some(session_id) => {
+            wake.wake_and_wait_for_session_projection(session_id, LIVE_TRANSCRIPT_REFRESH_DEADLINE)
+                .await
+        }
+        None => {
+            wake.wake_and_wait_for_projection(LIVE_TRANSCRIPT_REFRESH_DEADLINE)
+                .await
+        }
+    };
+    if published {
         Ok(LiveTranscriptRefreshJoin::PublicationJoined)
     } else {
         Err(unavailable())
@@ -108,11 +144,13 @@ async fn join_scope(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use serde_json::json;
     use tracedecay_contracts::{SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort};
+    use tracedecay_domain::SessionId;
     use tracedecay_sessions::serving::{
         SessionConvergenceStatus, SessionProjectionServingState, SessionProjectionServingStatus,
         SessionProjectionServingStatusPort,
@@ -125,12 +163,14 @@ mod tests {
     /// Refresh owner whose publication is the state after `wake_and_wait`.
     struct PublishingRefresh {
         published: AtomicBool,
+        session: Mutex<Option<SessionId>>,
     }
 
     impl PublishingRefresh {
         fn idle() -> Self {
             Self {
                 published: AtomicBool::new(false),
+                session: Mutex::new(None),
             }
         }
 
@@ -156,6 +196,16 @@ mod tests {
             let published = self.wake();
             Box::pin(async move { published })
         }
+
+        fn wake_and_wait_for_session_projection<'a>(
+            &'a self,
+            session_id: &'a SessionId,
+            _timeout: Duration,
+        ) -> SessionTemporalRefreshWakeFuture<'a> {
+            *self.session.lock().expect("record session target") = Some(session_id.clone());
+            let published = self.wake();
+            Box::pin(async move { published })
+        }
     }
 
     impl SessionProjectionServingStatusPort for PublishingRefresh {
@@ -175,6 +225,7 @@ mod tests {
     async fn completed_hook_ingest_fails_when_its_refresh_owner_is_unavailable() {
         let error = super::join_hook_ingest_refresh(
             false,
+            None,
             Some(&UnavailableSessionTemporalRefreshWake),
             None,
         )
@@ -197,7 +248,7 @@ mod tests {
     #[tokio::test]
     async fn user_scope_never_falls_back_to_the_project_refresh_owner() {
         let project = PublishingRefresh::idle();
-        let error = super::join_hook_ingest_refresh(true, Some(&project), None)
+        let error = super::join_hook_ingest_refresh(true, None, Some(&project), None)
             .await
             .expect_err("user ingest must require the user refresh owner");
 
@@ -214,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn project_ingest_does_not_publish_through_the_user_refresh_owner() {
         let user = PublishingRefresh::idle();
-        let error = super::join_hook_ingest_refresh(false, None, Some(&user))
+        let error = super::join_hook_ingest_refresh(false, None, None, Some(&user))
             .await
             .expect_err("project ingest must require the project refresh owner");
 
@@ -232,7 +283,7 @@ mod tests {
     async fn hook_ingest_joins_the_project_refresh_owner() {
         let project = PublishingRefresh::idle();
         let user = PublishingRefresh::idle();
-        super::join_hook_ingest_refresh(false, Some(&project), Some(&user))
+        super::join_hook_ingest_refresh(false, None, Some(&project), Some(&user))
             .await
             .expect("project hook ingest must join its refresh owner");
 
@@ -244,6 +295,40 @@ mod tests {
             !user.published(),
             "project hook ingest must not also publish through the user owner"
         );
+    }
+
+    #[tokio::test]
+    async fn hermes_inline_join_names_its_session_but_source_scans_remain_aggregate() {
+        for (arguments, expected) in [
+            (
+                json!({"action": "ingest_transcript", "provider": "hermes", "session_id": "hermes-live", "messages": [{"role": "user", "content": "live turn"}]}),
+                Some(SessionId::new("hermes-live").expect("session id")),
+            ),
+            (
+                json!({"action": "ingest_transcript", "provider": "hermes", "messages": null}),
+                None,
+            ),
+            (
+                json!({"action": "ingest_transcript", "provider": "hermes"}),
+                None,
+            ),
+            (
+                json!({"action": "ingest_transcript", "provider": "codex", "session_id": "native-provider-id", "messages": []}),
+                None,
+            ),
+        ] {
+            let target = super::hook_ingest_refresh_session(arguments.as_object().unwrap())
+                .expect("derive the canonical target without changing source-scan validation");
+            assert_eq!(target, expected);
+            let project = PublishingRefresh::idle();
+            let user = PublishingRefresh::idle();
+            super::join_hook_ingest_refresh(true, target.as_ref(), Some(&project), Some(&user))
+                .await
+                .expect("join the owning user store");
+            assert!(user.published());
+            assert_eq!(*user.session.lock().unwrap(), expected);
+            assert!(!project.published());
+        }
     }
 
     #[tokio::test]

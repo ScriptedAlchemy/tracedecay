@@ -429,6 +429,104 @@ struct ControlledProjector {
     reject: AtomicBool,
 }
 
+/// Fails one session while every other session uses the production projector.
+struct SessionRefusingProjector {
+    refused: SessionId,
+}
+
+impl SessionTemporalRefreshProjector for SessionRefusingProjector {
+    fn project<'a>(
+        &'a self,
+        database: &'a RegisteredGlobalDbLeaseV1,
+        recovery: SessionRefreshRecoveryV1,
+    ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        Box::pin(async move {
+            if recovery.session_id() == &self.refused {
+                Err(SessionTemporalRefreshProjectorError::terminal(
+                    "fixture_session_projection_refused",
+                ))
+            } else {
+                CanonicalSessionTemporalProjector
+                    .project(database, recovery)
+                    .await
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn named_projection_join_survives_an_unrelated_session_failure() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-join-session-isolation").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let successful = SessionId::new("projection-accepted").expect("successful session");
+    let refused = SessionId::new("projection-refused").expect("refused session");
+    begin_empty_refreshes(&store, ["projection-accepted", "projection-refused"]).await;
+    let recoveries = store.running_session_refreshes().await.expect("recoveries");
+    assert_eq!(recoveries.len(), 2);
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let handle = state.handle();
+    let successful_join =
+        handle.wake_and_wait_for_session_projection(&successful, Duration::from_secs(5));
+    let refused_join =
+        handle.wake_and_wait_for_session_projection(&refused, Duration::from_secs(5));
+    let aggregate_join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+    tokio::pin!(successful_join, refused_join, aggregate_join);
+    // Put all three obligations in the same pass before starting the worker.
+    // The unnamed caller still owns the aggregate failure contract.
+    let pending = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready((
+            successful_join.as_mut().poll(cx).is_pending(),
+            refused_join.as_mut().poll(cx).is_pending(),
+            aggregate_join.as_mut().poll(cx).is_pending(),
+        ))
+    })
+    .await;
+    assert_eq!(pending, (true, true, true));
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(SessionRefusingProjector {
+            refused: refused.clone(),
+        }),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(tokio::sync::Semaphore::new(0)),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+
+    let (successful_result, refused_result, aggregate_result) =
+        tokio::join!(successful_join, refused_join, aggregate_join);
+    state.cancel();
+    worker.await.expect("worker exits on cancellation");
+    assert!(
+        successful_result,
+        "another session cannot veto a committed publication"
+    );
+    assert!(
+        !refused_result,
+        "the failed session must refuse its own join"
+    );
+    assert!(
+        !aggregate_result,
+        "unnamed sweeps must retain aggregate failure"
+    );
+    for recovery in recoveries {
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                recovery.operation_id().clone(),
+                recovery.session_id().clone(),
+            ))
+            .await
+            .expect("read durable receipt")
+            .expect("both sessions must settle durably");
+        let expected = if recovery.session_id() == &successful {
+            SessionRefreshTerminalStateV1::Complete
+        } else {
+            SessionRefreshTerminalStateV1::Failed
+        };
+        assert_eq!(receipt.state(), expected);
+    }
+}
+
 impl SessionTemporalRefreshProjector for ControlledProjector {
     fn project<'a>(
         &'a self,
