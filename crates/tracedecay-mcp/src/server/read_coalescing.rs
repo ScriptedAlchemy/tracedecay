@@ -11,7 +11,7 @@ use serde_json::Value;
 use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use crate::ToolResult;
+use crate::{ToolResult, tool_result_has_semantic_error};
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -152,6 +152,11 @@ impl ReadFlight {
 
 impl ReadFlightLeader {
     pub fn complete(mut self, result: ToolResult) -> ToolResult {
+        // Refusals carry the caller's identity and invocation controls. Dropping
+        // this unfinished flight wakes followers to run their own dispatch.
+        if tool_result_has_semantic_error(&result) {
+            return result;
+        }
         self.finished = true;
         self.remove_registration();
         // Deregistration closes this flight to new followers (a later
@@ -199,11 +204,17 @@ pub fn tool_allows_identical_read_coalescing(
     tool_name: &str,
     tool_is_read_only: impl FnOnce(&str) -> bool,
 ) -> bool {
-    // Every owner side effect runs per call; identical calls never share one.
-    if ApplicationSurfaceOperation::from_tool_name(tool_name)
-        .and_then(ApplicationSurfaceOperation::owner_side_effect)
-        .is_some()
-    {
+    // The key identifies graph data, not an application invocation's authority
+    // or cancellation. Every non-graph call must reach its own executor.
+    let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) else {
+        return false;
+    };
+    if !operation.is_graph_tool() || operation.owner_side_effect().is_some() {
+        return false;
+    }
+    // A view records usage under this caller's request identity before reading
+    // the resulting summary, so every caller must execute the handler.
+    if operation == ApplicationSurfaceOperation::SkillView {
         return false;
     }
     if matches!(
@@ -233,7 +244,14 @@ fn read_flight_key(
     arguments: &Value,
     scope_prefix: Option<&str>,
 ) -> ReadFlightKey {
-    let arguments = serde_json::to_vec(arguments).unwrap_or_default();
+    // Routing assigns correlation identities per connection/request. They
+    // control cancellation, not eligible reads' inputs. Only successful reads
+    // are shared; a refusal makes every caller dispatch with its own identity.
+    let mut arguments = arguments.clone();
+    if let Some(arguments) = arguments.as_object_mut() {
+        arguments.remove("__mcp_request_id");
+    }
+    let arguments = serde_json::to_vec(&arguments).unwrap_or_default();
     let scope_present: &[u8] = if scope_prefix.is_some() { b"1" } else { b"0" };
     let scope = scope_prefix.unwrap_or_default();
     ReadFlightKey(canonical_framed_sha256_bytes(
@@ -259,8 +277,8 @@ mod tests {
         let coalescer = IdenticalReadCoalescer::default();
         let leader = match coalescer.claim(
             "graph-main",
-            "tracedecay_search",
-            &json!({"query": "DaemonEngine"}),
+            "tracedecay_files",
+            &json!({"path": "src", "__mcp_request_id": "connection-a:1"}),
             None,
         ) {
             ReadFlightClaim::Leader(leader) => leader,
@@ -268,8 +286,8 @@ mod tests {
         };
         let follower = match coalescer.claim(
             "graph-main",
-            "tracedecay_search",
-            &json!({"query": "DaemonEngine"}),
+            "tracedecay_files",
+            &json!({"path": "src", "__mcp_request_id": "connection-b:1"}),
             None,
         ) {
             ReadFlightClaim::Follower(follower) => follower,
@@ -421,14 +439,19 @@ mod tests {
             "tracedecay_dependency_depth",
             "tracedecay_health",
             "tracedecay_dsm",
+            "tracedecay_configuration_get",
+            "tracedecay_project_list",
+            "tracedecay_fact_store_search",
+            "tracedecay_source_outline",
+            "tracedecay_skill_view",
         ] {
             assert!(
                 !tool_allows_identical_read_coalescing(controlled_read, |_| true),
-                "{controlled_read} has caller-specific cancellation and deadline controls"
+                "{controlled_read} must execute with each caller's own identity and controls"
             );
         }
         assert!(tool_allows_identical_read_coalescing(
-            "tracedecay_source_outline",
+            "tracedecay_files",
             |_| true,
         ));
         assert!(!tool_allows_identical_read_coalescing(

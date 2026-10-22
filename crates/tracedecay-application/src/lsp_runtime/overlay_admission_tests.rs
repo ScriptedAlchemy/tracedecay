@@ -1,28 +1,27 @@
 use super::overlay_admission::admit_overlay;
-use std::sync::Arc;
-
 use tracedecay_domain::ContentDigest;
-use tracedecay_lsp::{
-    OverlayExtractionState, OverlayParseState, OverlayParseUnavailable, OverlaySnapshot,
-};
+use tracedecay_lsp::{AdmittedRoot, OverlaySnapshot, OverlayStore};
 
-fn overlay(content_digest: ContentDigest) -> OverlaySnapshot {
-    OverlaySnapshot {
-        uri: "file:///root/src/lib.rs".to_owned(),
-        language_id: "rust".to_owned(),
-        version: 7,
-        content_digest,
-        text: Arc::from("fn current() {}"),
-        ephemeral: true,
-        parse_state: OverlayParseState::Unavailable(OverlayParseUnavailable::StaleReport),
-        extraction_state: OverlayExtractionState::Unavailable(OverlayParseUnavailable::StaleReport),
-    }
+fn overlay(content_digest: ContentDigest) -> (OverlayStore, OverlaySnapshot) {
+    let mut store = OverlayStore::default();
+    let mut snapshot = store
+        .open(
+            &AdmittedRoot::new("file:///root"),
+            "file:///root/src/lib.rs",
+            "rust",
+            7,
+            "fn current() {}",
+        )
+        .expect("admitted overlay");
+    snapshot.content_digest = content_digest;
+    (store, snapshot)
 }
 
 #[test]
 fn overlay_admission_rejects_a_stale_content_digest() {
     let stale = ContentDigest::of_bytes(b"fn stale() {}");
-    let error = admit_overlay(overlay(stale), "file:///root/src/lib.rs")
+    let (_store, snapshot) = overlay(stale);
+    let error = admit_overlay(snapshot, "file:///root/src/lib.rs")
         .expect_err("stale digest must not authorize overlay bytes");
 
     assert_eq!(error.class(), "document-overlay-content-digest-mismatch");
@@ -31,10 +30,19 @@ fn overlay_admission_rejects_a_stale_content_digest() {
 #[test]
 fn overlay_admission_preserves_exact_version_digest_and_shared_text() {
     let digest = ContentDigest::of_bytes(b"fn current() {}");
-    let admitted =
-        admit_overlay(overlay(digest.clone()), "file:///root/src/lib.rs").expect("exact overlay");
+    let (_store, snapshot) = overlay(digest.clone());
+    let admitted = admit_overlay(snapshot, "file:///root/src/lib.rs").expect("exact overlay");
 
     assert_eq!(admitted.version, 7);
     assert_eq!(admitted.content_digest, digest);
     assert_eq!(&*admitted.text, "fn current() {}");
+}
+
+#[test]
+fn overlay_admission_rejects_work_retained_after_session_close() {
+    let (store, snapshot) = overlay(ContentDigest::of_bytes(b"fn current() {}"));
+    drop(store);
+    let error = admit_overlay(snapshot, "file:///root/src/lib.rs")
+        .expect_err("queued work cannot keep the overlay admission alive");
+    assert_eq!(error.class(), "document-overlay-closed");
 }

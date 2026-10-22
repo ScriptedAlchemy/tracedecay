@@ -23,8 +23,6 @@ use super::state::{query_optional_i64, read_observation, storage};
 use crate::schema_contract::invariants::TEMPORAL_OBSERVATION_EFFECT_DELETE_GUARD_SQL;
 
 const OPERATION: &str = "rearm Codex project path collisions";
-/// Recorded once the rows parked on the obsolete `project_path` collision are
-/// re-armed.
 const CONVERGENCE: &str = "codex-project-path-collision-rearm-v1";
 
 /// Re-arms queue rows parked terminal only because of the `project_path`

@@ -11,10 +11,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tracedecay_domain::NativeHostIdentityV1;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_hooks::{
     HOOK_SYNCHRONOUS_BUDGET, HookDeliveryReceiptWriterV1, HookDeliveryRetentionV1,
     HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
 };
+use tracedecay_runtime_core::logging::format_daemon_log_line;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 
 use crate::common::{
@@ -508,6 +511,23 @@ fn bound_worktrees(data_root: &Path) -> usize {
     std::fs::read_dir(data_root.join("hook-configurations")).map_or(0, Iterator::count)
 }
 
+fn admitted_edit_sequence(log: &str, root: &Path) -> Option<u64> {
+    let marker = format_daemon_log_line(
+        "hook_file_edit_admitted",
+        &[
+            ("project", root.display().to_string()),
+            (
+                "paths_digest",
+                sha256_hex(format!("{:?}", ["src/lib.rs"]).as_bytes()),
+            ),
+        ],
+    );
+    let prefix = format!("{marker} seq=");
+    log.lines()
+        .filter_map(|line| line.strip_prefix(prefix.as_str())?.parse::<u64>().ok())
+        .find(|sequence| *sequence > 0)
+}
+
 #[test]
 fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     let home = tempfile::TempDir::new().unwrap();
@@ -532,6 +552,8 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
         );
         std::fs::write(root.join("src/lib.rs"), "pub fn edited_in_worktree() {}\n").unwrap();
     }
+    let canonical_roots =
+        [&worktree, &other_worktree].map(|root| canonical_existing_identity(root).unwrap());
     assert_eq!(
         bound_worktrees(&data_root),
         1,
@@ -546,10 +568,13 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     let _daemon = spawn_tracedecay_daemon_logged(&home, &log, |command| {
         command.env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold);
     });
-    assert_eq!(
-        claude_edit(&home, &worktree, &data_root, "toolu_unbound_first"),
-        "hook_v2_accepted",
-        "the first edit in an unbound worktree must reach the daemon: {}\n{}",
+    let first = claude_edit(&home, &worktree, &data_root, "toolu_unbound_first");
+    assert!(
+        matches!(
+            first.as_str(),
+            "hook_v2_accepted" | "hook_v2_catchup_required"
+        ),
+        "the unbound callback must report its acknowledgement outcome, got {first}: {}\n{}",
         std::fs::read_to_string(&log).unwrap(),
         std::fs::read_to_string(data_root.join("hook_analytics.jsonl")).unwrap()
     );
@@ -560,22 +585,74 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     );
     assert!(
         hold.is_file(),
-        "the first edit was acknowledged while full publication is held"
+        "the first edit reached core publication while full publication is held"
     );
-    assert_eq!(
-        claude_edit(
-            &home,
-            &other_worktree,
-            &data_root,
-            "toolu_other_unbound_first"
+    let completion_deadline = Instant::now() + PROMPT_DRAIN;
+    let second = claude_edit(
+        &home,
+        &other_worktree,
+        &data_root,
+        "toolu_other_unbound_first",
+    );
+    assert!(
+        matches!(
+            second.as_str(),
+            "hook_v2_accepted" | "hook_v2_catchup_required"
         ),
-        "hook_v2_accepted",
-        "another linked checkout's same relative file must commit while full publication is held"
+        "the second unbound callback must report its acknowledgement outcome, got {second}"
     );
-    // Graph admission publishes hook bindings before the core hold. Full
-    // publication is the capability boundary this fixture actually holds.
-    let full_markers = [&worktree, &other_worktree]
-        .map(|root| format!("project={} phase=full_published", root.display()));
+    // A callback's fixed acknowledgement budget can expire while the daemon
+    // still commits its already-received event. Do not resubmit either edit:
+    // require its exact root/path receipt from the canonical broker before
+    // releasing full publication. Bindings alone cannot prove admission.
+    assert!(
+        latency_until(
+            completion_deadline.saturating_duration_since(Instant::now()),
+            || {
+                let admitted = std::fs::read_to_string(&log).unwrap();
+                canonical_roots
+                    .iter()
+                    .all(|root| admitted_edit_sequence(&admitted, root).is_some())
+            },
+        )
+        .is_some(),
+        "both first edits must have exact durable receipts before releasing publication (first={first}, second={second}): {}",
+        std::fs::read_to_string(&log).unwrap(),
+    );
+    let admitted = std::fs::read_to_string(&log).unwrap();
+    for line in admitted
+        .lines()
+        .filter(|line| line.contains("event=hook_file_edit_admitted"))
+    {
+        assert!(
+            !line.contains("src/lib.rs"),
+            "admission evidence must not expose edited filenames: {line}"
+        );
+    }
+    let sequences = canonical_roots
+        .each_ref()
+        .map(|root| admitted_edit_sequence(&admitted, root).unwrap());
+    assert_ne!(
+        sequences[0], sequences[1],
+        "each linked-worktree edit must have its own committed broker record"
+    );
+    // The first open retains process-wide capacity admission through full
+    // publication. The other edit must commit its durable receipt above while
+    // waiting for that admission; its binding follows once the hold releases.
+    assert_eq!(
+        bound_worktrees(&data_root),
+        2,
+        "only the main checkout and the first core-published worktree are bound while publication is held"
+    );
+    let full_markers = canonical_roots.each_ref().map(|root| {
+        format_daemon_log_line(
+            "project_open_phase",
+            &[
+                ("project", root.display().to_string()),
+                ("phase", "full_published".to_owned()),
+            ],
+        )
+    });
     let held_log = std::fs::read_to_string(&log).unwrap();
     for marker in &full_markers {
         assert!(
@@ -585,11 +662,14 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
     }
     std::fs::remove_file(&hold).unwrap();
     assert!(
-        latency_until(PROMPT_DRAIN, || {
-            let published = std::fs::read_to_string(&log).unwrap();
-            bound_worktrees(&data_root) == 3
-                && full_markers.iter().all(|marker| published.contains(marker))
-        })
+        latency_until(
+            completion_deadline.saturating_duration_since(Instant::now()),
+            || {
+                let published = std::fs::read_to_string(&log).unwrap();
+                bound_worktrees(&data_root) == 3
+                    && full_markers.iter().all(|marker| published.contains(marker))
+            }
+        )
         .is_some(),
         "delivering that edit opens the worktree and publishes its binding: {}",
         std::fs::read_to_string(&log).unwrap()
