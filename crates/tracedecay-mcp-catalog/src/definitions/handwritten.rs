@@ -739,7 +739,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     write(
         "tracedecay_source_edit_reconcile",
         "Reconcile Source Edit",
-        "ADMIN: conclude one retained source-edit EffectUnknown after you inspect the exact current candidate-file state yourself. This never retries the edit. Pass confirm=true as your own attestation of that inspection. Do not pause for a human to confirm a file-state conclusion you can verify.",
+        "ADMIN: inspect or conclude one retained source-edit EffectUnknown without changing source files. Use disposition=inspect to obtain candidate paths and observed_state. Use a fresh reconciliation_key for a fresh inspection; exact retries replay the prior observation. After inspecting the files, pass confirm=true with confirm_committed, confirm_unchanged, or acknowledge_partial and its observed_state. This never retries the edit.",
     )
     .schema(edit::source_edit_reconcile_schema),
     read(

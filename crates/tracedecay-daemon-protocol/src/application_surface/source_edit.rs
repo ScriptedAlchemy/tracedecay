@@ -2,7 +2,7 @@
 //!
 //! The messages are the public argument diagnostics every transport reports.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_contracts::{
     EffectId, IdempotencyKey, RenameSymbolBindingV1, RenameSymbolSurfaceRequestV1,
     SourceEditInvocationV1, SourceEditKind, SourceEditReconciliationDispositionV1,

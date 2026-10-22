@@ -17,12 +17,14 @@ apply fields.
   A partial failure can leave published files in place.
 - **Structural rewrite.** `tracedecay_ast_grep_rewrite` uses the same
   in-process ast-grep engine and grammars as structural search.
-- **Reconcile.** After an interrupted edit, inspect the current candidate files
-  before retrying. Use `tracedecay_source_edit_reconcile` to confirm committed
-  state with `committed_state`, confirm unchanged state, or acknowledge a
-  partial state with `observed_state`. Pass the original receipt's `operation`
-  as `original_operation`. Reconciliation checks the live digest and never
-  writes source files.
+- **Reconcile.** After an interrupted edit, call
+  `tracedecay_source_edit_reconcile` with `disposition: "inspect"` to obtain
+  candidate paths and `observed_state`. Pass the original receipt's `operation`
+  as `original_operation`. Inspect those files, then confirm committed state
+  with `committed_state`, confirm unchanged state, or acknowledge a partial
+  state with the returned `observed_state`. Use a fresh `reconciliation_key`
+  for each fresh inspection or conclusion; exact retries replay the prior
+  attempt. Reconciliation checks the live digest and never writes source files.
 
 For consolidation, compare candidate bodies and behavior directly; a similar
 name does not justify replacing an implementation.
