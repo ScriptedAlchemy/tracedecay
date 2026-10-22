@@ -46,12 +46,12 @@ const HINT_TS: i64 = 1_000_000;
 const AFTER_HORIZON: i64 = HINT_TS + 2_000;
 
 struct ProjectSettlementFixture {
-    _dir: TempDir,
     runtime: HostAdmissionTestRuntimeV1,
     project_root: std::path::PathBuf,
     /// Scope the observability envelopes are attributed to: the registered
     /// project session binding, not the analytics project key.
     binding_project_id: ProjectId,
+    _dir: TempDir,
 }
 
 impl ProjectSettlementFixture {
@@ -68,11 +68,22 @@ impl ProjectSettlementFixture {
         .await
         .expect("open registered project runtime");
         Self {
-            _dir: dir,
             runtime,
             project_root,
             binding_project_id,
+            _dir: dir,
         }
+    }
+
+    async fn shutdown(self) {
+        let Self {
+            runtime, _dir: dir, ..
+        } = self;
+        runtime
+            .shutdown()
+            .await
+            .expect("close registered project runtime");
+        drop(dir);
     }
 
     fn analytics(&self) -> &RegisteredGlobalDb {
@@ -261,6 +272,7 @@ async fn settlement_records_settled_hints_as_a_linked_adoption_outcome() {
         }
     );
     assert_eq!(fixture.adoption_outcome_events().await.len(), 1);
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -283,6 +295,7 @@ async fn settlement_with_only_open_hints_emits_no_adoption_outcome() {
         fixture.adoption_outcome_events().await.is_empty(),
         "an all-open pass settled nothing and must not fabricate funnel mass"
     );
+    fixture.shutdown().await;
 }
 
 #[tokio::test]
@@ -321,6 +334,7 @@ async fn fully_settled_pass_records_a_known_coverage_census() {
         CoverageStateV1::Known,
         "a pass that settled every scanned hint is a complete census"
     );
+    fixture.shutdown().await;
 }
 
 /// The daemon's delivery row for one intent-pass suggestion, built by the
@@ -520,4 +534,5 @@ async fn daemon_intent_delivery_rows_settle_against_their_intent_key() {
             ),
         ]
     );
+    fixture.shutdown().await;
 }

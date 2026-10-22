@@ -3,9 +3,15 @@
 
 use std::fs;
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::process::Output;
+#[cfg(unix)]
+use std::process::{Child, Command, Stdio};
 
 use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
+#[cfg(unix)]
+use tracedecay_daemon_control::{SOCKET_ENV, default_socket_path};
 #[cfg(unix)]
 use tracedecay_daemon_identity::current_daemon_connection;
 #[cfg(unix)]
@@ -382,20 +388,50 @@ fn a_signed_out_kiro_cli_never_blocks_the_kiro_lifecycle() {
 /// canonical report from the sole daemon owner and counts its absence as an
 /// issue.
 #[cfg(unix)]
-pub(super) struct ProfileDaemon(std::process::Child);
+pub(super) struct ProfileDaemon {
+    child: Option<Child>,
+    owned_socket_directory: Option<PathBuf>,
+}
 
 #[cfg(unix)]
 impl ProfileDaemon {
     pub(super) fn start(cli: &IsolatedCli) -> Self {
+        // The daemon relocates sockets that exceed the platform path limit.
+        // Readiness must use that same authority, including on remote workers
+        // whose TMPDIR makes an otherwise ordinary profile path too long.
+        let socket = default_socket_path(&cli.profile).unwrap();
+        let mut daemon = Self {
+            child: None,
+            owned_socket_directory: None,
+        };
+        let socket_override = std::env::var_os(SOCKET_ENV).filter(|path| !path.is_empty());
+        if socket_override.is_none() && socket != cli.profile.join("daemon.sock") {
+            let parent = socket.parent().unwrap().to_path_buf();
+            // Claim only a freshly created directory. Earlier fixture work
+            // may already own a private parent, which this guard must retain.
+            match tracedecay_private_fs::create_private_directory(&parent) {
+                Ok(()) => daemon.owned_socket_directory = Some(parent),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    tracedecay_private_fs::validate_private_directory(&parent).unwrap();
+                }
+                Err(error) => panic!("could not create fixture socket directory: {error}"),
+            }
+        }
+        let log_path = cli.home.path().join("profile-daemon.stderr");
+        let stderr_log = fs::File::create(&log_path).unwrap();
         let mut command = cli.command(&["daemon", "run"]);
         command
             .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let daemon = Self(command.spawn().unwrap());
+            .stdout(Stdio::null())
+            .stderr(stderr_log);
+        daemon.child = Some(command.spawn().unwrap());
+        let stderr = || {
+            fs::read_to_string(&log_path)
+                .unwrap_or_else(|error| format!("could not read daemon stderr: {error}"))
+        };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        // Deep worker paths can move the socket outside the profile. Follow
-        // the same profile-owned authority that production clients discover.
+        // Follow the exact isolated profile's published endpoint, retaining
+        // child ownership and startup diagnostics if admission fails.
         while !current_daemon_connection(&cli.profile).is_ok_and(|connection| {
             match connection.endpoint() {
                 DaemonEndpoint::Unix(socket) => {
@@ -404,10 +440,18 @@ impl ProfileDaemon {
                 DaemonEndpoint::Loopback(address) => std::net::TcpStream::connect(address).is_ok(),
             }
         }) {
+            if let Some(status) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+                panic!(
+                    "profile daemon exited before listening for {}: {status}; stderr:\n{}",
+                    cli.profile.display(),
+                    stderr()
+                );
+            }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the registered daemon never listened for profile {}",
-                cli.profile.display()
+                "the registered daemon never listened for profile {}; stderr:\n{}",
+                cli.profile.display(),
+                stderr()
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
@@ -418,9 +462,50 @@ impl ProfileDaemon {
 #[cfg(unix)]
 impl Drop for ProfileDaemon {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            if child.wait().is_err() {
+                return;
+            }
+        }
+        if let Some(directory) = self.owned_socket_directory.take() {
+            let _ = fs::remove_dir_all(directory);
+        }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reaches_the_canonical_daemon_socket_for_a_long_profile_path() {
+    if std::env::var_os(SOCKET_ENV).is_some() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host_lifecycle_cli_acceptance::sweep_outcomes::doctor_reaches_the_canonical_daemon_socket_for_a_long_profile_path",
+            ])
+            .env_remove(SOCKET_ENV)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the isolated Doctor journey failed");
+        return;
+    }
+
+    let mut cli = IsolatedCli::new();
+    cli.profile = cli.home.path().join("p".repeat(120)).join("profile");
+    install_cline(&cli);
+    let socket = default_socket_path(&cli.profile).unwrap();
+    assert_ne!(socket, cli.profile.join("daemon.sock"));
+
+    {
+        let _daemon = ProfileDaemon::start(&cli);
+        assert_success("profile", "doctor", cli.run(&["doctor"]));
+    }
+
+    assert!(
+        !socket.parent().unwrap().exists(),
+        "the stopped fixture must remove its owned fallback socket directory"
+    );
+    assert!(cli.profile.join("config.toml").exists());
 }
 
 /// Doctor classifies hosts the way `update-plugin` does: Kimi's pending

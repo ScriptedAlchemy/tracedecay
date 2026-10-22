@@ -51,20 +51,11 @@ async fn condensation_creates_higher_depth_summary_from_existing_leaf_nodes() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: Some(3),
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "depth one condensed".into(),
+            overrides: tracedecay_lcm::LcmCompressionOverrides {
+                summary_fan_in: Some(3),
+                ..Default::default()
             },
+            summarizer: provided_summary("depth one condensed"),
         })
         .await
         .unwrap();
@@ -169,20 +160,11 @@ async fn condensation_waits_for_one_depth_with_enough_unparented_nodes() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: Some(3),
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "should not mix depths".into(),
+            overrides: tracedecay_lcm::LcmCompressionOverrides {
+                summary_fan_in: Some(3),
+                ..Default::default()
             },
+            summarizer: provided_summary("should not mix depths"),
         })
         .await
         .unwrap();
@@ -257,20 +239,11 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: Some(3),
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "depth one condensed".into(),
+            overrides: tracedecay_lcm::LcmCompressionOverrides {
+                summary_fan_in: Some(3),
+                ..Default::default()
             },
+            summarizer: provided_summary("depth one condensed"),
         })
         .await
         .unwrap();
@@ -336,11 +309,9 @@ async fn condensation_respects_default_incremental_max_depth() {
     let mut request = compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "should not condense above max depth".into(),
-        },
+        provided_summary("should not condense above max depth"),
     );
-    request.summary_fan_in = Some(3);
+    request.overrides.summary_fan_in = Some(3);
     let response = db.lcm_compress(request).await.unwrap();
 
     assert_eq!(response.status, "ok");
@@ -402,12 +373,10 @@ async fn condensation_honors_non_default_incremental_max_depth() {
     let mut request = compress_request(
         "cursor",
         "session-1",
-        LcmSummarizerMode::Fake {
-            summary_text: "condensed depth one summaries".into(),
-        },
+        provided_summary("condensed depth one summaries"),
     );
-    request.summary_fan_in = Some(3);
-    request.incremental_max_depth = Some(2);
+    request.overrides.summary_fan_in = Some(3);
+    request.overrides.incremental_max_depth = Some(2);
     let response = db.lcm_compress(request).await.unwrap();
 
     assert_eq!(response.status, "ok");

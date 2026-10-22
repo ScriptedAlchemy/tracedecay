@@ -300,6 +300,7 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         !shard_root.join("branches").exists(),
         "no write may create a per-branch database"
     );
+    harness.shutdown().await;
 }
 
 #[cfg(not(unix))]
