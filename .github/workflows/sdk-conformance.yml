@@ -74,6 +74,9 @@ jobs:
           .github/workflows/release-please.yml
           .github/workflows/release-pr-integrity.yml
   packages:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -86,6 +89,10 @@ jobs:
         id: bazel
         with:
           cache-key: sdk-conformance
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
       - run: bazel test --config=ci //sdks/codegen:unit_test
       - run: pnpm run contracts:check
         working-directory: dashboard
@@ -103,6 +110,9 @@ jobs:
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
   production-router:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -119,6 +129,10 @@ jobs:
           config: ci
           dest: target/debug
           cache-key: sdk-conformance
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
       # This job owns every sdk_suite test that needs the production daemon,
       # which Bazel hands the suite as TRACEDECAY_TEST_BIN. Including the
       # ignored tests is what keeps a daemon-backed test from silently never
