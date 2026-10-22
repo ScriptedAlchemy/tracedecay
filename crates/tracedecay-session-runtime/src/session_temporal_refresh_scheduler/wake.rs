@@ -2,19 +2,20 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
 use std::time::Instant;
 use tracedecay_domain::SessionId;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::execution::ExecutionControl;
 
-use super::history::SessionHistoricalIngestOutcome;
+use super::history::{SessionHistoricalIngestOutcome, SessionHistoricalPass};
 use tracedecay_session_temporal_store::{
     SessionRefreshRecoveryV1, SessionTemporalRefreshDiscoveryCursor,
 };
 use tracedecay_sessions::serving::{
     RefreshWorkerMissing, SessionConvergenceState, SessionConvergenceStatus,
-    SessionProjectionServingState, SessionProjectionServingStatus,
+    SessionHistoryCatchUpProgress, SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
     SessionProjectionWorkerRetryClass,
@@ -99,6 +100,7 @@ struct SessionTemporalRefreshWorkerTelemetry {
     retry_class: Option<SessionTemporalRefreshRetryClass>,
     unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
     historical_state: SessionHistoricalServingState,
+    history_progress: SessionHistoryCatchUpProgress,
     /// The worker went idle with no dirty flag and no queued request, and
     /// nothing has requeued work since.
     quiescent: bool,
@@ -125,6 +127,7 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
             retry_class: None,
             unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Stopped),
             historical_state: SessionHistoricalServingState::Current,
+            history_progress: SessionHistoryCatchUpProgress::default(),
             quiescent: false,
             convergence_epoch: 0,
             converged_at_unix_micros: None,
@@ -533,6 +536,26 @@ impl SessionTemporalRefreshWakeState {
             .historical_state = state;
     }
 
+    /// Folds a pass the historical ingestor ran into the catch-up progress
+    /// status reports. Cancelled passes did not finish, so they are not
+    /// counted.
+    pub fn record_history_pass(&self, pass: &SessionHistoricalPass) {
+        if matches!(pass.outcome, SessionHistoricalIngestOutcome::Cancelled) {
+            return;
+        }
+        let now = tracedecay_runtime_core::tracedecay::saturating_utc_now().0;
+        self.telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .history_progress
+            .record_pass(
+                matches!(pass.outcome, SessionHistoricalIngestOutcome::Complete),
+                pass.made_progress,
+                &pass.provider_units,
+                now,
+            );
+    }
+
     pub fn recover_history_after_worker_panic(&self) {
         let should_retry = matches!(
             &self
@@ -627,7 +650,7 @@ impl SessionTemporalRefreshWakeState {
 
     fn serving_status(&self) -> SessionProjectionServingStatus {
         let worker = self.status();
-        let (historical_state, convergence) = {
+        let (historical_state, convergence, history) = {
             let telemetry = self
                 .telemetry
                 .lock()
@@ -635,6 +658,7 @@ impl SessionTemporalRefreshWakeState {
             (
                 telemetry.historical_state.clone(),
                 convergence_status(&telemetry, worker.unavailable_reason),
+                telemetry.history_progress.clone(),
             )
         };
         SessionProjectionServingStatus {
@@ -706,6 +730,7 @@ impl SessionTemporalRefreshWakeState {
                 }
             }),
             convergence,
+            history: Some(history),
         }
     }
 
@@ -1039,10 +1064,8 @@ impl SessionTemporalRefreshWake {
         )
     }
 
-    /// Join the worker's idle boundary, including background work. Callers
-    /// proving a rekey handoff still need that boundary; live transcript
-    /// publication uses the separate projection joins above.
-    pub async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
+    #[cfg(test)]
+    pub(super) async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
         let Some(state) = self.target() else {
             return false;
         };

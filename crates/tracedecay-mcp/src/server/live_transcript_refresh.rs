@@ -217,6 +217,7 @@ mod tests {
                 blocker: None,
                 retry_class: None,
                 convergence: SessionConvergenceStatus::unavailable(),
+                history: None,
             }
         }
     }
