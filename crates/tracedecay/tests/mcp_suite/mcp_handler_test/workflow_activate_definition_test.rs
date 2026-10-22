@@ -598,4 +598,7 @@ async fn activate_definition_publishes_active_revision_three() {
         Some(&json!(effect_id)),
         "{still_active}"
     );
+
+    drop(server);
+    production.shutdown().await;
 }

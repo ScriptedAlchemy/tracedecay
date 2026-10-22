@@ -184,4 +184,7 @@ async fn listed_definitions_are_the_registered_rows_and_unknown_fields_are_refus
     let (after_refusal_result, after_refusal) =
         call(&server, "tracedecay_workflow_list_definitions", json!({})).await;
     assert_list_success(&after_refusal_result, &after_refusal, &expected);
+
+    drop(server);
+    production.shutdown().await;
 }
