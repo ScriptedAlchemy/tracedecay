@@ -15,7 +15,7 @@ use super::test_support::{
     fixture_graph, fixture_request, fixture_request_for_edit, fixture_symbol_code_graph, git,
 };
 use crate::{
-    SourceEditApplicationResult, SourceEditEffectControlV1, execute_source_edit,
+    SourceEditApplicationResult, SourceEditEffectControlV1, SourceEditOutcome, execute_source_edit,
     execute_source_edit_rollback, execute_source_edit_with_control,
     preview_source_edit_expected_state,
 };
@@ -217,7 +217,8 @@ async fn live_cancellation_before_effect_keeps_source_unchanged_and_is_durable()
 }
 
 #[tokio::test]
-async fn move_symbol_rollback_preserves_preexisting_empty_destination_ancestors_through_recovery_and_follow_up_edit() {
+async fn move_symbol_rollback_preserves_preexisting_empty_destination_ancestors_through_recovery_and_follow_up_edit()
+ {
     let project = tempdir().unwrap();
     let source_directory = project.path().join("src/locked");
     let destination_directory = project.path().join("reserved/empty-module");
@@ -304,32 +305,54 @@ async fn move_symbol_rollback_preserves_preexisting_empty_destination_ancestors_
     #[cfg(windows)]
     drop(held_source);
     let interrupted = execution.unwrap();
+    #[cfg(not(windows))]
+    const INJECTED_PUBLISH_STEP: &str = "create source edit temporary file";
+    #[cfg(windows)]
+    const INJECTED_PUBLISH_STEP: &str = "atomically publish source edit candidate";
+    match &interrupted.outcome {
+        SourceEditOutcome::EffectUnknown { message } => assert!(
+            message.contains("move aborted before writing src/locked/a.rs")
+                && message.contains(INJECTED_PUBLISH_STEP),
+            "expected the injected source publication fault: {message}"
+        ),
+        other => panic!("expected EffectUnknown from source publication, got {other:?}"),
+    }
 
     assert_eq!(
         interrupted.effect.as_ref().unwrap().receipt.outcome,
         EffectTermination::EffectUnknown
     );
-    assert_eq!(fs::read(source_directory.join("a.rs")).unwrap(), original_source);
-    assert!(!project.path().join("reserved/empty-module/moved.rs").exists());
+    assert_eq!(
+        fs::read(source_directory.join("a.rs")).unwrap(),
+        original_source
+    );
+    assert!(
+        !project
+            .path()
+            .join("reserved/empty-module/moved.rs")
+            .exists()
+    );
     assert!(destination_directory.is_dir());
     assert!(project.path().join("reserved").is_dir());
 
-    let recovered = execute_source_edit(
-        &graph,
-        &code_graph,
-        &operation,
-        request,
-        &authorization,
-    )
-    .await
-    .unwrap();
+    let recovered = execute_source_edit(&graph, &code_graph, &operation, request, &authorization)
+        .await
+        .unwrap();
     assert!(recovered.replayed);
     assert_eq!(
         recovered.effect.as_ref().unwrap().receipt.outcome,
         EffectTermination::Failed
     );
-    assert_eq!(fs::read(source_directory.join("a.rs")).unwrap(), original_source);
-    assert!(!project.path().join("reserved/empty-module/moved.rs").exists());
+    assert_eq!(
+        fs::read(source_directory.join("a.rs")).unwrap(),
+        original_source
+    );
+    assert!(
+        !project
+            .path()
+            .join("reserved/empty-module/moved.rs")
+            .exists()
+    );
     assert!(destination_directory.is_dir());
     assert!(project.path().join("reserved").is_dir());
 
@@ -340,10 +363,8 @@ async fn move_symbol_rollback_preserves_preexisting_empty_destination_ancestors_
         dry_run: false,
         verify: false,
     };
-    let mut unrelated_request = fixture_request_for_edit(
-        unrelated_edit,
-        "source-edit.move-empty-parent-follow-up",
-    );
+    let mut unrelated_request =
+        fixture_request_for_edit(unrelated_edit, "source-edit.move-empty-parent-follow-up");
     unrelated_request.expected_state = preview_source_edit_expected_state(
         &graph,
         &code_graph,

@@ -316,11 +316,6 @@ pub(crate) async fn move_symbol(
             )
         })
     {
-        // Roll back so a half-applied move leaves no trace. If the
-        // destination existed before, restore its original bytes; if we
-        // created it, delete it (and any now-empty parent dirs we created)
-        // rather than leaving an empty file behind. Never overwrite a
-        // third party's destination edit while rolling back.
         let rollback = rollback_planned_source_edit_files(
             project_root,
             &[
@@ -336,20 +331,6 @@ pub(crate) async fn move_symbol(
                 },
             ],
         );
-        if !dest_existed && rollback.is_ok() {
-            let mut dir = dest_abs.parent().map(Path::to_path_buf);
-            while let Some(d) = dir {
-                if d == project_root {
-                    break;
-                }
-                // `remove_dir` removes only empty dirs and errors otherwise,
-                // so this naturally stops at the first non-empty ancestor.
-                if std::fs::remove_dir(&d).is_err() {
-                    break;
-                }
-                dir = d.parent().map(Path::to_path_buf);
-            }
-        }
         return Err(TraceDecayError::Config {
             message: match rollback {
                 Ok(()) => format!(
