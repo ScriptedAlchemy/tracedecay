@@ -13,6 +13,9 @@ use tracedecay_contracts::{
     MultiRootScopeSetReadRequestV1, RegisteredRootSelectorV1,
 };
 use tracedecay_domain::{ScopeSetId, UtcMicros};
+use tracedecay_runtime_core::native_runtime::{
+    NativeTask, NativeTaskOutcome, Runtime, in_tokio_context,
+};
 
 use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
@@ -97,22 +100,19 @@ async fn execute_native_daemon_invocation(
 ) -> DaemonInvocationResponse {
     let engine = engine.clone();
     let handshake = handshake.clone();
-    // Production installs its Tokio handle for native-worker project opens.
-    // Keep this fixture's handle scoped to its task so concurrent tests never
-    // borrow a different fixture's runtime or retain one after shutdown.
-    let runtime = tokio::runtime::Handle::current();
-    let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(
-        tracedecay_runtime_core::native_runtime::in_tokio_context(runtime, async move {
-            assert!(
-                tracedecay_runtime_core::native_runtime::Runtime::current_handle().is_some(),
-                "the daemon invocation must run on a native worker"
-            );
-            Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
-        }),
-    )
+    // Keep the fixture's Tokio handle scoped to this native task so concurrent
+    // fixtures cannot borrow a different runtime or retain it after shutdown.
+    let tokio_runtime = tokio::runtime::Handle::current();
+    let task = NativeTask::spawn(in_tokio_context(tokio_runtime, async move {
+        assert!(
+            Runtime::current_handle().is_some(),
+            "daemon invocation must be polled on the native runtime"
+        );
+        Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
+    }))
     .expect("native daemon invocation");
     match task.wait().await {
-        tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(response) => response,
+        NativeTaskOutcome::Completed(response) => response,
         outcome => panic!("native daemon invocation did not settle: {outcome:?}"),
     }
 }

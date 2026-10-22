@@ -557,12 +557,18 @@ jobs:
         run: test "${{ needs.linux-test.result }}" = "success"
 
   windows-test:
+    # Branch protection requires this check name.
     name: Test Windows
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
+    if: >-
+      ${{ needs.scope-gate.outputs.run-heavy == 'true' &&
+      (github.event_name != 'workflow_dispatch' ||
+      needs.scope-gate.outputs.run-os == 'true') }}
     runs-on: windows-latest
     timeout-minutes: 330
     steps:
+      # Linux builds do not enable cfg(windows). Compile every Bazel target on
+      # native Windows for ready PRs and pushes; full tests remain dispatch-only.
       # Full history: the search-quality workload fixture pins a
       # `source_repository_commit`, and `validate_source_bindings` resolves that
       # object out of this checkout.
@@ -580,9 +586,13 @@ jobs:
         with:
           cache-key: ci-windows-test
 
-      # `bazel test` builds every target in the pattern, so tests start
-      # while the rest of the workspace still links.
-      - name: Build and test the workspace
+      - name: Build and type-check the Windows workspace
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        shell: bash
+        run: bazel build --config=ci //...
+
+      - name: Build and test the Windows workspace
+        if: ${{ github.event_name == 'workflow_dispatch' && needs.scope-gate.outputs.run-os == 'true' }}
         shell: bash
         run: bazel test --config=ci //...
 
@@ -634,41 +644,6 @@ jobs:
 
       - name: Run blocking Clippy policy
         run: bazel build --config=ci --config=clippy //...
-
-      # The one deliberate Cargo step left in CI, and only because Bazel cannot
-      # replace it yet. Master pushes and ordinary PRs run no Windows lane
-      # (`windows-test` is dispatch-only), so `cfg(windows)` code otherwise
-      # first compiles in the release build. The workspace registers no
-      # Windows target toolchain for Linux, so this cross-target type check
-      # stays on Cargo: `cargo check` needs no linker, and mingw supplies the
-      # C compiler the native build scripts run. It type-checks only and
-      # produces no executable, so no eval, test, or release consumes its
-      # output and it cannot diverge a shipped runtime. Remove it when Bazel
-      # grows a Linux-hosted Windows target. macOS has no equivalent: its
-      # build scripts need the Apple SDK headers.
-      - name: Install pinned toolchain and Windows check target
-        run: |
-          rustup toolchain install
-          rustup target add x86_64-pc-windows-gnu
-
-      - uses: ./.github/actions/setup-pnpm
-
-      - name: Install the Windows C cross-compiler
-        run: |
-          # This compiler comes from Ubuntu, independently of third-party feeds
-          # preconfigured on the hosted image.
-          ubuntu_sources=(
-            -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources
-            -o Dir::Etc::sourceparts=-
-          )
-          sudo apt-get "${ubuntu_sources[@]}" update
-          sudo apt-get "${ubuntu_sources[@]}" install -y --no-install-recommends gcc-mingw-w64-x86-64
-
-      - name: Check the Windows target
-        run: >-
-          cargo check --workspace --all-targets --locked
-          --target x86_64-pc-windows-gnu
-          --features tracedecay/test-transport,tracedecay/test-helpers,tracedecay-cli/test-transport
 
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''

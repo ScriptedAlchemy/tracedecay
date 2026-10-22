@@ -65,6 +65,7 @@ impl InsertProject {
     }
 
     async fn close(self) {
+        drop(self.server);
         close_production_source_edit_fixture(self.fixture).await;
     }
 }

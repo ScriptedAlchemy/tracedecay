@@ -120,6 +120,8 @@ async fn production_daemon_reports_unconfigured_remote_plane() {
 
     let json_result = daemon_status(&mounted, json!({"format": "json"})).await;
     assert_eq!(status_text(&json_result), UNCONFIGURED_JSON);
+
+    mounted.harness.shutdown().await;
 }
 
 #[tokio::test]

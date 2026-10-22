@@ -62,14 +62,16 @@ gh attestation verify tracedecay-beta-<tag>-<platform>.tar.gz --repo ScriptedAlc
   --signer-workflow ScriptedAlchemy/tracedecay/.github/workflows/release-beta.yml
 ```
 
-Stable archives (`tracedecay-<tag>-<platform>`) are signed by
-`.github/workflows/release.yml`.
+Stable archives (`tracedecay-<tag>-<platform>`) have build-provenance
+attestations from `.github/workflows/release.yml`.
 
 **Windows:**
 
 Download the x86_64 Windows archive from the
 [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest),
 extract `tracedecay.exe`, and place it on `PATH`.
+The Windows executable is unsigned; archive checksums and build-provenance
+attestations do not provide an executable code signature.
 
 **Prebuilt binaries:**
 
