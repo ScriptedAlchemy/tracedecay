@@ -177,6 +177,15 @@ pub(super) fn prepare_page(
             "sealed lexical symbol-display cardinality does not match its chunks".to_owned(),
         ));
     }
+    let documents_span = tracing::trace_span!(
+        "query.artifact.page.documents",
+        page_ordinal = page.page_ordinal(),
+        chunk_count = page.chunk_count(),
+        document_count = tracing::field::Empty,
+        logical_ngram_postings = tracing::field::Empty,
+        dictionary_entries = tracing::field::Empty,
+    )
+    .entered();
     for (offset, (admitted, display)) in
         page.chunks().iter().zip(page.symbol_displays()).enumerate()
     {
@@ -219,11 +228,22 @@ pub(super) fn prepare_page(
         documents.push(prepared);
         texts.push(text);
     }
+    documents_span.record("document_count", documents.len());
+    documents_span.record("logical_ngram_postings", logical_ngram_postings);
+    documents_span.record("dictionary_entries", row_dictionary.len());
+    drop(documents_span);
     let mut clone_bodies = Vec::with_capacity(page.clone_bodies().len());
+    let clone_span = tracing::trace_span!(
+        "query.artifact.page.clone_encoding",
+        page_ordinal = page.page_ordinal(),
+        clone_body_count = page.clone_bodies().len(),
+    )
+    .entered();
     for body in page.clone_bodies() {
         checkpoint(control)?;
         clone_bodies.push(prepare_clone_body(metadata, body)?);
     }
+    drop(clone_span);
     let next_cursor = page
         .next_cursor()
         .persisted_bytes()
@@ -231,6 +251,14 @@ pub(super) fn prepare_page(
     // Documents were appended in ascending source order, so a stable sort by
     // key leaves each key's documents ascending; `document_ngrams`
     // deduplicates within a document, and the encoder refuses any repeat.
+    let ngram_span = tracing::trace_span!(
+        "query.artifact.page.ngram_aggregation",
+        page_ordinal = page.page_ordinal(),
+        document_count = documents.len(),
+        logical_ngram_postings,
+        shard_count = tracing::field::Empty,
+    )
+    .entered();
     ngram_postings.sort_by_key(|(key, _)| *key);
     let mut ngram_shards = Vec::new();
     for run in ngram_postings.chunk_by(|left, right| left.0 == right.0) {
@@ -250,6 +278,14 @@ pub(super) fn prepare_page(
         });
     }
     drop(ngram_postings);
+    ngram_span.record("shard_count", ngram_shards.len());
+    drop(ngram_span);
+    let ngram_receipt_span = tracing::trace_span!(
+        "query.artifact.page.ngram_receipt",
+        page_ordinal = page.page_ordinal(),
+        shard_count = ngram_shards.len(),
+    )
+    .entered();
     let ngram_digest = ngram_page_digest(ngram_shards.iter().map(|shard| {
         (
             shard.kind,
@@ -258,9 +294,25 @@ pub(super) fn prepare_page(
             shard.cardinality,
         )
     }))?;
+    drop(ngram_receipt_span);
+    let base_receipt_span = tracing::trace_span!(
+        "query.artifact.page.base_receipts",
+        page_ordinal = page.page_ordinal(),
+        document_count = documents.len(),
+        shard_count = ngram_shards.len(),
+    )
+    .entered();
     let base_sections_receipt =
         prepare_base_sections_receipt(first_document, &documents, &texts, &ngram_shards, control)?;
+    drop(base_receipt_span);
     checkpoint(control)?;
+    let row_blocks_span = tracing::trace_span!(
+        "query.artifact.page.row_blocks",
+        page_ordinal = page.page_ordinal(),
+        document_count = documents.len(),
+        block_count = tracing::field::Empty,
+    )
+    .entered();
     let row_blocks = encode_row_blocks(
         &documents
             .iter()
@@ -276,6 +328,21 @@ pub(super) fn prepare_page(
             })
             .collect::<Vec<_>>(),
     )?;
+    row_blocks_span.record("block_count", row_blocks.len());
+    drop(row_blocks_span);
+    let charging_span = tracing::trace_span!(
+        "query.artifact.page.charging",
+        page_ordinal = page.page_ordinal(),
+        chunk_count = page.chunk_count(),
+        document_count = documents.len(),
+        clone_body_count = clone_bodies.len(),
+        shard_count = ngram_shards.len(),
+        block_count = row_blocks.len(),
+        retained_bytes = tracing::field::Empty,
+        estimated_write_rows = tracing::field::Empty,
+        estimated_write_bytes = tracing::field::Empty,
+    )
+    .entered();
     drop(texts);
     let aggregation_scratch_bytes = logical_ngram_postings
         .checked_mul(NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1)
@@ -322,6 +389,9 @@ pub(super) fn prepare_page(
         prepared.estimated_write_rows,
         prepared.estimated_write_bytes,
     ) = estimated_sqlite_writes(&prepared)?;
+    charging_span.record("retained_bytes", prepared.prepared_retained_bytes);
+    charging_span.record("estimated_write_rows", prepared.estimated_write_rows);
+    charging_span.record("estimated_write_bytes", prepared.estimated_write_bytes);
     Ok(prepared)
 }
 

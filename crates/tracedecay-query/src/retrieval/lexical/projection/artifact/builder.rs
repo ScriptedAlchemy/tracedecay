@@ -661,6 +661,16 @@ impl CodeLexicalArtifactBuilderV1 {
             self.fixed_ledger_charge_bytes,
             self.memory_budget_bytes,
         )?;
+        tracing::trace!(
+            offered_pages = pages.len(),
+            memory_admitted_pages = memory_prefix,
+            replayed_pages = replayed_prefix,
+            prepared_pages = prepared.len(),
+            accepted_fresh_pages = fresh_prefix,
+            discarded_prepared_pages = prepared.len() - fresh_prefix,
+            limiting_authority = ?exact_limit.map(|exceeded| exceeded.limit),
+            "lexical artifact prepared prefix selected"
+        );
         if fresh_prefix == 0 && !prepared.is_empty() {
             let exceeded = exact_limit.ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
@@ -746,8 +756,13 @@ impl CodeLexicalArtifactBuilderV1 {
             .collect::<Result<Vec<_>, _>>()?;
         let metadata = &self.metadata;
         let prepared = {
-                           let _span = tracing::trace_span!("query.artifact.batch.parallel_prepare").entered();
-                           {
+            let _span = tracing::trace_span!(
+                "query.artifact.batch.parallel_prepare",
+                offered_pages = pages.len(),
+                replayed_pages = fresh_start,
+                fresh_pages = fresh_pages.len(),
+            )
+            .entered();
             tracedecay_code_index::parallelism::install(|| {
                 fresh_pages
                     .par_iter()
@@ -755,7 +770,19 @@ impl CodeLexicalArtifactBuilderV1 {
                     .zip(scratch.into_par_iter())
                     .enumerate()
                     .map(|(index, ((page, previous_cursor), scratch_bytes))| {
+                        let _permit_span = tracing::trace_span!(
+                            "query.artifact.page.cpu_permit_and_prepare",
+                            page_ordinal = page.page_ordinal(),
+                            chunk_count = page.chunk_count(),
+                        )
+                        .entered();
                         tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
+                            let _admitted_span = tracing::trace_span!(
+                                "query.artifact.page.admitted_prepare",
+                                page_ordinal = page.page_ordinal(),
+                                chunk_count = page.chunk_count(),
+                            )
+                            .entered();
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 prepare_page_values(
                                     metadata,
@@ -778,8 +805,7 @@ impl CodeLexicalArtifactBuilderV1 {
                     })
                     .collect::<Vec<_>>()
             })
-            }
-                       }
+        }
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;

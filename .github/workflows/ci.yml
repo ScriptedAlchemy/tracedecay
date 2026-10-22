@@ -88,3 +88,5 @@ jobs:
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.log
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.xml
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.outputs/**
+            bazel-testlogs/crates/tracedecay/mcp_suite/test.log
+            bazel-testlogs/crates/tracedecay/mcp_suite/test.xml

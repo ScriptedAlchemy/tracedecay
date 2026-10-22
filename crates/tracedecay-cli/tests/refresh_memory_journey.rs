@@ -133,6 +133,27 @@ impl TemporaryWorkerResources {
         for name in TEMPORARY_CGROUP_RESOURCES {
             let _ = record_raw_resource(&mut self.output, &root.join(name));
         }
+        let threads = PathBuf::from(format!("/proc/{}/task", self.daemon_pid));
+        match fs::read_dir(&threads) {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(entry) => {
+                            for name in ["comm", "stat", "schedstat"] {
+                                let _ =
+                                    record_raw_resource(&mut self.output, &entry.path().join(name));
+                            }
+                        }
+                        Err(error) => {
+                            writeln!(self.output, "thread_entry_unavailable error={error:?}")
+                                .expect("resource artifact")
+                        }
+                    }
+                }
+            }
+            Err(error) => writeln!(self.output, "threads_unavailable error={error:?}")
+                .expect("resource artifact"),
+        }
         for pid in [std::process::id(), self.daemon_pid] {
             for name in ["stat", "schedstat", "io", "status"] {
                 let _ = record_raw_resource(
@@ -382,7 +403,10 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
                     "tracedecay_code_index_runtime::code_index_scheduler::reconcile=trace,",
                     "tracedecay_code_index_runtime::code_index_scheduler::serving=trace,",
                     "tracedecay_query::retrieval::lexical::projection::artifact::builder=trace,",
+                    "tracedecay_query::retrieval::lexical::projection::artifact::prepared=trace,",
                     "tracedecay_code_index::production::lexical_page_source=trace,",
+                    "tracedecay_code_index::production::partitioned_codec=trace,",
+                    "tracedecay_code_index::production::sealed_codec=trace,",
                     "tracedecay_query::retrieval::lexical::projection::artifact::reader=trace",
                 ),
             );
