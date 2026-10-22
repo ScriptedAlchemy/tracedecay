@@ -1,15 +1,19 @@
-//! A record a source rewrite retired projects again once a later layout of
-//! the same source offers it again, and only then.
+//! A record a source rewrite retired projects again only after admission
+//! accepts an offer from a later layout of the same source.
 
 use tempfile::TempDir;
 
 use tracedecay_domain::{
-    ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1, SessionId,
+    DurableObservationV1, ObservationIdentityMaterialV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    SessionId, UtcMicros,
 };
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
-    ObservationStore, ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason,
+    ObservationStore, ObservationStoreError, ObservationWrite, ProjectionPersistOutcome,
+    ProjectionRebuildOutcome, ProjectionSkipReason, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor,
 };
 
 use crate::observation_batch_tests::{sequential_writes, sequential_writes_with_text};
@@ -49,6 +53,20 @@ impl<'a> Source<'a> {
             .unwrap();
     }
 
+    async fn accept(&self, generation: u64, write: &AnchoredObservationWrite) {
+        let store = self.registered.observation_store();
+        let expected = store
+            .get_source_cursor(&self.identity, &self.scope)
+            .await
+            .unwrap();
+        let candidate = reoffer(write, generation, expected);
+        assert!(matches!(
+            store.persist_observation(candidate).await.unwrap(),
+            ObservationPersistOutcome::CoveredDuplicate(_)
+                | ObservationPersistOutcome::ExactDuplicate(_)
+        ));
+    }
+
     /// Rewrites the source into a layout that retains the previous layout's
     /// records before `retained_through` and offers `offered` after it.
     /// Returns how many records the completed rewrite retired.
@@ -79,6 +97,61 @@ impl<'a> Source<'a> {
             .await
             .unwrap()
     }
+}
+
+fn reoffer(
+    write: &AnchoredObservationWrite,
+    generation: u64,
+    expected: Option<ObservationSourceCursorV1>,
+) -> AnchoredObservationWrite {
+    let original = write.observation();
+    let identity = original.identity();
+    let generation = ObservationSourceGenerationV1::new(generation).unwrap();
+    let observation = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            original.source().clone(),
+            original.scope().clone(),
+            generation,
+            identity.position(),
+            identity.ordering_domain(),
+            identity.native_record_id().unwrap().clone(),
+        )
+        .unwrap(),
+        original.receipt().clone(),
+        original.retention_class().clone(),
+        original.payload().clone(),
+    )
+    .unwrap();
+    let next = ObservationSourceCursorV1::for_ordering(
+        original.source().clone(),
+        original.scope().clone(),
+        generation,
+        identity.ordering_domain(),
+        identity.position().end(),
+    )
+    .unwrap();
+    let expected = if expected
+        .as_ref()
+        .is_some_and(|cursor| cursor.reached(&next))
+    {
+        write.expected_cursor().cloned()
+    } else {
+        expected
+    };
+    let anchor = build_observation_retrieval_anchor(
+        &observation,
+        write.projection_generation().clone(),
+        UtcMicros(1),
+        build_observation_resolution_authorization_v1(&observation, "observation-batch-test")
+            .unwrap(),
+    )
+    .unwrap();
+    AnchoredObservationWrite::new(
+        ObservationWrite::new(observation, expected, next).unwrap(),
+        anchor,
+        write.projection_generation().clone(),
+    )
+    .unwrap()
 }
 
 async fn persist(store: &GlobalDbObservationStore, writes: &[AnchoredObservationWrite]) {
@@ -301,6 +374,29 @@ async fn a_reoffered_retired_record_projects_again_across_rebuild_and_restart() 
         let source = Source::of(registered, &writes);
         assert!(projected_messages(registered).await.is_empty());
         assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
+        assert!(
+            projected_messages(registered).await.is_empty(),
+            "presence is not acceptance"
+        );
+        let store = registered.observation_store();
+        store.persist_observation(writes[0].clone()).await.unwrap();
+        drain(&store).await;
+        assert!(
+            projected_messages(registered).await.is_empty(),
+            "old coordinates do not accept the current offer"
+        );
+        source.accept(3, &writes[0]).await;
+        assert!(
+            projected_messages(registered).await.is_empty(),
+            "projection resumes after acceptance"
+        );
+    }
+
+    let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
+    {
+        let registered = runtime.profile_database();
+        let source = Source::of(registered, &writes);
+        drain(&registered.observation_store()).await;
         assert_eq!(
             projected_messages(registered).await,
             ["message.batch.0"],
@@ -341,10 +437,14 @@ async fn a_newer_layout_retires_a_revived_record_again() {
 
     assert_eq!(source.rewrite(1, 2, 0, &[]).await, 1);
     assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
+    source.accept(3, &writes[0]).await;
+    drain(&store).await;
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
     assert_eq!(source.rewrite(3, 4, 0, &[]).await, 1);
     assert!(projected_messages(registered).await.is_empty());
     assert_eq!(source.rewrite(4, 5, 0, &[&writes[0]]).await, 0);
+    source.accept(5, &writes[0]).await;
+    drain(&store).await;
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
@@ -392,6 +492,8 @@ async fn a_reoffered_record_settles_if_another_source_claimed_its_retired_output
             0,
             "the re-offer settles as a live collision instead of rolling back"
         );
+        original_source.accept(3, &original[0]).await;
+        drain(&store).await;
         assert_eq!(
             projection_disposition(registered, &original[0]).await,
             ProjectionSkipReason::OutputCollision.as_str()
@@ -455,7 +557,7 @@ async fn a_foreign_source_cannot_revive_a_retired_record() {
     let foreign =
         ObservationSourceIdentityV1::new(SessionId::new("session.source-foreign").unwrap())
             .unwrap();
-    let error = registered
+    registered
         .record_observation_source_presence(
             &foreign,
             &source.scope,
@@ -466,21 +568,18 @@ async fn a_foreign_source_cannot_revive_a_retired_record() {
             }],
         )
         .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            tracedecay_store::ProjectionStoreError::ProvenanceCollision
-        ),
-        "{error:?}"
-    );
+        .unwrap();
+    store.persist_observation(writes[0].clone()).await.unwrap();
+    drain(&store).await;
     assert!(projected_messages(registered).await.is_empty());
     assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
+    source.accept(3, &writes[0]).await;
+    drain(&store).await;
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
 #[asupersync::test]
-async fn a_failed_presence_batch_rolls_back_its_revival() {
+async fn a_failed_presence_batch_does_not_authorize_revival() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -524,6 +623,8 @@ async fn a_failed_presence_batch_rolls_back_its_revival() {
     rebuild_to_completion(registered).await;
     assert!(projected_messages(registered).await.is_empty());
     assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
+    source.accept(3, &writes[0]).await;
+    drain(&store).await;
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }
 
@@ -546,6 +647,7 @@ async fn a_record_retired_before_its_drain_projects_once_offered_again() {
 
     assert_eq!(source.rewrite(1, 2, 0, &[]).await, 2);
     assert_eq!(source.rewrite(2, 3, 0, &[&writes[0]]).await, 0);
+    source.accept(3, &writes[0]).await;
     let outcomes = drain(&store).await;
     assert!(
         matches!(
@@ -596,9 +698,299 @@ async fn a_rebuild_that_staged_a_retirement_activates_the_revival() {
         source.rewrite(2, 3, retained_through, &[&writes[0]]).await,
         0
     );
+    source.accept(3, &writes[0]).await;
     let rebuilt = rebuild_to_completion(registered).await;
     assert_eq!(rebuilt.skipped_observations(), 0);
     let messages = projected_messages(registered).await;
     assert_eq!(messages.len(), RECORDS);
     assert!(messages.iter().any(|message| message == "message.batch.0"));
+}
+
+#[asupersync::test]
+async fn a_rebuild_does_not_restore_a_revived_record_retired_again() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
+        .await
+        .unwrap();
+    let registered = runtime.profile_database();
+    let store = registered.observation_store();
+    let writes = sequential_writes(
+        &SessionId::new("session.source-retired-again").unwrap(),
+        300,
+    );
+    let all: Vec<_> = writes.iter().collect();
+    let source = Source::of(registered, &writes);
+    source.offer(1, &all).await;
+    persist(&store, &writes).await;
+    drain(&store).await;
+    assert_eq!(source.rewrite(1, 2, 0, &all[1..]).await, 1);
+    let staged = rebuild(registered).await;
+    assert!(!staged.is_complete());
+    assert_eq!(staged.skipped_observations(), 1);
+    source.rewrite(2, 3, 300, &[&writes[0]]).await;
+    source.accept(3, &writes[0]).await;
+    let first = store
+        .project_observation(writes[0].observation().observation_id())
+        .await
+        .unwrap();
+    assert!(matches!(first, ProjectionPersistOutcome::ExactDuplicate(_)));
+    assert_eq!(source.rewrite(3, 4, 0, &all[1..]).await, 1);
+    assert!(
+        !projected_messages(registered)
+            .await
+            .contains(&"message.batch.0".to_owned())
+    );
+
+    let rebuilt = rebuild_to_completion(registered).await;
+    assert!(
+        !projected_messages(registered)
+            .await
+            .contains(&"message.batch.0".to_owned()),
+        "activation must preserve a retirement after staging its revival"
+    );
+    assert_eq!(rebuilt.skipped_observations(), 1);
+}
+
+#[asupersync::test]
+async fn retirement_cancels_pending_revival_and_retained_prefix_preserves_acceptance() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
+        .await
+        .unwrap();
+    let registered = runtime.profile_database();
+    let store = registered.observation_store();
+    let writes = sequential_writes(&SessionId::new("session.source-pending").unwrap(), 1);
+    let source = Source::of(registered, &writes);
+    source.offer(1, &[&writes[0]]).await;
+    persist(&store, &writes).await;
+    drain(&store).await;
+    assert_eq!(source.rewrite(1, 2, 0, &[]).await, 1);
+    source.rewrite(2, 3, 0, &[&writes[0]]).await;
+    source.accept(3, &writes[0]).await;
+    source.rewrite(3, 4, 0, &[&writes[0]]).await;
+    drain(&store).await;
+    assert!(
+        projected_messages(registered).await.is_empty(),
+        "acceptance of an older layout does not accept the current offer"
+    );
+    source.accept(4, &writes[0]).await;
+    assert_eq!(source.rewrite(4, 5, 0, &[]).await, 0);
+    drain(&store).await;
+    assert!(projected_messages(registered).await.is_empty());
+    source.rewrite(5, 6, 0, &[&writes[0]]).await;
+    drain(&store).await;
+    assert!(projected_messages(registered).await.is_empty());
+
+    source.accept(6, &writes[0]).await;
+    source.rewrite(6, 7, 1, &[]).await;
+    drain(&store).await;
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
+}
+
+#[asupersync::test]
+async fn a_failed_accepted_batch_rolls_back_revival_and_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
+        .await
+        .unwrap();
+    let registered = runtime.profile_database();
+    let store = registered.observation_store();
+    let writes = sequential_writes(
+        &SessionId::new("session.source-accept-rollback").unwrap(),
+        2,
+    );
+    let source = Source::of(registered, &writes);
+    source.offer(1, &[&writes[0], &writes[1]]).await;
+    persist(&store, &writes).await;
+    drain(&store).await;
+    assert_eq!(source.rewrite(1, 2, 0, &[]).await, 2);
+    source.rewrite(2, 3, 0, &[&writes[0], &writes[1]]).await;
+    let previous = store
+        .get_source_cursor(&source.identity, &source.scope)
+        .await
+        .unwrap();
+    let first = reoffer(&writes[0], 3, previous.clone());
+    let second = reoffer(&writes[1], 3, Some(first.next_cursor().clone()));
+    registered
+        .writer_connection()
+        .unwrap()
+        .execute(
+            "CREATE TRIGGER fail_second_accepted_offer
+         BEFORE INSERT ON projection_queue
+         WHEN NEW.observation_id = (SELECT observation_id FROM observations WHERE sequence = 2)
+         BEGIN SELECT RAISE(ABORT, 'injected accepted-offer write failure'); END",
+            (),
+        )
+        .await
+        .unwrap();
+    let error = store
+        .persist_observations(vec![first.clone(), second.clone()])
+        .await
+        .unwrap_err();
+    let ObservationStoreError::Storage {
+        operation,
+        source: cause,
+    } = error
+    else {
+        panic!("expected the injected storage failure, got {error:?}");
+    };
+    assert_eq!(operation, "submit observation batch");
+    assert!(
+        cause
+            .to_string()
+            .contains("injected accepted-offer write failure"),
+        "{cause}"
+    );
+    registered
+        .writer_connection()
+        .unwrap()
+        .execute("DROP TRIGGER fail_second_accepted_offer", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_source_cursor(&source.identity, &source.scope)
+            .await
+            .unwrap(),
+        previous
+    );
+    drain(&store).await;
+    assert!(
+        projected_messages(registered).await.is_empty(),
+        "the first offer rolled back with the second"
+    );
+
+    let outcomes = store
+        .persist_observations(vec![first, second])
+        .await
+        .unwrap();
+    assert!(outcomes.iter().all(|item| matches!(
+        item.outcome(),
+        ObservationPersistOutcome::CoveredDuplicate(_)
+    )));
+    registered
+        .writer_connection()
+        .unwrap()
+        .execute(
+            "CREATE TRIGGER fail_revival_reset
+             BEFORE INSERT ON session_temporal_resets
+             BEGIN SELECT RAISE(ABORT, 'injected revival projection failure'); END",
+            (),
+        )
+        .await
+        .unwrap();
+    let error = store.project_queued_observations(128).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected revival projection failure"),
+        "{error:?}"
+    );
+    assert!(
+        projected_messages(registered).await.is_empty(),
+        "the failed projector must roll back restored outputs"
+    );
+    assert_eq!(
+        projection_disposition(registered, &writes[0]).await,
+        ProjectionSkipReason::SourceRecordRetired.as_str()
+    );
+    registered
+        .writer_connection()
+        .unwrap()
+        .execute("DROP TRIGGER fail_revival_reset", ())
+        .await
+        .unwrap();
+    drain(&store).await;
+    assert_eq!(
+        projected_messages(registered).await,
+        ["message.batch.0", "message.batch.1"]
+    );
+}
+
+#[asupersync::test]
+async fn an_exact_accepted_reoffer_revives_without_a_transport_receipt() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
+        .await
+        .unwrap();
+    let writes = sequential_writes(&SessionId::new("session.source-exact-reoffer").unwrap(), 1);
+    {
+        let registered = runtime.profile_database();
+        let store = registered.observation_store();
+        let source = Source::of(registered, &writes);
+        source.offer(1, &[&writes[0]]).await;
+        persist(&store, &writes).await;
+        drain(&store).await;
+        assert_eq!(source.rewrite(1, 2, 0, &[]).await, 1);
+        source.rewrite(2, 1, 0, &[&writes[0]]).await;
+        let outcome = store.persist_observation(writes[0].clone()).await.unwrap();
+        assert!(matches!(
+            outcome,
+            ObservationPersistOutcome::ExactDuplicate(_)
+        ));
+        let snapshot = registered.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query("SELECT COUNT(*) FROM td_runtime_writer_idempotency_v2", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+    }
+    let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
+    let registered = runtime.profile_database();
+    drain(&registered.observation_store()).await;
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
+}
+
+#[asupersync::test]
+async fn a_released_queue_upgrades_without_accepting_its_old_work() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
+        .await
+        .unwrap();
+    let writes = sequential_writes(&SessionId::new("session.source-queue-upgrade").unwrap(), 1);
+    {
+        let registered = runtime.profile_database();
+        let store = registered.observation_store();
+        let source = Source::of(registered, &writes);
+        source.offer(1, &[&writes[0]]).await;
+        persist(&store, &writes).await;
+        assert_eq!(source.rewrite(1, 2, 0, &[]).await, 1);
+        let writer = registered.writer_connection().unwrap();
+        writer
+            .execute(
+                "ALTER TABLE projection_queue DROP COLUMN revival_start_offset",
+                (),
+            )
+            .await
+            .unwrap();
+        writer
+            .execute(
+                "ALTER TABLE projection_queue DROP COLUMN revival_generation",
+                (),
+            )
+            .await
+            .unwrap();
+    }
+    let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
+    let registered = runtime.profile_database();
+    let store = registered.observation_store();
+    assert!(
+        registered
+            .writer_connection()
+            .unwrap()
+            .execute("UPDATE projection_queue SET revival_generation = '3'", (),)
+            .await
+            .is_err(),
+        "the upgraded queue rejects an incomplete fence"
+    );
+    drain(&store).await;
+    assert!(projected_messages(registered).await.is_empty());
+    let source = Source::of(registered, &writes);
+    source.rewrite(2, 3, 0, &[&writes[0]]).await;
+    source.accept(3, &writes[0]).await;
+    drain(&store).await;
+    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }

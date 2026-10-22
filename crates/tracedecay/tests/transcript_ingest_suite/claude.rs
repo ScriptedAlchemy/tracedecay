@@ -1408,14 +1408,13 @@ async fn claude_atomic_replacement_retires_superseded_messages_until_restored() 
     std::fs::rename(&replacement, &path).unwrap();
     let refused = ingest().await;
     assert_eq!(refused.records_rejected, 1);
+    let retired_hits = db.search_session_messages("claude", None, "beta", 10).await;
     assert!(
-        db.search_session_messages("claude", None, "claudeprobe beta", 10)
-            .await
-            .is_empty(),
-        "a refused identity collision must not revive the retired record's old content"
+        retired_hits.is_empty(),
+        "a refused identity collision must not revive the retired record's old content: {retired_hits:?}"
     );
     assert!(
-        db.search_session_messages("claude", None, "claudeprobe refused", 10)
+        db.search_session_messages("claude", None, "refused", 10)
             .await
             .is_empty()
     );

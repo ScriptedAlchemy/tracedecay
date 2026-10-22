@@ -459,82 +459,7 @@ impl GlobalDbObservationStore {
             ));
         }
         if canonical_payload_revision {
-            let Some(existing) = existing.as_ref() else {
-                return Err(runtime_storage_error(
-                    "persist canonical payload revision",
-                    "classified revision replay has no retained observation",
-                ));
-            };
-            let identity = observation.identity();
-            let actual_cursor = actual_cursor();
-            let revision_covered = actual_cursor.as_ref().is_some_and(|cursor| {
-                cursor.generation() == identity.generation()
-                    && cursor.ordering_domain() == identity.ordering_domain()
-                    && cursor.position() >= identity.position().end()
-            });
-            if revision_covered {
-                return Ok(PreparedObservationPersist::ready(
-                    ObservationPersistOutcome::CoveredDuplicate(
-                        ObservationCommitReceipt::new(
-                            existing.sequence(),
-                            existing.observation().clone(),
-                            write.next_cursor().clone(),
-                            existing.retrieval_anchor().clone(),
-                            existing.projection_generation().clone(),
-                        )?
-                        .with_repository_provenance_attachment(
-                            existing.repository_provenance_attachment().clone(),
-                        )?,
-                    ),
-                    existing,
-                ));
-            }
-            if known_cursor.is_some() {
-                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
-                    Box::new(write),
-                ));
-            }
-            let mut advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
-                identity.source().clone(),
-                identity.scope().clone(),
-                identity.generation(),
-                identity.ordering_domain(),
-                write.expected_cursor().cloned(),
-                identity.position(),
-                ObservationCoverageReason::CanonicalPayloadRevision,
-                observation.receipt().clone(),
-            )?;
-            match (
-                write.next_cursor().file_identity(),
-                write.next_cursor().resume_fingerprint(),
-            ) {
-                (Some(file_identity), Some(resume_fingerprint)) => {
-                    advance = advance.with_resume_checkpoint(file_identity, resume_fingerprint);
-                }
-                (None, None) => {}
-                _ => {
-                    return Err(runtime_storage_error(
-                        "persist canonical payload revision",
-                        "cursor resume checkpoint is incomplete",
-                    ));
-                }
-            }
-            self.advance_source_cursor(advance).await?;
-            return Ok(PreparedObservationPersist::ready(
-                ObservationPersistOutcome::CoveredDuplicate(
-                    ObservationCommitReceipt::new(
-                        existing.sequence(),
-                        existing.observation().clone(),
-                        write.next_cursor().clone(),
-                        existing.retrieval_anchor().clone(),
-                        existing.projection_generation().clone(),
-                    )?
-                    .with_repository_provenance_attachment(
-                        existing.repository_provenance_attachment().clone(),
-                    )?,
-                ),
-                existing,
-            ));
+            return Ok(PreparedObservationPersist::Submit(Box::new(write)));
         }
         let same_identity = pending
             .as_ref()
@@ -607,23 +532,7 @@ impl GlobalDbObservationStore {
                     retained.observation().receipt() == observation.receipt()
                 }));
         if existed_exact {
-            if pending.is_some() {
-                return Ok(PreparedObservationPersist::DeferredExactDuplicate(
-                    Box::new(write),
-                ));
-            }
-            let Some(existing) = existing.as_ref() else {
-                return Err(ObservationStoreError::Storage {
-                    operation: "persist_observation",
-                    source: Box::new(std::io::Error::other(
-                        "exact duplicate classification requires a stored observation",
-                    )),
-                });
-            };
-            return Ok(PreparedObservationPersist::ready(
-                ObservationPersistOutcome::ExactDuplicate(existing.commit_receipt().clone()),
-                existing,
-            ));
+            return Ok(PreparedObservationPersist::ExactDuplicate(Box::new(write)));
         }
         if pending.is_none() && existing.is_none() {
             batch_state.register_pending(&write)?;
@@ -667,7 +576,7 @@ impl GlobalDbObservationStore {
         let mut outcomes: Vec<Option<ObservationBatchPersistOutcome>> =
             Vec::with_capacity(writes.len());
         let mut submits = Vec::new();
-        let mut deferred_exact_duplicates = Vec::new();
+        let mut exact_duplicates = HashSet::new();
         let mut awaiting = Vec::new();
         let mut writes = writes.into_iter();
         while let Some(write) = writes.next() {
@@ -681,13 +590,13 @@ impl GlobalDbObservationStore {
                 .prepare_observation_persist(write, &preflight, &mut batch_state, known_cursor)
                 .await?
             {
-                PreparedObservationPersist::Ready(outcome) => outcomes.push(Some(*outcome)),
                 PreparedObservationPersist::Submit(write) => {
                     submits.push((outcomes.len(), *write));
                     outcomes.push(None);
                 }
-                PreparedObservationPersist::DeferredExactDuplicate(write) => {
-                    deferred_exact_duplicates.push((outcomes.len(), *write));
+                PreparedObservationPersist::ExactDuplicate(write) => {
+                    exact_duplicates.insert(outcomes.len());
+                    submits.push((outcomes.len(), *write));
                     outcomes.push(None);
                 }
                 PreparedObservationPersist::AwaitsDurablePredecessor(write) => {
@@ -705,21 +614,19 @@ impl GlobalDbObservationStore {
             published_cursors.insert(key, next_cursor);
         }
         if !submits.is_empty() {
-            let submitted = submit_observation_writes(
-                &self.database,
-                &self.runtime,
-                submits,
-                deferred_exact_duplicates,
-            )
-            .await?;
+            let submitted =
+                submit_observation_writes(&self.database, &self.runtime, submits).await?;
             for (slot, outcome) in submitted {
-                outcomes[slot] = Some(outcome);
+                outcomes[slot] = Some(if exact_duplicates.contains(&slot) {
+                    let (outcome, stored) = outcome.into_parts();
+                    ObservationBatchPersistOutcome::new(
+                        ObservationPersistOutcome::ExactDuplicate(outcome.receipt().clone()),
+                        stored,
+                    )
+                } else {
+                    outcome
+                });
             }
-        } else if !deferred_exact_duplicates.is_empty() {
-            return Err(runtime_storage_error(
-                "persist_observations",
-                "deferred duplicate has no preceding batch submission",
-            ));
         }
         let outcomes = outcomes
             .into_iter()
@@ -1522,26 +1429,11 @@ fn decode_json<T: serde::de::DeserializeOwned>(
 }
 
 enum PreparedObservationPersist {
-    // Both payloads are large and only one is ever live, so both are boxed:
-    // leaving either inline makes every value of this enum carry that variant's
-    // footprint.
-    Ready(Box<ObservationBatchPersistOutcome>),
     Submit(Box<AnchoredObservationWrite>),
-    DeferredExactDuplicate(Box<AnchoredObservationWrite>),
-    /// The write collides with, or must compare-and-set a source cursor
-    /// published by, an earlier member of this batch that is not durable yet.
-    /// The batch commits its prefix first and re-prepares this write against
-    /// the durable result, so it settles exactly as it would alone.
+    ExactDuplicate(Box<AnchoredObservationWrite>),
+    /// The write collides with an earlier member of this batch that is not
+    /// durable yet. Commit the prefix before classifying the collision.
     AwaitsDurablePredecessor(Box<AnchoredObservationWrite>),
-}
-
-impl PreparedObservationPersist {
-    fn ready(outcome: ObservationPersistOutcome, stored: &StoredObservation) -> Self {
-        Self::Ready(Box::new(ObservationBatchPersistOutcome::new(
-            outcome,
-            Some(stored.clone()),
-        )))
-    }
 }
 
 impl ObservationStore for GlobalDbObservationStore {
@@ -2041,19 +1933,10 @@ async fn submit_observation_writes(
     database: &Database,
     runtime: &DatabaseRuntimeClientV1,
     writes: Vec<(usize, AnchoredObservationWrite)>,
-    deferred_exact_duplicates: Vec<(usize, AnchoredObservationWrite)>,
 ) -> ObservationStoreResult<Vec<(usize, ObservationBatchPersistOutcome)>> {
-    let batches = partition_observation_writes(writes)?;
-    let mut deferred_exact_duplicates = Some(deferred_exact_duplicates);
     let mut outcomes = Vec::new();
-    let batch_count = batches.len();
-    for (index, batch) in batches.into_iter().enumerate() {
-        let deferred = if index + 1 == batch_count {
-            deferred_exact_duplicates.take().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        outcomes.extend(submit_observation_write_batch(database, runtime, batch, deferred).await?);
+    for batch in partition_observation_writes(writes)? {
+        outcomes.extend(submit_observation_write_batch(database, runtime, batch).await?);
     }
     Ok(outcomes)
 }
@@ -2115,7 +1998,6 @@ async fn submit_observation_write_batch(
     database: &Database,
     runtime: &DatabaseRuntimeClientV1,
     writes: Vec<(usize, AnchoredObservationWrite)>,
-    deferred_exact_duplicates: Vec<(usize, AnchoredObservationWrite)>,
 ) -> ObservationStoreResult<Vec<(usize, ObservationBatchPersistOutcome)>> {
     let admitted_at = now_micros();
     let command = serde_json::json!({
@@ -2191,7 +2073,6 @@ async fn submit_observation_write_batch(
     const READBACK_OPERATION: &str = "read committed observation batch";
     let observation_ids = writes
         .iter()
-        .chain(deferred_exact_duplicates.iter())
         .map(|(_, write)| write.observation().observation_id().clone())
         .collect::<Vec<_>>();
     let snapshot = begin_observation_read_snapshot(database, READBACK_OPERATION).await?;
@@ -2202,7 +2083,7 @@ async fn submit_observation_write_batch(
         .commit()
         .await
         .map_err(|error| runtime_storage_error(READBACK_OPERATION, error))?;
-    let mut outcomes = writes
+    let outcomes = writes
         .into_iter()
         .map(|(slot, write)| {
             let retained = stored
@@ -2224,20 +2105,6 @@ async fn submit_observation_write_batch(
             })
         })
         .collect::<ObservationStoreResult<Vec<_>>>()?;
-    for (slot, write) in deferred_exact_duplicates {
-        let retained = stored
-            .get(write.observation().observation_id().as_str())
-            .ok_or_else(|| {
-                runtime_storage_error("read committed observation", "row unavailable")
-            })?;
-        outcomes.push((
-            slot,
-            ObservationBatchPersistOutcome::new(
-                ObservationPersistOutcome::ExactDuplicate(retained.commit_receipt().clone()),
-                Some(retained.clone()),
-            ),
-        ));
-    }
     Ok(outcomes)
 }
 
@@ -2258,9 +2125,10 @@ fn persist_outcome_from_submit(
         RuntimeSubmitOutcomeV1::Committed { .. }
         | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
         | RuntimeSubmitOutcomeV1::ExactReplay { .. }
-            if stored.observation().identity() != candidate.identity()
-                && classify_observation_collision(stored.observation(), candidate)
-                    == ObservationCollisionOutcomeV1::ExactDuplicate =>
+            if is_canonical_payload_revision_replay(stored.observation(), candidate)
+                || (stored.observation().identity() != candidate.identity()
+                    && classify_observation_collision(stored.observation(), candidate)
+                        == ObservationCollisionOutcomeV1::ExactDuplicate) =>
         {
             Ok(ObservationPersistOutcome::CoveredDuplicate(
                 ObservationCommitReceipt::new(

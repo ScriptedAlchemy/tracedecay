@@ -26,7 +26,7 @@ use tracedecay_temporal_query::execution::ExecutionControl;
 use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, reopen_project_sessions_database,
 };
-use crate::{GlobalDbObservationStore, RegisteredGlobalDb};
+use crate::{GlobalDbObservationStore, ObservationSourcePresenceV1, RegisteredGlobalDb};
 
 const CODEX_SESSION: &str = "01a0da2f-45db-7572-bd15-e0b83c7a09d3";
 const CURSOR_SESSION: &str = "session.cursor-catch-up";
@@ -676,6 +676,118 @@ fn session_fact_with_transcript(cwd: &str, transcript_path: &str) -> CanonicalOb
         profile: None,
         location_provenance: None,
     }
+}
+
+#[asupersync::test]
+async fn a_retired_reoffer_keeps_its_terminal_session_collision() {
+    let tmp = TempDir::new().unwrap();
+    let project_root = tmp.path().join("repo");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let cwd = project_root.to_string_lossy().into_owned();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        &tmp.path().join("profile"),
+        &project_root,
+        ProjectId::new("project.reoffer-collision").unwrap(),
+    )
+    .await
+    .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let store = database.observation_store();
+    let write = anchored(observation(
+        "codex",
+        CODEX_SESSION,
+        project_scope("project.reoffer-collision"),
+        "record.codex.retired-collision",
+        ORIGINAL_TEXT,
+        "receipt.codex.retired-collision",
+        Some(session_fact_with_transcript(
+            &cwd,
+            "/private/original.jsonl",
+        )),
+    ));
+    let observation = write.observation();
+    let presence = [ObservationSourcePresenceV1 {
+        observation_id: observation.observation_id().clone(),
+        generation: observation.identity().generation(),
+        start_offset: observation.identity().position().start(),
+    }];
+    database
+        .record_observation_source_presence(observation.source(), observation.scope(), &presence)
+        .await
+        .unwrap();
+    store.persist_observation(write.clone()).await.unwrap();
+    drain_projection_queue(&store).await;
+    database
+        .begin_observation_source_rewrite(
+            observation.source(),
+            observation.scope(),
+            observation.identity().generation(),
+            ObservationSourceGenerationV1::new(2).unwrap(),
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        database
+            .complete_observation_source_rewrite(
+                observation.source(),
+                observation.scope(),
+                ObservationSourceGenerationV1::new(2).unwrap(),
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!projected_text_contains(database, "codex", CODEX_SESSION, ORIGINAL_TEXT).await);
+    database
+        .writer_connection()
+        .unwrap()
+        .execute(
+            "UPDATE sessions SET transcript_path = ?3 WHERE provider = ?1 AND session_id = ?2",
+            params!["codex", CODEX_SESSION, "/private/current.jsonl"],
+        )
+        .await
+        .unwrap();
+    database
+        .record_observation_source_presence(observation.source(), observation.scope(), &presence)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.persist_observation(write.clone()).await.unwrap(),
+        ObservationPersistOutcome::ExactDuplicate(_)
+    ));
+    persist(
+        &store,
+        observation_from_source(
+            "cursor",
+            CURSOR_SESSION,
+            None,
+            project_scope("project.reoffer-collision"),
+            "record.cursor.after-retired-collision",
+            CURSOR_TEXT,
+            "receipt.cursor.after-retired-collision",
+            None,
+        ),
+    )
+    .await;
+    let window = store.project_queued_observations(8).await.unwrap().unwrap();
+    assert_eq!(window.items.len(), 2);
+    assert!(!window.has_more);
+    let retained = queue_attempts(database, observation.observation_id().as_str()).await;
+    assert!(
+        retained.as_ref().is_some_and(|(attempts, error)| {
+            *attempts == 1
+                && error
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("transcript_path"))
+        }),
+        "the retired reoffer must retain its terminal collision: {retained:?}"
+    );
+    assert!(!projected_text_contains(database, "codex", CODEX_SESSION, ORIGINAL_TEXT).await);
+    assert!(projected_text_contains(database, "cursor", CURSOR_SESSION, CURSOR_TEXT).await);
+    assert!(store.next_queued_observation().await.unwrap().is_none());
 }
 
 async fn drain_projection_queue(store: &GlobalDbObservationStore) {

@@ -4,7 +4,7 @@
 //! it. A rewrite keeps the byte prefix it retained and re-offers the rest under
 //! a new generation; once that generation has been read to the end of the
 //! file, every record it did not offer again is retired from projection. A
-//! later layout that offers a retired record again projects it again.
+//! later layout's accepted offer queues the retired record for projection.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,7 +17,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_store::{ProjectionStoreError, ProjectionStoreResult};
 
 use super::RegisteredGlobalDb;
-use super::observation_projection::{retire_source_record, revive_source_record};
+use super::observation_projection::retire_source_record;
 use super::registered::JobExit;
 
 /// Unoffered-record reads are keyset-paginated at this page size. The exact-
@@ -112,13 +112,6 @@ impl RegisteredGlobalDb {
                     )
                     .await
                     .map_err(|error| storage("record source presence", error))?;
-                Box::pin(revive_source_record(
-                    transaction.database_transaction(),
-                    &record.observation_id,
-                    source,
-                    scope,
-                ))
-                .await?;
             }
             Ok(())
         }
@@ -167,6 +160,28 @@ impl RegisteredGlobalDb {
                 // A rewrite the previous generation never finished still names its
                 // own layout: its retained prefix was relabeled to it.
                 let unfinished = pending_rewrite(&transaction, &key).await?;
+                transaction
+                    .execute(
+                        "UPDATE projection_queue SET revival_generation = ?2
+                         WHERE EXISTS (
+                             SELECT 1 FROM observation_source_presence AS presence
+                             WHERE presence.source_key = ?1
+                               AND presence.observation_id = projection_queue.observation_id
+                               AND presence.start_offset < ?3
+                               AND presence.generation IN (?4, ?5)
+                               AND presence.generation = projection_queue.revival_generation
+                               AND presence.start_offset = projection_queue.revival_start_offset
+                         )",
+                        params![
+                            key.as_str(),
+                            generation.as_str(),
+                            retained_through,
+                            previous.as_str(),
+                            unfinished.as_deref(),
+                        ],
+                    )
+                    .await
+                    .map_err(|error| storage("retain accepted source offer", error))?;
                 transaction
                     .execute(
                         "UPDATE observation_source_presence SET generation = ?2

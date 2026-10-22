@@ -903,10 +903,6 @@ impl tracedecay_sessions::runtime::git_correlation::GitCorrelationWriteTxn
 }
 
 impl RegisteredGlobalDbWriteTransaction<'_> {
-    pub(crate) fn database_transaction(&self) -> &DatabaseWriteTransaction<'_> {
-        &self.transaction
-    }
-
     pub async fn execute<P>(
         &self,
         sql: &str,

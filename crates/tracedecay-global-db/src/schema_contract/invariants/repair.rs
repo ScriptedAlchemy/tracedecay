@@ -150,7 +150,8 @@ pub(super) async fn repair_projection_frontier(
     .await
     .map_err(audit_read_error)?;
     conn.execute(
-        "DELETE FROM projection_queue WHERE observation_sequence <= ?1",
+        "DELETE FROM projection_queue WHERE observation_sequence <= ?1
+           AND revival_generation IS NULL",
         params![repaired_checkpoint],
     )
     .await

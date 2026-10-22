@@ -2,9 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_domain::{
-    CanonicalObservationIdV1, DurableObservationV1, ObservationScopeV1, ObservationSourceIdentityV1,
-};
+use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::{
     Database, DatabaseWriteTransaction,
@@ -25,11 +23,11 @@ use super::apply::{
     derive_projection_with_alias, stage_provider_usage_effects, verify_effect,
 };
 use super::state::{
-    canonical_message_location, canonicalize_session_project_paths, consume_projection_queue_item,
-    decode_observation_row, decode_sequence, projected_stored_message, projection_retry_state,
-    queued_sequence, read_checkpoint, read_message, read_observation, read_session,
-    reconcile_session_rows_detailed, schedule_projection_retry, storage, storage_message,
-    stored_output_digest, write_checkpoint,
+    AcceptedSourceOffer, canonical_message_location, canonicalize_session_project_paths,
+    consume_projection_queue_item, decode_observation_row, decode_sequence,
+    projected_stored_message, projection_retry_state, queued_projection, read_checkpoint,
+    read_message, read_observation, read_session, reconcile_session_rows_detailed,
+    schedule_projection_retry, storage, storage_message, stored_output_digest, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -379,7 +377,11 @@ async fn persist_projection_rejection_on_database(
             actual: sequence,
         });
     }
-    if queued_sequence(&transaction, observation_id).await? != Some(sequence) {
+    if queued_projection(&transaction, observation_id)
+        .await?
+        .map(|queued| queued.sequence)
+        != Some(sequence)
+    {
         return Err(ProjectionStoreError::NotQueued);
     }
     apply_skip_disposition(&transaction, &observation, reason).await?;
@@ -536,51 +538,73 @@ async fn advance_projection_rebuild(
     frontier_sequence: u64,
     cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<RebuildAdvance> {
-    let job = read_rebuild_job(&database.read_connection()).await?;
-    match job.state {
-        RebuildState::Aliasing => {
-            let transaction = database
-                .begin_write_transaction("begin projection alias staging")
-                .await
-                .map_err(|error| storage("begin projection alias staging", error))?;
-            stage_projection_alias_batch_transaction(&transaction).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage("commit projection alias batch", error))?;
-            Ok(RebuildAdvance::Pending)
-        }
-        RebuildState::Building => {
-            let transaction = database
-                .begin_write_transaction("begin projection rebuild batch")
-                .await
-                .map_err(|error| storage("begin projection rebuild batch", error))?;
-            let outcome =
-                stage_projection_rebuild_batch_transaction(&transaction, cancelled).await?;
-            let commit_operation = match outcome {
-                RebuildBatchStage::AlreadyReady => "commit completed projection rebuild batch",
-                RebuildBatchStage::Advanced => "commit projection rebuild batch",
-            };
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage(commit_operation, error))?;
-            Ok(RebuildAdvance::Pending)
-        }
-        RebuildState::Ready => {
-            let transaction = database
-                .begin_write_transaction("begin projection rebuild activation")
-                .await
-                .map_err(|error| storage("begin projection rebuild activation", error))?;
-            let outcome =
-                activate_projection_rebuild_transaction(&transaction, frontier_sequence).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage("commit projection rebuild activation", error))?;
-            Ok(RebuildAdvance::Complete(outcome))
-        }
+    let transaction = database
+        .begin_write_transaction("begin projection rebuild advance")
+        .await
+        .map_err(|error| storage("begin projection rebuild advance", error))?;
+    let mut rows = transaction
+        .query(
+            "SELECT observation_id FROM projection_queue
+             WHERE revival_generation IS NOT NULL
+             ORDER BY observation_sequence LIMIT ?1",
+            params![REBUILD_PAGE_SIZE],
+        )
+        .await
+        .map_err(|error| storage("read accepted source offers for rebuild", error))?;
+    let mut revivals = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read accepted source offers for rebuild", error))?
+    {
+        revivals.push(
+            CanonicalObservationIdV1::new(
+                row.get::<String>(0)
+                    .map_err(|error| storage("read accepted source offer identity", error))?,
+            )
+            .map_err(ProjectionStoreError::Contract)?,
+        );
     }
+    drop(rows);
+    for observation_id in &revivals {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        let queued = queued_projection(&transaction, observation_id)
+            .await?
+            .ok_or(ProjectionStoreError::NotQueued)?;
+        let offer = queued.revival.ok_or_else(|| {
+            storage_message("consume accepted source offer", "queued offer has no fence")
+        })?;
+        let (_, observation) = read_observation(&transaction, observation_id)
+            .await?
+            .ok_or(ProjectionStoreError::ObservationNotFound)?;
+        Box::pin(consume_source_revival(&transaction, &observation, &offer)).await?;
+    }
+    let outcome = if revivals.len() == REBUILD_PAGE_SIZE as usize
+        || cancelled.load(Ordering::Acquire)
+    {
+        RebuildAdvance::Pending
+    } else {
+        match read_rebuild_job(&transaction).await?.state {
+            RebuildState::Aliasing => {
+                stage_projection_alias_batch_transaction(&transaction).await?;
+                RebuildAdvance::Pending
+            }
+            RebuildState::Building => {
+                stage_projection_rebuild_batch_transaction(&transaction, cancelled).await?;
+                RebuildAdvance::Pending
+            }
+            RebuildState::Ready => RebuildAdvance::Complete(
+                activate_projection_rebuild_transaction(&transaction, frontier_sequence).await?,
+            ),
+        }
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit projection rebuild advance", error))?;
+    Ok(outcome)
 }
 
 async fn project_observation_in_transaction(
@@ -604,11 +628,17 @@ async fn project_observation_in_transaction_with_session(
         return Err(ProjectionStoreError::ObservationNotFound);
     };
     let session_id = observation.source().session_id().as_str().to_owned();
+    let queued = queued_projection(transaction, observation_id).await?;
+    if let Some(offer) = queued.as_ref().and_then(|queued| queued.revival.as_ref()) {
+        Box::pin(consume_source_revival(transaction, &observation, offer)).await?;
+    }
     let mut effect = derive_projection_with_alias(transaction, &observation).await?;
     if sequence <= checkpoint.last_sequence() {
         verify_effect(transaction, &observation, &effect).await?;
         record_canonical_effect(transaction, sequence, &observation, &effect).await?;
-        consume_projection_queue_item(transaction, observation_id).await?;
+        if !queue_row_is_terminal_collision(transaction, observation_id).await? {
+            consume_projection_queue_item(transaction, observation_id).await?;
+        }
         return Ok((
             ProjectionPersistOutcome::ExactDuplicate(checkpoint),
             session_id,
@@ -621,7 +651,7 @@ async fn project_observation_in_transaction_with_session(
             actual: sequence,
         });
     }
-    if queued_sequence(transaction, observation_id).await? != Some(sequence) {
+    if queued.as_ref().map(|queued| queued.sequence) != Some(sequence) {
         return Err(ProjectionStoreError::NotQueued);
     }
 
@@ -655,17 +685,57 @@ async fn project_observation_in_transaction_with_session(
     Ok((outcome, session_id))
 }
 
+async fn consume_source_revival(
+    transaction: &DatabaseWriteTransaction<'_>,
+    observation: &DurableObservationV1,
+    offer: &AcceptedSourceOffer,
+) -> ProjectionStoreResult<()> {
+    let source_key = serde_json::to_string(&(observation.source(), observation.scope()))
+        .map_err(|error| storage("encode accepted source offer", error))?;
+    let mut rows = transaction
+        .query(
+            "SELECT 1 FROM observation_source_presence
+             WHERE source_key = ?1 AND observation_id = ?2
+               AND generation = ?3 AND start_offset = ?4",
+            params![
+                source_key,
+                observation.observation_id().as_str(),
+                offer.generation.generation_id().to_string(),
+                sequence_i64(offer.start_offset)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage("validate accepted source offer", error))?;
+    let current = rows
+        .next()
+        .await
+        .map_err(|error| storage("validate accepted source offer", error))?
+        .is_some();
+    drop(rows);
+    if current {
+        revive_source_record(transaction, observation.observation_id()).await?;
+    }
+    transaction
+        .execute(
+            "UPDATE projection_queue
+             SET revival_generation = NULL, revival_start_offset = NULL
+             WHERE observation_id = ?1",
+            params![observation.observation_id().as_str()],
+        )
+        .await
+        .map_err(|error| storage("consume accepted source offer", error))?;
+    Ok(())
+}
+
 /// Restores the projection of an observation a source rewrite retired, once
-/// its source offers it again. An observation still queued past the
+/// admission accepts its source's current offer. An observation still queued past the
 /// checkpoint only needs its disposition removed, since the drain projects it
 /// next; one the drain already passed has its effect applied here. A rebuild
 /// that already staged it as retired restages it, or activation would bring
 /// the retirement back.
-pub(in super::super) async fn revive_source_record(
+async fn revive_source_record(
     transaction: &DatabaseWriteTransaction<'_>,
     observation_id: &CanonicalObservationIdV1,
-    source: &ObservationSourceIdentityV1,
-    scope: &ObservationScopeV1,
 ) -> ProjectionStoreResult<()> {
     let retired = ProjectionSkipReason::SourceRecordRetired.as_str();
     let revived = transaction
@@ -686,9 +756,6 @@ pub(in super::super) async fn revive_source_record(
     let (sequence, observation) = read_observation(transaction, observation_id)
         .await?
         .ok_or(ProjectionStoreError::ObservationNotFound)?;
-    if observation.source() != source || observation.scope() != scope {
-        return Err(ProjectionStoreError::ProvenanceCollision);
-    }
     if sequence <= read_checkpoint(transaction).await?.last_sequence() {
         let mut effect = derive_projection_with_alias(transaction, &observation).await?;
         Box::pin(write_effect_converging_collisions(
@@ -948,10 +1015,10 @@ async fn stage_projection_alias_batch_transaction(
 async fn stage_projection_rebuild_batch_transaction(
     transaction: &DatabaseWriteTransaction<'_>,
     cancelled: &AtomicBool,
-) -> ProjectionStoreResult<RebuildBatchStage> {
+) -> ProjectionStoreResult<()> {
     let job = read_rebuild_job(transaction).await?;
     if job.state == RebuildState::Ready {
-        return Ok(RebuildBatchStage::AlreadyReady);
+        return Ok(());
     }
     if job.state != RebuildState::Building || job.aliases_staged_through != job.frontier {
         return Err(storage_message(
@@ -1040,13 +1107,7 @@ async fn stage_projection_rebuild_batch_transaction(
         )
         .await
         .map_err(|error| storage("advance projection rebuild batch", error))?;
-    Ok(RebuildBatchStage::Advanced)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RebuildBatchStage {
-    AlreadyReady,
-    Advanced,
+    Ok(())
 }
 
 async fn activate_projection_rebuild_transaction(
@@ -1090,7 +1151,8 @@ async fn activate_projection_rebuild_transaction(
         .map_err(|error| storage("requeue observations past rebuild frontier", error))?;
     transaction
         .execute(
-            "DELETE FROM projection_queue WHERE observation_sequence <= ?1",
+            "DELETE FROM projection_queue WHERE observation_sequence <= ?1
+               AND revival_generation IS NULL",
             params![job.frontier],
         )
         .await
