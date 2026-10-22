@@ -80,10 +80,13 @@ jobs:
   # host integrations. Ordinary Linux validation needs no CLI artifact, so
   # this build is absent unless `run_hosts=true`.
   debug-cli:
+    permissions:
+      contents: read
+      id-token: write
     name: Build debug CLI
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
-    runs-on: ubuntu-26.04-arm
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,7 +96,11 @@ jobs:
         with:
           config: ci
           dest: target/debug
-          cache-key: ci-linux-arm64
+          cache-key: ci-linux-debug
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Publish the binary for the host integration jobs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -262,6 +269,9 @@ jobs:
   # authority does, on demand: they exercise target-specific behavior the
   # Linux lane cannot prove.
   macos-test:
+    permissions:
+      contents: read
+      id-token: write
     name: Test macOS
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
@@ -304,6 +314,10 @@ jobs:
         id: bazel
         with:
           cache-key: ci-macos-test
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
@@ -797,7 +811,7 @@ jobs:
     name: Hermes integration (stock)
     needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
-    runs-on: ubuntu-26.04-arm
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Stock (upstream) Hermes pin. The generated plugin must keep working
@@ -847,7 +861,7 @@ jobs:
     name: Claude Code + OpenCode integration (stock)
     needs: [scope-gate, debug-cli]
     if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
-    runs-on: ubuntu-26.04-arm
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Stock host pins. The installed bundle must keep working against these
