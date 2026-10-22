@@ -1,3 +1,5 @@
+use tracedecay_lcm::dag::sanitize_summary_draft;
+
 use super::*;
 
 #[tokio::test]
@@ -26,17 +28,7 @@ async fn hermes_auxiliary_request_mode_returns_summary_contract() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: Default::default(),
             summarizer: LcmSummarizerMode::HermesAuxiliary,
         })
         .await
@@ -95,6 +87,7 @@ async fn provided_summarizer_advances_frontier_consistently() {
             LcmSummarizerMode::Provided {
                 summary_text: "one two three".into(),
                 route: Some("test-route".into()),
+                extraction_result: None,
             },
         ))
         .await
@@ -112,6 +105,7 @@ async fn provided_summarizer_advances_frontier_consistently() {
             LcmSummarizerMode::Provided {
                 summary_text: "four five".into(),
                 route: Some("test-route".into()),
+                extraction_result: None,
             },
         ))
         .await
@@ -129,64 +123,89 @@ async fn provided_summarizer_advances_frontier_consistently() {
     );
 }
 
-#[tokio::test]
-async fn provided_route_envelope_persists_extraction_metadata() {
+const WITH_EXTRACTION_METADATA: &str = r#"{"pre_compaction_extraction":{"items":["Decision: keep nightly backups","Commitment: rotate keys weekly"],"model":"openai/gpt-5.4-mini","output_path":"/tmp/extractions","status":"ok"},"summary_route":"backup"}"#;
+const ROUTE_ONLY_METADATA: &str = r#"{"pre_compaction_extraction":{"status":"not_requested"},"summary_route":"plain {route} 雪"}"#;
+const NO_ROUTE_METADATA: &str = r#"{"pre_compaction_extraction":{"status":"not_requested"}}"#;
+
+async fn persisted_summary_metadata(summarizer: LcmSummarizerMode) -> String {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_raw_messages(&db, "cursor", "session-1", &["old-1", "old-2", "fresh-1"]).await;
 
     let response = db
-        .lcm_compress(compress_request(
-            "cursor",
-            "session-1",
-            LcmSummarizerMode::Provided {
-                summary_text: "summary with extraction".into(),
-                route: Some(
-                    json!({
-                        "route": "backup",
-                        "pre_compaction_extraction": {
-                            "status": "ok",
-                            "items": [
-                                "Decision: keep nightly backups",
-                                "Commitment: rotate keys weekly"
-                            ],
-                            "model": "openai/gpt-5.4-mini",
-                            "output_path": "/tmp/extractions"
-                        }
-                    })
-                    .to_string(),
-                ),
-            },
-        ))
+        .lcm_compress(compress_request("cursor", "session-1", summarizer))
         .await
         .unwrap();
-
     assert_eq!(response.status, "ok");
     assert_eq!(response.summary_nodes_created, 1);
-    let metadata: Value = serde_json::from_str(
-        response.summary_nodes[0]
+    let node = &response.summary_nodes[0];
+    assert_eq!(node.source_refs.len(), 1);
+    assert_eq!(node.expand_hint.as_deref(), Some("1 raw messages"));
+    let expanded = db
+        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
+        .await
+        .unwrap();
+    let persisted = expanded
+        .summary
+        .metadata_json
+        .expect("persisted summary metadata");
+    assert_eq!(node.metadata_json.as_deref(), Some(persisted.as_str()));
+    persisted
+}
+
+fn provided(
+    route: Option<&str>,
+    extraction: Option<tracedecay_lcm::types::LcmExtractionResult>,
+) -> LcmSummarizerMode {
+    LcmSummarizerMode::Provided {
+        summary_text: "summary with extraction".into(),
+        route: route.map(str::to_string),
+        extraction_result: extraction,
+    }
+}
+
+#[tokio::test]
+async fn provided_summary_metadata_rows_are_byte_stable() {
+    let extraction = tracedecay_lcm::types::LcmExtractionResult {
+        status: "ok".into(),
+        items: vec![
+            "Decision: keep nightly backups".into(),
+            "Commitment: rotate keys weekly".into(),
+        ],
+        text: None,
+        model: Some("openai/gpt-5.4-mini".into()),
+        output_path: Some("/tmp/extractions".into()),
+        error: None,
+    };
+    let cases = [
+        (
+            provided(Some(" backup "), Some(extraction)),
+            WITH_EXTRACTION_METADATA,
+        ),
+        (
+            provided(Some("plain {route} 雪"), None),
+            ROUTE_ONLY_METADATA,
+        ),
+        (provided(Some("  "), None), NO_ROUTE_METADATA),
+        (provided(None, None), NO_ROUTE_METADATA),
+    ];
+    for (summarizer, expected) in cases {
+        // Pin compression's metadata bytes independently, then pass them
+        // through the same privacy authority every persisted summary requires.
+        // Compare the entire protected value, including all receipt bindings.
+        let mut draft = summary_draft(
+            "cursor",
+            "session-1",
+            0,
+            "summary with extraction",
+            Vec::new(),
+        );
+        draft.expand_hint = Some("1 raw messages".to_owned());
+        draft.metadata_json = Some(expected.to_owned());
+        let expected = sanitize_summary_draft(draft)
+            .expect("canonical summary protection")
             .metadata_json
-            .as_deref()
-            .expect("summary metadata"),
-    )
-    .unwrap();
-    assert_eq!(
-        metadata["summary_route"],
-        Value::String("backup".to_string())
-    );
-    assert_eq!(
-        metadata["pre_compaction_extraction"]["status"],
-        Value::String("ok".to_string())
-    );
-    assert_eq!(
-        metadata["pre_compaction_extraction"]["items"],
-        json!([
-            "Decision: keep nightly backups",
-            "Commitment: rotate keys weekly"
-        ])
-    );
-    assert_eq!(
-        metadata["pre_compaction_extraction"]["model"],
-        Value::String("openai/gpt-5.4-mini".to_string())
-    );
+            .expect("protected summary metadata");
+        assert_eq!(persisted_summary_metadata(summarizer).await, expected);
+    }
 }

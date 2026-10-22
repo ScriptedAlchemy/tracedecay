@@ -21,17 +21,7 @@ async fn preflight_is_read_only_and_never_ingests_active_messages() {
                 "content": format!("data:image/png;base64,{}", "A".repeat(100_000))
             })],
             current_tokens: Some(100),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
+            overrides: Default::default(),
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
         })
@@ -221,12 +211,12 @@ async fn preflight_decides_compression_from_threshold_and_overflow_pressure() {
 
         let mut request =
             preflight_request("cursor", &session_id, Vec::new(), Some(case.current_tokens));
-        request.threshold_tokens = case.threshold_tokens;
-        request.leaf_chunk_tokens = case.leaf_chunk_tokens;
-        request.max_source_messages = case.max_source_messages;
-        request.max_assembly_tokens = case.max_assembly_tokens;
-        request.context_length = case.context_length;
-        request.reserve_tokens_floor = case.reserve_tokens_floor;
+        request.overrides.threshold_tokens = case.threshold_tokens;
+        request.overrides.leaf_chunk_tokens = case.leaf_chunk_tokens;
+        request.overrides.max_source_messages = case.max_source_messages;
+        request.overrides.max_assembly_tokens = case.max_assembly_tokens;
+        request.overrides.context_length = case.context_length;
+        request.overrides.reserve_tokens_floor = case.reserve_tokens_floor;
 
         let response = db.lcm_preflight(request).await.unwrap();
 
@@ -262,9 +252,7 @@ async fn preflight_requests_compression_for_maintenance_debt() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "first chunk summary".into(),
-            },
+            provided_summary("first chunk summary"),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,

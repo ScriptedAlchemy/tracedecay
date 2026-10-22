@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use tracedecay_domain::{
     DurableObservationV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
 };
-use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 use tracedecay_store::observation::ObservationCoverageV1;
+use tracedecay_store::{PROJECTION_TERMINAL_RETRY_MICROS, SESSION_MESSAGE_PROJECTOR_VERSION};
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL;
@@ -150,8 +150,9 @@ pub(super) async fn repair_projection_frontier(
     .await
     .map_err(audit_read_error)?;
     conn.execute(
-        "DELETE FROM projection_queue WHERE observation_sequence <= ?1",
-        params![repaired_checkpoint],
+        "DELETE FROM projection_queue
+         WHERE observation_sequence <= ?1 AND next_retry_at_micros < ?2",
+        params![repaired_checkpoint, PROJECTION_TERMINAL_RETRY_MICROS],
     )
     .await
     .map_err(audit_read_error)?;

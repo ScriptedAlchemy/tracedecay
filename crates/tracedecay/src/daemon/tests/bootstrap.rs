@@ -3271,7 +3271,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         "portable initialize warmup must singleflight one project open"
     );
     let receipt = super::super::shutdown_project_servers(
-        tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
         &store_administration,
         &super::super::http_application::DaemonHttpApplicationRegistry::default(),
     )
@@ -3674,6 +3674,10 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         ..test_handshake_defaults()
     };
 
+    // This test controls project-open admission, not the discovery deadline.
+    // Keep the real discovery walk from expiring while the fleet is contended.
+    tracedecay_runtime_core::git_repository::hold_repository_discovery_clock_for_test(&project);
+
     // Project composition admits through its own capacity gate (the
     // `admit_route` phase of `production_project_server`, before the open
     // counts an attempt). The global store writer does not block route
@@ -3745,6 +3749,7 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         "the warming request's detached open must be the only open"
     );
     engine.shutdown_all().await;
+    tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
 }
 
 /// A profile registry read from a project connection answers from the

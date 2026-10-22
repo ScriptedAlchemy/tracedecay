@@ -1997,9 +1997,13 @@ fn assert_legal_host_response(provider: &str, state: &str, expected: &Value, out
             *project_root = Value::String("<PROJECT_ROOT>".to_string());
         }
         assert_eq!(document, expected, "{provider}/{state} stdout");
-    } else if provider == "kiro" && stdout != expected["stdout"].as_str().unwrap() {
-        // Kiro delivers its lookup notice as plain stdout, which becomes context.
-        assert_eq!(expected["stdout"].as_str().unwrap(), "{}");
+    } else if matches!(provider, "kiro" | "pi") && stdout != expected["stdout"].as_str().unwrap() {
+        // The daemon can finish its advisory cycle before either plain-text hook.
+        // This fixture seeds no findings; accept only a validated empty notice.
+        assert_eq!(
+            expected["stdout"].as_str().unwrap(),
+            if provider == "kiro" { "{}" } else { "" }
+        );
         let encoded = stdout
             .strip_prefix("TraceDecay feedback ready for authorized lookup: ")
             .unwrap_or_else(|| panic!("{provider}/{state} emitted unexpected context: {stdout}"));

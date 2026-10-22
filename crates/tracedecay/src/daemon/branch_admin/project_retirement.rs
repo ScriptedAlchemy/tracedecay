@@ -96,7 +96,7 @@ impl ProjectServerRetirementAdmission<'_> {
         track_project_server_retirement_after_admission(
             &mut self.retirements,
             owner,
-            spawn_tokio_retirement(retirement),
+            spawn_native_retirement(retirement),
         );
     }
 
@@ -144,31 +144,22 @@ where
         };
         finalizer.complete(status);
     };
-    // Without a Tokio runtime the retirement is dropped unstarted, and its
-    // finalizer publishes the failed receipt.
-    if let Some(runtime) = native_runtime::tokio_handle(RETIREMENT_TOKIO_SITE) {
-        runtime.spawn(retirement);
+    if let Err(error) = NativeTask::spawn(retirement) {
+        tracing::error!(%error, "project server capacity retirement was refused");
     }
     completion
 }
 
-/// Retirements reach `project_server_lifecycle`, whose timers are Tokio's, so
-/// they run on the daemon's Tokio runtime.
-const RETIREMENT_TOKIO_SITE: &str = "daemon.project_retirement";
-
-/// Spawns `retirement` on the Tokio runtime and returns its receipt. Without
-/// a Tokio runtime the retirement never runs and its receipt is a failure.
-fn spawn_tokio_retirement(
+fn spawn_native_retirement(
     retirement: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> impl std::future::Future<Output = ProjectServerRetirementStatus> + Send + 'static {
-    let task = native_runtime::tokio_handle(RETIREMENT_TOKIO_SITE)
-        .map(|runtime| runtime.spawn(retirement));
+    let task = NativeTask::spawn(retirement);
     async move {
         match task {
-            Some(task) => tokio_retirement_status(task).await,
-            None => ProjectServerRetirementStatus::Failed(
-                "no Tokio runtime ran the project server retirement".to_owned(),
-            ),
+            Ok(task) => native_retirement_status(task).await,
+            Err(error) => ProjectServerRetirementStatus::Failed(format!(
+                "native runtime refused project server retirement: {error}"
+            )),
         }
     }
 }
@@ -226,6 +217,7 @@ async fn wait_for_project_server_retirement(
     }
 }
 
+#[cfg(test)]
 async fn tokio_retirement_status(
     task: tokio::task::JoinHandle<()>,
 ) -> ProjectServerRetirementStatus {
@@ -241,6 +233,18 @@ async fn aborted_native_retirement_status(task: NativeTask<()>) -> ProjectServer
     match task.wait().await {
         NativeTaskOutcome::Completed(()) | NativeTaskOutcome::Cancelled => {
             ProjectServerRetirementStatus::Clean
+        }
+        NativeTaskOutcome::Panicked(panic) => {
+            ProjectServerRetirementStatus::Failed(format!("task panicked: {panic}"))
+        }
+    }
+}
+
+async fn native_retirement_status(task: NativeTask<()>) -> ProjectServerRetirementStatus {
+    match task.wait().await {
+        NativeTaskOutcome::Completed(()) => ProjectServerRetirementStatus::Clean,
+        NativeTaskOutcome::Cancelled => {
+            ProjectServerRetirementStatus::Failed("retirement task was cancelled".to_owned())
         }
         NativeTaskOutcome::Panicked(panic) => {
             ProjectServerRetirementStatus::Failed(format!("task panicked: {panic}"))
@@ -293,13 +297,12 @@ pub(super) async fn track_retirement_task(
     track_project_server_retirement(retirements, owner, tokio_retirement_status(task)).await;
 }
 
-/// Spawns `retirement` on the Tokio runtime and tracks its receipt.
-pub(super) async fn track_tokio_retirement(
+pub(super) async fn track_native_retirement(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     owner: StoreOwnerKey,
     retirement: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
-    track_project_server_retirement(retirements, owner, spawn_tokio_retirement(retirement)).await;
+    track_project_server_retirement(retirements, owner, spawn_native_retirement(retirement)).await;
 }
 
 pub(super) async fn track_aborted_native_retirement_task(
@@ -808,13 +811,19 @@ mod tests {
         let capacity_admission = Arc::clone(&capacity_gate).lock_owned().await;
         let release_capacity = Arc::new(tokio::sync::Notify::new());
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let ran_without_tokio = Arc::new(AtomicBool::new(false));
         let mut admission = administration
             .acquire_project_server_retirement_admission()
             .await;
         let completion = admission.spawn_and_track_fallible(owner("project-capacity"), {
             let release_capacity = Arc::clone(&release_capacity);
+            let ran_without_tokio = Arc::clone(&ran_without_tokio);
             async move {
                 let _capacity_admission = capacity_admission;
+                ran_without_tokio.store(
+                    tokio::runtime::Handle::try_current().is_err(),
+                    Ordering::Release,
+                );
                 let _ = started_tx.send(());
                 release_capacity.notified().await;
                 Ok(())
@@ -824,14 +833,29 @@ mod tests {
         drop(completion);
         started_rx.await.expect("capacity retirement started");
         assert!(
+            ran_without_tokio.load(Ordering::Acquire),
+            "capacity retirement must run on the native runtime without entering Tokio"
+        );
+        assert!(
             Arc::clone(&capacity_gate).try_lock_owned().is_err(),
             "a cancelled caller cannot release capacity while detached cleanup is pending"
         );
+        let tracked_completion = administration
+            .acquire_project_server_retirement_admission()
+            .await
+            .prior_completions_for_owner(&owner("project-capacity"))
+            .pop()
+            .expect("the cancelled caller must leave a tracked capacity receipt");
         release_capacity.notify_one();
-        let recovered_capacity = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            Arc::clone(&capacity_gate).lock_owned(),
-        )
+        let recovered_capacity = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let recovered_capacity = Arc::clone(&capacity_gate).lock_owned().await;
+            // The guard drops inside the retirement, before its terminal receipt is published.
+            tracked_completion
+                .wait()
+                .await
+                .expect("detached capacity retirement completes cleanly");
+            recovered_capacity
+        })
         .await
         .expect("detached cleanup must release capacity after completion");
 
@@ -1059,7 +1083,7 @@ mod tests {
         let http_application_registry =
             crate::daemon::http_application::DaemonHttpApplicationRegistry::default();
         let mut shutdown = Box::pin(project_server_lifecycle::shutdown_project_servers(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            Instant::now() + std::time::Duration::from_secs(5),
             &administration,
             &http_application_registry,
         ));
