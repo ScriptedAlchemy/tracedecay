@@ -14,7 +14,12 @@ import type {
   GraphTotalsV1,
   StrataMeasurementV1,
 } from '../../contracts/generated.ts';
-import type { Diagnostic, DiagnosticsSnapshot } from '../../data/query/codeDiagnostics.ts';
+import {
+  diagnosticPublication,
+  verifiedDiagnosticPublication,
+  type Diagnostic,
+  type DiagnosticsSnapshot,
+} from '../../data/query/codeDiagnostics.ts';
 import { directoryOf } from './cortexRelief.ts';
 
 /* ---- register strip ------------------------------------------------------ */
@@ -292,6 +297,10 @@ export interface FileDiagnostics {
   readonly rows: readonly Diagnostic[];
   readonly errors: number;
   readonly warnings: number;
+  readonly verified: number;
+  readonly retained: number;
+  readonly versionUnverified: number;
+  readonly hasVerifiedPublication: boolean;
 }
 
 /** The broker's diagnostics that sit in one file. Matched on the path the
@@ -305,10 +314,30 @@ export function diagnosticsForFile(
   const rows = snapshot.diagnostics.filter(
     (row) => row.file === filePath || row.file.endsWith(`/${filePath}`),
   );
+  let verified = 0;
+  let versionUnverified = 0;
+  for (const row of rows) {
+    // Suffix matching can find retained evidence for display, but only exact
+    // document identity can establish a publication for the selected file.
+    const publication = row.file === filePath ? diagnosticPublication(snapshot, row) : undefined;
+    if (verifiedDiagnosticPublication(publication)) verified += 1;
+    else if (publication?.state === 'published') versionUnverified += 1;
+  }
+  const publications = Object.entries(snapshot.coverage)
+    .filter(([, coverage]) => coverage.documents[filePath] !== undefined);
   return {
     rows,
     errors: rows.filter((row) => row.severity === 'error').length,
     warnings: rows.filter((row) => row.severity === 'warning').length,
+    verified,
+    retained: rows.length - verified - versionUnverified,
+    versionUnverified,
+    hasVerifiedPublication: publications.length > 0 && publications.every(([language, coverage]) => {
+      const roots = Object.values(coverage.roots);
+      return verifiedDiagnosticPublication(coverage.documents[filePath])
+        && roots.length > 0 && roots.every((root) => root === 'completed')
+        && snapshot.engines.some((engine) => engine.language === language && engine.state === 'ready');
+    }),
   };
 }
 

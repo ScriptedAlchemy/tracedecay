@@ -18,10 +18,11 @@ pub use admission::{
 pub use dto::{
     CallHierarchyItem, DiagnosticTrigger, DocumentSymbol, FeedbackCyclePort, FeedbackCycleRequest,
     FeedbackCycleResponse, GatewayMethod, GatewayResponse, Hover, IncomingCall, LspLocation,
-    LspSemanticOperationOutcome, LspSemanticRequest, MethodUnavailable, MethodUnavailableReason,
-    OutgoingCall, RenameCandidate, RenameCandidateResult, RenameCandidateUnavailableReason,
-    SemanticProviderOutcome, SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem,
-    WorkspaceSymbol, lsp_semantic_request, project_semantic_outcome,
+    LspSemanticDocumentSnapshot, LspSemanticOperationOutcome, LspSemanticRequest,
+    MethodUnavailable, MethodUnavailableReason, OutgoingCall, RenameCandidate,
+    RenameCandidateResult, RenameCandidateUnavailableReason, SemanticProviderOutcome,
+    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
+    lsp_semantic_request, project_semantic_outcome,
 };
 pub use runtime::{
     AnalyzerCancellationAdapter, DaemonLspGateway, DaemonLspProviderBundle,

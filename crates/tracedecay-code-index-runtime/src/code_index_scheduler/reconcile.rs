@@ -37,6 +37,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::GraphConflictContextV1;
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
     RESIDENT_OWNER_IDLE_WINDOW_V1, ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1,
@@ -1250,7 +1252,9 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
-    /// A standalone owner under the path policy a fresh profile resolves.
+    /// A standalone fixture owner under the path policy a fresh profile resolves.
+    /// Concurrent cases do not contribute measured pressure to this owner;
+    /// pressure scenarios bind their own explicit readings after opening it.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn open(
         project_id: ProjectId,
@@ -1258,14 +1262,23 @@ impl CodeIndexWorktreeSchedulerV1 {
         store_root: PathBuf,
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
-        Self::open_with_policy(
+        let mut scheduler = Self::open_with_policy(
             project_id,
             project_root,
             store_root,
             byte_pool,
             CodeIndexHintPolicyV1::default(),
             crate::config::registry_default_index_path_policy(),
-        )
+        )?;
+        let limit = detected_process_resident_memory_limit_v1();
+        scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
+            limit,
+            Arc::new(ResidentMemoryPressureV1::with_sampler(
+                limit,
+                Arc::new(|| None),
+            )),
+        )));
+        Ok(scheduler)
     }
 
     pub fn open_with_policy(

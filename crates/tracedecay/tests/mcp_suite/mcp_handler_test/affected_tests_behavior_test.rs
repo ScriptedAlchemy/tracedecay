@@ -6,15 +6,23 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use serde_json::{Value, json};
+use tracedecay::mcp::McpServer;
 use tracedecay_application::operation_stream::operation_event_authority;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{Deadline, OperationBudgetUsage, OperationReceipt};
 use tracedecay_domain::UtcMicros;
 use tracedecay_mcp::ToolResult;
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
 use url::Url;
 
+use crate::mcp_server_test::support::{
+    jsonrpc_request, response_with_id, run_client_connection_with_messages,
+};
 use crate::support::{
     ProductionCompositionFixture, call_tool_when_ready, extract_text, peer_production_composition,
     production_composition_fixture_with_sources, wait_for_current_graph,
@@ -23,6 +31,72 @@ use crate::support::{
 const GREETING_TEST: &str = "tests::greeting_is_hello_world";
 const FAILING_TEST: &str = "greeting_is_goodbye";
 const KEPT_TEST: &str = "alpha_kept";
+
+#[derive(Default)]
+pub(super) struct ReadFlightOverlap {
+    pause: Mutex<Option<mpsc::Receiver<()>>>,
+    resume: Mutex<Option<mpsc::Sender<()>>>,
+    leader_entered: tokio::sync::Notify,
+}
+
+struct ObserveReadFlight(Arc<ReadFlightOverlap>);
+
+impl<S> Layer<S> for ObserveReadFlight
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+        match ctx.span(id).unwrap().metadata().name() {
+            "mcp.dispatch.application" => {
+                let pause = self.0.pause.lock().unwrap().take();
+                if let Some(pause) = pause {
+                    self.0.leader_entered.notify_one();
+                    pause
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("the identical read must join the held leader");
+                } else {
+                    self.0.release();
+                }
+            }
+            "mcp.server.read_coalescing.follower_wait" => {
+                self.0.release();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl ReadFlightOverlap {
+    pub(super) fn install() -> Arc<Self> {
+        // The subscriber must follow dispatch onto other threads without
+        // observing unrelated tests in the parent process.
+        assert!(crate::common::in_child_test());
+        let overlap = Arc::new(Self::default());
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(ObserveReadFlight(Arc::clone(&overlap))),
+        )
+        .unwrap();
+        overlap
+    }
+
+    pub(super) fn hold_next_read(&self) {
+        let (resume, pause) = mpsc::channel();
+        *self.pause.lock().unwrap() = Some(pause);
+        *self.resume.lock().unwrap() = Some(resume);
+    }
+
+    pub(super) async fn wait_for_leader(&self) {
+        tokio::time::timeout(Duration::from_secs(5), self.leader_entered.notified())
+            .await
+            .expect("the held read must enter application dispatch");
+    }
+
+    fn release(&self) {
+        if let Some(resume) = self.resume.lock().unwrap().take() {
+            resume.send(()).expect("held read leader must still exist");
+        }
+    }
+}
 
 fn write_affected_fixture(project: &Path) {
     fs::create_dir_all(project.join("src")).unwrap();
@@ -83,6 +157,21 @@ async fn call_tool(
         .await,
         Vec::new(),
     )
+}
+
+async fn refused_files_read(server: &Arc<McpServer>, id: i64) -> Value {
+    let request = jsonrpc_request(
+        json!(id),
+        "tools/call",
+        json!({
+            "name": "tracedecay_files",
+            // The schema accepts this string; the owner refuses its invalid
+            // glob as a semantic result after dispatch, not an adapter error.
+            "arguments": {"pattern": "[", "format": "json"},
+        }),
+    );
+    let responses = run_client_connection_with_messages(Arc::clone(server), vec![request]).await;
+    response_with_id(&responses, json!(id))
 }
 
 fn parse_tool_json(tool_name: &str, result: &ToolResult) -> Value {
@@ -434,6 +523,14 @@ fn coalescing_counts(stats: &Value) -> (u64, u64) {
 /// Two identical concurrent reads still enter the identical-read coalescer.
 #[tokio::test]
 async fn identical_concurrent_test_runs_each_run_while_identical_reads_still_ride() {
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_handler_test::affected_tests_behavior_test::identical_concurrent_test_runs_each_run_while_identical_reads_still_ride",
+            &[],
+        );
+        return;
+    }
+    let overlap = ReadFlightOverlap::install();
     let fixture = production_composition_fixture_with_sources(write_affected_fixture).await;
     let server = fixture
         .harness
@@ -466,20 +563,100 @@ async fn identical_concurrent_test_runs_each_run_while_identical_reads_still_rid
         "test runs never enter the identical-read coalescer"
     );
 
-    let read = json!({"path": "src", "format": "json"});
+    let fixture = Arc::new(fixture);
+    let leader_fixture = Arc::clone(&fixture);
+    let runtime = tokio::runtime::Handle::current();
+    overlap.hold_next_read();
+    // A join alone can run two successive leaders. Hold the dispatcher
+    // after its claim until the second request is waiting on that flight.
+    let first_read = tokio::task::spawn_blocking(move || {
+        runtime.block_on(call_tool(
+            &leader_fixture,
+            "tracedecay_files",
+            json!({"path": "src", "format": "json"}),
+        ))
+    });
+    overlap.wait_for_leader().await;
     let (first_read, second_read) = tokio::join!(
-        call_tool(&fixture, "tracedecay_files", read.clone()),
-        call_tool(&fixture, "tracedecay_files", read.clone())
+        first_read,
+        call_tool(
+            &fixture,
+            "tracedecay_files",
+            json!({"path": "src", "format": "json"}),
+        )
     );
+    let first_read = first_read.expect("held files read must finish");
+    assert_eq!(parse_tool_json("tracedecay_files", &first_read)["count"], 2);
     assert_eq!(
         extract_text(&first_read.value),
         extract_text(&second_read.value)
     );
     let after_reads = coalescing_counts(&server.server_stats_json().await);
     assert_eq!(
-        (after_reads.0 - after_runs.0) + (after_reads.1 - after_runs.1),
-        2,
-        "both identical reads enter the identical-read coalescer"
+        (after_reads.0 - after_runs.0, after_reads.1 - after_runs.1),
+        (1, 1),
+        "one identical read leads and the other shares its in-flight result"
+    );
+    let fixture = Arc::try_unwrap(fixture)
+        .unwrap_or_else(|_| panic!("both read requests must release the fixture"));
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_read_refusals_keep_each_callers_request_identity() {
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_handler_test::affected_tests_behavior_test::concurrent_read_refusals_keep_each_callers_request_identity",
+            &[],
+        );
+        return;
+    }
+    let overlap = ReadFlightOverlap::install();
+    let fixture = production_composition_fixture_with_sources(write_affected_fixture).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production files server");
+    wait_for_current_graph(&server).await;
+    let before = coalescing_counts(&server.server_stats_json().await);
+
+    overlap.hold_next_read();
+    let leader_server = Arc::clone(&server);
+    let first = tokio::spawn(async move { refused_files_read(&leader_server, 701).await });
+    overlap.wait_for_leader().await;
+    let (first, second) = tokio::join!(first, refused_files_read(&server, 702));
+    let first = first.expect("held files read must finish");
+
+    for (response, id) in [(&first, 701), (&second, 702)] {
+        assert_eq!(response["id"], id);
+        assert!(response["error"].is_null(), "{response}");
+        let result = &response["result"];
+        assert_eq!(result["isError"], true, "{response}");
+        let problem = &result["structuredContent"]["problem"];
+        assert_eq!(problem["kind"], "invalid_request", "{response}");
+        assert_eq!(problem["code"], "application.surface.invalid_request");
+        assert_eq!(
+            problem["message"],
+            "invalid file glob '[': Pattern syntax error near position 0: invalid range pattern",
+            "{response}"
+        );
+        let request_id = problem["request_id"].as_str().expect("refusal request id");
+        assert!(request_id.starts_with("request.mcp."), "{response}");
+        assert_eq!(problem["trace_id"], request_id, "{response}");
+        let rendered: Value = serde_json::from_str(extract_text(result)).expect("JSON refusal");
+        assert_eq!(rendered["request_id"], request_id, "{response}");
+        assert_eq!(rendered["problem"], *problem, "{response}");
+    }
+    assert_ne!(
+        first["result"]["structuredContent"]["problem"]["request_id"],
+        second["result"]["structuredContent"]["problem"]["request_id"],
+        "an overlapping read must render its own refusal after the leader refuses"
+    );
+    let after = coalescing_counts(&server.server_stats_json().await);
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (1, 1),
+        "the second read must have joined the held flight before dispatching its refusal"
     );
     fixture.harness.shutdown().await;
 }
