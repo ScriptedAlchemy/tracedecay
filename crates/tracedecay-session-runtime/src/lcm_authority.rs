@@ -5,7 +5,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use tracedecay_contracts::{
     CancellationSignal, CancellationStage, OperationTermination, RequestAdmission, RequestContext,
@@ -38,61 +37,6 @@ pub use mount::{
 };
 use receipt::{terminal, terminal_failure, terminal_interruption, unavailable};
 
-type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, LcmError>> + Send + 'a>>;
-
-trait LcmDaemonStore: Send + Sync {
-    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse>;
-    fn status(&self, query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus>;
-    fn doctor(&self, query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value>;
-}
-
-struct RegisteredLcmDaemonStore {
-    database: RegisteredGlobalDbLeaseV1,
-}
-
-impl RegisteredLcmDaemonStore {
-    fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
-        Self { database }
-    }
-}
-
-impl LcmDaemonStore for RegisteredLcmDaemonStore {
-    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
-        let database = self.database.clone();
-        Box::pin(async move {
-            super::lcm_effects::DaemonLcmEffectService::new(database, None, None)
-                .compress(request)
-                .await
-        })
-    }
-
-    fn status(&self, query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus> {
-        let database = self.database.clone();
-        Box::pin(async move {
-            let gc_config = LcmGcConfig::default();
-            let status: Pin<Box<dyn Future<Output = Result<LcmStatus, LcmError>> + Send>> =
-                Box::pin(database.lcm_status_with_options(
-                    &query.provider,
-                    query.session_id.as_deref(),
-                    query.deep,
-                    &gc_config,
-                ));
-            status.await
-        })
-    }
-
-    fn doctor(&self, _query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value> {
-        Box::pin(async move {
-            serde_json::to_value(
-                SessionTemporalAccess::new(&*self.database)
-                    .session_temporal_doctor_health()
-                    .await,
-            )
-            .map_err(|error| LcmError::Db(error.to_string()))
-        })
-    }
-}
-
 /// Compression driven purely by host pressure evidence.
 ///
 /// The daemon compresses already-ingested canonical content: host-supplied
@@ -110,17 +54,7 @@ fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressio
         stateless_session_patterns: preflight.stateless_session_patterns,
         ignore_message_patterns: Vec::new(),
         expected_current_frontier_store_id: None,
-        threshold_tokens: preflight.threshold_tokens,
-        max_assembly_tokens: preflight.max_assembly_tokens,
-        leaf_chunk_tokens: preflight.leaf_chunk_tokens,
-        max_source_messages: preflight.max_source_messages,
-        summary_fan_in: preflight.summary_fan_in,
-        incremental_max_depth: preflight.incremental_max_depth,
-        fresh_tail_count: preflight.fresh_tail_count,
-        dynamic_leaf_chunk_enabled: preflight.dynamic_leaf_chunk_enabled,
-        dynamic_leaf_chunk_max: preflight.dynamic_leaf_chunk_max,
-        context_length: preflight.context_length,
-        reserve_tokens_floor: preflight.reserve_tokens_floor,
+        overrides: preflight.overrides,
         summarizer: LcmSummarizerMode::HermesAuxiliary,
     }
 }
@@ -131,24 +65,39 @@ fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressio
 /// restart binds a newly fenced handle to the same durable shard and reads the
 /// committed LCM frontier/status from storage.
 pub(crate) struct DaemonLcmAuthority {
-    store: Option<Arc<dyn LcmDaemonStore>>,
+    database: RegisteredGlobalDbLeaseV1,
 }
 
 impl DaemonLcmAuthority {
     pub(crate) fn registered(database: RegisteredGlobalDbLeaseV1) -> Self {
-        Self {
-            store: Some(Arc::new(RegisteredLcmDaemonStore::new(database))),
-        }
+        Self { database }
     }
 
-    #[cfg(test)]
-    fn unavailable() -> Self {
-        Self { store: None }
+    async fn compact(
+        &self,
+        request: LcmCompressionRequest,
+    ) -> Result<LcmCompressionResponse, LcmError> {
+        super::lcm_effects::DaemonLcmEffectService::new(self.database.clone(), None, None)
+            .compress(request)
+            .await
     }
 
-    #[cfg(test)]
-    fn with_store(store: Arc<dyn LcmDaemonStore>) -> Self {
-        Self { store: Some(store) }
+    async fn status(&self, query: &LcmStatusQuery) -> Result<LcmStatus, LcmError> {
+        self.database
+            .lcm_status_with_options(
+                &query.provider,
+                query.session_id.as_deref(),
+                query.deep,
+                &LcmGcConfig::default(),
+            )
+            .await
+    }
+
+    async fn doctor(&self) -> Result<serde_json::Value, LcmError> {
+        let health = SessionTemporalAccess::new(&*self.database)
+            .session_temporal_doctor_health()
+            .await;
+        serde_json::to_value(health).map_err(|error| LcmError::Db(error.to_string()))
     }
 
     #[tracing::instrument(name = "daemon.lcm.execute", level = "trace", skip_all)]
@@ -401,16 +350,8 @@ impl DaemonLcmAuthority {
         started_at: UtcMicros,
         query: LcmStatusQuery,
     ) -> LcmAuthorityResponse {
-        let Some(store) = self.store.as_ref() else {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Status,
-                started_at,
-                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable,
-            );
-        };
         tokio::select! {
-            result = store.status(query) => status_read_response(context, started_at, result),
+            result = self.status(&query) => status_read_response(context, started_at, result),
             () = cancellation.cancelled() => terminal_interruption(
                 context,
                 LcmAuthorityOperation::Status,
@@ -427,18 +368,10 @@ impl DaemonLcmAuthority {
         context: &RequestContext,
         cancellation: &CancellationSignal,
         started_at: UtcMicros,
-        query: LcmDoctorQuery,
+        _query: LcmDoctorQuery,
     ) -> LcmAuthorityResponse {
-        let Some(store) = self.store.as_ref() else {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Doctor,
-                started_at,
-                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable,
-            );
-        };
         tokio::select! {
-            result = store.doctor(query) => doctor_read_response(context, started_at, result),
+            result = self.doctor() => doctor_read_response(context, started_at, result),
             () = cancellation.cancelled() => terminal_interruption(
                 context,
                 LcmAuthorityOperation::Doctor,
@@ -458,14 +391,6 @@ impl DaemonLcmAuthority {
         started_at: UtcMicros,
         command: LcmCompactionCommand,
     ) -> LcmAuthorityResponse {
-        let Some(store) = self.store.as_ref() else {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Compact,
-                started_at,
-                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable,
-            );
-        };
         if command.evidence.protocol().provider() != command.preflight.provider {
             return unavailable(
                 context,
@@ -479,7 +404,7 @@ impl DaemonLcmAuthority {
         let result = run_application_request_interruptible(
             context,
             cancellation,
-            store.compact(request),
+            self.compact(request),
             || {},
         )
         .await;
@@ -549,18 +474,10 @@ impl DaemonLcmAuthority {
         started_at: UtcMicros,
         query: LcmStatusQuery,
     ) -> LcmAuthorityResponse {
-        let Some(store) = self.store.as_ref() else {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Status,
-                started_at,
-                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable,
-            );
-        };
         let result = run_application_request_interruptible(
             context,
             cancellation,
-            store.status(query),
+            self.status(&query),
             || {},
         )
         .await;
@@ -583,23 +500,11 @@ impl DaemonLcmAuthority {
         context: &RequestContext,
         cancellation: &CancellationToken,
         started_at: UtcMicros,
-        query: LcmDoctorQuery,
+        _query: LcmDoctorQuery,
     ) -> LcmAuthorityResponse {
-        let Some(store) = self.store.as_ref() else {
-            return unavailable(
-                context,
-                LcmAuthorityOperation::Doctor,
-                started_at,
-                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable,
-            );
-        };
-        let result = run_application_request_interruptible(
-            context,
-            cancellation,
-            store.doctor(query),
-            || {},
-        )
-        .await;
+        let result =
+            run_application_request_interruptible(context, cancellation, self.doctor(), || {})
+                .await;
         match result {
             Ok(result) => doctor_read_response(context, started_at, result),
             Err(interruption) => terminal_interruption(

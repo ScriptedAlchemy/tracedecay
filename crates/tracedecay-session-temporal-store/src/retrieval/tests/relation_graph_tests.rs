@@ -260,19 +260,16 @@ async fn seed_production_summary(
                 stateless_session_patterns: Vec::new(),
                 ignore_message_patterns: Vec::new(),
                 expected_current_frontier_store_id: None,
-                threshold_tokens: None,
-                max_assembly_tokens: None,
-                leaf_chunk_tokens: Some(1),
-                max_source_messages: Some(8),
-                summary_fan_in: None,
-                incremental_max_depth: None,
-                fresh_tail_count: Some(1),
-                dynamic_leaf_chunk_enabled: None,
-                dynamic_leaf_chunk_max: None,
-                context_length: None,
-                reserve_tokens_floor: None,
-                summarizer: tracedecay_lcm::LcmSummarizerMode::Fake {
+                overrides: tracedecay_lcm::LcmCompressionOverrides {
+                    leaf_chunk_tokens: Some(1),
+                    max_source_messages: Some(8),
+                    fresh_tail_count: Some(1),
+                    ..Default::default()
+                },
+                summarizer: tracedecay_lcm::LcmSummarizerMode::Provided {
                     summary_text: "production dirty summary sentinel".to_string(),
+                    route: None,
+                    extraction_result: None,
                 },
             },
             &ExecutionControl::default(),

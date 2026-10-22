@@ -16,9 +16,7 @@ async fn compress_noops_for_sub_threshold_backlog_in_threshold_mode() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "should not be written".into(),
-            },
+            provided_summary("should not be written"),
             Some(10),
             None,
             None,
@@ -89,9 +87,7 @@ async fn compress_proceeds_at_exact_leaf_chunk_threshold() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "boundary summary".into(),
-            },
+            provided_summary("boundary summary"),
             Some(4),
             None,
             None,
@@ -125,9 +121,7 @@ async fn maintenance_debt_bypasses_sub_threshold_noop_guard() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "first chunk summary".into(),
-            },
+            provided_summary("first chunk summary"),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
@@ -148,9 +142,7 @@ async fn maintenance_debt_bypasses_sub_threshold_noop_guard() {
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "debt catch-up summary".into(),
-            },
+            provided_summary("debt catch-up summary"),
             Some(50),
             None,
             None,
@@ -186,20 +178,12 @@ async fn zero_leaf_chunk_tokens_disables_threshold_guard() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: Some(100_000),
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: Some(1),
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "should not be used".into(),
+            overrides: tracedecay_lcm::LcmCompressionOverrides {
+                leaf_chunk_tokens: Some(100_000),
+                fresh_tail_count: Some(1),
+                ..Default::default()
             },
+            summarizer: provided_summary("should not be used"),
         })
         .await
         .unwrap();
@@ -217,20 +201,12 @@ async fn zero_leaf_chunk_tokens_disables_threshold_guard() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: Some(0),
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: Some(1),
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "zero leaf summary".into(),
+            overrides: tracedecay_lcm::LcmCompressionOverrides {
+                leaf_chunk_tokens: Some(0),
+                fresh_tail_count: Some(1),
+                ..Default::default()
             },
+            summarizer: provided_summary("zero leaf summary"),
         })
         .await
         .unwrap();
@@ -261,20 +237,11 @@ async fn zero_fresh_tail_count_keeps_no_raw_tail() {
             stateless_session_patterns: Vec::new(),
             ignore_message_patterns: Vec::new(),
             expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: Some(0),
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Fake {
-                summary_text: "zero tail summary".into(),
+            overrides: tracedecay_lcm::LcmCompressionOverrides {
+                fresh_tail_count: Some(0),
+                ..Default::default()
             },
+            summarizer: provided_summary("zero tail summary"),
         })
         .await
         .unwrap();
@@ -325,9 +292,7 @@ async fn dynamic_chunking_compacts_bounded_oldest_leaf_chunk_and_records_backlog
         .lcm_compress(limited_compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "first chunk summary".into(),
-            },
+            provided_summary("first chunk summary"),
             Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
@@ -395,9 +360,7 @@ async fn fake_summarizer_compacts_backlog_and_preserves_fresh_tail() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "old summary".into(),
-            },
+            provided_summary("old summary"),
         ))
         .await
         .unwrap();
@@ -447,9 +410,7 @@ async fn compression_preserves_leading_system_developer_tool_anchor_outside_summ
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "old exchange summary".into(),
-            },
+            provided_summary("old exchange summary"),
         ))
         .await
         .unwrap();
@@ -524,9 +485,7 @@ async fn compression_summarizes_historical_tool_messages_instead_of_pinning_all(
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "tool result summary".into(),
-            },
+            provided_summary("tool result summary"),
         ))
         .await
         .unwrap();
@@ -583,9 +542,7 @@ async fn compression_preserves_interleaved_policy_anchor_outside_summary() {
         .lcm_compress(compress_request(
             "cursor",
             "session-1",
-            LcmSummarizerMode::Fake {
-                summary_text: "old exchange summary".into(),
-            },
+            provided_summary("old exchange summary"),
         ))
         .await
         .unwrap();
