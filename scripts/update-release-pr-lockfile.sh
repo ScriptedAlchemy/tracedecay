@@ -28,7 +28,8 @@ repository_root=$PWD
 # The checkout's .cargo/config.toml replaces crates.io with pnpm-vendored
 # sources, which `cargo update` refuses. Cargo reads config from its working
 # directory, so resolve from outside the checkout with the pinned toolchain.
-(cd / && cargo "+$toolchain" update --manifest-path "$repository_root/Cargo.toml" \
+# Git dependencies are pinned; refreshing workspace versions needs no history.
+(cd / && CARGO_UNSTABLE_GIT=shallow-deps cargo "+$toolchain" update --manifest-path "$repository_root/Cargo.toml" \
   -p tracedecay --precise "$release_version")
 # pnpm validates workspace crate versions even for a frozen npm installation.
 # Repair the release's Cargo lock before installing generated-build inputs.
