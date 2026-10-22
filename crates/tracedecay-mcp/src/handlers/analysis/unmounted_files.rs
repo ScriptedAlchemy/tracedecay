@@ -62,6 +62,12 @@ pub(super) async fn compute_unmounted_files(
         message: format!("unmounted-file audit did not complete: {error}"),
     })??;
 
+    let coverage_complete = audit.ecosystems.iter().all(|ecosystem| {
+        ecosystem.status != EcosystemStatus::Partial
+            || ecosystem_filter
+                .as_deref()
+                .is_some_and(|wanted| wanted != ecosystem.ecosystem)
+    });
     let matching = audit
         .ecosystems
         .iter()
@@ -101,7 +107,7 @@ pub(super) async fn compute_unmounted_files(
             unmounted_file_count: unmounted_file_count as u64,
             returned_count: returned_count as u64,
             omitted_count: unmounted_file_count.saturating_sub(returned_count) as u64,
-            complete: returned_count == unmounted_file_count,
+            complete: coverage_complete && returned_count == unmounted_file_count,
             ecosystems: audit.ecosystems.iter().map(ecosystem_section).collect(),
             limit: limit as u64,
             path: path_filter,
@@ -118,6 +124,7 @@ fn ecosystem_section(audit: &EcosystemAudit) -> UnmountedEcosystemV1 {
         ecosystem: audit.ecosystem.to_owned(),
         status: match audit.status {
             EcosystemStatus::Audited => UnmountedEcosystemStatusV1::Audited,
+            EcosystemStatus::Partial => UnmountedEcosystemStatusV1::Partial,
             EcosystemStatus::NotPresent => UnmountedEcosystemStatusV1::NotPresent,
             EcosystemStatus::Unsupported => UnmountedEcosystemStatusV1::Unsupported,
         },

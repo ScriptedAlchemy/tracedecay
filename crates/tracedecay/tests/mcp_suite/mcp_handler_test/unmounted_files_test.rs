@@ -235,6 +235,62 @@ async fn unmounted_files_names_only_files_no_entry_reaches() {
 }
 
 #[tokio::test]
+async fn unmounted_files_reports_partial_input_coverage_in_json_and_markdown() {
+    let fixture = production_composition_fixture_with_sources(|root| {
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"complete\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(root, "src/lib.rs", "pub fn entry() {}\n");
+        write(root, "broken/package.json", "{");
+        write(root, "broken/src/index.ts", "import './used';");
+        write(root, "broken/src/used.ts", "export const used = 1;");
+        write(root, "broken/src/unknown.ts", "export const unknown = 1;");
+        write(root, "healthy/package.json", r#"{"name":"healthy"}"#);
+        write(root, "healthy/src/index.ts", "export const entry = 1;");
+        write(root, "healthy/src/orphan.ts", "export const orphan = 1;");
+    })
+    .await;
+    let payload = call_json(&fixture, json!({"format": "json"})).await;
+    assert_eq!(payload["complete"], false, "{payload}");
+    assert_eq!(payload["omitted_count"], 0, "{payload}");
+    assert_eq!(payload["unmounted_file_count"], 1, "{payload}");
+    assert_eq!(
+        payload["unmounted"][0]["file"], "healthy/src/orphan.ts",
+        "{payload}"
+    );
+    let typescript = census(&payload, "typescript");
+    assert_eq!(typescript["status"], "partial", "{payload}");
+    let note = typescript["note"].as_str().expect("omission reason");
+    assert!(note.contains("broken/package.json"), "{note}");
+    assert!(note.contains("EOF"), "{note}");
+    assert!(
+        !note.contains(&fixture.project_root.display().to_string()),
+        "{note}"
+    );
+
+    let markdown = call_markdown(&fixture, json!({})).await;
+    assert!(markdown.contains("**Coverage:** partial"), "{markdown}");
+    assert!(markdown.contains(note), "{markdown}");
+    assert!(!markdown.contains("**Omitted:**"), "{markdown}");
+    assert!(
+        !markdown_findings(&markdown).contains("broken/"),
+        "{markdown}"
+    );
+
+    let empty = call_markdown(&fixture, json!({"path": "broken"})).await;
+    assert!(empty.contains("Missing inputs prevent"), "{empty}");
+    assert!(
+        !empty.contains("Every scanned source file is reachable"),
+        "{empty}"
+    );
+    let rust = call_json(&fixture, json!({"format": "json", "ecosystem": "rust"})).await;
+    assert_eq!(rust["complete"], true, "{rust}");
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn unmounted_files_refuses_arguments_that_are_not_an_object() {
     let fixture = mount_probe().await;
     let response = fixture

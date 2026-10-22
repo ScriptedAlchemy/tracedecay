@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tracedecay_code_extraction::{LanguageExtractor, TypeScriptExtractor};
 use tracedecay_domain::blank_json_comments;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tree_sitter::Node;
 
 use super::{
@@ -81,6 +81,60 @@ struct NodePackage {
     aliases: Vec<AliasRule>,
     /// `compilerOptions.baseUrl` directories, for bare specifiers.
     base_urls: Vec<PathBuf>,
+    coverage: AuditCoverage,
+}
+
+#[derive(Default)]
+struct AuditCoverage {
+    omissions: BTreeSet<String>,
+}
+
+impl AuditCoverage {
+    fn omit(&mut self, root: &Path, path: &Path, reason: impl std::fmt::Display) {
+        self.omissions
+            .insert(format!("{}: {reason}", relative_display(root, path)));
+    }
+
+    fn read(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        reader: &impl Fn(&Path) -> std::io::Result<String>,
+    ) -> Option<String> {
+        match reader(path) {
+            Ok(source) => Some(source),
+            Err(error) => {
+                self.omit(root, path, error);
+                None
+            }
+        }
+    }
+
+    fn json(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        reader: &impl Fn(&Path) -> std::io::Result<String>,
+        comments: bool,
+    ) -> Option<Value> {
+        let source = self.read(root, path, reader)?;
+        let source = if comments {
+            blank_json_comments(&source)
+        } else {
+            source
+        };
+        match serde_json::from_str::<Value>(&source) {
+            Ok(value) if value.is_object() => Some(value),
+            Ok(_) => {
+                self.omit(root, path, "expected a JSON object");
+                None
+            }
+            Err(error) => {
+                self.omit(root, path, error);
+                None
+            }
+        }
+    }
 }
 
 /// One `compilerOptions.paths` entry: `"@app/*": ["src/*"]`.
@@ -119,14 +173,19 @@ impl AliasRule {
 /// Walks every discovered npm package's import graph and reports the source
 /// files no entry point reaches.
 pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
-    let project_root = files.root();
+    Ok(audit_with_reader(files, &|path| {
+        std::fs::read_to_string(path)
+    }))
+}
+
+fn audit_with_reader(
+    files: &ProjectFiles,
+    reader: &impl Fn(&Path) -> std::io::Result<String>,
+) -> EcosystemAudit {
     let manifest_paths = files.named("package.json");
     let source_files = files.with_extensions(&SOURCE_EXTENSIONS);
     if manifest_paths.is_empty() && source_files.is_empty() {
-        return Ok(EcosystemAudit::not_present(
-            "typescript",
-            TYPESCRIPT_VERDICT,
-        ));
+        return EcosystemAudit::not_present("typescript", TYPESCRIPT_VERDICT);
     }
 
     let owned_files = source_files.iter().copied().collect::<HashSet<&Path>>();
@@ -153,18 +212,32 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
             package_files[*index].push(file);
         }
     }
-    let packages = package_dirs
+    let mut packages = package_dirs
         .iter()
         .zip(&package_files)
-        .map(|(dir, sources)| node_package(project_root, dir, &owned_files, sources))
-        .collect::<Result<Vec<_>>>()?;
+        .map(|(dir, sources)| node_package(files, dir, &owned_files, sources, reader))
+        .collect::<Vec<_>>();
 
-    let mut mounted: HashSet<PathBuf> = HashSet::new();
-    let mut entry_point_count = 0usize;
-    for package in &packages {
-        entry_point_count += package.entries.len();
-        walk_imports(package, &mut mounted);
+    let entry_point_count = packages.iter().map(|package| package.entries.len()).sum();
+    let walks = packages
+        .iter_mut()
+        .map(|package| walk_imports(files.root(), package, &owned_files, reader))
+        .collect::<Vec<_>>();
+    let mut dependent_omissions = vec![BTreeSet::new(); packages.len()];
+    for (package, reached) in packages.iter().zip(&walks) {
+        if package.coverage.omissions.is_empty() {
+            continue;
+        }
+        for file in reached {
+            if let Some(owner) = file.ancestors().find_map(|dir| package_indices.get(dir)) {
+                dependent_omissions[*owner].extend(package.coverage.omissions.iter().cloned());
+            }
+        }
     }
+    for (package, omissions) in packages.iter_mut().zip(dependent_omissions) {
+        package.coverage.omissions.extend(omissions);
+    }
+    let mounted = walks.into_iter().flatten().collect::<HashSet<_>>();
 
     let mut scanned_file_count = 0usize;
     let mut unclaimed_file_count = 0usize;
@@ -176,7 +249,7 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
         };
         let package = &packages[index];
         scanned_file_count += 1;
-        if mounted.contains(&normalized(absolute)) {
+        if mounted.contains(&normalized(absolute)) || !package.coverage.omissions.is_empty() {
             continue;
         }
         unmounted.push(UnmountedFile {
@@ -193,9 +266,23 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     }
 
     unmounted.sort_by(|left, right| left.file.cmp(&right.file));
-    Ok(EcosystemAudit {
+    let omissions = packages
+        .iter()
+        .flat_map(|package| {
+            package
+                .coverage
+                .omissions
+                .iter()
+                .map(|reason| format!("{}: {reason}", package.manifest))
+        })
+        .collect::<Vec<_>>();
+    EcosystemAudit {
         ecosystem: "typescript",
-        status: EcosystemStatus::Audited,
+        status: if omissions.is_empty() {
+            EcosystemStatus::Audited
+        } else {
+            EcosystemStatus::Partial
+        },
         package_count: packages.len(),
         entry_point_count,
         scanned_file_count,
@@ -203,10 +290,15 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
         unclaimed_file_count,
         verdict: TYPESCRIPT_VERDICT,
         blind_spots: TYPESCRIPT_BLIND_SPOTS.to_vec(),
-        note: None,
+        note: (!omissions.is_empty()).then(|| {
+            format!(
+                "Negative reachability findings withheld for packages with missing inputs: {}",
+                omissions.join("; ")
+            )
+        }),
         excluded_globs: Vec::new(),
         unmounted,
-    })
+    }
 }
 
 /// Reads one `package.json` (and the tsconfigs and config files beside it) into
@@ -217,15 +309,16 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     skip_all
 )]
 fn node_package(
-    project_root: &Path,
+    files: &ProjectFiles,
     dir: &Path,
     owned: &HashSet<&Path>,
     sources: &[&Path],
-) -> Result<NodePackage> {
+    reader: &impl Fn(&Path) -> std::io::Result<String>,
+) -> NodePackage {
+    let project_root = files.root();
+    let mut coverage = AuditCoverage::default();
     let manifest_path = dir.join("package.json");
-    let manifest = std::fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let manifest = coverage.json(project_root, &manifest_path, reader, false);
     let name = manifest
         .as_ref()
         .and_then(|manifest| manifest.get("name"))
@@ -278,7 +371,8 @@ fn node_package(
         entries.extend(resolved);
     }
 
-    let (aliases, base_urls, tsconfig_files) = tsconfig_declarations(dir);
+    let (aliases, base_urls, tsconfig_files) =
+        tsconfig_declarations(files, dir, reader, &mut coverage);
     for file in tsconfig_files {
         for resolved in resolve_relative(dir, &file) {
             if owned.contains(resolved.as_path()) {
@@ -295,17 +389,17 @@ fn node_package(
         .filter(|file| file.parent() == Some(dir) && is_config_file(file))
     {
         entries.insert((*candidate).to_path_buf());
-        let source = std::fs::read_to_string(candidate).map_err(|error| TraceDecayError::File {
-            message: format!("failed to read TypeScript config: {error}"),
-            path: relative_display(project_root, candidate),
-        })?;
-        let literals =
-            config_string_literals(candidate, &source).ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "TypeScript config {} could not be parsed without syntax errors",
-                    relative_display(project_root, candidate)
-                ),
-            })?;
+        let Some(source) = coverage.read(project_root, candidate, reader) else {
+            continue;
+        };
+        let Some(literals) = config_string_literals(candidate, &source) else {
+            coverage.omit(
+                project_root,
+                candidate,
+                "TypeScript config could not be parsed without syntax errors",
+            );
+            continue;
+        };
         for literal in literals {
             for resolved in resolve_relative(dir, &literal) {
                 if owned.contains(resolved.as_path()) {
@@ -324,14 +418,15 @@ fn node_package(
         entries.insert((*candidate).to_path_buf());
     }
 
-    Ok(NodePackage {
+    NodePackage {
         name,
         dir: dir.to_path_buf(),
         manifest: relative_display(project_root, &manifest_path),
         entries: entries.into_iter().collect(),
         aliases,
         base_urls,
-    })
+        coverage,
+    }
 }
 
 /// Every string value anywhere inside a JSON value, how `exports` and `bin`
@@ -426,25 +521,24 @@ fn is_conventional_entry(package_dir: &Path, file: &Path) -> bool {
 
 /// `compilerOptions.paths` rules, `baseUrl` directories, and `files` entries
 /// from every `tsconfig*.json` beside the manifest.
-fn tsconfig_declarations(dir: &Path) -> (Vec<AliasRule>, Vec<PathBuf>, Vec<String>) {
+fn tsconfig_declarations(
+    inventory: &ProjectFiles,
+    dir: &Path,
+    reader: &impl Fn(&Path) -> std::io::Result<String>,
+    coverage: &mut AuditCoverage,
+) -> (Vec<AliasRule>, Vec<PathBuf>, Vec<String>) {
     let mut aliases = Vec::new();
     let mut base_urls = Vec::new();
     let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (aliases, base_urls, files);
-    };
-    let mut configs = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
+    let configs = inventory.files.iter().filter(|path| {
+        path.parent() == Some(dir)
+            && path
+                .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("tsconfig") && name.ends_with(".json"))
-        })
-        .collect::<Vec<_>>();
-    configs.sort();
+    });
     for config in configs {
-        let Some(parsed) = read_jsonc(&config) else {
+        let Some(parsed) = coverage.json(inventory.root(), config, reader, true) else {
             continue;
         };
         let options = parsed.get("compilerOptions");
@@ -487,12 +581,6 @@ fn tsconfig_declarations(dir: &Path) -> (Vec<AliasRule>, Vec<PathBuf>, Vec<Strin
         }
     }
     (aliases, base_urls, files)
-}
-
-/// Parses a tsconfig, which is JSON with comments in practice.
-fn read_jsonc(path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Value>(&blank_json_comments(&text)).ok()
 }
 
 /// Every static string literal in a config file's syntax tree.
@@ -541,7 +629,13 @@ fn collect_config_string_literals(source: &str, node: Node<'_>, out: &mut Vec<St
     level = "trace",
     skip_all
 )]
-fn walk_imports(package: &NodePackage, mounted: &mut HashSet<PathBuf>) {
+fn walk_imports(
+    root: &Path,
+    package: &mut NodePackage,
+    owned: &HashSet<&Path>,
+    reader: &impl Fn(&Path) -> std::io::Result<String>,
+) -> HashSet<PathBuf> {
+    let mut mounted = HashSet::new();
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
     for entry in &package.entries {
         let entry = normalized(entry);
@@ -550,17 +644,18 @@ fn walk_imports(package: &NodePackage, mounted: &mut HashSet<PathBuf>) {
         }
     }
     while let Some(file) = queue.pop_front() {
-        let Ok(source) = std::fs::read_to_string(&file) else {
+        let Some(source) = package.coverage.read(root, &file, reader) else {
             continue;
         };
-        for specifier in module_specifiers(&file, &source) {
+        for specifier in module_specifiers(root, &file, &source, &mut package.coverage) {
             for target in resolve_specifier(package, &file, &specifier) {
-                if mounted.insert(target.clone()) {
+                if owned.contains(target.as_path()) && mounted.insert(target.clone()) {
                     queue.push_back(target);
                 }
             }
         }
     }
+    mounted
 }
 
 /// Every module specifier one file names.
@@ -570,7 +665,12 @@ fn walk_imports(package: &NodePackage, mounted: &mut HashSet<PathBuf>) {
 /// disagree about those forms. Dynamic `import(…)` is still read off the
 /// tree-sitter grammar because the extractor does not emit that form as
 /// import evidence today.
-fn module_specifiers(file: &Path, source: &str) -> Vec<String> {
+fn module_specifiers(
+    root: &Path,
+    file: &Path,
+    source: &str,
+    coverage: &mut AuditCoverage,
+) -> Vec<String> {
     let logical_path = file.to_string_lossy().into_owned();
     let mut specifiers = TypeScriptExtractor
         .extract_artifact(&logical_path, source)
@@ -579,8 +679,14 @@ fn module_specifiers(file: &Path, source: &str) -> Vec<String> {
         .map(|evidence| evidence.module_specifier)
         .collect::<Vec<_>>();
 
-    if let Some(tree) = parse_typescript(file, source) {
-        collect_reexports_and_calls(source, tree.root_node(), &mut specifiers);
+    match parse_typescript(file, source) {
+        Some(tree) => {
+            if tree.root_node().has_error() {
+                coverage.omit(root, file, "source contains syntax errors");
+            }
+            collect_reexports_and_calls(source, tree.root_node(), &mut specifiers);
+        }
+        None => coverage.omit(root, file, "source parser unavailable"),
     }
     specifiers.sort();
     specifiers.dedup();
@@ -761,7 +867,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::super::tests::{project, write};
-    use super::{AliasRule, EcosystemAudit, audit};
+    use super::{AliasRule, EcosystemAudit, audit, audit_with_reader};
 
     fn audit_typescript(root: &Path) -> EcosystemAudit {
         audit(&project(root)).expect("TypeScript audit")
@@ -773,6 +879,146 @@ mod tests {
             .iter()
             .map(|entry| entry.file.as_str())
             .collect()
+    }
+
+    #[test]
+    fn malformed_manifest_withholds_affected_findings_and_keeps_independent_package() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        write(root, "broken/package.json", "{");
+        write(root, "broken/src/index.ts", "import './used';");
+        write(root, "broken/src/used.ts", "export const used = 1;");
+        write(root, "broken/src/unknown.ts", "export const unknown = 1;");
+        write(root, "healthy/package.json", r#"{"name":"healthy"}"#);
+        write(root, "healthy/src/index.ts", "export const entry = 1;");
+        write(root, "healthy/src/orphan.ts", "export const orphan = 1;");
+
+        let audit = audit_typescript(root);
+        assert_eq!(audit.status.as_str(), "partial");
+        assert_eq!(unmounted_paths(&audit), vec!["healthy/src/orphan.ts"]);
+        assert_eq!(audit.mounted_file_count, 3);
+        let note = audit.note.expect("missing-input explanation");
+        assert!(note.contains("broken/package.json"), "{note}");
+        assert!(note.contains("EOF"), "{note}");
+        assert!(!note.contains(&root.display().to_string()), "{note}");
+    }
+
+    #[test]
+    fn unreadable_inputs_withhold_package_findings_and_preserve_proven_mounts() {
+        for unreadable in [
+            "package.json",
+            "tsconfig.json",
+            "src/index.ts",
+            "src/intermediate.ts",
+            "rsbuild.config.ts",
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let root = temp.path();
+            write(root, "broken/package.json", r#"{"name":"broken"}"#);
+            write(root, "broken/tsconfig.json", "{}");
+            write(root, "broken/rsbuild.config.ts", "export default {};");
+            write(root, "broken/src/index.ts", "import './intermediate';");
+            write(root, "broken/src/intermediate.ts", "import './descendant';");
+            write(root, "broken/src/descendant.ts", "export const used = 1;");
+            write(root, "broken/src/orphan.ts", "export const orphan = 1;");
+            write(root, "healthy/package.json", r#"{"name":"healthy"}"#);
+            write(root, "healthy/src/index.ts", "export const entry = 1;");
+            write(root, "healthy/src/orphan.ts", "export const orphan = 1;");
+            let failed_path = root.join("broken").join(unreadable);
+            let audit = audit_with_reader(&project(root), &|path| {
+                if path == failed_path {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "fixture read denied",
+                    ))
+                } else {
+                    std::fs::read_to_string(path)
+                }
+            });
+            assert_eq!(audit.status.as_str(), "partial", "{unreadable}");
+            assert_eq!(
+                unmounted_paths(&audit),
+                vec!["healthy/src/orphan.ts"],
+                "{unreadable}"
+            );
+            let expected_mounted = match unreadable {
+                "src/index.ts" => 3,
+                "src/intermediate.ts" => 4,
+                _ => 5,
+            };
+            assert_eq!(audit.mounted_file_count, expected_mounted, "{unreadable}");
+            let note = audit.note.expect("read omission");
+            assert!(note.contains(&format!("broken/{unreadable}")), "{note}");
+            assert!(note.contains("fixture read denied"), "{note}");
+            assert!(!note.contains(&root.display().to_string()), "{note}");
+        }
+    }
+
+    #[test]
+    fn unreadable_cross_package_source_withholds_descendants_in_its_own_package() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        write(root, "app/package.json", r#"{"name":"app"}"#);
+        write(
+            root,
+            "app/src/index.ts",
+            "import '../../shared/src/intermediate';",
+        );
+        write(root, "shared/package.json", r#"{"name":"shared"}"#);
+        write(root, "shared/src/intermediate.ts", "import './descendant';");
+        write(root, "shared/src/descendant.ts", "export const used = 1;");
+        write(root, "healthy/package.json", r#"{"name":"healthy"}"#);
+        write(root, "healthy/src/index.ts", "export const entry = 1;");
+        write(root, "healthy/src/orphan.ts", "export const orphan = 1;");
+        let failed_path = root.join("shared/src/intermediate.ts");
+        let audit = audit_with_reader(&project(root), &|path| {
+            if path == failed_path {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "fixture read denied",
+                ))
+            } else {
+                std::fs::read_to_string(path)
+            }
+        });
+        assert_eq!(audit.status.as_str(), "partial");
+        assert_eq!(unmounted_paths(&audit), vec!["healthy/src/orphan.ts"]);
+        assert_eq!(audit.mounted_file_count, 3);
+    }
+
+    #[test]
+    fn malformed_tsconfig_and_source_withhold_negative_findings() {
+        for (path, contents) in [
+            ("tsconfig.json", "{"),
+            ("src/index.ts", "import './used'; export const broken = ;"),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let root = temp.path();
+            write(root, "package.json", r#"{"name":"broken"}"#);
+            write(root, "src/index.ts", "import './used';");
+            write(root, "src/used.ts", "export const used = 1;");
+            write(root, "src/orphan.ts", "export const orphan = 1;");
+            write(root, path, contents);
+            let audit = audit_typescript(root);
+            assert_eq!(audit.status.as_str(), "partial", "{path}");
+            assert!(audit.unmounted.is_empty(), "{path}");
+            assert_eq!(audit.mounted_file_count, 2, "{path}");
+            let note = audit.note.expect("parse omission");
+            assert!(note.contains(path), "{note}");
+        }
+    }
+
+    #[test]
+    fn missing_optional_tsconfig_is_a_complete_audit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        write(root, "package.json", r#"{"name":"complete"}"#);
+        write(root, "src/index.ts", "export const entry = 1;");
+        write(root, "src/orphan.ts", "export const orphan = 1;");
+        let audit = audit_typescript(root);
+        assert_eq!(audit.status.as_str(), "audited");
+        assert_eq!(unmounted_paths(&audit), vec!["src/orphan.ts"]);
+        assert!(audit.note.is_none());
     }
 
     /// The headline case: one module imported from the declared entry, one that
@@ -873,14 +1119,14 @@ mod tests {
         );
         write(root, "src/index.ts", "export const app = 1;\n");
 
-        let Err(error) = audit(&project(root)) else {
-            panic!("malformed config must make the audit unavailable");
-        };
+        let audit = audit_typescript(root);
+        assert_eq!(audit.status.as_str(), "partial");
+        assert!(audit.unmounted.is_empty());
+        let note = audit.note.expect("config omission");
+        assert!(note.contains("rsbuild.config.ts"), "{note}");
         assert!(
-            error.to_string().contains(
-                "TypeScript config rsbuild.config.ts could not be parsed without syntax errors"
-            ),
-            "{error}"
+            note.contains("could not be parsed without syntax errors"),
+            "{note}"
         );
     }
 
