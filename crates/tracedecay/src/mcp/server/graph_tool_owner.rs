@@ -15,7 +15,7 @@ use tracedecay_daemon_service::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::handlers::graph_tool::graph_tool_owner_stores;
-use tracedecay_mcp::server::join_hook_ingest_refresh;
+use tracedecay_mcp::server::{hook_ingest_refresh_session, join_hook_ingest_refresh};
 use tracedecay_mcp::tools::binding::{BranchSensitivity, tool_branch_sensitivity};
 use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::branch::BranchMemo;
@@ -152,6 +152,12 @@ impl McpServer {
         &self,
         invocation: GraphToolInvocationV1,
     ) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
+        let publication_session =
+            if invocation.operation == ApplicationSurfaceOperation::HookRuntime {
+                hook_ingest_refresh_session(&invocation.arguments)?
+            } else {
+                None
+            };
         let (cg, live_branch) = self.reopen_if_branch_drifted_memoized().await;
         self.probe_before_graph_read(invocation.operation, &cg, &live_branch);
         let server_stats = match invocation.operation {
@@ -169,11 +175,6 @@ impl McpServer {
             application_cancellation: Some(invocation.cancellation),
             ..self.tool_call_registry_options(session_sync_service.as_deref())
         };
-        let transcript_session_id = invocation
-            .arguments
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
         let computed = compute_graph_tool_for_owner(
             cg.as_ref(),
             invocation.operation,
@@ -195,8 +196,8 @@ impl McpServer {
             // The ingest wrote through this server's session stores; answer
             // only once their refresh owner has published it.
             join_hook_ingest_refresh(
-                transcript_session_id.as_deref(),
                 ingest.user_scope,
+                publication_session.as_ref(),
                 self.project_session_refresh_wake.as_deref(),
                 self.user_session_refresh_wake.as_deref(),
             )

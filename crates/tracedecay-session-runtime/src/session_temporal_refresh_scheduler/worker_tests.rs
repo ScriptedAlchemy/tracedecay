@@ -221,7 +221,7 @@ async fn a_wake_served_by_the_running_pass_joins_that_pass() {
     history.entered.notified().await;
 
     let handle = state.handle();
-    let join = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
+    let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
     tokio::pin!(join);
     // The first poll registers the join and delivers the wake.
     assert!(
@@ -287,7 +287,7 @@ async fn a_published_wake_does_not_wait_for_the_next_history_window() {
     history.entered.notified().await;
 
     let handle = state.handle();
-    let join = handle.wake_and_wait_for_projection(None, Duration::from_secs(1));
+    let join = handle.wake_and_wait_for_projection(Duration::from_secs(1));
     tokio::pin!(join);
     assert!(
         std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
@@ -319,7 +319,7 @@ async fn a_live_wake_publishes_before_waiting_for_summary_admission() {
         .expect("running refresh");
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
     let handle = state.handle();
-    let join = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
+    let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
     tokio::pin!(join);
     assert!(
         std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
@@ -337,16 +337,7 @@ async fn a_live_wake_publishes_before_waiting_for_summary_admission() {
 
     assert!(
         join.await,
-        "summary admission must not hold a live projection: status={:?}, passes={}, receipt={:?}",
-        state.handle().status(),
-        state.pass_count.load(Ordering::Acquire),
-        store
-            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
-                begun.operation_id().clone(),
-                begun.session_id().clone(),
-            ))
-            .await
-            .unwrap()
+        "summary admission must not hold a live projection"
     );
     let receipt = store
         .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
@@ -408,7 +399,7 @@ async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
     assert!(
         state
             .handle()
-            .wake_and_wait_for_projection(None, Duration::from_secs(5))
+            .wake_and_wait_for_projection(Duration::from_secs(5))
             .await,
         "a new wake must publish while summary admission has no permits"
     );
@@ -436,6 +427,104 @@ async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
 
 struct ControlledProjector {
     reject: AtomicBool,
+}
+
+/// Fails one session while every other session uses the production projector.
+struct SessionRefusingProjector {
+    refused: SessionId,
+}
+
+impl SessionTemporalRefreshProjector for SessionRefusingProjector {
+    fn project<'a>(
+        &'a self,
+        database: &'a RegisteredGlobalDbLeaseV1,
+        recovery: SessionRefreshRecoveryV1,
+    ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        Box::pin(async move {
+            if recovery.session_id() == &self.refused {
+                Err(SessionTemporalRefreshProjectorError::terminal(
+                    "fixture_session_projection_refused",
+                ))
+            } else {
+                CanonicalSessionTemporalProjector
+                    .project(database, recovery)
+                    .await
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn named_projection_join_survives_an_unrelated_session_failure() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-join-session-isolation").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let successful = SessionId::new("projection-accepted").expect("successful session");
+    let refused = SessionId::new("projection-refused").expect("refused session");
+    begin_empty_refreshes(&store, ["projection-accepted", "projection-refused"]).await;
+    let recoveries = store.running_session_refreshes().await.expect("recoveries");
+    assert_eq!(recoveries.len(), 2);
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let handle = state.handle();
+    let successful_join =
+        handle.wake_and_wait_for_session_projection(&successful, Duration::from_secs(5));
+    let refused_join =
+        handle.wake_and_wait_for_session_projection(&refused, Duration::from_secs(5));
+    let aggregate_join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+    tokio::pin!(successful_join, refused_join, aggregate_join);
+    // Put all three obligations in the same pass before starting the worker.
+    // The unnamed caller still owns the aggregate failure contract.
+    let pending = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready((
+            successful_join.as_mut().poll(cx).is_pending(),
+            refused_join.as_mut().poll(cx).is_pending(),
+            aggregate_join.as_mut().poll(cx).is_pending(),
+        ))
+    })
+    .await;
+    assert_eq!(pending, (true, true, true));
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(SessionRefusingProjector {
+            refused: refused.clone(),
+        }),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(tokio::sync::Semaphore::new(0)),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+
+    let (successful_result, refused_result, aggregate_result) =
+        tokio::join!(successful_join, refused_join, aggregate_join);
+    state.cancel();
+    worker.await.expect("worker exits on cancellation");
+    assert!(
+        successful_result,
+        "another session cannot veto a committed publication"
+    );
+    assert!(
+        !refused_result,
+        "the failed session must refuse its own join"
+    );
+    assert!(
+        !aggregate_result,
+        "unnamed sweeps must retain aggregate failure"
+    );
+    for recovery in recoveries {
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                recovery.operation_id().clone(),
+                recovery.session_id().clone(),
+            ))
+            .await
+            .expect("read durable receipt")
+            .expect("both sessions must settle durably");
+        let expected = if recovery.session_id() == &successful {
+            SessionRefreshTerminalStateV1::Complete
+        } else {
+            SessionRefreshTerminalStateV1::Failed
+        };
+        assert_eq!(receipt.state(), expected);
+    }
 }
 
 impl SessionTemporalRefreshProjector for ControlledProjector {
@@ -486,7 +575,7 @@ async fn projection_joins_keep_their_result_when_later_work_settles_differently(
         history.entered.notified().await;
 
         let handle = state.handle();
-        let first = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
+        let first = handle.wake_and_wait_for_projection(Duration::from_secs(5));
         tokio::pin!(first);
         assert!(
             std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx)))
@@ -501,7 +590,7 @@ async fn projection_joins_keep_their_result_when_later_work_settles_differently(
         // one already delivered to the earlier request.
         projector.reject.store(!reject_first, Ordering::Release);
         begin_empty_refreshes(&store, ["second-projection"]).await;
-        let second = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
+        let second = handle.wake_and_wait_for_projection(Duration::from_secs(5));
         tokio::pin!(second);
         assert!(
             std::future::poll_fn(|cx| std::task::Poll::Ready(second.as_mut().poll(cx)))
@@ -509,14 +598,7 @@ async fn projection_joins_keep_their_result_when_later_work_settles_differently(
                 .is_pending()
         );
         history.release.notify_one();
-        assert_eq!(
-            second.await,
-            reject_first,
-            "status={:?}, passes={}, running={:?}",
-            state.handle().status(),
-            state.pass_count.load(Ordering::Acquire),
-            store.running_session_refreshes().await.unwrap()
-        );
+        assert_eq!(second.await, reject_first);
         assert_eq!(first.await, !reject_first);
 
         state.cancel();

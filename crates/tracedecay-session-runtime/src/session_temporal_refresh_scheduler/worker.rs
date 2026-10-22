@@ -25,7 +25,7 @@ use super::projector::{
 };
 use super::registry::{SessionTemporalRefreshPassReport, session_refresh_retry_delay};
 use super::wake::{
-    PendingBeginRequestGuard, ProjectionJoin, RecoverySelectionGuard,
+    PendingBeginRequestGuard, RecoverySelectionGuard, SessionProjectionJoin,
     SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -235,7 +235,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     let mut history_priority_passes = 0u32;
     let mut history_release = None;
     let mut granted_history_admission = None;
-    let mut projection_joins: Vec<ProjectionJoin> = Vec::new();
+    let mut projection_joins: Vec<SessionProjectionJoin> = Vec::new();
     let live_projection = LiveProjectionDuringSummary {
         database: &database,
         state: &state,
@@ -793,10 +793,12 @@ async fn session_projection_refresh(
     state: &Arc<SessionTemporalRefreshWakeState>,
     projector: &dyn SessionTemporalRefreshProjector,
     policy: SessionTemporalRefreshPolicy,
-    joins: &mut Vec<ProjectionJoin>,
+    joins: &mut Vec<SessionProjectionJoin>,
 ) -> SessionTemporalRefreshPassReport {
     joins.retain(|join| !join.completion.is_closed());
     joins.extend(state.take_projection_joins());
+    let access = SessionTemporalAccess::new(database.as_ref());
+    capture_projection_targets(&access, joins).await;
     let report = run_session_temporal_refresh_pass(database, state, projector, policy).await;
     if state.cancelled.load(Ordering::Acquire) {
         return report;
@@ -815,36 +817,93 @@ async fn session_projection_refresh(
     } else {
         None
     };
-    let access = SessionTemporalAccess::new(database.as_ref());
-    let mut pending = Vec::new();
-    for join in joins.drain(..) {
-        let published = match &join.session_id {
-            Some(session_id) => match access
-                .session_projection_publication_result(session_id)
-                .await
+    settle_projection_joins(&access, joins, &report, result).await;
+    report
+}
+
+async fn capture_projection_targets(
+    access: &SessionTemporalAccess<'_, RegisteredGlobalDb>,
+    joins: &mut Vec<SessionProjectionJoin>,
+) {
+    let mut frontiers = HashMap::new();
+    for mut join in std::mem::take(joins) {
+        if let Some(session_id) = &join.session_id
+            && join.observed_through.is_none()
+        {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                frontiers.entry(session_id.clone())
             {
-                Ok(published) => published,
-                Err(error) => {
-                    tracing::warn!(%error, "could not verify session projection publication");
+                let frontier = access
+                    .session_temporal_publication_result(session_id)
+                    .await
+                    .map(|publication| publication.observed_through())
+                    .map_err(|error| {
+                        tracing::warn!(%session_id, %error, "session publication target unavailable");
+                    })
+                    .ok();
+                entry.insert(frontier);
+            }
+            let Some(frontier) = frontiers.get(session_id).copied().flatten() else {
+                let _ = join.completion.send(false);
+                continue;
+            };
+            join.observed_through = Some(frontier);
+        }
+        joins.push(join);
+    }
+}
+
+async fn settle_projection_joins(
+    access: &SessionTemporalAccess<'_, RegisteredGlobalDb>,
+    joins: &mut Vec<SessionProjectionJoin>,
+    report: &SessionTemporalRefreshPassReport,
+    aggregate: Option<bool>,
+) {
+    let mut publications = HashMap::new();
+    for join in std::mem::take(joins) {
+        if join.completion.is_closed() {
+            continue;
+        }
+        let result = if let Some(session_id) = &join.session_id {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                publications.entry(session_id.clone())
+            {
+                let publication = access
+                    .session_temporal_publication_result(session_id)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(%session_id, %error, "session publication proof unavailable");
+                    })
+                    .ok();
+                entry.insert(publication);
+            }
+            match publications.get(session_id).and_then(Option::as_ref) {
+                Some(publication)
+                    if join
+                        .observed_through
+                        .is_some_and(|target| publication.covers(target)) =>
+                {
+                    Some(true)
+                }
+                Some(_)
+                    if report.failed_sessions.contains(session_id) || aggregate == Some(true) =>
+                {
+                    // The named session must prove its own frontier. A drained
+                    // scope or another session's successful receipt is not proof.
                     Some(false)
                 }
-            },
-            None => result,
-        };
-        let published = if state.cancelled.load(Ordering::Acquire) {
-            Some(false)
-        } else {
-            published
-        };
-        match published {
-            Some(published) => {
-                let _ = join.completion.send(published);
+                Some(_) => None,
+                None => Some(false),
             }
-            None => pending.push(join),
+        } else {
+            aggregate
+        };
+        if let Some(published) = result {
+            let _ = join.completion.send(published);
+        } else {
+            joins.push(join);
         }
     }
-    *joins = pending;
-    report
 }
 
 /// Keeps one fair summary admission or in-flight summary page alive while the
@@ -861,7 +920,7 @@ impl LiveProjectionDuringSummary<'_> {
     async fn wait_for<F>(
         &self,
         stage: F,
-        joins: &mut Vec<ProjectionJoin>,
+        joins: &mut Vec<SessionProjectionJoin>,
         report: &mut SessionTemporalRefreshPassReport,
         idle_between_projections: bool,
     ) -> Option<F::Output>
@@ -1767,6 +1826,7 @@ async fn apply_fail_effect(
                 "session temporal refresh failed durably"
             );
             report.failed += 1;
+            report.failed_sessions.insert(recovery.session_id().clone());
             state.record_terminal_discovery_failure(recovery);
         }
         Err(error) if is_retryable_storage(&error) => {
@@ -2104,9 +2164,7 @@ pub async fn run_session_temporal_refresh_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_temporal_refresh_scheduler::projector::{
-        CanonicalSessionTemporalProjector, SessionTemporalRefreshProjectionFuture,
-    };
+    use crate::session_temporal_refresh_scheduler::projector::CanonicalSessionTemporalProjector;
     use tracedecay_domain::SessionId;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
@@ -2159,7 +2217,7 @@ mod tests {
         entered.notified().await;
 
         let handle = state.handle();
-        let join = handle.wake_and_wait_for_projection(None, Duration::from_secs(5));
+        let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
         tokio::pin!(join);
         assert!(
             std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
@@ -2729,117 +2787,5 @@ mod tests {
             row.get::<i64>(0).expect("from store id"),
             row.get::<i64>(1).expect("to store id"),
         ))
-    }
-    struct SessionSelectiveProjector;
-
-    impl SessionTemporalRefreshProjector for SessionSelectiveProjector {
-        fn project<'a>(
-            &'a self,
-            database: &'a RegisteredGlobalDbLeaseV1,
-            recovery: SessionRefreshRecoveryV1,
-        ) -> SessionTemporalRefreshProjectionFuture<'a> {
-            Box::pin(async move {
-                if recovery.session_id().as_str() == "rejected-session" {
-                    Err(SessionTemporalRefreshProjectorError::terminal(
-                        "fixture_projection_refused",
-                    ))
-                } else {
-                    CanonicalSessionTemporalProjector
-                        .project(database, recovery)
-                        .await
-                }
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn a_published_session_join_survives_an_unrelated_terminal_failure() {
-        let harness = RegisteredGlobalDbHarness::open("refresh-session-isolated-publication").await;
-        let store = SessionTemporalStore::new(harness.registered.as_ref());
-        for session in ["published-session", "rejected-session"] {
-            store
-                .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
-                    SessionId::new(session).unwrap(),
-                    SessionRefreshFrontierV1::new(0, 0).unwrap(),
-                ))
-                .await
-                .unwrap();
-        }
-        let state = Arc::new(SessionTemporalRefreshWakeState::default());
-        let handle = state.handle();
-        let published_id = SessionId::new("published-session").unwrap();
-        let rejected_id = SessionId::new("rejected-session").unwrap();
-        let published_operation = store
-            .session_refresh_recovery(&published_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let rejected_operation = store
-            .session_refresh_recovery(&rejected_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let published =
-            handle.wake_and_wait_for_projection(Some(published_id.clone()), Duration::from_secs(5));
-        let rejected =
-            handle.wake_and_wait_for_projection(Some(rejected_id.clone()), Duration::from_secs(5));
-        tokio::pin!(published, rejected);
-        assert!(
-            std::future::poll_fn(|cx| std::task::Poll::Ready(published.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
-        assert!(
-            std::future::poll_fn(|cx| std::task::Poll::Ready(rejected.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
-        let mut joins = Vec::new();
-        let first = session_projection_refresh(
-            &harness.registered,
-            &state,
-            &SessionSelectiveProjector,
-            SessionTemporalRefreshPolicy::default(),
-            &mut joins,
-        )
-        .await;
-        assert_eq!(first.failed, 1);
-        assert_eq!(first.projected_batches, 1);
-        assert!(
-            !rejected.await,
-            "the caller's own terminal failure must remain unavailable"
-        );
-        assert!(
-            std::future::poll_fn(|cx| std::task::Poll::Ready(published.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
-        let second = session_projection_refresh(
-            &harness.registered,
-            &state,
-            &SessionSelectiveProjector,
-            SessionTemporalRefreshPolicy::default(),
-            &mut joins,
-        )
-        .await;
-        assert_eq!(second.completed, 1);
-        assert!(
-            published.await,
-            "an unrelated failure must not reject the committed session"
-        );
-        for (operation, expected) in [
-            (published_operation, SessionRefreshTerminalStateV1::Complete),
-            (rejected_operation, SessionRefreshTerminalStateV1::Failed),
-        ] {
-            let receipt = store
-                .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
-                    operation.operation_id().clone(),
-                    operation.session_id().clone(),
-                ))
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(receipt.state(), expected);
-        }
     }
 }

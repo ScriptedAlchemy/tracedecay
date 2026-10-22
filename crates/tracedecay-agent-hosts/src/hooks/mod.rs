@@ -742,17 +742,10 @@ pub(crate) async fn ingest_transcript_for_event(
     budget: Duration,
     telemetry: Option<&analytics::HookTimingSpan>,
 ) {
-    let parsed = match serde_json::from_str::<Value>(event_json) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            tracing::warn!(provider, %error, "transcript ingest event is invalid");
-            return;
-        }
-    };
     let args = HookRuntimeSurfaceRequestV1::IngestTranscript(HookIngestTranscriptRequestV1 {
         provider: provider.to_owned(),
         user_scope: project_root.is_none(),
-        session_id: event_session_id(&parsed),
+        session_id: None,
         event_json: Some(event_json.to_owned()),
         messages: None,
         max_new_bytes,

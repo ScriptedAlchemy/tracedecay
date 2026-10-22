@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tracedecay_domain::SessionId;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
@@ -19,8 +20,12 @@ use tracedecay_sessions::serving::{
     SessionProjectionWorkerRetryClass,
 };
 
-pub(super) struct ProjectionJoin {
+/// One caller's publication obligation. Named sessions capture their source
+/// frontier before the worker starts the pass; unnamed sweeps retain the
+/// aggregate drain contract.
+pub(super) struct SessionProjectionJoin {
     pub(super) session_id: Option<SessionId>,
+    pub(super) observed_through: Option<u64>,
     pub(super) completion: tokio::sync::oneshot::Sender<bool>,
 }
 
@@ -144,7 +149,7 @@ macro_rules! define_wake_state {
             /// is still unpublished. The next history window waits.
             pub(super) history_after_projection: AtomicBool,
             pub(super) pass_count: std::sync::atomic::AtomicUsize,
-            projection_joins: std::sync::Mutex<Vec<ProjectionJoin>>,
+            projection_joins: std::sync::Mutex<Vec<SessionProjectionJoin>>,
             pub(super) wake: tokio::sync::Notify,
             pub(super) idle: tokio::sync::Notify,
             pub(super) cancelled: AtomicBool,
@@ -363,8 +368,9 @@ impl SessionTemporalRefreshWakeState {
         // joins, and each result is delivered once even if a later pass fails.
         joins.retain(|join| !join.completion.is_closed());
         let (completion, receiver) = tokio::sync::oneshot::channel();
-        joins.push(ProjectionJoin {
+        joins.push(SessionProjectionJoin {
             session_id,
+            observed_through: None,
             completion,
         });
         self.wake();
@@ -373,7 +379,7 @@ impl SessionTemporalRefreshWakeState {
 
     /// Take the joins covered by the projection about to start. A join that
     /// arrives during that projection remains queued for the next pass.
-    pub(super) fn take_projection_joins(&self) -> Vec<ProjectionJoin> {
+    pub(super) fn take_projection_joins(&self) -> Vec<SessionProjectionJoin> {
         std::mem::take(
             &mut *self
                 .projection_joins
@@ -892,7 +898,6 @@ struct SessionTemporalRefreshWakeRoute {
     target: std::sync::RwLock<std::sync::Weak<SessionTemporalRefreshWakeState>>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
 pub(super) fn enabled_idle_notification(
     state: &SessionTemporalRefreshWakeState,
 ) -> std::pin::Pin<Box<tokio::sync::futures::Notified<'_>>> {
@@ -995,7 +1000,22 @@ impl SessionTemporalRefreshWake {
     /// empty/unavailable semantics. Historical discovery and derived summaries
     /// may continue after that publication; their idle/admission state is not
     /// evidence that a temporal generation has committed.
-    pub async fn wake_and_wait_for_projection(
+    pub async fn wake_and_wait_for_projection(&self, timeout: std::time::Duration) -> bool {
+        self.join_projection(None, timeout).await
+    }
+
+    /// Join only this session's captured source frontier. Other sessions may
+    /// remain blocked without invalidating its committed publication.
+    pub async fn wake_and_wait_for_session_projection(
+        &self,
+        session_id: &SessionId,
+        timeout: std::time::Duration,
+    ) -> bool {
+        self.join_projection(Some(session_id.clone()), timeout)
+            .await
+    }
+
+    async fn join_projection(
         &self,
         session_id: Option<SessionId>,
         timeout: std::time::Duration,
@@ -1017,6 +1037,38 @@ impl SessionTemporalRefreshWake {
             .await,
             Ok(Ok(true))
         )
+    }
+
+    /// Join the worker's idle boundary, including background work. Callers
+    /// proving a rekey handoff still need that boundary; live transcript
+    /// publication uses the separate projection joins above.
+    pub async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
+        let Some(state) = self.target() else {
+            return false;
+        };
+        let before = state.pass_count.load(Ordering::Acquire);
+        state.wake();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let idle = tracing::Instrument::instrument(
+                enabled_idle_notification(&state),
+                tracing::trace_span!("daemon.scheduler.session_temporal.idle_wait"),
+            );
+            let pass_count = state.pass_count.load(Ordering::Acquire);
+            let busy = state.busy.load(Ordering::Acquire);
+            let dirty = state.dirty.load(Ordering::Acquire);
+            let pending = state.has_requests();
+            if pass_count > before && !busy && !dirty && !pending {
+                return true;
+            }
+            if native_runtime::timeout_at(deadline, idle).await.is_err() {
+                let pass_count = state.pass_count.load(Ordering::Acquire);
+                return pass_count > before
+                    && !state.busy.load(Ordering::Acquire)
+                    && !state.dirty.load(Ordering::Acquire)
+                    && !state.has_requests();
+            }
+        }
     }
 
     /// Marks historical catch-up pending and wakes its worker, unless the
@@ -1058,12 +1110,23 @@ impl tracedecay_contracts::SessionTemporalRefreshWakePort for SessionTemporalRef
 
     fn wake_and_wait_for_projection(
         &self,
-        session_id: Option<SessionId>,
         timeout: std::time::Duration,
     ) -> tracedecay_contracts::SessionTemporalRefreshWakeFuture<'_> {
         Box::pin(SessionTemporalRefreshWake::wake_and_wait_for_projection(
-            self, session_id, timeout,
+            self, timeout,
         ))
+    }
+
+    fn wake_and_wait_for_session_projection<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        timeout: std::time::Duration,
+    ) -> tracedecay_contracts::SessionTemporalRefreshWakeFuture<'a> {
+        Box::pin(
+            SessionTemporalRefreshWake::wake_and_wait_for_session_projection(
+                self, session_id, timeout,
+            ),
+        )
     }
 }
 

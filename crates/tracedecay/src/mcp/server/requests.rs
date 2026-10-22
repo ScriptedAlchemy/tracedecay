@@ -87,7 +87,6 @@ fn analytics_arguments_snapshot(tool_name: &str, arguments: &Value) -> Value {
     const ANALYTICS_ARGUMENT_KEYS: &[&str] = &[
         "action",
         "transcript_projection",
-        "session_id",
         "user_scope",
         "storage_scope",
         "include_memory",
@@ -1785,33 +1784,6 @@ mod tool_call_preparation_tests {
             .as_object()
             .cloned()
             .expect("object arguments")
-    }
-
-    #[test]
-    fn preflight_preparation_retains_its_publication_session_without_message_bodies() {
-        let params = json!({
-            "name": "tracedecay_lcm_preflight",
-            "arguments": {
-                "session_id": "live-session",
-                "transcript_projection": true,
-                "storage_scope": "user",
-                "messages": [{"role": "user", "content": "private transcript"}],
-            },
-        });
-        let prepared =
-            McpServer::prepare_tool_call(&json!(7), ToolCallParams::Raw(Some(&params))).unwrap();
-        assert_eq!(
-            prepared.analytics_arguments,
-            json!({
-                "session_id": "live-session",
-                "transcript_projection": true,
-                "storage_scope": "user",
-            })
-        );
-        assert_eq!(
-            prepared.arguments["messages"],
-            params["arguments"]["messages"]
-        );
     }
 
     /// The typed `rmcp` params and the equivalent raw JSON-RPC params must

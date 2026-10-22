@@ -23,8 +23,8 @@ use serde_json::{Map, Value};
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     AdminCliSurfaceRequestV1, AdminProjectResultV1, AdminProjectSurfaceRequestV1,
-    AutomationReconcileScope, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
-    ProfileAutomationReconcileReport, UncachedProjectReconcileOutcome,
+    AutomationReconcileScope, HookRuntimeResultV1, ProfileAutomationReconcileReport,
+    UncachedProjectReconcileOutcome,
 };
 use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, CancellationStage, CancellationState, Deadline,
@@ -40,7 +40,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_mcp::handlers::{
     SessionAuthorities, decode_primitive_request, hook_runtime, unknown_tool_error,
 };
-use tracedecay_mcp::server::join_hook_ingest_refresh;
+use tracedecay_mcp::server::{hook_ingest_refresh_session, join_hook_ingest_refresh};
 use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
@@ -185,6 +185,7 @@ async fn profile_hook_runtime(
     profile_identity: &LocalProfileIdentityAuthorityV1,
     arguments: Map<String, Value>,
 ) -> Result<HookRuntimeResultV1> {
+    let publication_session = hook_ingest_refresh_session(&arguments)?;
     let request = hook_runtime::decode_hook_runtime_request(&Value::Object(arguments))?;
     let global_db = Box::pin(store_administration.registered_profile_database()).await?;
     let user_session_db =
@@ -197,10 +198,6 @@ async fn profile_hook_runtime(
         user_session_db.clone(),
     ))
     .await;
-    let transcript_session_id = match &request {
-        HookRuntimeSurfaceRequestV1::IngestTranscript(ingest) => ingest.session_id.clone(),
-        _ => None,
-    };
     let result = Box::pin(hook_runtime::compute_projectless_hook_runtime(
         request,
         profile_identity.profile_root(),
@@ -213,8 +210,8 @@ async fn profile_hook_runtime(
     .await?;
     if let HookRuntimeResultV1::IngestTranscript(ingest) = &result {
         join_hook_ingest_refresh(
-            transcript_session_id.as_deref(),
             ingest.user_scope,
+            publication_session.as_ref(),
             None,
             Some(&refresh_wake),
         )

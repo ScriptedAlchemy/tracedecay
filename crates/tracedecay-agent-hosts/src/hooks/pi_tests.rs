@@ -63,7 +63,6 @@ async fn pi_session_boundaries_land_their_session() {
     for (root, args) in &ingests {
         assert_eq!(root.as_deref(), Some(project_root.as_path()));
         assert_eq!(args["provider"], "pi");
-        assert_eq!(args["session_id"], "pi-session-1");
         assert_eq!(args["user_scope"], false);
         let event: Value = serde_json::from_str(args["event_json"].as_str().unwrap()).unwrap();
         assert_eq!(event["session_id"], "pi-session-1");
