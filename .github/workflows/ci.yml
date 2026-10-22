@@ -557,7 +557,8 @@ jobs:
         run: test "${{ needs.linux-test.result }}" = "success"
 
   windows-test:
-    name: Windows Bazel check
+    # Branch protection requires this check name.
+    name: Test Windows
     needs: scope-gate
     if: >-
       ${{ needs.scope-gate.outputs.run-heavy == 'true' &&
