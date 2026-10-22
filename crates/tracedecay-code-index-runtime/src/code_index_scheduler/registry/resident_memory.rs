@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "test-helpers"))]
-use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 pub use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 #[cfg(any(test, feature = "test-helpers"))]
-use tracedecay_runtime_core::resident_memory::RESIDENT_OWNER_IDLE_WINDOW_V1;
+use tracedecay_runtime_core::resident_memory::{
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, RESIDENT_OWNER_IDLE_WINDOW_V1,
+    ResidentMemoryPressureV1,
+};
 use tracedecay_runtime_core::resident_memory::{ResidentOwnersV1, process_resident_owners_v1};
 
 use super::CodeIndexSchedulerRegistryV1;
@@ -15,10 +16,17 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(any(test, feature = "test-helpers"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(max_worktrees: usize) -> Self {
+        // A fixture owns its ledger and pressure readings. Concurrent tests'
+        // RSS is not an input; pressure journeys pass an explicit authority.
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            Arc::new(|| None),
+        ));
         Self::with_resident_memory_and_progress_producer_incarnation(
             max_worktrees,
-            Arc::new(ProcessResidentMemoryV1::new(
+            Arc::new(ProcessResidentMemoryV1::with_pressure(
                 DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+                pressure,
             )),
             1,
         )

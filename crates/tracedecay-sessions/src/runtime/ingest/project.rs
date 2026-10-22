@@ -279,6 +279,7 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
         units_failed: 0,
         byte_bounds_enforced: true,
         coverage_advanced: false,
+        provider_units: std::collections::BTreeMap::new(),
     };
     let initial_budgets = allocate_pass_byte_budgets(plan.admitted_indices.len(), bounds);
     let mut remaining_bytes = initial_budgets
@@ -322,7 +323,7 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
         let mut unit_result = provider_run.outcome;
         unit_result.byte_bounds_enforced &= unit_result.bytes_consumed <= grant;
         remaining_bytes = remaining_bytes.saturating_sub(unit_result.bytes_consumed.min(grant));
-        provider_runs.record(unit_result);
+        provider_runs.record(candidate.id(), unit_result);
         if cancellation.is_cancelled() {
             cancelled = true;
             provider_runs
@@ -345,10 +346,9 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
                 provider_runs.deferred_units = provider_runs
                     .deferred_units
                     .saturating_add(projection_stats.deferred_sources);
-                provider_runs.stats = provider_runs.stats.merge(
-                    projection_stats
-                        .deduplicated_transcript_stats(&mut claude_projected_session_ids),
-                );
+                let drained = projection_stats
+                    .deduplicated_transcript_stats(&mut claude_projected_session_ids);
+                provider_runs.stats = provider_runs.stats.merge(drained);
             }
             Err(error) => {
                 let failure = claude_catch_up_failure("projection", &error);
@@ -362,6 +362,11 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
         }
     }
     let admitted_planned = plan.admitted_indices.len();
+    for &index in plan.admitted_indices.iter().skip(attempted) {
+        if let Some(candidate) = selected.get(index) {
+            provider_runs.park(candidate.id());
+        }
+    }
     if cancelled {
         provider_runs.deferred_units = provider_runs.deferred_units.saturating_add(
             u64::try_from(admitted_planned.saturating_sub(attempted))
@@ -426,6 +431,7 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
         provider_runs.coverage_advanced || source_outcome.scheduling_state_written;
     source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
     source_outcome.failures.extend(provider_runs.failures);
+    source_outcome.provider_units = provider_runs.provider_units;
     source_outcome.into_transcript_outcome()
 }
 
