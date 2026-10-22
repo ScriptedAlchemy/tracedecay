@@ -168,8 +168,11 @@ pub(super) fn reconciliation_attempt_record(
             SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } => {
                 committed_state.clone()
             }
-            SourceEditReconciliationDispositionV1::ConfirmRolledBack => {
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged => {
                 journal.expected_state.clone()
+            }
+            SourceEditReconciliationDispositionV1::AcknowledgePartial { observed_state } => {
+                observed_state.clone()
             }
         })
     } else {

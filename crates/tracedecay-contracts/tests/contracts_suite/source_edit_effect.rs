@@ -4,8 +4,8 @@ use tracedecay_contracts::{
     EffectId, IdempotencyKey, RenamePreviewAcceptanceV1, RenameSymbolBindingV1,
     SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditInvocationV1, SourceEditKind,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
-    SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditRollbackInvocationV1,
-    source_edit_operation, source_edit_reconciliation_operation,
+    SourceEditReconciliationRequestV1, SourceEditRequest, source_edit_operation,
+    source_edit_reconciliation_operation,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{PrivacyDomainId, UtcMicros};
@@ -148,12 +148,15 @@ fn reconciliation_requires_its_distinct_current_capability() {
     let request = SourceEditReconciliationRequestV1 {
         authority: common::authority(&context),
         context,
-        kind: SourceEditKind::StrReplace,
+        original_operation: source_edit_operation(SourceEditKind::StrReplace)
+            .unwrap()
+            .use_case_id()
+            .clone(),
         effect_id: EffectId::new("effect.source-edit.fixture").unwrap(),
         idempotency_key: effect.idempotency_key.clone(),
         attempt_idempotency_key: IdempotencyKey::new("reconcile-attempt.fixture").unwrap(),
         input_digest,
-        disposition: SourceEditReconciliationDispositionV1::ConfirmRolledBack,
+        disposition: SourceEditReconciliationDispositionV1::ConfirmUnchanged,
         proof: SourceEditEffectProofV1 {
             policy_digest: common::digest(common::SHA256_B),
             configuration_revision_id: common::id::<ConfigurationRevisionId>(
@@ -211,25 +214,22 @@ fn source_edit_invocation_shapes_are_user_controlled_and_round_trip() {
         expected_state: Some(common::digest(common::SHA256_A)),
     };
     let reconcile = SourceEditReconciliationInvocationV1 {
-        kind: SourceEditKind::StrReplace,
+        original_operation: source_edit_operation(SourceEditKind::StrReplace)
+            .unwrap()
+            .use_case_id()
+            .clone(),
         effect_id: EffectId::new("effect.source-edit.invoke.fixture").unwrap(),
         idempotency_key: IdempotencyKey::new("source-edit.invoke.original").unwrap(),
         attempt_idempotency_key: IdempotencyKey::new("source-edit.invoke.attempt").unwrap(),
         input_digest: common::digest(common::SHA256_A),
-        disposition: SourceEditReconciliationDispositionV1::ConfirmRolledBack,
-    };
-    let rollback = SourceEditRollbackInvocationV1 {
-        effect_id: EffectId::new("effect.source-edit.rollback.fixture").unwrap(),
-        original_idempotency_key: IdempotencyKey::new("source-edit.rollback.original").unwrap(),
-        idempotency_key: IdempotencyKey::new("source-edit.rollback.attempt").unwrap(),
-        original_input_digest: common::digest(common::SHA256_A),
-        expected_state: common::digest(common::SHA256_B),
+        disposition: SourceEditReconciliationDispositionV1::AcknowledgePartial {
+            observed_state: common::digest(common::SHA256_B),
+        },
     };
 
     for value in [
         serde_json::to_value(&edit).unwrap(),
         serde_json::to_value(&reconcile).unwrap(),
-        serde_json::to_value(&rollback).unwrap(),
     ] {
         let object = value.as_object().expect("invocation object");
         assert!(!object.contains_key("authority"));
@@ -248,12 +248,5 @@ fn source_edit_invocation_shapes_are_user_controlled_and_round_trip() {
         )
         .unwrap(),
         reconcile
-    );
-    assert_eq!(
-        serde_json::from_value::<SourceEditRollbackInvocationV1>(
-            serde_json::to_value(&rollback).unwrap()
-        )
-        .unwrap(),
-        rollback
     );
 }

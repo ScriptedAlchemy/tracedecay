@@ -40,7 +40,6 @@ pub struct SourceEditInvocationContext<'a> {
 
 fn unavailable_authority(operation: ApplicationSurfaceOperation) -> TraceDecayError {
     let authority = match operation {
-        ApplicationSurfaceOperation::SourceEditRollback => "source edit rollback authority",
         ApplicationSurfaceOperation::SourceEditReconcile => "source edit reconciliation authority",
         _ => "source edit authority",
     };
@@ -173,8 +172,7 @@ fn render_source_edit_result(
     let value = serde_json::to_value(result)?;
     let success = result.outcome.success();
     let tool_result = match operation {
-        ApplicationSurfaceOperation::SourceEditRollback
-        | ApplicationSurfaceOperation::SourceEditReconcile => {
+        ApplicationSurfaceOperation::SourceEditReconcile => {
             generic_tool_result(response_handle_root, args, &value, Vec::new())
         }
         _ => rendered_tool_result(

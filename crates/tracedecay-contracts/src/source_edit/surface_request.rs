@@ -2,9 +2,10 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_tool_catalog::UseCaseId;
 
+use super::RenamePreviewAcceptanceV1;
 use super::effect_authorization::SourceEditReconciliationDispositionV1;
-use super::{RenamePreviewAcceptanceV1, SourceEditKind};
 
 /// Public control fields shared by the source-edit MCP effects.
 ///
@@ -175,23 +176,11 @@ pub struct RenameSymbolSurfaceRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEditReconcileSurfaceRequestV1 {
-    pub kind: SourceEditKind,
+    pub original_operation: UseCaseId,
     pub effect_id: String,
     pub idempotency_key: String,
     pub attempt_idempotency_key: String,
     pub input_digest: String,
     pub disposition: SourceEditReconciliationDispositionV1,
-    pub confirm: bool,
-}
-
-/// Exact public input accepted by `tracedecay_source_edit_rollback`.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceEditRollbackSurfaceRequestV1 {
-    pub effect_id: String,
-    pub original_idempotency_key: String,
-    pub idempotency_key: String,
-    pub original_input_digest: String,
-    pub expected_state: String,
     pub confirm: bool,
 }

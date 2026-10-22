@@ -1042,34 +1042,6 @@ impl DaemonInvocationService {
                 )
                 .await
             }
-            DaemonInvocationPayload::SourceEditRollback {
-                request,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                let response = execute_source_edit_rollback(
-                    request_id,
-                    source_edit_owner,
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                )
-                .await;
-                if let (
-                    Some(project_root),
-                    DaemonInvocationOutcome::SourceEdit { result, .. },
-                ) = (registered_project_root.as_deref(), &response.outcome)
-                    && !result.replayed
-                    && result.outcome.success()
-                {
-                    self.code_index_schedulers
-                        .notify_hook_overflow(project_root)
-                        .await;
-                }
-                response
-            }
         };
         if is_observable_operation(operation) {
             {

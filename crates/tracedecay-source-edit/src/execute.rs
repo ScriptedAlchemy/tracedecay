@@ -14,7 +14,7 @@ use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
 use super::digest::{
     effect_id, normalize_candidate_files, planned_source_edit_state_digest,
-    source_edit_recovery_digest, source_edit_state_digest,
+    source_edit_state_digest,
 };
 use super::dispatch::run_source_edit;
 use super::journal::{
@@ -108,8 +108,6 @@ fn persist_pre_effect_result(
         expected_state: expected_state.clone(),
         predicted_state,
         candidate_files,
-        recovery_files: Vec::new(),
-        recovery_digest: None,
         request: durable_request(operation, request, authority),
         state: SourceEditJournalStateV1::Prepared,
     };
@@ -492,10 +490,6 @@ where
 
     let effect_id = effect_id(&request.idempotency_key, &input_digest)?;
     let durable_request = durable_request(operation, &request, &current_authority);
-    let recovery_files = planned_files.clone();
-    let recovery_digest = (!recovery_files.is_empty())
-        .then(|| source_edit_recovery_digest(&recovery_files))
-        .transpose()?;
     let mut journal = SourceEditJournalV1 {
         version: JOURNAL_VERSION,
         effect_id,
@@ -503,8 +497,6 @@ where
         expected_state: request.expected_state.clone(),
         predicted_state: Some(predicted_state.clone()),
         candidate_files,
-        recovery_files,
-        recovery_digest,
         request: durable_request,
         state: SourceEditJournalStateV1::Prepared,
     };
@@ -556,7 +548,22 @@ where
     let mut control_observation = control
         .and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
         .map(|stop| stop.observation);
-    let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+    let committed_state =
+        match source_edit_state_digest(graph.project_root(), &journal.candidate_files) {
+            Ok(state) => state,
+            Err(error) => {
+                return persist_unknown(
+                    &durability,
+                    &journal,
+                    SourceEditOutcome::EffectUnknown {
+                        message: format!(
+                            "source edit state could not be inspected after publication: {error}"
+                        ),
+                    },
+                    None,
+                );
+            }
+        };
     if outcome.success() && (!plan_complete || committed_state != predicted_state) {
         let live_outcome = SourceEditOutcome::EffectUnknown {
             message: "source edit effect is unknown and requires reconciliation: the observed committed state did not match the exact preview".to_owned(),
@@ -613,7 +620,6 @@ where
             durability.persist_journal(&journal)?;
         }
     }
-    durability.persist_rollback_record(&journal, &committed_state, outcome.success())?;
     let record = applied_record(
         &journal,
         &outcome,

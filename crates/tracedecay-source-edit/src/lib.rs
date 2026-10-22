@@ -1,11 +1,11 @@
 //! The source-edit vertical slice: planning, preview capture, execute, the
-//! durable journal, rollback, crash recovery, and reconciliation.
+//! durable journal, crash recovery, and reconciliation.
 //!
 //! Request, result, and authorization contracts come from
 //! `tracedecay-contracts`. Graph evidence is admitted through
 //! `tracedecay_graph_query`. The composition root injects worktree identity
 //! and optional diagnostics through [`SourceEditRuntimePort`]; planning,
-//! primitives, journaling, rollback, recovery, and reconciliation are owned
+//! primitives, journaling, recovery, and reconciliation are owned
 //! here. This crate's only consumer is the composition root.
 //!
 //! Metric names stay `usecases.edit.*` for dashboard continuity. A later
@@ -22,7 +22,6 @@ use tracedecay_domain::errors::Result;
 const JOURNAL_VERSION: u8 = 1;
 const MAX_DURABLE_RECORD_BYTES: usize = 4 * 1024 * 1024;
 const SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1: &str = "tracedecay.source-edit-state.v1";
-const SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1: &str = "tracedecay.source-edit-recovery.v1";
 
 mod control;
 mod digest;
@@ -37,7 +36,6 @@ mod plan;
 mod port;
 mod reconcile;
 mod records;
-mod rollback;
 mod verify;
 
 #[cfg(test)]
@@ -48,7 +46,7 @@ pub use file_authority::SourceEditFileAuthority;
 pub use outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
 pub use plan::{
     PlannedSourceEditFile, capture_planned_source_edit, publish_planned_source_edit,
-    rollback_planned_source_edit_files, validate_planned_source_edit,
+    validate_planned_source_edit,
 };
 pub use port::{
     EditDiagnosticRecord, SourceEditFuture, SourceEditGraphReadV1, SourceEditRuntime,
@@ -57,7 +55,6 @@ pub use port::{
 
 use execute::{execute_source_edit_inner, resolve_source_edit_preview};
 use reconcile::reconcile_source_edit_effect_unknown_inner;
-use rollback::execute_source_edit_rollback_inner;
 use verify::config_error;
 
 /// Capture the exact candidate-file CAS digest returned by a dry-run preview.
@@ -122,35 +119,7 @@ where
     .await
 }
 
-pub async fn execute_source_edit_rollback<A>(
-    graph: &SourceEditRuntime,
-    operation: &ApplicationOperation,
-    request: tracedecay_contracts::SourceEditRollbackRequestV1,
-    authorization: &A,
-) -> Result<SourceEditApplicationResult>
-where
-    A: SourceEditAuthorizationPort,
-{
-    execute_source_edit_rollback_inner(graph, operation, request, authorization, None).await
-}
-
-pub async fn execute_source_edit_rollback_with_control<A>(
-    graph: &SourceEditRuntime,
-    operation: &ApplicationOperation,
-    request: tracedecay_contracts::SourceEditRollbackRequestV1,
-    authorization: &A,
-    control: &SourceEditEffectControlV1,
-) -> Result<SourceEditApplicationResult>
-where
-    A: SourceEditAuthorizationPort,
-{
-    execute_source_edit_rollback_inner(graph, operation, request, authorization, Some(control))
-        .await
-}
-
-/// Resolve one retained `EffectUnknown` only after an authorized inspection
-/// explicitly proves either the exact committed state or the exact rollback
-/// state. A mismatch retains the journal and its uncertainty.
+/// Resolve a retained effect by inspecting the exact current candidate digest.
 pub async fn reconcile_source_edit_effect_unknown_with_control<A>(
     graph: &SourceEditRuntime,
     request: SourceEditReconciliationRequestV1,

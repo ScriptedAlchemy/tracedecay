@@ -537,9 +537,8 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     (root / "Cargo.toml").write_text(
         "[package]\nname = \"tool-sweep-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
     )
-    # sweep_anchor stays last behind a blank line so the move_symbol journey's
-    # move-out/move-back rollback restores this file byte-exactly (removal
-    # collapses the separator; the return append recreates it).
+    # sweep_anchor stays last so the move_symbol journey exercises removing a
+    # final declaration without changing earlier fixture declarations.
     (root / "src/lib.rs").write_text(
         "pub trait SweepTrait { fn marker(&self) -> i32; }\n"
         "pub struct SweepType { pub value: i32 }\n"
@@ -2444,12 +2443,12 @@ def _reconcile_effect(
         response, elapsed_ms = recovery.call_tool(
             policy.name,
             {
-                "kind": "str_replace",
+                "original_operation": "use-case.application.source-edit.str-replace",
                 "effect_id": effect_id,
                 "idempotency_key": idempotency_key,
                 "attempt_idempotency_key": f"tool-sweep-reconcile-attempt-{time.monotonic_ns()}",
                 "input_digest": input_digest,
-                "disposition": "confirm_rolled_back",
+                "disposition": "confirm_unchanged",
                 "confirm": True,
                 "format": "json",
             },
@@ -2465,10 +2464,10 @@ def _reconcile_effect(
     finally:
         recovery.close()
     if row["verdict"] == "PASS" and source.read_text() == original:
-        row["rollback"] = "verified"
-        row["rollback_note"] = "durable uncertain edit reconciled against its unchanged preimage"
+        row["reconciliation"] = "verified"
+        row["reconciliation_note"] = "durable uncertain edit was confirmed unchanged"
     elif row["verdict"] == "PASS":
-        row.update({"verdict": "FAIL", "problem_code": "tool_sweep.rollback_failed", "note": "reconciliation changed its expected rolled-back preimage"})
+        row.update({"verdict": "FAIL", "problem_code": "tool_sweep.reconciliation_state_changed", "note": "reconciliation changed the expected unchanged source"})
     return row
 
 
@@ -2528,7 +2527,7 @@ def execute_effect(
     client: McpClient, definition: dict[str, Any], policy: ToolPolicy, fixture: dict[str, str],
     policies: dict[str, ToolPolicy],
 ) -> dict[str, Any]:
-    """Exercise a real effect and its inverse inside this phase's disposable profile."""
+    """Exercise a real effect and verify its receipt inside this disposable profile."""
     if policy.name == "tracedecay_source_edit_reconcile":
         return _reconcile_effect(client, policy, fixture, policies)
     if policy.name in EXPECTED_HERMETIC_DENIALS:

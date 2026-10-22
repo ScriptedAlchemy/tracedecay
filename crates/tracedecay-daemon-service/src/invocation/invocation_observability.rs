@@ -103,7 +103,6 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
         | DaemonInvocationOperation::SourceEdit
         | DaemonInvocationOperation::SourceEditReconcile
-        | DaemonInvocationOperation::SourceEditRollback
         | DaemonInvocationOperation::GraphTool => FeedbackOperationV1::FeedbackCycle,
     }
 }

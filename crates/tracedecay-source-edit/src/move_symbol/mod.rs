@@ -15,8 +15,8 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use crate::{
-    PlannedSourceEditFile, SourceEditGraphReadV1, capture_planned_source_edit,
-    publish_planned_source_edit, rollback_planned_source_edit_files, validate_planned_source_edit,
+    SourceEditGraphReadV1, capture_planned_source_edit, publish_planned_source_edit,
+    validate_planned_source_edit,
 };
 use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_with};
 use tracedecay_contracts::source_edit::{MoveHint, MoveResult};
@@ -105,10 +105,6 @@ pub(crate) async fn move_symbol(
             Vec::new(),
         ));
     }
-    // Both writes and the rollback below now go through the
-    // project-root-scoped source edit authority, so only the resolver's
-    // validation is still needed here: it errors when either path cannot be
-    // inspected, and neither resolved path is used afterwards.
     write_path_preserving_final_symlink(&source_abs, "source")?;
     write_path_preserving_final_symlink(&dest_abs, "destination")?;
     let source = std::fs::read_to_string(&source_abs).map_err(|e| TraceDecayError::Config {
@@ -244,15 +240,11 @@ pub(crate) async fn move_symbol(
     ));
 
     if dry_run {
-        capture_planned_source_edit(
-            &source_rel,
-            Some(source.as_str()),
-            Some(source_modified.as_str()),
-        );
+        capture_planned_source_edit(&source_rel, Some(source.as_str()), &source_modified);
         capture_planned_source_edit(
             &dest_rel,
             dest_existed.then_some(dest_original.as_str()),
-            Some(dest_modified.as_str()),
+            &dest_modified,
         );
         let diff = combined_diff(
             &source_rel,
@@ -280,15 +272,11 @@ pub(crate) async fn move_symbol(
     // move. Dependency analysis can take long enough for another agent or
     // editor to change either file; blindly writing those stale snapshots
     // would discard unrelated work.
-    validate_planned_source_edit(
-        &source_rel,
-        Some(source.as_str()),
-        Some(source_modified.as_str()),
-    )?;
+    validate_planned_source_edit(&source_rel, Some(source.as_str()), &source_modified)?;
     validate_planned_source_edit(
         &dest_rel,
         dest_existed.then_some(dest_original.as_str()),
-        Some(dest_modified.as_str()),
+        &dest_modified,
     )?;
     ensure_text_unchanged(&source_abs, Some(&source), &source_rel)?;
     ensure_text_unchanged(
@@ -316,49 +304,8 @@ pub(crate) async fn move_symbol(
             )
         })
     {
-        // Roll back so a half-applied move leaves no trace. If the
-        // destination existed before, restore its original bytes; if we
-        // created it, delete it (and any now-empty parent dirs we created)
-        // rather than leaving an empty file behind. Never overwrite a
-        // third party's destination edit while rolling back.
-        let rollback = rollback_planned_source_edit_files(
-            project_root,
-            &[
-                PlannedSourceEditFile {
-                    relative_path: source_rel.clone(),
-                    expected: Some(source.clone()),
-                    intended: Some(source_modified.clone()),
-                },
-                PlannedSourceEditFile {
-                    relative_path: dest_rel.clone(),
-                    expected: dest_existed.then_some(dest_original.clone()),
-                    intended: Some(dest_modified.clone()),
-                },
-            ],
-        );
-        if !dest_existed && rollback.is_ok() {
-            let mut dir = dest_abs.parent().map(Path::to_path_buf);
-            while let Some(d) = dir {
-                if d == project_root {
-                    break;
-                }
-                // `remove_dir` removes only empty dirs and errors otherwise,
-                // so this naturally stops at the first non-empty ancestor.
-                if std::fs::remove_dir(&d).is_err() {
-                    break;
-                }
-                dir = d.parent().map(Path::to_path_buf);
-            }
-        }
         return Err(TraceDecayError::Config {
-            message: match rollback {
-                Ok(()) => format!(
-                    "move aborted before writing {source_rel}: {e}; destination rolled back"
-                ),
-                Err(rollback_error) => format!(
-                    "move aborted before writing {source_rel}: {e}; rollback incomplete: {rollback_error}"
-                ),
-            },
+            message: format!("move published {dest_rel} but failed to publish {source_rel}: {e}"),
         });
     }
     Ok(MoveResult {

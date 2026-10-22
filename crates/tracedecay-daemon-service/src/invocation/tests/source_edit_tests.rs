@@ -2,9 +2,9 @@ use super::*;
 use tracedecay_contracts::{
     ApplicationProblemKind, EffectId, IdempotencyKey, SourceEditInvocationV1, SourceEditKind,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1, SourceEditRequest,
-    SourceEditRollbackInvocationV1,
 };
 use tracedecay_domain::ManifestDigest;
+use tracedecay_tool_catalog::UseCaseId;
 
 fn source_edit_deadline() -> Deadline {
     Deadline::new(UtcMicros(i64::MAX)).expect("source-edit deadline")
@@ -34,22 +34,12 @@ fn source_edit_invocation() -> SourceEditInvocationV1 {
 
 fn source_edit_reconcile_invocation() -> SourceEditReconciliationInvocationV1 {
     SourceEditReconciliationInvocationV1 {
-        kind: SourceEditKind::StrReplace,
+        original_operation: UseCaseId::new("use-case.application.source-edit.str-replace").unwrap(),
         effect_id: EffectId::new("effect.source-edit.dispatch").unwrap(),
         idempotency_key: IdempotencyKey::new("source-edit.dispatch.original").unwrap(),
         attempt_idempotency_key: IdempotencyKey::new("source-edit.dispatch.attempt").unwrap(),
         input_digest: fixture_digest(),
-        disposition: SourceEditReconciliationDispositionV1::ConfirmRolledBack,
-    }
-}
-
-fn source_edit_rollback_invocation() -> SourceEditRollbackInvocationV1 {
-    SourceEditRollbackInvocationV1 {
-        effect_id: EffectId::new("effect.source-edit.rollback").unwrap(),
-        original_idempotency_key: IdempotencyKey::new("source-edit.rollback.original").unwrap(),
-        idempotency_key: IdempotencyKey::new("source-edit.rollback.attempt").unwrap(),
-        original_input_digest: fixture_digest(),
-        expected_state: fixture_digest(),
+        disposition: SourceEditReconciliationDispositionV1::ConfirmUnchanged,
     }
 }
 
@@ -135,34 +125,6 @@ fn source_edit_reconcile_invocation_round_trips_on_the_daemon_protocol() {
     ));
 }
 
-#[test]
-fn source_edit_rollback_invocation_round_trips_on_the_daemon_protocol() {
-    let request = DaemonInvocationRequest::source_edit_rollback(
-        "request.source-edit-rollback.round-trip",
-        source_edit_rollback_invocation(),
-        UtcMicros(1),
-        source_edit_deadline(),
-        source_edit_cancellation("cancel.source-edit-rollback.round-trip"),
-    );
-    assert_eq!(
-        request.operation(),
-        DaemonInvocationOperation::SourceEditRollback
-    );
-    assert!(request.validate().is_ok());
-    let encoded = serde_json::to_string(&request).expect("encode");
-    let decoded = parse_daemon_invocation_request(&encoded)
-        .expect("daemon protocol")
-        .expect("valid request");
-    assert_eq!(
-        decoded.operation(),
-        DaemonInvocationOperation::SourceEditRollback
-    );
-    assert!(matches!(
-        decoded.payload,
-        DaemonInvocationPayload::SourceEditRollback { .. }
-    ));
-}
-
 #[tokio::test]
 async fn source_edit_dispatch_reaches_the_project_authority_and_refuses_when_it_is_missing() {
     let service = DaemonInvocationService::default();
@@ -206,31 +168,6 @@ async fn source_edit_reconcile_dispatch_reaches_the_project_authority_and_refuse
     assert_source_edit_authority_unavailable(
         response,
         "request.source-edit-reconcile.missing-owner",
-    );
-}
-
-#[tokio::test]
-async fn source_edit_rollback_dispatch_reaches_the_project_authority_and_refuses_when_it_is_missing()
- {
-    let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/projects/source-edit-rollback-missing-owner");
-    admit_project_without_source_edit_owner(&service, project_root.clone()).await;
-    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
-    let request = DaemonInvocationRequest::source_edit_rollback(
-        "request.source-edit-rollback.missing-owner",
-        source_edit_rollback_invocation(),
-        UtcMicros(1),
-        source_edit_deadline(),
-        source_edit_cancellation("cancel.source-edit-rollback.missing-owner"),
-    );
-
-    let response = service
-        .invoke(&registry, Some(&project_root), None, None, None, request)
-        .await;
-
-    assert_source_edit_authority_unavailable(
-        response,
-        "request.source-edit-rollback.missing-owner",
     );
 }
 
