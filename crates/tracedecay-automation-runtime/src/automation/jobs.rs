@@ -1064,6 +1064,10 @@ mod pre_run_command_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "jobs/scheduler_config_tests.rs"]
 mod scheduler_config_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "jobs/persistence_tests.rs"]
+mod persistence_tests;
 #[path = "jobs/scheduler_gate.rs"]
 mod scheduler_gate;
 pub use scheduler_gate::evaluate_and_record_scheduler_skip;
