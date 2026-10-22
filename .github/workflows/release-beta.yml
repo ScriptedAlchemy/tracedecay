@@ -106,6 +106,9 @@ jobs:
             --download-dir retained-assets
 
   build:
+    permissions:
+      contents: read
+      id-token: write
     needs: validate
     if: needs.validate.outputs.build_required == 'true'
     name: Build ${{ matrix.name }}
@@ -155,12 +158,17 @@ jobs:
             scripts/generate-release-inventory.py
           sparse-checkout-cone-mode: false
 
-      - name: Set up Bazel for inventory-only recovery
-        if: matrix.inventory_only == true
+      # Fleet setup comes from this workflow revision even when rebuilding an
+      # older tag whose build-cli action predates macOS remote execution.
+      - name: Set up Bazel for release builds
         uses: ./.release-automation/.github/actions/setup-bazel
         with:
           cache-key: release-${{ matrix.target }}
-          cache-save: "false"
+          tailscale-client-id: >-
+            ${{ (matrix.name == 'x86_64-linux' || matrix.name == 'aarch64-macos')
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+          cache-save: ${{ matrix.inventory_only != true }}
 
       - name: Build dashboard bundle for inventory-only recovery
         if: matrix.inventory_only == true
@@ -313,9 +321,11 @@ jobs:
           archives=(new-binaries/tracedecay-beta-*)
           bundles=(new-mcpbs/*.mcpb)
           inventories=(new-inventories/*.spdx.json)
-          echo "archives=${#archives[@]}" >>"$GITHUB_OUTPUT"
-          echo "bundles=${#bundles[@]}" >>"$GITHUB_OUTPUT"
-          echo "inventories=${#inventories[@]}" >>"$GITHUB_OUTPUT"
+          {
+            echo "archives=${#archives[@]}"
+            echo "bundles=${#bundles[@]}"
+            echo "inventories=${#inventories[@]}"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Attest newly built prerelease archives
         if: steps.built.outputs.archives != '0'
@@ -405,7 +415,7 @@ jobs:
             --mcpbs verified-mcpbs \
             --inventories verified-inventories
           for inventory in verified-inventories/*.spdx.json; do
-            platform="${inventory#verified-inventories/tracedecay-beta-${RELEASE_TAG}-}"
+            platform="${inventory#verified-inventories/tracedecay-beta-"${RELEASE_TAG}"-}"
             platform="${platform%.spdx.json}"
             archive_format="$(jq -r --arg platform "$platform" \
               '.include[] | select(.name == $platform) | .archive' .github/release-targets.json)"
