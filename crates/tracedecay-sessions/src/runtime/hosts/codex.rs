@@ -579,9 +579,6 @@ impl CodexDiscoveryHub {
                                 detail: "Codex replay index disappeared before delivery",
                             },
                         )?;
-                        // A complete durable frontier at the index's epoch already
-                        // covers every indexed path (a restarted daemon's later
-                        // consumers land here), so its replay starts past the end.
                         let effective_position =
                             if frontier.is_complete() && frontier == index.frontier {
                                 index.paths.last().cloned()

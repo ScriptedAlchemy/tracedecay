@@ -1750,8 +1750,6 @@ mod recent_first_discovery_tests {
         .await;
         assert_eq!(project_frontier, profile_frontier);
 
-        // A restarted daemon registers its consumers one by one, so every
-        // consumer after the first joins a hub whose shared scan already began.
         let restarted = CodexDiscoveryHub::default();
         restarted.register("project", Some(home));
         let (project_paths, _) =

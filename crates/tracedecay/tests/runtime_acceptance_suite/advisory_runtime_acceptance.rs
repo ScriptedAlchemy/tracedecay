@@ -1218,9 +1218,6 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     // client protocol; only a non-retryable failure is a test failure.
     let advisory_deadline = std::time::Instant::now() + Duration::from_secs(60);
     let advisory = loop {
-        // Capture only the already-owned log before invoking the CLI. The
-        // same phase deadline bounds this read, so a terminal request failure
-        // never starts new diagnostic work after its deadline has elapsed.
         let daemon_log_before_invocation =
             tokio::time::timeout_at(tokio::time::Instant::from_std(advisory_deadline), async {
                 const MAX_LOG_BYTES: u64 = 16 * 1024;
