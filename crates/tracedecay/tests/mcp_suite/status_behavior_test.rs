@@ -417,6 +417,8 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
              **session_projection:** current\n"
         )
     );
+
+    project.harness.shutdown().await;
 }
 
 /// One daemon serving two projects: each project's status lists only its own
