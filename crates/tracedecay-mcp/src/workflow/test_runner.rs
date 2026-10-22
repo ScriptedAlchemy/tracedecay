@@ -707,8 +707,8 @@ mod tests {
 
     #[cfg(unix)]
     use super::{
-        MAX_TEST_RUN_OUTPUT_BYTES, ProcessOutcome, TestRunStream, configure_command,
-        wait_for_process,
+        MAX_TEST_RUN_OUTPUT_BYTES, PROCESS_POLL_INTERVAL, ProcessOutcome, TestRunStream,
+        configure_command, terminate_and_reap, wait_for_process,
     };
     use super::{
         TestProfile, TestRunControl, TestRunFailure, TestRunOutput, cargo_test_build_args,
@@ -1204,26 +1204,27 @@ mod tests {
         configure_command(&mut command);
         let mut child = command.spawn().expect("fixture parent");
         let process_group = child.id();
-        let control = TestRunControl::default();
-        control.register(process_group);
-
-        // This assertion needs a live descendant. Process startup is not part
-        // of the 50 ms execution deadline exercised by the production waiter.
-        let startup_deadline = Instant::now() + Duration::from_secs(1);
-        while !marker.exists() && Instant::now() < startup_deadline {
-            thread::sleep(Duration::from_millis(5));
+        // Measure execution expiry only after the descendant exists. On a busy
+        // worker, starting two test binaries can consume the entire 50 ms.
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if fs::read_to_string(&marker).is_ok_and(|pid| pid.trim().parse::<u32>().is_ok()) {
+                break;
+            }
+            if Instant::now() >= ready_deadline {
+                terminate_and_reap(&mut child, process_group);
+                panic!("fixture descendant did not become ready");
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
         }
-        let ready = marker.exists();
-        let outcome = wait_for_process(
+        let result = wait_for_process(
             &mut child,
             process_group,
             Instant::now() + Duration::from_millis(50),
-            &control,
+            &TestRunControl::default(),
         );
-        control.unregister(process_group);
-        // Reap the owned group before a startup assertion can unwind.
-        assert!(ready, "fixture descendant did not finish starting");
-        assert!(matches!(outcome, ProcessOutcome::TimedOut));
+        assert!(matches!(result, ProcessOutcome::TimedOut));
+        assert_process_reaped(process_group, "fixture parent");
         assert_reaped(&marker);
     }
 
