@@ -35,7 +35,6 @@ pub(crate) fn register_for_tests() {
         | Err(tracedecay_project::product_runtime::ProductRuntimeError::ConflictingProvider) => {}
         Err(error) => panic!("register the CLI product runtime for tests: {error}"),
     }
-    crate::cloud::admit_sync_probes();
 }
 
 pub(crate) fn provider() -> tracedecay_project::product_runtime::ProductRuntimeProvider {

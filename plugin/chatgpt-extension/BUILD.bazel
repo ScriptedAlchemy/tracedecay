@@ -24,3 +24,10 @@ vitest_bin.vitest_test(
     args = ["run", "test/adapter.test.ts"],
     chdir = package_name(),
 )
+
+vitest_bin.vitest_test(
+    name = "serve_client_test",
+    data = [":sources", ":node_modules", "//sdks/typescript:dist"],
+    args = ["run", "test/serve-client.test.ts"],
+    chdir = package_name(),
+)

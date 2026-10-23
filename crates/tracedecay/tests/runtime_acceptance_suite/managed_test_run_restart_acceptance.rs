@@ -138,8 +138,9 @@ async fn a_session_attributed_test_run_survives_a_physical_daemon_restart_on_loo
         false,
     )
     .expect("daemon handshake");
-    // Session stores mount with the full project server, after the code
-    // index; until then the owner answers the typed mounting refusal.
+    // Session stores mount after the code index, and temporal publication can
+    // still be catching up. Retry only the typed pre-admission states before
+    // asserting the completed transcript and its durable attribution.
     let deadline = Instant::now() + Duration::from_secs(60);
     let ingest = loop {
         let ingest = mcp_tool(
@@ -149,12 +150,16 @@ async fn a_session_attributed_test_run_survives_a_physical_daemon_restart_on_loo
             json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false}),
         )
         .await;
-        if ingest["problem"]["code"] != json!("application.runtime.mounting") {
+        let mounting = ingest["problem"]["code"] == json!("application.runtime.mounting");
+        let catching_up = ingest["problem"]["code"] == json!("temporal_refresh_unavailable")
+            && ingest["problem"]["retryable"] == json!(true)
+            && ingest["problem"]["terminality"] == json!("pre_admission");
+        if !mounting && !catching_up {
             break ingest;
         }
         assert!(
             Instant::now() < deadline,
-            "session stores never mounted: {ingest}"
+            "session authority never became ready: {ingest}"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };

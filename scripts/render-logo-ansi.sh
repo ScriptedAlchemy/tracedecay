@@ -18,8 +18,6 @@ width=90
 tool_root="$(mktemp -d)"
 trap 'rm -rf "$tool_root"' EXIT
 
-# Run outside the checkout, where .cargo/config.toml would limit Cargo to the
-# crates pnpm vendored for this workspace; logo-art is not among them.
 (cd "$tool_root" && cargo install --quiet --locked --root "$tool_root" --example cli logo-art@0.2.1)
 "$tool_root/bin/cli" "$resources/logo.png" "$width" > "$resources/logo.ansi"
 echo "wrote $resources/logo.ansi ($(wc -c < "$resources/logo.ansi") bytes)"

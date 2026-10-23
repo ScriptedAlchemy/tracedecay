@@ -1204,21 +1204,22 @@ impl AutomationEffectAuthority {
         let index_root = dashboard_root.clone();
         let index_path = journal_path.clone();
         let indexed = admission.clone();
-        let reservation = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let _span = tracing::trace_span!("daemon.automation.effect.reserve").entered();
-            {
-                reserve_or_replay_indexed_blocking(
-                    &reserve_path,
-                    requested,
-                    || add_pending_blocking(&index_root, &index_path, &indexed),
-                    || remove_pending_blocking(&index_root, &index_path),
-                )
-            }
-        })
-        .await
-        .map_err(|error| {
-            contract_error(format!("automation reservation writer failed: {error}"))
-        })??;
+        let reservation =
+            tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
+                let _span = tracing::trace_span!("daemon.automation.effect.reserve").entered();
+                {
+                    reserve_or_replay_indexed_blocking(
+                        &reserve_path,
+                        requested,
+                        || add_pending_blocking(&index_root, &index_path, &indexed),
+                        || remove_pending_blocking(&index_root, &index_path),
+                    )
+                }
+            })
+            .await
+            .map_err(|error| {
+                contract_error(format!("automation reservation writer failed: {error}"))
+            })??;
         let admission = match reservation {
             ReservationResult::Replay {
                 terminal,
@@ -1689,7 +1690,7 @@ impl AutomationEffectAuthority {
         let path = self.journal_path.clone();
         let admission = self.admission.clone();
         let journal_publication = publication.clone();
-        let terminal = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        let terminal = tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
             promote_prepared_terminal_blocking(&path, &admission, terminal, &journal_publication)
         })
         .await
@@ -1715,7 +1716,7 @@ impl AutomationEffectAuthority {
         let path = self.journal_path.clone();
         let admission = self.admission.clone();
         let cancellation = self.cancellation.clone();
-        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
             persist_recovered_terminal_blocking(&path, &admission, terminal, Some(&cancellation))?
                 .ok_or_else(|| contract_error("automation recovery settlement was cancelled"))
         })

@@ -1997,9 +1997,11 @@ fn assert_legal_host_response(provider: &str, state: &str, expected: &Value, out
             *project_root = Value::String("<PROJECT_ROOT>".to_string());
         }
         assert_eq!(document, expected, "{provider}/{state} stdout");
-    } else if matches!(provider, "kiro" | "pi") && stdout != expected["stdout"].as_str().unwrap() {
-        // The daemon can finish its advisory cycle before either plain-text hook.
-        // This fixture seeds no findings; accept only a validated empty notice.
+    } else if (provider == "pi" && !stdout.is_empty())
+        || (provider == "kiro" && stdout != expected["stdout"].as_str().unwrap())
+    {
+        // Advisory completion can race with admission. These hosts carry its
+        // zero-finding notice as plain text.
         assert_eq!(
             expected["stdout"].as_str().unwrap(),
             if provider == "kiro" { "{}" } else { "" },

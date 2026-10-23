@@ -12,46 +12,27 @@ bazel build //...
 bazel test //... --test_output=errors
 ```
 
-Use the Rust toolchain pinned in `rust-toolchain.toml` (edition 2024) and
-**Node.js 22+ and pnpm** (the version pinned by `packageManager` in
-`package.json`; an older pnpm switches to it automatically). Run
-`pnpm install` at the repository root after cloning and whenever
-`pnpm-lock.yaml` or a `Cargo.lock` changes. Besides the npm packages, it
-installs every crate into `.pnpm/crates`, which the committed
-`.cargo/config.toml` substitutes for crates.io and the pinned git sources, so
-`cargo` cannot resolve dependencies until it has run. Bazel is the workspace
-build, test, check, run, benchmark, and code-generation authority locally
-and in CI. Cargo metadata and dependency resolution remain inputs to Bazel;
-formatting does not compile or execute the workspace. Commands below run
+Bazel manages the Rust toolchain and dependencies from `rust-toolchain.toml`,
+the workspace manifests, and `Cargo.lock`. It is the workspace build, test,
+check, run, benchmark, and code-generation authority locally and in CI.
+
+Use **Node.js 22+ and pnpm** for JavaScript packages. The pnpm version is pinned
+by `packageManager` in `package.json`. Run `pnpm install` at the repository
+root after cloning and after `pnpm-lock.yaml` changes. Commands below run
 from the repository root unless noted.
 
-Two Cargo errors mean "run `pnpm install` at the repository root". Before any
-install, Cargo reports `failed to read root of directory source
-<repo>/.pnpm/crates/git`. When `Cargo.lock` names a crate that is not vendored
-yet, it reports `no matching package named '<crate>' found` with `location
-searched: directory source '<repo>/.pnpm/crates/crates-io'`.
-`verifyDepsBeforeRun` guards only the npm packages against `pnpm-lock.yaml`;
-`pnpm install` reads `Cargo.lock` as it is and never rewrites it or fails when
-a `Cargo.toml` no longer matches it.
-
-To add, remove, or bump a crate, edit the manifests by hand and refresh the
-lock from outside the checkout with the pinned toolchain, then vendor the
-result:
+To add, remove, or bump a Rust dependency, edit the manifests and refresh the
+lockfile and generated Bazel targets:
 
 ```bash
-# <toolchain> is the channel in rust-toolchain.toml; add -p <crate> for one bump
-cd / && cargo +<toolchain> update -w --manifest-path "$repo/Cargo.toml"
-cd "$repo" && pnpm install
+CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c
+bazel run //scripts:bazel/gen_builds.py
 ```
 
-Inside the checkout `cargo update` refuses the vendored git sources and
-`cargo add` sees only vendored crates. Do not use `pnpm add crate:`; from a
-member directory it regenerates the whole `Cargo.lock`, and at the root it
-fails. `pnpm remove crate:` is unsupported. Unused `.pnpm/crates` directories
-stay in place after `pnpm install` and are inert once the lock stops naming
-them. Dashboard `contracts:generate` and `contracts:check` run the
-`//sdks/codegen:generate` and `//sdks/codegen:dashboard_schema` Bazel targets
-from the repository root.
+For a targeted dependency update, use `CARGO_BAZEL_REPIN=<crate>` instead.
+Review and commit `Cargo.lock` and any generated target changes together.
+Dashboard `contracts:generate` and `contracts:check` run the
+`//sdks/codegen:generate` and `//sdks/codegen:dashboard_schema` Bazel targets.
 
 Use your current checkout; no particular absolute path or historical PR branch
 is required. See [AGENTS.md](AGENTS.md) for checkout safety and shared-work rules.
