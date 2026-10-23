@@ -1,25 +1,18 @@
 /**
  * The Canvas2D substrate of the temporal field.
  *
- * A measuring instrument: 32px graticule hairlines with the labelled ticks as
- * majors, one banded rail per session, and causal links routed orthogonally
- * in their grade's line style. Luminance is spent only on real quantities:
- * recency within the loaded page (dimmest at the oldest start, full at NOW)
- * and the selected causal chain, which lifts over the recency veil with a
- * restrained cyan halo. Additive blending applies to rails and links so that
- * only where two real marks cross does the field brighten.
- *
- * Semantic zoom is one rule: a lane that cannot hold legible glyphs draws its
- * density summary instead. A collapsed branch is always a summary, a
- * shared-scale histogram of member sessions with a measured extent, with
- * begun-but-unmeasured sessions dotted above it; a session lane whose marks
- * collide draws its extent band and a floor rug of dated events. Zooming the
- * window or expanding a branch resolves the same lanes to rails and glyphs.
+ * The spindle paints every recorded session from its canonical sampled
+ * fiber, including members of collapsed branches. Strata and Rails retain
+ * measured extent bands and density summaries where glyphs cannot fit.
+ * All treatments share the evidence-grade language, loaded-page recency,
+ * replay boundary and emphasis on the selected causal chain.
  */
 import type { DensityBin, LaneDensity } from '../density.ts';
 import { gradeStroke, type TemporalPalette } from '../palette.ts';
 import type { SceneLane, ScenePath } from '../types.ts';
 import { focusAlpha, hatch, isLifted, isLink, pathEnds, recencySpan, resolvedLanes, type SceneFrame } from './frame.ts';
+import { paintSpindle } from './spindlePaint.ts';
+import { fillGrade, paintRibbon, traceCurve } from './treatments.ts';
 
 const GRATICULE_PX = 32;
 const CORNER_PX = 4;
@@ -111,7 +104,12 @@ function paintRug(ctx: CanvasRenderingContext2D, lane: SceneLane, density: LaneD
 }
 
 export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, palette: TemporalPalette): void {
-  const { model, fieldX0, fieldX1, top, height, density } = frame;
+  if (frame.variant === 'weave' && frame.model.spindle) {
+    paintSpindle(ctx, frame, palette);
+    paintUnrevealed(ctx, frame, palette);
+    return;
+  }
+  const { model, variant, fieldX0, fieldX1, top, height, density } = frame;
   const width = Math.max(1, fieldX1 - fieldX0);
   const resolved = resolvedLanes(frame);
   const additive = palette.light ? 'source-over' : 'lighter';
@@ -147,14 +145,16 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
       ctx.globalAlpha = lane.focus === 'selected' ? 0.08 : 0.035;
       ctx.fillStyle = palette.signal;
       ctx.fillRect(fieldX0, y0, width, lane.height);
-    } else if (lane.row % 2 === 1) {
+    } else if (variant !== 'weave' && lane.row % 2 === 1) {
       ctx.globalAlpha = palette.light ? 0.03 : 0.022;
       ctx.fillStyle = palette.text;
       ctx.fillRect(fieldX0, y0, width, lane.height);
     }
-    ctx.globalAlpha = 0.7;
-    ctx.fillStyle = palette.grid;
-    ctx.fillRect(fieldX0, Math.round(y0 + lane.height) - 1, width, 1);
+    if (variant !== 'weave') {
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = palette.grid;
+      ctx.fillRect(fieldX0, Math.round(y0 + lane.height) - 1, width, 1);
+    }
   }
   for (const rail of model.rails) {
     ctx.globalAlpha = 0.9;
@@ -172,19 +172,28 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
     const laneDensity = density?.lanes.get(lane.id);
     if (!laneDensity || !lane.revealed) continue;
     const alpha = focusAlpha(lane.focus);
-    if (lane.kind === 'bundle') paintBundle(ctx, lane, laneDensity, bundlePeak, palette, alpha);
+    if (lane.kind === 'bundle') {
+      if (variant === 'weave') paintRibbon(ctx, lane, laneDensity, palette, alpha);
+      else paintBundle(ctx, lane, laneDensity, bundlePeak, palette, alpha);
+    }
     if (!resolved.has(lane.id)) paintRug(ctx, lane, laneDensity, palette, alpha);
   }
 
-  ctx.globalCompositeOperation = additive;
+  ctx.globalCompositeOperation = variant === 'strata' ? 'source-over' : additive;
+  ctx.lineCap = variant === 'weave' ? 'round' : 'butt';
   const laneById = new Map(model.lanes.map((lane) => [lane.id, lane] as const));
   for (const path of model.paths) {
     if (path.kind !== 'lane') continue;
     const lane = laneById.get(path.fromId);
-    if (!lane || lane.kind === 'bundle') continue;
+    if (!lane || !lane.revealed || (lane.kind === 'bundle' && variant !== 'weave')) continue;
     const stroke = gradeStroke(path.grade, palette);
     const resolves = resolved.has(lane.id);
-    if (!resolves) {
+    if (variant === 'strata') {
+      const bandHeight = Math.max(2, Math.min(12, lane.height - BAND_INSET * 2));
+      fillGrade(ctx, path.grade, lane.x0, lane.y - bandHeight / 2,
+        lane.endSource === null ? 18 : Math.max(lane.x1 - lane.x0, 2), bandHeight,
+        palette, focusAlpha(path.focus));
+    } else if (variant === 'rail' && !resolves) {
       // An aggregated session is its extent band; the grade rides on the
       // hairline through it, since a dashed band reads as a barcode.
       ctx.globalAlpha = 0.28 * focusAlpha(path.focus);
@@ -197,7 +206,7 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
     }
     ctx.globalAlpha = focusAlpha(path.focus);
     ctx.strokeStyle = stroke.color;
-    ctx.lineWidth = 1 + (path.weight ?? 0) * 1.5;
+    ctx.lineWidth = variant === 'weave' ? 1.1 + (path.weight ?? 0) * 3.6 : 1 + (path.weight ?? 0) * 1.5;
     ctx.setLineDash([...stroke.dash]);
     ctx.beginPath();
     traceRail(ctx, lane);
@@ -206,13 +215,31 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
   const links = model.paths.filter(isLink);
   for (const path of links) {
     const stroke = gradeStroke(path.grade, palette);
+    const alpha = focusAlpha(path.focus) * (path.kind === 'rejoin' ? 0.6 : 1);
+    if (variant === 'strata') {
+      const { x0, y0, x1, y1 } = pathEnds(path.controls);
+      fillGrade(ctx, path.grade, (x0 + x1) / 2 - 2, Math.min(y0, y1), 4, Math.abs(y1 - y0), palette, alpha);
+    } else if (variant === 'weave') {
+      // A substrate casing makes a delegated strand readable where it
+      // crosses another session. Only its graded centre carries evidence.
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = palette.substrate;
+      ctx.lineWidth = 5;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      traceCurve(ctx, path);
+      ctx.stroke();
+      ctx.globalCompositeOperation = additive;
+    }
     // A join is an inference from two extents; it recedes behind the forks.
-    ctx.globalAlpha = focusAlpha(path.focus) * (path.kind === 'rejoin' ? 0.6 : 1);
+    ctx.globalAlpha = alpha;
     ctx.strokeStyle = stroke.color;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = variant === 'weave' ? 1.6 : 1;
     ctx.setLineDash([...stroke.dash]);
     ctx.beginPath();
-    traceRoute(ctx, path);
+    if (variant === 'weave') traceCurve(ctx, path);
+    else traceRoute(ctx, path);
     ctx.stroke();
   }
   ctx.globalCompositeOperation = 'source-over';
@@ -260,9 +287,9 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
     if (!isLifted(path.focus)) continue;
     if (path.kind === 'lane') {
       const lane = laneById.get(path.fromId);
-      if (lane && lane.kind !== 'bundle' && resolved.has(lane.id)) lifted.push([path, (c) => traceRail(c, lane)]);
+      if (lane && lane.revealed && lane.kind !== 'bundle' && (variant === 'weave' || resolved.has(lane.id))) lifted.push([path, (c) => traceRail(c, lane)]);
     } else if (isLink(path)) {
-      lifted.push([path, (c) => traceRoute(c, path)]);
+      lifted.push([path, (c) => variant === 'weave' ? traceCurve(c, path) : traceRoute(c, path)]);
     }
   }
   for (const [, trace] of lifted) {
@@ -279,7 +306,9 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
     const stroke = gradeStroke(path.grade, palette);
     ctx.globalAlpha = 1;
     ctx.strokeStyle = path.focus === 'selected' && path.kind === 'lane' ? palette.signalHot : stroke.color;
-    ctx.lineWidth = path.kind === 'lane' ? 1.5 + (path.weight ?? 0) * 1.5 : 1.5;
+    ctx.lineWidth = path.kind === 'lane'
+      ? (variant === 'weave' ? 2 + (path.weight ?? 0) * 3.6 : 1.5 + (path.weight ?? 0) * 1.5)
+      : 1.5;
     ctx.setLineDash([...stroke.dash]);
     ctx.beginPath();
     trace(ctx);

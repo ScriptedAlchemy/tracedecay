@@ -302,6 +302,7 @@ export function layoutTemporalScene(
 
   // --- event dispositions (independent of y) ---------------------------------
   const eventsByLane = new Map<string, JourneyEvent[]>();
+  const eventById = new Map(projection.events.map((event) => [event.id, event]));
   for (const event of projection.events) {
     const bucket = eventsByLane.get(event.laneId);
     if (bucket) bucket.push(event);
@@ -522,6 +523,11 @@ export function layoutTemporalScene(
     const parent = sceneLaneById.get(relation.fromLaneId);
     if (!parent) continue;
     if (reveal !== null && reveal.time !== null && relation.time !== null && relation.time > reveal.time) {
+      relationsWithheld += 1;
+      continue;
+    }
+    const originEvent = relation.fromEventId === undefined ? undefined : eventById.get(relation.fromEventId);
+    if (originEvent && isWithheld(originEvent)) {
       relationsWithheld += 1;
       continue;
     }

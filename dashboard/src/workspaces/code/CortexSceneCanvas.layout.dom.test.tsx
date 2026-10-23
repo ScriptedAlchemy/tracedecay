@@ -3,7 +3,7 @@
  * request write: a superseded result is dropped, an unmount aborts the request
  * and the selection a reader holds is untouched by a layout completing.
  */
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CortexSceneCanvas } from './CortexSceneCanvas.tsx';
@@ -70,6 +70,7 @@ function renderCanvas(
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -145,6 +146,56 @@ describe('layout requests from the canvas', () => {
       await requests[0]!.settled;
     });
     expect(painter.draw).not.toHaveBeenCalled();
+  });
+
+  it('keeps resize and wheel zoom working after a failed layout is replaced by another view', async () => {
+    mockCanvas();
+    const { flush } = controlFrames();
+    let resize = () => {};
+    vi.stubGlobal('ResizeObserver', class {
+      target: Element | null = null;
+      constructor(callback: ResizeObserverCallback) {
+        resize = () => {
+          if (this.target?.isConnected) callback([], this as unknown as ResizeObserver);
+        };
+      }
+      observe(target: Element) { this.target = target; }
+      disconnect() { this.target = null; }
+    });
+    const failed = fakePainter();
+    const recovered = fakePainter();
+    const scene = sceneOf('a', 'b');
+    const view = render(renderCanvas({ scene, painter: failed.painter }));
+    await waitFor(() => expect(failed.requests).toHaveLength(1));
+    await act(async () => {
+      failed.requests[0]!.reject(new Error('worker unavailable'));
+      await failed.requests[0]!.settled.catch(() => {});
+    });
+    expect(screen.getByText(/worker unavailable/)).toBeTruthy();
+    view.rerender(renderCanvas({ scene, painter: recovered.painter }));
+    await waitFor(() => expect(recovered.requests).toHaveLength(1));
+    await act(async () => {
+      recovered.requests[0]!.resolve({ tag: 'recovered' });
+      await recovered.requests[0]!.settled;
+    });
+    flush();
+    expect(screen.queryByText(/worker unavailable/)).toBeNull();
+
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, width: 400, height: 300, right: 400, bottom: 300, toJSON: () => ({}),
+    } as DOMRect);
+    act(resize);
+    flush();
+    const resized = vi.mocked(recovered.painter.draw).mock.calls.at(-1)![2];
+    expect([resized.width, resized.height]).toEqual([400, 300]);
+    fireEvent.wheel(screen.getByRole('group', { name: /test field/ }), {
+      deltaY: -100, clientX: 200, clientY: 150,
+    });
+    flush();
+    const zoomed = vi.mocked(recovered.painter.draw).mock.calls.at(-1)![2];
+    expect(zoomed.camera.k).toBeGreaterThan(resized.camera.k);
+    expect(screen.getByLabelText('zoom 116 percent of fit')).toBeTruthy();
+    view.unmount();
   });
 
   it('keeps the pinned symbol, and the list notice, while the layout is pending and after it lands', async () => {

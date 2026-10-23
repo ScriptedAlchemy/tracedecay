@@ -15,9 +15,11 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { formatMoment } from '../../workspaces/loom/tracks.ts';
 import type { SceneDensity } from './density.ts';
 import { glyphLabel, TemporalLegend } from './glyphs.tsx';
-import { resolveTemporalPalette, type TemporalPalette } from './palette.ts';
-import { focusAlpha, type SceneFrame } from './scene/frame.ts';
-import { ClusterMark, FieldOverlay, LegendEncodings, laneDetail, NODE_CLASS, NodeMark } from './scene/marks.tsx';
+import { gradeDashArray, resolveTemporalPalette, type TemporalPalette } from './palette.ts';
+import { pointsPath } from './spindle.ts';
+import { sceneAnnotations } from './scene/annotations.ts';
+import { focusAlpha, type SceneFrame, type TemporalSceneVariant } from './scene/frame.ts';
+import { ClusterMark, FieldOverlay, LegendEncodings, laneDetail, NODE_CLASS, NodeMark, OverflowReadouts, RelationEvidence } from './scene/marks.tsx';
 import { paintScene } from './scene/paint.ts';
 import type {
   SceneCluster,
@@ -29,8 +31,12 @@ import type {
   TemporalSceneModel,
 } from './types.ts';
 
+export type { TemporalSceneVariant } from './scene/frame.ts';
+
 export interface TemporalSceneProps {
   model: TemporalSceneModel;
+  /** Visual treatment over the same laid-out evidence and interaction model. */
+  variant?: TemporalSceneVariant;
   ariaLabel: string;
   onSelectLane: (laneId: string | null) => void;
   onSelectEvent: (eventId: string) => void;
@@ -61,6 +67,7 @@ type SceneLayer = 'canvas' | 'unavailable';
 interface DragState {
   pointerId: number;
   startClientX: number;
+  startClientY: number;
   startWindow: SceneWindow;
   moved: boolean;
 }
@@ -118,6 +125,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     className,
     fullWindow,
     density = null,
+    variant = 'weave',
   } = props;
   const clipId = useId();
   const hostRef = useRef<HTMLElement>(null);
@@ -137,24 +145,16 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const fieldX1 = width - viewport.right;
   const fieldWidth = Math.max(1, fieldX1 - fieldX0);
   const frame: SceneFrame = useMemo(
-    () => ({ model, density, fieldX0, fieldX1, top: RULER, height }),
-    [model, density, fieldX0, fieldX1, height],
+    () => ({ model, variant, density, fieldX0, fieldX1, top: RULER, height, highContrast: palette?.highContrast ?? false }),
+    [model, variant, density, fieldX0, fieldX1, height, palette?.highContrast],
   );
+  const annotations = useMemo(() => sceneAnnotations(frame), [frame]);
 
   const lanes = useMemo(() => [...model.lanes].sort((a, b) => a.row - b.row), [model.lanes]);
   const clusterByLane = useMemo(
     () => new Map(model.clusters.map((cluster) => [cluster.laneId, cluster])),
     [model.clusters],
   );
-  const nodesByLane = useMemo(() => {
-    const groups = new Map<string, SceneNode[]>();
-    for (const node of model.nodes) {
-      const group = groups.get(node.laneId);
-      if (group) group.push(node);
-      else groups.set(node.laneId, [node]);
-    }
-    return groups;
-  }, [model.nodes]);
   const intervalsByLane = useMemo(() => {
     const groups = new Map<string, SceneInterval[]>();
     for (const interval of model.intervals) {
@@ -297,6 +297,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     dragRef.current = {
       pointerId: event.pointerId,
       startClientX: Number(event.clientX) || 0,
+      startClientY: Number(event.clientY) || 0,
       startWindow: window,
       moved: false,
     };
@@ -313,7 +314,10 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     const bounds = overlay.getBoundingClientRect();
     const scale = bounds.width > 0 ? width / bounds.width : 1;
     const dx = ((Number(event.clientX) || 0) - drag.startClientX) * scale;
-    if (!drag.moved && Math.abs(dx) < CLICK_SLOP_PX) return;
+    const dy = ((Number(event.clientY) || 0) - drag.startClientY) * scale;
+    // Let the page own a vertical touch scroll. A small horizontal drift must
+    // not alter the time window before the browser cancels our pointer.
+    if (!drag.moved && (Math.abs(dx) < CLICK_SLOP_PX || Math.abs(dy) > Math.abs(dx))) return;
     drag.moved = true;
     const seconds = (-dx / fieldWidth) * spanOf(drag.startWindow);
     onWindowChange({ start: drag.startWindow.start + seconds, end: drag.startWindow.end + seconds });
@@ -420,7 +424,6 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   };
 
   const renderLaneField = (lane: SceneLane): JSX.Element => {
-    const nodes = nodesByLane.get(lane.id) ?? [];
     const intervals = intervalsByLane.get(lane.id) ?? [];
     const gaps = gapsByLane.get(lane.id) ?? [];
     const cluster = clusterByLane.get(lane.id);
@@ -444,13 +447,30 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         {intervals.map((interval) => renderInterval(interval))}
         {cluster && renderCluster(cluster, lane)}
         {gaps.map((gap) => renderGap(gap))}
-        {nodes.map((node) => renderNode(node))}
       </g>
     );
   };
 
   const renderInterval = (interval: SceneInterval): JSX.Element => {
     const x1 = Math.max(interval.x1, interval.x0 + 2);
+    if (interval.points) {
+      const d = pointsPath(interval.points);
+      if (interval.kind === 'git_span') return (
+        <path key={interval.id} data-interval={interval.id} data-interval-kind={interval.kind} d={d} fill="none" stroke="var(--raw-graph-edge)" strokeWidth={3} opacity={0.8}>
+          <title>{interval.label}</title>
+        </path>
+      );
+      const select = (): void => { if (interval.ref !== null) onSelectEncounter?.(interval.ref); };
+      return (
+        <g key={interval.id} role="button" tabIndex={0} aria-label={`Open encounter ${interval.label}`} className="cursor-pointer outline-none [&:focus-visible>path]:stroke-white" onClick={select} onKeyDown={(event) => {
+          if (isActivation(event)) { event.preventDefault(); select(); }
+        }}>
+          <title>{`${interval.label} · ${interval.grade}`}</title>
+          <path d={d} fill="none" stroke="transparent" strokeWidth={44} />
+          <path data-interval={interval.id} data-interval-kind={interval.kind} data-proximity-encounter={interval.ref ?? undefined} d={d} fill="none" stroke={proximityTone(interval.tone)} strokeWidth={5} strokeLinecap="round" opacity={0.85} pointerEvents="none" />
+        </g>
+      );
+    }
     switch (interval.kind) {
       case 'git_span':
         return (
@@ -566,7 +586,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
           height={Math.max(cluster.height, 44)}
           fill="transparent"
         />
-        <ClusterMark cluster={cluster} />
+        <ClusterMark cluster={cluster} frame={frame} />
       </g>
     );
   };
@@ -595,6 +615,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         aria-label={`Select ${glyphLabel(node.kind)} ${node.label}`}
         aria-pressed={node.selected}
         className={NODE_CLASS}
+        style={laneGroupStyle(node.laneId)}
         opacity={focusAlpha(node.focus)}
         onClick={select}
         onKeyDown={(event) => {
@@ -613,7 +634,9 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         onBlur={leaveNode}
       >
         <title>{title}</title>
-        <rect x={node.x - halfHit} y={node.y - 22} width={Math.max(2, halfHit * 2)} height={44} fill="transparent" />
+        {node.hitRadius !== undefined
+          ? <circle data-event-hit cx={node.x} cy={node.y} r={node.hitRadius} fill="transparent" />
+          : <rect x={node.x - halfHit} y={node.y - 22} width={Math.max(2, halfHit * 2)} height={44} fill="transparent" />}
         <NodeMark node={node} frame={frame} />
       </g>
     );
@@ -621,10 +644,13 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
 
   const renderLaneRow = (lane: SceneLane): JSX.Element => {
     const rowHeight = Math.max(22, lane.height);
-    const indent = 8 + lane.depth * 10;
-    const labelWidth = viewport.left - TOGGLE_WIDTH - indent - 6;
-    const twoLine = lane.height >= 28;
     const toggle = branchToggleFor(lane);
+    const toggleWidth = toggle ? Math.max(TOGGLE_WIDTH, (String(toggle.count).length + 1) * LABEL_CHAR_PX + 8) : 0;
+    // Deep hierarchy must not consume the whole compact label column. The
+    // full name and exact branch action remain in the accessible label/title.
+    const indent = Math.min(8 + lane.depth * 10, Math.max(8, viewport.left - toggleWidth - 70));
+    const labelWidth = Math.max(0, viewport.left - toggleWidth - indent - 6);
+    const twoLine = lane.height >= 28;
     const bundleCount = clusterByLane.get(lane.id)?.counts.sessions ?? lane.collapsedDescendants;
     const detailLine =
       laneDetail(lane, frame) ??
@@ -651,7 +677,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
           }}
         >
           <title>{`${lane.label} · ${detailLine}${lane.offscreen ? ' · outside the window' : ''}${lane.revealed ? '' : ' · starts after the playback cursor'}`}</title>
-          <rect x={0} y={lane.y - rowHeight / 2} width={Math.max(1, viewport.left - TOGGLE_WIDTH)} height={rowHeight} fill="transparent" stroke="none" />
+          <rect x={0} y={lane.y - rowHeight / 2} width={Math.max(1, viewport.left - toggleWidth)} height={rowHeight} fill="transparent" stroke="none" />
           <text x={indent} y={twoLine ? lane.y - 3 : lane.y + 4} fontSize={11} fill="var(--raw-graph-text)" pointerEvents="none">
             {truncateLabel(lane.label, labelWidth)}
           </text>
@@ -678,8 +704,8 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
             }}
           >
             <title>{toggle.label}</title>
-            <rect x={viewport.left - TOGGLE_WIDTH} y={lane.y - rowHeight / 2} width={TOGGLE_WIDTH} height={rowHeight} fill="transparent" stroke="none" />
-            <text x={viewport.left - TOGGLE_WIDTH + 4} y={lane.y + 4} fontSize={10} fill="var(--raw-graph-accent)" pointerEvents="none">
+            <rect x={viewport.left - toggleWidth} y={lane.y - rowHeight / 2} width={toggleWidth} height={rowHeight} fill="transparent" stroke="none" />
+            <text x={viewport.left - toggleWidth + 4} y={lane.y + 4} fontSize={10} fill="var(--raw-graph-accent)" pointerEvents="none">
               {toggle.expanded ? `−${toggle.count}` : `+${toggle.count}`}
             </text>
           </g>
@@ -699,6 +725,9 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     <section
       ref={hostRef}
       aria-label={ariaLabel}
+      data-scene-variant={variant}
+      data-scene-geometry={model.spindle ? 'spindle' : 'lanes'}
+      data-scene-fibers={model.spindle?.fibers.length}
       className={`td-optic relative min-w-0 ${className ?? ''}`.trim()}
     >
       <div role="toolbar" aria-label="Time window" className="relative z-10 flex min-h-10 flex-wrap items-center gap-1 border-b border-edge-subtle px-1 text-xs">
@@ -726,6 +755,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
           </span>
         ) : null}
       </div>
+      <OverflowReadouts annotations={annotations} />
       <div className="relative" data-scene-field>
         <canvas
           ref={canvasRef}
@@ -754,13 +784,16 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
             const next = event.relatedTarget;
             if (!(next instanceof Node) || !event.currentTarget.contains(next)) leaveNode();
           }}
-          className="relative block touch-none select-none outline-none [&:focus-visible_[data-event-current]>.td-focus-ring]:opacity-100"
+          className="relative block touch-pan-y select-none outline-none [&:focus-visible_[data-event-current]>.td-focus-ring]:opacity-100"
           width="100%"
           viewBox={`0 0 ${width} ${height}`}
         >
           <defs>
             <clipPath id={clipId}>
               <rect x={fieldX0} y={RULER} width={fieldWidth} height={Math.max(0, height - RULER)} />
+            </clipPath>
+            <clipPath id={`${clipId}-lanes`}>
+              <rect x={0} y={RULER} width={fieldX0} height={Math.max(0, height - RULER)} />
             </clipPath>
           </defs>
           <rect x={0} y={0} width={width} height={RULER} fill="var(--raw-graph-substrate)" opacity={0.6} />
@@ -785,9 +818,43 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
               dragRef.current = null;
             }}
           />
-          {lanes.map((lane) => renderLaneRow(lane))}
+          <g clipPath={`url(#${clipId}-lanes)`}>
+            {lanes.filter((lane) => !model.spindle || model.spindle.labelLaneIds.has(lane.id)).map((lane) => renderLaneRow(lane))}
+          </g>
           <g clipPath={`url(#${clipId})`}>
-            {lanes.map((lane) => renderLaneField(lane))}
+            {model.spindle ? (
+              <>
+                {model.spindle.fibers.map((fiber) => (
+                  <path
+                    key={fiber.id}
+                    data-spindle-fiber={fiber.id}
+                    data-spindle-owner={fiber.ownerLaneId}
+                    data-spindle-family={fiber.familyId}
+                    role="button"
+                    tabIndex={-1}
+                    aria-label={`Inspect session thread ${fiber.label}`}
+                    aria-pressed={fiber.focus === 'selected'}
+                    d={pointsPath(fiber.points)}
+                    fill="none"
+                    stroke={layer === 'unavailable' ? frame.highContrast ? 'var(--raw-graph-text)' : fiber.color : 'transparent'}
+                    strokeWidth={layer === 'unavailable' ? 1 : 8}
+                    strokeDasharray={layer === 'unavailable' ? gradeDashArray(fiber.grade) || undefined : undefined}
+                    className="cursor-pointer outline-none [&:focus-visible]:stroke-white"
+                    onClick={() => onSelectLane(fiber.id)}
+                    onKeyDown={(event) => {
+                      if (isActivation(event)) { event.preventDefault(); onSelectLane(fiber.id); }
+                    }}
+                  >
+                    <title>{`${fiber.label} · ${fiber.provider} · ${fiber.grade} · ${fiber.endSource ?? 'extent unknown'}`}</title>
+                  </path>
+                ))}
+                {model.intervals.map((interval) => renderInterval(interval))}
+                {model.gaps.map((gap) => renderGap(gap))}
+              </>
+            ) : lanes.map((lane) => renderLaneField(lane))}
+            <g data-scene-events>
+              {model.nodes.map((node) => renderNode(node))}
+            </g>
             {model.labels
               .filter((label) => label.group !== 'lane')
               .map((label) => (
@@ -805,7 +872,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
                 </text>
               ))}
           </g>
-          <FieldOverlay frame={frame} />
+          <FieldOverlay frame={frame} annotations={annotations} />
         </svg>
       </div>
       <svg
@@ -835,7 +902,19 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
             />
           );
         })}
-        {minimap.lanes.map((lane) => (
+        {minimap.lanes.map((lane) => lane.points ? (
+          <path
+            key={lane.id}
+            data-minimap-lane={lane.id}
+            data-minimap-fiber
+            d={pointsPath(lane.points)}
+            fill="none"
+            stroke={frame.highContrast ? 'var(--raw-graph-text)' : lane.color ?? 'var(--raw-graph-text)'}
+            strokeWidth={0.75}
+            strokeDasharray={lane.endSource === null ? '1 3' : undefined}
+            opacity={0.7}
+          />
+        ) : (
           <line
             key={lane.id}
             data-minimap-lane={lane.id}
@@ -861,8 +940,9 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
           strokeWidth={1}
         />
       </svg>
+      <RelationEvidence frame={frame} annotations={annotations} />
       <TemporalLegend gaps={model.gaps}>
-        <LegendEncodings />
+        <LegendEncodings variant={variant} />
       </TemporalLegend>
     </section>
   );

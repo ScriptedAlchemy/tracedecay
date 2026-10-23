@@ -165,7 +165,8 @@ describe('TemporalScene', () => {
       expect(container.querySelector('[data-scene-layer="canvas"]')).toBeTruthy();
       expect(container.querySelector('[data-scene-layer="unavailable"]')).toBeNull();
       expect(calls).toContain('stroke');
-      expect(calls).toContain('arcTo');
+      expect(calls).toContain('bezierCurveTo');
+      expect(container.querySelector('[data-scene-variant="weave"]')).toBeTruthy();
       expect(screen.queryByRole('status')).toBeNull();
     });
 
@@ -175,6 +176,45 @@ describe('TemporalScene', () => {
       expect(container.querySelector('[data-scene-layer="unavailable"]')).toBeTruthy();
       expect(screen.getByRole('status').textContent).toContain('scene layer unavailable');
       expect(container.querySelectorAll('[data-event]').length).toBe(model.nodes.length);
+    });
+  });
+
+  describe('visual treatments', () => {
+    it('repaints a single canvas while keeping event positions, cursor and selection across views', () => {
+      const model = fixture();
+      const handlers = {
+        onSelectLane: vi.fn(), onSelectEvent: vi.fn(), onToggleBranch: vi.fn(), onWindowChange: vi.fn(),
+      };
+      const scene = (variant: 'weave' | 'strata' | 'rail') => (
+        <TemporalScene model={model} variant={variant} ariaLabel="Temporal execution field" reducedMotion={true} {...handlers} />
+      );
+      const { container, rerender } = render(scene('weave'));
+      const canvas = container.querySelector('canvas');
+      const commit = container.querySelector('[data-event="n-commit"]')!;
+      fireEvent.click(commit);
+      const hit = commit.querySelector('rect[fill="transparent"]')!;
+      const position = [hit.getAttribute('x'), hit.getAttribute('y')];
+      for (const variant of ['strata', 'rail', 'weave'] as const) {
+        rerender(scene(variant));
+        expect(container.querySelector('canvas')).toBe(canvas);
+        expect(container.querySelector('[data-event="n-commit"]')).toBe(commit);
+        expect([hit.getAttribute('x'), hit.getAttribute('y')]).toEqual(position);
+        expect(container.querySelector('[data-event-current]')).toBe(commit);
+        expect(container.querySelector('[data-cursor]')?.getAttribute('x1')).toBe('320');
+        fireEvent.keyDown(container.querySelector('svg[data-scene-layer="overlay"]')!, { key: 'Enter' });
+        expect(handlers.onSelectEvent).toHaveBeenLastCalledWith('n-commit');
+      }
+      expect(handlers.onSelectEvent).toHaveBeenCalledTimes(4);
+    });
+
+    it.each(['weave', 'strata', 'rail'] as const)('retains keyboard event inspection without canvas in %s', (variant) => {
+      stubCanvas(false);
+      const { container, onSelectEvent, model } = renderScene({ variant });
+      expect(container.querySelectorAll('[data-event]').length).toBe(model.nodes.length);
+      expect(screen.getByRole('status').textContent).toContain('scene layer unavailable');
+      fireEvent.keyDown(container.querySelector('svg[data-scene-layer="overlay"]')!, { key: 'End' });
+      fireEvent.keyDown(container.querySelector('svg[data-scene-layer="overlay"]')!, { key: 'Enter' });
+      expect(onSelectEvent).toHaveBeenCalledWith('n-end');
     });
   });
 
@@ -255,6 +295,31 @@ describe('TemporalScene', () => {
   });
 
   describe('lanes and branches', () => {
+    it('keeps deep compact lane names and large branch toggles inside separate targets', () => {
+      const base = fixture();
+      const model = {
+        ...base,
+        viewport: { ...base.viewport, width: 320, left: 128 },
+        lanes: base.lanes.map((lane) => lane.id === BUNDLE ? { ...lane, depth: 12 } : lane),
+        clusters: base.clusters.map((cluster) => ({ ...cluster, counts: { ...cluster.counts, sessions: 12345 } })),
+      };
+      const { container, onSelectLane, onToggleBranch } = renderScene({ model });
+      const label = container.querySelector(`[data-lane-row='${BUNDLE}']`)!;
+      const toggle = container.querySelector(`[data-branch-toggle='${BUNDLE}']`)!;
+      const labelHit = label.querySelector('rect')!;
+      const toggleHit = toggle.querySelector('rect')!;
+      expect(Number(labelHit.getAttribute('width'))).toBeGreaterThan(60);
+      expect(Number(toggleHit.getAttribute('x'))).toBe(Number(labelHit.getAttribute('width')));
+      expect(Number(toggleHit.getAttribute('x')) + Number(toggleHit.getAttribute('width'))).toBe(128);
+      expect(label.querySelector('text')!.textContent!.length).toBeGreaterThan(8);
+      expect(label.querySelector('title')?.textContent).toContain(BUNDLE_LABEL);
+      expect(toggle.querySelector('text')?.textContent).toBe('+12345');
+      fireEvent.click(label);
+      fireEvent.click(toggle);
+      expect(onSelectLane).toHaveBeenCalledWith(BUNDLE);
+      expect(onToggleBranch).toHaveBeenCalledWith(BUNDLE);
+    });
+
     it('opens a lane from its label row', () => {
       const { onSelectLane } = renderScene();
       fireEvent.click(screen.getByRole('button', { name: `Open session ${ROOT_LABEL}` }));
@@ -336,6 +401,23 @@ describe('TemporalScene', () => {
       fireEvent.pointerUp(background, { pointerId: 1, clientX: 401 });
       expect(onSelectLane).toHaveBeenCalledWith(null);
       expect(onWindowChange).not.toHaveBeenCalled();
+    });
+
+    it('lets a vertical gesture cancel without shifting the window, while a horizontal drag still pans', () => {
+      const { container, onSelectLane, onWindowChange } = renderScene();
+      const background = container.querySelector('[data-field-background]')!;
+      fireEvent.pointerDown(background, { pointerId: 1, button: 0, clientX: 400, clientY: 100 });
+      fireEvent.pointerMove(background, { pointerId: 1, clientX: 405, clientY: 140 });
+      fireEvent.pointerCancel(background, { pointerId: 1 });
+      expect(onWindowChange).not.toHaveBeenCalled();
+      expect(onSelectLane).not.toHaveBeenCalled();
+
+      fireEvent.pointerDown(background, { pointerId: 2, button: 0, clientX: 400, clientY: 100 });
+      fireEvent.pointerMove(background, { pointerId: 2, clientX: 440, clientY: 105 });
+      fireEvent.pointerUp(background, { pointerId: 2, clientX: 440, clientY: 105 });
+      expect(lastWindow(onWindowChange).start).toBeLessThan(WINDOW.start);
+      expect(lastWindow(onWindowChange).end - lastWindow(onWindowChange).start).toBeCloseTo(WINDOW.end - WINDOW.start);
+      expect(onSelectLane).not.toHaveBeenCalled();
     });
   });
 
