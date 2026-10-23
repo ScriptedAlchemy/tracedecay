@@ -748,9 +748,6 @@ jobs:
   # Do not serialize them behind repository-wide Rust formatting and gates.
   dashboard:
     name: Dashboard
-    permissions:
-      contents: read
-      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -760,10 +757,6 @@ jobs:
         id: bazel
         with:
           cache-key: ci-dashboard
-          tailscale-client-id: >-
-            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Check frontend types, tests, and artifacts
         run: >-
