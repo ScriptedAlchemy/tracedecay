@@ -79,7 +79,7 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
             tracedecay_graph_query::health::HEALTH_DEFINITION,
             extract_json(&summary_json.value)["quality_signal"].clone(),
         ),
-        ("health.2026-09-12", json!(8706)),
+        ("health.2026-10-22", json!(8706)),
         "the indexed scope's score moved: bump HEALTH_DEFINITION and re-pin in the same change"
     );
     assert_eq!(
