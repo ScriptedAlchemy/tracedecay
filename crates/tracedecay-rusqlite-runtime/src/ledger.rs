@@ -12,6 +12,7 @@ mod schema;
 mod sqlite;
 
 pub(crate) use checkpoint::current_watermark;
+pub use checkpoint::{PersistedWriterAuthorityError, persisted_writer_authority_epoch};
 #[cfg(test)]
 pub(crate) use commit::record_commit;
 pub(crate) use commit::record_runtime_commit;

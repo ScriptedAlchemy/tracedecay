@@ -7,6 +7,7 @@ py_test(
         "//benchmark_data:run_benchmarks.py",
         "//evals/hermetic:score.py",
         "//scripts:build-eval-binary.sh",
+        "//scripts:lib/portable_process.py",
     ],
     imports = ["."],
     legacy_create_init = 0,

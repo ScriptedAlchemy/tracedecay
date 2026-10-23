@@ -26,6 +26,8 @@ mod monitor_test;
 mod provision_host_cli_fixture;
 #[cfg(unix)]
 mod remote_cli_test;
+#[cfg(unix)]
+mod session_store_reopen_test;
 mod source_provenance_test;
 mod sync_test;
 mod test_profile_isolation_test;

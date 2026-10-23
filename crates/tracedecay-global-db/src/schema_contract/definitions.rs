@@ -501,6 +501,8 @@ pub(super) const TABLES: &[Table] = &[
             column("attempt_count", "INTEGER", true, Some("0"), 0),
             column("next_retry_at_micros", "INTEGER", true, Some("0"), 0),
             column("last_error", "TEXT", false, None, 0),
+            column("revival_generation", "TEXT", false, None, 0),
+            column("revival_start_offset", "INTEGER", false, None, 0),
         ],
         [foreign_key(
             "observation_id",

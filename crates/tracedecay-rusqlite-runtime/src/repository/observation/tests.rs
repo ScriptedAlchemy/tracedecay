@@ -394,7 +394,21 @@ fn connection() -> Connection {
                    observation_sequence INTEGER NOT NULL UNIQUE,
                    attempt_count INTEGER NOT NULL DEFAULT 0,
                    next_retry_at_micros INTEGER NOT NULL DEFAULT 0,
-                   last_error TEXT
+                   last_error TEXT,
+                   revival_generation TEXT,
+                   revival_start_offset INTEGER
+                 );
+                 CREATE TABLE observation_source_presence (
+                   source_key TEXT NOT NULL,
+                   observation_id TEXT NOT NULL,
+                   generation TEXT NOT NULL,
+                   start_offset INTEGER NOT NULL,
+                   PRIMARY KEY(source_key, observation_id)
+                 );
+                 CREATE TABLE observation_projection_dispositions (
+                   projector_version TEXT NOT NULL,
+                   observation_id TEXT NOT NULL,
+                   reason TEXT NOT NULL
                  );
                  CREATE TABLE retrieval_anchors (
                     anchor_id TEXT PRIMARY KEY,

@@ -2096,19 +2096,17 @@ mod recent_first_discovery_tests {
         let home = resolved_home.as_path();
         let directory = home.join(".codex/sessions/2026/08/23");
         std::fs::create_dir_all(&directory).unwrap();
+        let newer_directory = home.join(".codex/sessions/2026/08/24");
+        std::fs::create_dir_all(&newer_directory).unwrap();
         let session_id = "0198-session-beyond-default-budget";
         let expected = directory.join(format!("rollout-2026-08-23-{session_id}.jsonl"));
-        // Write the target mid-corpus: tmpfs lists newest entries first and
-        // btrfs oldest first, so either end would land in the first slice.
-        // Distractor names also sort before the target so ordered enumeration
-        // (NTFS) only reaches it past the first retained slice; the loop below
-        // must then continue across calls on every platform.
-        for index in 0..4_100 {
-            if index == 2_050 {
-                std::fs::write(&expected, b"{}\n").unwrap();
-            }
+        std::fs::write(&expected, b"{}\n").unwrap();
+        // Recent-first discovery exhausts this newer bucket before the
+        // target's older bucket. More than one slice of newer files forces
+        // continuation regardless of filesystem entry enumeration order.
+        for index in 0..=EXACT_HOOK_DISCOVERY_UNITS_PER_CALL {
             std::fs::write(
-                directory.join(format!("rollout-1999-12-31-distractor-{index:04}.jsonl")),
+                newer_directory.join(format!("rollout-2026-08-24-distractor-{index:04}.jsonl")),
                 b"{}\n",
             )
             .unwrap();

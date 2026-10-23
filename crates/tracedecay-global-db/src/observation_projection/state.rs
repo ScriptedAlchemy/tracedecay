@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 
-use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1, PayloadDigestV1};
+use tracedecay_domain::{
+    CanonicalObservationIdV1, DurableObservationV1, ObservationSourceGenerationV1, PayloadDigestV1,
+};
 use tracedecay_store::{
     EDITED_FILES_KEY, ObservationProjection, PROJECTION_TERMINAL_RETRY_MICROS,
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
@@ -127,13 +129,24 @@ pub(super) async fn write_checkpoint(
     Ok(ProjectionCheckpoint::new(sequence))
 }
 
-pub(super) async fn queued_sequence(
+pub(super) struct AcceptedSourceOffer {
+    pub(super) generation: ObservationSourceGenerationV1,
+    pub(super) start_offset: u64,
+}
+
+pub(super) struct QueuedProjection {
+    pub(super) sequence: u64,
+    pub(super) revival: Option<AcceptedSourceOffer>,
+}
+
+pub(super) async fn queued_projection(
     conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
-) -> ProjectionStoreResult<Option<u64>> {
+) -> ProjectionStoreResult<Option<QueuedProjection>> {
     let mut rows = conn
         .query(
-            "SELECT observation_sequence FROM projection_queue WHERE observation_id = ?1",
+            "SELECT observation_sequence, revival_generation, revival_start_offset
+             FROM projection_queue WHERE observation_id = ?1",
             params![observation_id.as_str()],
         )
         .await
@@ -145,12 +158,36 @@ pub(super) async fn queued_sequence(
     else {
         return Ok(None);
     };
-    decode_sequence(
+    let sequence = decode_sequence(
         row.get::<i64>(0)
             .map_err(|error| storage("read projection queue", error))?,
         "read projection queue",
-    )
-    .map(Some)
+    )?;
+    let generation = row
+        .get::<Option<String>>(1)
+        .map_err(|error| storage("read accepted source offer", error))?;
+    let start_offset = row
+        .get::<Option<i64>>(2)
+        .map_err(|error| storage("read accepted source offer", error))?;
+    let revival = match (generation, start_offset) {
+        (None, None) => None,
+        (Some(generation), Some(start_offset)) => Some(AcceptedSourceOffer {
+            generation: ObservationSourceGenerationV1::new(
+                generation
+                    .parse()
+                    .map_err(|error| storage("decode accepted source generation", error))?,
+            )
+            .map_err(ProjectionStoreError::Contract)?,
+            start_offset: decode_sequence(start_offset, "decode accepted source offset")?,
+        }),
+        _ => {
+            return Err(storage_message(
+                "read accepted source offer",
+                "incomplete offer fence",
+            ));
+        }
+    };
+    Ok(Some(QueuedProjection { sequence, revival }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

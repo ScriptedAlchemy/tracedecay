@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.91](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.90...v1.0.0-beta.91) (2026-10-23)
+
+
+### Bug Fixes
+
+* **automation:** bound cron step expansion before addition ([#4460](https://github.com/ScriptedAlchemy/tracedecay/issues/4460)) ([ca677ea](https://github.com/ScriptedAlchemy/tracedecay/commit/ca677ea0308812b77960a1633a35016555814f88))
+* **code-audit:** report missing TypeScript reachability evidence ([#4461](https://github.com/ScriptedAlchemy/tracedecay/issues/4461)) ([8700230](https://github.com/ScriptedAlchemy/tracedecay/commit/8700230e1555289ae062e2ffd853924af3367d19))
+* **cursor:** keep workspace selector roots literal ([#4452](https://github.com/ScriptedAlchemy/tracedecay/issues/4452)) ([46a0af6](https://github.com/ScriptedAlchemy/tracedecay/commit/46a0af6a83966744420012352c5c8a6e7ae381b9))
+* **deps:** update dependency vscode-languageclient to v11 ([#4459](https://github.com/ScriptedAlchemy/tracedecay/issues/4459)) ([d0d3d25](https://github.com/ScriptedAlchemy/tracedecay/commit/d0d3d2502226cd7ff45707bc190993aec4e37f4b))
+* **extension:** validate and bound response handle reassembly ([#4463](https://github.com/ScriptedAlchemy/tracedecay/issues/4463)) ([5eb2114](https://github.com/ScriptedAlchemy/tracedecay/commit/5eb211422ed044342ab20407018ce4f8ba7a3dcf))
+* **projection:** recover Codex rows parked by obsolete path collisions ([2d8a442](https://github.com/ScriptedAlchemy/tracedecay/commit/2d8a442e2537924b1724f883e91e0de6405c09ee))
+* **runtime:** preserve daemon ownership and CLI boundaries ([5138115](https://github.com/ScriptedAlchemy/tracedecay/commit/51381152358e9e22e22e3e082225107c89640a3c))
+* **session:** rediscover refreshes superseded by reset ([#4455](https://github.com/ScriptedAlchemy/tracedecay/issues/4455)) ([d7e9afe](https://github.com/ScriptedAlchemy/tracedecay/commit/d7e9afee0eed9f2a199aed2c4cf9ec930c620033))
+* **sessions:** skip Codex replay a complete frontier covers ([27c61da](https://github.com/ScriptedAlchemy/tracedecay/commit/27c61da77cc7700e95c2985c04a9da86dd48d6d5))
+
 ## [1.0.0-beta.90](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.89...v1.0.0-beta.90) (2026-10-22)
 
 
