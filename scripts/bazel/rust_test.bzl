@@ -264,6 +264,8 @@ def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
             for label in runfiles_env.values()
         }.keys()),
     }
+    if native.package_name() == "crates/tracedecay-cli" and name == "refresh_memory_journey":
+        wrapper_args["tags"] = tags + ["no-remote-exec"]
     wrapper_args.update(test_attributes)
     exec_properties = {"cpu_count": "4"}
     exec_properties.update(wrapper_args.get("exec_properties", {}))

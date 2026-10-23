@@ -173,7 +173,6 @@ jobs:
           --noexecution_log_sort
           --test_env=TRACEDECAY_PERF_BIN="$TRACEDECAY_PERF_BIN"
           --test_env=TRACEDECAY_READELF="$TRACEDECAY_READELF"
-          --strategy_regexp='^Testing //crates/tracedecay-cli:refresh_memory_journey=sandboxed'
           //...
 
       - name: Upload heavy refresh diagnostics
