@@ -831,6 +831,8 @@ jobs:
         run: chmod +x target/debug/tracedecay
 
       - name: Run generated-plugin unit checks (no Hermes required)
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
         run: python3 scripts/hermes_plugin_unit_check.py
 
       - name: Clone stock Hermes at pinned ref
