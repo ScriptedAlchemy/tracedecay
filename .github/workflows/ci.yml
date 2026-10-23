@@ -791,6 +791,12 @@ jobs:
         working-directory: plugin/chatgpt-extension
         run: pnpm run check:embedded
 
+      - name: Check Cursor extension types, diagnostics, and embedded artifact
+        run: |
+          bazel run @nodejs//:node -- "$GITHUB_WORKSPACE/plugin/cursor-native-extension/node_modules/typescript/bin/tsc" --noEmit -p "$GITHUB_WORKSPACE/plugin/cursor-native-extension/tsconfig.json"
+          bazel run @nodejs//:node -- "$GITHUB_WORKSPACE/plugin/cursor-native-extension/node_modules/tsx/dist/cli.mjs" --test "$GITHUB_WORKSPACE/plugin/cursor-native-extension/test/nativeDiagnostics.test.ts"
+          bazel run @nodejs//:node -- "$GITHUB_WORKSPACE/plugin/cursor-native-extension/scripts/build-extension.mjs" --check
+
       - name: Upload failed frontend test diagnostics
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
