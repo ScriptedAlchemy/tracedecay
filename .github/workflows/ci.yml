@@ -59,6 +59,80 @@ jobs:
           tailscale-client-id: ${{ env.FLEET_CLIENT_ID }}
           extra-restore-keys: ci-linux-test,ci-linux-workspace-test
 
+      - name: Prepare hosted CPU profiler
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          tool_package="linux-tools-$(uname -r)"
+          if ! apt-cache show "$tool_package" >/dev/null 2>&1; then
+            tool_package=linux-tools-generic
+          fi
+          sudo apt-get install -y --no-install-recommends binutils libcap2-bin linux-tools-common "$tool_package"
+          perf_path="/usr/lib/linux-tools/$(uname -r)/perf"
+          if [[ ! -x "$perf_path" ]]; then
+            perf_path="$(find /usr/lib/linux-tools -type f -name perf -perm /111 -print | sort -V | tail -n 1)"
+          fi
+          if [[ -z "$perf_path" || ! -x "$perf_path" ]]; then
+            echo "No installed perf ELF found in /usr/lib/linux-tools" >&2
+            dpkg -L "$tool_package" >&2 || true
+            find /usr/lib/linux-tools -maxdepth 3 -type f -print >&2 || true
+            exit 1
+          fi
+          perf_path="$(readlink -f "$perf_path")"
+          readelf_path="$(readlink -f "$(command -v readelf)")"
+          metadata="$RUNNER_TEMP/heavy-refresh-profiler-host.txt"
+          {
+            printf 'runner_image=%s %s\n' "${ImageOS:-unavailable}" "${ImageVersion:-unavailable}"
+            printf 'hostname=%s\n' "$(hostname)"
+            printf 'boot_id=%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
+            printf 'kernel=%s\n' "$(uname -r)"
+            printf 'perf_path=%s\n' "$perf_path"
+            printf 'readelf_path=%s\n' "$readelf_path"
+            printf 'online_cpus=%s\n' "$(cat /sys/devices/system/cpu/online)"
+            printf 'affinity=%s\n' "$(taskset -pc $$ 2>&1)"
+            printf 'perf_event_paranoid_before=%s\n' "$(cat /proc/sys/kernel/perf_event_paranoid)"
+            printf 'cap_eff=%s\n' "$(awk '/^CapEff:/ {print $2}' /proc/self/status)"
+            printf 'loadavg=%s\n' "$(cat /proc/loadavg)"
+            lscpu
+            "$perf_path" --version
+            dpkg -S "$perf_path"
+            "$readelf_path" -h "$perf_path"
+            ldd "$perf_path"
+            capsh --print
+          } >"$metadata" 2>&1
+          cat "$metadata"
+          echo "TRACEDECAY_PERF_BIN=$perf_path" >> "$GITHUB_ENV"
+          echo "TRACEDECAY_READELF=$readelf_path" >> "$GITHUB_ENV"
+
+          probe_data="$RUNNER_TEMP/heavy-refresh-perf-probe.data"
+          probe_stderr="$RUNNER_TEMP/heavy-refresh-perf-probe.stderr"
+          probe_samples="$RUNNER_TEMP/heavy-refresh-perf-probe.samples"
+          trap 'rm -f "$probe_data" "$probe_data.old" "$probe_samples"' EXIT
+          probe_status=0
+          DEBUGINFOD_URLS='' "$perf_path" record --no-buildid-cache -F 49 -e cpu-clock:u --inherit -o "$probe_data" -- bash -c 'for ((i=0; i<2000000; i++)); do :; done' 2>"$probe_stderr" || probe_status=$?
+          if [[ "$probe_status" -ne 0 && "$(cat /proc/sys/kernel/perf_event_paranoid)" -gt 2 ]]; then
+            sudo sysctl -w kernel.perf_event_paranoid=2 >>"$metadata" 2>&1
+            printf 'perf_event_paranoid_after_adjustment=%s\n' "$(cat /proc/sys/kernel/perf_event_paranoid)" >>"$metadata"
+            rm -f "$probe_data" "$probe_data.old"
+            probe_status=0
+            DEBUGINFOD_URLS='' "$perf_path" record --no-buildid-cache -F 49 -e cpu-clock:u --inherit -o "$probe_data" -- bash -c 'for ((i=0; i<2000000; i++)); do :; done' 2>>"$probe_stderr" || probe_status=$?
+          fi
+          printf 'cpu_clock_user_probe_exit=%s\n' "$probe_status" | tee -a "$metadata"
+          cat "$probe_stderr"
+          if [[ "$probe_status" -ne 0 ]]; then
+            exit "$probe_status"
+          fi
+          DEBUGINFOD_URLS='' "$perf_path" script -i "$probe_data" >"$probe_samples" 2>>"$probe_stderr" || probe_status=$?
+          if [[ "$probe_status" -eq 0 ]] && ! grep -q 'cpu-clock:u' "$probe_samples"; then
+            printf 'perf script produced no cpu-clock:u samples\n' >>"$probe_stderr"
+            probe_status=1
+          fi
+          printf 'cpu_clock_user_sample_probe_exit=%s\n' "$probe_status" | tee -a "$metadata"
+          if [[ "$probe_status" -ne 0 ]]; then
+            cat "$probe_stderr" >&2
+            exit "$probe_status"
+          fi
+
       - name: Build workspace test binaries
         run: bazel build --config=ci //...
 
@@ -73,6 +147,9 @@ jobs:
           --build_event_json_file="${{ runner.temp }}/heavy-refresh-events.json"
           --execution_log_json_file="${{ runner.temp }}/heavy-refresh-exec.json"
           --noexecution_log_sort
+          --test_env=TRACEDECAY_PERF_BIN="$TRACEDECAY_PERF_BIN"
+          --test_env=TRACEDECAY_READELF="$TRACEDECAY_READELF"
+          --strategy_regexp='^Testing //crates/tracedecay-cli:refresh_memory_journey=sandboxed'
           //...
 
       - name: Upload heavy refresh diagnostics
@@ -84,6 +161,8 @@ jobs:
             ${{ runner.temp }}/heavy-refresh-profile.json.gz
             ${{ runner.temp }}/heavy-refresh-exec.json
             ${{ runner.temp }}/heavy-refresh-events.json
+            ${{ runner.temp }}/heavy-refresh-profiler-host.txt
+            ${{ runner.temp }}/heavy-refresh-perf-probe.stderr
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.log
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.xml
             bazel-testlogs/crates/tracedecay-cli/refresh_memory_journey/test.outputs/**

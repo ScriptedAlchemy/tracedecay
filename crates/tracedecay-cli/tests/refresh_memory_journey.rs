@@ -9,11 +9,15 @@
 #[path = "../../tracedecay/tests/common/mod.rs"]
 mod common;
 
+use std::ffi::CString;
 use std::fmt::Write as _;
-use std::fs;
-use std::io::Write as _;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read as _, Write as _};
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -32,6 +36,8 @@ const FILES: usize = 300;
 const FUNCTIONS_PER_FILE: usize = 160;
 const INDEX_TIMEOUT: Duration = Duration::from_secs(900);
 const STATUS_POLL: Duration = Duration::from_secs(5);
+const PERF_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+const PERF_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const TEMPORARY_CGROUP_RESOURCES: [&str; 8] = [
     "cpu.max",
     "cpu.stat",
@@ -220,6 +226,487 @@ impl TemporaryWorkerResources {
     }
 }
 
+struct CpuSample {
+    child: Option<Child>,
+    control: fs::File,
+    ack: fs::File,
+    _fifos: TempDir,
+    log: fs::File,
+    perf: PathBuf,
+    profile: PathBuf,
+    stderr: PathBuf,
+    daemon_pid: u32,
+    daemon_start: u64,
+    profiler_pid: u32,
+    started: Instant,
+}
+
+fn daemon_starttime(pid: u32) -> io::Result<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+        .and_then(|field| field.parse().ok())
+        .ok_or_else(|| io::Error::other("invalid daemon proc stat"))
+}
+
+fn require_daemon(pid: u32, start: u64) -> Result<(), String> {
+    if daemon_starttime(pid).map_err(|error| error.to_string())? == start {
+        Ok(())
+    } else {
+        Err(format!("daemon pid {pid} changed starttime from {start}"))
+    }
+}
+
+fn prepare_cpu_profiler(out: &Path, daemon_pid: u32, daemon_start: u64) -> Result<PathBuf, String> {
+    let perf = PathBuf::from(
+        std::env::var_os("TRACEDECAY_PERF_BIN").ok_or("TRACEDECAY_PERF_BIN is required")?,
+    );
+    let readelf = PathBuf::from(
+        std::env::var_os("TRACEDECAY_READELF").ok_or("TRACEDECAY_READELF is required")?,
+    );
+    let declared_binary = fs::canonicalize(
+        std::env::var_os("TRACEDECAY_TEST_BIN").ok_or("TRACEDECAY_TEST_BIN is required")?,
+    )
+    .map_err(|error| error.to_string())?;
+    let binary =
+        fs::canonicalize(format!("/proc/{daemon_pid}/exe")).map_err(|error| error.to_string())?;
+    if binary != declared_binary {
+        return Err(format!(
+            "daemon executable {} differs from test binary {}",
+            binary.display(),
+            declared_binary.display()
+        ));
+    }
+    if !perf.is_absolute() || !readelf.is_absolute() {
+        return Err("perf and readelf paths must be absolute".into());
+    }
+    let mut host = fs::File::create(out.join("heavy-refresh-profiler-host.txt"))
+        .map_err(|error| error.to_string())?;
+    writeln!(
+        host,
+        "perf={} readelf={} binary={} daemon_pid={daemon_pid} daemon_starttime={daemon_start}",
+        perf.display(),
+        readelf.display(),
+        binary.display()
+    )
+    .map_err(|error| error.to_string())?;
+    let help = Command::new(&perf)
+        .args(["record", "-h"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    let help_status = help.status;
+    let help_text = format!(
+        "status={}\nstdout:\n{}\nstderr:\n{}",
+        help_status,
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    fs::write(out.join("heavy-refresh-perf-record-help.txt"), &help_text)
+        .map_err(|error| error.to_string())?;
+    let help_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+    if !help_output.contains("--control") || !help_output.contains("--delay") {
+        return Err(format!(
+            "installed perf record -h lacks --control or --delay (exit {help_status})"
+        ));
+    }
+    let inspection = Command::new(readelf)
+        .args(["--wide", "--sections", "--symbols", "--notes"])
+        .arg(&binary)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !inspection.status.success() {
+        return Err(format!("readelf failed: {}", inspection.status));
+    }
+    let elf = String::from_utf8_lossy(&inspection.stdout);
+    fs::write(out.join("heavy-refresh-daemon-elf.txt"), elf.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let section_size = |name: &str| {
+        elf.lines()
+            .find(|line| line.split_whitespace().any(|field| field == name))
+            .and_then(|line| line.split(name).nth(1))
+            .and_then(|tail| tail.split_whitespace().nth(3))
+            .and_then(|size| u64::from_str_radix(size, 16).ok())
+            .unwrap_or(0)
+    };
+    let (symtab, unwind) = (section_size(".symtab"), section_size(".eh_frame"));
+    let mut in_symtab = false;
+    let mut functions = 0;
+    for line in elf.lines() {
+        if line.starts_with("Symbol table '") {
+            in_symtab = line.contains("'.symtab'");
+        } else if in_symtab && line.contains(" FUNC ") {
+            functions += 1;
+        }
+    }
+    if symtab == 0 || unwind == 0 || functions == 0 {
+        return Err(format!(
+            "unusable daemon ELF attribution: symtab={symtab} eh_frame={unwind} functions={functions}"
+        ));
+    }
+    let identity = elf
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Build ID: "))
+        .map(str::to_owned)
+        .or_else(|| {
+            Command::new("sha256sum")
+                .arg(&binary)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    String::from_utf8_lossy(&output.stdout)
+                        .split_whitespace()
+                        .next()
+                        .map(str::to_owned)
+                })
+        })
+        .ok_or("daemon ELF has no build ID or digest")?;
+    writeln!(host, "binary_identity={identity} symtab_size={symtab} eh_frame_size={unwind} symtab_function_count={functions} separate_debug_reference={}", elf.contains(".gnu_debuglink") || elf.contains(".gnu_debugaltlink")).map_err(|error| error.to_string())?;
+    for path in [
+        PathBuf::from("/proc/sys/kernel/random/boot_id"),
+        PathBuf::from("/proc/sys/kernel/hostname"),
+        PathBuf::from("/sys/devices/system/cpu/online"),
+    ] {
+        let _ = record_raw_resource(&mut host, &path);
+    }
+    let _ = record_raw_resource(
+        &mut host,
+        &PathBuf::from(format!("/proc/{daemon_pid}/maps")),
+    );
+    Ok(perf)
+}
+
+fn append_log(path: &Path, text: &[u8]) -> io::Result<()> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(text)
+}
+
+fn create_fifo(path: &Path) -> io::Result<()> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    if unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn open_fifo(path: &Path) -> io::Result<fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+fn wait_ack(file: &mut fs::File, child: &mut Child) -> Result<(), String> {
+    let deadline = Instant::now() + PERF_ACK_TIMEOUT;
+    let mut bytes = Vec::new();
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!("perf exited before control ack: {status}"));
+        }
+        let mut descriptor = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 50) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.to_string());
+        }
+        if ready == 0 {
+            continue;
+        }
+        let mut chunk = [0; 64];
+        match file.read(&mut chunk) {
+            Ok(count) if count > 0 => {
+                bytes.extend_from_slice(&chunk[..count]);
+                if bytes.contains(&b'\n') {
+                    if String::from_utf8_lossy(&bytes).trim() == "ack" {
+                        return Ok(());
+                    }
+                    return Err(format!(
+                        "unexpected perf ack {:?}",
+                        String::from_utf8_lossy(&bytes)
+                    ));
+                }
+            }
+            Ok(_) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("timed out waiting for perf control ack".into())
+}
+
+impl CpuSample {
+    fn prepare(
+        perf: &Path,
+        daemon_pid: u32,
+        daemon_start: u64,
+        started: Instant,
+        out: &Path,
+    ) -> Result<Self, String> {
+        require_daemon(daemon_pid, daemon_start)?;
+        let fifos = TempDir::new().map_err(|error| error.to_string())?;
+        let control_path = fifos.path().join("control");
+        let ack_path = fifos.path().join("ack");
+        create_fifo(&control_path).map_err(|error| error.to_string())?;
+        create_fifo(&ack_path).map_err(|error| error.to_string())?;
+        let control = open_fifo(&control_path).map_err(|error| error.to_string())?;
+        let ack_file = open_fifo(&ack_path).map_err(|error| error.to_string())?;
+        let profile = out.join("heavy-refresh-generation-2.perf.data");
+        let stderr = out.join("heavy-refresh-generation-2.perf.stderr");
+        let log = fs::File::create(out.join("heavy-refresh-generation-2.perf.log"))
+            .map_err(|error| error.to_string())?;
+        let stderr_file = fs::File::create(&stderr).map_err(|error| error.to_string())?;
+        let pid = daemon_pid.to_string();
+        let child = Command::new(perf)
+            .env("DEBUGINFOD_URLS", "")
+            .args([
+                "record",
+                "--no-buildid-cache",
+                "-F",
+                "49",
+                "-e",
+                "cpu-clock:u",
+                "--call-graph",
+                "dwarf,8192",
+                "--inherit",
+                "--delay=-1",
+            ])
+            .arg(format!(
+                "--control=fifo:{},{}",
+                control_path.display(),
+                ack_path.display()
+            ))
+            .args(["-p", pid.as_str(), "-o"])
+            .arg(&profile)
+            .stderr(Stdio::from(stderr_file))
+            .spawn()
+            .map_err(|error| format!("spawn perf for daemon {daemon_pid}: {error}"))?;
+        let profiler_pid = child.id();
+        let mut sample = Self {
+            child: Some(child),
+            control,
+            ack: ack_file,
+            _fifos: fifos,
+            log,
+            perf: perf.to_path_buf(),
+            profile,
+            stderr,
+            daemon_pid,
+            daemon_start,
+            profiler_pid,
+            started,
+        };
+        sample.command(b"disable\n")?;
+        writeln!(sample.log, "daemon_pid={daemon_pid} daemon_starttime={daemon_start} profiler_pid={profiler_pid} attachment_ack=ack initial_state=disabled profile={}", sample.profile.display()).map_err(|error| error.to_string())?;
+        for name in ["stat", "status", "io"] {
+            let _ = record_raw_resource(
+                &mut sample.log,
+                &PathBuf::from(format!("/proc/{profiler_pid}/{name}")),
+            );
+        }
+        Ok(sample)
+    }
+
+    fn command(&mut self, command: &[u8]) -> Result<(), String> {
+        self.control
+            .write_all(command)
+            .map_err(|error| error.to_string())?;
+        self.control.flush().map_err(|error| error.to_string())?;
+        wait_ack(
+            &mut self.ack,
+            self.child.as_mut().ok_or("profiler already reaped")?,
+        )
+    }
+
+    fn enable(&mut self) -> Result<(), String> {
+        self.command(b"enable\n")?;
+        writeln!(
+            self.log,
+            "enable_ack_monotonic={:?}",
+            self.started.elapsed()
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn stop_child(&mut self) -> Result<ExitStatus, String> {
+        let pid = self.child.as_ref().ok_or("profiler already reaped")?.id();
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGINT);
+        }
+        let deadline = Instant::now() + PERF_STOP_TIMEOUT;
+        loop {
+            let child = self.child.as_mut().ok_or("profiler already reaped")?;
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.child.take();
+                    return Ok(status);
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Ok(None) => {
+                    let child = self.child.as_mut().ok_or("profiler already reaped")?;
+                    let _ = child.kill();
+                    let status = child.wait().map_err(|error| error.to_string())?;
+                    self.child.take();
+                    return Err(format!(
+                        "perf missed stop deadline and was killed: {status}"
+                    ));
+                }
+                Err(error) => {
+                    let child = self.child.as_mut().ok_or("profiler already reaped")?;
+                    let _ = child.kill();
+                    let status = child.wait().map_err(|wait| format!("{error}; {wait}"))?;
+                    self.child.take();
+                    return Err(format!("perf wait failed and was killed: {status}"));
+                }
+            }
+        }
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        let disabled = self.command(b"disable\n");
+        writeln!(
+            self.log,
+            "disable_ack={disabled:?} monotonic={:?}",
+            self.started.elapsed()
+        )
+        .map_err(|error| error.to_string())?;
+        let mut errors = disabled.err().into_iter().collect::<Vec<_>>();
+        for name in ["stat", "status", "io"] {
+            let _ = record_raw_resource(
+                &mut self.log,
+                &PathBuf::from(format!("/proc/{}/{name}", self.profiler_pid)),
+            );
+        }
+        if let Err(error) = require_daemon(self.daemon_pid, self.daemon_start) {
+            errors.push(error);
+        }
+        match self.stop_child() {
+            Ok(status) => {
+                writeln!(self.log, "profiler_exit={status}").map_err(|error| error.to_string())?;
+                if !status.success() {
+                    errors.push(format!("perf exited unsuccessfully: {status}"));
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+        if fs::metadata(&self.profile)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+            == 0
+        {
+            errors.push("perf profile is missing or empty".into());
+        }
+        if errors.is_empty() {
+            self.export()?;
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    fn export(&mut self) -> Result<(), String> {
+        require_daemon(self.daemon_pid, self.daemon_start)?;
+        let out = self
+            .profile
+            .parent()
+            .ok_or("profile has no output directory")?;
+        for (name, children) in [("self", "--no-children"), ("inclusive", "--children")] {
+            let report = Command::new(&self.perf)
+                .env("DEBUGINFOD_URLS", "")
+                .args(["report", "--stdio", children, "--percent-limit", "0", "-i"])
+                .arg(&self.profile)
+                .output()
+                .map_err(|error| error.to_string())?;
+            fs::write(
+                out.join(format!("heavy-refresh-generation-2-{name}.txt")),
+                &report.stdout,
+            )
+            .map_err(|error| error.to_string())?;
+            append_log(&self.stderr, &report.stderr).map_err(|error| error.to_string())?;
+            if !report.status.success() {
+                return Err(format!("perf report {name} failed: {}", report.status));
+            }
+        }
+        let script = Command::new(&self.perf)
+            .env("DEBUGINFOD_URLS", "")
+            .args([
+                "script",
+                "-F",
+                "comm,pid,tid,time,period,event,ip,sym,dso",
+                "-i",
+            ])
+            .arg(&self.profile)
+            .output()
+            .map_err(|error| error.to_string())?;
+        let samples_path = out.join("heavy-refresh-generation-2-samples.txt");
+        fs::write(&samples_path, &script.stdout).map_err(|error| error.to_string())?;
+        append_log(&self.stderr, &script.stderr).map_err(|error| error.to_string())?;
+        if !script.status.success() {
+            return Err(format!("perf script failed: {}", script.status));
+        }
+        let text = String::from_utf8_lossy(&script.stdout);
+        let samples: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("cpu-clock:u"))
+            .collect();
+        if samples.is_empty() {
+            return Err("perf script contains no cpu-clock:u samples".into());
+        }
+        let periods: u64 = samples
+            .iter()
+            .filter_map(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                let event = fields
+                    .iter()
+                    .position(|field| field.starts_with("cpu-clock:u"))?;
+                fields.get(event.checked_sub(1)?)?.parse().ok()
+            })
+            .sum();
+        let unknown = text
+            .lines()
+            .filter(|line| line.contains("[unknown]") || line.trim_start().starts_with("0x"))
+            .count();
+        let stderr = fs::read_to_string(&self.stderr)
+            .map_err(|error| error.to_string())?
+            .to_ascii_lowercase();
+        writeln!(self.log, "sample_records={} period_total={} unresolved_frame_lines={} lost_warning={} throttling_warning={} sample_export={}", samples.len(), periods, unknown, stderr.contains("lost"), stderr.contains("throttl"), samples_path.display()).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
+impl Drop for CpuSample {
+    fn drop(&mut self) {
+        if self.child.is_some() {
+            let _ = writeln!(
+                self.log,
+                "cleanup=drop monotonic={:?}",
+                self.started.elapsed()
+            );
+            let _ = self.stop_child();
+        }
+    }
+}
+
 /// Every function of every file changes with `edit`, so each refresh
 /// reparses the whole corpus.
 fn write_corpus(project: &Path, edit: usize) {
@@ -394,22 +881,8 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
                 "TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES",
                 LIMIT_BYTES.to_string(),
             )
-            .env("TRACEDECAY_SPAN_TIMINGS", "1")
-            .env(
-                "RUST_LOG",
-                concat!(
-                    "info,",
-                    "tracedecay_code_index_runtime::code_index_scheduler::registry=trace,",
-                    "tracedecay_code_index_runtime::code_index_scheduler::reconcile=trace,",
-                    "tracedecay_code_index_runtime::code_index_scheduler::serving=trace,",
-                    "tracedecay_query::retrieval::lexical::projection::artifact::builder=trace,",
-                    "tracedecay_query::retrieval::lexical::projection::artifact::prepared=trace,",
-                    "tracedecay_code_index::production::lexical_page_source=trace,",
-                    "tracedecay_code_index::production::partitioned_codec=trace,",
-                    "tracedecay_code_index::production::sealed_codec=trace,",
-                    "tracedecay_query::retrieval::lexical::projection::artifact::reader=trace",
-                ),
-            );
+            .env("RUST_LOG", "info")
+            .env_remove("TRACEDECAY_SPAN_TIMINGS");
     });
     let mut resources = TemporaryWorkerResources {
         output: fs::File::create(log.with_file_name("heavy-refresh-worker-resources.log"))
@@ -425,6 +898,11 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
     let _ = record_raw_resource(&mut resources.output, Path::new("/proc/cpuinfo"));
     resources.sample("daemon_ready");
     eprintln!("heavy_refresh daemon_ready elapsed={:?}", started.elapsed());
+    let output_dir = log.parent().expect("daemon output directory");
+    let daemon_start_ticks =
+        daemon_starttime(daemon.id()).expect("record ready daemon process starttime");
+    let perf_path = prepare_cpu_profiler(output_dir, daemon.id(), daemon_start_ticks)
+        .unwrap_or_else(|error| panic!("CPU profiler preparation failed: {error}"));
     eprintln!("heavy_refresh init_started elapsed={:?}", started.elapsed());
     initialize_tracedecay_cli_project(&home, &project);
     eprintln!(
@@ -437,7 +915,22 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
     assert_within_limit(&home, &project, daemon.id());
 
     for edit in 1..=REFRESHES {
+        let mut cpu_sample = (edit == 2).then(|| {
+            CpuSample::prepare(
+                &perf_path,
+                daemon.id(),
+                daemon_start_ticks,
+                started,
+                output_dir,
+            )
+            .unwrap_or_else(|error| panic!("CPU profiler attach failed: {error}"))
+        });
         resources.sample(&format!("edit_{edit}_started"));
+        if let Some(sample) = cpu_sample.as_mut() {
+            sample
+                .enable()
+                .unwrap_or_else(|error| panic!("CPU profiler enable failed: {error}"));
+        }
         eprintln!(
             "heavy_refresh edit_started edit={edit} elapsed={:?}",
             started.elapsed()
@@ -455,6 +948,11 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
         );
         generation = refreshed;
         assert_within_limit(&home, &project, daemon.id());
+        if let Some(sample) = cpu_sample {
+            sample
+                .finish()
+                .unwrap_or_else(|error| panic!("CPU profiler finish failed: {error}"));
+        }
         eprintln!(
             "heavy_refresh edit_finished edit={edit} elapsed={:?}",
             started.elapsed()
