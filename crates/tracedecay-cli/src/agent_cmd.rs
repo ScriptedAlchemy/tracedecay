@@ -2708,7 +2708,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
-        assert_eq!(std::fs::read(&prompt_path).unwrap(), original_prompt);
+        let expected_home = tempfile::tempdir().unwrap();
+        let expected_prompt_path = expected_home.path().join(".config/opencode/AGENTS.md");
+        let integration = tracedecay_agent_hosts::agents::get_integration("opencode").unwrap();
+        integration
+            .activate_deployed_host_component_registration(
+                &[tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::Core],
+                &tracedecay_agent_hosts::agents::InstallContext {
+                    profile: tracedecay_runtime_core::config::ProfileRoot::under_home(
+                        expected_home.path(),
+                    ),
+                    home: expected_home.path().to_path_buf(),
+                    tracedecay_bin: "tracedecay".to_string(),
+                    project_root: None,
+                    dashboard: false,
+                    serve_args: Default::default(),
+                },
+            )
+            .unwrap();
+        let canonical_prompt = std::fs::read(expected_prompt_path).unwrap();
+        let expected_prompt = [original_prompt.as_slice(), canonical_prompt.as_slice()].concat();
+        let installed_prompt = std::fs::read(&prompt_path).unwrap();
+        let marker = b"## Prefer tracedecay MCP tools";
+        assert_eq!(installed_prompt, expected_prompt);
+        assert_eq!(
+            installed_prompt
+                .windows(marker.len())
+                .filter(|window| *window == marker)
+                .count(),
+            1
+        );
     }
 
     /// The canonical Codex set (Core + ContextMcp) is the whole rendered
