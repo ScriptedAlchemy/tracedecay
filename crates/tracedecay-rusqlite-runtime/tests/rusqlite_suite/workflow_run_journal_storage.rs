@@ -471,10 +471,8 @@ fn command_replay_is_idempotent_and_divergent_reuse_is_a_typed_conflict() {
 fn artifact_payloads_survive_restart_and_hydration_verifies_content() {
     let store = RegisteredWorkflowStore::start("artifact-payload-durability");
     let authority = attach(&store);
-    let payload = content_artifact(
-        "artifact.workflow.journal.context",
-        b"durable context bytes",
-    );
+    let content = vec![b'x'; 5 * 1024 * 1024];
+    let payload = content_artifact("artifact.workflow.journal.context", &content);
 
     assert_eq!(
         authority.persist(&payload).unwrap(),
