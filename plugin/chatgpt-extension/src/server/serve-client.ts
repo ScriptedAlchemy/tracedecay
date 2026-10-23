@@ -5,6 +5,9 @@ import { z } from "zod";
 import type { Failure, FailureKind } from "../shared/view.js";
 
 const REPEATED_QUERY_HINT_PREFIX = "tracedecay_repeated_query:";
+const MAX_RESPONSE_HANDLE_BYTES = 1024 * 1024;
+const MAX_RESPONSE_HANDLE_PAGES = 1024;
+const SafeOffsetSchema = z.int().nonnegative();
 
 /**
  * Collects the repeated-query hints `tracedecay serve` attaches to the daemon
@@ -27,6 +30,35 @@ export class DaemonFailure extends Error {
     this.name = "DaemonFailure";
     this.failure = failure;
   }
+}
+
+function isResponseHandleCandidate(payload: unknown): boolean {
+  return typeof payload === "object" && payload !== null && !Array.isArray(payload) &&
+    "handle" in payload && "truncated" in payload && payload.truncated === true;
+}
+
+function unicodeScalarCount(value: string): number | null {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    if (current >= 0xd800 && current <= 0xdbff) {
+      const following = value.charCodeAt(index + 1);
+      if (following < 0xdc00 || following > 0xdfff || Number.isNaN(following)) return null;
+      index += 1;
+    } else if (current >= 0xdc00 && current <= 0xdfff) {
+      return null;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+function protocolFailure(code: string, message: string): DaemonFailure {
+  return new DaemonFailure({ kind: "protocol", code, message });
+}
+
+function budgetFailure(code: string, message: string): DaemonFailure {
+  return new DaemonFailure({ kind: "unavailable", code, message });
 }
 
 export function toFailure(error: unknown): Failure {
@@ -60,22 +92,28 @@ export function classifyCode(code: string): FailureKind {
 }
 
 const ResponseHandleSchema = z.object({
-  handle: z.string(),
-  original_chars: z.number().int().nonnegative(),
+  handle: z.string().min(1),
+  original_chars: SafeOffsetSchema,
   preview: z.string(),
-  preview_chars: z.number().int().nonnegative(),
+  preview_chars: SafeOffsetSchema,
   truncated: z.literal(true),
 });
 
 const RetrievePageSchema = z.object({
+  handle: z.string().min(1),
+  expired: z.literal(false),
+  original_chars: SafeOffsetSchema,
+  total_chars: SafeOffsetSchema,
   content: z.string(),
-  offset: z.number().int().nonnegative(),
-  next_offset: z.number().int().nonnegative().nullable().optional(),
+  offset: SafeOffsetSchema,
+  next_offset: SafeOffsetSchema.nullable().optional(),
   has_more: z.boolean(),
 });
 
 const RetrieveMissingSchema = z.object({
-  handle: z.string(),
+  handle: z.string().min(1),
+  expired: z.boolean().nullable().optional(),
+  content: z.null().optional(),
   reason_code: z.string(),
 });
 
@@ -197,45 +235,105 @@ export class ServeSession {
     if (this.#closed) {
       throw new DaemonFailure({ kind: "disconnected", code: "serve_closed", message: "tracedecay serve exited" });
     }
-    const result = await this.#client.callTool({ name: toolName, arguments: { ...args, format: "json" } }, {
-      ...(signal === undefined ? {} : { signal }),
-    });
+    const result = await this.#callTool({ name: toolName, arguments: { ...args, format: "json" } }, signal);
     for (const item of result.content) {
       if (item.type === "text" && item.text.startsWith(REPEATED_QUERY_HINT_PREFIX)) relayedHints.getStore()?.push(item.text);
     }
     let payload = payloadOf(result, toolName);
-    const handle = ResponseHandleSchema.safeParse(payload);
-    if (handle.success) {
-      payload = parseJson(await this.#retrieveAll(handle.data.handle, signal), toolName);
+    if (isResponseHandleCandidate(payload)) {
+      const handle = ResponseHandleSchema.safeParse(payload);
+      if (!handle.success) {
+        throw protocolFailure("response_handle_malformed", "truncated response metadata is malformed");
+      }
+      if (unicodeScalarCount(handle.data.preview) !== handle.data.preview_chars) {
+        throw protocolFailure("response_handle_malformed", "truncated response preview length is inconsistent");
+      }
+      if (handle.data.original_chars > MAX_RESPONSE_HANDLE_BYTES) {
+        throw budgetFailure("response_handle_too_large", `response handle exceeds the ${MAX_RESPONSE_HANDLE_BYTES}-byte reassembly budget`);
+      }
+      payload = parseJson(await this.#retrieveAll(handle.data, signal), toolName);
     }
     return payload;
   }
 
-  async #retrieveAll(handle: string, signal?: AbortSignal): Promise<string> {
+  async #retrieveAll(handle: z.infer<typeof ResponseHandleSchema>, signal?: AbortSignal): Promise<string> {
     let offset = 0;
-    let assembled = "";
+    let retainedBytes = 0;
+    const chunks: string[] = [];
     for (;;) {
-      const result = await this.#client.callTool(
-        { name: "tracedecay_retrieve", arguments: { handle, offset, format: "json" } },
-        { ...(signal === undefined ? {} : { signal }) },
+      if (chunks.length === MAX_RESPONSE_HANDLE_PAGES) {
+        throw budgetFailure("response_handle_page_limit", `response handle exceeds the ${MAX_RESPONSE_HANDLE_PAGES}-page reassembly limit`);
+      }
+      const result = await this.#callTool(
+        { name: "tracedecay_retrieve", arguments: { handle: handle.handle, offset, format: "json" } },
+        signal,
       );
       const page = payloadOf(result, "tracedecay_retrieve");
       const parsed = RetrievePageSchema.safeParse(page);
       if (!parsed.success) {
         const missing = RetrieveMissingSchema.safeParse(page);
+        if (missing.success && missing.data.handle === handle.handle) {
+          throw new DaemonFailure({
+            kind: "unavailable",
+            code: missing.data.reason_code,
+            message: `response handle ${handle.handle} is no longer available (${missing.data.reason_code})`,
+          });
+        }
         throw new DaemonFailure({
-          kind: missing.success ? "unavailable" : "protocol",
-          code: missing.success ? missing.data.reason_code : "retrieve_page_malformed",
-          message: missing.success
-            ? `response handle ${handle} is no longer available (${missing.data.reason_code})`
-            : `tracedecay_retrieve returned an unexpected page shape for ${handle}`,
+          kind: "protocol",
+          code: "retrieve_page_malformed",
+          message: `tracedecay_retrieve returned an unexpected page shape for ${handle.handle}`,
         });
       }
-      assembled += parsed.data.content;
-      if (!parsed.data.has_more || parsed.data.next_offset === null || parsed.data.next_offset === undefined) {
-        return assembled;
+      const data = parsed.data;
+      const scalarCount = unicodeScalarCount(data.content);
+      const expectedNextOffset = scalarCount === null ? null : offset + scalarCount;
+      if (
+        data.handle !== handle.handle ||
+        data.original_chars !== handle.original_chars ||
+        data.total_chars !== handle.original_chars ||
+        data.offset !== offset ||
+        expectedNextOffset === null ||
+        !Number.isSafeInteger(expectedNextOffset) ||
+        expectedNextOffset > handle.original_chars
+      ) {
+        throw protocolFailure("retrieve_page_malformed", `tracedecay_retrieve returned inconsistent page metadata for ${handle.handle}`);
       }
-      offset = parsed.data.next_offset;
+
+      const pageBytes = Buffer.byteLength(data.content, "utf8");
+      if (pageBytes > MAX_RESPONSE_HANDLE_BYTES - retainedBytes) {
+        throw budgetFailure("response_handle_too_large", `response handle exceeds the ${MAX_RESPONSE_HANDLE_BYTES}-byte reassembly budget`);
+      }
+      retainedBytes += pageBytes;
+      chunks.push(data.content);
+
+      if (data.has_more) {
+        if (
+          data.next_offset === null || data.next_offset === undefined ||
+          data.next_offset <= offset || data.next_offset !== expectedNextOffset ||
+          expectedNextOffset >= handle.original_chars
+        ) {
+          throw protocolFailure("retrieve_page_malformed", `tracedecay_retrieve returned an invalid continuation for ${handle.handle}`);
+        }
+        offset = data.next_offset;
+        continue;
+      }
+      if ((data.next_offset !== null && data.next_offset !== undefined) || expectedNextOffset !== handle.original_chars) {
+        throw protocolFailure("retrieve_page_malformed", `tracedecay_retrieve returned an incomplete terminal page for ${handle.handle}`);
+      }
+      return chunks.join("");
+    }
+  }
+
+  async #callTool(params: { readonly name: string; readonly arguments: Record<string, unknown> }, signal?: AbortSignal): Promise<CallToolResult> {
+    if (signal?.aborted) throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+    try {
+      const result = await this.#client.callTool(params, { ...(signal === undefined ? {} : { signal }) });
+      if (signal?.aborted) throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+      return result;
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      throw error;
     }
   }
 

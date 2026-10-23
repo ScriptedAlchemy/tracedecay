@@ -3,7 +3,7 @@ use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 use super::{
     AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery, job_schedule_decision,
-    jobs_configured_for_scheduler, jobs_path,
+    jobs_configured_for_scheduler, jobs_path, validate_job,
 };
 use crate::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use crate::automation::config::AutomationConfig;
@@ -53,6 +53,35 @@ async fn valid_schedulable_job_reports_work_and_recovers_after_corruption() {
     assert!(jobs_configured_for_scheduler(root).await.is_err());
     std::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap()).unwrap();
     assert!(jobs_configured_for_scheduler(root).await.unwrap());
+}
+
+#[test]
+fn large_cron_steps_do_not_make_user_jobs_due_on_unselected_days() {
+    let mut job = interval_job();
+    job.schedule = Some("0 0 31/4294967295 * *".to_owned());
+    job.interval_secs = None;
+    validate_job(&job).unwrap();
+    let january_31 = 30 * 86_400;
+    let records = [ledger_record(
+        "january",
+        AutomationRunStatus::Succeeded,
+        None,
+        january_31,
+    )];
+    for day in 31..89 {
+        assert_eq!(
+            job_schedule_decision(&job, &records, day * 86_400),
+            Some(AutomationSkipReasonV1::SchedulerCronNotDue),
+            "day {day} since 1970-01-01"
+        );
+    }
+    assert_eq!(job_schedule_decision(&job, &records, 89 * 86_400), None);
+    job.schedule = Some("0 0 31/4294967296 * *".to_owned());
+    assert!(validate_job(&job).is_err());
+    assert_eq!(
+        job_schedule_decision(&job, &records, 89 * 86_400),
+        Some(AutomationSkipReasonV1::SchedulerScheduleInvalid)
+    );
 }
 
 #[test]
