@@ -830,11 +830,6 @@ jobs:
       - name: Restore the executable bit the artifact store drops
         run: chmod +x target/debug/tracedecay
 
-      - name: Run generated-plugin unit checks (no Hermes required)
-        env:
-          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
-        run: python3 scripts/hermes_plugin_unit_check.py
-
       - name: Clone stock Hermes at pinned ref
         run: |
           set -euo pipefail
@@ -848,6 +843,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: ${{ runner.temp }}/hermes-upstream/uv.lock
           cache-suffix: hermes-${{ env.HERMES_UPSTREAM_REF }}
+
+      - name: Run generated-plugin unit checks (no Hermes required)
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: uv run --no-project --with PyYAML==6.0.3 python scripts/hermes_plugin_unit_check.py
 
       - name: Set up stock Hermes environment
         working-directory: ${{ runner.temp }}/hermes-upstream
