@@ -1459,10 +1459,32 @@ fn observe_http_connections(action: impl FnOnce(SocketAddr)) -> usize {
 
 #[test]
 fn http_observation_counts_connections_and_releases_its_listener_on_unwind() {
+    if !crate::common::in_child_test() {
+        let invoked = AtomicBool::new(false);
+        let refusal = std::panic::catch_unwind(|| {
+            observe_http_connections(|_| invoked.store(true, Ordering::SeqCst));
+        });
+        assert!(
+            refusal.is_err(),
+            "HTTP observation requires an isolated test process"
+        );
+        assert!(!invoked.load(Ordering::SeqCst));
+        crate::common::rerun_test_in_child(
+            "cli_non_interactive_test::http_observation_counts_connections_and_releases_its_listener_on_unwind",
+            &[],
+        );
+        return;
+    }
+    let normal_address = OnceLock::new();
     let accepted = observe_http_connections(|address| {
+        normal_address.set(address).expect("one listener");
         drop(TcpStream::connect(address).expect("controlled connection"));
     });
     assert_eq!(accepted, 1, "a completed connection must be observed");
+    assert!(
+        TcpStream::connect(*normal_address.get().expect("listener was created")).is_err(),
+        "the scoped listener must close before observation returns"
+    );
 
     let address = OnceLock::new();
     let failure = std::panic::catch_unwind(|| {
