@@ -240,7 +240,7 @@ elif args[:1] == ["init"]:
     c = socket.socket(socket.AF_UNIX)
     c.connect(os.environ["TRACEDECAY_DAEMON_SOCKET"])
 elif args[:1] == ["tool"]:
-    print('{"fact": {"fact_id": "fact.1"}}')
+    print('{"outcome": "committed", "result": {"disposition": "added", "fact": {"kind": "available", "fact": {"fact_id": "fact.1"}}}}')
 """
 
 
@@ -285,7 +285,7 @@ class IsolatedLifecycleTest(unittest.TestCase):
             "id": "lifecycle",
             "setup": {
                 "facts": [
-                    {"content": "c", "category": "project", "source": "s", "trust": 0.5}
+                    {"content": "c", "category": "project", "source_label": "s", "trust": 0.5}
                 ]
             },
         }
@@ -1277,6 +1277,159 @@ class ReportLifecycleTest(unittest.TestCase):
 
 
 class ExactFactStoreEvaluationTest(unittest.TestCase):
+    def test_exact_tool_unwraps_the_retained_payload(self):
+        envelope = {
+            "outcome": {
+                "outcome": "evidence",
+                "value": {"payload": {"hits": []}},
+            }
+        }
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps(envelope), stderr=""
+        )
+
+        with mock.patch.object(run_real_model, "run", return_value=completed) as run_mock:
+            response = run_real_model.call_exact_tool(
+                "tracedecay",
+                Path("/fixture"),
+                {},
+                "tracedecay_fact_store_search",
+                {"query": "seed", "limit": 3},
+            )
+
+        self.assertEqual(response, {"hits": []})
+        self.assertEqual(json.loads(run_mock.call_args.args[0][-1]), {
+            "query": "seed", "limit": 3, "format": "json"
+        })
+
+    def test_fixture_seeds_the_canonical_source_label_field(self):
+        scenario = {
+            "id": "canonical-source-label",
+            "setup": {
+                "facts": [
+                    {
+                        "content": "A seeded fact",
+                        "category": "project",
+                        "source_label": "fixture-seed",
+                        "trust": 0.8,
+                    }
+                ]
+            },
+        }
+        with (
+            tempfile.TemporaryDirectory() as fixture,
+            mock.patch.object(run_real_model, "run"),
+            mock.patch.object(
+                run_real_model,
+                "call_exact_tool",
+                return_value={
+                    "outcome": "committed",
+                    "result": {
+                        "disposition": "added",
+                        "fact": {
+                            "kind": "available",
+                            "fact": {"fact_id": "fact.seed"},
+                        },
+                    },
+                },
+            ) as call_tool,
+        ):
+            run_real_model.seed_fixture(scenario, "tracedecay", {}, Path(fixture))
+
+        self.assertEqual(call_tool.call_args.args[4], {
+            "content": "A seeded fact",
+            "category": "project",
+            "source_label": "fixture-seed",
+            "trust": 0.8,
+        })
+
+    def test_source_assertions_select_fact_v1_source_labels(self):
+        fact_records = [
+            {
+                "kind": "available",
+                "fact": {
+                    "fact_id": "fact.seed",
+                    "source": {"kind": "application", "operation_id": "op.seed"},
+                    "source_label": "fixture-seed",
+                    "trust_score_millionths": 800_000,
+                    "telemetry": {"retrieval_count": 4},
+                },
+            },
+            {
+                "kind": "available",
+                "fact": {
+                    "fact_id": "fact.other",
+                    "source": {"kind": "application", "operation_id": "op.other"},
+                    "source_label": "other-seed",
+                    "trust_score_millionths": 500_000,
+                    "telemetry": {"retrieval_count": 2},
+                },
+            },
+        ]
+        search_hits = [{"fact": item["fact"]} for item in fact_records]
+        scenario = {
+            "assertions": [
+                {
+                    "kind": "source-count",
+                    "name": "fixture_seed_count",
+                    "source": "fixture-seed",
+                    "op": "eq",
+                    "value": 1,
+                },
+                {
+                    "kind": "source-trust",
+                    "name": "fixture_seed_trust",
+                    "source": "fixture-seed",
+                    "op": "gt",
+                    "value": 0.3,
+                },
+                {
+                    "kind": "retrieval-total",
+                    "name": "fixture_seed_retrievals",
+                    "source": "fixture-seed",
+                    "op": "eq",
+                    "value": 4,
+                },
+                {
+                    "kind": "feedback-history",
+                    "name": "fixture_seed_feedback",
+                    "source": "fixture-seed",
+                    "action": "helpful",
+                    "op": "eq",
+                    "value": 1,
+                },
+                {
+                    "kind": "search-source",
+                    "name": "fixture_seed_search",
+                    "source": "fixture-seed",
+                    "query": "seed",
+                },
+                {
+                    "kind": "search-rank",
+                    "name": "fixture_seed_rank",
+                    "top_fact_source": "fixture-seed",
+                    "query": "seed",
+                    "min_rank_gap": 1,
+                },
+            ]
+        }
+
+        def call_tool(_binary, _fixture, _env, tool, _payload):
+            if tool == "tracedecay_fact_store_list":
+                return {"facts": fact_records}
+            if tool == "tracedecay_fact_store_search":
+                return {"hits": search_hits}
+            return {"trust_history": [{"action": "helpful"}]}
+
+        with mock.patch.object(
+            run_real_model, "call_exact_tool", side_effect=call_tool
+        ):
+            outcomes = run_real_model.evaluate_assertions(
+                scenario, "tracedecay", Path("/fixture"), {}
+            )
+
+        self.assertEqual([outcome["passed"] for outcome in outcomes], [True] * 6)
+
     def test_fixture_preload_requires_the_seeded_fact_in_search_results(self):
         scenario = {
             "id": "exact-preload",
@@ -1285,7 +1438,7 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                     {
                         "content": "Warm this fact through exact search",
                         "category": "project",
-                        "source": "hot",
+                        "source_label": "hot",
                         "trust": 0.8,
                         "preload_query": "warm",
                         "preload_searches": 1,
@@ -1297,10 +1450,37 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
             [
                 subprocess.CompletedProcess([], 0, stdout="", stderr=""),
                 subprocess.CompletedProcess(
-                    [], 0, stdout=json.dumps({"fact": {"fact_id": "fact.hot"}}), stderr=""
+                    [],
+                    0,
+                    stdout=json.dumps({
+                        "outcome": {
+                            "outcome": "effect",
+                            "value": {
+                                "payload": {
+                                    "outcome": "committed",
+                                    "result": {
+                                        "disposition": "added",
+                                        "fact": {
+                                            "kind": "available",
+                                            "fact": {"fact_id": "fact.hot"},
+                                        },
+                                    },
+                                }
+                            },
+                        },
+                    }),
+                    stderr="",
                 ),
                 subprocess.CompletedProcess(
-                    [], 0, stdout=json.dumps({"facts": []}), stderr=""
+                    [],
+                    0,
+                    stdout=json.dumps({
+                        "outcome": {
+                            "outcome": "evidence",
+                            "value": {"payload": {"hits": []}},
+                        }
+                    }),
+                    stderr="",
                 ),
             ]
         )
@@ -1313,7 +1493,7 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(
-                run_real_model.ExactFactStoreError, "did not return FactId"
+                run_real_model.ExactFactStoreError, "did not return the requested FactId"
             ):
                 run_real_model.seed_fixture(scenario, "tracedecay", {}, Path(fixture))
 
