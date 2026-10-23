@@ -27,7 +27,10 @@ use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
-use super::record_canonical_observation_effect;
+use super::{
+    record_canonical_observation_effect,
+    record_live_collision_preserving_canonical_observation_effect,
+};
 use crate::handle::SessionTemporalRegisteredDb;
 use crate::relations::{SessionRelationProjection, SessionRelationScope};
 use crate::test_support::{FailingRegisteredDb, QueryCountingConnection};
@@ -2027,6 +2030,67 @@ async fn canonical_effect_replay_converges_on_an_identical_row() {
         recorded_effect(&connection, &observation).await,
         Some(first)
     );
+}
+
+#[asupersync::test]
+async fn live_collision_preserves_an_immutable_positive_output_effect() {
+    let (_directory, connection) = open_effect_store("effect-live-collision").await;
+    let session_id = fixture_session("session.projector.effect-live-collision");
+    let (observation, _) = fixture_observation(&session_id, 0, None, false);
+    let sequence = seed_effect_observation(&connection, &observation).await;
+    let original = tracedecay_store::derive_canonical_projection(&observation).unwrap();
+    record_canonical_observation_effect(&connection, sequence, &observation, &original)
+        .await
+        .unwrap();
+    let first = recorded_effect(&connection, &observation).await.unwrap();
+    assert_eq!(first.3, 1);
+
+    record_live_collision_preserving_canonical_observation_effect(
+        &connection,
+        sequence,
+        &observation,
+        &ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        recorded_effect(&connection, &observation).await,
+        Some(first)
+    );
+}
+
+#[asupersync::test]
+async fn live_collision_rejects_a_mismatched_positive_output_authority() {
+    let (_directory, connection) = open_effect_store("effect-live-collision-mismatch").await;
+    let session_id = fixture_session("session.projector.effect-live-collision-mismatch");
+    let (observation, _) = fixture_observation(&session_id, 0, None, false);
+    let sequence = seed_effect_observation(&connection, &observation).await;
+    connection
+        .execute(
+            "INSERT INTO session_temporal_observation_effects (
+                observation_id, observation_sequence, session_id, receipt_id,
+                effect_digest, output_count, recorded_at
+             ) VALUES (?1, ?2, 'session.foreign', ?3, 'effect.foreign', 1, 1)",
+            params![
+                observation.observation_id().as_str(),
+                i64::try_from(sequence).unwrap(),
+                observation.receipt().receipt().receipt_id().as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let error = record_live_collision_preserving_canonical_observation_effect(
+        &connection,
+        sequence,
+        &observation,
+        &ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, ProjectionStoreError::ProvenanceCollision));
 }
 
 /// Case 3, conflict with a divergent payload. The durable row satisfies the

@@ -237,6 +237,12 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sanit
             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
             next_retry_at_micros INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at_micros >= 0),
             last_error TEXT,
+            revival_generation TEXT,
+            revival_start_offset INTEGER CHECK(
+                (revival_generation IS NULL AND revival_start_offset IS NULL)
+                OR (revival_generation IS NOT NULL AND revival_start_offset IS NOT NULL
+                    AND revival_start_offset >= 0)
+            ),
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
         );
         CREATE INDEX IF NOT EXISTS idx_retrieval_anchor_dispositions_release_due
@@ -263,6 +269,39 @@ pub async fn ensure_observation_schema(
     conn.execute_batch(OBSERVATION_AUTHORITY_SCHEMA_SQL)
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    for (column, alteration) in [
+        (
+            "revival_generation",
+            "ALTER TABLE projection_queue ADD COLUMN revival_generation TEXT",
+        ),
+        (
+            "revival_start_offset",
+            "ALTER TABLE projection_queue ADD COLUMN revival_start_offset INTEGER CHECK(
+                (revival_generation IS NULL AND revival_start_offset IS NULL)
+                OR (revival_generation IS NOT NULL AND revival_start_offset IS NOT NULL
+                    AND revival_start_offset >= 0)
+            )",
+        ),
+    ] {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM pragma_table_xinfo('projection_queue') WHERE name = ?1",
+                [column],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let present = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+            .is_some();
+        drop(rows);
+        if !present {
+            conn.execute(alteration, ())
+                .await
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        }
+    }
     if !table_preexisted {
         for migration in [
             OBSERVATION_SCHEMA_MIGRATION,

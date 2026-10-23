@@ -1289,8 +1289,9 @@ async fn claude_observation_path_conflicting_redelivery_does_not_overwrite() {
 /// An atomically replaced transcript (temp file renamed over the original)
 /// is reconciled once: records the new file no longer holds stop being
 /// searchable, and an idle repoll of the replaced file reads no bytes.
+/// Restoring the original makes its records searchable again.
 #[tokio::test]
-async fn claude_atomic_replacement_retires_superseded_messages_and_settles() {
+async fn claude_atomic_replacement_retires_superseded_messages_until_restored() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     init_git_repo(&project);
@@ -1321,20 +1322,18 @@ async fn claude_atomic_replacement_retires_superseded_messages_and_settles() {
         let body: String = rows.iter().map(|row| format!("{row}\n")).collect();
         std::fs::write(target, body).unwrap();
     };
-    write(
-        &path,
-        &[
-            alpha.clone(),
-            row(
-                "c-a1",
-                Some("c-u1"),
-                "assistant",
-                5,
-                "claudeprobe beta: square_area is called twice.",
-            ),
-            row("c-u2", Some("c-a1"), "user", 9, "claudeprobe gamma: thanks"),
-        ],
-    );
+    let original = [
+        alpha.clone(),
+        row(
+            "c-a1",
+            Some("c-u1"),
+            "assistant",
+            5,
+            "claudeprobe beta: square_area is called twice.",
+        ),
+        row("c-u2", Some("c-a1"), "user", 9, "claudeprobe gamma: thanks"),
+    ];
+    write(&path, &original);
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
@@ -1401,6 +1400,44 @@ async fn claude_atomic_replacement_retires_superseded_messages_and_settles() {
             "idle repoll {repoll} of the replaced transcript must read nothing"
         );
     }
+
+    let mut conflicting = original.clone();
+    conflicting[1]["message"]["content"][0]["text"] =
+        serde_json::json!("claudeprobe refused: a different answer under the retired UUID.");
+    write(&replacement, &conflicting);
+    std::fs::rename(&replacement, &path).unwrap();
+    let refused = ingest().await;
+    assert_eq!(refused.records_rejected, 1);
+    let retired_hits = db.search_session_messages("claude", None, "beta", 10).await;
+    assert!(
+        retired_hits.is_empty(),
+        "a refused identity collision must not revive the retired record's old content: {retired_hits:?}"
+    );
+    assert!(
+        db.search_session_messages("claude", None, "refused", 10)
+            .await
+            .is_empty()
+    );
+
+    write(&replacement, &original);
+    std::fs::rename(&replacement, &path).unwrap();
+    ingest().await;
+    let mut texts: Vec<String> = db
+        .search_session_messages("claude", None, "claudeprobe", 10)
+        .await
+        .into_iter()
+        .map(|hit| hit.message.text)
+        .collect();
+    texts.sort();
+    assert_eq!(
+        texts,
+        [
+            "claudeprobe alpha: where is square_area called?",
+            "claudeprobe beta: square_area is called twice.",
+            "claudeprobe gamma: thanks",
+        ],
+        "restoring the original transcript must revive the messages the replacement retired"
+    );
 }
 
 /// Production journal on #3393: Claude catch-up fails

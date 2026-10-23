@@ -251,11 +251,14 @@ fn anchored_write_under(
     AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap()
 }
 
-fn sequential_writes(session_id: &SessionId, count: usize) -> Vec<AnchoredObservationWrite> {
+pub(crate) fn sequential_writes(
+    session_id: &SessionId,
+    count: usize,
+) -> Vec<AnchoredObservationWrite> {
     sequential_writes_with_text(session_id, count, |ordinal| format!("frame {ordinal}"))
 }
 
-fn sequential_writes_with_text(
+pub(crate) fn sequential_writes_with_text(
     session_id: &SessionId,
     count: usize,
     text: impl Fn(u64) -> String,
@@ -431,10 +434,21 @@ async fn intra_batch_exact_duplicate_is_hydrated_as_a_duplicate() {
     let first = sequential_writes(&session_id, 1)
         .pop()
         .expect("intra-batch exact observation");
+    let retry_projection = ProjectionGenerationId::new("projection.retry.batch.v2").unwrap();
+    let retry_anchor = tracedecay_store::build_observation_retrieval_anchor(
+        first.observation(),
+        retry_projection.clone(),
+        UtcMicros(2),
+        first.retrieval_anchor().authorization().clone(),
+    )
+    .unwrap();
+    let retry =
+        AnchoredObservationWrite::new(first.write().clone(), retry_anchor, retry_projection)
+            .unwrap();
     let before = writer_txn_census(&runtime).await;
 
     let outcomes = store
-        .persist_observations(vec![first.clone(), first.clone()])
+        .persist_observations(vec![first.clone(), retry, first.clone()])
         .await
         .unwrap();
 
@@ -446,7 +460,12 @@ async fn intra_batch_exact_duplicate_is_hydrated_as_a_duplicate() {
         outcomes[1].outcome(),
         ObservationPersistOutcome::ExactDuplicate(_)
     ));
+    assert!(matches!(
+        outcomes[2].outcome(),
+        ObservationPersistOutcome::ExactDuplicate(_)
+    ));
     assert_eq!(outcomes[0].stored(), outcomes[1].stored());
+    assert_eq!(outcomes[0].stored(), outcomes[2].stored());
     let after = writer_txn_census(&runtime).await;
     assert_eq!(after.operations - before.operations, 1);
 }

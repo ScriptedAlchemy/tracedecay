@@ -10,14 +10,15 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, DurableObservationV1, ObservationCollisionOutcomeV1,
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
     ProjectionGenerationId, SanitizationReceiptV1, classify_observation_collision,
+    is_canonical_payload_revision_replay,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, CanonicalBodyError, CursorAdvanceLedgerDisagreementV1,
     CursorAdvanceLedgerIdentityV1, LOAD_CANONICAL_BODY_SQL, ObservationCoverageReason,
     ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
     PROJECTION_TERMINAL_RETRY_MICROS, ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
-    SESSION_MESSAGE_PROJECTOR_VERSION, UPSERT_CANONICAL_BODY_SQL, parse_stored_observation,
-    slim_stored_json,
+    ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION, UPSERT_CANONICAL_BODY_SQL,
+    parse_stored_observation, slim_stored_json,
 };
 
 use crate::operation::StorageOperationError;
@@ -80,8 +81,11 @@ impl ObservationExecutor {
             let stored_observation =
                 decode_stored_observation_on_savepoint(savepoint, stored_observation)?;
             let collision = classify_observation_collision(&stored_observation, observation);
-            if collision == ObservationCollisionOutcomeV1::ExactDuplicate
-                && stored_observation.identity() != observation.identity()
+            let canonical_revision =
+                is_canonical_payload_revision_replay(&stored_observation, observation);
+            if canonical_revision
+                || (collision == ObservationCollisionOutcomeV1::ExactDuplicate
+                    && stored_observation.identity() != observation.identity())
             {
                 let identity = observation.identity();
                 let mut advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
@@ -91,7 +95,11 @@ impl ObservationExecutor {
                     identity.ordering_domain(),
                     write.expected_cursor().cloned(),
                     identity.position(),
-                    ObservationCoverageReason::DuplicateObservation,
+                    if canonical_revision {
+                        ObservationCoverageReason::CanonicalPayloadRevision
+                    } else {
+                        ObservationCoverageReason::DuplicateObservation
+                    },
                     observation.receipt().clone(),
                 )
                 .map_err(invalid)?;
@@ -105,7 +113,8 @@ impl ObservationExecutor {
                     (None, None) => {}
                     _ => return Err(invalid("cursor resume checkpoint is incomplete").into()),
                 }
-                return self.execute_cursor_advance(savepoint, &advance);
+                self.execute_cursor_advance(savepoint, &advance)?;
+                return queue_accepted_source_revival(savepoint, observation, &stored_observation);
             }
             if collision != ObservationCollisionOutcomeV1::ExactDuplicate
                 || stored_digest != payload_digest
@@ -123,7 +132,7 @@ impl ObservationExecutor {
                 return Err(invalid("sanitization receipt identity collision").into());
             }
             verify_observation_authority(savepoint, write)?;
-            return Ok(());
+            return queue_accepted_source_revival(savepoint, observation, &stored_observation);
         }
 
         let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
@@ -418,6 +427,47 @@ impl ObservationExecutor {
             }
         }
     }
+}
+
+fn queue_accepted_source_revival(
+    savepoint: &Savepoint<'_>,
+    candidate: &DurableObservationV1,
+    retained: &DurableObservationV1,
+) -> Result<(), StorageOperationError> {
+    if candidate.source() != retained.source() || candidate.scope() != retained.scope() {
+        return Err(invalid("accepted source offer does not own the retained observation").into());
+    }
+    let identity = candidate.identity();
+    let start_offset = i64::try_from(identity.position().start())
+        .map_err(|_| invalid("source offer offset exceeds SQLite integer"))?;
+    savepoint.execute_cached(
+        "INSERT INTO projection_queue (
+             observation_id, observation_sequence, revival_generation, revival_start_offset
+         )
+         SELECT observation.observation_id, observation.sequence,
+                presence.generation, presence.start_offset
+         FROM observations AS observation
+         JOIN observation_source_presence AS presence
+           ON presence.observation_id = observation.observation_id
+         JOIN observation_projection_dispositions AS disposition
+           ON disposition.observation_id = observation.observation_id
+         WHERE observation.observation_id = ?1 AND presence.source_key = ?2
+           AND presence.generation = ?3 AND presence.start_offset = ?4
+           AND disposition.projector_version = ?5 AND disposition.reason = ?6
+         ON CONFLICT(observation_id) DO UPDATE SET
+             revival_generation = excluded.revival_generation,
+             revival_start_offset = excluded.revival_start_offset,
+             attempt_count = 0, next_retry_at_micros = 0, last_error = NULL",
+        params![
+            candidate.observation_id().as_str(),
+            encode(&(candidate.source(), candidate.scope()))?,
+            identity.generation().generation_id().to_string(),
+            start_offset,
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            ProjectionSkipReason::SourceRecordRetired.as_str(),
+        ],
+    )?;
+    Ok(())
 }
 
 /// Committed cursors of one source in commit order, read through the indexed
