@@ -756,11 +756,12 @@ pub fn unmounted_files_md(value: &Value) -> String {
         .and_then(Value::as_u64)
         .unwrap_or(unmounted.len() as u64);
     md.field("Unmounted file count", &count.to_string());
-    // A truncated list must never read as the whole finding.
-    if value.get("complete").and_then(Value::as_bool) == Some(false)
-        && let Some(omitted) = value.get("omitted_count").and_then(Value::as_u64)
-    {
+    if value.get("complete").and_then(Value::as_bool) == Some(false) {
         md.field("Coverage", "partial");
+    }
+    if let Some(omitted) = value.get("omitted_count").and_then(Value::as_u64)
+        && omitted > 0
+    {
         md.field("Omitted", &format!("{omitted} (raise `limit` to see them)"));
     }
     md.blank();
@@ -781,7 +782,15 @@ pub fn unmounted_files_md(value: &Value) -> String {
         let audited = ecosystems
             .iter()
             .any(|ecosystem| ecosystem.get("status").and_then(Value::as_str) == Some("audited"));
-        if audited {
+        let partial = ecosystems
+            .iter()
+            .any(|ecosystem| ecosystem.get("status").and_then(Value::as_str) == Some("partial"));
+        if partial {
+            md.empty_note(
+                "No unmounted findings are available in this response. Missing inputs prevent \
+                 reachability verdicts for the affected packages listed above.",
+            );
+        } else if audited {
             md.empty_note(
                 "Every scanned source file is reachable from a declared entry point in the \
                  ecosystems listed above.",
@@ -844,7 +853,7 @@ fn render_ecosystem(md: &mut Md, ecosystem: &Value) {
     if let Some(note) = ecosystem.get("note").and_then(Value::as_str) {
         md.line(&format!("  {note}"));
     }
-    if status != "audited" {
+    if !matches!(status, "audited" | "partial") {
         return;
     }
     if let Some(verdict) = ecosystem.get("verdict").and_then(Value::as_str) {

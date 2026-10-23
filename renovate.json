@@ -23,7 +23,10 @@
       "description": "rules_rust's nightly pin, and the .bazelrc note that names it, must match rust-toolchain.toml",
       "customType": "regex",
       "managerFilePatterns": ["/^MODULE\\.bazel$/", "/^\\.bazelrc$/"],
-      "matchStrings": ["nightly/(?<currentValue>\\d{4}-\\d{2}-\\d{2})"],
+      "matchStrings": [
+        "nightly/(?<currentValue>\\d{4}-\\d{2}-\\d{2})",
+        "rust_analyzer_nightly-(?<currentValue>\\d{4}-\\d{2}-\\d{2})_tools"
+      ],
       "depNameTemplate": "rust",
       "datasourceTemplate": "rust-version",
       "extractVersionTemplate": "^nightly-(?<version>\\d{4}-\\d{2}-\\d{2})$",

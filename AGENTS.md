@@ -85,35 +85,14 @@ unauthorized external action after completing independent, authorized work.
   resolver 3, and the toolchain pinned in `rust-toolchain.toml` remain
   canonical inputs. Never invoke `cargo` directly; route every build, test,
   check, run, bench, and codegen through Bazel.
-- pnpm (pinned by `packageManager`) manages the npm packages and the Cargo
-  sources. Run `pnpm install` at the repository root after cloning and after
-  any `pnpm-lock.yaml` or `Cargo.lock` change. The committed
-  `.cargo/config.toml` optionally includes `.pnpm/crates/config.toml`, which
-  that install generates to replace crates.io and the pinned git sources with
-  `.pnpm/crates`. The Cargo error `no matching package named '<crate>' found`
-  with `location searched: directory source '<repo>/.pnpm/crates/crates-io'`
-  means "run `pnpm install`": Cargo.lock names a crate that is not vendored
-  yet. `verifyDepsBeforeRun` guards only the npm
-  packages; pnpm reads Cargo.lock as it is and never rewrites it or fails on
-  a manifest mismatch.
-- To add, remove, or bump a crate (member or `[workspace.dependencies]`),
-  edit the manifests by hand, then run `pnpm install` to re-vendor. For
-  lockfile refresh from outside the checkout (bumping a vendored source), use
-  the pinned toolchain: `cd / && cargo +<toolchain> update -w --manifest-path
-  <repo>/Cargo.toml` (`-p <crate>` for a targeted bump), then run
-  `pnpm install` again. Inside the checkout `cargo update` refuses the
-  vendored git sources and `cargo add` sees only vendored crates. A fork
-  only workspace members consume is a plain `git` + `rev` dependency
-  (grafeo in `[workspace.dependencies]`); `[patch.crates-io]` is only for
-  forks that crates.io dependents must also resolve to. To bump one, edit
-  `rev` on every crate from that repository, refresh the lock with `-p` for
-  each, and run `pnpm install`: pnpm vendors every source Cargo.lock names,
-  git included, and rewrites that source's replacement block in
-  `.pnpm/crates/config.toml`. Do not use `pnpm add crate:`; from a member
-  directory it regenerates the whole Cargo.lock, at the root it fails, and
-  `pnpm remove crate:` is unsupported. `pnpm install` leaves unused
-  `.pnpm/crates` directories in place; they are inert once the lock stops
-  naming them.
+- pnpm (pinned by `packageManager`) manages JavaScript packages only. Run
+  `pnpm install` after cloning and after `pnpm-lock.yaml` changes. Bazel
+  resolves Rust dependencies from the workspace manifests and `Cargo.lock`.
+- After changing Rust dependencies, run
+  `CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c`.
+  Then run `bazel run //scripts:bazel/gen_builds.py`.
+  Use `CARGO_BAZEL_REPIN=<crate>` for a targeted dependency update. Commit
+  the refreshed lockfile and generated targets together.
 - Code generation: `bazel run //sdks/codegen:generate -- <output-root>`
   exports SDK sources; `bazel run //sdks/codegen:dashboard_schema -- <output-file>`
   exports the dashboard schema. Dashboard `contracts:generate` and

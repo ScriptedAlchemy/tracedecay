@@ -156,6 +156,78 @@ async fn cached_request_snapshot_must_settle_before_project_quiescence_drains() 
 }
 
 #[tokio::test]
+async fn retained_request_observes_exact_root_and_daemon_retirement() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let other_registry = ProjectRuntimeRegistryV1::default();
+    let retired = root("retained-effect-retiring");
+    let sibling = root("retained-effect-sibling");
+    registry
+        .publish(retired.clone(), component(1))
+        .await
+        .unwrap();
+    registry
+        .publish(sibling.clone(), component(2))
+        .await
+        .unwrap();
+    other_registry
+        .publish(retired.clone(), component(3))
+        .await
+        .unwrap();
+    let retired_lease = registry.admit_request(&retired, None).unwrap();
+    let sibling_lease = registry.admit_request(&sibling, None).unwrap();
+    let other_lease = other_registry.admit_request(&retired, None).unwrap();
+    assert!(!retired_lease.is_retiring());
+    assert!(!sibling_lease.is_retiring());
+    assert!(!other_lease.is_retiring());
+
+    let retiring_registry = registry.clone();
+    let quiescence = tokio::spawn(async move {
+        retiring_registry
+            .quiesce_roots(&BTreeSet::from([retired]))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !retired_lease.is_retiring() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the admitted effect observes its root's retirement fence");
+    assert!(
+        !quiescence.is_finished(),
+        "accepted settlement still owns its root"
+    );
+    assert!(
+        !sibling_lease.is_retiring(),
+        "another project stays available"
+    );
+    assert!(
+        !other_lease.is_retiring(),
+        "another daemon owns an independent fence"
+    );
+
+    drop(retired_lease);
+    let quiesced = quiescence
+        .await
+        .unwrap()
+        .expect("the retired effect settled");
+    drop(quiesced);
+    registry.begin_shutdown();
+    assert!(
+        sibling_lease.is_retiring(),
+        "daemon shutdown reaches every remaining root"
+    );
+    assert!(
+        !other_lease.is_retiring(),
+        "daemon shutdown cannot cross compositions"
+    );
+    drop(sibling_lease);
+    drop(other_lease);
+    registry.shut_down_all(None).await;
+    other_registry.shut_down_all(None).await;
+}
+
+#[tokio::test]
 async fn project_quiescence_rejects_new_cached_route_snapshots() {
     let registry = ProjectRuntimeRegistryV1::default();
     let project = root("route-admission-during-recovery");
