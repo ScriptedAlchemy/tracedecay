@@ -1954,6 +1954,14 @@ pub(in super::super) async fn retire_source_record(
     conn: &(impl Executor + SendProjectionDerive),
     observation_id: &str,
 ) -> ProjectionStoreResult<bool> {
+    conn.execute(
+        "UPDATE projection_queue
+         SET revival_generation = NULL, revival_start_offset = NULL
+         WHERE observation_id = ?1",
+        params![observation_id],
+    )
+    .await
+    .map_err(|error| storage("cancel accepted source offer", error))?;
     let mut rows = conn
         .query(
             "SELECT observation.receipt_id,
@@ -1985,6 +1993,16 @@ pub(in super::super) async fn retire_source_record(
     if settled {
         return Ok(false);
     }
+    // Activation must not restore a rendering this retirement removes.
+    conn.execute(
+        "DELETE FROM observation_projection_rebuilds
+         WHERE projector_version = ?1 AND staged_through >= (
+             SELECT sequence FROM observations WHERE observation_id = ?2
+         )",
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+    )
+    .await
+    .map_err(|error| storage("invalidate retired source rebuild", error))?;
     let mut rows = conn
         .query(
             "SELECT DISTINCT output_provider, output_message_id

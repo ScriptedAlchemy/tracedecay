@@ -31,6 +31,21 @@ pub(super) fn acquire_run_ledger_lock(path: &Path) -> std::io::Result<std::fs::F
     acquire_nofollow_lock(&lock_path)
 }
 
+/// Reuses the writer's sidecar inode without publishing a namespace entry.
+/// First creation still establishes the directory barrier; writers retain
+/// their own barrier even when the lock already exists. Only absence permits
+/// creation, so no-follow, type and access refusals cannot become replacements.
+pub(super) fn acquire_run_ledger_read_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
+    match open_run_ledger_nofollow(&lock_path, true, true, false, false)? {
+        Some(file) => {
+            file.lock()?;
+            Ok(file)
+        }
+        None => acquire_run_ledger_lock(path),
+    }
+}
+
 fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
     let parent = lock_path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -1766,6 +1781,9 @@ impl Write for DigestWriter {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
     use super::*;
     use crate::automation::backend::AgentTaskKind;
     use crate::automation::run_ledger::{AutomationRunStatus, AutomationTrigger};
@@ -2101,6 +2119,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn existing_read_lock_excludes_an_independent_writer() {
+        const PROBE_PATH: &str = "TRACEDECAY_TEST_RUN_LEDGER_LOCK_PROBE";
+        const PROBE_HELD: &str = "TRACEDECAY_TEST_RUN_LEDGER_LOCK_HELD";
+        if let Some(path) = std::env::var_os(PROBE_PATH) {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .expect("open the parent's lock without creating it");
+            let held = match file.try_lock() {
+                Ok(()) => {
+                    file.unlock().expect("release the probe lock");
+                    false
+                }
+                Err(std::fs::TryLockError::WouldBlock) => true,
+                Err(error) => panic!("probe lock failed: {error}"),
+            };
+            assert_eq!(held.to_string(), std::env::var(PROBE_HELD).unwrap());
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = run_ledger_path(temp.path());
+        let initial = acquire_run_ledger_lock(&ledger).unwrap();
+        initial.unlock().unwrap();
+        drop(initial);
+        let lock_path = tracedecay_runtime_core::storage::append_lock_path(&ledger);
+        let original = std::fs::metadata(&lock_path).unwrap();
+        let reader = acquire_run_ledger_read_lock(&ledger).unwrap();
+        let opened = reader.metadata().unwrap();
+        assert_eq!(
+            (opened.dev(), opened.ino()),
+            (original.dev(), original.ino())
+        );
+
+        let probe = |held: bool| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "automation::run_ledger::exact_publication::tests::existing_read_lock_excludes_an_independent_writer",
+                ])
+                .env(PROBE_PATH, &lock_path)
+                .env(PROBE_HELD, held.to_string())
+                .output()
+                .expect("run an independent writer probe");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
+                "{stdout}"
+            );
+        };
+        probe(true);
+        reader.unlock().unwrap();
+        probe(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ledger_and_lock_open_through_parent_alias_without_following_final_symlinks() {
         use std::os::unix::fs::symlink;
 
@@ -2116,6 +2196,7 @@ mod tests {
         file.write_all(b"retained ledger").expect("write ledger");
         drop(file);
         drop(acquire_run_ledger_lock(&ledger).expect("lock through alias"));
+        drop(acquire_run_ledger_read_lock(&ledger).expect("reuse lock through alias"));
         let mut file = open_run_ledger_nofollow(&ledger, true, false, false, false)
             .expect("reopen through alias")
             .expect("ledger");
@@ -2128,6 +2209,9 @@ mod tests {
         std::fs::remove_file(&lock).expect("remove lock");
         symlink(&ledger, &lock).expect("final lock symlink");
         let error = acquire_run_ledger_lock(&ledger).expect_err("refuse final lock symlink");
+        assert!(error.to_string().contains("symlink"));
+        let error =
+            acquire_run_ledger_read_lock(&ledger).expect_err("read refuses final lock symlink");
         assert!(error.to_string().contains("symlink"));
         assert_eq!(
             std::fs::read(&ledger).expect("unchanged target"),

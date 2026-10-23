@@ -8,7 +8,8 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr::{addr_of, addr_of_mut, copy_nonoverlapping, null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS,
+    INVALID_HANDLE_VALUE, LocalFree, MAX_PATH,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, EXPLICIT_ACCESS_W, GetSecurityInfo, NO_MULTIPLE_TRUSTEE,
@@ -28,11 +29,12 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileAttributeTagInfo, FileRenameInfoEx, GetDiskFreeSpaceExW,
-    GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
-    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileRenameInfoEx,
+    GetDiskFreeSpaceExW, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_ALWAYS, OPEN_EXISTING,
+    READ_CONTROL, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -292,6 +294,107 @@ pub fn create_private_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RenameMode {
+    Replace,
+    NoReplace,
+}
+
+/// Publish a same-volume rename with the Windows namespace durability barrier.
+/// `MOVEFILE_COPY_ALLOWED` is deliberately absent: publication must remain one
+/// rename, including when the destination already exists.
+///
+/// Unlike the unsupported `REPLACEFILE_WRITE_THROUGH`, `MOVEFILE_WRITE_THROUGH`
+/// makes completion wait for the move on disk:
+/// <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw>.
+pub(crate) fn rename_paths_durable(
+    source: &Path,
+    destination: &Path,
+    mode: RenameMode,
+) -> io::Result<()> {
+    let source = absolute_security_path(source)?;
+    let destination = absolute_security_path(destination)?;
+    let source_wide = encode_path(&source)?;
+    let destination_wide = encode_path(&destination)?;
+    let flags = MOVEFILE_WRITE_THROUGH
+        | match mode {
+            RenameMode::Replace => MOVEFILE_REPLACE_EXISTING,
+            RenameMode::NoReplace => 0,
+        };
+    // SAFETY: both buffers are NUL-terminated with embedded NUL rejected and
+    // stay live for the entire synchronous call.
+    if unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) } != 0 {
+        return Ok(());
+    }
+    let move_error = io::Error::last_os_error();
+    if !matches!(mode, RenameMode::Replace)
+        || move_error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32)
+    {
+        return Err(move_error);
+    }
+
+    let _source_ancestors = hold_directory_ancestors(&source)?;
+    let _destination_ancestors = hold_directory_ancestors(&destination)?;
+    let source_file = open_raw_handle(
+        &source,
+        OPEN_EXISTING,
+        DELETE | FILE_READ_ATTRIBUTES,
+        null(),
+        SHARE_READ_WRITE_DELETE,
+        FILE_FLAG_WRITE_THROUGH,
+    )?;
+    validate_file_kind(&source_file, &source, PathKind::File)?;
+    require_ntfs_rename_durability(&source_file).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("Windows replacement after MoveFileExW failed ({move_error}): {error}"),
+        )
+    })?;
+    rename_handle_posix(&source_file, &destination)
+}
+
+fn require_ntfs_rename_durability(file: &File) -> io::Result<()> {
+    let mut filesystem = [0_u16; MAX_PATH as usize + 1];
+    // SAFETY: the file handle is live and the only requested output buffer
+    // holds `filesystem.len()` UTF-16 code units.
+    if unsafe {
+        GetVolumeInformationByHandleW(
+            file.as_raw_handle(),
+            null_mut(),
+            0,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let length = filesystem
+        .iter()
+        .position(|unit| *unit == 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unterminated Windows filesystem name",
+            )
+        })?;
+    let filesystem = String::from_utf16(&filesystem[..length])
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // NTFS documents rename metadata flushes for FILE_FLAG_WRITE_THROUGH.
+    // This fallback depends on that filesystem-specific guarantee.
+    // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew#caching-behavior
+    if !filesystem.eq_ignore_ascii_case("NTFS") {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("write-through replacement requires NTFS, found {filesystem}"),
+        ));
+    }
+    Ok(())
+}
+
 /// Atomically replace one sibling file with another, returning the exact
 /// published file handle.
 ///
@@ -360,18 +463,23 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
         DELETE | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
         null(),
         SHARE_READ_WRITE_DELETE,
+        0,
     )?;
     validate_file_kind(&source_file, &source, PathKind::File)?;
     source_file.sync_all()?;
 
-    let (storage, buffer_size) = posix_rename_payload(&destination)?;
+    rename_handle_posix(&source_file, &destination)?;
+    drop(ancestor_handles);
+    Ok(source_file)
+}
 
-    // SAFETY: the source handle stays live with DELETE access, the ancestor
-    // handles pin the destination directory, and `storage` is a complete
-    // FILE_RENAME_INFO_EX payload.
+fn rename_handle_posix(source: &File, destination: &Path) -> io::Result<()> {
+    let (storage, buffer_size) = posix_rename_payload(destination)?;
+    // SAFETY: the source handle stays live and `storage` contains the complete
+    // FILE_RENAME_INFO_EX payload for the duration of the synchronous call.
     if unsafe {
         SetFileInformationByHandle(
-            source_file.as_raw_handle(),
+            source.as_raw_handle(),
             FileRenameInfoEx,
             storage.as_ptr().cast(),
             buffer_size,
@@ -380,8 +488,7 @@ pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<
     {
         return Err(io::Error::last_os_error());
     }
-    drop(ancestor_handles);
-    Ok(source_file)
+    Ok(())
 }
 
 /// `FileRenameInfoEx` payload for a same-volume POSIX replace.
@@ -602,6 +709,7 @@ fn open_handle_with_share(
         access,
         security_attributes,
         share_mode,
+        0,
     )
 }
 
@@ -611,6 +719,7 @@ fn open_raw_handle(
     access: u32,
     security_attributes: *const SECURITY_ATTRIBUTES,
     share_mode: u32,
+    extra_flags: u32,
 ) -> io::Result<File> {
     let encoded = encode_path(path)?;
 
@@ -623,7 +732,7 @@ fn open_raw_handle(
             share_mode,
             security_attributes,
             disposition,
-            SECURE_OPEN_FLAGS,
+            SECURE_OPEN_FLAGS | extra_flags,
             null_mut(),
         )
     };
@@ -766,6 +875,7 @@ fn hold_directory_ancestors(path: &Path) -> io::Result<Vec<File>> {
             FILE_READ_ATTRIBUTES,
             null(),
             FILE_SHARE_READ,
+            0,
         )?;
         validate_file_kind(&handle, ancestor, PathKind::Directory)?;
         handles.push(handle);

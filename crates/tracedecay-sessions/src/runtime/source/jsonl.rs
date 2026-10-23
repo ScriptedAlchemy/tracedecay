@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -582,7 +582,8 @@ pub enum JsonlPrefixRecovery {
     /// can load the source's committed checkpoints.
     Report,
     /// Resume the rewritten generation after the longest prefix that still
-    /// hashes to one of these checkpoints; none matching rescans from zero.
+    /// hashes to one of these checkpoints the recorded generation committed;
+    /// none matching rescans from zero.
     Checkpoints(Arc<[JsonlPrefixCheckpoint]>),
 }
 
@@ -705,16 +706,20 @@ pub(in crate::runtime) fn jsonl_prefix_digest<R: Read + Seek>(
     Ok((digest, hashed))
 }
 
-/// Longest checkpointed prefix of `file` whose digest still matches, or
-/// `recorded` itself as soon as it matches, since resuming the recorded
-/// generation needs no replacement.
+/// Longest prefix of `file` that still hashes to a checkpoint the recorded
+/// `generation` committed, or `recorded` itself as soon as it matches, since
+/// resuming the recorded generation needs no replacement.
 ///
-/// Checkpoints of one generation share one byte stream, so its first mismatch
-/// rules out every later checkpoint of that generation; hashing stops once
-/// every generation has diverged instead of walking the whole extent.
+/// A rewrite keeps the recorded generation's records before the retained
+/// prefix, so only that generation's checkpoints can prove one. An older
+/// generation's checkpoint can match bytes the recorded generation had
+/// replaced, and retaining them would keep the replacement's records and
+/// never offer the restored ones again. The checkpoints share one byte
+/// stream, so the first mismatch ends the walk.
 fn longest_retained_jsonl_prefix<R: Read + Seek>(
     file: &mut R,
     checkpoints: &[JsonlPrefixCheckpoint],
+    generation: u64,
     recorded: Option<JsonlPrefixCheckpoint>,
     extent: u64,
 ) -> std::io::Result<(Option<(JsonlPrefixCheckpoint, ResumeDigest)>, u64)> {
@@ -722,33 +727,20 @@ fn longest_retained_jsonl_prefix<R: Read + Seek>(
         .iter()
         .copied()
         .chain(recorded)
-        .filter(|checkpoint| checkpoint.position > 0 && checkpoint.position <= extent)
+        .filter(|checkpoint| {
+            checkpoint.generation == generation
+                && checkpoint.position > 0
+                && checkpoint.position <= extent
+        })
         .collect::<Vec<_>>();
-    ordered.sort_unstable_by_key(|checkpoint| {
-        (
-            checkpoint.position,
-            checkpoint.generation,
-            checkpoint.fingerprint,
-        )
-    });
+    ordered.sort_unstable_by_key(|checkpoint| (checkpoint.position, checkpoint.fingerprint));
     ordered.dedup();
-    let generations = ordered
-        .iter()
-        .map(|checkpoint| checkpoint.generation)
-        .collect::<HashSet<_>>();
-    let mut diverged = HashSet::new();
     let mut digest = ResumeDigest::new();
     let mut hashed = 0_u64;
     let mut retained = None;
     let mut buffer = vec![0_u8; JSONL_HASH_CHUNK_BYTES];
     file.seek(SeekFrom::Start(0))?;
     for checkpoint in ordered {
-        if diverged.len() == generations.len() {
-            break;
-        }
-        if diverged.contains(&checkpoint.generation) {
-            continue;
-        }
         while hashed < checkpoint.position {
             let requested =
                 usize::try_from((checkpoint.position - hashed).min(buffer.len() as u64))
@@ -763,14 +755,13 @@ fn longest_retained_jsonl_prefix<R: Read + Seek>(
             digest.extend(&buffer[..read]);
             hashed = hashed.saturating_add(read as u64);
         }
-        if digest.fingerprint(checkpoint.position) == checkpoint.fingerprint {
-            if Some(checkpoint) == recorded {
-                return Ok((Some((checkpoint, digest)), hashed));
-            }
-            retained = Some((checkpoint, digest.clone()));
-        } else {
-            diverged.insert(checkpoint.generation);
+        if digest.fingerprint(checkpoint.position) != checkpoint.fingerprint {
+            break;
         }
+        if Some(checkpoint) == recorded {
+            return Ok((Some((checkpoint, digest)), hashed));
+        }
+        retained = Some((checkpoint, digest.clone()));
     }
     Ok((retained, hashed))
 }
@@ -787,6 +778,7 @@ enum RecordedPrefix {
 fn match_recorded_prefix(
     file: &mut MeasuredJsonlFile<'_>,
     path: &Path,
+    generation: u64,
     recorded: Option<JsonlPrefixCheckpoint>,
     prefix_recovery: &JsonlPrefixRecovery,
     extent: u64,
@@ -809,7 +801,7 @@ fn match_recorded_prefix(
         }
         (_, JsonlPrefixRecovery::Checkpoints(checkpoints)) => {
             let (retained, hashed) =
-                longest_retained_jsonl_prefix(file, checkpoints, recorded, extent)
+                longest_retained_jsonl_prefix(file, checkpoints, generation, recorded, extent)
                     .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
             io.prefix_validation_bytes = io.prefix_validation_bytes.saturating_add(hashed);
             Ok(match retained {
@@ -1326,6 +1318,7 @@ impl<'a> PreparedJsonlScan<'a> {
                     match match_recorded_prefix(
                         &mut file,
                         path,
+                        resume_state.generation,
                         recorded,
                         prefix_recovery,
                         file_size,

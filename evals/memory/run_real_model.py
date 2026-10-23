@@ -4,7 +4,7 @@
 Seeds a throwaway fixture project, points a REAL agent (Hermes by default,
 optionally `cursor-agent`) at it through the generated tracedecay plugin /
 MCP server, sends the scenario prompts, then reads end-state through exact
-FactId/FactRecordV1 fact-store operations.
+FactId/FactV1 fact-store operations.
 
 Real model turns consume credits/quota, so the run is gated behind BOTH
 `--agent-turn` and `--i-understand-model-cost` (pattern adopted from the
@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -34,8 +35,15 @@ from pathlib import Path
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts/lib"))
+
+from portable_process import dies_with_this_process, stop_owned_process
+
 SCENARIO_DIR = EVAL_DIR / "scenarios"
 RUNS_DIR = EVAL_DIR / "runs"
+PROCESS_HELPER = REPO_ROOT / "scripts/lib/portable_process.py"
+DAEMON_READY_TIMEOUT_SECONDS = 60
+PROCESS_STOP_GRACE_SECONDS = 5
 
 DEFAULT_HERMES_DIR = Path.home() / "hermes-agent"
 DEFAULT_MODEL = "gpt-5.4-mini"
@@ -122,44 +130,162 @@ class EvalEnvironment:
     data_dir: Path
     global_db: Path
     env: dict[str, str]
-    _temp_dir: tempfile.TemporaryDirectory
+    socket_dir: Path | None = None
+    daemon: subprocess.Popen | None = None
+    daemon_log: Path | None = None
+
+    def start_daemon(self, tracedecay_bin, ready_timeout=DAEMON_READY_TIMEOUT_SECONDS):
+        """Launches the selected binary's daemon on a socket private to this profile."""
+        if self.daemon is not None:
+            raise EvalSetupError("isolated daemon already started")
+        # Unix socket paths are length-limited, so keep the socket in a short directory.
+        self.socket_dir = Path(tempfile.mkdtemp(prefix="td-eval-"))
+        socket_path = self.socket_dir / "daemon.sock"
+        self.env["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
+        self.daemon_log = self.root / "daemon.log"
+        with open(self.daemon_log, "wb") as log:
+            self.daemon = subprocess.Popen(
+                [
+                    tracedecay_bin,
+                    "daemon",
+                    "run",
+                    "--socket",
+                    str(socket_path),
+                ],
+                env=self.env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                preexec_fn=dies_with_this_process(),
+            )
+        ready = run(
+            [
+                sys.executable,
+                "-S",
+                str(PROCESS_HELPER),
+                "wait-unix-socket",
+                "--path",
+                str(socket_path),
+                "--pid",
+                str(self.daemon.pid),
+                "--timeout",
+                str(ready_timeout),
+            ],
+            check=False,
+        )
+        if ready.returncode != 0:
+            raise EvalSetupError(
+                f"isolated daemon did not become ready ({ready.returncode}): "
+                f"{ready.stdout.strip()}\n{self.daemon_log_tail()}"
+            )
+
+    def daemon_log_tail(self):
+        if self.daemon_log is None or not self.daemon_log.exists():
+            return "(no daemon output captured)"
+        return self.daemon_log.read_text(errors="replace")[-4096:] or "(no daemon output captured)"
+
+    def stop_daemon(self):
+        if self.daemon is None:
+            return
+        # Teardown must not depend on launching another Python executable.
+        # Retain ownership until the canonical group stop and reap complete.
+        stop_owned_process(self.daemon, PROCESS_STOP_GRACE_SECONDS)
+        self.daemon = None
 
     def cleanup(self):
-        self._temp_dir.cleanup()
+        self.stop_daemon()
+        errors = []
+        for path in (self.socket_dir, self.root):
+            if path is None:
+                continue
+            try:
+                shutil.rmtree(path)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                errors.append(exc)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup(
+                "isolated environment cleanup failed: "
+                + "; ".join(str(error) for error in errors),
+                errors,
+            )
 
 
-def cleanup_eval_artifacts(fixture, eval_env):
-    if fixture is not None:
-        shutil.rmtree(fixture, ignore_errors=True)
-    eval_env.cleanup()
+class EvalSetupError(RuntimeError):
+    """An operational failure (daemon, init, install) reported instead of exiting."""
+
+
+class OwnedProcessCleanupError(EvalSetupError):
+    """Transfer an unconfirmed command stop to the enclosing resource owner."""
+
+    def __init__(self, process, original_error, cleanup_error):
+        self.process = process
+        self.original_error = original_error
+        self.cleanup_error = cleanup_error
+        super().__init__(f"owned process group {process.pid} cleanup failed: {cleanup_error}")
+
+    @property
+    def cancelled(self):
+        return isinstance(self.original_error, KeyboardInterrupt) or isinstance(
+            self.cleanup_error, KeyboardInterrupt
+        )
+
+    def primary_detail(self):
+        error = self.original_error if self.original_error is not None else self.cleanup_error
+        return str(error) or ("interrupted" if self.cancelled else type(error).__name__)
+
+
+class OwnedProfileCleanupError(EvalSetupError):
+    """Retain allocation failures before an environment can own its profile."""
+
+    def __init__(self, root, original_error, cleanup_error):
+        self.root = root
+        self.original_error = original_error
+        self.cleanup_error = cleanup_error
+        super().__init__(f"profile allocation cleanup failed for {root}: {cleanup_error}")
 
 
 def create_eval_environment(scenario_id):
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario_id)
-    temp_dir = tempfile.TemporaryDirectory(prefix=f"tracedecay-eval-env-{safe_id}-")
-    root = Path(temp_dir.name)
-    home = root / "home"
-    data_dir = root / ".tracedecay"
-    global_db = data_dir / "global.db"
-    home.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    # Explicit ownership prevents an implicit temporary-directory finalizer
+    # from deleting the profile if stopping an owned daemon fails.
+    root = tempfile.mkdtemp(prefix=f"tracedecay-eval-env-{safe_id}-")
+    try:
+        root = Path(root)
+        home = root / "home"
+        data_dir = root / ".tracedecay"
+        global_db = data_dir / "global.db"
+        home.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
 
-    env = dict(os.environ)
-    env["HOME"] = str(home)
-    env["USERPROFILE"] = str(home)
-    env["XDG_CONFIG_HOME"] = str(home / ".config")
-    env["TRACEDECAY_DATA_DIR"] = str(data_dir)
-    env["TRACEDECAY_GLOBAL_DB"] = str(global_db)
-    env.pop("HERMES_HOME", None)
-    env.pop("HERMES_PROFILE", None)
-    return EvalEnvironment(
-        root=root,
-        home=home,
-        data_dir=data_dir,
-        global_db=global_db,
-        env=env,
-        _temp_dir=temp_dir,
-    )
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+        env["TRACEDECAY_DATA_DIR"] = str(data_dir)
+        env["TRACEDECAY_GLOBAL_DB"] = str(global_db)
+        env.pop("HERMES_HOME", None)
+        env.pop("HERMES_PROFILE", None)
+        return EvalEnvironment(
+            root=root,
+            home=home,
+            data_dir=data_dir,
+            global_db=global_db,
+            env=env,
+        )
+    except BaseException as original_error:
+        # Ownership reaches the caller only after the whole environment has
+        # been constructed; cancellation during setup still belongs here.
+        try:
+            shutil.rmtree(root)
+        except FileNotFoundError:
+            pass
+        except BaseException as cleanup_error:
+            raise OwnedProfileCleanupError(root, original_error, cleanup_error) from original_error
+        raise
 
 
 def resolve_tracedecay_bin(explicit):
@@ -171,15 +297,16 @@ def resolve_tracedecay_bin(explicit):
     env = dict(os.environ)
     if explicit:
         env["TRACEDECAY_BIN"] = str(explicit)
-    result = subprocess.run(
+    result = run(
         [str(REPO_ROOT / "scripts/build-eval-binary.sh")],
         env=env,
-        stdout=subprocess.PIPE,
-        text=True,
         check=False,
+        stderr=None,
     )
     if result.returncode != 0:
-        sys.exit(f"no tracedecay binary: scripts/build-eval-binary.sh exited {result.returncode}")
+        raise EvalSetupError(
+            f"no tracedecay binary: scripts/build-eval-binary.sh exited {result.returncode}"
+        )
     return result.stdout.strip()
 
 
@@ -204,18 +331,45 @@ def load_scenarios(ids):
     return scenarios
 
 
-def run(cmd, cwd=None, env=None, timeout=None, check=True):
-    result = subprocess.run(
+def run(cmd, cwd=None, env=None, timeout=None, check=True, stderr=subprocess.STDOUT):
+    process = subprocess.Popen(
         cmd,
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=stderr,
         text=True,
-        timeout=timeout,
+        start_new_session=True,
+        preexec_fn=dies_with_this_process(),
     )
-    if check and result.returncode != 0:
-        sys.exit(f"command failed ({result.returncode}): {' '.join(map(str, cmd))}\n{result.stdout}")
+    original_error = None
+    try:
+        output, captured_stderr = process.communicate(timeout=timeout)
+        result = subprocess.CompletedProcess(
+            cmd, process.returncode, stdout=output, stderr=captured_stderr
+        )
+        if check and result.returncode != 0:
+            raise EvalSetupError(
+                f"command failed ({result.returncode}): {' '.join(map(str, cmd))}\n{result.stdout}"
+            )
+    except BaseException as exc:
+        original_error = exc
+    try:
+        # Popen's context manager waits during an exception without stopping
+        # the child. Explicit ownership makes cancellation and timeouts stop
+        # the entire turn, including its MCP children, before fixture cleanup.
+        stop_owned_process(process, PROCESS_STOP_GRACE_SECONDS)
+    except BaseException as exc:
+        # A signal can arrive for the first time during the stop itself. Keep
+        # the Popen reachable so the caller retries before deleting its files.
+        raise OwnedProcessCleanupError(process, original_error, exc) from original_error
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    if original_error is not None:
+        raise original_error
     return result
 
 
@@ -240,22 +394,50 @@ def call_exact_tool(tracedecay_bin, fixture, env, tool, args):
             f"{tool} failed ({result.returncode}): {result.stdout.strip()}"
         )
     try:
-        return json.loads(result.stdout)
+        envelope = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise ExactFactStoreError(f"{tool} returned invalid JSON: {exc}") from exc
-
-
-def require_fact_record(response, operation):
-    fact = response.get("fact") if isinstance(response, dict) else None
-    if not isinstance(fact, dict) or not isinstance(fact.get("fact_id"), str):
         raise ExactFactStoreError(
-            f"{operation} did not return a canonical FactRecordV1 with string fact_id"
+            f"{tool} returned invalid retained-surface JSON: {exc}"
+        ) from exc
+    outcome = envelope.get("outcome") if isinstance(envelope, dict) else None
+    if not isinstance(outcome, dict) or outcome.get("outcome") not in ("evidence", "effect"):
+        raise ExactFactStoreError(
+            f"{tool} did not return retained evidence or an effect: {envelope}"
+        )
+    value = outcome.get("value")
+    response = value.get("payload") if isinstance(value, dict) else None
+    if not isinstance(response, dict):
+        raise ExactFactStoreError(f"{tool} omitted its retained result payload")
+    return response
+
+
+def require_fact_record(fact, operation):
+    telemetry = fact.get("telemetry") if isinstance(fact, dict) else None
+    if (
+        not isinstance(fact, dict)
+        or not isinstance(fact.get("fact_id"), str)
+        or not isinstance(fact.get("content"), str)
+        or not isinstance(fact.get("source"), dict)
+        or not (fact.get("source_label") is None or isinstance(fact.get("source_label"), str))
+        or not isinstance(fact.get("trust_score_millionths"), int)
+        or not isinstance(telemetry, dict)
+        or not isinstance(telemetry.get("retrieval_count"), int)
+    ):
+        raise ExactFactStoreError(
+            f"{operation} did not return a canonical FactV1"
         )
     return fact
 
 
-def build_fixture(scenario, tracedecay_bin, env):
-    fixture = Path(tempfile.mkdtemp(prefix=f"tracedecay-eval-{scenario['id']}-"))
+def available_fact_record(projection, operation):
+    if not isinstance(projection, dict) or projection.get("kind") != "available":
+        raise ExactFactStoreError(
+            f"{operation} did not return an available FactProjectionV1"
+        )
+    return require_fact_record(projection.get("fact"), operation)
+
+
+def seed_fixture(scenario, tracedecay_bin, env, fixture):
     (fixture / "src").mkdir()
     (fixture / "src/lib.rs").write_text("pub fn eval_fixture_marker() {}\n")
     for name, contents in scenario["setup"].get("files", {}).items():
@@ -270,11 +452,18 @@ def build_fixture(scenario, tracedecay_bin, env):
             {
                 "content": fact["content"],
                 "category": fact["category"],
-                "source": fact["source"],
+                "source_label": fact["source_label"],
                 "trust": fact["trust"],
             },
         )
-        seeded_fact = require_fact_record(response, "fixture setup")
+        commit = response.get("result") if response.get("outcome") == "committed" else None
+        if not isinstance(commit, dict) or commit.get("disposition") not in (
+            "added", "near_duplicate", "possible_conflict"
+        ):
+            raise ExactFactStoreError(
+                "fixture setup did not return a committed FactStoreAddResultV1"
+            )
+        seeded_fact = available_fact_record(commit.get("fact"), "fixture setup")
         preload_query = fact.get("preload_query")
         for _ in range(fact.get("preload_searches", 0)):
             if not preload_query:
@@ -290,7 +479,7 @@ def build_fixture(scenario, tracedecay_bin, env):
             )
             returned_ids = {
                 record["fact_id"]
-                for record in fact_records_from_collection(
+                for record in fact_records_from_search(
                     search_response, "fixture preload search"
                 )
             }
@@ -299,7 +488,6 @@ def build_fixture(scenario, tracedecay_bin, env):
                     f"fixture preload search `{preload_query}` did not return "
                     f"FactId {seeded_fact['fact_id']}"
                 )
-    return fixture
 
 
 def provider_env_passthrough(env):
@@ -518,19 +706,21 @@ def compare_assertion_value(actual, expected, op):
     return None
 
 
-def fact_records_from_collection(response, operation):
+def fact_records_from_list(response, operation):
     entries = response.get("facts") if isinstance(response, dict) else None
     if not isinstance(entries, list):
-        raise ExactFactStoreError(f"{operation} omitted its FactRecordV1 collection")
-    records = []
-    for entry in entries:
-        record = entry.get("fact", entry) if isinstance(entry, dict) else None
-        if not isinstance(record, dict) or not isinstance(record.get("fact_id"), str):
-            raise ExactFactStoreError(
-                f"{operation} returned a collection entry without a string FactId"
-            )
-        records.append(record)
-    return records
+        raise ExactFactStoreError(f"{operation} omitted its FactProjectionV1 collection")
+    return [available_fact_record(projection, operation) for projection in entries]
+
+
+def fact_records_from_search(response, operation):
+    hits = response.get("hits") if isinstance(response, dict) else None
+    if not isinstance(hits, list):
+        raise ExactFactStoreError(f"{operation} omitted its FactSearchHitV1 collection")
+    return [
+        require_fact_record(hit.get("fact") if isinstance(hit, dict) else None, operation)
+        for hit in hits
+    ]
 
 
 def list_fact_records(tracedecay_bin, fixture, env):
@@ -541,7 +731,7 @@ def list_fact_records(tracedecay_bin, fixture, env):
         "tracedecay_fact_store_list",
         {"limit": 200},
     )
-    return fact_records_from_collection(response, "tracedecay_fact_store_list")
+    return fact_records_from_list(response, "tracedecay_fact_store_list")
 
 
 def search_fact_records(tracedecay_bin, fixture, env, query, limit):
@@ -552,14 +742,14 @@ def search_fact_records(tracedecay_bin, fixture, env, query, limit):
         "tracedecay_fact_store_search",
         {"query": query, "limit": limit},
     )
-    return fact_records_from_collection(response, "tracedecay_fact_store_search")
+    return fact_records_from_search(response, "tracedecay_fact_store_search")
 
 
 def source_record(records, source):
-    matches = [record for record in records if record.get("source") == source]
+    matches = [record for record in records if record.get("source_label") == source]
     if len(matches) != 1:
         raise ExactFactStoreError(
-            f"source `{source}` resolved to {len(matches)} FactRecordV1 values, expected one"
+            f"source label `{source}` resolved to {len(matches)} FactV1 values, expected one"
         )
     return matches[0]
 
@@ -614,24 +804,32 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
                 )
             elif kind == "source-count":
                 records = list_fact_records(tracedecay_bin, fixture, env)
-                actual = sum(record.get("source") == assertion["source"] for record in records)
+                actual = sum(
+                    record.get("source_label") == assertion["source"]
+                    for record in records
+                )
                 outcomes.append(compare_or_failure(assertion, actual))
             elif kind == "content-count":
                 records = list_fact_records(tracedecay_bin, fixture, env)
                 actual = sum(
-                    assertion["contains"] in record.get("content", "") for record in records
+                    assertion["contains"] in record["content"] for record in records
                 )
                 outcomes.append(compare_or_failure(assertion, actual))
             elif kind == "source-trust":
                 records = list_fact_records(tracedecay_bin, fixture, env)
                 matching = [
-                    record for record in records if record.get("source") == assertion["source"]
+                    record
+                    for record in records
+                    if record.get("source_label") == assertion["source"]
                 ]
-                values = [record.get("trust_score") for record in matching]
-                if not values or not all(isinstance(value, (int, float)) for value in values):
+                trust_scores = [record.get("trust_score_millionths") for record in matching]
+                if not trust_scores or not all(
+                    isinstance(value, int) for value in trust_scores
+                ):
                     raise ExactFactStoreError(
-                        f"source `{assertion['source']}` did not yield typed FactRecordV1 trust"
+                        f"source label `{assertion['source']}` did not yield typed FactV1 trust"
                     )
+                values = [value / 1_000_000 for value in trust_scores]
                 passed = all(
                     compare_assertion_value(value, assertion["value"], assertion["op"])
                     for value in values
@@ -640,9 +838,9 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
             elif kind == "retrieval-total":
                 records = list_fact_records(tracedecay_bin, fixture, env)
                 actual = sum(
-                    record.get("retrieval_count", 0)
+                    record["telemetry"]["retrieval_count"]
                     for record in records
-                    if record.get("source") == assertion["source"]
+                    if record.get("source_label") == assertion["source"]
                 )
                 outcomes.append(compare_or_failure(assertion, actual))
             elif kind == "feedback-history":
@@ -669,7 +867,7 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
                     assertion["query"],
                     assertion.get("limit", 5),
                 )
-                sources = [record.get("source") for record in records]
+                sources = [record.get("source_label") for record in records]
                 expected_source = assertion.get("top_fact_source", assertion.get("source"))
                 if kind == "search-source":
                     outcomes.append(assertion_outcome(assertion, sources, expected_source in sources))
@@ -695,6 +893,143 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
         except ExactFactStoreError as exc:
             outcomes.append(failed_assertion(assertion, str(exc), error_type="fact-store"))
     return outcomes
+
+
+def run_scenario(args, scenario, run_dir, report):
+    """Runs one scenario in an owned profile/daemon/fixture scope.
+
+    Returns (ok, cancelled). Operational failures and cancellation are recorded
+    in the report. Cleanup stops owned processes before removing their files;
+    a cleanup failure preserves both its error and the original result.
+    """
+    eval_env = None
+    fixture = None
+    entry = error_entry(scenario, "error (setup or agent failure)", "scenario did not finish")
+    report["scenarios"].append(entry)
+    ok = False
+    cancelled = False
+    pending_command = None
+    unclaimed_profile = None
+    cleanup_error = None
+
+    def cleanup():
+        nonlocal pending_command
+        if pending_command is not None:
+            stop_owned_process(pending_command, PROCESS_STOP_GRACE_SECONDS)
+            pending_command = None
+        if eval_env is not None:
+            eval_env.cleanup()
+
+    try:
+        eval_env = create_eval_environment(scenario["id"])
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", scenario["id"])
+        # This scope owns the fixture before any daemon or seeding command can
+        # use it. Setup errors therefore follow the same stop-before-delete
+        # order as completed turns and cancellation.
+        fixture = Path(
+            tempfile.mkdtemp(prefix=f"tracedecay-eval-{safe_id}-", dir=eval_env.root)
+        )
+        eval_env.start_daemon(args.tracedecay_bin)
+        seed_fixture(scenario, args.tracedecay_bin, eval_env.env, fixture)
+        if args.driver == "hermes":
+            transcripts = drive_hermes(args, scenario, fixture, run_dir, eval_env.env)
+        else:
+            transcripts = drive_cursor_agent(args, scenario, fixture, run_dir, eval_env.env)
+        outcomes = evaluate_assertions(scenario, args.tracedecay_bin, fixture, eval_env.env)
+        failed = [o for o in outcomes if not o["passed"]]
+        status = "pass" if not failed else "fail"
+        if failed and scenario.get("contract") == "pending-sibling":
+            status = "fail (note: scenario contract is pending-sibling, see contract_notes)"
+        if not transcripts or not all(t["turn_valid"] for t in transcripts):
+            status = "error (agent turn invalid, see transcript logs)"
+            failed = failed or [{"name": "agent-turn", "passed": False}]
+        entry.pop("error")
+        entry.update(status=status, assertions=outcomes, transcripts=transcripts)
+        ok = not failed
+    except OwnedProfileCleanupError as exc:
+        unclaimed_profile = exc.root
+        cleanup_error = exc.cleanup_error
+        cancelled = isinstance(exc.original_error, KeyboardInterrupt)
+        entry["error"] = str(exc.original_error) or (
+            "interrupted" if cancelled else type(exc.original_error).__name__
+        )
+    except OwnedProcessCleanupError as exc:
+        pending_command = exc.process
+        cancelled = exc.cancelled
+        if cancelled:
+            entry["status"] = "cancelled"
+        entry["error"] = exc.primary_detail()
+    except KeyboardInterrupt as exc:
+        entry.update(status="cancelled", error=str(exc) or "interrupted")
+        cancelled = True
+    except Exception as exc:
+        entry["error"] = str(exc)
+    finally:
+        try:
+            try:
+                cleanup()
+            except KeyboardInterrupt as exc:
+                # The first signal may arrive during teardown. main keeps
+                # subsequent signals from interrupting this final cleanup.
+                cancelled = True
+                ok = False
+                entry["status"] = "cancelled"
+                entry.setdefault("error", str(exc) or "interrupted")
+                cleanup()
+        except BaseException as exc:
+            cleanup_error = exc
+        if cleanup_error is not None:
+            ok = False
+            cancelled |= isinstance(cleanup_error, KeyboardInterrupt)
+            entry["cleanup_error"] = str(cleanup_error) or type(cleanup_error).__name__
+            if pending_command is not None:
+                entry["command_pid"] = pending_command.pid
+            for label, path in (
+                ("retained_fixture", fixture),
+                ("retained_profile", eval_env.root if eval_env is not None else unclaimed_profile),
+                ("retained_socket_dir", eval_env.socket_dir if eval_env is not None else None),
+            ):
+                if path is None:
+                    continue
+                try:
+                    os.stat(path)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    # An inaccessible owned path may still exist. Preserve
+                    # its location without replacing the cleanup failure.
+                    pass
+                entry[label] = str(path)
+            if eval_env is not None and eval_env.daemon is not None:
+                entry["daemon_pid"] = eval_env.daemon.pid
+            entry["status"] = "cancelled" if cancelled else "error (cleanup failure)"
+
+    print(f"[{scenario['id']}] {entry['status']}")
+    if entry.get("error"):
+        print(f"  {entry['error']}", file=sys.stderr)
+    if entry.get("cleanup_error"):
+        print(f"  cleanup: {entry['cleanup_error']}", file=sys.stderr)
+    for outcome in entry["assertions"]:
+        marker = "pass" if outcome["passed"] else "FAIL"
+        if outcome.get("error"):
+            print(f"  [{marker}] {outcome['name']}, {outcome['error']}")
+        else:
+            print(
+                f"  [{marker}] {outcome['name']}, actual {outcome['actual']} "
+                f"{outcome['op']} expected {outcome['expected']}"
+            )
+    return ok, cancelled
+
+
+def error_entry(scenario, status, error):
+    return {
+        "id": scenario["id"],
+        "contract": scenario.get("contract", "stable"),
+        "status": status,
+        "error": error,
+        "assertions": [],
+        "transcripts": [],
+    }
 
 
 def main(argv):
@@ -728,55 +1063,72 @@ def main(argv):
         print(f"\nblocked report written to {report_path}", file=sys.stderr)
         return 2
 
-    args.tracedecay_bin = resolve_tracedecay_bin(args.tracedecay_bin)
-    report["tracedecay_bin"] = args.tracedecay_bin
+    cancel_requested = False
+    def raise_cancelled(signum, _frame):
+        nonlocal cancel_requested
+        if not cancel_requested:
+            cancel_requested = True
+            raise KeyboardInterrupt(f"cancelled by signal {signum}")
 
+    previous_handlers = {
+        sig: signal.signal(sig, raise_cancelled)
+        for sig in (signal.SIGINT, signal.SIGTERM)
+    }
     overall_ok = True
-    for scenario in scenarios:
-        eval_env = create_eval_environment(scenario["id"])
-        fixture = None
-        try:
-            fixture = build_fixture(scenario, args.tracedecay_bin, eval_env.env)
-            if args.driver == "hermes":
-                transcripts = drive_hermes(args, scenario, fixture, run_dir, eval_env.env)
-            else:
-                transcripts = drive_cursor_agent(args, scenario, fixture, run_dir, eval_env.env)
-            outcomes = evaluate_assertions(
-                scenario, args.tracedecay_bin, fixture, eval_env.env
-            )
-            failed = [o for o in outcomes if not o["passed"]]
-            status = "pass" if not failed else "fail"
-            if failed and scenario.get("contract") == "pending-sibling":
-                status = "fail (note: scenario contract is pending-sibling, see contract_notes)"
-            if not all(t["turn_valid"] for t in transcripts):
-                status = "error (agent turn invalid, see transcript logs)"
-                failed = failed or [{"name": "agent-turn", "passed": False}]
-            report["scenarios"].append(
-                {
-                    "id": scenario["id"],
-                    "contract": scenario.get("contract", "stable"),
-                    "status": status,
-                    "assertions": outcomes,
-                    "transcripts": transcripts,
-                }
-            )
-            overall_ok &= not failed
-            print(f"[{scenario['id']}] {status}")
-            for outcome in outcomes:
-                marker = "pass" if outcome["passed"] else "FAIL"
-                if outcome.get("error"):
-                    print(f"  [{marker}] {outcome['name']}, {outcome['error']}")
-                else:
-                    print(
-                        f"  [{marker}] {outcome['name']}, actual {outcome['actual']} "
-                        f"{outcome['op']} expected {outcome['expected']}"
-                    )
-        finally:
-            cleanup_eval_artifacts(fixture, eval_env)
-
-    report["status"] = "pass" if overall_ok else "fail"
+    cancelled = False
+    phase = "binary resolution"
     report_path = run_dir / "report.json"
-    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    try:
+        try:
+            args.tracedecay_bin = resolve_tracedecay_bin(args.tracedecay_bin)
+            report["tracedecay_bin"] = args.tracedecay_bin
+            phase = "scenario execution"
+            for scenario in scenarios:
+                ok, cancelled = run_scenario(args, scenario, run_dir, report)
+                overall_ok &= ok
+                cancelled |= cancel_requested
+                if cancelled:
+                    break
+        except OwnedProcessCleanupError as exc:
+            overall_ok = False
+            cancelled = exc.cancelled
+            report["reason"] = exc.primary_detail()
+            report["phase"] = phase
+            # Binary resolution runs before any environment exists, so main
+            # is the owner of a command whose initial stop did not complete.
+            try:
+                try:
+                    stop_owned_process(exc.process, PROCESS_STOP_GRACE_SECONDS)
+                except KeyboardInterrupt:
+                    cancelled = True
+                    stop_owned_process(exc.process, PROCESS_STOP_GRACE_SECONDS)
+            except BaseException as cleanup_error:
+                cancelled |= isinstance(cleanup_error, KeyboardInterrupt)
+                report["cleanup_error"] = str(cleanup_error) or type(cleanup_error).__name__
+                report["command_pid"] = exc.process.pid
+        except Exception as exc:
+            overall_ok = False
+            report["reason"] = str(exc)
+            report["phase"] = phase
+
+        cancelled |= cancel_requested
+        report["status"] = "cancelled" if cancelled else ("pass" if overall_ok else "fail")
+        phase = "report publication"
+        report_path.write_text(json.dumps(report, indent=2) + "\n")
+    except KeyboardInterrupt as exc:
+        # This scope covers resolution, gaps between scenarios, and report
+        # publication. Finish the report before restoring signal handlers.
+        cancelled = True
+        report.update(status="cancelled", reason=str(exc) or "interrupted", phase=phase)
+        report_path.write_text(json.dumps(report, indent=2) + "\n")
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+
+    if cancelled:
+        print(f"\ncancelled; report written to {report_path}", file=sys.stderr)
+        return 130
+
     print(f"\nreport written to {report_path}")
     return 0 if overall_ok else 1
 

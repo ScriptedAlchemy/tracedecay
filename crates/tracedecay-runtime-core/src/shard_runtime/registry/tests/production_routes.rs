@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -12,11 +13,16 @@ use tracedecay_domain::{
     BrainId, BrainNodeId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros,
     WorktreeId,
 };
+use tracedecay_graph_db::{
+    GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
+    NeverCancelled,
+};
 use tracedecay_store::{
-    CodeShardScopeV1, ConsistencyModeV1, OperationPriorityV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadOperationV1,
-    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    StoreShardIdV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
+    CodeShardScopeV1, ConsistencyModeV1, OperationPriorityV1, RetainedGraphStoreLeaseV1,
+    RetainedGraphStoreOwnerAttachmentV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
+    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
+    StoreShardScopeV1, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 use super::super::*;
@@ -133,6 +139,26 @@ impl StoreRuntimeResolver for FileResolver {
             LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
         );
         Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
+    }
+
+    fn resolve_graph<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        Box::pin(async move {
+            let resolved = self
+                .resolve(key, StoreRuntimeOpenMode::Existing, None)
+                .await?;
+            Ok(ResolvedStoreLocator::new(
+                VerifiedStoreLocatorV1::new(
+                    key.shard_id.clone(),
+                    key.incarnation,
+                    canonical_store_locator_digest(resolved.path()).unwrap(),
+                ),
+                resolved.path().to_path_buf(),
+            ))
+        })
     }
 }
 
@@ -647,5 +673,331 @@ async fn existing_store_at_an_older_schema_is_refused_even_with_write_authority(
         user_version(&project_path),
         34,
         "a refused open must leave the stamp alone"
+    );
+}
+
+struct SubmitProbe {
+    cancellation: RuntimeCancellationIdentityV1,
+    deadline: RuntimeDeadlineV1,
+}
+
+impl RuntimeRequestProbeV1 for SubmitProbe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        &self.cancellation
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        &self.deadline
+    }
+
+    fn interruption(&self) -> Option<tracedecay_store::RuntimeInterruptionV1> {
+        None
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        true
+    }
+}
+
+fn diagnostics_submit(
+    binding: &tracedecay_store::StoreRuntimeBindingV1,
+    name: &str,
+) -> (tracedecay_store::RuntimeSubmitRequestV1, SubmitProbe) {
+    let metadata: tracedecay_store::StoreOperationMetadataV1 =
+        serde_json::from_value(serde_json::json!({
+            "operation_id": format!("operation.{name}"),
+            "client_id": "client.reopen",
+            "shard_id": binding.shard_id,
+            "incarnation": binding.incarnation.get(),
+            "authority_epoch": binding.authority_epoch.get(),
+            "idempotency": {
+                "key": format!("key.{name}"),
+                "command_digest": format!("sha256:{}", "e".repeat(64)),
+            },
+            "durability": "full",
+            "priority": "foreground",
+            "admission_bytes": 128,
+            "admitted_at": 1
+        }))
+        .unwrap();
+    let scope = tracedecay_store::RuntimeTransactionScopeV1 {
+        transaction_id: tracedecay_store::RuntimeTransactionIdV1::new(format!(
+            "transaction.{name}"
+        ))
+        .unwrap(),
+        compatibility: tracedecay_store::RuntimeBatchCompatibilityV1::from_operation(&metadata)
+            .unwrap(),
+        opened_at: metadata.admitted_at,
+    };
+    let cancellation = RuntimeCancellationIdentityV1 {
+        cancellation_id: RuntimeCancellationIdV1::new(format!("cancel.{name}")).unwrap(),
+        generation: 1,
+    };
+    let deadline = RuntimeDeadlineV1 {
+        deadline_id: RuntimeDeadlineIdV1::new(format!("deadline.{name}")).unwrap(),
+    };
+    let control = RuntimeRequestControlV1 {
+        requested_at: UtcMicros(1),
+        deadline: deadline.clone(),
+        cancellation: cancellation.clone(),
+    };
+    let request = tracedecay_store::RuntimeSubmitRequestV1::new(
+        tracedecay_store::RepositoryOperationEnvelopeV1 {
+            metadata,
+            payload: tracedecay_store::RepositoryWritePayloadV1::Diagnostics(Box::new(
+                tracedecay_store::SanitizedCleanDiagnosticSnapshotV1::new(
+                    tracedecay_domain::CodeGenerationId::new(format!("generation.{name}")).unwrap(),
+                    Vec::new(),
+                )
+                .unwrap(),
+            )),
+        },
+        scope,
+        control,
+    )
+    .unwrap();
+    (
+        request,
+        SubmitProbe {
+            cancellation,
+            deadline,
+        },
+    )
+}
+
+async fn commit_diagnostics_with_writer(
+    path: &Path,
+    binding: &tracedecay_store::StoreRuntimeBindingV1,
+    name: &str,
+) {
+    let writer = tracedecay_rusqlite_runtime::PersistentWriter::start(
+        &crate::native_runtime::handle().unwrap(),
+        tracedecay_rusqlite_runtime::ExistingWriterLocator::new(
+            binding.clone(),
+            VerifiedStoreLocatorV1::new(
+                binding.shard_id.clone(),
+                binding.incarnation,
+                LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+            ),
+            path.to_path_buf(),
+        )
+        .unwrap(),
+        tracedecay_store::AdmissionConfigV1::default(),
+        tracedecay_rusqlite_runtime::repository::ConcreteRepositoryWriteExecutor::default(),
+    )
+    .unwrap();
+    let (request, probe) = diagnostics_submit(binding, name);
+    let outcome = writer
+        .submit(
+            &crate::native_runtime::cx().unwrap(),
+            request,
+            Arc::new(probe),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+        ),
+        "the writer must durably establish its authority: {outcome:?}"
+    );
+    crate::native_runtime::spawn_blocking(move || writer.shutdown_and_join())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// A store this incarnation already wrote under a newer authority (a previous
+/// daemon of the same incarnation, or a sibling runtime on the file) fences
+/// every writer below that authority. The reopen converges above it instead of
+/// publishing a runtime whose every submit would be fenced.
+#[asupersync::test]
+async fn reopening_a_store_behind_its_persisted_writer_authority_converges_above_it() {
+    let root = TempDir::new().unwrap();
+    let resolver = Arc::new(FileResolver::default());
+    resolver.push(seed_db(&root, "profile.db"));
+    let project_path = seed_final_graph_db(&root, "project.db").await;
+    Connection::open(&project_path)
+        .unwrap()
+        .execute_batch(tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL)
+        .unwrap();
+    resolver.push(project_path.clone());
+    resolver.push(project_path.clone());
+    let shard = StoreShardIdV1::project(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<ProjectId>("project.reopen"),
+    );
+    let ahead = tracedecay_store::StoreRuntimeBindingV1::new(
+        shard.clone(),
+        incarnation(),
+        tracedecay_store::StoreAuthorityEpochV1::new(1 << 40).unwrap(),
+    );
+    let runtime = asupersync::runtime::Runtime::current_handle().unwrap();
+    commit_diagnostics_with_writer(&project_path, &ahead, "previous-authority").await;
+
+    let registry =
+        StoreRuntimeRegistry::new(runtime, resolver, Arc::new(LifecycleShardRuntimePublisher))
+            .unwrap();
+    let _profile = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    let pin = match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    };
+    let authority = crate::db::DatabaseAuthority::for_runtime(&project_path, "reopen project")
+        .expect("project database authority");
+    let project_runtime = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new_authorized(shard, incarnation(), Some(pin), authority.clone()),
+    )
+    .await;
+
+    assert!(
+        project_runtime.binding().authority_epoch > ahead.authority_epoch,
+        "the reopened runtime publishes above the persisted authority: {:?} vs {:?}",
+        project_runtime.binding().authority_epoch,
+        ahead.authority_epoch
+    );
+    let (request, probe) = diagnostics_submit(project_runtime.binding(), "converged-authority");
+    let outcome = project_runtime
+        .dispatch_submit_authorized(request, Arc::new(probe), authority)
+        .await
+        .expect("converged runtime accepts writes");
+    assert!(
+        matches!(
+            outcome,
+            tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+        ),
+        "a write through the converged runtime commits: {outcome:?}"
+    );
+    assert!(
+        tracedecay_rusqlite_runtime::exact_sql::native_thread_storage_wait_sites()
+            .iter()
+            .all(|site| !site.call_site.contains("/ledger/checkpoint.rs:")),
+        "persisted writer authority reads must not park native runtime workers"
+    );
+}
+
+/// A graph-first owner cannot be rebound while any of its graph leases remain
+/// live. Reopening refuses once with the exact writer fence, then succeeds
+/// above the ledger after the ordinary graph close releases that authority.
+#[asupersync::test]
+async fn a_stale_graph_writer_authority_refuses_once_then_reopens_after_graph_close() {
+    let root = TempDir::new().unwrap();
+    let resolver = Arc::new(FileResolver::default());
+    resolver.push(seed_db(&root, "profile.db"));
+    let graph_path = root.path().join("project.grafeo");
+    resolver.push(graph_path.clone());
+    let project_path = seed_final_graph_db(&root, "project.db").await;
+    Connection::open(&project_path)
+        .unwrap()
+        .execute_batch(tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL)
+        .unwrap();
+    resolver.push(project_path.clone());
+    resolver.push(project_path.clone());
+    resolver.push(graph_path);
+    let registry = StoreRuntimeRegistry::new(
+        asupersync::runtime::Runtime::current_handle().unwrap(),
+        resolver.clone(),
+        Arc::new(LifecycleShardRuntimePublisher),
+    )
+    .unwrap();
+    let _profile = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    let pin = match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    };
+    let shard = project_shard("project.graph-first-reopen");
+    let key = StoreRuntimeKey::new(shard.clone(), incarnation());
+    let (store_attachment, store_target) = registry
+        .attach_graph_store_owner(key.clone())
+        .await
+        .unwrap();
+    let stale = store_attachment.binding().clone();
+    let graph_locator = store_attachment.verified_locator().clone();
+    let operation = store_attachment.issue_operation_lease().unwrap();
+    let graphs = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let graph_owner = graphs
+        .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+            operation: GraphDbRegistration {
+                authority_lease: operation,
+                cancellation: Arc::new(NeverCancelled),
+                lifecycle_cancellation: Arc::new(NeverCancelled),
+                deadline: Instant::now() + Duration::from_secs(30),
+            },
+            authority_attachment: Box::new(store_attachment),
+        })
+        .unwrap();
+    let client = graph_owner.issue_lease().unwrap();
+
+    let mut ahead = stale.clone();
+    ahead.authority_epoch = tracedecay_store::StoreAuthorityEpochV1::new(
+        stale.authority_epoch.get().checked_add(1).unwrap(),
+    )
+    .unwrap();
+    commit_diagnostics_with_writer(&project_path, &ahead, "graph-newer-writer").await;
+    let authority =
+        crate::db::DatabaseAuthority::for_runtime(&project_path, "reopen project").unwrap();
+    let request =
+        StoreRuntimeOpenRequest::new_authorized(shard, incarnation(), Some(pin), authority.clone());
+    let calls = resolver.calls.load(Ordering::SeqCst);
+    assert!(matches!(
+        registry.open(request.clone()).await,
+        StoreRuntimeOpenResult::Failed(
+            StoreRuntimeRegistryFailure::WriterAuthorityBehindPersisted { binding, persisted }
+        ) if *binding == stale && persisted == ahead.authority_epoch
+    ));
+    assert_eq!(
+        resolver.calls.load(Ordering::SeqCst),
+        calls + 1,
+        "a live stale graph binding cannot converge through another identical open"
+    );
+    assert_eq!(graph_owner.binding(), &stale);
+    assert!(graph_owner.shares_runtime_with(&client));
+    drop(
+        client
+            .snapshot()
+            .expect("the old graph client stays readable"),
+    );
+    assert!(
+        graphs.close_retained(&stale, &graph_locator).is_err(),
+        "the refused writer must preserve the graph owner's live close blockers"
+    );
+    drop(
+        graph_owner
+            .issue_lease()
+            .expect("the old exact graph owner stays usable"),
+    );
+
+    drop(client);
+    drop(graph_owner);
+    assert!(graphs.close_retained(&stale, &graph_locator).unwrap());
+    drop(store_target);
+    assert_eq!(registry.retained_graph_publications_for_test(), 0);
+
+    let project = open_published(&registry, request).await;
+    assert!(project.binding().authority_epoch > ahead.authority_epoch);
+    let graph = registry.retain_graph_store(key).await.unwrap();
+    assert_eq!(graph.binding(), project.binding());
+    let (request, probe) = diagnostics_submit(project.binding(), "graph-reopened-writer");
+    let outcome = project
+        .dispatch_submit_authorized(request, Arc::new(probe), authority)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+        ),
+        "the reopened shared authority accepts writes: {outcome:?}"
     );
 }

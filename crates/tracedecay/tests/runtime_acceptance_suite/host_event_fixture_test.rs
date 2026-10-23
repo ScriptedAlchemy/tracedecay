@@ -2004,7 +2004,8 @@ fn assert_legal_host_response(provider: &str, state: &str, expected: &Value, out
         // zero-finding notice as plain text.
         assert_eq!(
             expected["stdout"].as_str().unwrap(),
-            if provider == "kiro" { "{}" } else { "" }
+            if provider == "kiro" { "{}" } else { "" },
+            "{provider}/{state} fixture baseline"
         );
         let encoded = stdout
             .strip_prefix("TraceDecay feedback ready for authorized lookup: ")

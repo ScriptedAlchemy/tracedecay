@@ -46,7 +46,7 @@ impl SessionTemporalRefreshWakePort for AcceptedIdleSessionRefreshWake {
         false
     }
 
-    fn wake_and_wait_until_idle(
+    fn wake_and_wait_for_projection(
         &self,
         _timeout: Duration,
     ) -> tracedecay_contracts::SessionTemporalRefreshWakeFuture<'_> {

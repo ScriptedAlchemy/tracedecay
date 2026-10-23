@@ -26,7 +26,8 @@ pub use consistency::{
 };
 pub use error::{
     CorruptionClassV1, RuntimeCancellationStageV1, SaturationScopeV1,
-    StorageRuntimeContractErrorV1, StorageRuntimeErrorV1, UnavailableReasonV1,
+    StorageRuntimeContractErrorV1, StorageRuntimeErrorV1, StoreWriterFencedV1, UnavailableReasonV1,
+    error_chain_writer_fence,
 };
 pub use graph_publication::{
     GraphCanonicalReplaySourceDigestV1, GraphDependencyGenerationClosureDigestV1,

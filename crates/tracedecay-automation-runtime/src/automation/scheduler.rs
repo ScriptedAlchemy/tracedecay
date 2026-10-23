@@ -232,22 +232,11 @@ pub async fn save_scheduler_control(
     control: &AutomationSchedulerControl,
 ) -> Result<()> {
     let path = scheduler_control_path(dashboard_root);
-    if let Some(parent) = path.parent() {
-        let directory = parent.to_path_buf();
-        crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
-            .await
-            .map_err(|e| TraceDecayError::Config {
-                message: format!(
-                    "failed to create automation scheduler control directory '{}': {e}",
-                    parent.display()
-                ),
-            })?;
-    }
     let bytes = serde_json::to_vec_pretty(control).map_err(|e| TraceDecayError::Config {
         message: format!("failed to encode automation scheduler control: {e}"),
     })?;
-    let write_path = path.clone();
-    crate::automation::blocking_fs(move || std::fs::write(write_path, bytes))
+    let directory = dashboard_root.to_path_buf();
+    crate::automation::blocking_fs(move || save_scheduler_control_blocking(&directory, &bytes))
         .await
         .map_err(|e| TraceDecayError::Config {
             message: format!(
@@ -255,6 +244,23 @@ pub async fn save_scheduler_control(
                 path.display()
             ),
         })
+}
+
+fn save_scheduler_control_blocking(dashboard_root: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // Resolve existing OS aliases before the private-store authority validates
+    // the path, while leaving the control file itself subject to its no-follow
+    // publication checks. A new dashboard and every missing ancestor must be
+    // durable before a pause can be acknowledged.
+    let directory = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(
+        &std::path::absolute(dashboard_root)?,
+    );
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&directory)?;
+    tracedecay_private_fs::framed_log::atomic_write(
+        &scheduler_control_path(&directory),
+        "scheduler-control",
+        bytes,
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
+    )
 }
 
 impl AutomationTaskLock {
@@ -1553,6 +1559,8 @@ fn windows_process_state(pid: u32) -> ProcessState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::super::backend::{AgentTaskFailureClass, AgentTaskRetryAttempt};
     use super::super::backend_identity::BACKEND_IDENTITY_SUPPRESSED;
     use super::super::config::AutomationTaskSet;
@@ -1561,6 +1569,154 @@ mod tests {
     use tracedecay_automation::evidence_budget::{
         SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
     };
+    use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
+    #[cfg(unix)]
+    use tracedecay_runtime_core::storage::with_durable_namespace_sync_fault_for_test;
+
+    #[tokio::test]
+    async fn scheduler_control_round_trips_atomically_and_keeps_corruption_typed() {
+        let dir = tempdir().unwrap();
+        assert!(!load_scheduler_control(dir.path()).await.unwrap().paused);
+        for paused in [true, false, true] {
+            save_scheduler_control(dir.path(), &AutomationSchedulerControl { paused })
+                .await
+                .unwrap();
+            assert_eq!(
+                load_scheduler_control(dir.path()).await.unwrap().paused,
+                paused
+            );
+        }
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 1, "staging files must be cleaned up");
+        std::fs::write(scheduler_control_path(dir.path()), b"{").unwrap();
+        assert!(matches!(
+            load_scheduler_control(dir.path()).await,
+            Err(TraceDecayError::Config { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn scheduler_control_creates_private_missing_ancestors() {
+        let root = tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let dashboard = profile.join("dashboard");
+        assert!(!dashboard.exists());
+
+        save_scheduler_control(&dashboard, &AutomationSchedulerControl { paused: true })
+            .await
+            .unwrap();
+
+        assert!(load_scheduler_control(&dashboard).await.unwrap().paused);
+        tracedecay_private_fs::validate_private_directory(&profile).unwrap();
+        tracedecay_private_fs::validate_private_directory(&dashboard).unwrap();
+        assert_eq!(std::fs::read_dir(&dashboard).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_control_does_not_publish_after_an_ancestor_sync_fails() {
+        // The first barrier covers the existing prefix; the following two
+        // publish the new profile and dashboard entries, respectively.
+        for barrier in [2, 3] {
+            let root = tempdir().unwrap();
+            let dashboard = root.path().join("profile").join("dashboard");
+            let bytes = br#"{"paused":true}"#;
+            let error = with_durable_namespace_sync_fault_for_test(barrier, || {
+                save_scheduler_control_blocking(&dashboard, bytes)
+            })
+            .expect_err("an uncommitted ancestor must prevent acknowledgement");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert!(!scheduler_control_path(&dashboard).exists());
+            save_scheduler_control_blocking(&dashboard, bytes).unwrap();
+            assert_eq!(
+                std::fs::read(scheduler_control_path(&dashboard)).unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_control_readers_observe_complete_states_during_replacement() {
+        let dir = tempdir().unwrap();
+        save_scheduler_control(dir.path(), &AutomationSchedulerControl { paused: true })
+            .await
+            .unwrap();
+        let ready = tokio::sync::Barrier::new(2);
+        let finished = AtomicBool::new(false);
+        let writer = async {
+            ready.wait().await;
+            let mut result = Ok(());
+            for update in 0..64 {
+                result = save_scheduler_control(
+                    dir.path(),
+                    &AutomationSchedulerControl {
+                        paused: update % 2 != 0,
+                    },
+                )
+                .await;
+                if result.is_err() {
+                    break;
+                }
+            }
+            finished.store(true, Ordering::Release);
+            result
+        };
+        let reader = async {
+            assert!(load_scheduler_control(dir.path()).await.unwrap().paused);
+            ready.wait().await;
+            let mut reads = 0;
+            while !finished.load(Ordering::Acquire) {
+                load_scheduler_control(dir.path())
+                    .await
+                    .expect("a replacement must not expose empty or partial JSON");
+                reads += 1;
+            }
+            reads
+        };
+        let (written, reads) = tokio::join!(writer, reader);
+        written.unwrap();
+        assert!(reads > 0, "the reader must overlap the update sequence");
+        assert!(load_scheduler_control(dir.path()).await.unwrap().paused);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn scheduler_control_staging_failures_preserve_the_committed_pause() {
+        let dir = tempdir().unwrap();
+        save_scheduler_control(dir.path(), &AutomationSchedulerControl { paused: true })
+            .await
+            .unwrap();
+        let path = scheduler_control_path(dir.path());
+        let committed = std::fs::read(&path).unwrap();
+        // Inject faults at the existing publication primitive used by
+        // atomic_write, without adding a fault hook to the scheduler API.
+        for fail_during_write in [true, false] {
+            let error = with_owned_temp_publish(
+                &path,
+                "scheduler-control",
+                |_, _| Err(std::io::Error::other("injected publication failure")),
+                |staging| {
+                    staging.write_all(b"{")?;
+                    if fail_during_write {
+                        Err(std::io::Error::other("injected partial-write failure"))
+                    } else {
+                        staging.write_all(b"\"paused\": false}")
+                    }
+                },
+                DirectorySyncPolicy::Strict,
+            )
+            .expect_err("failed staging must be reported to the writer");
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert_eq!(std::fs::read(&path).unwrap(), committed);
+            assert!(load_scheduler_control(dir.path()).await.unwrap().paused);
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "failed publication must remove its owned staging file"
+            );
+        }
+    }
 
     #[test]
     fn backoff_starts_at_one_tick_and_grows() {

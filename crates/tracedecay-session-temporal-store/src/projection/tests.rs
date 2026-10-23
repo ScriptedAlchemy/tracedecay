@@ -27,7 +27,10 @@ use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
-use super::record_canonical_observation_effect;
+use super::{
+    record_canonical_observation_effect,
+    record_live_collision_preserving_canonical_observation_effect,
+};
 use crate::handle::SessionTemporalRegisteredDb;
 use crate::relations::{SessionRelationProjection, SessionRelationScope};
 use crate::test_support::{FailingRegisteredDb, QueryCountingConnection};
@@ -2029,6 +2032,67 @@ async fn canonical_effect_replay_converges_on_an_identical_row() {
     );
 }
 
+#[asupersync::test]
+async fn live_collision_preserves_an_immutable_positive_output_effect() {
+    let (_directory, connection) = open_effect_store("effect-live-collision").await;
+    let session_id = fixture_session("session.projector.effect-live-collision");
+    let (observation, _) = fixture_observation(&session_id, 0, None, false);
+    let sequence = seed_effect_observation(&connection, &observation).await;
+    let original = tracedecay_store::derive_canonical_projection(&observation).unwrap();
+    record_canonical_observation_effect(&connection, sequence, &observation, &original)
+        .await
+        .unwrap();
+    let first = recorded_effect(&connection, &observation).await.unwrap();
+    assert_eq!(first.3, 1);
+
+    record_live_collision_preserving_canonical_observation_effect(
+        &connection,
+        sequence,
+        &observation,
+        &ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        recorded_effect(&connection, &observation).await,
+        Some(first)
+    );
+}
+
+#[asupersync::test]
+async fn live_collision_rejects_a_mismatched_positive_output_authority() {
+    let (_directory, connection) = open_effect_store("effect-live-collision-mismatch").await;
+    let session_id = fixture_session("session.projector.effect-live-collision-mismatch");
+    let (observation, _) = fixture_observation(&session_id, 0, None, false);
+    let sequence = seed_effect_observation(&connection, &observation).await;
+    connection
+        .execute(
+            "INSERT INTO session_temporal_observation_effects (
+                observation_id, observation_sequence, session_id, receipt_id,
+                effect_digest, output_count, recorded_at
+             ) VALUES (?1, ?2, 'session.foreign', ?3, 'effect.foreign', 1, 1)",
+            params![
+                observation.observation_id().as_str(),
+                i64::try_from(sequence).unwrap(),
+                observation.receipt().receipt().receipt_id().as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let error = record_live_collision_preserving_canonical_observation_effect(
+        &connection,
+        sequence,
+        &observation,
+        &ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, ProjectionStoreError::ProvenanceCollision));
+}
+
 /// Case 3, conflict with a divergent payload. The durable row satisfies the
 /// insert guard (same observation, sequence, and receipt) yet disagrees on the
 /// projected effect, so the conflict-only read-back must still reject it.
@@ -2503,6 +2567,163 @@ async fn refresh_through(
             .await
             .unwrap();
     }
+}
+
+#[asupersync::test]
+async fn publication_requires_applied_current_receipt_and_source_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let access = SessionTemporalAccess::new(database);
+    let session_id = fixture_session("session.publication-proof");
+    let (first, first_write) = fixture_observation(&session_id, 0, None, false);
+    Box::pin(persist_fixture(&runtime, first, first_write)).await;
+    let first_generation = refresh_through(&store, &session_id, 1, 0).await;
+    let publication = access
+        .session_temporal_publication_result(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(publication.observed_through(), 1);
+    assert!(publication.covers(1));
+    assert!(
+        !publication.covers(2),
+        "a future source target has no publication proof"
+    );
+
+    let (second, second_write) = fixture_observation(&session_id, 1, None, true);
+    let second_observation = second.observation_id().clone();
+    Box::pin(persist_fixture(&runtime, second, second_write)).await;
+    let publication = access
+        .session_temporal_publication_result(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(publication.observed_through(), 2);
+    assert!(publication.covers(1));
+    assert!(
+        !publication.covers(2),
+        "the old receipt cannot cover the new observation"
+    );
+    let active_generation = refresh_through(&store, &session_id, 2, 1).await;
+    assert_ne!(first_generation, active_generation);
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut older_receipt = snapshot.query(
+        "SELECT COUNT(*) FROM session_relation_receipts WHERE session_id = ?1 AND generation = ?2 AND state = 'applied'",
+        params![session_id.as_str(), i64::try_from(first_generation.value()).unwrap()],
+    ).await.unwrap();
+    assert_eq!(
+        older_receipt
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        1
+    );
+    drop(older_receipt);
+    drop(snapshot);
+    assert!(
+        access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(2)
+    );
+
+    // A pending graph application cannot serve this generation, even though
+    // an older generation still has its applied receipt.
+    let transaction = database.begin_write_transaction().await.unwrap();
+    assert_eq!(transaction.execute(
+        "UPDATE session_relation_receipts SET state = 'pending', graph_watermark = NULL, applied_at = NULL WHERE session_id = ?1 AND generation = ?2",
+        params![session_id.as_str(), i64::try_from(active_generation.value()).unwrap()],
+    ).await.unwrap(), 1);
+    transaction.commit().await.unwrap();
+    assert!(
+        !access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(2),
+        "a pending graph receipt must not publish"
+    );
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction.execute(
+        "UPDATE session_relation_receipts SET state = 'applied', graph_watermark = expected_graph_watermark || '.mismatch', applied_at = 1 WHERE session_id = ?1 AND generation = ?2",
+        params![session_id.as_str(), i64::try_from(active_generation.value()).unwrap()],
+    ).await.expect_err("schema must refuse a mismatched graph publication");
+    transaction.execute(
+        "UPDATE session_relation_receipts SET state = 'applied', graph_watermark = expected_graph_watermark, applied_at = 1 WHERE session_id = ?1 AND generation = ?2",
+        params![session_id.as_str(), i64::try_from(active_generation.value()).unwrap()],
+    ).await.unwrap();
+    transaction.commit().await.unwrap();
+    assert!(
+        access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(2)
+    );
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    super::request_session_temporal_reset(&transaction, second_observation.as_str())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(
+        !access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(2),
+        "a pending reset invalidates the old publication"
+    );
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM session_temporal_resets WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "DELETE FROM session_relation_receipts WHERE session_id = ?1 AND generation = ?2",
+                params![
+                    session_id.as_str(),
+                    i64::try_from(active_generation.value()).unwrap()
+                ]
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+    assert!(
+        !access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(1),
+        "a retired generation's receipt cannot stand in for the active generation"
+    );
+}
+
+#[test]
+fn publication_refuses_a_frontier_beyond_the_observed_source() {
+    let publication = super::SessionTemporalPublication {
+        observed_through: 2,
+        published_through: Some(3),
+    };
+    assert!(!publication.covers(2));
+    assert!(!publication.covers(3));
 }
 
 /// One observation of a live session: the thread changes every third

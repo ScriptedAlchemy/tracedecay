@@ -415,6 +415,7 @@ impl StoreRuntimeRegistry {
                 },
             );
         };
+        let mut converged_on_persisted_authority = false;
         loop {
             if let Some(path) = request
                 .database_authority
@@ -443,7 +444,50 @@ impl StoreRuntimeRegistry {
                 StoreRuntimeOpenBegin::Rejected(
                     StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress { .. },
                 ) => {}
-                begin => return begin.wait().await,
+                begin => match begin.wait().await {
+                    // A store the same incarnation already wrote under a newer
+                    // authority fences every writer below it. Allocating above
+                    // the persisted epoch converges this process on the store's
+                    // authority; a second fence means the store moved again
+                    // while this open ran, which the caller must see.
+                    StoreRuntimeOpenResult::Failed(
+                        StoreRuntimeRegistryFailure::WriterAuthorityBehindPersisted {
+                            binding,
+                            persisted,
+                        },
+                    ) if !converged_on_persisted_authority => {
+                        retain_authority_epoch_floor(persisted);
+                        let retained_graph_is_stale = self
+                            .lock_state()
+                            .graph_publications
+                            .get(request.key())
+                            .is_some_and(|graph| graph.binding.authority_epoch < persisted);
+                        if retained_graph_is_stale {
+                            // Graph owner and operation leases retain this
+                            // exact immutable binding. A retry would reuse the
+                            // same stale epoch, and rebinding here would bypass
+                            // their retirement authority. Fail once; after the
+                            // owners release, the retained floor admits a new
+                            // shared graph/relational binding above the ledger.
+                            return StoreRuntimeOpenResult::Failed(
+                                StoreRuntimeRegistryFailure::WriterAuthorityBehindPersisted {
+                                    binding,
+                                    persisted,
+                                },
+                            );
+                        }
+                        converged_on_persisted_authority = true;
+                        tracing::warn!(
+                            event = "store_writer_authority_floor_retained",
+                            shard = ?binding.shard_id,
+                            incarnation = binding.incarnation.get(),
+                            requested_epoch = binding.authority_epoch.get(),
+                            persisted_epoch = persisted.get(),
+                            "store ledger holds a newer writer authority; retrying above its retained epoch floor"
+                        );
+                    }
+                    result => return result,
+                },
             }
         }
     }

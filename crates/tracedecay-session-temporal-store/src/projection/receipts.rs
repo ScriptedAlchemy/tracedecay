@@ -6,8 +6,8 @@ use tracedecay_domain::RetrievalAnchorRecord;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_store::{
-    ObservationProjection, ProjectionStoreError, ProjectionStoreResult, SessionStoreResult,
-    SessionTemporalDigestV1, SessionTemporalProjectionBatchReceiptV1,
+    ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
+    SessionStoreResult, SessionTemporalDigestV1, SessionTemporalProjectionBatchReceiptV1,
     SessionTemporalProjectionBatchV1,
 };
 use tracedecay_temporal_query::execution::ExecutionControl;
@@ -543,6 +543,82 @@ pub async fn record_canonical_observation_effect(
         output_count,
     );
     if actual == expected {
+        Ok(())
+    } else {
+        Err(ProjectionStoreError::ProvenanceCollision)
+    }
+}
+
+/// Records a live output-collision skip without rewriting an immutable
+/// positive-output receipt from an earlier projection of the same observation.
+/// The live disposition is the authority that the output is no longer
+/// materialized; the retained receipt remains the authority for the original
+/// projection and must still agree on observation sequence, session, and
+/// sanitization receipt. Any disagreement remains a provenance collision. A
+/// zero-output or absent row takes the ordinary full-digest path.
+#[tracing::instrument(
+    name = "session_temporal.persist.live_collision_effect",
+    level = "trace",
+    skip_all
+)]
+pub async fn record_live_collision_preserving_canonical_observation_effect(
+    conn: &impl Executor,
+    sequence: u64,
+    observation: &tracedecay_domain::DurableObservationV1,
+    effect: &ObservationProjection,
+) -> ProjectionStoreResult<()> {
+    if !matches!(
+        effect,
+        ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision)
+    ) {
+        return record_canonical_observation_effect(conn, sequence, observation, effect).await;
+    }
+    let Ok(envelope) = observation_envelope_from_payload(observation.payload()) else {
+        return record_canonical_observation_effect(conn, sequence, observation, effect).await;
+    };
+    let sequence_i64 =
+        i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
+    let mut rows = conn
+        .query(
+            "SELECT observation_sequence, session_id, receipt_id, output_count
+             FROM session_temporal_observation_effects WHERE observation_id = ?1",
+            params![observation.observation_id().as_str()],
+        )
+        .await
+        .map_err(|error| {
+            ProjectionStoreError::storage("read canonical temporal collision effect", error)
+        })?;
+    let Some(row) = rows.next().await.map_err(|error| {
+        ProjectionStoreError::storage("read canonical temporal collision effect", error)
+    })?
+    else {
+        drop(rows);
+        return record_canonical_observation_effect(conn, sequence, observation, effect).await;
+    };
+    let actual = (
+        row.get::<i64>(0).map_err(|error| {
+            ProjectionStoreError::storage("read canonical temporal collision effect", error)
+        })?,
+        row.get::<String>(1).map_err(|error| {
+            ProjectionStoreError::storage("read canonical temporal collision effect", error)
+        })?,
+        row.get::<String>(2).map_err(|error| {
+            ProjectionStoreError::storage("read canonical temporal collision effect", error)
+        })?,
+        row.get::<i64>(3).map_err(|error| {
+            ProjectionStoreError::storage("read canonical temporal collision effect", error)
+        })?,
+    );
+    drop(rows);
+    if actual.3 <= 0 {
+        return record_canonical_observation_effect(conn, sequence, observation, effect).await;
+    }
+    let expected = (
+        sequence_i64,
+        envelope.relations().session_id().as_str(),
+        observation.receipt().receipt().receipt_id().as_str(),
+    );
+    if (actual.0, actual.1.as_str(), actual.2.as_str()) == expected {
         Ok(())
     } else {
         Err(ProjectionStoreError::ProvenanceCollision)
