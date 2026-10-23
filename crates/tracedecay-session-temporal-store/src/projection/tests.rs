@@ -2569,6 +2569,163 @@ async fn refresh_through(
     }
 }
 
+#[asupersync::test]
+async fn publication_requires_applied_current_receipt_and_source_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let access = SessionTemporalAccess::new(database);
+    let session_id = fixture_session("session.publication-proof");
+    let (first, first_write) = fixture_observation(&session_id, 0, None, false);
+    Box::pin(persist_fixture(&runtime, first, first_write)).await;
+    let first_generation = refresh_through(&store, &session_id, 1, 0).await;
+    let publication = access
+        .session_temporal_publication_result(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(publication.observed_through(), 1);
+    assert!(publication.covers(1));
+    assert!(
+        !publication.covers(2),
+        "a future source target has no publication proof"
+    );
+
+    let (second, second_write) = fixture_observation(&session_id, 1, None, true);
+    let second_observation = second.observation_id().clone();
+    Box::pin(persist_fixture(&runtime, second, second_write)).await;
+    let publication = access
+        .session_temporal_publication_result(&session_id)
+        .await
+        .unwrap();
+    assert_eq!(publication.observed_through(), 2);
+    assert!(publication.covers(1));
+    assert!(
+        !publication.covers(2),
+        "the old receipt cannot cover the new observation"
+    );
+    let active_generation = refresh_through(&store, &session_id, 2, 1).await;
+    assert_ne!(first_generation, active_generation);
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut older_receipt = snapshot.query(
+        "SELECT COUNT(*) FROM session_relation_receipts WHERE session_id = ?1 AND generation = ?2 AND state = 'applied'",
+        params![session_id.as_str(), i64::try_from(first_generation.value()).unwrap()],
+    ).await.unwrap();
+    assert_eq!(
+        older_receipt
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        1
+    );
+    drop(older_receipt);
+    drop(snapshot);
+    assert!(
+        access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(2)
+    );
+
+    // A pending graph application cannot serve this generation, even though
+    // an older generation still has its applied receipt.
+    let transaction = database.begin_write_transaction().await.unwrap();
+    assert_eq!(transaction.execute(
+        "UPDATE session_relation_receipts SET state = 'pending', graph_watermark = NULL, applied_at = NULL WHERE session_id = ?1 AND generation = ?2",
+        params![session_id.as_str(), i64::try_from(active_generation.value()).unwrap()],
+    ).await.unwrap(), 1);
+    transaction.commit().await.unwrap();
+    assert!(
+        !access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(2),
+        "a pending graph receipt must not publish"
+    );
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction.execute(
+        "UPDATE session_relation_receipts SET state = 'applied', graph_watermark = expected_graph_watermark || '.mismatch', applied_at = 1 WHERE session_id = ?1 AND generation = ?2",
+        params![session_id.as_str(), i64::try_from(active_generation.value()).unwrap()],
+    ).await.expect_err("schema must refuse a mismatched graph publication");
+    transaction.execute(
+        "UPDATE session_relation_receipts SET state = 'applied', graph_watermark = expected_graph_watermark, applied_at = 1 WHERE session_id = ?1 AND generation = ?2",
+        params![session_id.as_str(), i64::try_from(active_generation.value()).unwrap()],
+    ).await.unwrap();
+    transaction.commit().await.unwrap();
+    assert!(
+        access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(2)
+    );
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    super::request_session_temporal_reset(&transaction, second_observation.as_str())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(
+        !access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(2),
+        "a pending reset invalidates the old publication"
+    );
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM session_temporal_resets WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "DELETE FROM session_relation_receipts WHERE session_id = ?1 AND generation = ?2",
+                params![
+                    session_id.as_str(),
+                    i64::try_from(active_generation.value()).unwrap()
+                ]
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+    assert!(
+        !access
+            .session_temporal_publication_result(&session_id)
+            .await
+            .unwrap()
+            .covers(1),
+        "a retired generation's receipt cannot stand in for the active generation"
+    );
+}
+
+#[test]
+fn publication_refuses_a_frontier_beyond_the_observed_source() {
+    let publication = super::SessionTemporalPublication {
+        observed_through: 2,
+        published_through: Some(3),
+    };
+    assert!(!publication.covers(2));
+    assert!(!publication.covers(3));
+}
+
 /// One observation of a live session: the thread changes every third
 /// message, each message replies to the previous one, and every fourth
 /// message supersedes the one before it.

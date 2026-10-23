@@ -30,7 +30,10 @@ mod hydration;
 pub mod operations;
 mod participant_freeze;
 mod projection;
-pub use projection::{SessionTemporalRefreshDiscoveryCursor, SessionTemporalRefreshDiscoveryPage};
+pub use projection::{
+    SessionTemporalPublication, SessionTemporalRefreshDiscoveryCursor,
+    SessionTemporalRefreshDiscoveryPage,
+};
 mod query;
 mod rebuild;
 mod refresh;

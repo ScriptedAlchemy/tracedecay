@@ -104,7 +104,9 @@ fn json_extract_neq_predicates(left_alias: &str, json_column: &str, fields: &[&s
 }
 
 fn records_transient_projection_retry(error: &ProjectionStoreError) -> bool {
-    matches!(error, ProjectionStoreError::Storage { .. }) && !error.is_sqlite_disk_image_corrupt()
+    matches!(error, ProjectionStoreError::Storage { .. })
+        && !error.is_sqlite_disk_image_corrupt()
+        && error.writer_fence().is_none()
 }
 
 /// Projects one queued observation through the guarded registered database

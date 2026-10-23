@@ -25,8 +25,8 @@ use super::projector::{
 };
 use super::registry::{SessionTemporalRefreshPassReport, session_refresh_retry_delay};
 use super::wake::{
-    PendingBeginRequestGuard, RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
-    SessionTemporalRefreshWakeState, TerminalAttemptGuard,
+    PendingBeginRequestGuard, RecoverySelectionGuard, SessionProjectionJoin,
+    SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::engine::Error as EngineError;
@@ -238,6 +238,13 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     let mut history_priority_passes = 0u32;
     let mut history_release = None;
     let mut granted_history_admission = None;
+    let mut projection_joins: Vec<SessionProjectionJoin> = Vec::new();
+    let live_projection = LiveProjectionDuringSummary {
+        database: &database,
+        state: &state,
+        projector: projector.as_ref(),
+        policy,
+    };
     let _instrumentation = SessionTemporalRefreshWorkerInstrumentation::new(&state);
     state.mark_running();
     loop {
@@ -287,8 +294,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 None
             };
             // A wake that lands after this pass started is served by its
-            // projection instead of a pass of its own, so it counts as a
-            // pass: `wake_and_wait_until_idle` joins the pass after its wake.
+            // projection instead of a pass of its own.
             if state.take_dirty() {
                 projection_requested = true;
                 state.pass_count.fetch_add(1, Ordering::AcqRel);
@@ -326,7 +332,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             ) || history_outcome
                 .as_ref()
                 .is_some_and(SessionHistoricalIngestOutcome::made_progress);
-            let report = if projection_requested
+            let mut report = if projection_requested
                 || state.has_requests()
                 || history_requires_projection
             {
@@ -337,6 +343,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     &state,
                     projector.as_ref(),
                     policy,
+                    &mut projection_joins,
                 ));
                 let pass = tracing::Instrument::instrument(
                     projection,
@@ -366,24 +373,35 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             } else {
                 history_outcome.clone()
             };
-            let convergence_admission =
+            let mut convergence_admission =
                 lcm_convergence_admission(convergence_outcome, &mut history_priority_passes);
-            // Derived from the admission so the pass report can never disagree
-            // with what this pass actually ran.
             let history_needs_another_pass = !matches!(
                 convergence_admission,
                 LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
             );
+            // Finish the temporal generation before spending the next pass on
+            // derived summaries. In particular, waiting for summary admission
+            // must not strand a live hook's partially published projection.
+            // The bounded predecessor rewrite retains its history fairness
+            // turn; it performs no model call.
+            if matches!(
+                convergence_admission,
+                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
+            ) && projection_still_unpublished(&report)
+                && (projection_published_work(&report)
+                    || (!projection_joins.is_empty() && report.discovery_advanced))
+            {
+                convergence_admission = LcmConvergenceAdmission::Deferred;
+            }
             let (
                 summary_convergence_made_progress,
                 summary_convergence_has_more,
                 summary_retry_delay,
             ) = match convergence_admission {
                 LcmConvergenceAdmission::Deferred => {
-                    // Historical continuation owns the next bounded pass. LCM
-                    // summaries are independent derived work and can run after
-                    // the raw frontier is terminal; placing a model call between
-                    // source windows delays both project and profile readiness.
+                    // Historical continuation or temporal publication owns the
+                    // next bounded pass. Summaries can run after those frontiers
+                    // settle without delaying live projection joins.
                     (false, false, None)
                 }
                 LcmConvergenceAdmission::Admitted(convergence_page) => {
@@ -408,10 +426,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         // registered to receive one.
                         state.mark_worker_idle();
                         state.idle.notify_waiters();
-                        let permit = tokio::select! {
-                            biased;
-                            () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.lcm_summary.admission_cancel")) => return,
-                            permit = &mut admission => permit,
+                        let Some(permit) = live_projection
+                            .wait_for(&mut admission, &mut projection_joins, &mut report, true)
+                            .await
+                        else {
+                            return;
                         };
                         state.mark_worker_busy();
                         permit
@@ -447,10 +466,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                             ),
                         };
                         tokio::pin!(page);
-                        let result = tokio::select! {
-                            biased;
-                            () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.lcm_summary.cancel")) => return,
-                            result = &mut page => result,
+                        let Some(result) = live_projection
+                            .wait_for(&mut page, &mut projection_joins, &mut report, false)
+                            .await
+                        else {
+                            return;
                         };
                         drop(permit);
                         result
@@ -541,7 +561,8 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 match window_follow_up(
                     history_continuation(history_outcome),
                     projection_still_unpublished(&report),
-                    projection_published_work(&report),
+                    projection_published_work(&report)
+                        || (!projection_joins.is_empty() && report.discovery_advanced),
                     holding_publication,
                 ) {
                     // The admitted window is not searchable until this backlog
@@ -770,8 +791,236 @@ async fn session_projection_refresh(
     state: &Arc<SessionTemporalRefreshWakeState>,
     projector: &dyn SessionTemporalRefreshProjector,
     policy: SessionTemporalRefreshPolicy,
+    joins: &mut Vec<SessionProjectionJoin>,
 ) -> SessionTemporalRefreshPassReport {
-    run_session_temporal_refresh_pass(database, state, projector, policy).await
+    joins.retain(|join| !join.completion.is_closed());
+    joins.extend(state.take_projection_joins());
+    let access = SessionTemporalAccess::new(database.as_ref());
+    capture_projection_targets(&access, joins).await;
+    let report = run_session_temporal_refresh_pass(database, state, projector, policy).await;
+    if state.cancelled.load(Ordering::Acquire) {
+        return report;
+    }
+    let result = if report.failed > 0 || report.cancelled > 0 || report.terminal_errors > 0 {
+        Some(false)
+    } else if report.backlog == Some(0)
+        && !report.saturated
+        && report.retry_class.is_none()
+        && report.retryable_errors == 0
+        && report.deadline_errors == 0
+        && report.deferred == 0
+        && !state.has_requests()
+    {
+        Some(true)
+    } else {
+        None
+    };
+    settle_projection_joins(&access, joins, &report, result).await;
+    report
+}
+
+async fn capture_projection_targets(
+    access: &SessionTemporalAccess<'_, RegisteredGlobalDb>,
+    joins: &mut Vec<SessionProjectionJoin>,
+) {
+    let mut frontiers = HashMap::new();
+    for mut join in std::mem::take(joins) {
+        if let Some(session_id) = &join.session_id
+            && join.observed_through.is_none()
+        {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                frontiers.entry(session_id.clone())
+            {
+                let frontier = access
+                    .session_temporal_publication_result(session_id)
+                    .await
+                    .map(|publication| publication.observed_through())
+                    .map_err(|error| {
+                        tracing::warn!(%session_id, %error, "session publication target unavailable");
+                    })
+                    .ok();
+                entry.insert(frontier);
+            }
+            let Some(frontier) = frontiers.get(session_id).copied().flatten() else {
+                let _ = join.completion.send(false);
+                continue;
+            };
+            join.observed_through = Some(frontier);
+        }
+        joins.push(join);
+    }
+}
+
+async fn settle_projection_joins(
+    access: &SessionTemporalAccess<'_, RegisteredGlobalDb>,
+    joins: &mut Vec<SessionProjectionJoin>,
+    report: &SessionTemporalRefreshPassReport,
+    aggregate: Option<bool>,
+) {
+    let mut publications = HashMap::new();
+    for join in std::mem::take(joins) {
+        if join.completion.is_closed() {
+            continue;
+        }
+        let result = if let Some(session_id) = &join.session_id {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                publications.entry(session_id.clone())
+            {
+                let publication = access
+                    .session_temporal_publication_result(session_id)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(%session_id, %error, "session publication proof unavailable");
+                    })
+                    .ok();
+                entry.insert(publication);
+            }
+            match publications.get(session_id).and_then(Option::as_ref) {
+                Some(publication)
+                    if join
+                        .observed_through
+                        .is_some_and(|target| publication.covers(target)) =>
+                {
+                    Some(true)
+                }
+                Some(_)
+                    if report.failed_sessions.contains(session_id) || aggregate == Some(true) =>
+                {
+                    // The named session must prove its own frontier. A drained
+                    // scope or another session's successful receipt is not proof.
+                    Some(false)
+                }
+                Some(_) => None,
+                None => Some(false),
+            }
+        } else {
+            aggregate
+        };
+        if let Some(published) = result {
+            let _ = join.completion.send(published);
+        } else {
+            joins.push(join);
+        }
+    }
+}
+
+/// Keeps one fair summary admission or in-flight summary page alive while the
+/// same worker services live temporal projection. Both futures keep polling:
+/// suspending a summary while it owns a writer could block the projection.
+struct LiveProjectionDuringSummary<'a> {
+    database: &'a RegisteredGlobalDbLeaseV1,
+    state: &'a Arc<SessionTemporalRefreshWakeState>,
+    projector: &'a dyn SessionTemporalRefreshProjector,
+    policy: SessionTemporalRefreshPolicy,
+}
+
+impl LiveProjectionDuringSummary<'_> {
+    async fn wait_for<F>(
+        &self,
+        stage: F,
+        joins: &mut Vec<SessionProjectionJoin>,
+        report: &mut SessionTemporalRefreshPassReport,
+        idle_between_projections: bool,
+    ) -> Option<F::Output>
+    where
+        F: Future + Send,
+        F::Output: Send,
+    {
+        tokio::pin!(stage);
+        let mut retry_attempt = 0u32;
+        let mut retry_at = None;
+        loop {
+            let projection_wake = async {
+                let wake = self.state.wake.notified();
+                if let Some(deadline) = retry_at {
+                    tokio::select! {
+                        () = wake => true,
+                        fired = native_runtime::sleep_until(deadline) => !stop_without_timer(fired),
+                    }
+                } else {
+                    if !self.state.dirty.load(Ordering::Acquire) {
+                        wake.await;
+                    }
+                    true
+                }
+            };
+            let woke = tokio::select! {
+                biased;
+                () = self.state.wait_for_cancellation() => return None,
+                result = &mut stage => return Some(result),
+                woke = projection_wake => woke,
+            };
+            if !woke {
+                return None;
+            }
+            if !self.state.take_dirty() {
+                continue;
+            }
+            self.state.mark_worker_busy();
+            self.state.begin_pass();
+            self.state.pass_count.fetch_add(1, Ordering::AcqRel);
+            let (next_report, completed_stage) = {
+                let projection: Pin<
+                    Box<dyn Future<Output = SessionTemporalRefreshPassReport> + Send + '_>,
+                > = Box::pin(session_projection_refresh(
+                    self.database,
+                    self.state,
+                    self.projector,
+                    self.policy,
+                    joins,
+                ));
+                let projection = tracing::Instrument::instrument(
+                    projection,
+                    tracing::trace_span!("daemon.scheduler.session_temporal.projection"),
+                );
+                tokio::pin!(projection);
+                tokio::select! {
+                    biased;
+                    () = self.state.wait_for_cancellation() => return None,
+                    next = &mut projection => (next, None),
+                    result = &mut stage => {
+                        // Finish the admitted projection rather than cancelling
+                        // it when the summary stage happens to complete first.
+                        let next = tokio::select! {
+                            biased;
+                            () = self.state.wait_for_cancellation() => return None,
+                            next = &mut projection => next,
+                        };
+                        (next, Some(result))
+                    }
+                }
+            };
+            *report = next_report;
+            if let Some(backlog) = report.backlog {
+                self.state
+                    .record_pass(backlog, projection_published_work(report));
+            }
+            if let Some(class) = report.retry_class {
+                retry_attempt = retry_attempt.saturating_add(1);
+                self.state.mark_recovering(class.into(), class);
+                self.state.requeue_projection();
+                retry_at = Some(Instant::now() + session_refresh_retry_delay(class, retry_attempt));
+            } else {
+                retry_attempt = 0;
+                retry_at = None;
+                self.state.mark_running();
+                if self.state.has_requests()
+                    || report.begun > 0
+                    || report.saturated
+                    || report.projected_batches > 0
+                {
+                    self.state.requeue_projection();
+                }
+            }
+            if let Some(result) = completed_stage {
+                return Some(result);
+            }
+            if idle_between_projections {
+                self.state.mark_worker_idle();
+                self.state.idle.notify_waiters();
+            }
+        }
+    }
 }
 
 /// True when replaying this store failure unchanged could still succeed.
@@ -798,9 +1047,12 @@ fn is_deterministic_refusal(error: &SessionStoreError) -> bool {
         SessionStoreError::Cancelled
         | SessionStoreError::DeadlineExceeded
         | SessionStoreError::BudgetExceeded { .. } => false,
-        SessionStoreError::Storage { source, .. } => source
-            .downcast_ref::<EngineError>()
-            .is_some_and(EngineError::is_deterministic_refusal),
+        SessionStoreError::Storage { source, .. } => {
+            source
+                .downcast_ref::<EngineError>()
+                .is_some_and(EngineError::is_deterministic_refusal)
+                || tracedecay_store::error_chain_writer_fence(source.as_ref()).is_some()
+        }
         _ => true,
     }
 }
@@ -948,6 +1200,7 @@ pub async fn begin_admitted_session_refreshes<'a>(
         }
     };
     let (requests, next_cursor, has_more) = page.into_parts();
+    report.discovery_advanced |= next_cursor != cursor;
     for request in requests.into_iter().rev() {
         if !state.suppresses_discovered_request(&request) {
             state.requeue_request(request);
@@ -1609,6 +1862,7 @@ async fn apply_fail_effect(
                 "session temporal refresh failed durably"
             );
             report.failed += 1;
+            report.failed_sessions.insert(recovery.session_id().clone());
             if matches!(disposition, RefreshFailureDisposition::SuppressDiscovery) {
                 state.record_terminal_discovery_failure(recovery);
             }
@@ -1948,10 +2202,110 @@ pub async fn run_session_temporal_refresh_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_temporal_refresh_scheduler::projector::CanonicalSessionTemporalProjector;
     use tracedecay_domain::SessionId;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+    use tracedecay_store::{SessionRefreshReceiptRequestV1, SessionRefreshTerminalStateV1};
+
+    #[tokio::test]
+    async fn an_in_flight_summary_stage_keeps_polling_while_a_live_wake_projects() {
+        let harness = RegisteredGlobalDbHarness::open("refresh-during-summary-writer").await;
+        let store = SessionTemporalStore::new(harness.registered.as_ref());
+        let begun = store
+            .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+                SessionId::new("refresh-during-summary-writer").expect("session id"),
+                SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+            ))
+            .await
+            .expect("running refresh");
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release_writer = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let worker = tokio::spawn({
+            let database = harness.registered.clone();
+            let state = Arc::clone(&state);
+            let entered = Arc::clone(&entered);
+            let release_writer = Arc::clone(&release_writer);
+            let finish = Arc::clone(&finish);
+            async move {
+                let stage = async {
+                    let transaction = database.begin_write_transaction().await.expect("writer");
+                    entered.notify_one();
+                    release_writer.notified().await;
+                    transaction.commit().await.expect("release summary writer");
+                    finish.notified().await;
+                    17usize
+                };
+                let live_projection = LiveProjectionDuringSummary {
+                    database: &database,
+                    state: &state,
+                    projector: &CanonicalSessionTemporalProjector,
+                    policy: SessionTemporalRefreshPolicy::default(),
+                };
+                let mut joins = Vec::new();
+                let mut report = SessionTemporalRefreshPassReport::default();
+                live_projection
+                    .wait_for(stage, &mut joins, &mut report, false)
+                    .await
+            }
+        });
+        entered.notified().await;
+
+        let handle = state.handle();
+        let join = handle.wake_and_wait_for_projection(Duration::from_secs(5));
+        tokio::pin!(join);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.pass_count.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live projection starts while the summary stage owns the writer");
+        release_writer.notify_one();
+        assert!(
+            join.await,
+            "summary must keep polling to release the writer needed by projection"
+        );
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                begun.operation_id().clone(),
+                begun.session_id().clone(),
+            ))
+            .await
+            .expect("read terminal receipt")
+            .expect("projection publishes before summary finishes");
+        assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+        assert!(!worker.is_finished(), "the summary stage remains in flight");
+        finish.notify_one();
+        assert_eq!(worker.await.expect("summary stage completes"), Some(17));
+    }
+
+    /// A lease the store has fenced resubmits the identical request on every
+    /// pass and can never commit through it, so the pass retires the refresh
+    /// instead of backing off forever.
+    #[test]
+    fn a_fenced_writer_is_a_deterministic_refusal_not_a_retry() {
+        let fence = tracedecay_store::StoreWriterFencedV1 {
+            requested: tracedecay_store::StoreAuthorityEpochV1::new(2).unwrap(),
+            current: tracedecay_store::StoreAuthorityEpochV1::new(3).unwrap(),
+        };
+        let wrapped = tracedecay_store::ObservationStoreError::Storage {
+            operation: "submit anchored observation",
+            source: Box::new(fence),
+        };
+        let error = SessionStoreError::storage("persist session history batch", wrapped);
+
+        assert!(is_deterministic_refusal(&error));
+        assert!(!is_retryable_storage(&error));
+    }
 
     /// Commits `item_count` items. A group of several items never commits, and
     /// neither does a `slow` item alone: its transaction ends in the

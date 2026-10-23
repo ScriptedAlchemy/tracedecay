@@ -974,9 +974,15 @@ async fn failure_effects_use_typed_terminal_store_operations() {
     );
 }
 
+enum BlockingProjectorOutcome {
+    CompleteEmptyProjection,
+    Deferred,
+}
+
 struct BlockingProjector {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+    outcome: BlockingProjectorOutcome,
 }
 
 impl SessionTemporalRefreshProjector for BlockingProjector {
@@ -987,10 +993,16 @@ impl SessionTemporalRefreshProjector for BlockingProjector {
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         let started = Arc::clone(&self.started);
         let release = Arc::clone(&self.release);
+        let outcome = &self.outcome;
         Box::pin(async move {
             started.notify_one();
             release.notified().await;
-            Ok(empty_projection_effect(&recovery))
+            match outcome {
+                BlockingProjectorOutcome::Deferred => Ok(SessionTemporalRefreshEffect::Deferred),
+                BlockingProjectorOutcome::CompleteEmptyProjection => {
+                    Ok(empty_projection_effect(&recovery))
+                }
+            }
         })
     }
 }
@@ -1011,6 +1023,7 @@ async fn stale_owner_cannot_persist_after_cancellation() {
     let projector = BlockingProjector {
         started: Arc::clone(&started),
         release: Arc::clone(&release),
+        outcome: BlockingProjectorOutcome::CompleteEmptyProjection,
     };
     let pass = tokio::spawn({
         let authority = Arc::clone(&authority);
@@ -1081,7 +1094,7 @@ async fn hook_ingest_join_runs_the_bound_refresh_worker() {
     let wake = authority.ensure_profile(&registry).await;
     let before = registry.profile_pass_count(db.db_path()).await;
 
-    tracedecay_mcp::server::join_hook_ingest_refresh(false, Some(&wake), None)
+    tracedecay_mcp::server::join_hook_ingest_refresh(false, None, Some(&wake), None)
         .await
         .expect("hook ingest must join the refresh worker that owns the written store");
 
@@ -1142,6 +1155,7 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
         Arc::new(BlockingProjector {
             started: Arc::clone(&started),
             release: Arc::new(tokio::sync::Notify::new()),
+            outcome: BlockingProjectorOutcome::CompleteEmptyProjection,
         }),
         SessionTemporalRefreshPolicy::default(),
     );
@@ -1445,9 +1459,30 @@ async fn profile_database_has_one_scheduler_and_equivalent_kicks_coalesce() {
     let authority =
         registered_test_database(&temp, "profile-coalescing", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
+    configure_scheduler(
+        &mut registry,
+        Arc::new(BlockingProjector {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            outcome: BlockingProjectorOutcome::Deferred,
+        }),
+        SessionTemporalRefreshPolicy::default(),
+    );
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
+    let started_refresh = store
+        .begin_or_join_session_refresh(request("session.profile.coalescing", 0))
+        .await
+        .unwrap();
 
     let first = authority.ensure_profile(&registry).await;
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .unwrap();
+    assert_eq!(registry.profile_pass_count(db.db_path()).await, 1);
+
     let second = authority.ensure_profile(&registry).await;
     for _ in 0..32 {
         second.wake();
@@ -1455,8 +1490,27 @@ async fn profile_database_has_one_scheduler_and_equivalent_kicks_coalesce() {
 
     assert!(first.same_route(&second));
     assert_eq!(registry.profile_worker_count().await, 1);
-    registry.wait_profile_idle(db.db_path()).await;
-    assert!(registry.profile_pass_count(db.db_path()).await <= 2);
+    assert_eq!(registry.profile_pass_count(db.db_path()).await, 1);
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .unwrap();
+    assert_eq!(registry.profile_pass_count(db.db_path()).await, 2);
+    release.notify_one();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        registry.wait_profile_idle(db.db_path()),
+    )
+    .await
+    .unwrap();
+    let pending = store.running_session_refreshes().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].session_id(), started_refresh.session_id());
+    let pass_count = registry.profile_pass_count(db.db_path()).await;
+    assert!(
+        pass_count <= 2,
+        "profile scheduler used {pass_count} passes"
+    );
     registry.shutdown().await;
     assert_eq!(registry.profile_worker_count().await, 0);
 }
@@ -1490,7 +1544,10 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
         .rekey_project(&registry, &old_owner, new_owner.clone())
         .await;
     // The replacement worker owns the dirty flag; join its actual pass.
-    assert!(wake.wake_and_wait_until_idle(Duration::from_secs(1)).await);
+    assert!(
+        wake.wake_and_wait_for_projection(Duration::from_secs(1))
+            .await
+    );
 
     assert!(old_state.is_cancelled());
     assert!(registry.project_state(&old_owner).await.is_none());

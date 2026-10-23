@@ -1,4 +1,12 @@
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_session_runtime::session_temporal_refresh_scheduler::history::{
+    SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
+    SessionHistoricalIngestor,
+};
 
 use super::*;
 
@@ -317,6 +325,30 @@ async fn activation_is_pinned_to_the_generation_the_refresh_extends() {
     );
 }
 
+#[derive(Default)]
+struct GatedHistory {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl SessionHistoricalIngestor for GatedHistory {
+    fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            SessionHistoricalIngestOutcome::Complete.into()
+        })
+    }
+
+    fn capacity_release(&self) -> SessionHistoricalCapacityRelease {
+        SessionHistoricalCapacityRelease::new(Vec::new())
+    }
+
+    fn cancel(&self) {
+        self.release.notify_one();
+    }
+}
+
 #[tokio::test]
 async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
     let tmp = TempDir::new().unwrap();
@@ -355,16 +387,35 @@ async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
     assert_eq!(requested, 1, "the retired observation requests one reset");
 
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
-    registry
-        .ensure_profile(
+    let history = Arc::new(GatedHistory::default());
+    let wake = registry
+        .ensure_profile_with_history(
             path.clone(),
             runtime
                 .registered_database_arc(HostAdmissionScope::Profile)
                 .unwrap(),
+            history.clone(),
         )
         .await;
+    history.entered.notified().await;
+    let named_join = wake.wake_and_wait_for_session_projection(&session_id, Duration::from_secs(5));
+    let aggregate_join = wake.wake_and_wait_for_projection(Duration::from_secs(5));
+    tokio::pin!(named_join, aggregate_join);
+    assert_eq!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready((
+            named_join.as_mut().poll(cx).is_pending(),
+            aggregate_join.as_mut().poll(cx).is_pending(),
+        )))
+        .await,
+        (true, true)
+    );
+    history.release.notify_one();
+    assert_eq!(
+        tokio::join!(named_join, aggregate_join),
+        (false, false),
+        "the superseded operation must refuse both waiting publication joins"
+    );
     registry.wait_profile_idle(&path).await;
-    registry.shutdown().await;
 
     assert_eq!(
         rows(
@@ -412,6 +463,18 @@ async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
         .await,
         vec![format!("message.temporal.{}.0", session_id.as_str())]
     );
+
+    assert!(
+        wake.wake_and_wait_for_session_projection(&session_id, Duration::from_secs(5))
+            .await,
+        "a new join must observe the automatically rebuilt session publication"
+    );
+    assert!(
+        wake.wake_and_wait_for_projection(Duration::from_secs(5))
+            .await,
+        "a new aggregate join must observe the completed replacement"
+    );
+    registry.shutdown().await;
 }
 
 #[tokio::test]
