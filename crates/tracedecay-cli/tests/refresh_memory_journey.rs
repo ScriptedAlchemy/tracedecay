@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use common::fixture::{git_capture, git_run};
 use common::{
@@ -31,6 +32,17 @@ const FILES: usize = 300;
 const FUNCTIONS_PER_FILE: usize = 160;
 const INDEX_TIMEOUT: Duration = Duration::from_secs(900);
 const STATUS_POLL: Duration = Duration::from_secs(5);
+
+fn report_phase(started: Instant, phase: &str, edit: usize) {
+    log_daemon_event(
+        "refresh_memory_journey_phase",
+        &[
+            ("phase", phase.to_owned()),
+            ("edit", edit.to_string()),
+            ("elapsed_ms", started.elapsed().as_millis().to_string()),
+        ],
+    );
+}
 
 /// Every function of every file changes with `edit`, so each refresh
 /// reparses the whole corpus.
@@ -53,12 +65,25 @@ fn write_corpus(project: &Path, edit: usize) {
 }
 
 fn run_cli(home: &Path, project: &Path, args: &[&str]) -> Vec<u8> {
+    let started = Instant::now();
+    log_daemon_event(
+        "refresh_memory_journey_command_started",
+        &[("args", format!("{args:?}"))],
+    );
     let output = tracedecay_command_with_home(home)
         .args(args)
         .current_dir(project)
         .stdin(Stdio::null())
         .output()
         .unwrap_or_else(|error| panic!("tracedecay {args:?}: {error}"));
+    log_daemon_event(
+        "refresh_memory_journey_command_finished",
+        &[
+            ("args", format!("{args:?}")),
+            ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ("status", output.status.to_string()),
+        ],
+    );
     assert!(
         output.status.success(),
         "tracedecay {args:?} failed\nstdout:\n{}\nstderr:\n{}",
@@ -104,9 +129,19 @@ fn status(home: &Path, project: &Path) -> Value {
 /// Waits until the index serves a complete generation of `revision` and
 /// returns that generation's id.
 fn wait_for_current(home: &Path, project: &Path, revision: &str) -> String {
-    let deadline = Instant::now() + INDEX_TIMEOUT;
+    let started = Instant::now();
+    let deadline = started + INDEX_TIMEOUT;
     loop {
         let status = status(home, project);
+        log_daemon_event(
+            "refresh_memory_journey_status",
+            &[
+                ("expected_revision", revision.to_owned()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ("freshness", status["code_index_freshness"].to_string()),
+                ("memory", status["memory"].to_string()),
+            ],
+        );
         let worktree = &status["code_index_freshness"]["worktree"];
         if status["code_index_freshness"]["status"] == "current"
             && worktree["source_revision"] == revision
@@ -156,6 +191,8 @@ fn assert_within_limit(home: &Path, project: &Path, pid: u32) {
 
 #[test]
 fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
+    let started = Instant::now();
+    report_phase(started, "prepare_corpus", 0);
     let home = TempDir::new().expect("isolated home");
     let home = canonical_existing_path(home.path());
     let workspace = TempDir::new().expect("project root");
@@ -168,23 +205,31 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
     let cold_revision = git_capture(&project, &["rev-parse", "HEAD"]);
 
     let log = home.join("daemon.log");
+    report_phase(started, "start_daemon", 0);
     let daemon = spawn_tracedecay_daemon_logged(&home, &log, |command| {
         command
             .env(
                 "TRACEDECAY_RESIDENT_MEMORY_LIMIT_BYTES",
                 LIMIT_BYTES.to_string(),
             )
+            .env("TRACEDECAY_TEST_DAEMON_LOG_STDERR", "1")
             .env("RUST_LOG", "info");
     });
+    report_phase(started, "initialize_project", 0);
     initialize_tracedecay_cli_project(&home, &project);
+    report_phase(started, "wait_for_current", 0);
     let mut generation = wait_for_current(&home, &project, &cold_revision);
     assert_within_limit(&home, &project, daemon.id());
+    report_phase(started, "generation_current", 0);
 
     for edit in 1..=REFRESHES {
+        report_phase(started, "prepare_corpus", edit);
         write_corpus(&project, edit);
         git_run(&project, &["commit", "--quiet", "-am", "edit every file"]);
         let revision = git_capture(&project, &["rev-parse", "HEAD"]);
+        report_phase(started, "sync", edit);
         run_cli(&home, &project, &["sync"]);
+        report_phase(started, "wait_for_current", edit);
         let refreshed = wait_for_current(&home, &project, &revision);
         assert_ne!(
             refreshed, generation,
@@ -192,6 +237,7 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
         );
         generation = refreshed;
         assert_within_limit(&home, &project, daemon.id());
+        report_phase(started, "generation_current", edit);
     }
 
     let log = fs::read_to_string(&log).expect("daemon log");
@@ -206,4 +252,5 @@ fn repeated_heavy_refreshes_under_the_limit_are_admitted() {
         "the daemon refused work it had room for:\n{log}"
     );
     drop(daemon);
+    report_phase(started, "complete", REFRESHES);
 }
