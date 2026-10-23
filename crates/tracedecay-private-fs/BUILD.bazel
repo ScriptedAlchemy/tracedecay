@@ -53,7 +53,6 @@ rust_test(
     crate_features = ["test-helpers"],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
-    rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
 )
 
 rust_test(
@@ -69,7 +68,6 @@ rust_test(
     crate_features = ["test-helpers"],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
-    rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
 )
 
 rust_test(

@@ -18,21 +18,8 @@ RELEASE_PR_BRANCH=$(
     '.headBranchName | select(type == "string" and length > 0)' \
     <<<"$RELEASE_PR_JSON"
 )
-release_version=$(tr -d '[:space:]' < version.txt)
-if [[ -z "$release_version" ]]; then
-  echo "Release version is empty" >&2
-  exit 1
-fi
-toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
-repository_root=$PWD
-# The checkout's .cargo/config.toml replaces crates.io with pnpm-vendored
-# sources, which `cargo update` refuses. Cargo reads config from its working
-# directory, so resolve from outside the checkout with the pinned toolchain.
-(cd / && cargo "+$toolchain" update --manifest-path "$repository_root/Cargo.toml" \
-  -p tracedecay --precise "$release_version")
-# pnpm validates workspace crate versions even for a frozen npm installation.
-# Repair the release's Cargo lock before installing generated-build inputs.
 pnpm install --frozen-lockfile
+CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c
 bazel run //scripts:bazel/gen_builds.py
 pnpm --dir sdks/typescript run build
 pnpm --dir plugin/chatgpt-extension run build

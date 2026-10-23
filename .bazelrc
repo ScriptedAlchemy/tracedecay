@@ -18,7 +18,7 @@ common --repo_env=CARGO_NET_GIT_FETCH_WITH_CLI=true
 # host cargo would download another 418 MB toolchain on every CI job.
 common --repo_env=CARGO_UNSTABLE_GIT=shallow-deps
 common --repo_env=RUSTC_BOOTSTRAP=1
-# MODULE.bazel registers only nightly/2026-10-18. Without this, rules_rust
+# MODULE.bazel registers only nightly/2026-10-19. Without this, rules_rust
 # resolves the stable channel and the build fails closed.
 # Hosts can extend this repository profile with their private fleet settings.
 build --config=tracedecay
@@ -67,6 +67,8 @@ test --default_test_resources=cpu=HOST_CPUS
 build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 # Lint outputs need dependency metadata, not linked test executables.
 build:clippy --output_groups=clippy_checks
+# Produce dependency metadata so linting does not require full Rust libraries.
+build:clippy --@rules_rust//rust/settings:pipelined_compilation=true
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 build:clippy --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
 
