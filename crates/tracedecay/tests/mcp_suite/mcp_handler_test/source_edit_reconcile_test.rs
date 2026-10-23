@@ -28,9 +28,9 @@ const COMMITTED_MISMATCH: &str = "execution_failed source_edit.execution_failed 
 const UNCHANGED_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit unchanged-state inspection does not match the admitted expected state";
 const CONFIRM_REQUIRED: &str = "project route error (application_surface_invalid_request): source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human";
 const ATTEMPT_KEY_CONFLICT: &str = "project route error (application_surface_invalid_request): reconciliation attempt idempotency key must differ from the original edit key";
-const COMMITTED_STATE_UNEXPECTED: &str = "project route error (application_surface_invalid_request): committed_state is only valid when disposition is confirm_committed";
-const COMMITTED_STATE_REQUIRED: &str = "project route error (application_surface_invalid_request): missing required parameter: committed_state";
-const INVALID_DISPOSITION: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation disposition: guess";
+const COMMITTED_STATE_UNEXPECTED: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation request: unknown field `committed_state`, there are no fields";
+const COMMITTED_STATE_REQUIRED: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation request: missing field `committed_state`";
+const INVALID_DISPOSITION: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation request: unknown variant `guess`, expected one of `inspect`, `confirm_committed`, `confirm_unchanged`, `acknowledge_partial`";
 
 struct OpenedProject {
     _dir: TestTempDir,

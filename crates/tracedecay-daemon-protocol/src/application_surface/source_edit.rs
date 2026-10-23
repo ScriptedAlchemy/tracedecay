@@ -161,7 +161,12 @@ fn edit_request(
 }
 
 fn reconcile(args: &Value) -> Result<SourceEditReconciliationInvocationV1, String> {
-    let request: SourceEditReconcileSurfaceRequestV1 = serde_json::from_value(args.clone())
+    let mut input = args.clone();
+    if let Some(object) = input.as_object_mut() {
+        object.remove("format");
+        object.remove("__mcp_request_id");
+    }
+    let request: SourceEditReconcileSurfaceRequestV1 = serde_json::from_value(input)
         .map_err(|error| format!("invalid source edit reconciliation request: {error}"))?;
     if !matches!(
         request.disposition,
@@ -368,33 +373,38 @@ mod tests {
             let decoded: SourceEditReconcileSurfaceRequestV1 =
                 serde_json::from_value(value.clone()).unwrap();
             assert_eq!(decoded, request);
-            let ApplicationSurfaceRequest::SourceEditReconcile(parsed) =
-                parse_source_edit_arguments(
-                    ApplicationSurfaceOperation::SourceEditReconcile,
-                    &value,
-                )
-                .unwrap()
-            else {
-                panic!("reconciliation request");
-            };
-            let mut unknown = value.clone();
-            unknown["unexpected"] = json!(true);
-            assert!(
-                parse_source_edit_arguments(
-                    ApplicationSurfaceOperation::SourceEditReconcile,
-                    &unknown,
-                )
-                .is_err()
-            );
-            assert_eq!(parsed.disposition, disposition);
-            assert_eq!(parsed.original_operation, request.original_operation);
-            assert_eq!(parsed.effect_id.as_str(), request.effect_id);
-            assert_eq!(parsed.idempotency_key.as_str(), request.idempotency_key);
-            assert_eq!(
-                parsed.attempt_idempotency_key.as_str(),
-                request.attempt_idempotency_key
-            );
-            assert_eq!(parsed.input_digest, digest);
+            let mut tool_arguments = value.clone();
+            tool_arguments["format"] = json!("json");
+            tool_arguments["__mcp_request_id"] = json!("request.reconcile");
+            for arguments in [value, tool_arguments] {
+                let ApplicationSurfaceRequest::SourceEditReconcile(parsed) =
+                    parse_source_edit_arguments(
+                        ApplicationSurfaceOperation::SourceEditReconcile,
+                        &arguments,
+                    )
+                    .unwrap()
+                else {
+                    panic!("reconciliation request");
+                };
+                let mut unknown = arguments;
+                unknown["unexpected"] = json!(true);
+                assert!(
+                    parse_source_edit_arguments(
+                        ApplicationSurfaceOperation::SourceEditReconcile,
+                        &unknown,
+                    )
+                    .is_err()
+                );
+                assert_eq!(parsed.disposition, disposition);
+                assert_eq!(parsed.original_operation, request.original_operation);
+                assert_eq!(parsed.effect_id.as_str(), request.effect_id);
+                assert_eq!(parsed.idempotency_key.as_str(), request.idempotency_key);
+                assert_eq!(
+                    parsed.attempt_idempotency_key.as_str(),
+                    request.attempt_idempotency_key
+                );
+                assert_eq!(parsed.input_digest, digest);
+            }
         }
     }
 

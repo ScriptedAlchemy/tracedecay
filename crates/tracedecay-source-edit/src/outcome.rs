@@ -125,7 +125,7 @@ impl SourceEditDurableOutcomeV1 {
                     if self.observed_state.is_some() {
                         "source edit candidate files inspected; original effect remains pending"
                     } else if self.failed {
-                        "source edit failed"
+                        "source edit failed before the effect"
                     } else if self.cancelled {
                         "source edit was cancelled"
                     } else if self.timed_out {
@@ -195,7 +195,9 @@ impl SourceEditOutcome {
             Self::DurableMetadata(result) if result.observed_state.is_some() => {
                 "source edit candidate files inspected; original effect remains pending"
             }
-            Self::DurableMetadata(result) if result.failed => "source edit failed",
+            Self::DurableMetadata(result) if result.failed => {
+                "source edit failed before the effect"
+            }
             Self::DurableMetadata(result) if result.cancelled => "source edit was cancelled",
             Self::DurableMetadata(result) if result.timed_out => "source edit timed out",
             Self::DurableMetadata(result) if result.effect_unknown => {

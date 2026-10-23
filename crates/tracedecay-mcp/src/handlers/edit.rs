@@ -179,7 +179,11 @@ fn render_source_edit_result(
             response_handle_root,
             args,
             &value,
-            result.outcome.touched_files(),
+            if result.replayed {
+                Vec::new()
+            } else {
+                result.outcome.touched_files()
+            },
             || {
                 result
                     .outcome
