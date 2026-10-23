@@ -1425,13 +1425,18 @@ impl Drop for StopHttpObservation<'_> {
 }
 
 fn observe_http_connections(action: impl FnOnce(SocketAddr)) -> usize {
+    assert!(
+        crate::common::in_child_test(),
+        "HTTP observation requires an isolated test process"
+    );
     let listener = TcpListener::bind("127.0.0.1:0").expect("controlled loopback proxy");
     listener.set_nonblocking(true).expect("nonblocking proxy");
     let address = listener.local_addr().expect("proxy address");
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let stop_observation = StopHttpObservation(&stop);
-        let observer = scope.spawn(|| {
+        let stop = &stop;
+        let observer = scope.spawn(move || {
             let mut accepted = 0;
             loop {
                 match listener.accept() {
