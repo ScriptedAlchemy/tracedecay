@@ -1051,6 +1051,7 @@ thread_local! {
 pub fn stop_managed_daemon(home: &Path) {
     let home = canonical_existing_path(home);
     drop(take_managed_daemon(&home));
+    wait_for_stopped_daemon(&home);
     let profile_root = home.join(".tracedecay");
     let _ = std::fs::remove_file(daemon_authority_path(&profile_root));
     #[cfg(unix)]
