@@ -77,6 +77,8 @@ pub struct UnmountedFile {
 pub enum EcosystemStatus {
     /// A reachability walk ran and its findings are authoritative.
     Audited,
+    /// Missing inputs prevent negative findings for affected packages.
+    Partial,
     /// No manifest or source file of this ecosystem exists in the project.
     NotPresent,
     /// Files of this ecosystem exist and no reachability model covers them.
@@ -87,6 +89,7 @@ impl EcosystemStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Audited => "audited",
+            Self::Partial => "partial",
             Self::NotPresent => "not_present",
             Self::Unsupported => "unsupported",
         }

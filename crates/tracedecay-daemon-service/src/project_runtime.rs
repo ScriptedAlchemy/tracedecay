@@ -583,6 +583,17 @@ impl ProjectRuntimeRequestLeaseV1 {
     pub fn registered_root(&self) -> &Path {
         &self.inner.registered_root
     }
+
+    /// Accepted work stops at its next safe point when its exact roots are
+    /// retired or the owning daemon closes admission. The lease still pins
+    /// those runtimes until the work finishes settling.
+    pub(crate) fn is_retiring(&self) -> bool {
+        if self.inner.registry.closed.load(Ordering::Acquire) {
+            return true;
+        }
+        let fences = self.inner.registry.lock_root_fences();
+        self.inner.roots.iter().any(|root| fences.contains(root))
+    }
 }
 
 impl Drop for ProjectRuntimeRequestLeaseInnerV1 {

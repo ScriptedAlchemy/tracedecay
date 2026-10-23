@@ -744,8 +744,14 @@ impl ProjectOpenInputs<'_> {
         // Discovery runs before the per-route gate and the process-wide
         // capacity gate. A hung walk must refuse this project, not hold either
         // lock while it sits in `open()`.
-        ensure_checkout_topology_before_admission(self.canonical_project_path).await?;
-        let gate = project_open_gate(self.project_open_gates, &route).await?;
+        let repository_common_dir =
+            ensure_checkout_topology_before_admission(self.canonical_project_path).await?;
+        let gate = project_open_gate(
+            self.project_open_gates,
+            &route,
+            repository_common_dir.as_deref(),
+        )
+        .await;
         let singleflight = tokio::select! {
             biased;
             () = self.cancellation.cancelled() => return Err(project_open_cancellation_error()),

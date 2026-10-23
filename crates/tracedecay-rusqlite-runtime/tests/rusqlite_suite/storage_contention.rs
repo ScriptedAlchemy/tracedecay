@@ -26,6 +26,7 @@ use tracedecay_rusqlite_runtime::{
         ConcreteRepositoryReadExecutor, ConcreteRepositoryWriteExecutor,
         RepositoryPhysicalAttachmentFactory,
     },
+    runtime_ledger::{PersistedWriterAuthorityError, persisted_writer_authority_epoch},
 };
 use tracedecay_store::{
     AdmissionConfigV1, CommitSequenceV1, ConsistencyModeV1, DiagnosticReadOperationV1,
@@ -1163,6 +1164,120 @@ fn at_least_reads_under_a_superseded_authority_epoch_are_typed_unavailable() {
     );
     assert!(outcome.value().is_none());
     assert_eq!(outcome.validate_for(&request), Ok(()));
+    attachment.drain().unwrap();
+    attachment.close_and_join().unwrap();
+}
+
+/// Two live writers on one file under one incarnation. Once the newer authority
+/// commits, a submit from the older writer is the typed fence every caller can
+/// classify as terminal, not a storage failure they would retry forever.
+#[test]
+fn a_writer_behind_the_persisted_authority_epoch_is_fenced_on_submit() {
+    let database = TestDatabase::new("write-superseded-epoch.db");
+    seed(&database);
+    let superseded = binding(0);
+    let mut current = superseded.clone();
+    current.authority_epoch =
+        StoreAuthorityEpochV1::new(superseded.authority_epoch.get() + 1).unwrap();
+    let stale_writer = start_writer(
+        &database,
+        &superseded,
+        ConcreteRepositoryWriteExecutor::default(),
+    );
+    let current_writer = start_writer(
+        &database,
+        &current,
+        ConcreteRepositoryWriteExecutor::default(),
+    );
+    commit(
+        &current_writer,
+        publication(&current, "generation.current", 1),
+    );
+
+    let request = publication(&superseded, "generation.stale", 1);
+    let probe = Probe::for_submit(&request);
+    let outcome = run(stale_writer.submit(&native_runtime::cx().unwrap(), request, probe)).unwrap();
+
+    assert!(
+        matches!(
+            outcome,
+            RuntimeSubmitOutcomeV1::Fenced { expected, actual }
+                if expected == superseded.authority_epoch && actual == current.authority_epoch
+        ),
+        "stale writer submit is a typed fence: {outcome:?}"
+    );
+    assert_eq!(
+        persisted_rows(&database.connect(), "generation_diagnostics"),
+        1,
+        "the fenced write rolled back and only the current authority's rows remain"
+    );
+    stale_writer.shutdown_and_join().unwrap();
+    current_writer.shutdown_and_join().unwrap();
+}
+
+#[test]
+fn persisted_writer_authority_is_scoped_to_the_shard_and_incarnation() {
+    let database = TestDatabase::new("persisted-authority.db");
+    seed(&database);
+    let current = binding(0);
+    let writer = start_writer(
+        &database,
+        &current,
+        ConcreteRepositoryWriteExecutor::default(),
+    );
+    commit(&writer, publication(&current, "generation.persisted", 1));
+    writer.shutdown_and_join().unwrap();
+    let mut other_incarnation = current.clone();
+    other_incarnation.incarnation =
+        tracedecay_store::StoreIncarnationV1::new(current.incarnation.get() + 1).unwrap();
+
+    for (binding, expected) in [
+        (current.clone(), Some(current.authority_epoch)),
+        (binding(1), None),
+        (other_incarnation, None),
+    ] {
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .attach_read_only(
+                binding.clone(),
+                verified_locator(&binding),
+                database.path.canonicalize().unwrap(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        let handle = attachment.exact_sql_handle().unwrap();
+        assert_eq!(
+            run(persisted_writer_authority_epoch(
+                &handle,
+                &binding,
+                Duration::ZERO
+            ))
+            .unwrap(),
+            expected
+        );
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
+
+    database.connect().execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE td_runtime_writer_checkpoint_v1 SET authority_epoch = -1;").unwrap();
+    let attachment = RepositoryPhysicalAttachmentFactory
+        .attach_read_only(
+            current.clone(),
+            verified_locator(&current),
+            database.path.canonicalize().unwrap(),
+            AdmissionConfigV1::default(),
+        )
+        .unwrap();
+    let handle = attachment.exact_sql_handle().unwrap();
+    assert!(matches!(
+        run(persisted_writer_authority_epoch(
+            &handle,
+            &current,
+            Duration::ZERO
+        )),
+        Err(PersistedWriterAuthorityError::Corrupt {
+            field: "authority_epoch"
+        })
+    ));
     attachment.drain().unwrap();
     attachment.close_and_join().unwrap();
 }

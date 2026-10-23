@@ -46,27 +46,5 @@ pub(crate) fn rename_noreplace_at(
 
 #[cfg(windows)]
 pub(crate) fn rename_noreplace_paths(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-    let wide = |path: &Path| {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>()
-    };
-    let source = wide(source);
-    let destination = wide(destination);
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    crate::windows::rename_paths_durable(source, destination, crate::windows::RenameMode::NoReplace)
 }

@@ -220,10 +220,11 @@ pub use runtime::{
     StorageRuntimeErrorV1, StoreAuthorityEpochV1, StoreClientIdV1, StoreCommitReceiptV1,
     StoreIdempotencyKeyV1, StoreIncarnationV1, StoreOperationIdV1, StoreOperationMetadataV1,
     StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1, StoreShardIdV1, StoreShardScopeV1,
-    StoreSnapshotIdV1, StoredObservationRowV1, UnavailableReasonV1, UserProfileId,
-    VerifiedStoreLocatorV1, WAL_HARD_LIMIT_BYTES, WAL_SOFT_LIMIT_BYTES,
+    StoreSnapshotIdV1, StoreWriterFencedV1, StoredObservationRowV1, UnavailableReasonV1,
+    UserProfileId, VerifiedStoreLocatorV1, WAL_HARD_LIMIT_BYTES, WAL_SOFT_LIMIT_BYTES,
     WORKSTATION_GLOBAL_QUEUE_BYTES, WalBudgetV1, WatermarkCoverageStatusV1, WorktreeId,
-    canonical_store_locator_digest, graph_store_locator_path, single_shard_required_coverage_v1,
+    canonical_store_locator_digest, error_chain_writer_fence, graph_store_locator_path,
+    single_shard_required_coverage_v1,
 };
 pub use schema::{
     CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL, CLEAR_CURRENT_DIAGNOSTICS_SQL,

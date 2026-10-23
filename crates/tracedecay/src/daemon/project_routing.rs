@@ -162,17 +162,11 @@ pub(super) async fn bind_authenticated_profile_identity(
 pub(super) async fn project_open_gate(
     gates: &tokio::sync::Mutex<ProjectOpenGates>,
     route: &ProjectRouteKey,
-) -> Result<Arc<ProjectOpenGate>> {
+    repository_common_dir: Option<&Path>,
+) -> Arc<ProjectOpenGate> {
     let mut gate_route = route.clone();
-    match tracedecay_runtime_core::worktree::git_common_dir_outcome(&route.project_path) {
-        Ok(Some(git_common_dir)) => gate_route.project_path = git_common_dir,
-        Ok(None) => {}
-        Err(tracedecay_runtime_core::git_repository::DiscoveryBlocked { .. }) => {
-            return Err(super::core_proxy::repository_discovery_deferred(
-                &route.project_path,
-                tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
-            ));
-        }
+    if let Some(common_dir) = repository_common_dir {
+        gate_route.project_path = common_dir.to_path_buf();
     }
     let mut gates = gates.lock().await;
     if let Some(gate) = gates
@@ -180,11 +174,11 @@ pub(super) async fn project_open_gate(
         .get(&gate_route)
         .and_then(std::sync::Weak::upgrade)
     {
-        return Ok(gate);
+        return gate;
     }
     let gate = Arc::new(ProjectOpenGate::new(()));
     gates.gates.insert(gate_route, Arc::downgrade(&gate));
-    Ok(gate)
+    gate
 }
 
 pub(super) async fn project_open_capacity_gate(
@@ -205,16 +199,24 @@ pub(super) async fn project_open_tasks(
 /// the process-wide project-open capacity gate was held, so every other
 /// project's open queued behind that hang and the profile runtime never
 /// reached Ready.
-pub(super) async fn ensure_checkout_topology_before_admission(project_path: &Path) -> Result<()> {
+///
+/// Carry the decided common directory into gate selection. Re-discovering
+/// there can collide with a new walk of a non-Git root, whose absence is not
+/// retained, and refuse an identity this preflight already resolved.
+pub(super) async fn ensure_checkout_topology_before_admission(
+    project_path: &Path,
+) -> Result<Option<PathBuf>> {
     match super::core_proxy::bounded_repository_identity(
         project_path,
         super::core_proxy::repository_discovery_parent_deadline(),
     )
     .await
     {
-        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(_)
-        | tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
-            Ok(())
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+            identity,
+        ) => Ok(Some(identity.common_dir)),
+        tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            Ok(None)
         }
         tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(reason) => {
             Err(super::core_proxy::repository_discovery_deferred(

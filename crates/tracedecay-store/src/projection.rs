@@ -665,6 +665,18 @@ impl ProjectionStoreError {
         }
     }
 
+    /// The store's writer fence when this failure is one: the lease's
+    /// authority epoch is behind the authority the store holds, so replaying
+    /// the request on that lease can never commit.
+    pub fn writer_fence(&self) -> Option<crate::runtime::StoreWriterFencedV1> {
+        match self {
+            Self::Storage { source, .. } => {
+                crate::runtime::error_chain_writer_fence(source.as_ref())
+            }
+            _ => None,
+        }
+    }
+
     pub fn durable_detail(&self) -> String {
         durable_error_detail(self)
     }

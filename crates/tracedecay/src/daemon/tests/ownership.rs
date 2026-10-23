@@ -205,6 +205,97 @@ async fn unborn_git_project_open_retains_lsp_and_starts_hook_replay() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_git_open_gate_reuses_preflight_identity_during_concurrent_discovery() {
+    crate::register_runtime_ports().expect("runtime port registration");
+    let temp = TempDir::new().expect("gate fixture");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).expect("non-Git project");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity: test_client_identity_for(temp.path().join("profile")),
+        ..test_handshake_defaults()
+    };
+    let route = ProjectRouteKey::from_handshake(&project, &handshake).expect("project route");
+    let gates = tokio::sync::Mutex::new(super::super::ProjectOpenGates::default());
+    let common_dir = super::super::ensure_checkout_topology_before_admission(&project)
+        .await
+        .expect("preflight decides this is not a repository");
+    assert!(common_dir.is_none());
+
+    // Non-repository topology is not retained. Another reader can start a
+    // fresh walk after preflight; gate selection must use the decided identity.
+    let mut block =
+        tracedecay_runtime_core::git_repository::block_repository_discovery_for_test(&project);
+    let probe_path = project.clone();
+    let walk = std::thread::spawn(move || {
+        tracedecay_runtime_core::git_repository::repository_topology(&probe_path)
+    });
+    block.wait_entered().await;
+    let gate = super::super::project_open_gate(&gates, &route, common_dir.as_deref()).await;
+    block.release();
+    assert!(walk.join().expect("discovery thread").is_err());
+    tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
+
+    let same_gate = super::super::project_open_gate(&gates, &route, common_dir.as_deref()).await;
+    assert!(Arc::ptr_eq(&gate, &same_gate));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linked_worktree_open_gates_share_repository_and_isolate_scope() {
+    crate::register_runtime_ports().expect("runtime port registration");
+    let temp = TempDir::new().expect("gate fixture");
+    let project = temp.path().join("project");
+    let linked = temp.path().join("linked");
+    std::fs::create_dir_all(&project).expect("project directory");
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
+    git(
+        &project,
+        &["commit", "--allow-empty", "--quiet", "-m", "fixture"],
+    );
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            linked.to_str().expect("UTF-8 linked path"),
+        ],
+    );
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity: test_client_identity_for(temp.path().join("profile")),
+        ..test_handshake_defaults()
+    };
+    let route = ProjectRouteKey::from_handshake(&project, &handshake).expect("primary route");
+    let linked_route = ProjectRouteKey::from_handshake(&linked, &handshake).expect("linked route");
+    assert_ne!(route, linked_route);
+    let common_dir = super::super::ensure_checkout_topology_before_admission(&project)
+        .await
+        .expect("primary preflight");
+    let linked_common_dir = super::super::ensure_checkout_topology_before_admission(&linked)
+        .await
+        .expect("linked preflight");
+    assert!(common_dir.is_some());
+    assert_eq!(common_dir, linked_common_dir);
+    let gates = tokio::sync::Mutex::new(super::super::ProjectOpenGates::default());
+    let gate = super::super::project_open_gate(&gates, &route, common_dir.as_deref()).await;
+    let linked_gate =
+        super::super::project_open_gate(&gates, &linked_route, linked_common_dir.as_deref()).await;
+    assert!(Arc::ptr_eq(&gate, &linked_gate));
+
+    let mut scoped_route = linked_route;
+    scoped_route.scope_prefix = Some("other-scope".to_owned());
+    let scoped_gate =
+        super::super::project_open_gate(&gates, &scoped_route, linked_common_dir.as_deref()).await;
+    assert!(!Arc::ptr_eq(&gate, &scoped_gate));
+    tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
+    tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&linked);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     const PARALLEL_CLIENT_IDENTITIES: usize = 16;
     let temp = TempDir::new().expect("temp dir");
@@ -215,9 +306,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("project source");
     std::os::unix::fs::symlink(&project, &project_alias).expect("project alias");
     let client_identity = test_client_identity_for(profile_root.clone());
-    eprintln!("[cache-test] phase=init start");
     initialize_test_project(&project, &client_identity).await;
-    eprintln!("[cache-test] phase=init done");
 
     let direct = DaemonHandshake {
         project_path: Some(project.clone()),
@@ -248,7 +337,6 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     );
 
     tracedecay_runtime_core::git_repository::hold_repository_discovery_clock_for_test(&project);
-    eprintln!("[cache-test] phase=concurrent-open start");
     let (direct_server, alias_server) = Box::pin(async {
         tokio::join!(
             engine.project_server(&direct),
@@ -256,7 +344,6 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         )
     })
     .await;
-    eprintln!("[cache-test] phase=concurrent-open done");
     let direct_server = direct_server.expect("direct project server");
     let alias_server = alias_server.expect("aliased project server");
     assert!(std::sync::Arc::ptr_eq(&direct_server, &alias_server));
@@ -278,12 +365,10 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         .automation_config_probe_attempts
         .store(0, std::sync::atomic::Ordering::Relaxed);
 
-    eprintln!("[cache-test] phase=cached-open start");
     let cached = engine
         .project_server(&direct)
         .await
         .expect("cached project server");
-    eprintln!("[cache-test] phase=cached-open done");
     assert!(std::sync::Arc::ptr_eq(&direct_server, &cached));
     assert_eq!(
         engine
@@ -322,20 +407,15 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
             .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
-    eprintln!(
-        "same_worktree_live_engine_proxy clients={PARALLEL_CLIENT_IDENTITIES} open_attempts=1 retained_servers={retained_servers} cache_hits={PARALLEL_CLIENT_IDENTITIES}"
-    );
     let released_server = Arc::downgrade(&direct_server);
     drop(cached);
     drop(alias_server);
     drop(direct_server);
-    eprintln!("[cache-test] phase=shutdown start");
     engine.shutdown_all().await;
     assert!(
         released_server.upgrade().is_none(),
         "shutdown must break the server-to-administration ownership cycle"
     );
-    eprintln!("[cache-test] phase=shutdown done");
     tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
 }
 
@@ -366,30 +446,36 @@ async fn mounted_graph_listing_takes_no_server_lease_while_it_reads() {
         .expect("mount project server");
 
     let swap = server.graph_slot().write_owned().await;
+    let mut registry_gate = Some(engine.store_administration.project_servers().lock().await);
     let listing = engine.store_administration.mounted_project_graphs();
     let mut listing = std::pin::pin!(listing);
     let handles = Arc::strong_count(&server);
-    assert!(
-        std::future::Future::poll(
-            listing.as_mut(),
-            &mut std::task::Context::from_waker(std::task::Waker::noop()),
-        )
-        .is_pending(),
-        "the listing parks on the held graph read"
-    );
+    let registry_lock = engine.store_administration.project_servers().lock();
+    let mut registry_lock = std::pin::pin!(registry_lock);
+    // Force the first listing poll to wait for another registry user. Tokio's
+    // cooperative budget can also defer it before the held graph slot.
+    // Drive both futures with real wakeups: the fair registry mutex admits
+    // the listing before this later lock request, then must release it while
+    // the graph write guard still prevents the listing from completing.
+    let registry = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        std::future::poll_fn(|context| {
+            assert!(
+                std::future::Future::poll(listing.as_mut(), context).is_pending(),
+                "the listing parks on the held graph read"
+            );
+            drop(registry_gate.take());
+            std::future::Future::poll(registry_lock.as_mut(), context)
+        }),
+    )
+    .await
+    .expect("a parked graph listing must release the registry lock for route binds");
     assert_eq!(
         Arc::strong_count(&server),
         handles,
         "a parked graph listing must hold no server handle"
     );
-    assert!(
-        engine
-            .store_administration
-            .project_servers()
-            .try_lock()
-            .is_ok(),
-        "a parked graph listing must not hold the registry lock, or every route bind waits on the swap"
-    );
+    drop(registry);
     drop(swap);
     assert_eq!(listing.await.len(), 1);
 }

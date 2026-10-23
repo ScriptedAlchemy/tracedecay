@@ -4,9 +4,15 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::process::Command;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use tracedecay_contracts::retained_surfaces::{MemoryStatusRequestV1, RetainedSurfaceRequestV1};
+use tokio::io::AsyncWriteExt;
+use tracedecay_contracts::retained_surfaces::{
+    FactStoreCurateRequestV1, MemoryStatusRequestV1, RetainedSurfaceRequestV1,
+};
 use tracedecay_contracts::{
     ApplicationProblemKind, CancellationContext, Deadline, ProblemTerminality, RetryDirective,
     WorkGraphReadRequestV1, WorkProductSelectionScopeV1,
@@ -34,6 +40,8 @@ use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
 use tracedecay_daemon_service::{
     DaemonInvocationProblem, ProjectRuntimePublicationStateV1, RegisteredRetainedRuntime,
 };
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
 
 async fn committed_fixture(
     label: &str,
@@ -87,6 +95,173 @@ async fn unopened_committed_fixture(
     let database_scope = enter_test_daemon_database_scope(&profile_root, label);
     let engine = test_daemon_engine_for_profile(&profile_root);
     (temp, database_scope, engine, handshake)
+}
+
+const PREPARATION_RELEASE_DEADLINE: Duration = Duration::from_mins(1);
+
+#[derive(Default)]
+struct CuratorPreparationPause {
+    release: Mutex<Option<mpsc::Receiver<()>>>,
+    entered: tokio::sync::Notify,
+}
+
+struct PauseCuratorPreparation(Arc<CuratorPreparationPause>);
+
+impl<S> Layer<S> for PauseCuratorPreparation
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_enter(&self, id: &tracing::span::Id, context: Context<'_, S>) {
+        if context.span(id).unwrap().metadata().name() != "daemon.automation.effect.reserve" {
+            return;
+        }
+        if let Some(release) = self.0.release.lock().unwrap().take() {
+            self.0.entered.notify_one();
+            release
+                .recv_timeout(PREPARATION_RELEASE_DEADLINE)
+                .expect("release the curator reservation writer");
+        }
+    }
+}
+
+/// The forced client phase drops the authenticated direct invocation, but a
+/// journal write it already queued must keep the exact project owner alive.
+#[tokio::test]
+async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutdown() {
+    const CHILD: &str = "TRACEDECAY_TEST_CURATOR_PREPARATION_SHUTDOWN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // A global subscriber follows the real reserve onto its native
+        // blocking thread. Isolate it from the other tests in this process.
+        let test_name = format!(
+            "{}::aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutdown",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name, "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("run isolated curator preparation shutdown journey");
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "curator preparation shutdown journey failed: {output:?}"
+        );
+        return;
+    }
+
+    let pause = Arc::new(CuratorPreparationPause::default());
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(PauseCuratorPreparation(Arc::clone(&pause))),
+    )
+    .expect("isolated curator preparation subscriber");
+    let (_temp, _database_scope, engine, handshake) =
+        committed_fixture("curator-preparation-shutdown").await;
+    super::prewarm_test_profile_runtime(&engine.store_administration).await;
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("project server");
+    let dashboard_root = server.cg().await.store_layout().dashboard_root.clone();
+    drop(server);
+    let registry = engine.invocation.service.project_runtimes.clone();
+
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("curator socket pair");
+    let server = tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(server)
+        .expect("native curator socket");
+    let serving = Box::pin(crate::daemon::serve_authenticated_socket_client_with_class(
+        server,
+        engine.clone(),
+        super::TEST_AUTH_TOKEN.to_owned(),
+        crate::daemon::DaemonClientAdmissionClass::General,
+    ));
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
+    clients
+        .spawn(async move { serving.await.map_err(|error| error.to_string()) })
+        .expect("native authenticated client task");
+    super::write_test_auth_preface(&mut client).await;
+    client
+        .write_all(handshake.to_line().expect("curator handshake").as_bytes())
+        .await
+        .expect("write curator handshake");
+    client.write_all(b"\n").await.expect("handshake newline");
+
+    let (release, release_rx) = mpsc::channel();
+    *pause.release.lock().unwrap() = Some(release_rx);
+    let request_id = "request.socket-curator-preparation-shutdown";
+    let observed_at = tracedecay_contracts::clock::now_micros();
+    let request = DaemonInvocationRequest::retained_application(
+        request_id,
+        RetainedSurfaceRequestV1::FactStoreCurate(FactStoreCurateRequestV1::default()),
+        observed_at,
+        Deadline::new(UtcMicros(observed_at.0.saturating_add(60_000_000)))
+            .expect("curator request deadline"),
+        CancellationContext::active("cancel.socket-curator-preparation-shutdown")
+            .expect("curator cancellation"),
+    );
+    client
+        .write_all(serde_json::to_string(&request).unwrap().as_bytes())
+        .await
+        .expect("write retained curator invocation");
+    client.write_all(b"\n").await.expect("invocation newline");
+    tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, pause.entered.notified())
+        .await
+        .expect("authenticated curator reaches the real reservation writer");
+
+    let run_id = tracedecay_domain::RunId::new(request_id).expect("curator run id");
+    let journal_key = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.automation-run.terminal-key.v1",
+        &run_id,
+    ))
+    .expect("curator journal key");
+    let journal_path = dashboard_root.join("automation_effects").join(format!(
+        "{}.json",
+        journal_key.as_str().trim_start_matches("sha256:")
+    ));
+    assert!(!journal_path.exists(), "the reservation I/O is paused");
+
+    let aborted = tracedecay_daemon_service::shutdown::join_shutdown_owners(
+        Instant::now() + PREPARATION_RELEASE_DEADLINE,
+        vec![crate::daemon::bootstrap::client_shutdown_owner(clients)],
+    )
+    .await;
+    assert_eq!(aborted.owners.len(), 1);
+    assert!(aborted.owners[0].status.is_clean(), "{aborted:?}");
+    drop(client);
+
+    let (drain_waiting, drain_is_waiting) = tokio::sync::oneshot::channel();
+    registry.arm_shutdown_drain_waiting(drain_waiting);
+    let shutdown_engine = engine.clone();
+    let mut shutdown = tokio::spawn(async move { shutdown_engine.shutdown_all().await });
+    tokio::select! {
+        result = &mut shutdown => panic!(
+            "shutdown returned while the aborted client's writer was live: {result:?}"
+        ),
+        waiting = tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, drain_is_waiting) => {
+            waiting.expect("shutdown reaches the project runtime drain")
+                .expect("the detached reservation still owns the project drain");
+        }
+    }
+    assert!(!shutdown.is_finished());
+    assert!(!journal_path.exists(), "the writer is still paused");
+    release.send(()).expect("release the reservation writer");
+    let shutdown = tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, shutdown)
+        .await
+        .expect("the completed writer releases project shutdown")
+        .expect("shutdown task");
+    assert!(
+        shutdown
+            .background
+            .owners
+            .iter()
+            .any(|owner| owner.name == "invocation" && owner.status.is_clean()),
+        "the project runtime owner must finish cleanly: {shutdown:?}"
+    );
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(journal_path).expect("reservation I/O completed before shutdown"),
+    )
+    .expect("durable curator reservation");
+    assert_eq!(record["admission"]["request"]["run_id"], request_id);
 }
 
 // Each surface check constructs its future inside its own function and returns

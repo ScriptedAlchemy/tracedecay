@@ -146,6 +146,7 @@ pub struct UnmountedFilesSurfaceRequestV1 {
 #[serde(rename_all = "snake_case")]
 pub enum UnmountedEcosystemStatusV1 {
     Audited,
+    Partial,
     NotPresent,
     Unsupported,
 }

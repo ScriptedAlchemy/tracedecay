@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
+      id-token: write
       actions: write
       contents: write
       issues: write
@@ -135,20 +136,20 @@ jobs:
       # The release PR is opened as a draft and stays one until it carries a
       # lockfile matching the bumped Cargo.toml, the same invariant the later
       # locked release build enforces.
-      # The bumped manifests deliberately precede Cargo.lock. Bootstrap pnpm
-      # here; the updater repairs Cargo.lock before its frozen installation.
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         if: steps.release.outputs.prs_created == 'true'
         with:
           cache: true
-          cache_dependency_path: |
-            pnpm-lock.yaml
-            Cargo.lock
+          cache_dependency_path: pnpm-lock.yaml
 
       - uses: ./.github/actions/setup-bazel
         if: steps.release.outputs.prs_created == 'true'
         with:
           cache-key: release-metadata-ubuntu-latest
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Update release PR generated metadata
         if: steps.release.outputs.prs_created == 'true'

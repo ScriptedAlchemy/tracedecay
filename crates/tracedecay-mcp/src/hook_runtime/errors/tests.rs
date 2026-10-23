@@ -252,6 +252,35 @@ fn authority_write_failed_includes_cause_in_hook_detail() {
 }
 
 #[test]
+fn transcript_resource_refusal_keeps_the_resource_and_backpressure_status() {
+    let mapped = map_transcript_ingest_error(
+        &tracedecay_sessions::runtime::source::TranscriptIngestError::BackgroundResourceUnavailable {
+            provider: "codex",
+            resource: "shared JSONL page resident-memory capacity",
+        },
+    );
+    let data = structured_hook_error_data(&mapped).unwrap();
+    assert_eq!(
+        data["reason_code"],
+        "transcript_background_resource_unavailable"
+    );
+    assert_eq!(data["status"], "backpressured");
+    assert_eq!(data["retryable"], true);
+    let detail = data["detail"].as_str().expect("hook detail");
+    assert!(detail.contains("codex"), "{detail}");
+    assert!(
+        detail.contains("shared JSONL page resident-memory capacity"),
+        "{detail}"
+    );
+    assert!(
+        mapped
+            .to_string()
+            .contains("shared JSONL page resident-memory capacity"),
+        "{mapped}"
+    );
+}
+
+#[test]
 fn transcript_hook_errors_keep_bounded_retry_data_without_source_detail() {
     let error =
         tracedecay_sessions::runtime::source::TranscriptIngestError::InvalidSourceIdentity {

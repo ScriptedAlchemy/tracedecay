@@ -101,6 +101,7 @@ exports_files(
     [
         "bazel/rust_test.bzl",
         "build-eval-binary.sh",
+        "lib/portable_process.py",
         "test-rust-cache-lineage.py",
         "test-check-packaged-lsp-bridge.py",
         "test-check-sdk-publish-workflow.py",
