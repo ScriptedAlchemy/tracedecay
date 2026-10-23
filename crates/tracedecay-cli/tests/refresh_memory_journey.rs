@@ -672,24 +672,13 @@ impl CpuSample {
         if samples.is_empty() {
             return Err("perf script contains no cpu-clock:u samples".into());
         }
-        let periods: u64 = samples
-            .iter()
-            .filter_map(|line| {
-                let fields: Vec<_> = line.split_whitespace().collect();
-                let event = fields
-                    .iter()
-                    .position(|field| field.starts_with("cpu-clock:u"))?;
-                fields.get(event.checked_sub(1)?)?.parse().ok()
-            })
-            .sum();
-        let unknown = text
-            .lines()
-            .filter(|line| line.contains("[unknown]") || line.trim_start().starts_with("0x"))
-            .count();
-        let stderr = fs::read_to_string(&self.stderr)
-            .map_err(|error| error.to_string())?
-            .to_ascii_lowercase();
-        writeln!(self.log, "sample_records={} period_total={} unresolved_frame_lines={} lost_warning={} throttling_warning={} sample_export={}", samples.len(), periods, unknown, stderr.contains("lost"), stderr.contains("throttl"), samples_path.display()).map_err(|error| error.to_string())?;
+        writeln!(
+            self.log,
+            "sample_records={} sample_export={}",
+            samples.len(),
+            samples_path.display()
+        )
+        .map_err(|error| error.to_string())?;
         Ok(())
     }
 }
