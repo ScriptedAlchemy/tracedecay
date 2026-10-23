@@ -64,6 +64,7 @@ use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
+use crate::ObservationSourcePresenceV1;
 use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
@@ -2253,6 +2254,117 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
         .unwrap()
         .expect("retained observation row");
     assert_eq!(stored.observation().payload(), legacy.payload());
+}
+
+#[asupersync::test]
+async fn an_accepted_canonical_payload_revision_revives_a_retired_record() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let registered = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let store = registered.observation_store();
+    let session_id = SessionId::new("session.codex.revision-revival").unwrap();
+    let legacy = codex_revision_observation(
+        &session_id,
+        1,
+        "receipt.codex.revival.legacy",
+        true,
+        "stable authored content",
+    );
+    registered
+        .record_observation_source_presence(
+            legacy.source(),
+            legacy.scope(),
+            &[ObservationSourcePresenceV1 {
+                observation_id: legacy.observation_id().clone(),
+                generation: legacy.identity().generation(),
+                start_offset: 0,
+            }],
+        )
+        .await
+        .unwrap();
+    store
+        .persist_observation(anchored_write_for(legacy.clone(), None))
+        .await
+        .unwrap();
+    store
+        .project_observation(legacy.observation_id())
+        .await
+        .unwrap();
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
+    let retired_generation = ObservationSourceGenerationV1::new(2).unwrap();
+    registered
+        .begin_observation_source_rewrite(
+            legacy.source(),
+            legacy.scope(),
+            legacy.identity().generation(),
+            retired_generation,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        registered
+            .complete_observation_source_rewrite(
+                legacy.source(),
+                legacy.scope(),
+                retired_generation,
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 0);
+
+    let revision = codex_revision_observation(
+        &session_id,
+        3,
+        "receipt.codex.revival.current",
+        false,
+        "stable authored content",
+    );
+    registered
+        .record_observation_source_presence(
+            revision.source(),
+            revision.scope(),
+            &[ObservationSourcePresenceV1 {
+                observation_id: revision.observation_id().clone(),
+                generation: revision.identity().generation(),
+                start_offset: 0,
+            }],
+        )
+        .await
+        .unwrap();
+    let expected = store
+        .get_source_cursor(legacy.source(), legacy.scope())
+        .await
+        .unwrap();
+    let outcome = store
+        .persist_observation(anchored_write_for(revision.clone(), expected))
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ObservationPersistOutcome::CoveredDuplicate(_)
+    ));
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 0);
+    store
+        .project_observation(legacy.observation_id())
+        .await
+        .unwrap();
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
+    assert_eq!(
+        store
+            .get_observation(legacy.observation_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .observation(),
+        &legacy
+    );
 }
 
 /// Atomicity gate: the refusal marker commits before its cursor advance, so a

@@ -16,7 +16,7 @@ use crate::{
     RuntimeWriteAuthorityStage, StorageOperationExecutor,
     admission::QueueItem,
     connection,
-    persistence::RuntimeWriterPersistence,
+    persistence::{ApplyRecordError, RuntimeWriterPersistence},
     telemetry::{
         LockWorkScope, WriterBatchMetrics, WriterLockWorkSnapshot, WriterTelemetry,
         WriterTransactionMetrics, WriterTransactionOutcome, take_observed_vm,
@@ -364,7 +364,27 @@ fn apply_new<E: StorageOperationExecutor>(
     // One operation-and-ledger boundary: the receipt is the one this savepoint recorded.
     let receipt = match persistence.apply_and_record(&mut savepoint, binding, &item.request) {
         Ok(receipt) => receipt,
-        Err(error) => {
+        Err(ApplyRecordError::Fenced {
+            requested,
+            persisted,
+        }) => {
+            return match savepoint.rollback() {
+                Ok(()) => processed(
+                    item,
+                    Ok(RuntimeSubmitOutcomeV1::Fenced {
+                        expected: requested,
+                        actual: persisted,
+                    }),
+                    false,
+                ),
+                Err(error) => {
+                    let result =
+                        driver_failure(error, "rollback fenced request").result(&item.request);
+                    processed(item, result, false)
+                }
+            };
+        }
+        Err(ApplyRecordError::Storage(error)) => {
             if let Some(outcome) = interruption_outcome(
                 &item.request,
                 item.probe.as_ref(),

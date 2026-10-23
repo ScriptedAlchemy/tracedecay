@@ -1140,6 +1140,9 @@ fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmissionOutcom
         ProjectionStoreError::Storage { .. } if error.is_sqlite_disk_image_corrupt() => {
             HostAdmissionOutcome::terminal_unavailable("projection_store_corrupt")
         }
+        ProjectionStoreError::Storage { .. } if error.writer_fence().is_some() => {
+            HostAdmissionOutcome::terminal_unavailable("projection_store_writer_fenced")
+        }
         ProjectionStoreError::Storage { .. } => {
             HostAdmissionOutcome::retained_unavailable("projection_storage_retry_scheduled")
         }
@@ -1243,6 +1246,29 @@ mod projection_error_outcome_tests {
             Some("projection_storage_retry_scheduled")
         );
         assert!(outcome.retryable);
+    }
+
+    /// A lease whose authority epoch is behind the store's can never commit
+    /// again; the drain must stop instead of rescheduling the same write.
+    #[test]
+    fn a_fenced_writer_classifies_as_blocked_not_retryable() {
+        let fence = tracedecay_store::StoreWriterFencedV1 {
+            requested: tracedecay_store::StoreAuthorityEpochV1::new(2).unwrap(),
+            current: tracedecay_store::StoreAuthorityEpochV1::new(3).unwrap(),
+        };
+        let error = ProjectionStoreError::Storage {
+            operation: "dispatch observation projection runtime operation",
+            source: Box::new(ObservationStoreError::Storage {
+                operation: "submit anchored observation",
+                source: Box::new(fence),
+            }),
+        };
+
+        let outcome = projection_error_outcome(&error);
+
+        assert_eq!(outcome.reason_code, Some("projection_store_writer_fenced"));
+        assert!(!outcome.retryable, "a fenced writer must not be retried");
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
     }
 }
 
@@ -1606,6 +1632,23 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
         }
         ObservationApplicationError::Store(ObservationStoreError::WriterSaturated { .. }) => {
             HostAdmissionOutcome::retained_backpressured("writer_lane_saturated")
+        }
+        // The store fenced this lease: its authority epoch is behind the one
+        // the store holds, so re-driving the same batch through it can never
+        // commit. The owner must reopen the store, not retry.
+        ObservationApplicationError::Store(ObservationStoreError::Storage {
+            operation,
+            source,
+        }) if tracedecay_store::error_chain_writer_fence(source.as_ref()).is_some() => {
+            tracing::warn!(
+                operation,
+                error = %source,
+                reason_code = "authority_writer_fenced",
+                "observation store fenced this writer; its lease must be reopened"
+            );
+            let mut outcome = HostAdmissionOutcome::terminal_unavailable("authority_writer_fenced");
+            outcome.cause = Some(format!("{operation}: {source}"));
+            outcome
         }
         ObservationApplicationError::Store(ObservationStoreError::Storage {
             operation,

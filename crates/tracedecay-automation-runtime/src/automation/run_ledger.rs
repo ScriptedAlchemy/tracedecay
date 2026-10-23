@@ -802,8 +802,8 @@ fn validate_requested_task_key(task_key: &str) -> Result<()> {
 /// Answers a ledger read either from `absent` or from `read` under the
 /// exclusive ledger lock.
 ///
-/// A read must not mint the dashboard directory: acquiring the lock creates
-/// it, and a root that does not exist has no ledger. Absence is therefore
+/// A read must not mint the dashboard directory: first lock acquisition can
+/// create it, and a root that does not exist has no ledger. Absence is therefore
 /// answered from `absent` alone. Running `read` there would open whatever a
 /// first writer created in the meantime, outside the lock and outside
 /// `ensure_no_exact_append_intent`, and expose a row whose publication has
@@ -835,7 +835,7 @@ fn with_run_ledger_read_lock<T>(
     }
     let lock = {
         let _span = tracing::trace_span!("automation.run_ledger.read_lock.acquire").entered();
-        exact_publication::acquire_run_ledger_lock(path).map_err(TraceDecayError::from)
+        exact_publication::acquire_run_ledger_read_lock(path).map_err(TraceDecayError::from)
     }?;
     let result = (|| {
         {
@@ -1694,6 +1694,10 @@ fn validate_run_id_component(run_id: &str) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use tracedecay_runtime_core::storage::{
+        PrivateStoreIo, with_durable_namespace_sync_fault_for_test,
+    };
 
     #[test]
     fn run_id_path_validation_accepts_canonical_dashboard_ids_only_as_normal_components() {
@@ -1738,6 +1742,74 @@ mod tests {
         body.push('\n');
         std::fs::write(&path, body).unwrap();
         (temp, path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ledger_reads_reuse_the_lock_without_republishing_its_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = run_ledger_path(temp.path());
+        let run_id = "settled-run";
+        append_jsonl_line_locked(&path, &ledger_line(run_id, 1)).unwrap();
+
+        let (page, exact) = with_durable_namespace_sync_fault_for_test(1, || {
+            let page = with_run_ledger_read_lock(
+                temp.path(),
+                &path,
+                AutomationRunLedgerPageV1::empty,
+                || read_run_records_tail_page(&path, 25),
+            )
+            .expect("an existing ledger read must not republish the lock directory");
+            let exact = find_run_record_exact_bounded_blocking(temp.path(), run_id)
+                .expect("the exact read must also reuse the existing lock");
+            let error = PrivateStoreIo::create_dir_all_durable(temp.path())
+                .expect_err("the reads must leave the namespace-sync fault armed");
+            assert_eq!(
+                error.to_string(),
+                "injected durable namespace synchronization failure"
+            );
+            (page, exact)
+        });
+
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].run_id, run_id);
+        assert_eq!(exact.unwrap().run_id, run_id);
+
+        let error = with_durable_namespace_sync_fault_for_test(1, || {
+            append_jsonl_line_locked(&path, &ledger_line("next-run", 2))
+        })
+        .expect_err("writers must still reestablish the directory barrier");
+        assert_eq!(
+            error.to_string(),
+            "injected durable namespace synchronization failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_ledger_read_preserves_the_directory_publication_barrier() {
+        let (temp, path) = write_ledger(&[ledger_line("first-read", 1)]);
+        let lock_path = tracedecay_runtime_core::storage::append_lock_path(&path);
+        let error = with_durable_namespace_sync_fault_for_test(1, || {
+            with_run_ledger_read_lock(temp.path(), &path, AutomationRunLedgerPageV1::empty, || {
+                panic!("a failed publication barrier must precede reading")
+            })
+        })
+        .expect_err("first creation must establish the directory barrier");
+        assert!(
+            error
+                .to_string()
+                .contains("injected durable namespace synchronization failure")
+        );
+        assert!(!lock_path.exists());
+
+        let page =
+            with_run_ledger_read_lock(temp.path(), &path, AutomationRunLedgerPageV1::empty, || {
+                read_run_records_tail_page(&path, 25)
+            })
+            .expect("retry the first creation after its barrier can settle");
+        assert_eq!(page.records[0].run_id, "first-read");
+        assert!(lock_path.is_file());
     }
 
     /// A skipped session-reflector scheduler run whose reason sits in the

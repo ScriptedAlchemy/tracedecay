@@ -100,6 +100,8 @@ async fn execute_native_daemon_invocation(
 ) -> DaemonInvocationResponse {
     let engine = engine.clone();
     let handshake = handshake.clone();
+    // Keep the fixture's Tokio handle scoped to this native task so concurrent
+    // fixtures cannot borrow a different runtime or retain it after shutdown.
     let tokio_runtime = tokio::runtime::Handle::current();
     let task = NativeTask::spawn(in_tokio_context(tokio_runtime, async move {
         assert!(

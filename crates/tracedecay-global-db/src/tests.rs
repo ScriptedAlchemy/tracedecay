@@ -22,6 +22,8 @@ mod schema_install_cancellation;
 #[cfg(test)]
 mod session_sync;
 #[cfg(test)]
+mod source_revival;
+#[cfg(test)]
 mod source_rewrite;
 
 #[cfg(test)]

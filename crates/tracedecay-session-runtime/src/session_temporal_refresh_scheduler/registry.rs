@@ -17,6 +17,7 @@ use super::wake::{
 use super::wake::{SessionTemporalRefreshWorkerStatus, enabled_idle_notification};
 use super::worker::run_session_temporal_refresh_scheduler;
 use crate::StoreOwnerKey;
+use tracedecay_domain::SessionId;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
@@ -35,12 +36,14 @@ macro_rules! define_pass_report {
             $visibility projected_batches: usize,
             $visibility completed: usize,
             $visibility failed: usize,
+            $visibility failed_sessions: HashSet<SessionId>,
             $visibility cancelled: usize,
             $visibility deferred: usize,
             $visibility retryable_errors: usize,
             $visibility terminal_errors: usize,
             $visibility deadline_errors: usize,
             $visibility saturated: bool,
+            $visibility discovery_advanced: bool,
             $visibility backlog: Option<usize>,
             $visibility retry_class: Option<SessionTemporalRefreshRetryClass>,
             $visibility last_error: Option<String>,

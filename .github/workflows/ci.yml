@@ -10,13 +10,22 @@ on:
   workflow_dispatch:
     inputs:
       run_os:
-        description: "Also run the macOS matrix"
+        description: "Also run native macOS and Windows tests"
         type: boolean
         default: false
       run_hosts:
         description: "Also run stock host integrations"
         type: boolean
         default: false
+      native_platform:
+        description: "Native platform to test when run_os is enabled"
+        type: choice
+        options: [all, macos, windows]
+        default: all
+      native_targets:
+        description: "Space-separated Bazel target patterns for native tests"
+        type: string
+        default: "//..."
 
 permissions:
   contents: read
@@ -28,7 +37,7 @@ permissions:
 # keeps only the newest pending tip. Shorter shards cut how long that tip
 # may wait for first job — shard layout is owned elsewhere.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && format('os-{0}-hosts-{1}', inputs.run_os, inputs.run_hosts) || 'default' }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && format('os-{0}-{1}-hosts-{2}', inputs.run_os, inputs.native_platform, inputs.run_hosts) || 'default' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
@@ -209,11 +218,10 @@ jobs:
       - name: Test the Hermes dashboard embed helpers
         run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
 
-      - name: Check Rust cache key lineage and the superseded-entry selection
+      - name: Check superseded Actions cache selection and Rust cache lineage
         run: |
           python3 scripts/test-prune-superseded-actions-caches.py
           python3 scripts/test-rust-cache-lineage.py
-          python3 scripts/check-rust-cache-lineage.py
 
       # Packager unit tests. They do not need a release binary, so they run
       # once here instead of once per release matrix target.
@@ -274,7 +282,7 @@ jobs:
       id-token: write
     name: Test macOS
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-os == 'true' && (inputs.native_platform == 'all' || inputs.native_platform == 'macos') }}
     runs-on: macos-26
     timeout-minutes: 330
     steps:
@@ -321,9 +329,27 @@ jobs:
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
-      - name: Build and test the workspace
+      - name: Build and test native targets
         shell: bash
-        run: bazel test --config=ci //...
+        env:
+          BAZEL_TARGETS: ${{ inputs.native_targets || '//...' }}
+        run: |
+          if [[ "$BAZEL_TARGETS" == *$'\n'* ]]; then
+            echo "Native targets must be space-separated" >&2
+            exit 1
+          fi
+          read -r -a targets <<< "$BAZEL_TARGETS"
+          if (( ${#targets[@]} == 0 )); then
+            echo "At least one native Bazel target is required" >&2
+            exit 1
+          fi
+          for target in "${targets[@]}"; do
+            case "$target" in
+              //?*|@*//?*) ;;
+              *) echo "Expected a Bazel target pattern: $target" >&2; exit 1 ;;
+            esac
+          done
+          bazel test --config=ci --test_output=all "${targets[@]}"
 
       - name: Upload failed test diagnostics
         if: failure()
@@ -581,7 +607,8 @@ jobs:
     if: >-
       ${{ needs.scope-gate.outputs.run-heavy == 'true' &&
       (github.event_name != 'workflow_dispatch' ||
-      needs.scope-gate.outputs.run-os == 'true') }}
+      (needs.scope-gate.outputs.run-os == 'true' &&
+      (inputs.native_platform == 'all' || inputs.native_platform == 'windows'))) }}
     runs-on: windows-latest
     timeout-minutes: 330
     steps:
@@ -609,10 +636,28 @@ jobs:
         shell: bash
         run: bazel build --config=ci //...
 
-      - name: Build and test the Windows workspace
+      - name: Build and test native targets
         if: ${{ github.event_name == 'workflow_dispatch' && needs.scope-gate.outputs.run-os == 'true' }}
         shell: bash
-        run: bazel test --config=ci //...
+        env:
+          BAZEL_TARGETS: ${{ inputs.native_targets || '//...' }}
+        run: |
+          if [[ "$BAZEL_TARGETS" == *$'\n'* ]]; then
+            echo "Native targets must be space-separated" >&2
+            exit 1
+          fi
+          read -r -a targets <<< "$BAZEL_TARGETS"
+          if (( ${#targets[@]} == 0 )); then
+            echo "At least one native Bazel target is required" >&2
+            exit 1
+          fi
+          for target in "${targets[@]}"; do
+            case "$target" in
+              //?*|@*//?*) ;;
+              *) echo "Expected a Bazel target pattern: $target" >&2; exit 1 ;;
+            esac
+          done
+          bazel test --config=ci --test_output=all "${targets[@]}"
 
       - name: Upload failed test diagnostics
         if: failure()
@@ -678,15 +723,10 @@ jobs:
     name: Feature gates
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    # x86 shares the pnpm store Repository gates and Dashboard already warm.
-    # ubuntu-26.04-arm missed that cache on run 37707017494 and spent 325s
-    # in `pnpm install` for an 8s `cargo tree`.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: ./.github/actions/setup-pnpm
 
       # One graph walk per push. The release resolver repeats it on the tag it
       # builds, since a release is dispatched without waiting on this run.
@@ -754,9 +794,6 @@ jobs:
   # Do not serialize them behind repository-wide Rust formatting and gates.
   dashboard:
     name: Dashboard
-    permissions:
-      contents: read
-      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -766,10 +803,6 @@ jobs:
         id: bazel
         with:
           cache-key: ci-dashboard
-          tailscale-client-id: >-
-            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Check frontend types, tests, and artifacts
         run: >-
@@ -796,6 +829,12 @@ jobs:
       - name: Verify ChatGPT extension embedded artifacts
         working-directory: plugin/chatgpt-extension
         run: pnpm run check:embedded
+
+      - name: Check Cursor extension types, diagnostics, and embedded artifact
+        run: |
+          bazel run @nodejs//:node -- "$GITHUB_WORKSPACE/plugin/cursor-native-extension/node_modules/typescript/bin/tsc" --noEmit -p "$GITHUB_WORKSPACE/plugin/cursor-native-extension/tsconfig.json"
+          bazel run @nodejs//:node -- "$GITHUB_WORKSPACE/plugin/cursor-native-extension/node_modules/tsx/dist/cli.mjs" --test "$GITHUB_WORKSPACE/plugin/cursor-native-extension/test/nativeDiagnostics.test.ts"
+          bazel run @nodejs//:node -- "$GITHUB_WORKSPACE/plugin/cursor-native-extension/scripts/build-extension.mjs" --check
 
       - name: Upload failed frontend test diagnostics
         if: failure()
@@ -830,9 +869,6 @@ jobs:
       - name: Restore the executable bit the artifact store drops
         run: chmod +x target/debug/tracedecay
 
-      - name: Run generated-plugin unit checks (no Hermes required)
-        run: python3 scripts/hermes_plugin_unit_check.py
-
       - name: Clone stock Hermes at pinned ref
         run: |
           set -euo pipefail
@@ -841,11 +877,16 @@ jobs:
           git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
           git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
 
-      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: ${{ runner.temp }}/hermes-upstream/uv.lock
           cache-suffix: hermes-${{ env.HERMES_UPSTREAM_REF }}
+
+      - name: Run generated-plugin unit checks (no Hermes required)
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: uv run --no-project --with PyYAML==6.0.3 python scripts/hermes_plugin_unit_check.py
 
       - name: Set up stock Hermes environment
         working-directory: ${{ runner.temp }}/hermes-upstream

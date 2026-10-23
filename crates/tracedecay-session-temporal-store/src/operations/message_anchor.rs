@@ -32,6 +32,7 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::derive_canonical_projection;
 
 use super::sources::unavailable;
+use crate::sql::live_effect_predicate;
 
 /// Resolved canonical source binding: anchor id, whether the publication still
 /// has to write an unobserved raw-message anchor row, and the source's
@@ -126,7 +127,8 @@ async fn resolve_materialized_occurrences(
         serde_json::to_string(message_ids).map_err(|error| LcmError::Db(error.to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT DISTINCT occurrence.message_id, occurrence.retrieval_anchor_id,
+            &format!(
+                "SELECT DISTINCT occurrence.message_id, occurrence.retrieval_anchor_id,
                     anchor.anchor_json, anchor.owner_json, occurrence.knowledge_at,
                     observation.observation_json, observation.receipt_id
              FROM session_occurrences occurrence
@@ -134,10 +136,15 @@ async fn resolve_materialized_occurrences(
                ON anchor.anchor_id = occurrence.retrieval_anchor_id
              JOIN observations observation
                ON observation.observation_id = occurrence.source_observation_id
+             JOIN session_temporal_observation_effects AS effect
+               ON effect.observation_id = observation.observation_id
              WHERE occurrence.session_id = ?1
                AND +occurrence.generation <= ?2
                AND occurrence.message_id IN (SELECT value FROM json_each(?3))
+               AND {}
              ORDER BY occurrence.message_id, occurrence.retrieval_anchor_id",
+                live_effect_predicate("(SELECT COALESCE(MAX(sequence), 0) FROM observations)")
+            ),
             params![session_id, generation, encoded_ids],
         )
         .await?;
@@ -218,7 +225,8 @@ async fn resolve_canonical_observations(
     let wanted = unresolved.iter().copied().collect::<BTreeSet<_>>();
     let mut rows = conn
         .query(
-            "SELECT observation.observation_json, observation.receipt_id,
+            &format!(
+                "SELECT observation.observation_json, observation.receipt_id,
                     effect.receipt_id, link.anchor_id, anchor.anchor_json,
                     anchor.owner_json
              FROM session_temporal_observation_effects AS effect
@@ -230,7 +238,10 @@ async fn resolve_canonical_observations(
                ON anchor.anchor_id = link.anchor_id
              WHERE effect.session_id = ?1
                AND effect.output_count > 0
+               AND {}
              ORDER BY effect.observation_sequence, link.anchor_id",
+                live_effect_predicate("(SELECT COALESCE(MAX(sequence), 0) FROM observations)")
+            ),
             params![session_id],
         )
         .await?;
@@ -707,6 +718,35 @@ mod tests {
         .expect("materialized occurrence");
     }
 
+    async fn mark_output_collision(
+        conn: &impl crate::handle::SessionTemporalExec,
+        observation: &DurableObservationV1,
+    ) {
+        conn.execute(
+            "DELETE FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![
+                tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+            ],
+        )
+        .await
+        .expect("collision releases live provenance");
+        conn.execute(
+            "INSERT INTO observation_projection_dispositions (
+                projector_version, observation_id, receipt_id, reason
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+                observation.receipt().receipt().receipt_id().as_str(),
+                tracedecay_store::ProjectionSkipReason::OutputCollision.as_str(),
+            ],
+        )
+        .await
+        .expect("live collision disposition");
+    }
+
     fn publication_over(store_ids: &[i64]) -> LcmImmutableSummaryPublication {
         let mut publication = publication();
         publication.draft.source_refs = store_ids
@@ -989,6 +1029,75 @@ mod tests {
             Err(LcmError::SummarySourceUnavailable { ref reason, .. })
                 if reason == "missing_anchor_binding"
         ));
+    }
+
+    #[asupersync::test]
+    async fn collided_observation_is_not_a_canonical_unmaterialized_source() {
+        let directory = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let conn = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile database")
+            .writer_connection()
+            .expect("profile writer");
+        seed_raw_source(&conn, "1715000001").await;
+        let observation =
+            fixture_observation("codex", "session.message-anchor", "message.source", 1);
+        let anchor = fixture_anchor(&observation);
+        seed_canonical_binding(
+            &conn,
+            &serde_json::to_string(&observation).expect("observation json"),
+            &observation,
+            &anchor,
+            &anchor.owner_column_json().expect("owner json"),
+        )
+        .await;
+        mark_output_collision(&conn, &observation).await;
+
+        let sources = super::super::sources::prepare_sources(&conn, &publication())
+            .await
+            .expect("collided canonical receipt is excluded from live ownership");
+
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].unobserved_raw_anchor);
+        assert_ne!(sources[0].canonical.id, anchor.anchor_id().as_str());
+    }
+
+    #[asupersync::test]
+    async fn collided_observation_is_not_a_canonical_materialized_source() {
+        let directory = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let conn = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile database")
+            .writer_connection()
+            .expect("profile writer");
+        seed_raw_source(&conn, "1715000001").await;
+        let observation =
+            fixture_observation("codex", "session.message-anchor", "message.source", 1);
+        let anchor = fixture_anchor(&observation);
+        seed_canonical_binding(
+            &conn,
+            &serde_json::to_string(&observation).expect("observation json"),
+            &observation,
+            &anchor,
+            &anchor.owner_column_json().expect("owner json"),
+        )
+        .await;
+        materialize_occurrence(&conn, &observation, &anchor, "message.source").await;
+        mark_output_collision(&conn, &observation).await;
+
+        let sources = super::super::sources::prepare_sources(&conn, &publication())
+            .await
+            .expect("collided materialized receipt is excluded from live ownership");
+
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].unobserved_raw_anchor);
+        assert_ne!(sources[0].canonical.id, anchor.anchor_id().as_str());
     }
 
     #[asupersync::test]

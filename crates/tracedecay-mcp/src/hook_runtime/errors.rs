@@ -27,6 +27,13 @@ pub fn map_transcript_ingest_error(
             detail: Some(cause),
             ..
         } => format!("transcript ingest failed: authority_write_failed: {cause}"),
+        tracedecay_sessions::runtime::source::TranscriptIngestError::BackgroundResourceUnavailable {
+            provider,
+            resource,
+        } => format!(
+            "transcript ingest failed: {}: {provider}: {resource}",
+            disposition.reason_code
+        ),
         _ => format!("transcript ingest failed: {}", disposition.reason_code),
     };
     hook_admission_error(

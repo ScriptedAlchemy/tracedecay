@@ -3,7 +3,8 @@
 //! Admission records where each record sits in the newest layout that offered
 //! it. A rewrite keeps the byte prefix it retained and re-offers the rest under
 //! a new generation; once that generation has been read to the end of the
-//! file, every record it did not offer again is retired from projection.
+//! file, every record it did not offer again is retired from projection. A
+//! later layout's accepted offer queues the retired record for projection.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -88,42 +89,45 @@ impl RegisteredGlobalDb {
             return Ok(());
         }
         let key = source_key(source, scope)?;
-        let rows = records
-            .iter()
-            .map(|record| {
-                Ok((
-                    record.observation_id.as_str().to_owned(),
-                    record.generation.generation_id().to_string(),
-                    offset(record.start_offset)?,
-                ))
-            })
-            .collect::<ProjectionStoreResult<Vec<_>>>()?;
-        self.transact_or(
-            |error| storage("run source presence transaction", error),
-            async move |transaction| {
-                for (observation_id, generation, start_offset) in &rows {
-                    transaction
-                        .execute(
-                            "INSERT INTO observation_source_presence (
-                                source_key, observation_id, generation, start_offset
-                             ) VALUES (?1, ?2, ?3, ?4)
-                             ON CONFLICT(source_key, observation_id) DO UPDATE SET
-                                generation = excluded.generation,
-                                start_offset = excluded.start_offset",
-                            params![
-                                key.as_str(),
-                                observation_id.as_str(),
-                                generation.as_str(),
-                                *start_offset,
-                            ],
-                        )
-                        .await
-                        .map_err(|error| storage("record source presence", error))?;
-                }
-                Ok(())
-            },
-        )
-        .await
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| storage("begin source presence transaction", error))?;
+        let recorded = async {
+            for record in records {
+                transaction
+                    .execute(
+                        "INSERT INTO observation_source_presence (
+                            source_key, observation_id, generation, start_offset
+                         ) VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(source_key, observation_id) DO UPDATE SET
+                            generation = excluded.generation,
+                            start_offset = excluded.start_offset",
+                        params![
+                            key.as_str(),
+                            record.observation_id.as_str(),
+                            record.generation.generation_id().to_string(),
+                            offset(record.start_offset)?,
+                        ],
+                    )
+                    .await
+                    .map_err(|error| storage("record source presence", error))?;
+            }
+            Ok(())
+        }
+        .await;
+        match recorded {
+            Ok(()) => transaction
+                .commit()
+                .await
+                .map_err(|error| storage("commit source presence transaction", error)),
+            Err(error) => {
+                transaction.rollback().await.map_err(|rollback| {
+                    storage("roll back source presence transaction", rollback)
+                })?;
+                Err(error)
+            }
+        }
     }
 
     /// Starts a rewrite of the source from `previous` to `generation`. The
@@ -156,6 +160,28 @@ impl RegisteredGlobalDb {
                 // A rewrite the previous generation never finished still names its
                 // own layout: its retained prefix was relabeled to it.
                 let unfinished = pending_rewrite(&transaction, &key).await?;
+                transaction
+                    .execute(
+                        "UPDATE projection_queue SET revival_generation = ?2
+                         WHERE EXISTS (
+                             SELECT 1 FROM observation_source_presence AS presence
+                             WHERE presence.source_key = ?1
+                               AND presence.observation_id = projection_queue.observation_id
+                               AND presence.start_offset < ?3
+                               AND presence.generation IN (?4, ?5)
+                               AND presence.generation = projection_queue.revival_generation
+                               AND presence.start_offset = projection_queue.revival_start_offset
+                         )",
+                        params![
+                            key.as_str(),
+                            generation.as_str(),
+                            retained_through,
+                            previous.as_str(),
+                            unfinished.as_deref(),
+                        ],
+                    )
+                    .await
+                    .map_err(|error| storage("retain accepted source offer", error))?;
                 transaction
                     .execute(
                         "UPDATE observation_source_presence SET generation = ?2

@@ -2,8 +2,33 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::ObservationSourceCursorV1;
 
-use super::{DurabilityClassV1, StoreIncarnationV1};
+use super::{DurabilityClassV1, StoreAuthorityEpochV1, StoreIncarnationV1};
 use crate::observation::CursorAdvanceLedgerDisagreementV1;
+
+/// A writer whose authority epoch is behind the authority its store already
+/// holds for the same shard and incarnation. The fence is permanent for that
+/// writer: replaying the same request on the same lease can never commit, so
+/// every retry loop must treat it as terminal and reopen the store instead.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("store writer authority epoch {requested:?} is fenced by authority epoch {current:?}")]
+pub struct StoreWriterFencedV1 {
+    pub requested: StoreAuthorityEpochV1,
+    pub current: StoreAuthorityEpochV1,
+}
+
+/// The writer fence carried anywhere in `error`'s source chain.
+pub fn error_chain_writer_fence(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<StoreWriterFencedV1> {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = current {
+        if let Some(fence) = err.downcast_ref::<StoreWriterFencedV1>() {
+            return Some(*fence);
+        }
+        current = err.source();
+    }
+    None
+}
 
 /// Validation failures for pure runtime contract DTOs.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

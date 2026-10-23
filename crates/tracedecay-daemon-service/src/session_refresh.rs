@@ -295,7 +295,10 @@ impl SessionTemporalRefreshWakePort for FixedSessionTemporalRefreshWake {
         !self.0
     }
 
-    fn wake_and_wait_until_idle(&self, _timeout: Duration) -> SessionTemporalRefreshWakeFuture<'_> {
+    fn wake_and_wait_for_projection(
+        &self,
+        _timeout: Duration,
+    ) -> SessionTemporalRefreshWakeFuture<'_> {
         let accepted = self.0;
         Box::pin(async move { accepted })
     }

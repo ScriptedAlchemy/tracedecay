@@ -28,7 +28,8 @@ use receipts::full_projection_coverage;
 pub(super) use receipts::validate_final_projection_receipt;
 pub(crate) use receipts::{base_source_frontier, digest_bytes};
 pub use receipts::{
-    record_canonical_observation_effect, request_session_temporal_reset,
+    record_canonical_observation_effect,
+    record_live_collision_preserving_canonical_observation_effect, request_session_temporal_reset,
     request_session_temporal_reset_if_materialized,
 };
 
@@ -73,6 +74,26 @@ pub struct SessionTemporalRefreshDiscoveryPage {
     cursor: SessionTemporalRefreshDiscoveryCursor,
     active_rows_scanned: usize,
     has_more: bool,
+}
+
+/// The canonical source frontier and the active generation's publication.
+/// Only an applied relation receipt belonging to that active generation and
+/// matching its expected graph watermark proves it is searchable. A pending
+/// receipt or retired generation cannot satisfy a new join.
+pub struct SessionTemporalPublication {
+    observed_through: u64,
+    published_through: Option<u64>,
+}
+
+impl SessionTemporalPublication {
+    pub const fn observed_through(&self) -> u64 {
+        self.observed_through
+    }
+
+    pub fn covers(&self, target: u64) -> bool {
+        self.published_through
+            .is_some_and(|published| target <= published && published <= self.observed_through)
+    }
 }
 
 impl SessionTemporalRefreshDiscoveryPage {
@@ -402,6 +423,68 @@ async fn skip_trailing_history_effects(
 }
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
+    /// Read one session's source and publication from the same snapshot.
+    /// A pending reset invalidates the old publication even when its numeric
+    /// frontier still covers the source; a future frontier is never proof.
+    pub async fn session_temporal_publication_result(
+        &self,
+        session_id: &SessionId,
+    ) -> SessionStoreResult<SessionTemporalPublication> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT
+                     COALESCE((
+                         SELECT effect.observation_sequence
+                         FROM session_temporal_observation_effects AS effect
+                         WHERE effect.session_id = ?1 AND effect.output_count > 0
+                         ORDER BY effect.observation_sequence DESC LIMIT 1
+                     ), 0),
+                     (SELECT CAST(json_extract(
+                          active.frozen_watermarks_json, '$.projection_frontier'
+                      ) AS INTEGER)
+                      FROM session_temporal_generations AS active
+                      JOIN session_relation_receipts AS receipt
+                        ON receipt.session_id = active.session_id
+                       AND receipt.generation = active.generation
+                       AND receipt.state = 'applied'
+                       AND receipt.graph_watermark = receipt.expected_graph_watermark
+                      WHERE active.session_id = ?1 AND active.state = 'active'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM session_temporal_resets AS reset
+                            WHERE reset.session_id = ?1 AND reset.requested_at IS NOT NULL
+                        ))",
+                params![session_id.as_str()],
+            )
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?
+            .ok_or_else(|| {
+                storage_message(DISCOVER_REFRESH, "session publication returned no row")
+            })?;
+        let observed_through = u64::try_from(
+            row.get::<i64>(0)
+                .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+        )
+        .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        let published_through = row
+            .get::<Option<i64>>(1)
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        Ok(SessionTemporalPublication {
+            observed_through,
+            published_through,
+        })
+    }
+
     /// Discovers sessions that need temporal projection: sessions whose
     /// output-producing effects committed past `cursor` left them behind their
     /// projection frontier, plus active generations that lack an applied

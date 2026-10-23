@@ -1,0 +1,114 @@
+diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -645,7 +645,7 @@
+             visited_libs[name] = artifact
+     return ambiguous_libs
+ 
+-def _depend_on_metadata(crate_info, force_depend_on_objects):
++def _depend_on_metadata(crate_info, force_depend_on_objects, force_depend_on_metadata = False):
+     """Determines if we can depend on metadata for this crate.
+ 
+     By default (when pipelining is disabled or when the crate type needs to link against
+@@ -658,6 +658,8 @@
+     Args:
+         crate_info (CrateInfo): The Crate to determine this for.
+         force_depend_on_objects (bool): if set we will not depend on metadata.
++        force_depend_on_metadata (bool): A no-link action, such as Clippy, can use
++            metadata even when checking an executable or procedural macro.
+ 
+     Returns:
+         Whether we can depend on metadata for this crate.
+@@ -665,7 +667,7 @@
+     if force_depend_on_objects:
+         return False
+ 
+-    return crate_info.type in ("rlib", "lib")
++    return force_depend_on_metadata or crate_info.type in ("rlib", "lib")
+ 
+ def collect_inputs(
+         ctx,
+@@ -683,7 +685,8 @@
+         force_depend_on_objects = False,
+         experimental_use_cc_common_link = False,
+         include_linker_inputs = False,
+-        include_link_flags = True):
++        include_link_flags = True,
++        force_depend_on_metadata = False):
+     """Gather's the inputs and required input information for a rustc action
+ 
+     Args:
+@@ -707,6 +710,8 @@
+             rust binaries.
+         include_linker_inputs (bool, optional): Whether to include linker inputs in transitive dependencies.
+         include_link_flags (bool, optional): Whether to include flags like `-l` that instruct the linker to search for a library.
++        force_depend_on_metadata (bool, optional): Select metadata dependencies and
++            omit transitive native linker artifacts for a no-link action.
+ 
+     Returns:
+         tuple: A tuple: A tuple of the following items:
+@@ -747,7 +752,7 @@
+     # flattened on each transitive rust_library dependency.
+     libs_from_linker_inputs = []
+     ambiguous_libs = {}
+-    if crate_info.type not in ("lib", "rlib") or include_linker_inputs:
++    if (not force_depend_on_metadata and crate_info.type not in ("lib", "rlib")) or include_linker_inputs:
+         linker_inputs = dep_info.transitive_noncrates.to_list()
+         ambiguous_libs = _disambiguate_libs(ctx.actions, toolchain, crate_info, dep_info, use_pic)
+         libs_from_linker_inputs = _collect_libs_from_linker_inputs(linker_inputs, use_pic) + [
+@@ -762,7 +767,7 @@
+     linkstamp_outs = []
+ 
+     transitive_crate_outputs = dep_info.transitive_crate_outputs
+-    if _depend_on_metadata(crate_info, force_depend_on_objects):
++    if _depend_on_metadata(crate_info, force_depend_on_objects, force_depend_on_metadata):
+         transitive_crate_outputs = dep_info.transitive_metadata_outputs
+ 
+     dependency_search_artifacts = None
+@@ -1009,7 +1014,8 @@
+         error_format = None,
+         allowed_unstable_rust_features = None,
+         link_std_dylib = False,
+-        dependency_search_artifacts = None):
++        dependency_search_artifacts = None,
++        force_depend_on_metadata = False):
+     """Builds an Args object containing common rustc flags
+ 
+     Args:
+@@ -1078,6 +1084,8 @@
+         use_json_output (bool): Have rustc emit json and process_wrapper parse json messages to output rendered output.
+         build_metadata (bool): Generate CLI arguments for building *only* .rmeta files. This requires use_json_output.
+         force_depend_on_objects (bool): Force using `.rlib` object files instead of metadata (`.rmeta`) files even if they are available.
++        force_depend_on_metadata (bool): Use metadata dependencies for an action
++            that checks an executable without linking it.
+         skip_expanding_rustc_env (bool): Whether to skip expanding CrateInfo.rustc_env_attr
+         require_explicit_unstable_features (bool): Whether to require all unstable features to be explicitly opted in to using `-Zallow-features=...`.
+         error_format (str, optional): Error format to pass to the `--error-format` command line argument. If set to None, uses the "_error_format" entry in `attr`.
+@@ -1421,7 +1429,7 @@
+         if crate_info.type == "dylib" and toolchain.target_os in ["macos", "darwin"]:
+             rustc_flags.add("--codegen=link-arg=-Wl,-install_name,@rpath/" + crate_info.output.basename)
+ 
+-    use_metadata = _depend_on_metadata(crate_info, force_depend_on_objects)
++    use_metadata = _depend_on_metadata(crate_info, force_depend_on_objects, force_depend_on_metadata)
+ 
+     # These always need to be added, even if not linking this crate.
+     add_crate_link_flags(rustc_flags, dep_info, force_all_deps_direct, use_metadata, dependency_search_artifacts)
+diff --git a/rust/private/clippy.bzl b/rust/private/clippy.bzl
+--- a/rust/private/clippy.bzl
++++ b/rust/private/clippy.bzl
+@@ -161,6 +161,7 @@
+         dep_info,
+         build_info,
+         lint_files,
++        force_depend_on_metadata = True,
+     )
+ 
+     if clippy_diagnostics_file:
+@@ -187,6 +188,7 @@
+         build_env_files = build_env_files,
+         build_flags_files = build_flags_files,
+         emit = ["dep-info", "metadata"],
++        force_depend_on_metadata = True,
+         skip_expanding_rustc_env = True,
+         use_json_output = bool(clippy_diagnostics_file),
+         error_format = error_format,

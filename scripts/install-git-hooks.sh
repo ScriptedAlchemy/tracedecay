@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-pnpm install
+pnpm install --frozen-lockfile
 # Written to the shared repository config, so every linked worktree inherits
 # it; the relative path resolves against each worktree's own root.
 git config core.hooksPath .githooks

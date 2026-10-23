@@ -73,7 +73,6 @@ pub(crate) use connection::ProductionMcpConnectionContext;
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
-pub(crate) use lifecycle::VersionCheckState;
 pub(crate) use rmcp::RmcpInitializeResponseDecorator;
 #[cfg(test)]
 pub(crate) use rmcp::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
@@ -401,7 +400,6 @@ pub struct McpServer {
     _host_admission_test_runtime:
         Option<Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
     hook_project_routes: SharedHookProjectRouteCache,
-    version_cache: std::sync::Mutex<VersionCheckState>,
     /// When the MCP server was started from a subdirectory of the project root,
     /// this holds the relative path prefix (e.g. `"src/mcp"`). Listing tools
     /// use it as the default path filter. `None` when cwd == project root.
@@ -751,18 +749,6 @@ impl McpServer {
             )
             .await?;
         }
-        // Registered test servers exercise real completion without consulting
-        // the operator's network. A fresh cache entry for this exact build
-        // keeps version-notice behavior deterministic while preserving the
-        // production completion path.
-        {
-            let mut version_cache = server
-                .version_cache
-                .lock()
-                .expect("registered test server version cache");
-            version_cache.latest = Some(env!("CARGO_PKG_VERSION").to_owned());
-            version_cache.checked_at = Some(Instant::now());
-        }
         let _ = active_server_slot.set(Arc::downgrade(&server));
         Ok(server)
     }
@@ -1050,11 +1036,6 @@ impl McpServer {
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
             hook_project_routes: project_routes,
-            version_cache: std::sync::Mutex::new(VersionCheckState {
-                latest: None,
-                checked_at: None,
-                refreshing: false,
-            }),
             scope_prefix,
             shutdown: tracedecay_daemon_service::ShutdownCoordinatorV1::default(),
             timings_enabled: AtomicBool::new(telemetry_config.timings),

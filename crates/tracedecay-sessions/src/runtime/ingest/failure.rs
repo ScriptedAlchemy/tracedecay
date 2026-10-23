@@ -343,6 +343,11 @@ pub fn classify_transcript_ingest_disposition(
         source::TranscriptIngestError::Store(TranscriptStoreError::Conflict { .. }) => {
             ("transcript_cursor_conflict", true, Backpressured)
         }
+        source::TranscriptIngestError::Store(TranscriptStoreError::Storage { source, .. })
+            if tracedecay_store::error_chain_writer_fence(source.as_ref()).is_some() =>
+        {
+            ("transcript_writer_fenced", false, Unavailable)
+        }
         source::TranscriptIngestError::Store(TranscriptStoreError::Storage { .. }) => {
             ("transcript_storage_failed", true, Unavailable)
         }
@@ -500,12 +505,30 @@ pub fn classify_claude_observation_failure(
         Store::CursorCoverageMismatch => permanent("observation_cursor_coverage_gap"),
         Store::InvalidReplayLimit { .. } => permanent("observation_replay_limit_invalid"),
         Store::Contract(_) => permanent("observation_contract_invalid"),
+        // The lease's authority is behind the store's: no replay through this
+        // lease can commit, so the pass stops instead of spinning on it.
+        Store::Storage { source, .. }
+            if tracedecay_store::error_chain_writer_fence(source.as_ref()).is_some() =>
+        {
+            ClaudeObservationFailureClass {
+                reason_code: "observation_writer_fenced",
+                retryable: false,
+                status: Unavailable,
+            }
+        }
         _ => unavailable("observation_storage_failed"),
     };
     let projection = |error: &Projection| {
         if error.is_sqlite_disk_image_corrupt() {
             return ClaudeObservationFailureClass {
                 reason_code: "projection_store_corrupt",
+                retryable: false,
+                status: Unavailable,
+            };
+        }
+        if error.writer_fence().is_some() {
+            return ClaudeObservationFailureClass {
+                reason_code: "projection_store_writer_fenced",
                 retryable: false,
                 status: Unavailable,
             };
@@ -706,5 +729,36 @@ mod cancellation_tests {
             "a genuine content rejection stays permanent"
         );
         assert_eq!(disposition.status, HostAdmissionStatus::Degraded);
+    }
+
+    /// A store that fenced the ingest lease rejects every replay through it;
+    /// the pass must not keep retrying the same write.
+    #[test]
+    fn a_fenced_writer_is_not_retryable() {
+        let fence = tracedecay_store::StoreWriterFencedV1 {
+            requested: tracedecay_store::StoreAuthorityEpochV1::new(2).unwrap(),
+            current: tracedecay_store::StoreAuthorityEpochV1::new(3).unwrap(),
+        };
+        let fenced =
+            source::TranscriptIngestError::Store(tracedecay_store::TranscriptStoreError::Storage {
+                operation: "persist transcript observations",
+                source: Box::new(fence),
+            });
+
+        let disposition = classify_transcript_ingest_disposition(&fenced);
+
+        assert_eq!(disposition.reason_code, "transcript_writer_fenced");
+        assert!(!disposition.retryable, "a fenced lease never commits again");
+        assert_eq!(disposition.status, HostAdmissionStatus::Unavailable);
+
+        let transient =
+            source::TranscriptIngestError::Store(tracedecay_store::TranscriptStoreError::Storage {
+                operation: "persist transcript observations",
+                source: Box::new(std::io::Error::other("database is locked")),
+            });
+        assert!(
+            classify_transcript_ingest_disposition(&transient).retryable,
+            "ordinary storage failures stay retryable"
+        );
     }
 }

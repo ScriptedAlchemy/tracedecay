@@ -315,7 +315,7 @@ pub fn find_run_record_exact_bounded_blocking(
 ) -> Result<Option<AutomationRunLedgerRecord>> {
     validate_run_id_component(run_id)?;
     let path = run_ledger_path(dashboard_root);
-    let lock = super::exact_publication::acquire_run_ledger_lock(&path)
+    let lock = super::exact_publication::acquire_run_ledger_read_lock(&path)
         .map_err(tracedecay_domain::errors::TraceDecayError::from)?;
     let result = (|| {
         super::exact_publication::ensure_no_exact_append_intent(dashboard_root)

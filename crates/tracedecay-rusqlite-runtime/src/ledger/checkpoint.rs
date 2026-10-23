@@ -1,3 +1,6 @@
+use std::fmt;
+use std::time::Duration;
+
 use rusqlite::{Row, params};
 use tracedecay_store::{
     CommitSequenceV1, DurabilityClassV1, RuntimeTransactionScopeV1, ShardWatermarkV1,
@@ -8,8 +11,110 @@ use super::{
     LedgerError,
     sqlite::{BindingKey, LedgerTransaction, Submission, decode_json, encode_json, sqlite_u64},
 };
+use crate::exact_sql::{ExactSqlError, ExactSqlHandle, ExactSqlStatement, ExactSqlValue};
 
 const CHECKPOINT_TABLE: &str = "td_runtime_writer_checkpoint_v1";
+const SELECT_PERSISTED_AUTHORITY_EPOCH: &str = r#"
+SELECT authority_epoch
+FROM td_runtime_writer_checkpoint_v1
+WHERE shard_json = ?1 AND incarnation = ?2
+"#;
+
+/// Why the persisted writer authority of a shard incarnation could not be read.
+#[derive(Debug)]
+pub enum PersistedWriterAuthorityError {
+    Sql(ExactSqlError),
+    Corrupt { field: &'static str },
+}
+
+impl fmt::Display for PersistedWriterAuthorityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sql(error) => {
+                write!(formatter, "persisted writer authority read failed: {error}")
+            }
+            Self::Corrupt { field } => write!(
+                formatter,
+                "persisted writer authority row is corrupt in {CHECKPOINT_TABLE}.{field}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PersistedWriterAuthorityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sql(error) => Some(error),
+            Self::Corrupt { .. } => None,
+        }
+    }
+}
+
+impl From<ExactSqlError> for PersistedWriterAuthorityError {
+    fn from(error: ExactSqlError) -> Self {
+        Self::Sql(error)
+    }
+}
+
+/// The authority epoch the ledger last checkpointed for `binding`'s shard and
+/// incarnation, or `None` for a store no writer of that incarnation has
+/// committed to. Read through the attached runtime's own readers, before the
+/// runtime is published, so a reopen can learn whether its allocated epoch
+/// is already behind the store. Reader admission and execution are awaited
+/// off the native runtime worker through the existing exact-SQL async port.
+pub async fn persisted_writer_authority_epoch(
+    handle: &ExactSqlHandle,
+    binding: &StoreRuntimeBindingV1,
+    max_wait: Duration,
+) -> Result<Option<StoreAuthorityEpochV1>, PersistedWriterAuthorityError> {
+    if handle.binding() != binding {
+        return Err(ExactSqlError::AuthorityMismatch.into());
+    }
+    let key =
+        BindingKey::from_binding(binding).map_err(|_| PersistedWriterAuthorityError::Corrupt {
+            field: "shard_json",
+        })?;
+    let schema = handle
+        .query_async(
+            ExactSqlStatement::new(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)"
+                    .to_owned(),
+                vec![ExactSqlValue::Text(CHECKPOINT_TABLE.to_owned())],
+            )?,
+            max_wait,
+        )
+        .await?;
+    match schema.rows.first().and_then(|row| row.values.first()) {
+        Some(ExactSqlValue::Integer(0)) => return Ok(None),
+        Some(ExactSqlValue::Integer(1)) => {}
+        _ => return Err(PersistedWriterAuthorityError::Corrupt { field: "schema" }),
+    }
+    let rows = handle
+        .query_async(
+            ExactSqlStatement::new(
+                SELECT_PERSISTED_AUTHORITY_EPOCH.to_owned(),
+                vec![
+                    ExactSqlValue::Text(key.shard_json),
+                    ExactSqlValue::Integer(key.incarnation_sql),
+                ],
+            )?,
+            max_wait,
+        )
+        .await?;
+    let Some(row) = rows.rows.first() else {
+        return Ok(None);
+    };
+    match row.values.first() {
+        Some(ExactSqlValue::Integer(raw)) => decode_authority_epoch(*raw, "authority_epoch")
+            .map(Some)
+            .map_err(|_| PersistedWriterAuthorityError::Corrupt {
+                field: "authority_epoch",
+            }),
+        _ => Err(PersistedWriterAuthorityError::Corrupt {
+            field: "authority_epoch",
+        }),
+    }
+}
 const SELECT_CHECKPOINT: &str = r#"
 SELECT authority_epoch, commit_sequence, watermark_json, transaction_scope_json,
        original_receipt_json, operation_id, durability_json, committed_at_micros
