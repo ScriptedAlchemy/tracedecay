@@ -3,8 +3,9 @@
 use rusqlite::Connection;
 
 pub const WORKFLOW_SCHEMA_VERSION_V1: i64 = 1;
+// SHA-256 of table SQL in WORKFLOW_TABLE_CONTRACTS_V1 order, joined with "\n".
 pub const WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1: &str =
-    "sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be";
+    "sha256:91b41d948895e40b7f7213dd2cc1ded333a4583eadba3dd72897dc3b8cc48748";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkflowColumnContractV1 {
@@ -368,9 +369,7 @@ const WORKFLOW_SCHEMA_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
 
 const WORKFLOW_ARTIFACT_PAYLOADS_SQL_V1: &str = "CREATE TABLE workflow_artifact_payloads (
     payload_digest TEXT NOT NULL PRIMARY KEY,
-    byte_length INTEGER NOT NULL CHECK (
-        byte_length = length(payload) AND byte_length <= 4194304
-    ),
+    byte_length INTEGER NOT NULL CHECK (byte_length = length(payload)),
     payload BLOB NOT NULL
 ) STRICT";
 
@@ -472,7 +471,7 @@ pub const WORKFLOW_SCHEMA_IDENTITY_V1: &str =
 VALUES (
     1,
     1,
-    'sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be'
+    'sha256:91b41d948895e40b7f7213dd2cc1ded333a4583eadba3dd72897dc3b8cc48748'
 )";
 
 pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
