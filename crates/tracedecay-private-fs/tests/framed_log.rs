@@ -183,6 +183,7 @@ mod windows_publication {
                     permissions.set_readonly(true);
                     fs::set_permissions(temporary, permissions)
                 },
+                tracedecay_private_fs::framed_log::replace_via_rename,
                 DirectorySyncPolicy::Strict,
             )
         };
