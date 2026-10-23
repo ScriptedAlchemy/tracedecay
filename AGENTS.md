@@ -41,6 +41,10 @@ unauthorized external action after completing independent, authorized work.
 - Never create or retain rollback copies, profile backups, old databases, old
   binaries, snapshot clones, or any other secondary copy of project or operator
   data or installed artifacts. Do not keep a prior version "just in case."
+- This includes agent-host configuration. Never copy `~/.claude`, `~/.codex`,
+  `~/.agents`, or their settings, config, plugin, or marketplace files before
+  `tracedecay install`, `update`, `uninstall`, or a manual edit. Preview with
+  `--dry-run` and rely on the receipt-backed host lifecycle instead.
 - An operation that inherently requires temporary staging must remove that
   staging when it finishes; it must not leave a recoverable old copy behind.
   Never delete the sole active durable copy under the guise of this cleanup.
