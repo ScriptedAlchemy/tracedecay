@@ -120,8 +120,7 @@ impl HostBundleWriterV1 {
         Ok(())
     }
 
-    /// Verify first-party catalog identity, validate artifact bytes, plan ownership-aware
-    /// mutations, then execute them, putting every touched path back on failure.
+    /// Catalog identity and artifact bytes must verify before owned paths are mutated.
     #[tracing::instrument(name = "hosts.agent.host_bundle.execute", level = "trace", skip_all)]
     pub fn execute(
         &mut self,
