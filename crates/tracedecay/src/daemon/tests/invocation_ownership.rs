@@ -101,8 +101,39 @@ const PREPARATION_RELEASE_DEADLINE: Duration = Duration::from_mins(1);
 
 #[derive(Default)]
 struct CuratorPreparationPause {
+    run_id: Mutex<Option<String>>,
     release: Mutex<Option<mpsc::Receiver<()>>>,
+    completed: Mutex<Option<mpsc::Sender<()>>>,
     entered: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct ReservationRunId(Option<String>);
+
+impl tracing::field::Visit for ReservationRunId {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "run_id" {
+            self.0 = Some(format!("{value:?}"));
+        }
+    }
+}
+
+struct CuratorPreparationRelease {
+    release: mpsc::Sender<()>,
+    completed: mpsc::Receiver<()>,
+    pause: Arc<CuratorPreparationPause>,
+}
+
+impl Drop for CuratorPreparationRelease {
+    fn drop(&mut self) {
+        if self.pause.release.lock().unwrap().take().is_some() {
+            return;
+        }
+        let _ = self.release.send(());
+        self.completed
+            .recv_timeout(PREPARATION_RELEASE_DEADLINE)
+            .expect("reservation writer finishes before fixture cleanup");
+    }
 }
 
 struct PauseCuratorPreparation(Arc<CuratorPreparationPause>);
@@ -111,15 +142,63 @@ impl<S> Layer<S> for PauseCuratorPreparation
 where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn on_enter(&self, id: &tracing::span::Id, context: Context<'_, S>) {
-        if context.span(id).unwrap().metadata().name() != "daemon.automation.effect.reserve" {
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        context: Context<'_, S>,
+    ) {
+        if attributes.metadata().name() != "daemon.automation.effect.reserve" {
             return;
         }
-        if let Some(release) = self.0.release.lock().unwrap().take() {
+        let mut run_id = ReservationRunId::default();
+        attributes.record(&mut run_id);
+        println!("reservation observed run_id={:?}", run_id.0);
+        let mut selected = self.0.run_id.lock().unwrap();
+        if selected.is_none() {
+            *selected = run_id.0.clone();
+        }
+        context.span(id).unwrap().extensions_mut().insert(run_id);
+    }
+
+    fn on_enter(&self, id: &tracing::span::Id, context: Context<'_, S>) {
+        let span = context.span(id).unwrap();
+        let extensions = span.extensions();
+        let Some(run_id) = extensions
+            .get::<ReservationRunId>()
+            .and_then(|run| run.0.as_deref())
+        else {
+            return;
+        };
+        if Some(run_id) != self.0.run_id.lock().unwrap().as_deref() {
+            return;
+        }
+        let release = self.0.release.lock().unwrap().take();
+        if let Some(release) = release {
+            println!(
+                "reservation paused run_id={:?}",
+                self.0.run_id.lock().unwrap()
+            );
             self.0.entered.notify_one();
             release
                 .recv_timeout(PREPARATION_RELEASE_DEADLINE)
                 .expect("release the curator reservation writer");
+        }
+    }
+
+    fn on_close(&self, id: tracing::span::Id, context: Context<'_, S>) {
+        let span = context.span(&id).unwrap();
+        let extensions = span.extensions();
+        let Some(run_id) = extensions
+            .get::<ReservationRunId>()
+            .and_then(|run| run.0.as_deref())
+        else {
+            return;
+        };
+        if Some(run_id) == self.0.run_id.lock().unwrap().as_deref() {
+            if let Some(completed) = self.0.completed.lock().unwrap().take() {
+                let _ = completed.send(());
+            }
         }
     }
 }
@@ -149,7 +228,11 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
         return;
     }
 
-    let pause = Arc::new(CuratorPreparationPause::default());
+    let request_id = "request.socket-curator-preparation-shutdown";
+    let pause = Arc::new(CuratorPreparationPause {
+        run_id: Mutex::new(Some(request_id.to_owned())),
+        ..CuratorPreparationPause::default()
+    });
     tracing::subscriber::set_global_default(
         tracing_subscriber::registry().with(PauseCuratorPreparation(Arc::clone(&pause))),
     )
@@ -186,8 +269,14 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
     client.write_all(b"\n").await.expect("handshake newline");
 
     let (release, release_rx) = mpsc::channel();
+    let (completed, completed_rx) = mpsc::channel();
     *pause.release.lock().unwrap() = Some(release_rx);
-    let request_id = "request.socket-curator-preparation-shutdown";
+    *pause.completed.lock().unwrap() = Some(completed);
+    let release = CuratorPreparationRelease {
+        release,
+        completed: completed_rx,
+        pause: Arc::clone(&pause),
+    };
     let observed_at = tracedecay_contracts::clock::now_micros();
     let request = DaemonInvocationRequest::retained_application(
         request_id,
@@ -243,7 +332,7 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
     }
     assert!(!shutdown.is_finished());
     assert!(!journal_path.exists(), "the writer is still paused");
-    release.send(()).expect("release the reservation writer");
+    drop(release);
     let shutdown = tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, shutdown)
         .await
         .expect("the completed writer releases project shutdown")
@@ -262,6 +351,162 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
     )
     .expect("durable curator reservation");
     assert_eq!(record["admission"]["request"]["run_id"], request_id);
+}
+
+#[tokio::test]
+async fn scheduler_curator_preparation_keeps_its_writer_owned_through_shutdown() {
+    const CHILD: &str = "TRACEDECAY_TEST_SCHEDULER_PREPARATION_SHUTDOWN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let test_name = format!(
+            "{}::scheduler_curator_preparation_keeps_its_writer_owned_through_shutdown",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name, "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("run isolated scheduler preparation shutdown journey");
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "scheduler preparation shutdown journey failed: {output:?}"
+        );
+        return;
+    }
+
+    let pause = Arc::new(CuratorPreparationPause::default());
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(PauseCuratorPreparation(Arc::clone(&pause))),
+    )
+    .expect("isolated scheduler preparation subscriber");
+    let (_temp, _database_scope, engine, handshake) =
+        unopened_committed_fixture("scheduler-preparation-shutdown").await;
+    let (release, release_rx) = mpsc::channel();
+    let (completed, completed_rx) = mpsc::channel();
+    *pause.release.lock().unwrap() = Some(release_rx);
+    *pause.completed.lock().unwrap() = Some(completed);
+    let release = CuratorPreparationRelease {
+        release,
+        completed: completed_rx,
+        pause: Arc::clone(&pause),
+    };
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("project server");
+    let dashboard_root = server.cg().await.store_layout().dashboard_root.clone();
+    drop(server);
+    tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, pause.entered.notified())
+        .await
+        .expect("the real background scheduler reaches its reservation writer");
+    let run_id = pause
+        .run_id
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("observed run identity");
+    assert!(
+        run_id.starts_with("request.automation.scheduler."),
+        "{run_id}"
+    );
+    let schedulers = engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await;
+    assert_eq!(schedulers.len(), 1, "only the fixture scheduler is running");
+    let (owner, handle) = schedulers.iter().next().unwrap();
+    assert_eq!(
+        owner.project_root,
+        handshake
+            .project_path
+            .as_ref()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+    );
+    assert_eq!(
+        handle.lifecycle,
+        crate::daemon::scheduler::AutomationSchedulerLifecycle::Running
+    );
+    assert!(
+        handle.task.is_some(),
+        "the registered production scheduler owns the tick"
+    );
+    println!("paused scheduler run_id={run_id} owner={owner:?}");
+    drop(schedulers);
+
+    let typed_run_id = tracedecay_domain::RunId::new(&run_id).expect("scheduler run id");
+    let journal_key = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.automation-run.terminal-key.v1",
+        &typed_run_id,
+    ))
+    .expect("scheduler journal key");
+    let journal_path = dashboard_root.join("automation_effects").join(format!(
+        "{}.json",
+        journal_key.as_str().trim_start_matches("sha256:")
+    ));
+    assert!(
+        !journal_path.exists(),
+        "the exact scheduler reservation is paused"
+    );
+    let registry = engine.invocation.service.project_runtimes.clone();
+    let (drain_waiting, drain_is_waiting) = tokio::sync::oneshot::channel();
+    registry.arm_shutdown_drain_waiting(drain_waiting);
+    let shutdown_engine = engine.clone();
+    let mut shutdown = tokio::spawn(async move { shutdown_engine.shutdown_all().await });
+    let early_shutdown = tokio::select! {
+        result = &mut shutdown => Some(result.expect("shutdown task")),
+        waiting = tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, drain_is_waiting) => {
+            waiting.expect("shutdown reaches the project runtime drain")
+                .expect("the scheduler reservation owns the project drain");
+            None
+        }
+    };
+    assert!(
+        !journal_path.exists(),
+        "the scheduler writer remains paused"
+    );
+    println!("scheduler shutdown before writer release run_id={run_id} receipt={early_shutdown:?}");
+    drop(release);
+    let returned_early = early_shutdown.is_some();
+    let shutdown = match early_shutdown {
+        Some(receipt) => receipt,
+        None => tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, shutdown)
+            .await
+            .expect("released scheduler writer permits shutdown")
+            .expect("shutdown task"),
+    };
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(journal_path)
+            .expect("scheduler reservation completed before fixture cleanup"),
+    )
+    .expect("durable scheduler reservation");
+    assert_eq!(record["admission"]["request"]["run_id"], run_id);
+    assert_eq!(record["admission"]["request_id"], run_id);
+    assert_eq!(
+        record["admission"]["request"]["task"]["kind"],
+        "memory_curator"
+    );
+    println!(
+        "scheduler writer completed run_id={run_id} admission={}",
+        record["admission"]
+    );
+    assert!(
+        !returned_early,
+        "shutdown returned while scheduler writer {run_id} was paused: {shutdown:?}"
+    );
+    for name in ["invocation", "automation"] {
+        assert!(
+            shutdown
+                .background
+                .owners
+                .iter()
+                .any(|owner| owner.name == name && owner.status.is_clean()),
+            "{name} must finish cleanly after its writer: {shutdown:?}"
+        );
+    }
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
 }
 
 // Each surface check constructs its future inside its own function and returns
