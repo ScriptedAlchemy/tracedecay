@@ -6028,7 +6028,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.91"
+version = "1.0.0-beta.92"
 dependencies = [
  "asupersync",
  "axum",
@@ -6304,7 +6304,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.91"
+version = "1.0.0-beta.92"
 dependencies = [
  "asupersync",
  "aws-lc-rs",
@@ -7050,7 +7050,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.91"
+version = "1.0.0-beta.92"
 dependencies = [
  "asupersync",
  "rusqlite",
