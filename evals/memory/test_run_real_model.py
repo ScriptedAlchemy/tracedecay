@@ -252,6 +252,7 @@ elif args[:1] == ["tool"]:
                             "kind": "available",
                             "fact": {
                                 "fact_id": "fact.1",
+                                "content": "c",
                                 "source": {"kind": "application", "operation_id": "op.1"},
                                 "source_label": "fixture-seed",
                                 "trust_score_millionths": 500000,
@@ -1352,6 +1353,7 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                             "kind": "available",
                             "fact": {
                                 "fact_id": "fact.seed",
+                                "content": "A seeded fact",
                                 "source": {"kind": "application", "operation_id": "op.seed"},
                                 "source_label": "fixture-seed",
                                 "trust_score_millionths": 800_000,
@@ -1371,12 +1373,13 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
             "trust": 0.8,
         })
 
-    def test_source_assertions_select_fact_v1_source_labels(self):
+    def test_source_and_content_assertions_require_canonical_facts(self):
         fact_records = [
             {
                 "kind": "available",
                 "fact": {
                     "fact_id": "fact.seed",
+                    "content": "A seeded fact",
                     "source": {"kind": "application", "operation_id": "op.seed"},
                     "source_label": "fixture-seed",
                     "trust_score_millionths": 800_000,
@@ -1387,6 +1390,7 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                 "kind": "available",
                 "fact": {
                     "fact_id": "fact.other",
+                    "content": "Another fact",
                     "source": {"kind": "application", "operation_id": "op.other"},
                     "source_label": "other-seed",
                     "trust_score_millionths": 500_000,
@@ -1397,6 +1401,20 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
         search_hits = [{"fact": item["fact"]} for item in fact_records]
         scenario = {
             "assertions": [
+                {
+                    "kind": "content-count",
+                    "name": "no_secret_value_stored",
+                    "contains": "SECRET_TOKEN",
+                    "op": "eq",
+                    "value": 0,
+                },
+                {
+                    "kind": "content-count",
+                    "name": "seeded_content_count",
+                    "contains": "A seeded fact",
+                    "op": "eq",
+                    "value": 1,
+                },
                 {
                     "kind": "source-count",
                     "name": "fixture_seed_count",
@@ -1456,7 +1474,47 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                 scenario, "tracedecay", Path("/fixture"), {}
             )
 
-        self.assertEqual([outcome["passed"] for outcome in outcomes], [True] * 6)
+        self.assertEqual(len(outcomes), len(scenario["assertions"]))
+        for outcome in outcomes:
+            self.assertTrue(outcome["passed"], outcome)
+        self.assertEqual([outcome["actual"] for outcome in outcomes[:2]], [0, 1])
+
+        fact = fact_records[0]["fact"]
+        for content, expected_count in (("", 0), ("SECRET_TOKEN", 1)):
+            with self.subTest(content=content):
+                fact["content"] = content
+                with mock.patch.object(
+                    run_real_model, "call_exact_tool", side_effect=call_tool
+                ):
+                    outcomes = run_real_model.evaluate_assertions(
+                        scenario, "tracedecay", Path("/fixture"), {}
+                    )
+                no_secret = outcomes[0]
+                self.assertEqual(no_secret["actual"], expected_count)
+                self.assertEqual(no_secret["passed"], expected_count == 0)
+
+        for content_fields in (
+            {},
+            {"content": None},
+            {"content": 0},
+            {"content": False},
+            {"content": ["SECRET_TOKEN"]},
+            {"content": {"SECRET_TOKEN": "value"}},
+        ):
+            with self.subTest(content_fields=content_fields):
+                fact.pop("content", None)
+                fact.update(content_fields)
+                with mock.patch.object(
+                    run_real_model, "call_exact_tool", side_effect=call_tool
+                ):
+                    outcomes = run_real_model.evaluate_assertions(
+                        scenario, "tracedecay", Path("/fixture"), {}
+                    )
+                self.assertEqual(len(outcomes), len(scenario["assertions"]))
+                for outcome in outcomes:
+                    self.assertFalse(outcome["passed"], outcome)
+                    self.assertEqual(outcome.get("error_type"), "fact-store", outcome)
+                    self.assertIn("did not return a canonical FactV1", outcome["error"])
 
     def test_fixture_preload_requires_the_seeded_fact_in_search_results(self):
         scenario = {
@@ -1492,6 +1550,7 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                                             "kind": "available",
                                             "fact": {
                                                 "fact_id": "fact.hot",
+                                                "content": "Warm this fact through exact search",
                                                 "source": {
                                                     "kind": "application",
                                                     "operation_id": "op.hot",

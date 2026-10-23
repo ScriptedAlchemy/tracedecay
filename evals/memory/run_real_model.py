@@ -416,6 +416,7 @@ def require_fact_record(fact, operation):
     if (
         not isinstance(fact, dict)
         or not isinstance(fact.get("fact_id"), str)
+        or not isinstance(fact.get("content"), str)
         or not isinstance(fact.get("source"), dict)
         or not (fact.get("source_label") is None or isinstance(fact.get("source_label"), str))
         or not isinstance(fact.get("trust_score_millionths"), int)
@@ -811,7 +812,7 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
             elif kind == "content-count":
                 records = list_fact_records(tracedecay_bin, fixture, env)
                 actual = sum(
-                    assertion["contains"] in record.get("content", "") for record in records
+                    assertion["contains"] in record["content"] for record in records
                 )
                 outcomes.append(compare_or_failure(assertion, actual))
             elif kind == "source-trust":
