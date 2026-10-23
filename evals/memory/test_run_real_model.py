@@ -222,7 +222,7 @@ class EvalStorageIsolationTest(unittest.TestCase):
 
 
 FAKE_BIN = """#!/usr/bin/env python3
-import os, socket, sys, time
+import json, os, socket, sys, time
 args = sys.argv[1:]
 if args[:2] == ["daemon", "run"]:
     if os.environ.get("FAKE_DAEMON_FAIL"):
@@ -240,7 +240,29 @@ elif args[:1] == ["init"]:
     c = socket.socket(socket.AF_UNIX)
     c.connect(os.environ["TRACEDECAY_DAEMON_SOCKET"])
 elif args[:1] == ["tool"]:
-    print('{"outcome": "committed", "result": {"disposition": "added", "fact": {"kind": "available", "fact": {"fact_id": "fact.1"}}}}')
+    print(json.dumps({
+        "outcome": {
+            "outcome": "effect",
+            "value": {
+                "payload": {
+                    "outcome": "committed",
+                    "result": {
+                        "disposition": "added",
+                        "fact": {
+                            "kind": "available",
+                            "fact": {
+                                "fact_id": "fact.1",
+                                "source": {"kind": "application", "operation_id": "op.1"},
+                                "source_label": "fixture-seed",
+                                "trust_score_millionths": 500000,
+                                "telemetry": {"retrieval_count": 0},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }))
 """
 
 
@@ -1328,7 +1350,13 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                         "disposition": "added",
                         "fact": {
                             "kind": "available",
-                            "fact": {"fact_id": "fact.seed"},
+                            "fact": {
+                                "fact_id": "fact.seed",
+                                "source": {"kind": "application", "operation_id": "op.seed"},
+                                "source_label": "fixture-seed",
+                                "trust_score_millionths": 800_000,
+                                "telemetry": {"retrieval_count": 0},
+                            },
                         },
                     },
                 },
@@ -1462,7 +1490,16 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
                                         "disposition": "added",
                                         "fact": {
                                             "kind": "available",
-                                            "fact": {"fact_id": "fact.hot"},
+                                            "fact": {
+                                                "fact_id": "fact.hot",
+                                                "source": {
+                                                    "kind": "application",
+                                                    "operation_id": "op.hot",
+                                                },
+                                                "source_label": "hot",
+                                                "trust_score_millionths": 800_000,
+                                                "telemetry": {"retrieval_count": 0},
+                                            },
                                         },
                                     },
                                 }
@@ -1493,7 +1530,7 @@ class ExactFactStoreEvaluationTest(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(
-                run_real_model.ExactFactStoreError, "did not return the requested FactId"
+                run_real_model.ExactFactStoreError, "did not return FactId fact.hot"
             ):
                 run_real_model.seed_fixture(scenario, "tracedecay", {}, Path(fixture))
 

@@ -4,7 +4,7 @@
 Seeds a throwaway fixture project, points a REAL agent (Hermes by default,
 optionally `cursor-agent`) at it through the generated tracedecay plugin /
 MCP server, sends the scenario prompts, then reads end-state through exact
-FactId/FactRecordV1 fact-store operations.
+FactId/FactV1 fact-store operations.
 
 Real model turns consume credits/quota, so the run is gated behind BOTH
 `--agent-turn` and `--i-understand-model-cost` (pattern adopted from the
@@ -394,18 +394,46 @@ def call_exact_tool(tracedecay_bin, fixture, env, tool, args):
             f"{tool} failed ({result.returncode}): {result.stdout.strip()}"
         )
     try:
-        return json.loads(result.stdout)
+        envelope = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise ExactFactStoreError(f"{tool} returned invalid JSON: {exc}") from exc
-
-
-def require_fact_record(response, operation):
-    fact = response.get("fact") if isinstance(response, dict) else None
-    if not isinstance(fact, dict) or not isinstance(fact.get("fact_id"), str):
         raise ExactFactStoreError(
-            f"{operation} did not return a canonical FactRecordV1 with string fact_id"
+            f"{tool} returned invalid retained-surface JSON: {exc}"
+        ) from exc
+    outcome = envelope.get("outcome") if isinstance(envelope, dict) else None
+    if not isinstance(outcome, dict) or outcome.get("outcome") not in ("evidence", "effect"):
+        raise ExactFactStoreError(
+            f"{tool} did not return retained evidence or an effect: {envelope}"
+        )
+    value = outcome.get("value")
+    response = value.get("payload") if isinstance(value, dict) else None
+    if not isinstance(response, dict):
+        raise ExactFactStoreError(f"{tool} omitted its retained result payload")
+    return response
+
+
+def require_fact_record(fact, operation):
+    telemetry = fact.get("telemetry") if isinstance(fact, dict) else None
+    if (
+        not isinstance(fact, dict)
+        or not isinstance(fact.get("fact_id"), str)
+        or not isinstance(fact.get("source"), dict)
+        or not (fact.get("source_label") is None or isinstance(fact.get("source_label"), str))
+        or not isinstance(fact.get("trust_score_millionths"), int)
+        or not isinstance(telemetry, dict)
+        or not isinstance(telemetry.get("retrieval_count"), int)
+    ):
+        raise ExactFactStoreError(
+            f"{operation} did not return a canonical FactV1"
         )
     return fact
+
+
+def available_fact_record(projection, operation):
+    if not isinstance(projection, dict) or projection.get("kind") != "available":
+        raise ExactFactStoreError(
+            f"{operation} did not return an available FactProjectionV1"
+        )
+    return require_fact_record(projection.get("fact"), operation)
 
 
 def seed_fixture(scenario, tracedecay_bin, env, fixture):
@@ -423,11 +451,18 @@ def seed_fixture(scenario, tracedecay_bin, env, fixture):
             {
                 "content": fact["content"],
                 "category": fact["category"],
-                "source": fact["source"],
+                "source_label": fact["source_label"],
                 "trust": fact["trust"],
             },
         )
-        seeded_fact = require_fact_record(response, "fixture setup")
+        commit = response.get("result") if response.get("outcome") == "committed" else None
+        if not isinstance(commit, dict) or commit.get("disposition") not in (
+            "added", "near_duplicate", "possible_conflict"
+        ):
+            raise ExactFactStoreError(
+                "fixture setup did not return a committed FactStoreAddResultV1"
+            )
+        seeded_fact = available_fact_record(commit.get("fact"), "fixture setup")
         preload_query = fact.get("preload_query")
         for _ in range(fact.get("preload_searches", 0)):
             if not preload_query:
@@ -443,7 +478,7 @@ def seed_fixture(scenario, tracedecay_bin, env, fixture):
             )
             returned_ids = {
                 record["fact_id"]
-                for record in fact_records_from_collection(
+                for record in fact_records_from_search(
                     search_response, "fixture preload search"
                 )
             }
@@ -670,19 +705,21 @@ def compare_assertion_value(actual, expected, op):
     return None
 
 
-def fact_records_from_collection(response, operation):
+def fact_records_from_list(response, operation):
     entries = response.get("facts") if isinstance(response, dict) else None
     if not isinstance(entries, list):
-        raise ExactFactStoreError(f"{operation} omitted its FactRecordV1 collection")
-    records = []
-    for entry in entries:
-        record = entry.get("fact", entry) if isinstance(entry, dict) else None
-        if not isinstance(record, dict) or not isinstance(record.get("fact_id"), str):
-            raise ExactFactStoreError(
-                f"{operation} returned a collection entry without a string FactId"
-            )
-        records.append(record)
-    return records
+        raise ExactFactStoreError(f"{operation} omitted its FactProjectionV1 collection")
+    return [available_fact_record(projection, operation) for projection in entries]
+
+
+def fact_records_from_search(response, operation):
+    hits = response.get("hits") if isinstance(response, dict) else None
+    if not isinstance(hits, list):
+        raise ExactFactStoreError(f"{operation} omitted its FactSearchHitV1 collection")
+    return [
+        require_fact_record(hit.get("fact") if isinstance(hit, dict) else None, operation)
+        for hit in hits
+    ]
 
 
 def list_fact_records(tracedecay_bin, fixture, env):
@@ -693,7 +730,7 @@ def list_fact_records(tracedecay_bin, fixture, env):
         "tracedecay_fact_store_list",
         {"limit": 200},
     )
-    return fact_records_from_collection(response, "tracedecay_fact_store_list")
+    return fact_records_from_list(response, "tracedecay_fact_store_list")
 
 
 def search_fact_records(tracedecay_bin, fixture, env, query, limit):
@@ -704,14 +741,14 @@ def search_fact_records(tracedecay_bin, fixture, env, query, limit):
         "tracedecay_fact_store_search",
         {"query": query, "limit": limit},
     )
-    return fact_records_from_collection(response, "tracedecay_fact_store_search")
+    return fact_records_from_search(response, "tracedecay_fact_store_search")
 
 
 def source_record(records, source):
-    matches = [record for record in records if record.get("source") == source]
+    matches = [record for record in records if record.get("source_label") == source]
     if len(matches) != 1:
         raise ExactFactStoreError(
-            f"source `{source}` resolved to {len(matches)} FactRecordV1 values, expected one"
+            f"source label `{source}` resolved to {len(matches)} FactV1 values, expected one"
         )
     return matches[0]
 
@@ -766,7 +803,10 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
                 )
             elif kind == "source-count":
                 records = list_fact_records(tracedecay_bin, fixture, env)
-                actual = sum(record.get("source") == assertion["source"] for record in records)
+                actual = sum(
+                    record.get("source_label") == assertion["source"]
+                    for record in records
+                )
                 outcomes.append(compare_or_failure(assertion, actual))
             elif kind == "content-count":
                 records = list_fact_records(tracedecay_bin, fixture, env)
@@ -777,13 +817,18 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
             elif kind == "source-trust":
                 records = list_fact_records(tracedecay_bin, fixture, env)
                 matching = [
-                    record for record in records if record.get("source") == assertion["source"]
+                    record
+                    for record in records
+                    if record.get("source_label") == assertion["source"]
                 ]
-                values = [record.get("trust_score") for record in matching]
-                if not values or not all(isinstance(value, (int, float)) for value in values):
+                trust_scores = [record.get("trust_score_millionths") for record in matching]
+                if not trust_scores or not all(
+                    isinstance(value, int) for value in trust_scores
+                ):
                     raise ExactFactStoreError(
-                        f"source `{assertion['source']}` did not yield typed FactRecordV1 trust"
+                        f"source label `{assertion['source']}` did not yield typed FactV1 trust"
                     )
+                values = [value / 1_000_000 for value in trust_scores]
                 passed = all(
                     compare_assertion_value(value, assertion["value"], assertion["op"])
                     for value in values
@@ -792,9 +837,9 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
             elif kind == "retrieval-total":
                 records = list_fact_records(tracedecay_bin, fixture, env)
                 actual = sum(
-                    record.get("retrieval_count", 0)
+                    record["telemetry"]["retrieval_count"]
                     for record in records
-                    if record.get("source") == assertion["source"]
+                    if record.get("source_label") == assertion["source"]
                 )
                 outcomes.append(compare_or_failure(assertion, actual))
             elif kind == "feedback-history":
@@ -821,7 +866,7 @@ def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
                     assertion["query"],
                     assertion.get("limit", 5),
                 )
-                sources = [record.get("source") for record in records]
+                sources = [record.get("source_label") for record in records]
                 expected_source = assertion.get("top_fact_source", assertion.get("source"))
                 if kind == "search-source":
                     outcomes.append(assertion_outcome(assertion, sources, expected_source in sources))
