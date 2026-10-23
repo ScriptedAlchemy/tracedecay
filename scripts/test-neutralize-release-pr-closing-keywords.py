@@ -152,7 +152,7 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
     linked worktree of the operator's repository."""
 
     def run_refresh(
-        self, scratch_path: Path, cargo_stub: str, bazel_stub: str = ""
+        self, scratch_path: Path, bazel_generator: str = ""
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path, Path, bytes]:
         main = scratch_path / "main"
         checkout = scratch_path / "checkout"
@@ -181,7 +181,17 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / name, main / "scripts" / name)
         (main / "scripts" / "bazel").mkdir()
         generator = main / "scripts" / "bazel" / "gen_builds.py"
-        generator.write_text(bazel_stub)
+        generator.write_text(
+            bazel_generator
+            or """from pathlib import Path
+for path in (
+    "crates/tracedecay/BUILD.bazel",
+    "crates/tracedecay-cli/BUILD.bazel",
+    "crates/tracedecay-project/BUILD.bazel",
+):
+    Path(path).write_text('version = "1.0.0-beta.58"\\n')
+"""
+        )
         for package in ("sdks/typescript", "plugin/chatgpt-extension"):
             path = main / package / "package.json"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,7 +221,6 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
             text=True,
         )
         (main / "version.txt").write_text("1.0.0-beta.58\n")
-        (main / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.95.0"\n')
         (main / "Cargo.lock").write_text("version = 4\n")
         git("init", "-q", "-b", "main")
         git("config", "user.name", "Operator")
@@ -228,12 +237,18 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
         body_path.write_text(RELEASE_PLEASE_BODY)
         edited_path = scratch_path / "edited.md"
         stubs = {
-            "cargo": cargo_stub.format(lockfile=checkout / "Cargo.lock"),
             "bazel": (
                 "#!/bin/sh\n"
-                '[ "$#" -eq 2 ] && [ "$1" = run ] && '
-                '[ "$2" = //scripts:bazel/gen_builds.py ] || exit 64\n'
-                'exec python3 scripts/bazel/gen_builds.py\n'
+                '[ "$#" -eq 2 ] || exit 64\n'
+                'case "$1 $2" in\n'
+                '  "fetch --repo=@c")\n'
+                '    [ "${CARGO_BAZEL_REPIN:-}" = workspace ] || exit 65\n'
+                "    printf 'version = 4\\n# refreshed by Bazel\\n' > Cargo.lock ;;\n"
+                '  "run //scripts:bazel/gen_builds.py")\n'
+                '    grep -q "# refreshed by Bazel" Cargo.lock || exit 66\n'
+                '    exec python3 scripts/bazel/gen_builds.py ;;\n'
+                '  *) exit 64 ;;\n'
+                'esac\n'
             ),
             "gh": (
                 "#!/bin/sh\n"
@@ -271,7 +286,6 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             result, _, edited_path, _, _ = self.run_refresh(
                 Path(scratch),
-                "#!/bin/sh\nexit 0\n",
                 """from pathlib import Path
 for path in (
     "crates/tracedecay/BUILD.bazel",
@@ -292,7 +306,14 @@ for path in (
             global_config = scratch_path / "global.gitconfig"
             result, git_env, _, remote, shared_config_before = self.run_refresh(
                 scratch_path,
-                "#!/bin/sh\nprintf 'version = 4\\n# bumped\\n' > '{lockfile}'\n",
+                """from pathlib import Path
+for path in (
+    "crates/tracedecay/BUILD.bazel",
+    "crates/tracedecay-cli/BUILD.bazel",
+    "crates/tracedecay-project/BUILD.bazel",
+):
+    Path(path).write_text('version = "1.0.0-beta.58"\\n')
+""",
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(shared_config.read_bytes(), shared_config_before)

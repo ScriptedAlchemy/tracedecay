@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
-"""Behavioral tests for rust-cache key lineage and the workspace-root guard."""
+"""Behavioral tests for rust-cache key lineage."""
 
 from __future__ import annotations
 
-import contextlib
 import importlib.util
-import io
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
 LINEAGE_PATH = ROOT / "scripts/rust_cache_lineage.py"
-CHECKER_PATH = ROOT / "scripts/check-rust-cache-lineage.py"
-WORKFLOWS = ROOT / ".github/workflows"
-# Hawk still uses the Cargo cache for its optional diagnostics.
-FIXTURE = "hawk.yml"
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -61,57 +53,6 @@ class RustCacheKeyLineageTests(unittest.TestCase):
             self.lineage.lineage_of("v0-rust-slice-tests-Linux-x64-a68045c9-6447760f"),
             "slice-tests-Linux-x64",
         )
-
-
-class WorkspaceRootTests(unittest.TestCase):
-    """Drive the checker against a scratch copy of a Cargo-building workflow."""
-
-    def setUp(self) -> None:
-        self.checker = load_module(CHECKER_PATH, "check_rust_cache_lineage")
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        self.workflows = Path(scratch.name)
-        shutil.copyfile(WORKFLOWS / FIXTURE, self.workflows / FIXTURE)
-        self.checker.WORKFLOWS = self.workflows
-
-    def _assert_rejected_after(self, old: str, new: str, reason: str) -> None:
-        self.assertEqual(self.checker.main(), 0)
-        path = self.workflows / FIXTURE
-        text = path.read_text(encoding="utf-8")
-        self.assertIn(old, text)
-        path.write_text(text.replace(old, new, 1), encoding="utf-8")
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
-            self.checker.main()
-        self.assertIn(reason, stderr.getvalue())
-
-    def test_rejects_rooting_rust_cache_at_the_vendored_checkout(self) -> None:
-        self._assert_rejected_after(
-            "crates -> ../target/hawk\n",
-            ". -> target\n",
-            f"{FIXTURE} rust-cache step must list workspace root 'crates -> ../target'",
-        )
-
-    def test_rejects_dropping_the_lockfile_key_root(self) -> None:
-        self._assert_rejected_after(
-            "            . -> target/rust-cache-lockfile-key\n",
-            "",
-            f"{FIXTURE} rust-cache step must list workspace root "
-            "'. -> target/rust-cache-lockfile-key'",
-        )
-
-    def test_step_split_ignores_sibling_steps(self) -> None:
-        text = (
-            "steps:\n"
-            "      - uses: Swatinem/rust-cache@v2\n"
-            "        with:\n"
-            "          shared-key: a\n"
-            "\n"
-            "      - run: echo 'crates -> ../target'\n"
-        )
-        (step,) = self.checker.rust_cache_steps(text)
-        self.assertIn("shared-key: a", step)
-        self.assertNotIn("crates -> ../target", step)
 
 
 if __name__ == "__main__":

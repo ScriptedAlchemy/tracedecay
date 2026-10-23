@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::sync::OnceLock;
 use std::time::{Duration, UNIX_EPOCH};
 
 use semver::Version;
@@ -37,27 +36,10 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
     latest.cmp_precedence(&current) == Ordering::Greater
 }
 
-/// Returns true if `latest` is a newer version than `current` AND the
-/// difference is at least a minor version bump (patch-only bumps return false).
-pub fn is_newer_minor_version(current: &str, latest: &str) -> bool {
-    let Ok(current) = Version::parse(current) else {
-        return false;
-    };
-    let Ok(latest) = Version::parse(latest) else {
-        return false;
-    };
-    if current.pre.is_empty() != latest.pre.is_empty() {
-        return false;
-    }
-    latest.cmp_precedence(&current) == Ordering::Greater
-        && (latest.major, latest.minor) > (current.major, current.minor)
-}
-
 /// Why a GitHub release lookup produced no installable version.
 ///
-/// The updater, `doctor`, and the version warning share this one
-/// classification, so a refusal GitHub answered is never reported as a
-/// missing asset or as being offline.
+/// The updater and `doctor` share this one classification, so a refusal GitHub
+/// answered is never reported as a missing asset or as being offline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseLookupError {
     /// GitHub refused the request because the API quota is exhausted.
@@ -162,26 +144,4 @@ impl std::error::Error for ReleaseLookupError {}
 
 fn http_date(unix_seconds: u64) -> String {
     httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_secs(unix_seconds))
-}
-
-type FetchLatestVersion = fn() -> Result<String, ReleaseLookupError>;
-
-static FETCH_LATEST_VERSION: OnceLock<FetchLatestVersion> = OnceLock::new();
-
-/// Admits the CLI binary's sync ureq release lookup. A second admission is
-/// ignored so tests that re-enter process start stay idempotent. An
-/// unregistered lookup returns `None`.
-pub fn admit_sync_cloud_probes(fetch_latest_version: FetchLatestVersion) {
-    let _ = FETCH_LATEST_VERSION.set(fetch_latest_version);
-}
-
-/// Set by test harnesses so no spawned CLI or daemon asks GitHub for the
-/// latest release; the advisory version check then has no answer.
-pub const NO_RELEASE_CHECK_ENV: &str = "TRACEDECAY_NO_RELEASE_CHECK";
-
-pub fn fetch_latest_version() -> Option<Result<String, ReleaseLookupError>> {
-    if std::env::var_os(NO_RELEASE_CHECK_ENV).is_some() {
-        return None;
-    }
-    FETCH_LATEST_VERSION.get().map(|fetch| fetch())
 }

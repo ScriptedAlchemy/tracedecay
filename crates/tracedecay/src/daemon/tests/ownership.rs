@@ -366,30 +366,36 @@ async fn mounted_graph_listing_takes_no_server_lease_while_it_reads() {
         .expect("mount project server");
 
     let swap = server.graph_slot().write_owned().await;
+    let mut registry_gate = Some(engine.store_administration.project_servers().lock().await);
     let listing = engine.store_administration.mounted_project_graphs();
     let mut listing = std::pin::pin!(listing);
     let handles = Arc::strong_count(&server);
-    assert!(
-        std::future::Future::poll(
-            listing.as_mut(),
-            &mut std::task::Context::from_waker(std::task::Waker::noop()),
-        )
-        .is_pending(),
-        "the listing parks on the held graph read"
-    );
+    let registry_lock = engine.store_administration.project_servers().lock();
+    let mut registry_lock = std::pin::pin!(registry_lock);
+    // Force the first listing poll to wait for another registry user. Tokio's
+    // cooperative budget can also defer it before the held graph slot.
+    // Drive both futures with real wakeups: the fair registry mutex admits
+    // the listing before this later lock request, then must release it while
+    // the graph write guard still prevents the listing from completing.
+    let registry = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        std::future::poll_fn(|context| {
+            assert!(
+                std::future::Future::poll(listing.as_mut(), context).is_pending(),
+                "the listing parks on the held graph read"
+            );
+            drop(registry_gate.take());
+            std::future::Future::poll(registry_lock.as_mut(), context)
+        }),
+    )
+    .await
+    .expect("a parked graph listing must release the registry lock for route binds");
     assert_eq!(
         Arc::strong_count(&server),
         handles,
         "a parked graph listing must hold no server handle"
     );
-    assert!(
-        engine
-            .store_administration
-            .project_servers()
-            .try_lock()
-            .is_ok(),
-        "a parked graph listing must not hold the registry lock, or every route bind waits on the swap"
-    );
+    drop(registry);
     drop(swap);
     assert_eq!(listing.await.len(), 1);
 }
