@@ -286,10 +286,10 @@ importers:
     dependencies:
       '@modelcontextprotocol/client':
         specifier: ^2.3.1
-        version: 2.3.1
+        version: 2.4.0
       '@modelcontextprotocol/ext-apps':
         specifier: ^2.0.3
-        version: 2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)
+        version: 2.0.3(@modelcontextprotocol/client@2.4.0)(@modelcontextprotocol/core@2.4.0)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)
       '@modelcontextprotocol/node':
         specifier: ^2.1.1
         version: 2.1.1(@modelcontextprotocol/server@2.3.1)
@@ -298,7 +298,7 @@ importers:
         version: 2.3.1
       '@openai/mcp-extensions':
         specifier: ^0.2.0
-        version: 0.2.1(@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)
+        version: 0.2.1(@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.4.0)(@modelcontextprotocol/core@2.4.0)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)
       '@tracedecay/sdk':
         specifier: workspace:*
         version: link:../../sdks/typescript
@@ -824,12 +824,16 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
-  '@modelcontextprotocol/client@2.3.1':
-    resolution: {integrity: sha512-mIGZXpHsjnZ6lD+gD/WCMpR5k8yVQQ8nNFH1N0Srf7AvnwTUMYD6pvTY8ng2+He5FfV7YMZLmrjL7cLa/cc3dQ==}
+  '@modelcontextprotocol/client@2.4.0':
+    resolution: {integrity: sha512-LgrD2OphHuG12vfKFKz6SOnq7bKHQmhGJIAYdD+MZBn2npHEyry6uD8zvktodtl5CQM85MO0anUyD9JwmUmxww==}
     engines: {node: '>=20'}
 
   '@modelcontextprotocol/core@2.3.1':
     resolution: {integrity: sha512-laVmIhPGpWi7rG9q+0UigblRN0Hws/Yjlb6qLFtVqryXVLkc4h+yN8z731POD2LnAGQlFe7/tXhUm7Bi0YB91g==}
+    engines: {node: '>=20'}
+
+  '@modelcontextprotocol/core@2.4.0':
+    resolution: {integrity: sha512-z8QBKqdfXLPzkLQuG4xp8hrVEMm1PZ1IgxMN2sMbJiFiAKOWXnAzogXn2W4aqIBlP1ea6U5yiqVquvUNM1Cj6Q==}
     engines: {node: '>=20'}
 
   '@modelcontextprotocol/ext-apps@2.0.3':
@@ -1737,6 +1741,11 @@ packages:
 
   ajv-formats@3.0.1:
     resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
+    peerDependencies:
+      ajv: ^8.0.0
+    peerDependenciesMeta:
+      ajv:
+        optional: true
 
   ajv@8.20.0:
     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
@@ -3383,9 +3392,9 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  '@modelcontextprotocol/client@2.3.1':
+  '@modelcontextprotocol/client@2.4.0':
     dependencies:
-      '@modelcontextprotocol/core': 2.3.1
+      '@modelcontextprotocol/core': 2.4.0
       cross-spawn: 7.0.6
       eventsource: 3.0.7
       eventsource-parser: 3.1.1
@@ -3397,10 +3406,14 @@ snapshots:
     dependencies:
       zod: 4.6.7
 
-  '@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)':
+  '@modelcontextprotocol/core@2.4.0':
     dependencies:
-      '@modelcontextprotocol/client': 2.3.1
-      '@modelcontextprotocol/core': 2.3.1
+      zod: 4.6.7
+
+  '@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.4.0)(@modelcontextprotocol/core@2.4.0)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)':
+    dependencies:
+      '@modelcontextprotocol/client': 2.4.0
+      '@modelcontextprotocol/core': 2.4.0
       '@standard-schema/spec': 1.1.0
       zod: 4.6.7
     optionalDependencies:
@@ -3466,13 +3479,13 @@ snapshots:
 
   '@open-draft/until@3.0.1': {}
 
-  '@openai/mcp-extensions@0.2.1(@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)':
+  '@openai/mcp-extensions@0.2.1(@modelcontextprotocol/ext-apps@2.0.3(@modelcontextprotocol/client@2.4.0)(@modelcontextprotocol/core@2.4.0)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@modelcontextprotocol/server@2.3.1)':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       '@modelcontextprotocol/core': 2.3.1
       zod: 4.4.3
     optionalDependencies:
-      '@modelcontextprotocol/ext-apps': 2.0.3(@modelcontextprotocol/client@2.3.1)(@modelcontextprotocol/core@2.3.1)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)
+      '@modelcontextprotocol/ext-apps': 2.0.3(@modelcontextprotocol/client@2.4.0)(@modelcontextprotocol/core@2.4.0)(@modelcontextprotocol/server@2.3.1)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(zod@4.6.7)
       '@modelcontextprotocol/sdk': 1.32.1(@cfworker/json-schema@4.1.1)(zod@4.6.7)
       '@modelcontextprotocol/server': 2.3.1
 
