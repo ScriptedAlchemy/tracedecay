@@ -553,56 +553,11 @@ export function CortexSceneCanvas<L>({
   ) : null;
   return (
     <div className={cn('td-night relative flex min-h-0 flex-1 flex-col', className)}>
-      <div
-        ref={hostRef}
-        role="group"
-        aria-roledescription="symbol field"
-        aria-label={`${ariaLabel} Arrow keys walk the symbols by degree, Enter pins, plus and minus zoom, 0 fits.`}
-        tabIndex={unavailable ? -1 : 0}
-        onKeyDown={onKeyDown}
-        onBlur={() => setCursor(null)}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerLeave={onPointerLeave}
-        className={cn(
-          'td-graph-field relative min-h-[52vw] flex-1 touch-none overflow-hidden border border-edge-subtle/60 md:min-h-[46vh] lg:min-h-[18rem]',
-          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-          hovered !== null ? 'cursor-pointer' : 'cursor-grab',
-        )}
-        data-cortex-render={painter.name}
-        data-layout={layoutState.status}
-      >
-        <canvas
-          ref={canvasRef}
-          aria-hidden
-          className={cn('absolute inset-0 block size-full', unavailable && 'invisible')}
-        />
-        {unavailable ? (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <FieldUnavailable>{unavailable}</FieldUnavailable>
-          </div>
-        ) : null}
-      </div>
-      {!noContext && layoutState.status === 'pending' ? (
-        <p
-          role="status"
-          data-state="loading"
-          className="absolute left-3 top-3 bg-surface-0/90 p-2 text-2xs text-text-secondary"
-        >
-          Calculating positions. The symbol list remains available.
-        </p>
-      ) : null}
-      {!unavailable && overlay ? (
-        <div className="pointer-events-none absolute inset-0 z-[5]" data-graph-overlay>
-          {overlay}
-        </div>
-      ) : null}
       {!unavailable ? (
         <div
           role="group"
           aria-label="Field camera"
-          className="absolute right-3 top-3 z-10 flex items-stretch border border-edge-subtle bg-surface-0/90"
+          className="mb-1 flex shrink-0 items-stretch self-end border border-edge-subtle bg-surface-0"
         >
           <CameraButton label="Zoom out field" onClick={() => zoomBy(0.8)}>
             −
@@ -621,6 +576,51 @@ export function CortexSceneCanvas<L>({
           </CameraButton>
         </div>
       ) : null}
+      <div
+        ref={hostRef}
+        role="group"
+        aria-roledescription="symbol field"
+        aria-label={`${ariaLabel} Arrow keys walk the symbols by degree, Enter pins, plus and minus zoom, 0 fits.`}
+        tabIndex={unavailable ? -1 : 0}
+        onKeyDown={onKeyDown}
+        onBlur={() => setCursor(null)}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerLeave}
+        className={cn(
+          'td-graph-field relative min-h-[18rem] flex-1 touch-none overflow-hidden border border-edge-subtle/60 md:min-h-[46vh] lg:min-h-[18rem]',
+          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+          hovered !== null ? 'cursor-pointer' : 'cursor-grab',
+        )}
+        data-cortex-render={painter.name}
+        data-layout={layoutState.status}
+      >
+        <canvas
+          ref={canvasRef}
+          aria-hidden
+          className={cn('absolute inset-0 block size-full', unavailable && 'invisible')}
+        />
+        {unavailable ? (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <FieldUnavailable>{unavailable}</FieldUnavailable>
+          </div>
+        ) : null}
+        {!noContext && layoutState.status === 'pending' ? (
+          <p
+            role="status"
+            data-state="loading"
+            className="absolute left-3 top-3 bg-surface-0/90 p-2 text-2xs text-text-secondary"
+          >
+            Calculating positions. The symbol list remains available.
+          </p>
+        ) : null}
+        {!unavailable && overlay ? (
+          <div className="pointer-events-none absolute inset-0 z-[5]" data-graph-overlay>
+            {overlay}
+          </div>
+        ) : null}
+      </div>
       <p className="sr-only" aria-live="polite">
         {announcement}
       </p>

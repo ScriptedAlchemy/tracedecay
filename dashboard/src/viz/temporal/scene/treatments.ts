@@ -5,6 +5,15 @@ import { hatch } from './frame.ts';
 
 /** Draw the layout's actual cubic, preserving both endpoint coordinates. */
 export function traceCurve(ctx: CanvasRenderingContext2D, path: ScenePath): void {
+  if (path.points && path.points.length > 0) {
+    const first = path.points[0]!;
+    ctx.moveTo(first.x, first.y);
+    for (let index = 1; index < path.points.length; index += 1) {
+      const point = path.points[index]!;
+      ctx.lineTo(point.x, point.y);
+    }
+    return;
+  }
   const c = path.controls;
   if (c.length < 4) return;
   ctx.moveTo(c[0]!, c[1]!);

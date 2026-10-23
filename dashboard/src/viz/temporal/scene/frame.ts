@@ -17,6 +17,8 @@ export interface SceneFrame {
   /** Top of the field, below the time ruler. */
   readonly top: number;
   readonly height: number;
+  /** Honor the dashboard's stronger-contrast mode in every rendering layer. */
+  readonly highContrast?: boolean;
 }
 
 /** Below this row height a lane cannot hold a glyph plate and aggregates. */

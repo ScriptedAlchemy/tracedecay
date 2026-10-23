@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { GraphEdgeV1, GraphNodeV1, StrataMeasurementV1 } from '../../contracts/generated.ts';
 import { sceneFromSlice } from './cortexScene.ts';
-import { edgeCourse, plateLayout, sliceDepths, stratify } from './cortexPlate.ts';
+import { describePlate, edgeCourse, plateLayout, sliceDepths, stratify } from './cortexPlate.ts';
 
 function node(id: string, file: string | null, degree = 1): GraphNodeV1 {
   return { id, kind: 'function', name: id, file_path: file, degree } as GraphNodeV1;
@@ -150,7 +150,7 @@ describe('plateLayout', () => {
   it('counts unrouted relation kinds without mislabelling them as containment', () => {
     const scene = sceneFromSlice([node('a', null), node('b', null)], [edge('a', 'b', 'contains'), edge('a', 'b', 'unrecognized'), edge('a', 'b')]);
     const layout = plateLayout(scene, { width: 800, height: 400 }, 'pending');
-    expect(layout.unroutedEdges).toBe(2);
+    expect(describePlate(scene, 'pending').relations).toBe('0 cyclic · 2 other relations not routed');
     expect(layout.strat.basis).toMatchObject({ dependencyEdges: 1 });
   });
 });

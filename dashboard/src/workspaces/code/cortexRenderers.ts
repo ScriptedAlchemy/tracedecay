@@ -26,12 +26,12 @@ export const CORTEX_RENDERER_DETAILS: Record<CortexRenderer, RendererReading> = 
   plate: {
     label: 'Plate',
     layout: 'dependency layers',
-    layoutNote: 'depth down, directories across · basis printed on the field',
+    layoutNote: 'depth down, directories across · basis above the field',
     description: 'Symbols sit in directory columns and dependency-depth bands. The field names whether depth is measured across the index or derived from this slice.',
     readings: [
       ['size', 'served degree'],
       ['hue + shape', 'kind'],
-      ['bands', 'dependency depth · basis printed on field'],
+      ['bands', 'dependency depth · basis above field'],
       ['columns', 'directory of the file'],
       ['routes', 'dependency relations · other kinds counted only'],
     ],

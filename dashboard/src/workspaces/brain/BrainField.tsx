@@ -199,16 +199,17 @@ export function BrainField({
           <div className="absolute inset-0 bg-surface-0">
             <CenteredState title="The registry field could not draw" kind="unavailable" detail={`${failure} The project registry beside it lists the same projects.`} />
           </div>
-        ) : <div
+        ) : null}
+      </div>
+      {!failure ? <div
           role="group"
           aria-label="Field camera"
-          className="absolute bottom-3 left-3 z-10 flex border border-edge-subtle bg-surface-0/90"
+          className="td-night flex shrink-0 self-start border border-edge-subtle bg-surface-0"
         >
           <button type="button" aria-label={variant === 'atlas' ? 'Previous atlas rows' : 'Zoom out field'} onClick={() => rendererRef.current?.zoom(1 / 1.5)} className="td-hit border-r border-edge-subtle px-3 text-xs text-text-secondary hover:bg-surface-2">{variant === 'atlas' ? '↑' : '−'}</button>
           <button type="button" aria-label={variant === 'atlas' ? 'Next atlas rows' : 'Zoom in field'} onClick={() => rendererRef.current?.zoom(1.5)} className="td-hit border-r border-edge-subtle px-3 text-xs text-text-secondary hover:bg-surface-2">{variant === 'atlas' ? '↓' : '+'}</button>
           <button type="button" onClick={() => rendererRef.current?.fit()} className="td-hit px-3 text-2xs text-text-secondary hover:bg-surface-2">Fit</button>
-        </div>}
-      </div>
+        </div> : null}
       <p id="brain-field-keys" className="sr-only">
         Arrow keys step through {scene.columns ? 'projects' : 'symbols'}, Enter {scene.columns ? 'selects project scope' : 'inspects the symbol'}, Escape dismisses inspection,
         plus and minus {variant === 'atlas' ? 'move through atlas rows' : 'zoom'}.

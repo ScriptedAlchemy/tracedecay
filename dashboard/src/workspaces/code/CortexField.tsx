@@ -15,14 +15,13 @@ import { StructureReadV12Schema as StrataReadSchema, type GraphSubgraphPayloadV1
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { useStructure } from '../../data/query/structure.ts';
 import { CenteredState, envelopeReadState } from '../../ui/ReadSection.tsx';
-import { cn } from '../../ui/cn';
 import type { ActivationField } from '../../viz/graph/activation.ts';
 import { kindColor } from '../../viz/graph/kindColor.ts';
 import { CortexSceneCanvas } from './CortexSceneCanvas.tsx';
 import { kindLegend, relationLegend, type LegendEntry } from './cortex.ts';
 import { reliefPainterOffThread } from './cortexReliefOffThread.ts';
 import { luminousPainter } from './cortexLuminous.ts';
-import { DEPENDENCY_KINDS, platePainter } from './cortexPlate.ts';
+import { DEPENDENCY_KINDS, describePlate, platePainter } from './cortexPlate.ts';
 import { CORTEX_RENDERER_DETAILS, type CortexRenderer } from './cortexRenderers.ts';
 import { kindShape, sceneFromSlice, type KindShape } from './cortexScene.ts';
 import { describeSubgraph } from './hubs.ts';
@@ -134,30 +133,22 @@ function PaintedField({
         onInspect={onInspect}
         activation={activation}
         ariaLabel={fieldDescription(payload, caption?.scale ?? null, kinds, seedLabel, renderer)}
-        overlay={
-          <>
-            {caption ? (
-              <Hud className={renderer === 'plate' ? 'bottom-3 right-3 max-w-[60%]' : 'left-3 top-3 max-w-[60%]'} label="slice">
-                <span className="td-value text-2xs text-text-primary">{caption.scale}</span>
-                {caption.capped ? (
-                  <span className="td-legend text-state-partial">capped at the limit · more exists</span>
-                ) : null}
-                <span className="td-legend normal-case tracking-normal text-text-muted">
-                  {payload.mode === 'seeded' ? 'seeded neighbourhood' : 'busiest connected region'}
-                </span>
-                {scene.unknownDegree > 0 ? (
-                  <span className="td-legend normal-case tracking-normal text-state-unknown">
-                    degree absent for {scene.unknownDegree} · dashed, not zero
-                  </span>
-                ) : null}
-              </Hud>
-            ) : null}
-            <Hud className="bottom-3 left-3" label="symbol kind">
-              <KindShapeList entries={kinds} />
-            </Hud>
-          </>
-        }
       />
+      <div className="flex shrink-0 flex-wrap items-start gap-x-6 gap-y-2 border-b border-edge-subtle/70 pb-1.5">
+        {caption ? (
+          <FieldReadout label="Slice">
+            <span className="td-value text-2xs text-text-primary">{caption.scale}</span>
+            {caption.capped ? <span className="td-legend text-state-partial">capped at the limit · more exists</span> : null}
+            <span className="text-3xs text-text-muted">
+              {payload.mode === 'seeded' ? 'seeded neighbourhood' : 'busiest connected region'}
+            </span>
+            {scene.unknownDegree > 0 ? (
+              <span className="text-3xs text-state-unknown">degree absent for {scene.unknownDegree} · dashed, not zero</span>
+            ) : null}
+          </FieldReadout>
+        ) : null}
+        <FieldReadout label="Symbol kind"><KindShapeList entries={kinds} /></FieldReadout>
+      </div>
       <div
         className="flex flex-wrap items-center gap-x-4 gap-y-1 border-y border-edge-subtle/70 py-1 text-3xs"
         aria-label="Field reading"
@@ -183,12 +174,25 @@ function CanvasRenderer({ renderer, ...props }: Omit<ComponentProps<typeof Corte
     StrataReadSchema,
     { enabled: renderer === 'plate' },
   );
-  const plate = useMemo(() => platePainter(strata.isPending ? 'pending' : strata.data), [strata.isPending, strata.data]);
-  switch (renderer) {
-    case 'luminous': return <CortexSceneCanvas {...props} painter={luminousPainter} />;
-    case 'plate': return <CortexSceneCanvas {...props} painter={plate} />;
-    case 'relief': return <CortexSceneCanvas {...props} painter={reliefPainterOffThread} />;
-  }
+  const input = strata.isPending ? 'pending' : strata.data;
+  const plate = useMemo(() => platePainter(input), [input]);
+  const basis = useMemo(() => renderer === 'plate' ? describePlate(props.scene, input) : null, [renderer, props.scene, input]);
+  // The optional basis gets its own slot; every mode keeps the same mounted
+  // canvas host, observer and cancellation path in the second slot.
+  return (
+    <>
+      {basis ? (
+        <section aria-label="Plate layout basis" className="min-w-0 shrink-0 space-y-1 border border-edge-subtle bg-surface-1 px-2.5 py-2 text-3xs [overflow-wrap:anywhere]">
+          <p className="font-medium text-text-primary">{basis.title}</p>
+          <p className="text-text-secondary">{basis.detail}</p>
+          <p className="text-text-muted">{basis.relations}</p>
+        </section>
+      ) : null}
+      {renderer === 'plate' ? <CortexSceneCanvas {...props} painter={plate} />
+        : renderer === 'luminous' ? <CortexSceneCanvas {...props} painter={luminousPainter} />
+          : <CortexSceneCanvas {...props} painter={reliefPainterOffThread} />}
+    </>
+  );
 }
 
 /** Selection vocabulary. Pinning is a ring, not a hue: kinds share the cyan band. */
@@ -232,7 +236,7 @@ function ShapeSwatch({ shape, kind }: { shape: KindShape; kind: string }) {
 function KindShapeList({ entries }: { entries: readonly LegendEntry[] }) {
   const folded = entries.slice(LEGEND_ROWS);
   return (
-    <ul className="flex flex-col gap-0.5 text-3xs" aria-label="drawn by kind">
+    <ul className="flex flex-wrap gap-x-3 gap-y-1 text-3xs" aria-label="drawn by kind">
       {entries.slice(0, LEGEND_ROWS).map((entry) => (
         <li key={entry.kind} className="flex items-center gap-1.5">
           <ShapeSwatch shape={kindShape(entry.kind)} kind={entry.kind} />
@@ -282,29 +286,16 @@ function RelationList({ entries, renderer }: { entries: readonly LegendEntry[]; 
   );
 }
 
-/** One HUD plate on the field: bracketed, translucent, pointer-transparent. */
-function Hud({
+/** Readouts flow beside the chart, so narrow canvases keep their full data area. */
+function FieldReadout({
   label,
-  className,
   children,
 }: {
   label: string;
-  className?: string;
   children: ReactNode;
 }) {
   return (
-    <div
-      className={cn(
-        'absolute flex max-w-[45%] flex-col gap-1 border border-edge-subtle/80 bg-surface-0/80 px-2.5 py-1.5 backdrop-blur-sm',
-        'max-sm:hidden',
-        className,
-      )}
-      data-hud={label}
-    >
-      <span aria-hidden className="pointer-events-none absolute -left-px -top-px size-1.5 border-l border-t border-accent/60" />
-      <span aria-hidden className="pointer-events-none absolute -right-px -top-px size-1.5 border-r border-t border-accent/60" />
-      <span aria-hidden className="pointer-events-none absolute -bottom-px -left-px size-1.5 border-b border-l border-accent/60" />
-      <span aria-hidden className="pointer-events-none absolute -bottom-px -right-px size-1.5 border-b border-r border-accent/60" />
+    <div role="group" aria-label={label} className="flex min-w-0 flex-1 basis-56 flex-col gap-1">
       <span className="td-legend">{label}</span>
       {children}
     </div>

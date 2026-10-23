@@ -295,6 +295,31 @@ describe('TemporalScene', () => {
   });
 
   describe('lanes and branches', () => {
+    it('keeps deep compact lane names and large branch toggles inside separate targets', () => {
+      const base = fixture();
+      const model = {
+        ...base,
+        viewport: { ...base.viewport, width: 320, left: 128 },
+        lanes: base.lanes.map((lane) => lane.id === BUNDLE ? { ...lane, depth: 12 } : lane),
+        clusters: base.clusters.map((cluster) => ({ ...cluster, counts: { ...cluster.counts, sessions: 12345 } })),
+      };
+      const { container, onSelectLane, onToggleBranch } = renderScene({ model });
+      const label = container.querySelector(`[data-lane-row='${BUNDLE}']`)!;
+      const toggle = container.querySelector(`[data-branch-toggle='${BUNDLE}']`)!;
+      const labelHit = label.querySelector('rect')!;
+      const toggleHit = toggle.querySelector('rect')!;
+      expect(Number(labelHit.getAttribute('width'))).toBeGreaterThan(60);
+      expect(Number(toggleHit.getAttribute('x'))).toBe(Number(labelHit.getAttribute('width')));
+      expect(Number(toggleHit.getAttribute('x')) + Number(toggleHit.getAttribute('width'))).toBe(128);
+      expect(label.querySelector('text')!.textContent!.length).toBeGreaterThan(8);
+      expect(label.querySelector('title')?.textContent).toContain(BUNDLE_LABEL);
+      expect(toggle.querySelector('text')?.textContent).toBe('+12345');
+      fireEvent.click(label);
+      fireEvent.click(toggle);
+      expect(onSelectLane).toHaveBeenCalledWith(BUNDLE);
+      expect(onToggleBranch).toHaveBeenCalledWith(BUNDLE);
+    });
+
     it('opens a lane from its label row', () => {
       const { onSelectLane } = renderScene();
       fireEvent.click(screen.getByRole('button', { name: `Open session ${ROOT_LABEL}` }));
@@ -376,6 +401,23 @@ describe('TemporalScene', () => {
       fireEvent.pointerUp(background, { pointerId: 1, clientX: 401 });
       expect(onSelectLane).toHaveBeenCalledWith(null);
       expect(onWindowChange).not.toHaveBeenCalled();
+    });
+
+    it('lets a vertical gesture cancel without shifting the window, while a horizontal drag still pans', () => {
+      const { container, onSelectLane, onWindowChange } = renderScene();
+      const background = container.querySelector('[data-field-background]')!;
+      fireEvent.pointerDown(background, { pointerId: 1, button: 0, clientX: 400, clientY: 100 });
+      fireEvent.pointerMove(background, { pointerId: 1, clientX: 405, clientY: 140 });
+      fireEvent.pointerCancel(background, { pointerId: 1 });
+      expect(onWindowChange).not.toHaveBeenCalled();
+      expect(onSelectLane).not.toHaveBeenCalled();
+
+      fireEvent.pointerDown(background, { pointerId: 2, button: 0, clientX: 400, clientY: 100 });
+      fireEvent.pointerMove(background, { pointerId: 2, clientX: 440, clientY: 105 });
+      fireEvent.pointerUp(background, { pointerId: 2, clientX: 440, clientY: 105 });
+      expect(lastWindow(onWindowChange).start).toBeLessThan(WINDOW.start);
+      expect(lastWindow(onWindowChange).end - lastWindow(onWindowChange).start).toBeCloseTo(WINDOW.end - WINDOW.start);
+      expect(onSelectLane).not.toHaveBeenCalled();
     });
   });
 

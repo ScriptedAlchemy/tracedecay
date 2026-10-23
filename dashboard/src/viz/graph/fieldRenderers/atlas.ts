@@ -287,16 +287,23 @@ export const createAtlasField: FieldRendererFactory = ({
       text(fit(plate.footer ?? '', w - 20), x + 10, y + h - 7, mono(400, 10), colors.inkMuted, 0.9 * alpha);
       return;
     }
-    const strike = synapses.find((synapse) => synapse.from === body.id);
+    let strike: Synapse | undefined;
+    for (let index = synapses.length - 1; index >= 0; index -= 1) {
+      if (synapses[index]!.from === body.id) {
+        strike = synapses[index];
+        break;
+      }
+    }
     const warm = heat > 0.02 && strike;
     const [stores, artifacts, mass, seen, head, defaultBranch, repo] = body.detail;
     // A narrow plate keeps its name and drops the age, which the inspector
     // and the exact registry still print.
     const printsWhen = level === 'full' || (level === 'minimal' && w >= 150);
-    const labelWidth = w - (printsWhen ? 84 : 34);
+    const when = warm ? `${warm.label} · ${warm.time}` : (seen ?? 'seen absent').replace(/^seen /, '');
+    const printedWhen = fit(when, (w - 24) * 0.45);
+    const labelWidth = w - (printsWhen ? printedWhen.length * 6.6 + 34 : 34);
     text(fit(body.label, labelWidth), x + 12, y + (level === 'minimal' ? 16 : 17), mono(600, 11), body.id === view.inspected ? colors.hot : colors.ink, 0.95 * alpha);
-    const when = warm ? `${strike.label} · ${strike.time}` : (seen ?? 'seen absent').replace(/^seen /, '');
-    if (printsWhen) text(when, x + w - 10, y + (level === 'minimal' ? 16 : 17), mono(400, 10), warm ? colors.alert : colors.inkMuted, 0.95 * alpha, 'right');
+    if (printsWhen) text(printedWhen, x + w - 10, y + (level === 'minimal' ? 16 : 17), mono(400, 10), warm ? colors.alert : colors.inkMuted, 0.95 * alpha, 'right');
     const bar = (by: number): void => {
       const track = w - 24;
       context.fillStyle = rgbaString(colors.edgeStrong, 0.35 * alpha);
@@ -314,7 +321,7 @@ export const createAtlasField: FieldRendererFactory = ({
       glyph(x + w - 18, y + 9, body, alpha);
       return;
     }
-    text([stores, artifacts, mass].map((value) => value ?? 'absent').join(' · '), x + 12, y + 32, mono(400, 10), colors.inkMuted, 0.95 * alpha);
+    text(fit([stores, artifacts, mass].map((value) => value ?? 'absent').join(' · '), w - 24), x + 12, y + 32, mono(400, 10), colors.inkMuted, 0.95 * alpha);
     bar(y + 38);
     // Repository tile, printed even when absent.
     const tileY = y + 46;

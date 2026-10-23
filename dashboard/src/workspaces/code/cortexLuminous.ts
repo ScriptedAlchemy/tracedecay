@@ -8,8 +8,9 @@
  * grows AND brightens with its served degree, and a relation is a faint line
  * of its source's kind hue, so where many relations overlap the field is
  * brighter because there are more of them. Hover or the keyboard cursor lifts
- * one neighbourhood and lets the rest recede; labels are reserved for the six
- * highest-degree symbols and whatever is hovered, focused or pinned.
+ * one neighbourhood and lets the rest recede. Label density follows the
+ * viewport; hovered, focused and pinned symbols get priority. Every symbol
+ * stays in the field and its exact name remains in the ledger and inspector.
  */
 import { settleEmergentOffThread } from '../../viz/graph/emergentLayout.ts';
 import { prepareField } from '../../viz/graph/layout.ts';
@@ -179,20 +180,26 @@ function draw(layout: LuminousLayout, scene: CortexScene, frame: PaintFrame): vo
   }
   ctx.restore();
 
-  const hubs = new Set(
-    keyboardOrder(scene).slice(0, LUMINOUS_HUB_LABELS),
-  );
   const marked = (id: string) => frame.selected === id || frame.hovered === id || frame.cursor === id;
+  const budget = Math.min(LUMINOUS_HUB_LABELS, Math.max(1, Math.floor(frame.width / 140)));
+  const ambient = new Set(keyboardOrder(scene)
+    .filter((id) => !marked(id) && (emphasis === null || emphasis.has(id)))
+    .slice(0, budget));
   const labelled = scene.nodes
-    .filter((node) => marked(node.id) || (emphasis === null ? hubs.has(node.id) : emphasis.has(node.id)))
+    .filter((node) => marked(node.id) || ambient.has(node.id))
     .sort((a, b) => Number(marked(b.id)) - Number(marked(a.id)) || (b.degree ?? 0) - (a.degree ?? 0));
-  ctx.font = monoFont(11);
+  const obstacles = scene.nodes.map((node) => {
+    const p = screen.get(node.id)!;
+    const r = pointRadius(scene, node.id, frame) + 2;
+    return { id: node.id, x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r };
+  });
   const candidates: LabelCandidate[][] = labelled.map((node) => {
     const p = screen.get(node.id)!;
     const r = pointRadius(scene, node.id, frame);
+    ctx.font = monoFont(11, marked(node.id) ? 600 : 400);
     return anchorsAround(node.id, p.x, p.y, r, ctx.measureText(node.label).width, 14);
   });
-  for (const box of placeLabels(candidates)) {
+  for (const box of placeLabels(candidates, obstacles, 4, { x0: 6, y0: 6, x1: frame.width - 6, y1: frame.height - 6 })) {
     const node = scene.byId.get(box.id)!;
     drawHaloLabel(ctx, node.label, box.x, box.y + 7, {
       font: monoFont(11, marked(node.id) ? 600 : 400),

@@ -14,11 +14,11 @@
  *           Symbols whose file it did not lay out stand in a hatched NOT IN
  *           SCAN band, printed, not dropped or guessed.
  *   slice   otherwise, the drawn slice's own layering: longest path over its
- *           dependency relations with cycles condensed. The header says why
+ *           dependency relations with cycles condensed. The readout says why
  *           the index strata were not used.
  *
  * A relation that climbs against the layering, or runs inside a condensed
- * cycle, is drawn in the error hue, and the header counts them. That is a
+ * cycle, is drawn in the error hue, and the readout counts them. That is a
  * boundary observation, not a finding of a bug. Other relation kinds,
  * including containment, are counted without being routed as dependencies.
  */
@@ -195,13 +195,12 @@ export function stratify(scene: CortexScene, strata: StrataInput | undefined): S
 
 /* ---- geometry ------------------------------------------------------------ */
 
-/** Tall enough that the field's camera controls clear the column heads. */
-const HEADER = 46;
+/** The basis and camera controls live outside the bitmap. */
+const HEADER = 8;
 const COLUMN_HEAD = 20;
 const LEFT = 88;
 const RIGHT = 14;
 const BOTTOM = 8;
-const CAMERA_CLEARANCE = 190;
 const R_MAX = 7;
 const PITCH = 2 * R_MAX + 20;
 const ROW = 24;
@@ -230,7 +229,6 @@ export interface PlateLayout {
   readonly columns: readonly PlateColumn[];
   readonly positions: ReadonlyMap<string, { x: number; y: number }>;
   readonly bandOf: ReadonlyMap<string, PlateBand>;
-  readonly unroutedEdges: number;
 }
 
 export function plateLayout(
@@ -307,7 +305,6 @@ export function plateLayout(
     columns,
     positions,
     bandOf,
-    unroutedEdges: scene.edges.filter((edge) => !DEPENDENCY_KINDS.has(edge.kind)).length,
   };
 }
 
@@ -325,6 +322,30 @@ export function edgeCourse(
   if (ds > dt) return 'descends';
   if (ds < dt) return 'climbs';
   return 'level';
+}
+
+/** Full, wrapping HTML readout; canvas width must never hide its evidence basis. */
+export function describePlate(scene: CortexScene, strata: StrataInput | undefined): {
+  title: string;
+  detail: string;
+  relations: string;
+} {
+  const strat = stratify(scene, strata);
+  const { basis } = strat;
+  const climbs = scene.edges.filter((edge) => {
+    const course = edgeCourse({ strat }, edge.source, edge.target);
+    return DEPENDENCY_KINDS.has(edge.kind) && (course === 'climbs' || course === 'cycle');
+  }).length;
+  const unrouted = scene.edges.filter((edge) => !DEPENDENCY_KINDS.has(edge.kind)).length;
+  return {
+    title: basis.kind === 'strata'
+      ? `Index file depth · ${basis.placedFiles} of ${basis.drawnFiles} drawn files in scan`
+      : 'Dependency depth within the drawn slice',
+    detail: basis.kind === 'strata'
+      ? `Longest-path layering, generation ${basis.generation}`
+      : `${basis.why} · longest path over ${basis.dependencyEdges} dependency relations, ${basis.cycles} ${basis.cycles === 1 ? 'cycle' : 'cycles'} condensed`,
+    relations: `${climbs} ${basis.kind === 'strata' ? 'climbing or cyclic' : 'cyclic'} · ${unrouted} other relations not routed`,
+  };
 }
 
 /* ---- paint --------------------------------------------------------------- */
@@ -357,6 +378,7 @@ function fitText(
   width: number,
   keep: 'head' | 'tail' = 'head',
 ): string {
+  if (width < ctx.measureText('…').width) return '';
   if (ctx.measureText(text).width <= width) return text;
   let cut = text;
   const shown = () => (keep === 'tail' ? `…${cut}` : `${cut}…`);
@@ -366,7 +388,7 @@ function fitText(
   return shown();
 }
 
-function drawFrame(layout: PlateLayout, scene: CortexScene, frame: PaintFrame): void {
+function drawFrame(layout: PlateLayout, frame: PaintFrame): void {
   const { ctx, camera, palette } = frame;
   const { strat } = layout;
   const x0 = project(camera, LEFT, 0).x;
@@ -404,16 +426,23 @@ function drawFrame(layout: PlateLayout, scene: CortexScene, frame: PaintFrame): 
     ctx.stroke();
     ctx.restore();
     const mid = (top + bottom) / 2;
+    const bandHeight = bottom - top;
+    // A compact band gets one depth label; its count appears when zoom opens
+    // enough room for two lines. The symbols remain positioned at every zoom.
+    if (bandHeight < 14) return;
     const label = band.key === 'unplaced' ? 'NOT IN SCAN' : `D${band.key}`;
     ctx.save();
     ctx.font = monoFont(band.key === 'unplaced' ? 9 : 12, 600);
     ctx.fillStyle = band.key === 'unplaced' ? palette.unknown : palette.text;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(label, LEFT - 14, mid - 6);
-    ctx.font = monoFont(10);
-    ctx.fillStyle = palette.muted;
-    ctx.fillText(`${band.count} sym`, LEFT - 14, mid + 8);
+    const labelX = x0 - 12;
+    ctx.fillText(label, labelX, bandHeight >= 30 ? mid - 6 : mid);
+    if (bandHeight >= 30) {
+      ctx.font = monoFont(10);
+      ctx.fillStyle = palette.muted;
+      ctx.fillText(`${band.count} sym`, labelX, mid + 8);
+    }
     ctx.restore();
   });
   if (layout.bands.length > 0) {
@@ -424,7 +453,7 @@ function drawFrame(layout: PlateLayout, scene: CortexScene, frame: PaintFrame): 
     ctx.rotate(-Math.PI / 2);
     engrave(
       ctx,
-      strat.basis.kind === 'strata' ? 'FILE DEPTH' : 'CALL DEPTH',
+      strat.basis.kind === 'strata' ? 'FILE DEPTH' : 'DEPENDENCY DEPTH',
       0,
       0,
       palette.muted,
@@ -457,7 +486,8 @@ function drawFrame(layout: PlateLayout, scene: CortexScene, frame: PaintFrame): 
     const width = cx1 - cx0 - 10;
     const count = ` · ${column.count}`;
     const name = fitText(ctx, column.module, width - ctx.measureText(count).width, 'tail');
-    ctx.fillText(`${name}${count}`, (cx0 + cx1) / 2, headTop + 10);
+    const label = name ? `${name}${count}` : fitText(ctx, `${column.count}`, width);
+    ctx.fillText(label, (cx0 + cx1) / 2, headTop + 10);
     ctx.restore();
   }
   ctx.save();
@@ -469,31 +499,6 @@ function drawFrame(layout: PlateLayout, scene: CortexScene, frame: PaintFrame): 
   ctx.stroke();
   ctx.restore();
 
-  const basis = strat.basis;
-  const climbs = scene.edges.filter((edge) => {
-    const course = edgeCourse(layout, edge.source, edge.target);
-    return DEPENDENCY_KINDS.has(edge.kind) && (course === 'climbs' || course === 'cycle');
-  }).length;
-  const title =
-    basis.kind === 'strata'
-      ? `PLATE · INDEX FILE DEPTH · ${basis.placedFiles} OF ${basis.drawnFiles} FILES IN SCAN`
-      : 'PLATE · DEPENDENCY DEPTH WITHIN THE DRAWN SLICE';
-  const detail =
-    basis.kind === 'strata'
-      ? `longest-path layering, generation ${basis.generation}`
-      : `${basis.why} · longest path over ${basis.dependencyEdges} dependency relations, ${basis.cycles} ${basis.cycles === 1 ? 'cycle' : 'cycles'} condensed`;
-  ctx.save();
-  ctx.font = monoFont(10);
-  ctx.fillStyle = palette.muted;
-  ctx.textBaseline = 'middle';
-  const right = `${climbs} ${basis.kind === 'strata' ? 'climbing or cyclic' : 'cyclic'} · ${layout.unroutedEdges} other relations not routed`;
-  // The field's camera controls sit over the header's right end.
-  const clear = Math.max(20, frame.width - CAMERA_CLEARANCE - 10);
-  engrave(ctx, fitText(ctx, title, clear), 10, 12, palette.text);
-  ctx.fillText(fitText(ctx, detail, frame.width - 20), 10, 42);
-  ctx.fillStyle = climbs > 0 ? palette.danger : palette.muted;
-  ctx.fillText(fitText(ctx, right, clear), 10, 27);
-  ctx.restore();
 }
 
 function drawRoutes(layout: PlateLayout, scene: CortexScene, frame: PaintFrame): void {
@@ -581,7 +586,9 @@ function drawStations(layout: PlateLayout, scene: CortexScene, frame: PaintFrame
     });
   }
   candidates.sort((a, b) => b.priority - a.priority);
-  const kept = new Set(placeLabels(candidates.map((c) => [c.box]), obstacles, 1).map((box) => box.id));
+  const kept = new Set(placeLabels(candidates.map((c) => [c.box]), obstacles, 3, {
+    x0: 6, y0: 6, x1: frame.width - 6, y1: frame.height - 6,
+  }).map((box) => box.id));
   for (const { box, dimmed, text } of candidates) {
     if (!kept.has(box.id)) continue;
     const strong = frame.selected === box.id || frame.hovered === box.id || frame.cursor === box.id;
@@ -603,7 +610,7 @@ export function platePainter(strata: StrataInput | undefined): CortexPainter<Pla
     position: (layout, id) => layout.positions.get(id) ?? null,
     hitRadius: (_layout, scene, id) => stationRadius(scene, id),
     draw(layout, scene, frame) {
-      drawFrame(layout, scene, frame);
+      drawFrame(layout, frame);
       drawRoutes(layout, scene, frame);
       drawStations(layout, scene, frame);
     },

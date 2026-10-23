@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DensityBin, LaneDensity, SceneDensity } from '../density.ts';
 import { TemporalScene, type TemporalSceneVariant } from '../TemporalScene.tsx';
@@ -306,6 +306,52 @@ describe('temporal field paint', () => {
     it('tags an EXACT link once it is on the lifted chain', () => {
       const { container } = renderWith({ model: withFocus({ [BUNDLE]: 'selected' }, { 'p-spawn-exact': 'selected' }) });
       expect([...container.querySelectorAll('[data-link-grade]')].map((tag) => tag.textContent)).toEqual(['AMBIGUOUS', 'EXACT']);
+    });
+
+    it('gives a selected link the available label space without losing crowded relation evidence', () => {
+      const base = model();
+      const ambiguous = base.paths.find((path) => path.id === 'p-spawn')!;
+      const selected = { ...ambiguous, id: 'p-selected', grade: 'inferred' as const, focus: 'selected' as const, basis: 'selected child parent columns', controls: [438, 80, 457, 80, 451, 130, 470, 130] };
+      const outside = { ...ambiguous, id: 'p-at-left', controls: [200, 80, 219, 80, 213, 130, 232, 130] };
+      const current = model({ paths: [ambiguous, selected, outside] });
+      const { container } = renderWith({ model: current });
+      const tags = container.querySelectorAll('[data-link-grade]');
+      expect(tags).toHaveLength(1);
+      expect(tags[0]?.textContent).toBe('INFERRED');
+      expect(Number(tags[0]?.getAttribute('x'))).toBeGreaterThanOrEqual(current.viewport.left);
+
+      fireEvent.click(screen.getByText('Fork and join evidence · 3 relations'));
+      const evidence = screen.getByRole('list', { name: 'Drawn relation evidence' });
+      expect(within(evidence).getAllByRole('listitem')).toHaveLength(3);
+      expect(evidence.textContent).toContain('selected child parent columns');
+      expect(evidence.textContent).toContain('child start precedes parent start');
+      expect(evidence.textContent).toContain('root session → child agent');
+      expect(container.querySelectorAll('[data-event]')).toHaveLength(current.nodes.length);
+    });
+
+    it('moves narrow tally and cursor text into wrapping readouts while retaining NOW and every drawn relation', () => {
+      const base = model();
+      const current = model({
+        viewport: { ...base.viewport, width: 320, left: 128 },
+        paths: [
+          { ...base.paths[3]!, controls: [144, 80, 163, 80, 157, 130, 176, 130] },
+          { ...base.paths[4]!, kind: 'rejoin', grade: 'inferred', controls: [240, 190, 259, 190, 253, 80, 272, 80], basis: 'child recorded end inside parent' },
+        ],
+        cursor: { x: 180, laneId: ROOT, xBasis: 'time' },
+      });
+      const { container } = renderWith({ model: current, density: density({ tailX: 280 }) });
+      const overlay = container.querySelector('[data-scene-layer="overlay"]')!;
+      expect(overlay.querySelector('[data-link-tally]')).toBeNull();
+      const tally = container.querySelector('[data-link-tally]')!;
+      expect(tally.namespaceURI).toBe('http://www.w3.org/1999/xhtml');
+      expect(tally.textContent).toBe('1 FORKS AMBIGUOUS · 1 JOINS INFERRED');
+      expect(container.querySelector('[data-cursor-readout]')?.textContent).toContain('CURSOR');
+      expect(overlay.querySelector('[data-cursor]')?.getAttribute('x1')).toBe('180');
+      expect(overlay.querySelector('[data-tail-marker]')?.getAttribute('data-tail-x')).toBe('280');
+      expect(container.querySelectorAll('[data-link-evidence]')).toHaveLength(2);
+      for (const tag of overlay.querySelectorAll('[data-link-grade]')) {
+        expect(Number(tag.getAttribute('x'))).toBeGreaterThanOrEqual(current.viewport.left);
+      }
     });
   });
 

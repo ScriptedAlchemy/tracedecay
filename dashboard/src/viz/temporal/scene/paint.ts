@@ -1,25 +1,17 @@
 /**
  * The Canvas2D substrate of the temporal field.
  *
- * Woven threads, stratified extent bands and the compact rail instrument
- * share one measured layout, density index and evidence-grade language.
- * Luminance is spent only on real quantities:
- * recency within the loaded page (dimmest at the oldest start, full at NOW)
- * and the selected causal chain, which lifts over the recency veil with a
- * restrained cyan halo. Additive blending applies to rails and links so that
- * only where two real marks cross does the field brighten.
- *
- * Semantic zoom is one rule: a lane that cannot hold legible glyphs draws its
- * density summary instead. A collapsed branch is always a summary, a
- * shared-scale histogram of member sessions with a measured extent, with
- * begun-but-unmeasured sessions dotted above it; a session lane whose marks
- * collide draws its extent band and a floor rug of dated events. Zooming the
- * window or expanding a branch resolves the same lanes to rails and glyphs.
+ * The spindle paints every recorded session from its canonical sampled
+ * fiber, including members of collapsed branches. Strata and Rails retain
+ * measured extent bands and density summaries where glyphs cannot fit.
+ * All treatments share the evidence-grade language, loaded-page recency,
+ * replay boundary and emphasis on the selected causal chain.
  */
 import type { DensityBin, LaneDensity } from '../density.ts';
 import { gradeStroke, type TemporalPalette } from '../palette.ts';
 import type { SceneLane, ScenePath } from '../types.ts';
 import { focusAlpha, hatch, isLifted, isLink, pathEnds, recencySpan, resolvedLanes, type SceneFrame } from './frame.ts';
+import { paintSpindle } from './spindlePaint.ts';
 import { fillGrade, paintRibbon, traceCurve } from './treatments.ts';
 
 const GRATICULE_PX = 32;
@@ -112,6 +104,11 @@ function paintRug(ctx: CanvasRenderingContext2D, lane: SceneLane, density: LaneD
 }
 
 export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, palette: TemporalPalette): void {
+  if (frame.variant === 'weave' && frame.model.spindle) {
+    paintSpindle(ctx, frame, palette);
+    paintUnrevealed(ctx, frame, palette);
+    return;
+  }
   const { model, variant, fieldX0, fieldX1, top, height, density } = frame;
   const width = Math.max(1, fieldX1 - fieldX0);
   const resolved = resolvedLanes(frame);

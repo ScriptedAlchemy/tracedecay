@@ -118,6 +118,18 @@ describe('canvas field keyboard', () => {
 });
 
 describe('Cortex canvas modes', () => {
+  it('exposes the complete Plate basis and slice/kind readouts as text even when drawing is unavailable', async () => {
+    vi.stubGlobal('fetch', serve());
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+    renderCode('/code?render=plate');
+    await screen.findByText(/this browser gave no 2D canvas/);
+    const basis = screen.getByRole('region', { name: 'Plate layout basis' });
+    await waitFor(() => expect(basis.textContent).toMatch(/longest.path/i));
+    expect(basis.textContent).toMatch(/other relations not routed/);
+    expect(screen.getByRole('group', { name: 'Slice' }).textContent).toContain('250');
+    expect(within(screen.getByRole('group', { name: 'Symbol kind' })).getByRole('list', { name: 'drawn by kind' })).toBeTruthy();
+  });
+
   it('defaults to luminous and exposes every mode even without a canvas context', async () => {
     vi.stubGlobal('fetch', serve());
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
@@ -134,15 +146,18 @@ describe('Cortex canvas modes', () => {
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
     renderCode('/code?render=relief&symbol=sym-0&scope=project-code&scopeLabel=Code&extra=keep');
     await screen.findByText(/this browser gave no 2D canvas/);
+    const canvas = screen.getByRole('group', { name: /Code cortex/ }).querySelector('canvas');
     const selector = screen.getByRole('combobox', { name: 'Cortex canvas view' }) as HTMLSelectElement;
     const readUrl = () => new URL(screen.getByTestId('url').textContent!, 'http://dashboard.test');
     const subgraphReads = () => fetchMock.mock.calls.filter((call) => String(call[0]).includes('/subgraph')).length;
     const before = subgraphReads();
     const user = userEvent.setup();
     await user.selectOptions(selector, 'plate');
+    expect(screen.getByRole('group', { name: /Code cortex/ }).querySelector('canvas')).toBe(canvas);
     expect(Object.fromEntries(readUrl().searchParams)).toEqual({ render: 'plate', symbol: 'sym-0', scope: 'project-code', scopeLabel: 'Code', extra: 'keep' });
     expect(await within(screen.getByRole('region', { name: 'Graph register' })).findByText('dependency layers')).toBeTruthy();
     await user.selectOptions(selector, 'luminous');
+    expect(screen.getByRole('group', { name: /Code cortex/ }).querySelector('canvas')).toBe(canvas);
     expect(readUrl().searchParams.get('symbol')).toBe('sym-0');
     expect(within(screen.getByRole('region', { name: 'Graph register' })).getByText('force-directed')).toBeTruthy();
     expect(subgraphReads()).toBe(before);

@@ -131,7 +131,10 @@ export function createPicker(scene: FieldScene, bodyReach = 1) {
 }
 
 function pointFieldCamera(scene: FieldScene, width: number, height: number): CameraState {
-  return fitCamera(scene.extent, width, height, scene.columns ? PAD : { top: 24, right: 24, bottom: 24, left: 24 });
+  // Keep the desktop label gutter only when the field has room for it. A
+  // fixed 150px gutter compressed every recency column into a phone's left third.
+  const pad = scene.columns ? { ...PAD, right: Math.min(PAD.right, Math.max(24, width - 480)) } : { top: 24, right: 24, bottom: 24, left: 24 };
+  return fitCamera(scene.extent, width, height, pad);
 }
 
 export const createPointField: FieldRendererFactory = (options) => createField(options, 'points');
@@ -524,13 +527,16 @@ function createField({
     const { width: fieldWidth, height: fieldHeight } = size();
     const put = (lines: string[], lx: number, ly: number, force: boolean, colour: (index: number) => string, alpha: number): void => {
       // Mono glyphs have one advance, so width needs no measurement per frame.
-      const width = Math.max(...lines.map((line) => line.length)) * 6.7;
+      const glyphs = Math.max(1, Math.floor((fieldWidth - 14) / 6.7));
+      const printed = lines.map((line) => line.length > glyphs ? `${line.slice(0, glyphs - 1)}…` : line);
+      const width = Math.max(...printed.map((line) => line.length)) * 6.7;
       const height = 13 * lines.length;
-      if (!force && (lx + width > fieldWidth - 4 || !free(lx - 2, ly - 2, width + 6, height + 4))) return;
+      lx = Math.max(7, Math.min(lx, fieldWidth - width - 7));
+      if (!force && !free(lx - 2, ly - 2, width + 6, height + 4)) return;
       occupied.push([lx - 2, ly - 2, width + 6, height + 4]);
       g.fillStyle = rgbaString(colors.substrate, 0.62 * alpha);
       g.fillRect(lx - 3, ly, width + 6, height + 2);
-      lines.forEach((line, index) => {
+      printed.forEach((line, index) => {
         g.font = index === 0 ? `600 11px ${colors.labelFont}` : `400 10px ${colors.labelFont}`;
         g.fillStyle = colour(index);
         g.fillText(line, lx, ly + 10 + index * 13);
@@ -589,9 +595,10 @@ function createField({
       if (strike) lines.push(`${strike.label} · ${strike.time}`);
       const width = Math.max(...lines.map((line) => line.length)) * 6.7;
       const alpha = lit(body.id) ? 1 : 0.4;
+      const labelX = body.role === 'hub' ? x - width / 2 : x + r + width <= fieldWidth - 4 ? x + r : x - r - width;
       put(
         lines,
-        body.role === 'hub' ? x - width / 2 : x + r,
+        labelX,
         body.role === 'hub' ? y + 12 : y - 6,
         body.id === anchor,
         (index) =>

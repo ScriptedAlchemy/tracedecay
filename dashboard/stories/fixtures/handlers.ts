@@ -12,7 +12,7 @@
  */
 import { http, HttpResponse, type JsonBodyType, type RequestHandler } from 'msw';
 import { setupServer, type SetupServer } from 'msw/node';
-import { lookupFixture } from './data.ts';
+import { isFixtureEventStream, lookupFixture } from './data.ts';
 
 /**
  * The fixture for a request, or nothing. A resolver that returns nothing leaves
@@ -21,23 +21,27 @@ import { lookupFixture } from './data.ts';
  */
 function fixtureResponse(request: Request): Response | undefined {
   const url = new URL(request.url);
+  if (request.method === 'GET' && isFixtureEventStream(url.pathname)) {
+    // Closing an empty stream exercises offline/reconnecting liveness without
+    // fabricating admitted events for either scope.
+    return new HttpResponse(':ok\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+    });
+  }
   const payload = lookupFixture(url.pathname, url.search);
   return payload === undefined ? undefined : HttpResponse.json(payload as JsonBodyType);
 }
 
 /** Every modelled `/api` GET, resolved from the pathname to its fixture payload. */
 const handlers = [
-  http.get('*/api/events', () =>
-    // The event stream is intentionally empty in fixtures: the app degrades to
-    // its "offline" liveness state, which is a valid surface to audit.
-    new HttpResponse('', {
-      status: 200,
-      headers: { 'content-type': 'text/event-stream' },
-    }),
-  ),
   http.get('*/api/*', ({ request }) => {
     return fixtureResponse(request);
   }),
+  // Loom's proximity read uses the application POST envelope in both scopes.
+  // Keep these exact so unmodelled commands remain unhandled.
+  http.post('*/api/feedback/proximity', ({ request }) => fixtureResponse(request)),
+  http.post('*/api/projects/:projectId/feedback/proximity', ({ request }) => fixtureResponse(request)),
   http.post('*/api/application/retained/fact_store_curate', ({ request }) => {
     return fixtureResponse(request);
   }),
