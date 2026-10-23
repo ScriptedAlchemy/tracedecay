@@ -521,6 +521,41 @@ function linkedTemporal(ordered = false) {
 }
 
 describe('LoomPage', () => {
+  it('switches visual views without losing the selected thread, replay, filters or time window', async () => {
+    const params = new URLSearchParams({
+      scope: 'project-loom',
+      loomSession: LANE('cursor', 'sess-open'),
+      loomEvent: 'm1',
+      loomWindow: `${NOW - 10_800},${NOW - 3600}`,
+      loomHide: 'commit',
+      loomRenderer: 'strata',
+    });
+    renderLoom(
+      { ...HAPPY, '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) } },
+      `/loom?${params}`,
+    );
+    const views = within(await screen.findByRole('group', { name: 'Loom view' }));
+    await screen.findAllByText('Reading the reconciliation path.');
+    expect(views.getByRole('button', { name: 'Strata' }).getAttribute('aria-pressed')).toBe('true');
+    const visibleEvents = () => Array.from(document.querySelectorAll('[data-event]'), (node) => [
+      node.getAttribute('data-event'), node.getAttribute('data-grade'),
+    ]);
+    const before = visibleEvents();
+    expect(before.length).toBeGreaterThan(0);
+
+    for (const [label, value] of [['Weave', null], ['Rails', 'rail'], ['Strata', 'strata']] as const) {
+      await userEvent.click(views.getByRole('button', { name: label }));
+      expect(views.getByRole('button', { name: label }).getAttribute('aria-pressed')).toBe('true');
+      const restored = new URLSearchParams(screen.getByTestId('loom-url').textContent ?? '');
+      expect(restored.get('loomRenderer')).toBe(value);
+      for (const key of ['scope', 'loomSession', 'loomEvent', 'loomWindow', 'loomHide']) {
+        expect(restored.get(key)).toBe(params.get(key));
+      }
+      expect(visibleEvents()).toEqual(before);
+      expect(document.querySelectorAll('[data-event][data-kind="commit"]')).toHaveLength(0);
+    }
+  });
+
   it('restores encounter selection without clearing thread or replay URL state', async () => {
     const thread = encodeURIComponent(LANE('cursor', 'sess-open'));
     const encounter = PROXIMITY.page.encounters[0]!.encounter_id;

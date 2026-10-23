@@ -1,5 +1,6 @@
 import { cssColorToRgb, lerpRgbTuple } from '../activation.ts';
 import { kindColor } from '../kindColor.ts';
+import { buildNeuralBody, type NeuralBodyGeometry } from './neuralBody.ts';
 import {
   EasedCamera,
   SYNAPSE_TRAVEL_MS,
@@ -48,6 +49,8 @@ const GOLDEN = Math.PI * (3 - Math.sqrt(5));
 const PAD = { top: 44, right: 150, bottom: 28, left: 56 };
 /** Spatial index cell, in field units; about one body diameter. */
 const INDEX_CELL = 0.25;
+/** Crowns, outer dust and hanging roots share this body-local envelope. */
+const NEURAL_REACH = 2.6;
 
 interface PointCloud {
   /** Unit offsets inside a unit disc, interleaved x,y. */
@@ -85,7 +88,7 @@ type Picked = { kind: 'cluster'; cluster: SceneCluster } | { kind: 'body'; body:
 
 /** Picking over a spatial index: an unresolved cluster frame first, then the
  * nearest drawn body within reach. Cost is the bodies near the pointer. */
-export function createPicker(scene: FieldScene) {
+export function createPicker(scene: FieldScene, bodyReach = 1) {
   const index = createSpatialIndex(scene.bodies, INDEX_CELL);
   const maxRadius = scene.bodies.reduce((max, body) => Math.max(max, body.radius), 0);
   const clusterOf = new Map(scene.clusters.map((cluster) => [cluster.id, cluster]));
@@ -108,10 +111,14 @@ export function createPicker(scene: FieldScene) {
       }
       let best: SceneBody | null = null;
       let bestDistance = Infinity;
-      for (const body of index.near(wx, wy, maxRadius + 10 / camera.scale)) {
+      // Lookup and hit testing use the same drawn envelope. Body radii grow
+      // more slowly than the camera, so convert the screen reach back to world
+      // units instead of assuming the unzoomed radius covers the artwork.
+      const searchReach = (bodyScreenRadius(maxRadius, camera.scale, fitScale) * bodyReach + 10) / camera.scale;
+      for (const body of index.near(wx, wy, searchReach)) {
         if (body.cluster && unresolved(clusterOf.get(body.cluster), zoom)) continue;
         const [x, y] = toScreen(camera, body.x, body.y);
-        const reach = body.role === 'hub' ? 9 : bodyScreenRadius(body.radius, camera.scale, fitScale) + 5;
+        const reach = body.role === 'hub' ? 9 : bodyScreenRadius(body.radius, camera.scale, fitScale) * bodyReach + 5;
         const distance = Math.hypot(sx - x, sy - y);
         if (distance <= reach && distance < bestDistance) {
           best = body;
@@ -127,7 +134,17 @@ function pointFieldCamera(scene: FieldScene, width: number, height: number): Cam
   return fitCamera(scene.extent, width, height, scene.columns ? PAD : { top: 24, right: 24, bottom: 24, left: 24 });
 }
 
-export const createPointField: FieldRendererFactory = ({
+export const createPointField: FieldRendererFactory = (options) => createField(options, 'points');
+
+/** The former luminous Brain bodies, on the same camera, picking and frame
+ * lifecycle as the point field. The scene still owns every measured value. */
+export const createLuminousField: FieldRendererFactory = (options) => createField(options, 'luminous');
+
+/** Original particulate crowns and dendritic filaments, using the shared
+ * Canvas2D lifetime and measured scene instead of a second WebGL runtime. */
+export const createNeuralField: FieldRendererFactory = (options) => createField(options, 'neural');
+
+function createField({
   container,
   scene,
   field,
@@ -135,7 +152,7 @@ export const createPointField: FieldRendererFactory = ({
   isReduced,
   onHover,
   onSelect,
-}) => {
+}: Parameters<FieldRendererFactory>[0], appearance: 'points' | 'luminous' | 'neural'): ReturnType<FieldRendererFactory> {
   const mounted = mountCanvas(container);
   if (!mounted) throw new Error('This browser has no 2D canvas context.');
   const { canvas, context, size, fitToContainer } = mounted;
@@ -146,7 +163,22 @@ export const createPointField: FieldRendererFactory = ({
   const synapses: Synapse[] = [];
   const ratio = unitsPerPoint(scene);
   const clouds = new Map<string, PointCloud>();
-  for (const body of scene.bodies) if (body.units) clouds.set(body.id, pointCloud(body.units, ratio));
+  if (appearance === 'points') {
+    for (const body of scene.bodies) if (body.units) clouds.set(body.id, pointCloud(body.units, ratio));
+  }
+  const neuralBodies = new Map<string, NeuralBodyGeometry>();
+  if (appearance === 'neural') {
+    for (const body of scene.bodies) {
+      if (body.role !== 'body') continue;
+      const vitality = body.vitality;
+      neuralBodies.set(body.id, buildNeuralBody({
+        id: body.id,
+        radius: body.radius,
+        depth: vitality === null || vitality >= 0.55 ? 0 : vitality >= 0.22 ? 1 : 2,
+      }));
+    }
+  }
+  let neuralStride = 1;
   const kindRgb = new Map<string, [number, number, number]>();
   const hue = (kind: string): [number, number, number] => {
     let value = kindRgb.get(kind);
@@ -157,7 +189,7 @@ export const createPointField: FieldRendererFactory = ({
     return value;
   };
   const byId = new Map(scene.bodies.map((body) => [body.id, body]));
-  const picker = createPicker(scene);
+  const picker = createPicker(scene, appearance === 'neural' ? NEURAL_REACH : 1);
   const sprites = createSpriteCache();
   const fitState = (): CameraState => pointFieldCamera(scene, size().width, size().height);
   /** The whole field, or the camera focus when one is set. */
@@ -219,6 +251,18 @@ export const createPointField: FieldRendererFactory = ({
 
   const renderStatic = (g: CanvasRenderingContext2D, cam: CameraState, zoom: number): void => {
     const { width, height } = size();
+    if (appearance === 'neural') {
+      let visibleParticles = 0;
+      for (const body of scene.bodies) {
+        const [x, y] = toScreen(cam, body.x, body.y);
+        const reach = radiusOf(body, cam) * NEURAL_REACH;
+        if (x + reach < 0 || x - reach > width || y + reach < 0 || y - reach > height) continue;
+        visibleParticles += neuralBodies.get(body.id)?.count ?? 0;
+      }
+      // Particles are texture, not records. Sample the same seeded geometry
+      // within the field's existing point budget and resolve it as zoom earns room.
+      neuralStride = Math.max(1, Math.ceil(visibleParticles / MAX_POINTS));
+    }
     g.globalCompositeOperation = 'source-over';
     drawGraticule(g, width, height, cam, colors);
     if (scene.columns) {
@@ -235,7 +279,7 @@ export const createPointField: FieldRendererFactory = ({
       const dim = (lit(a.id) && lit(b.id) ? 1 : 0.25) * (receded(a.id) && receded(b.id) ? 0.2 : 1);
       g.setLineDash(path.grade === 'EXACT' ? [] : [3, 3]);
       g.lineWidth = 1;
-      g.strokeStyle = rgbaString(colors.ink, (scene.columns ? 0.42 : 0.16) * dim);
+      g.strokeStyle = rgbaString(colors.ink, (scene.columns ? 0.42 : appearance !== 'points' ? 0.3 : 0.16) * dim);
       const [cx, cy] = bow(ax, ay, bx, by, path.relation);
       g.beginPath();
       g.moveTo(ax, ay);
@@ -245,7 +289,7 @@ export const createPointField: FieldRendererFactory = ({
     g.setLineDash([]);
     // Envelopes: one hairline frame per measured body, stating its area.
     for (const body of scene.bodies) {
-      if (body.role !== 'body' || !body.units || hiddenIn(body)) continue;
+      if (appearance !== 'points' || body.role !== 'body' || !body.units || hiddenIn(body)) continue;
       const [x, y] = toScreen(cam, body.x, body.y);
       g.strokeStyle = rgbaString(colors.edgeStrong, (receded(body.id) ? 0.08 : 0.3) * (lit(body.id) ? 1 : 0.4));
       g.lineWidth = 1;
@@ -255,7 +299,7 @@ export const createPointField: FieldRendererFactory = ({
     }
     // Units, additive, so luminance is density of real holdings. Members of an
     // unresolved cell still draw every unit: the cell's glow is their sum.
-    g.globalCompositeOperation = 'lighter';
+    g.globalCompositeOperation = appearance === 'luminous' ? 'source-over' : 'lighter';
     for (const body of scene.bodies) {
       if (body.role !== 'body') continue;
       const alpha = (0.35 + 0.65 * (body.vitality ?? 0.6)) * (lit(body.id) ? 1 : 0.22) * (receded(body.id) ? 0.14 : 1);
@@ -291,7 +335,52 @@ export const createPointField: FieldRendererFactory = ({
     const { width, height } = size();
     const [x, y] = toScreen(cam, body.x, body.y);
     const r = radiusOf(body, cam);
-    if (x < -r || x > width + r || y < -r || y > height + r) return;
+    const reach = appearance === 'neural' ? r * NEURAL_REACH : r;
+    if (x < -reach || x > width + reach || y < -reach || y > height + reach) return;
+    const neural = neuralBodies.get(body.id);
+    if (neural) {
+      const rgb = tint ?? hue(body.kind);
+      const sprite = sprites.get(rgb);
+      const scale = r / Math.max(0.01, body.radius);
+      g.globalAlpha = 1;
+      g.strokeStyle = rgbaString(rgb, alpha * 0.38);
+      g.lineWidth = 0.7;
+      g.beginPath();
+      for (let index = 0; index < neural.filaments.length; index += 4) {
+        g.moveTo(x + neural.filaments[index]! * scale, y - neural.filaments[index + 1]! * scale);
+        g.lineTo(x + neural.filaments[index + 2]! * scale, y - neural.filaments[index + 3]! * scale);
+      }
+      g.stroke();
+      for (let index = 0; index < neural.glows.length; index += 4) {
+        const diameter = Math.max(0.5, neural.glows[index + 2]! * scale);
+        g.globalAlpha = alpha * neural.glows[index + 3]!;
+        g.drawImage(sprite, x + neural.glows[index]! * scale - diameter / 2, y - neural.glows[index + 1]! * scale - diameter / 2, diameter, diameter);
+      }
+      for (let index = 0; index < neural.count; index += neuralStride) {
+        const diameter = Math.max(0.5, neural.sizes[index]! * scale);
+        g.globalAlpha = alpha * neural.alphas[index]!;
+        g.drawImage(sprite, x + neural.positions[index * 3]! * scale - diameter / 2, y - neural.positions[index * 3 + 1]! * scale - diameter / 2, diameter, diameter);
+      }
+      g.globalAlpha = 1;
+      return;
+    }
+    if (appearance === 'luminous') {
+      const radius = Math.max(1.5, r);
+      const rgb = tint ?? hue(body.kind);
+      const core = g.createRadialGradient(x - radius * 0.2, y - radius * 0.25, 0, x, y, radius);
+      core.addColorStop(0, rgbaString(lerpRgbTuple(rgb, colors.ice, 0.45), alpha));
+      core.addColorStop(0.45, rgbaString(rgb, alpha * 0.82));
+      core.addColorStop(1, rgbaString(rgb, alpha * 0.24));
+      g.globalAlpha = 1;
+      g.fillStyle = core;
+      g.beginPath();
+      g.arc(x, y, radius, 0, Math.PI * 2);
+      g.fill();
+      g.lineWidth = 1;
+      g.strokeStyle = rgbaString(tint ?? colors.ice, alpha * 0.65);
+      g.stroke();
+      return;
+    }
     const cloud = clouds.get(body.id);
     if (!cloud) {
       // A symbol body: one point sized by connectedness.
@@ -632,4 +721,4 @@ export const createPointField: FieldRendererFactory = ({
       canvas.remove();
     },
   };
-};
+}

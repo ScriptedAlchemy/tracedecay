@@ -21,6 +21,7 @@ import {
   type DiagnosticsSnapshot,
 } from '../../data/query/codeDiagnostics.ts';
 import { directoryOf } from './cortexRelief.ts';
+import { CORTEX_RENDERER_DETAILS, type CortexRenderer } from './cortexRenderers.ts';
 
 /* ---- register strip ------------------------------------------------------ */
 
@@ -80,7 +81,7 @@ export function densityReading(totals: GraphTotalsV1): RegisterReading {
 export function cortexRegister(payload: {
   totals: GraphTotalsV1;
   nodes_by_kind: readonly GraphKindCountV1[];
-}): RegisterCell[] {
+}, renderer: CortexRenderer = 'luminous'): RegisterCell[] {
   const { totals } = payload;
   return [
     {
@@ -113,8 +114,8 @@ export function cortexRegister(payload: {
       label: 'layout',
       reading: {
         kind: 'measured',
-        value: 'module-packed',
-        note: 'directories packed by shared relations',
+        value: CORTEX_RENDERER_DETAILS[renderer].layout,
+        note: CORTEX_RENDERER_DETAILS[renderer].layoutNote,
       },
     },
     {

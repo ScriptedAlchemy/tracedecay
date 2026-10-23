@@ -1,24 +1,19 @@
 /**
- * The Cortex aperture: the graph slice as one relief field, with its HUD.
+ * The Cortex aperture: one served graph slice with selectable canvas views.
  *
- * The field is `CortexSceneCanvas` drawing `reliefPainter`: symbols inside
- * their directory's hull, a relief of measured coupling under each hull, and
- * relations across directories bundled into trunks. Everything drawn over it
- * is a reading of the same slice: the scale and the rule that chose it (top
- * left), the symbol kinds on the field with their counts (bottom left), and
- * the strip beneath naming what each mark measures. The legends list what is
- * DRAWN, not what the index holds; the register above the aperture states the
- * whole.
+ * Luminous, Plate and Relief reuse the current canvas lifetime, camera and
+ * picking. Their legends describe their own encodings over the same data.
  *
  * Hover on the field inspects; click pins. Both are wired through the
  * canvas's own `onInspect` / `onSelect`, so the list beside it and the
  * inspector share one identity model with the picture and the picture never
  * owns a selection.
  */
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, type ComponentProps, type ReactNode } from 'react';
 
-import type { GraphSubgraphPayloadV1 } from '../../contracts/generated.ts';
+import { StructureReadV12Schema as StrataReadSchema, type GraphSubgraphPayloadV1, type StrataMeasurementV1 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import { useStructure } from '../../data/query/structure.ts';
 import { CenteredState, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { cn } from '../../ui/cn';
 import type { ActivationField } from '../../viz/graph/activation.ts';
@@ -26,22 +21,17 @@ import { kindColor } from '../../viz/graph/kindColor.ts';
 import { CortexSceneCanvas } from './CortexSceneCanvas.tsx';
 import { kindLegend, relationLegend, type LegendEntry } from './cortex.ts';
 import { reliefPainterOffThread } from './cortexReliefOffThread.ts';
+import { luminousPainter } from './cortexLuminous.ts';
+import { DEPENDENCY_KINDS, platePainter } from './cortexPlate.ts';
+import { CORTEX_RENDERER_DETAILS, type CortexRenderer } from './cortexRenderers.ts';
 import { kindShape, sceneFromSlice, type KindShape } from './cortexScene.ts';
 import { describeSubgraph } from './hubs.ts';
 
 /** The most kinds a legend prints before folding the rest into one line. */
 const LEGEND_ROWS = 7;
 
-/** What each mark on the field measures, printed beneath it. */
-const READINGS: readonly (readonly [string, string])[] = [
-  ['size', 'degree · area ∝ in + out'],
-  ['hue + shape', 'kind'],
-  ['relief', 'drawn relation endpoints, per directory'],
-  ['hull', 'directory of the file'],
-  ['trunk', 'relations across directories · brighter = more'],
-];
-
 export function CortexField({
+  renderer,
   pending,
   result,
   selectedId,
@@ -52,6 +42,7 @@ export function CortexField({
   totalNodes,
   seedLabel,
 }: {
+  renderer: CortexRenderer;
   pending: boolean;
   result: EnvelopeResult<GraphSubgraphPayloadV1> | undefined;
   selectedId: string | null;
@@ -93,7 +84,8 @@ export function CortexField({
     );
   }
   return (
-    <ReliefField
+    <PaintedField
+      renderer={renderer}
       payload={payload}
       totalNodes={totalNodes}
       seedLabel={seedLabel}
@@ -106,7 +98,8 @@ export function CortexField({
   );
 }
 
-function ReliefField({
+function PaintedField({
+  renderer,
   payload,
   totalNodes,
   seedLabel,
@@ -116,6 +109,7 @@ function ReliefField({
   onInspect,
   activation,
 }: {
+  renderer: CortexRenderer;
   payload: GraphSubgraphPayloadV1;
   totalNodes: number | null;
   seedLabel: string | null;
@@ -131,19 +125,19 @@ function ReliefField({
   const relations = relationLegend(payload.edges);
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-1.5 p-3" data-cortex-field="ready">
-      <CortexSceneCanvas
+      <CanvasRenderer
+        renderer={renderer}
         scene={scene}
-        painter={reliefPainterOffThread}
         selectedId={selectedId}
         inspectedId={inspectedId}
         onSelect={onSelect}
         onInspect={onInspect}
         activation={activation}
-        ariaLabel={fieldDescription(payload, caption?.scale ?? null, kinds, seedLabel)}
+        ariaLabel={fieldDescription(payload, caption?.scale ?? null, kinds, seedLabel, renderer)}
         overlay={
           <>
             {caption ? (
-              <Hud className="left-3 top-3 max-w-[60%]" label="slice">
+              <Hud className={renderer === 'plate' ? 'bottom-3 right-3 max-w-[60%]' : 'left-3 top-3 max-w-[60%]'} label="slice">
                 <span className="td-value text-2xs text-text-primary">{caption.scale}</span>
                 {caption.capped ? (
                   <span className="td-legend text-state-partial">capped at the limit · more exists</span>
@@ -168,18 +162,33 @@ function ReliefField({
         className="flex flex-wrap items-center gap-x-4 gap-y-1 border-y border-edge-subtle/70 py-1 text-3xs"
         aria-label="Field reading"
       >
-        {READINGS.map(([term, value]) => (
+        {CORTEX_RENDERER_DETAILS[renderer].readings.map(([term, value]) => (
           <span key={term} className="inline-flex items-baseline gap-1.5">
             <span className="td-legend">{term}</span>
             <span className="text-text-secondary">{value}</span>
           </span>
         ))}
         <StateKey />
-        {relations.length > 0 ? <RelationList entries={relations} /> : null}
+        {relations.length > 0 ? <RelationList entries={relations} renderer={renderer} /> : null}
       </div>
       {caption ? <p className="text-3xs leading-relaxed text-text-muted">{caption.rule}</p> : null}
     </div>
   );
+}
+
+function CanvasRenderer({ renderer, ...props }: Omit<ComponentProps<typeof CortexSceneCanvas>, 'painter'> & { renderer: CortexRenderer }) {
+  const strata = useStructure<StrataMeasurementV1>(
+    ['graph', 'strata'],
+    '/api/plugins/graph/strata',
+    StrataReadSchema,
+    { enabled: renderer === 'plate' },
+  );
+  const plate = useMemo(() => platePainter(strata.isPending ? 'pending' : strata.data), [strata.isPending, strata.data]);
+  switch (renderer) {
+    case 'luminous': return <CortexSceneCanvas {...props} painter={luminousPainter} />;
+    case 'plate': return <CortexSceneCanvas {...props} painter={plate} />;
+    case 'relief': return <CortexSceneCanvas {...props} painter={reliefPainterOffThread} />;
+  }
 }
 
 /** Selection vocabulary. Pinning is a ring, not a hue: kinds share the cyan band. */
@@ -246,12 +255,12 @@ function KindShapeList({ entries }: { entries: readonly LegendEntry[] }) {
 const RELATION_DASH: Record<string, string> = { references: '3 2', contains: '1 2' };
 
 /** Relation kinds on the slice, each with the line style the field draws it in. */
-function RelationList({ entries }: { entries: readonly LegendEntry[] }) {
+function RelationList({ entries, renderer }: { entries: readonly LegendEntry[]; renderer: CortexRenderer }) {
   return (
     <ul className="flex flex-wrap gap-x-3 gap-y-0.5 text-3xs" aria-label="edges by kind">
       {entries.map((entry) => (
         <li key={entry.kind} className="flex items-center gap-1.5">
-          <svg aria-hidden width="12" height="4" viewBox="0 0 12 4" className="shrink-0">
+          {renderer !== 'plate' || DEPENDENCY_KINDS.has(entry.kind) ? <svg aria-hidden width="12" height="4" viewBox="0 0 12 4" className="shrink-0">
             <line
               x1="0"
               y1="2"
@@ -261,8 +270,9 @@ function RelationList({ entries }: { entries: readonly LegendEntry[] }) {
               className="stroke-edge-strong"
               strokeDasharray={RELATION_DASH[entry.kind]}
             />
-          </svg>
+          </svg> : null}
           <span className="td-value text-text-secondary">{entry.kind}</span>
+          {renderer === 'plate' && !DEPENDENCY_KINDS.has(entry.kind) ? <span className="text-text-muted">not routed</span> : null}
           <span className="td-value text-text-muted" data-cell="numeric">
             {entry.count.toLocaleString()}
           </span>
@@ -306,6 +316,7 @@ function fieldDescription(
   scale: string | null,
   kinds: readonly LegendEntry[],
   seedLabel: string | null,
+  renderer: CortexRenderer,
 ): string {
   const composition = kinds
     .slice(0, LEGEND_ROWS)
@@ -315,5 +326,5 @@ function fieldDescription(
     payload.mode === 'seeded'
       ? `the neighbourhood of ${seedLabel ?? 'the selected symbol'}, one edge deep`
       : "the graph's busiest connected region";
-  return `Code cortex: ${scale ?? `${payload.nodes.length} symbols`} drawn as ${rule}. Symbols sit in their directory's hull; size is degree, hue and shape are kind (${composition}). Hover inspects a symbol in the inspector; click pins it. The symbol list beside the field is the accessible equivalent.`;
+  return `Code cortex: ${scale ?? `${payload.nodes.length} symbols`} drawn as ${rule}. ${CORTEX_RENDERER_DETAILS[renderer].description} Size is degree, hue and shape are kind (${composition}). Hover inspects a symbol in the inspector; click pins it. The symbol list beside the field is the accessible equivalent.`;
 }

@@ -85,7 +85,7 @@ describe('the register strip', () => {
     const cells = cortexRegister({
       totals: { nodes: 12_873, edges: 41_206, files: 642 },
       nodes_by_kind: [{ kind: 'module', count: 393 }],
-    });
+    }, 'relief');
     expect(cells.map((cell) => cell.label)).toEqual([
       'nodes',
       'edges',

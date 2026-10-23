@@ -6,8 +6,11 @@ import { timeToX } from '../layout.ts';
 import type { SceneDensity } from '../density.ts';
 import type { FocusTreatment, SceneLane, ScenePath, TemporalSceneModel } from '../types.ts';
 
+export type TemporalSceneVariant = 'weave' | 'strata' | 'rail';
+
 export interface SceneFrame {
   readonly model: TemporalSceneModel;
+  readonly variant: TemporalSceneVariant;
   readonly density: SceneDensity | null;
   readonly fieldX0: number;
   readonly fieldX1: number;

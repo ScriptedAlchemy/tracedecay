@@ -165,7 +165,8 @@ describe('TemporalScene', () => {
       expect(container.querySelector('[data-scene-layer="canvas"]')).toBeTruthy();
       expect(container.querySelector('[data-scene-layer="unavailable"]')).toBeNull();
       expect(calls).toContain('stroke');
-      expect(calls).toContain('arcTo');
+      expect(calls).toContain('bezierCurveTo');
+      expect(container.querySelector('[data-scene-variant="weave"]')).toBeTruthy();
       expect(screen.queryByRole('status')).toBeNull();
     });
 
@@ -175,6 +176,45 @@ describe('TemporalScene', () => {
       expect(container.querySelector('[data-scene-layer="unavailable"]')).toBeTruthy();
       expect(screen.getByRole('status').textContent).toContain('scene layer unavailable');
       expect(container.querySelectorAll('[data-event]').length).toBe(model.nodes.length);
+    });
+  });
+
+  describe('visual treatments', () => {
+    it('repaints a single canvas while keeping event positions, cursor and selection across views', () => {
+      const model = fixture();
+      const handlers = {
+        onSelectLane: vi.fn(), onSelectEvent: vi.fn(), onToggleBranch: vi.fn(), onWindowChange: vi.fn(),
+      };
+      const scene = (variant: 'weave' | 'strata' | 'rail') => (
+        <TemporalScene model={model} variant={variant} ariaLabel="Temporal execution field" reducedMotion={true} {...handlers} />
+      );
+      const { container, rerender } = render(scene('weave'));
+      const canvas = container.querySelector('canvas');
+      const commit = container.querySelector('[data-event="n-commit"]')!;
+      fireEvent.click(commit);
+      const hit = commit.querySelector('rect[fill="transparent"]')!;
+      const position = [hit.getAttribute('x'), hit.getAttribute('y')];
+      for (const variant of ['strata', 'rail', 'weave'] as const) {
+        rerender(scene(variant));
+        expect(container.querySelector('canvas')).toBe(canvas);
+        expect(container.querySelector('[data-event="n-commit"]')).toBe(commit);
+        expect([hit.getAttribute('x'), hit.getAttribute('y')]).toEqual(position);
+        expect(container.querySelector('[data-event-current]')).toBe(commit);
+        expect(container.querySelector('[data-cursor]')?.getAttribute('x1')).toBe('320');
+        fireEvent.keyDown(container.querySelector('svg[data-scene-layer="overlay"]')!, { key: 'Enter' });
+        expect(handlers.onSelectEvent).toHaveBeenLastCalledWith('n-commit');
+      }
+      expect(handlers.onSelectEvent).toHaveBeenCalledTimes(4);
+    });
+
+    it.each(['weave', 'strata', 'rail'] as const)('retains keyboard event inspection without canvas in %s', (variant) => {
+      stubCanvas(false);
+      const { container, onSelectEvent, model } = renderScene({ variant });
+      expect(container.querySelectorAll('[data-event]').length).toBe(model.nodes.length);
+      expect(screen.getByRole('status').textContent).toContain('scene layer unavailable');
+      fireEvent.keyDown(container.querySelector('svg[data-scene-layer="overlay"]')!, { key: 'End' });
+      fireEvent.keyDown(container.querySelector('svg[data-scene-layer="overlay"]')!, { key: 'Enter' });
+      expect(onSelectEvent).toHaveBeenCalledWith('n-end');
     });
   });
 

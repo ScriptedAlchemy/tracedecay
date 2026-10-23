@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -122,7 +123,7 @@ function renderScoped() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <ScopedBrain projectId="proj_x" label="ai-train" />
+      <MemoryRouter><ScopedBrain projectId="proj_x" label="ai-train" /></MemoryRouter>
     </QueryClientProvider>,
   );
 }

@@ -537,23 +537,20 @@ export function CortexSceneCanvas<L>({
       ? ''
       : `${cursorNode.label}, ${cursorNode.kind}, degree ${cursorNode.degree ?? 'absent'}, ${cursorNode.module}. ${reachable.indexOf(cursorNode.id) + 1} of ${reachable.length}. Enter pins.`;
 
-  if (noContext) {
-    return (
-      <FieldUnavailable>
-        this browser gave no 2D canvas, so the {scene.nodes.length.toLocaleString()}-symbol field
-        is not drawn; the symbol list and inspector beside it carry every symbol
-      </FieldUnavailable>
-    );
-  }
-  if (layoutState.status === 'failed') {
-    return (
-      <FieldUnavailable>
-        the {painter.name} layout could not be completed ({layoutState.reason}), so the{' '}
-        {scene.nodes.length.toLocaleString()}-symbol field has no positions to draw; the symbol
-        list and inspector beside it carry every symbol
-      </FieldUnavailable>
-    );
-  }
+  // Keep the measured host mounted through a layout failure. Switching to a
+  // different painter must retain its ResizeObserver and native wheel listener.
+  const unavailable = noContext ? (
+    <>
+      this browser gave no 2D canvas, so the {scene.nodes.length.toLocaleString()}-symbol field
+      is not drawn; the symbol list and inspector beside it carry every symbol
+    </>
+  ) : layoutState.status === 'failed' ? (
+    <>
+      the {painter.name} layout could not be completed ({layoutState.reason}), so the{' '}
+      {scene.nodes.length.toLocaleString()}-symbol field has no positions to draw; the symbol
+      list and inspector beside it carry every symbol
+    </>
+  ) : null;
   return (
     <div className={cn('td-night relative flex min-h-0 flex-1 flex-col', className)}>
       <div
@@ -561,7 +558,7 @@ export function CortexSceneCanvas<L>({
         role="group"
         aria-roledescription="symbol field"
         aria-label={`${ariaLabel} Arrow keys walk the symbols by degree, Enter pins, plus and minus zoom, 0 fits.`}
-        tabIndex={0}
+        tabIndex={unavailable ? -1 : 0}
         onKeyDown={onKeyDown}
         onBlur={() => setCursor(null)}
         onPointerDown={onPointerDown}
@@ -576,9 +573,18 @@ export function CortexSceneCanvas<L>({
         data-cortex-render={painter.name}
         data-layout={layoutState.status}
       >
-        <canvas ref={canvasRef} aria-hidden className="absolute inset-0 block size-full" />
+        <canvas
+          ref={canvasRef}
+          aria-hidden
+          className={cn('absolute inset-0 block size-full', unavailable && 'invisible')}
+        />
+        {unavailable ? (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <FieldUnavailable>{unavailable}</FieldUnavailable>
+          </div>
+        ) : null}
       </div>
-      {layoutState.status === 'pending' ? (
+      {!noContext && layoutState.status === 'pending' ? (
         <p
           role="status"
           data-state="loading"
@@ -587,32 +593,34 @@ export function CortexSceneCanvas<L>({
           Calculating positions. The symbol list remains available.
         </p>
       ) : null}
-      {overlay ? (
+      {!unavailable && overlay ? (
         <div className="pointer-events-none absolute inset-0 z-[5]" data-graph-overlay>
           {overlay}
         </div>
       ) : null}
-      <div
-        role="group"
-        aria-label="Field camera"
-        className="absolute right-3 top-3 z-10 flex items-stretch border border-edge-subtle bg-surface-0/90"
-      >
-        <CameraButton label="Zoom out field" onClick={() => zoomBy(0.8)}>
-          −
-        </CameraButton>
-        <span
-          className="td-value flex min-w-12 items-center justify-center border-r border-edge-subtle px-1.5 text-2xs text-text-secondary"
-          aria-label={`zoom ${zoomPercent} percent of fit`}
+      {!unavailable ? (
+        <div
+          role="group"
+          aria-label="Field camera"
+          className="absolute right-3 top-3 z-10 flex items-stretch border border-edge-subtle bg-surface-0/90"
         >
-          {zoomPercent}%
-        </span>
-        <CameraButton label="Zoom in field" onClick={() => zoomBy(1.25)}>
-          +
-        </CameraButton>
-        <CameraButton label="Fit field" onClick={fit} last>
-          Fit
-        </CameraButton>
-      </div>
+          <CameraButton label="Zoom out field" onClick={() => zoomBy(0.8)}>
+            −
+          </CameraButton>
+          <span
+            className="td-value flex min-w-12 items-center justify-center border-r border-edge-subtle px-1.5 text-2xs text-text-secondary"
+            aria-label={`zoom ${zoomPercent} percent of fit`}
+          >
+            {zoomPercent}%
+          </span>
+          <CameraButton label="Zoom in field" onClick={() => zoomBy(1.25)}>
+            +
+          </CameraButton>
+          <CameraButton label="Fit field" onClick={fit} last>
+            Fit
+          </CameraButton>
+        </div>
+      ) : null}
       <p className="sr-only" aria-live="polite">
         {announcement}
       </p>

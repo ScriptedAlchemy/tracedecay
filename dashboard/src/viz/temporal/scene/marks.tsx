@@ -13,7 +13,7 @@ import { EventGlyph } from '../glyphs.tsx';
 import { xToTime } from '../layout.ts';
 import { gradeColorVar, gradeDashArray } from '../palette.ts';
 import type { EvidenceGrade, SceneCluster, SceneLane, SceneNode } from '../types.ts';
-import { focusAlpha, isLifted, isLink, pathEnds, recencyAlpha, resolvedLanes, type SceneFrame } from './frame.ts';
+import { focusAlpha, isLifted, isLink, pathEnds, recencyAlpha, resolvedLanes, type SceneFrame, type TemporalSceneVariant } from './frame.ts';
 
 /** Focus is a stable 2px cyan ring, shown only for keyboard focus. */
 export const NODE_CLASS = 'cursor-pointer outline-none [&:focus-visible>.td-focus-ring]:opacity-100';
@@ -41,7 +41,14 @@ export function NodeMark({ node, frame }: { node: SceneNode; frame: SceneFrame }
   const color = gradeColorVar(node.grade);
   const luminance = isLifted(node.focus) ? 1 : recencyAlpha(frame, node.x);
   if (!resolvedLanes(frame).has(node.laneId) && !node.selected) {
-    return <FocusRing x={node.x} y={node.y} r={6} />;
+    return (
+      <>
+        <FocusRing x={node.x} y={node.y} r={6} />
+        {frame.variant === 'weave' && (
+          <circle cx={node.x} cy={node.y} r={2.2} fill={color} stroke="var(--raw-graph-substrate)" strokeWidth={1} opacity={luminance} pointerEvents="none" />
+        )}
+      </>
+    );
   }
   return (
     <>
@@ -51,7 +58,11 @@ export function NodeMark({ node, frame }: { node: SceneNode; frame: SceneFrame }
       )}
       <FocusRing x={node.x} y={node.y} r={13} />
       <g opacity={luminance} pointerEvents="none">
-        <rect x={node.x - 7} y={node.y - 7} width={14} height={14} fill="var(--raw-graph-substrate)" stroke={color} strokeWidth={1} strokeDasharray={gradeDashArray(node.grade) || undefined} />
+        {frame.variant === 'weave' ? (
+          <circle cx={node.x} cy={node.y} r={7} fill="var(--raw-graph-substrate)" stroke={color} strokeWidth={1} strokeDasharray={gradeDashArray(node.grade) || undefined} />
+        ) : (
+          <rect x={node.x - 7} y={node.y - 7} width={14} height={14} fill="var(--raw-graph-substrate)" stroke={color} strokeWidth={1} strokeDasharray={gradeDashArray(node.grade) || undefined} />
+        )}
         <g transform={`translate(${node.x} ${node.y})`} color={color}>
           <EventGlyph kind={node.kind} size={11} />
         </g>
@@ -60,17 +71,24 @@ export function NodeMark({ node, frame }: { node: SceneNode; frame: SceneFrame }
   );
 }
 
-export function ClusterMark({ cluster }: { cluster: SceneCluster }): JSX.Element {
+export function ClusterMark({ cluster, frame }: { cluster: SceneCluster; frame: SceneFrame }): JSX.Element {
   const x1 = Math.max(cluster.x1, cluster.x0 + 2);
   const top = cluster.y - cluster.height / 2 + 1;
   const h = cluster.height - 3;
   return (
-    <path
-      d={`M ${cluster.x0 + 4} ${top} H ${cluster.x0} V ${top + h} H ${cluster.x0 + 4} M ${x1 - 4} ${top} H ${x1} V ${top + h} H ${x1 - 4}`}
-      fill="none"
-      stroke="var(--raw-graph-edge)"
-      strokeWidth={1}
-    />
+    <>
+      <path
+        d={`M ${cluster.x0 + 4} ${top} H ${cluster.x0} V ${top + h} H ${cluster.x0 + 4} M ${x1 - 4} ${top} H ${x1} V ${top + h} H ${x1 - 4}`}
+        fill="none"
+        stroke="var(--raw-graph-edge)"
+        strokeWidth={1}
+      />
+      {frame.variant === 'weave' && cluster.height >= 28 && x1 - cluster.x0 >= 100 ? (
+        <text x={cluster.x0 + 6} y={top + 9} fontSize={8} letterSpacing="0.1em" fill="var(--raw-graph-text)" opacity={0.75} style={MONO} pointerEvents="none">
+          {frame.density?.lanes.get(cluster.laneId)?.totals.sessions ?? cluster.counts.sessions} THREADS
+        </text>
+      ) : null}
+    </>
   );
 }
 
@@ -217,10 +235,15 @@ export function laneDetail(lane: SceneLane, frame: SceneFrame): string | null {
   return `${lane.provider} · ${COUNT_FORMAT.format(totals.messages)} msg${commits}`;
 }
 
-export function LegendEncodings(): JSX.Element {
+export function LegendEncodings({ variant }: { variant: TemporalSceneVariant }): JSX.Element {
+  const treatment = variant === 'weave'
+    ? 'thread thickness = messages (log) · curved threads = graded forks and joins · ribbon width = member sessions with a measured extent (√) · dotted strand = begun, extent unknown · beads = crowded events'
+    : variant === 'strata'
+      ? 'bands = session extents · solid/pale = exact/explicit · diagonal/crosshatch = inferred/ambiguous · sparse hatch/dots = stale/unavailable · junction plates = graded forks and joins · bundle bars = measured member sessions (√, shared scale)'
+      : 'rail weight = messages (log) · bundle bars = member sessions with a measured extent (√, one scale for every bundle) · dots = begun, extent unknown';
   return (
-    <p className="text-3xs text-text-muted" data-legend-encodings>
-      brightness = recency within the loaded page, dimmest at the oldest start and full at NOW · rail weight = messages (log) · bundle bars = member sessions with a measured extent (√, one scale for every bundle) · dots = begun, extent unknown · floor ticks = dated events per bin where glyphs would not fit · link tags print every non-EXACT grade · the selected chain lifts over the recency veil
+    <p className="text-3xs text-text-muted" data-legend-encodings={variant}>
+      {treatment} · brightness = recency within the loaded page, dimmest at the oldest start and full at NOW · floor ticks = dated events per bin where glyphs would not fit · link tags print every non-EXACT grade · the selected chain lifts over the recency veil
     </p>
   );
 }

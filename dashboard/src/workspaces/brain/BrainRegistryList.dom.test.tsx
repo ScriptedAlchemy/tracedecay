@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -53,7 +54,7 @@ function mount(count: number) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   return render(
     <QueryClientProvider client={client}>
-      <BrainPage />
+      <MemoryRouter><BrainPage /></MemoryRouter>
     </QueryClientProvider>,
   );
 }

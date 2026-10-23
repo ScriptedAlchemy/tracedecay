@@ -2,21 +2,31 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNod
 import { useLiveActivity } from '../../data/sse/useEvents.tsx';
 import { CenteredState } from '../../ui/ReadSection.tsx';
 import { useEmergentPositions } from '../../viz/graph/fieldRenderers/emergentPositions.ts';
-import { createPointField, unitsPerPoint } from '../../viz/graph/fieldRenderers/pointField.ts';
-import { sampleFieldPalette, type FieldRenderer, type FieldScene } from '../../viz/graph/fieldRenderers/scene.ts';
+import { createLuminousField, createNeuralField, createPointField, unitsPerPoint } from '../../viz/graph/fieldRenderers/pointField.ts';
+import { createAtlasField } from '../../viz/graph/fieldRenderers/atlas.ts';
+import { sampleFieldPalette, type FieldRenderer, type FieldRendererFactory, type FieldScene } from '../../viz/graph/fieldRenderers/scene.ts';
 import type { GraphCanvasEdge, GraphCanvasNode } from '../../viz/graph/types.ts';
 import { useActivationField } from '../../viz/graph/useActivationField.ts';
 import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
 import { FIELD_HALF_LIFE_MS, buildGraphScene, strikeFor, traversalOrder } from './registryScene.ts';
+import type { BrainFieldView } from './fieldView.tsx';
+
+const RENDERERS: Record<BrainFieldView, FieldRendererFactory> = {
+  neural: createNeuralField,
+  sigma: createLuminousField,
+  points: createPointField,
+  atlas: createAtlasField,
+};
 
 /**
- * The Brain's measured point field and its host: renderer lifetime, the reader's
+ * The Brain canvases share renderer lifetime, the reader's
  * inspection and camera focus, keyboard traversal with a spoken reading, and
  * admitted activity. Hover and keyboard focus inspect; Enter selects through
  * the caller's production route; nothing here fires activity except an
  * admitted pulse naming a drawn body.
  */
 export function BrainField({
+  variant = 'neural',
   scene,
   inspectedId,
   onInspect,
@@ -27,6 +37,7 @@ export function BrainField({
   activity,
   className,
 }: {
+  variant?: BrainFieldView;
   scene: FieldScene;
   inspectedId: string | null;
   onInspect: (id: string | null) => void;
@@ -57,7 +68,7 @@ export function BrainField({
     if (!container) return;
     let renderer: FieldRenderer;
     try {
-      renderer = createPointField({
+      renderer = RENDERERS[variant]({
         container,
         scene,
         field: activation,
@@ -67,6 +78,7 @@ export function BrainField({
         onSelect: (id) => selectRef.current(id),
       });
     } catch (error) {
+      container.replaceChildren();
       setFailure(error instanceof Error ? error.message : 'The field renderer could not start.');
       return;
     }
@@ -74,7 +86,7 @@ export function BrainField({
     rendererRef.current = renderer;
     renderer.setView(viewRef.current);
     // A container can lose its box for a frame while the page relayouts;
-    // resizing into zero is what makes Sigma throw, so that frame is skipped.
+    // resizing into zero discards its useful camera frame, so skip that frame.
     const resize =
       typeof ResizeObserver === 'function'
         ? new ResizeObserver(() => {
@@ -90,7 +102,7 @@ export function BrainField({
       renderer.destroy();
       if (rendererRef.current === renderer) rendererRef.current = null;
     };
-  }, [scene, activation]);
+  }, [variant, scene, activation]);
 
   useEffect(() => {
     rendererRef.current?.setView({ inspected: inspectedId, focus });
@@ -168,22 +180,14 @@ export function BrainField({
     }
   };
 
-  if (failure) {
-    return (
-      <CenteredState
-        title="The registry field could not draw"
-        kind="unavailable"
-        detail={`${failure} The project registry beside it lists the same projects.`}
-      />
-    );
-  }
   return (
     <figure className={className ?? 'flex h-full min-h-0 flex-col gap-2'}>
       <div className="td-night relative min-h-0 flex-1 max-md:min-h-80">
         <div
           ref={containerRef}
-          data-brain-field
-          tabIndex={0}
+          data-brain-field={variant}
+          tabIndex={failure ? -1 : 0}
+          aria-hidden={failure ? true : undefined}
           role="group"
           aria-roledescription="field"
           aria-label={ariaLabel}
@@ -191,19 +195,23 @@ export function BrainField({
           onKeyDown={keyDown}
           className="absolute inset-0 overflow-hidden border border-edge-subtle bg-[var(--raw-graph-substrate)] outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
         />
-        <div
+        {failure ? (
+          <div className="absolute inset-0 bg-surface-0">
+            <CenteredState title="The registry field could not draw" kind="unavailable" detail={`${failure} The project registry beside it lists the same projects.`} />
+          </div>
+        ) : <div
           role="group"
           aria-label="Field camera"
           className="absolute bottom-3 left-3 z-10 flex border border-edge-subtle bg-surface-0/90"
         >
-          <button type="button" aria-label="Zoom out field" onClick={() => rendererRef.current?.zoom(1 / 1.5)} className="td-hit border-r border-edge-subtle px-3 text-xs text-text-secondary hover:bg-surface-2">−</button>
-          <button type="button" aria-label="Zoom in field" onClick={() => rendererRef.current?.zoom(1.5)} className="td-hit border-r border-edge-subtle px-3 text-xs text-text-secondary hover:bg-surface-2">+</button>
+          <button type="button" aria-label={variant === 'atlas' ? 'Previous atlas rows' : 'Zoom out field'} onClick={() => rendererRef.current?.zoom(1 / 1.5)} className="td-hit border-r border-edge-subtle px-3 text-xs text-text-secondary hover:bg-surface-2">{variant === 'atlas' ? '↑' : '−'}</button>
+          <button type="button" aria-label={variant === 'atlas' ? 'Next atlas rows' : 'Zoom in field'} onClick={() => rendererRef.current?.zoom(1.5)} className="td-hit border-r border-edge-subtle px-3 text-xs text-text-secondary hover:bg-surface-2">{variant === 'atlas' ? '↓' : '+'}</button>
           <button type="button" onClick={() => rendererRef.current?.fit()} className="td-hit px-3 text-2xs text-text-secondary hover:bg-surface-2">Fit</button>
-        </div>
+        </div>}
       </div>
       <p id="brain-field-keys" className="sr-only">
-        Arrow keys step through projects, Enter selects project scope, Escape dismisses inspection, plus and
-        minus zoom.
+        Arrow keys step through {scene.columns ? 'projects' : 'symbols'}, Enter {scene.columns ? 'selects project scope' : 'inspects the symbol'}, Escape dismisses inspection,
+        plus and minus {variant === 'atlas' ? 'move through atlas rows' : 'zoom'}.
       </p>
       <p className="sr-only" aria-live="polite">
         {inspectedBody ? `${inspectedBody.label}: ${inspectedBody.detail.join(', ')}` : ''}
@@ -215,27 +223,33 @@ export function BrainField({
 
 /** The encoding the field draws, stated beside it. Amber is named as
  * admitted activity only; cyan as inspection only. */
-export function FieldLegend({ scene }: { scene: FieldScene }) {
+export function FieldLegend({ scene, variant = 'neural' }: { scene: FieldScene; variant?: BrainFieldView }) {
   const ratio = unitsPerPoint(scene);
   const registry = scene.columns != null;
-  const encoding: ReadonlyArray<[string, string]> = registry
+  const encoding: ReadonlyArray<[string, string]> = variant === 'atlas'
+    ? registry
+      ? [['plate', 'one project; recency groups, ordered by canonical id'], ['bar', 'indexed mass against the heaviest project'], ['wire', 'exact shared git directory']]
+      : [['plate', 'one symbol kind; every returned symbol ordered by connectedness'], ['wire', 'returned relations between symbol kinds, counted']]
+    : registry
     ? [
         ['across', 'recency column (registry last seen)'],
         ['up', 'indexed mass, log'],
-        ['point', ratio === 1 ? 'one indexed unit; stores ice at the core, artifacts by kind' : `${ratio} indexed units`],
-        ['disc', 'area = indexed mass; brightness = recency'],
+        ...(variant === 'points'
+          ? [['point', ratio === 1 ? 'one indexed unit; stores ice at the core, artifacts by kind' : `${ratio} indexed units`], ['disc', 'area = indexed mass; brightness = recency']] as [string, string][]
+          : [['body', 'one project; area = indexed mass, hue = kind, brightness = recency']] as [string, string][]),
         ['line', 'exact shared git directory'],
         ...(scene.clusters.length > 0
           ? [['frame', 'a crowded recency × mass cell with its exact count; zoom or click to resolve'] as [string, string]]
           : []),
       ]
     : [
-        ['point', 'one returned symbol; size = connectedness, hue = kind'],
+        [variant === 'points' ? 'point' : 'body', 'one returned symbol; size = connectedness, hue = kind'],
         ['line', 'returned relation'],
       ];
   return (
     <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
       {encoding.map(([label, value]) => <LegendItem key={label} label={label} value={value} />)}
+      {variant === 'neural' ? <LegendItem label="texture" value="particulate crowns and hanging filaments shape each identity; particles are not records and filaments are not relations" /> : null}
       <span className="inline-flex items-center gap-1.5">
         <span aria-hidden className="h-2 w-3 bg-alert" />
         <span className="td-legend">amber</span>
@@ -257,6 +271,7 @@ export function FieldLegend({ scene }: { scene: FieldScene }) {
 /** A project's returned symbol graph on the same field. Symbols carry no
  * admitted activity, so this field never blooms. */
 export function ScopedField({
+  variant = 'neural',
   nodes,
   edges,
   inspectedId,
@@ -264,6 +279,7 @@ export function ScopedField({
   label,
   caption,
 }: {
+  variant?: BrainFieldView;
   nodes: readonly GraphCanvasNode[];
   edges: readonly GraphCanvasEdge[];
   inspectedId: string | null;
@@ -272,8 +288,11 @@ export function ScopedField({
   /** What the returned slice is, including any daemon cap. */
   caption: ReactNode;
 }) {
-  const layout = useEmergentPositions(nodes, edges);
+  const layout = useEmergentPositions(variant === 'atlas' ? null : nodes, edges);
   const scene = useMemo(() => {
+    // Atlas positions rows by kind and connectedness; force coordinates are
+    // unused in that projection, so a worker is not needed to open it.
+    if (variant === 'atlas') return buildGraphScene(nodes.map((node) => ({ ...node, x: 0, y: 0 })), edges);
     if (layout.state !== 'ready') return null;
     return buildGraphScene(
       nodes.map((node) => {
@@ -282,8 +301,8 @@ export function ScopedField({
       }),
       edges,
     );
-  }, [nodes, edges, layout]);
-  if (layout.state === 'failed') {
+  }, [variant, nodes, edges, layout]);
+  if (layout.state === 'failed' && variant !== 'atlas') {
     return (
       <CenteredState
         title="The force layout could not be completed"
@@ -297,6 +316,7 @@ export function ScopedField({
   }
   return (
     <BrainField
+      variant={variant}
       scene={scene}
       inspectedId={inspectedId}
       onInspect={onInspect}
@@ -307,7 +327,7 @@ export function ScopedField({
       ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The returned symbol list alongside is the exact equivalent.`}
       legend={
         <span className="flex flex-col gap-1">
-          <FieldLegend scene={scene} />
+          <FieldLegend scene={scene} variant={variant} />
           <span>{caption}</span>
         </span>
       }

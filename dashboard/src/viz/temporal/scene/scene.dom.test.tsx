@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DensityBin, LaneDensity, SceneDensity } from '../density.ts';
-import { TemporalScene } from '../TemporalScene.tsx';
+import { TemporalScene, type TemporalSceneVariant } from '../TemporalScene.tsx';
 import type { SceneNode, SceneWindow, TemporalSceneModel } from '../types.ts';
 
 /**
@@ -92,18 +92,22 @@ interface Recorded {
   rects: number[][];
   lineWidths: number[];
   composites: string[];
+  curves: number[][];
+  dashes: number[][];
 }
 
 const originalGetContext = HTMLCanvasElement.prototype.getContext;
 
 function stubCanvas(): Recorded {
-  const recorded: Recorded = { calls: [], rects: [], lineWidths: [], composites: [] };
+  const recorded: Recorded = { calls: [], rects: [], lineWidths: [], composites: [], curves: [], dashes: [] };
   const context = new Proxy({} as Record<string, unknown>, {
     get(_target, property) {
       if (typeof property !== 'string') return undefined;
       return (...args: number[]): unknown => {
         recorded.calls.push(property);
         if (property === 'rect') recorded.rects.push(args);
+        if (property === 'bezierCurveTo') recorded.curves.push(args);
+        if (property === 'setLineDash') recorded.dashes.push(args[0] as unknown as number[]);
         if (property === 'stroke') recorded.lineWidths.push(currentLineWidth);
         return property.startsWith('create') ? { addColorStop(): void {} } : undefined;
       };
@@ -119,10 +123,11 @@ function stubCanvas(): Recorded {
   return recorded;
 }
 
-function renderWith(over: { model?: TemporalSceneModel; density?: SceneDensity | null } = {}) {
+function renderWith(over: { model?: TemporalSceneModel; density?: SceneDensity | null; variant?: TemporalSceneVariant } = {}) {
   return render(
     <TemporalScene
       model={over.model ?? model()}
+      variant={over.variant ?? 'rail'}
       density={over.density === undefined ? density() : over.density}
       ariaLabel="Temporal execution field"
       reducedMotion={true}
@@ -146,6 +151,56 @@ describe('temporal field paint', () => {
   let recorded: Recorded;
   beforeEach(() => {
     recorded = stubCanvas();
+  });
+
+  describe('restored canvas treatments', () => {
+    it('weaves the current layout curves and keeps ambiguous relationships visibly graded', () => {
+      const { container } = renderWith({ variant: 'weave' });
+      expect(recorded.curves).toContainEqual([447, 80, 441, 130, 460, 130]);
+      expect(recorded.calls).not.toContain('arcTo');
+      expect(recorded.dashes).toContainEqual([1, 3]);
+      expect(container.querySelector('[data-link-grade="ambiguous"]')?.textContent).toBe('AMBIGUOUS');
+      expect(container.querySelector('[data-event="n-commit"] circle[stroke-dasharray="4 3"]')).toBeTruthy();
+    });
+
+    it('keeps crowded events as individual woven knots at their measured positions', () => {
+      const { container } = renderWith({ variant: 'weave', density: density({}, 8) });
+      const knot = container.querySelector('[data-event="n-commit"] circle[r="2.2"]')!;
+      expect(knot.getAttribute('cx')).toBe('450');
+      expect(knot.getAttribute('cy')).toBe('80');
+      expect(container.querySelectorAll('[data-event]')).toHaveLength(3);
+      expect(container.querySelectorAll('[data-event] [data-glyph]')).toHaveLength(0);
+    });
+
+    it('stratifies measured extents and limits an unknown extent to its labelled stub', () => {
+      renderWith({ variant: 'strata' });
+      expect(recorded.rects).toContainEqual([200, 74, 610, 12]);
+      expect(recorded.rects).toContainEqual([444, 124, 18, 12]);
+      expect(recorded.rects).not.toContainEqual([444, 124, 244, 12]);
+      // The ambiguous relation's junction plate uses the recorded endpoints.
+      expect(recorded.rects).toContainEqual([442, 80, 4, 50]);
+      expect(recorded.curves).toHaveLength(0);
+    });
+
+    it('paints no future fork when replay omits it, even after changing treatment', () => {
+      const base = model();
+      const beforeFork = model({
+        nodes: base.nodes.slice(0, 1),
+        paths: base.paths.filter((path) => path.kind === 'lane' && path.fromId === ROOT),
+        cursor: { x: 300, laneId: ROOT, xBasis: 'time' },
+      });
+      const handlers = { onSelectLane: vi.fn(), onSelectEvent: vi.fn(), onToggleBranch: vi.fn(), onWindowChange: vi.fn() };
+      const scene = (variant: TemporalSceneVariant, current: TemporalSceneModel) => (
+        <TemporalScene variant={variant} model={current} density={density()} ariaLabel="Temporal execution field" reducedMotion={true} {...handlers} />
+      );
+      const { container, rerender } = render(scene('rail', base));
+      recorded.curves.length = 0;
+      rerender(scene('weave', beforeFork));
+      expect(recorded.curves).toHaveLength(0);
+      expect(container.querySelector('[data-event="n-spawn"]')).toBeNull();
+      expect(container.querySelector('[data-link-tally]')).toBeNull();
+      expect(container.querySelector('[data-cursor]')?.getAttribute('x1')).toBe('300');
+    });
   });
   afterEach(() => {
     Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', { configurable: true, value: originalGetContext });

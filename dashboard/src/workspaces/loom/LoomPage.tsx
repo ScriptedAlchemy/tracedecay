@@ -21,7 +21,7 @@ import {
 } from '../../viz/temporal/layout.ts';
 import { densityIndex, layoutDensity, membershipKey } from '../../viz/temporal/density.ts';
 import { glyphLabel } from '../../viz/temporal/glyphs.tsx';
-import { TemporalScene } from '../../viz/temporal/TemporalScene.tsx';
+import { TemporalScene, type TemporalSceneVariant } from '../../viz/temporal/TemporalScene.tsx';
 import type {
   JourneyEventKind,
   JourneyProjection,
@@ -33,6 +33,7 @@ import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
 import { BranchNavigator } from './BranchNavigator.tsx';
 import {
   LOOM_PARAMS,
+  parseLoomRenderer,
   parseLoomSession,
   resolveLoomSession,
   parseHiddenKinds,
@@ -214,6 +215,7 @@ function TemporalBody({
   const expanded = parseLaneSet(params.get(LOOM_PARAMS.expanded));
   const hiddenKinds = parseHiddenKinds(params.get(LOOM_PARAMS.hidden));
   const zoom = selectedLane ? 'event' : parseZoom(params.get(LOOM_PARAMS.zoom));
+  const renderer = parseLoomRenderer(params.get(LOOM_PARAMS.renderer));
 
   const model = useMemo(
     () =>
@@ -289,6 +291,11 @@ function TemporalBody({
     update((search) => {
       if (next === 'agent') search.delete(LOOM_PARAMS.zoom);
       else search.set(LOOM_PARAMS.zoom, next);
+    });
+  const setRenderer = (next: TemporalSceneVariant) =>
+    update((search) => {
+      if (next === 'weave') search.delete(LOOM_PARAMS.renderer);
+      else search.set(LOOM_PARAMS.renderer, next);
     });
   const selectEvent = (eventId: string) => {
     const node = model.nodes.find((candidate) => candidate.id === eventId);
@@ -424,6 +431,8 @@ function TemporalBody({
         ) : (
           <>
             <FieldControls
+              renderer={renderer}
+              onRenderer={setRenderer}
               following={following}
               onReturnToTail={() => setWindow(null)}
               zoom={zoom}
@@ -435,6 +444,7 @@ function TemporalBody({
               selected={selectedLane != null}
             />
             <TemporalScene
+              variant={renderer}
               model={model}
               ariaLabel={fieldDescription(projection, model)}
               density={density}
@@ -592,6 +602,8 @@ function writeSet(search: URLSearchParams, key: string, ids: ReadonlySet<string>
  * picture cannot drift.
  */
 function FieldControls({
+  renderer,
+  onRenderer,
   following,
   onReturnToTail,
   zoom,
@@ -602,6 +614,8 @@ function FieldControls({
   onToggleKind,
   selected,
 }: {
+  renderer: TemporalSceneVariant;
+  onRenderer: (renderer: TemporalSceneVariant) => void;
   following: boolean;
   onReturnToTail: () => void;
   zoom: 'workstream' | 'agent' | 'event';
@@ -620,6 +634,28 @@ function FieldControls({
   const { counts } = model;
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border border-edge-subtle px-2 py-1 text-3xs">
+      <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Loom view">
+        <span className="td-legend mr-1">view</span>
+        {([
+          ['weave', 'Weave', 'Luminous threads with curved forks and joins'],
+          ['strata', 'Strata', 'Layered session bands and activity density'],
+          ['rail', 'Rails', 'Compact execution lanes'],
+        ] as const).map(([value, label, description]) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={renderer === value}
+            title={description}
+            onClick={() => onRenderer(value)}
+            className={cn(
+              'td-hit border px-2 td-legend',
+              renderer === value ? 'border-accent/60 text-accent' : 'border-edge-subtle text-text-secondary',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1" role="group" aria-label="Loaded tail">
         {following ? (
           <span className="border border-accent/40 px-1.5 py-0.5 td-legend text-accent" data-follow="following">

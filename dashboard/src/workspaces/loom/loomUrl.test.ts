@@ -4,6 +4,7 @@ import {
   parseHiddenKinds,
   parseLaneSet,
   parseLoomSession,
+  parseLoomRenderer,
   parseWindow,
   parseZoom,
   resolveLoomSession,
@@ -29,6 +30,14 @@ function row(provider: string, sessionId: string): LoomSessionRowV1 {
 }
 
 describe('loomUrl', () => {
+  it('restores saved visual choices and defaults unknown views to the weave', () => {
+    expect(parseLoomRenderer('strata')).toBe('strata');
+    expect(parseLoomRenderer('rail')).toBe('rail');
+    expect(parseLoomRenderer('weave')).toBe('weave');
+    expect(parseLoomRenderer(null)).toBe('weave');
+    expect(parseLoomRenderer('unknown')).toBe('weave');
+  });
+
   it('round-trips a window and refuses one that is not a time this store could record', () => {
     const window = { start: 1_784_700_000, end: 1_784_703_600 };
     expect(parseWindow(serializeWindow(window))).toEqual(window);

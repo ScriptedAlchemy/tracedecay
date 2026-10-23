@@ -16,7 +16,7 @@ import { formatMoment } from '../../workspaces/loom/tracks.ts';
 import type { SceneDensity } from './density.ts';
 import { glyphLabel, TemporalLegend } from './glyphs.tsx';
 import { resolveTemporalPalette, type TemporalPalette } from './palette.ts';
-import { focusAlpha, type SceneFrame } from './scene/frame.ts';
+import { focusAlpha, type SceneFrame, type TemporalSceneVariant } from './scene/frame.ts';
 import { ClusterMark, FieldOverlay, LegendEncodings, laneDetail, NODE_CLASS, NodeMark } from './scene/marks.tsx';
 import { paintScene } from './scene/paint.ts';
 import type {
@@ -29,8 +29,12 @@ import type {
   TemporalSceneModel,
 } from './types.ts';
 
+export type { TemporalSceneVariant } from './scene/frame.ts';
+
 export interface TemporalSceneProps {
   model: TemporalSceneModel;
+  /** Visual treatment over the same laid-out evidence and interaction model. */
+  variant?: TemporalSceneVariant;
   ariaLabel: string;
   onSelectLane: (laneId: string | null) => void;
   onSelectEvent: (eventId: string) => void;
@@ -118,6 +122,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     className,
     fullWindow,
     density = null,
+    variant = 'weave',
   } = props;
   const clipId = useId();
   const hostRef = useRef<HTMLElement>(null);
@@ -137,8 +142,8 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const fieldX1 = width - viewport.right;
   const fieldWidth = Math.max(1, fieldX1 - fieldX0);
   const frame: SceneFrame = useMemo(
-    () => ({ model, density, fieldX0, fieldX1, top: RULER, height }),
-    [model, density, fieldX0, fieldX1, height],
+    () => ({ model, variant, density, fieldX0, fieldX1, top: RULER, height }),
+    [model, variant, density, fieldX0, fieldX1, height],
   );
 
   const lanes = useMemo(() => [...model.lanes].sort((a, b) => a.row - b.row), [model.lanes]);
@@ -566,7 +571,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
           height={Math.max(cluster.height, 44)}
           fill="transparent"
         />
-        <ClusterMark cluster={cluster} />
+        <ClusterMark cluster={cluster} frame={frame} />
       </g>
     );
   };
@@ -699,6 +704,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     <section
       ref={hostRef}
       aria-label={ariaLabel}
+      data-scene-variant={variant}
       className={`td-optic relative min-w-0 ${className ?? ''}`.trim()}
     >
       <div role="toolbar" aria-label="Time window" className="relative z-10 flex min-h-10 flex-wrap items-center gap-1 border-b border-edge-subtle px-1 text-xs">
@@ -862,7 +868,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         />
       </svg>
       <TemporalLegend gaps={model.gaps}>
-        <LegendEncodings />
+        <LegendEncodings variant={variant} />
       </TemporalLegend>
     </section>
   );
