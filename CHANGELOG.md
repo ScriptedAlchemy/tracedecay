@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.92](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.91...v1.0.0-beta.92) (2026-10-23)
+
+
+### Features
+
+* **dashboard:** restore the Loom spindle and canvas views ([#4480](https://github.com/ScriptedAlchemy/tracedecay/issues/4480)) ([098711c](https://github.com/ScriptedAlchemy/tracedecay/commit/098711c8ccb1585d11dbfc4d54fd5a6989aabf67))
+
+
+### Bug Fixes
+
+* **automation:** publish scheduler pause state atomically ([#4357](https://github.com/ScriptedAlchemy/tracedecay/issues/4357)) ([e72ff87](https://github.com/ScriptedAlchemy/tracedecay/commit/e72ff8786c5566e854a45e04ddd7c799da94056d))
+* **ci:** run Hermes checks with their CLI and dependencies ([#4453](https://github.com/ScriptedAlchemy/tracedecay/issues/4453)) ([5414b23](https://github.com/ScriptedAlchemy/tracedecay/commit/5414b2384121eaf4e9a53de1f0a86f0614aa780a))
+* **evals:** isolate daemon lifecycle and validate fact responses ([#4355](https://github.com/ScriptedAlchemy/tracedecay/issues/4355)) ([2a4aba8](https://github.com/ScriptedAlchemy/tracedecay/commit/2a4aba8ff869aefdc44be4fdadfe1c1be9e9e171))
+* **runtime:** recover retired sources and preserve replay authority ([#4395](https://github.com/ScriptedAlchemy/tracedecay/issues/4395)) ([15f2d41](https://github.com/ScriptedAlchemy/tracedecay/commit/15f2d4142ffab0f749537d471f207da997c95ab3))
+* **sessions:** recover writer authority and verify publication joins ([#4388](https://github.com/ScriptedAlchemy/tracedecay/issues/4388)) ([715f9a2](https://github.com/ScriptedAlchemy/tracedecay/commit/715f9a285a0909c85eae9db668a1f8ed182daebe))
+
 ## [1.0.0-beta.91](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.90...v1.0.0-beta.91) (2026-10-23)
 
 
