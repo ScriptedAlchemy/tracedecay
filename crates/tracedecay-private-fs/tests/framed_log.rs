@@ -119,54 +119,44 @@ fn prepared_publish_is_private_and_readable_through_the_adapter() {
     }
 }
 
-/// A batch makes its own members durable and nothing else: syncing one small
-/// member must not wait for another writer's dirty data on the same
-/// filesystem. Asserted as a latency class against the cost of flushing that
-/// unrelated data afterwards, on disk under the target directory (a tmpfs
-/// would make both free).
+/// Observe the barriers themselves: a filesystem can coalesce unrelated
+/// writeback with a member's fsync, so their relative elapsed times cannot
+/// establish which files the batch requested to flush.
 #[cfg(target_os = "linux")]
 #[test]
-fn durable_batch_sync_is_sized_to_its_members_not_the_filesystem() {
-    // The Bazel test launcher passes its scratch dir at run time.
-    let target_tmp = std::env::var_os("CARGO_TARGET_TMPDIR")
-        .unwrap_or_else(|| env!("CARGO_TARGET_TMPDIR").into());
-    let root = tempfile::tempdir_in(target_tmp).expect("batch fixture root");
-    // Incompressible, so a compressing filesystem still has to write it.
-    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-    let chunk = (0..1 << 20)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state.to_le_bytes()[0]
-        })
-        .collect::<Vec<_>>();
-    let mut unrelated = fs::File::create(root.path().join("unrelated")).expect("unrelated file");
-    for round in 0..128_u8 {
-        let mut block = chunk.clone();
-        block[0] = round;
-        unrelated.write_all(&block).expect("unrelated dirty data");
-    }
-
+fn durable_batch_sync_flushes_only_its_members() {
+    let root = tempfile::tempdir().expect("batch fixture root");
+    let unrelated_path = root.path().join("unrelated");
+    fs::write(&unrelated_path, b"unrelated dirty data").expect("unrelated file");
     let member_path = root.path().join("member.tmp");
     let mut member = fs::File::create(&member_path).expect("member file");
     member.write_all(b"sealed segment").expect("member bytes");
     let mut batch = DurableFileBatch::new();
     batch.written(&member_path, &member).expect("record member");
-    let started = std::time::Instant::now();
+    let member_barriers = sync_latency::inject(&member_path, Duration::ZERO);
+    let unrelated_barriers = sync_latency::inject(&unrelated_path, Duration::ZERO);
+    let all_barriers = sync_latency::inject(root.path(), Duration::ZERO);
     batch.sync().expect("batch sync");
-    let batch_sync = started.elapsed();
-    let started = std::time::Instant::now();
-    unrelated.sync_all().expect("unrelated sync");
-    let unrelated_sync = started.elapsed();
+
+    assert_eq!(member_barriers.syncs(), 1, "the member must be flushed");
+    assert_eq!(
+        unrelated_barriers.syncs(),
+        0,
+        "unrelated data is not a member"
+    );
+    assert_eq!(all_barriers.syncs(), 0, "no additional filesystem barriers");
 
     assert_eq!(
         fs::read(&member_path).expect("member readback"),
         b"sealed segment"
     );
-    assert!(
-        batch_sync * 4 < unrelated_sync,
-        "one-member batch sync took {batch_sync:?}; flushing the unrelated 128 MiB took {unrelated_sync:?}"
+    fs::remove_file(&member_path).expect("remove member before another sync");
+    assert_eq!(
+        batch
+            .sync()
+            .expect_err("missing member must refuse durability")
+            .kind(),
+        ErrorKind::NotFound
     );
 }
 

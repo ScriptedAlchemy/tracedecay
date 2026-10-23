@@ -1198,24 +1198,6 @@ impl McpServer {
     }
 
     #[tracing::instrument(
-        name = "mcp.server.tools_call.complete.version_check",
-        level = "trace",
-        skip_all
-    )]
-    fn append_version_notice(&self, result: &mut ToolResult) {
-        // The check serves the cached answer and refreshes in the background,
-        // so completion never awaits the fetch.
-        if let Some(warning) = self.check_version_update()
-            && let Some(content) = result
-                .value
-                .get_mut("content")
-                .and_then(|c| c.as_array_mut())
-        {
-            content.insert(0, json!({"type": "text", "text": warning}));
-        }
-    }
-
-    #[tracing::instrument(
         name = "mcp.server.tools_call.complete.index_warnings",
         level = "trace",
         skip_all
@@ -1331,7 +1313,6 @@ impl McpServer {
                     )
                     .await;
                 }
-                self.append_version_notice(&mut result);
                 self.prepend_index_warnings(selected_owner.is_none(), &mut result);
                 {
                     let _span =

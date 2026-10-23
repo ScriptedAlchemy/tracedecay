@@ -554,7 +554,6 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         crate::product_runtime::provider(),
     )?;
     if !is_one_shot_daemon_client(cli.command.as_ref()) {
-        crate::cloud::admit_sync_probes();
         // Inverted runtime ports are read by ingest, installers, hooks, and
         // project open. One-shot daemon clients call the daemon directly and
         // never read those slots.
