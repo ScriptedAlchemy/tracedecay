@@ -1577,6 +1577,102 @@ fn a_replacement_daemon_waits_for_its_predecessors_authority_lock() {
     let _daemon = spawn_tracedecay_daemon(&home_path);
 }
 
+#[test]
+fn stop_managed_daemon_refuses_a_child_held_authority_lock() {
+    const HOLDER_HOME: &str = "TRACEDECAY_TEST_AUTHORITY_HOLDER_HOME";
+    if let Some(home) = std::env::var_os(HOLDER_HOME) {
+        let lock = std::fs::File::open(
+            PathBuf::from(home)
+                .join(".tracedecay")
+                .join(tracedecay_runtime_core::storage::DAEMON_AUTHORITY_LOCK_FILE),
+        )
+        .unwrap();
+        lock.try_lock().unwrap();
+        // The fork inherits the lock's open file description. Closing the
+        // parent's handle must not unlock it before the child exits.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "authority holder must fork");
+        if pid == 0 {
+            let mut release = 0_u8;
+            // SAFETY: Only async-signal-safe operations run after fork. The
+            // byte lives until read returns, and _exit runs no Rust cleanup.
+            unsafe {
+                let read = libc::read(libc::STDIN_FILENO, (&raw mut release).cast(), 1);
+                libc::_exit(if read == 1 { 0 } else { 1 });
+            }
+        }
+        drop(lock);
+        println!("\nauthority held");
+        std::io::stdout().flush().unwrap();
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
+        assert_eq!(status, 0);
+        return;
+    }
+
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    common::ensure_tracedecay_daemon(&home_path);
+    spawn_tracedecay_daemon(&home_path).kill_and_wait().unwrap();
+    common::wait_for_stopped_daemon(&home_path);
+
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    common::apply_tracedecay_home_env(&mut command, &home_path);
+    command
+        .args([
+            "--exact",
+            "tool_daemon_test::stop_managed_daemon_refuses_a_child_held_authority_lock",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(HOLDER_HOME, &home_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut readiness = BufReader::new(child.stdout.take().unwrap());
+    let mut holder = common::TestChildProcess::new(child);
+    let mut line = String::new();
+    loop {
+        assert_ne!(readiness.read_line(&mut line).unwrap(), 0);
+        if line.trim() == "authority held" {
+            break;
+        }
+        line.clear();
+    }
+    let lock_path = home_path
+        .join(".tracedecay")
+        .join(tracedecay_runtime_core::storage::DAEMON_AUTHORITY_LOCK_FILE);
+    assert!(matches!(
+        std::fs::File::open(&lock_path).unwrap().try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+
+    let refusal = std::panic::catch_unwind(|| common::stop_managed_daemon(&home_path));
+    assert!(
+        refusal.is_err(),
+        "stopping must not return while a child still owns the authority lock"
+    );
+    assert_eq!(
+        refusal.unwrap_err().downcast_ref::<String>(),
+        Some(&format!(
+            "a stopped test daemon still owns an endpoint or authority lock in {}",
+            home_path.join(".tracedecay").display()
+        ))
+    );
+    holder.stdin_mut().unwrap().write_all(b"release\n").unwrap();
+    assert!(
+        holder
+            .wait_for_exit(LOCAL_READY_TIMEOUT)
+            .unwrap()
+            .expect("released authority holder should exit")
+            .success()
+    );
+    common::stop_managed_daemon(&home_path);
+    let lock = std::fs::File::open(lock_path).unwrap();
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
+}
+
 /// A draining daemon waits only for the store mount an in-flight open is
 /// inside. Once that mount returns, the open stops before opening the
 /// project graph instead of running on to its next composition phase.
