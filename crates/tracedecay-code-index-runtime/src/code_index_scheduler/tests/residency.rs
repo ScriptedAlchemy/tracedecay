@@ -1,6 +1,7 @@
 use std::num::NonZeroU64;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -1423,6 +1424,108 @@ async fn a_refused_text_build_retries_when_a_reservation_it_waited_on_drops() {
         text.query_owners_are_ready(),
         "the dropped reservation, not an owner release, woke the refused build"
     );
+
+    registry.shutdown().await;
+}
+
+async fn owner_passes_started(registry: &CodeIndexSchedulerRegistryV1, root: &Path) -> u64 {
+    registry
+        .subscribe_owner_activity(root)
+        .await
+        .expect("mounted worktree activity")
+        .passes()
+        .started
+}
+
+/// Issue #4505: a cold build the watermark stops gives back what it built,
+/// and the latch clearing behind that release is no memory anyone else gave
+/// back. Retrying on it rebuilt the same refused pass forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cold_build_refused_at_the_watermark_retries_only_on_memory_it_did_not_give_back() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(16 * GIB).unwrap();
+    // The process outside the build, plus what the build adds while it holds
+    // admitted bytes: from 11.5 GiB it crosses the 14.4 GiB high watermark,
+    // and once it drops them the process is back under the 12 GiB low one.
+    let outside = Arc::new(AtomicU64::new(11 * GIB + GIB / 2));
+    let ledger = Arc::new(OnceLock::<Weak<ProcessResidentMemoryV1>>::new());
+    let sampler = {
+        let outside = Arc::clone(&outside);
+        let ledger = Arc::clone(&ledger);
+        Arc::new(move || {
+            let building = ledger
+                .get()
+                .and_then(Weak::upgrade)
+                .is_some_and(|ledger| ledger.snapshot().used_bytes > 0);
+            let bytes = outside.load(Ordering::Acquire) + if building { 3 * GIB } else { 0 };
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: bytes,
+                unreclaimable_bytes: bytes,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        })
+    };
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(limit, sampler));
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    ledger.set(Arc::downgrade(&resident_memory)).unwrap();
+    pressure.sample_and_publish();
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let registry = CodeIndexSchedulerRegistryV1::with_resident_memory(1, resident_memory)
+        .with_resident_owners(Arc::clone(&owners));
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let blocked = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(reason) = registry
+                .dashboard_freshness(fixture.path())
+                .await
+                .and_then(|freshness| freshness.parked)
+                .and_then(|parked| parked.blocked_reason)
+            {
+                return reason;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the cold build parks on resident memory");
+    assert_eq!(blocked, CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+
+    // The build's own memory is gone and the latch clears.
+    let refused = owner_passes_started(&registry, fixture.path()).await;
+    assert!(!pressure.sample_and_publish().unwrap().1.is_over_budget());
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        owner_passes_started(&registry, fixture.path()).await,
+        refused,
+        "the refused build's own release is not headroom for its retry"
+    );
+    assert!(
+        registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .is_none()
+    );
+
+    // Something else gave memory back: the process now measures below where
+    // the refused build started, so the build fits and publishes.
+    outside.store(11 * GIB, Ordering::Release);
+    pressure.sample_and_publish();
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert!(text.query_owners_are_ready());
 
     registry.shutdown().await;
 }
