@@ -300,6 +300,17 @@ impl JsonlCheckpoint {
     }
 }
 
+/// Contiguous frames covered past for one reason, not yet written.
+///
+/// Every cover-past advance is one store write transaction. A rollout that
+/// belongs to another project is out of scope frame after frame, so writing
+/// each frame on its own costs one transaction per frame for every project
+/// and profile store that scans it. A run settles as one advance instead.
+struct CoverageRun {
+    checkpoint: JsonlCheckpoint,
+    reason: ObservationCoverageReason,
+}
+
 /// Bounded persist window: flush consecutive durables before this many
 /// frames so one `persist_observations` call stays a scan-sized batch.
 pub(in crate::runtime) const MAX_CAPTURE_WINDOW: usize = 256;
@@ -1927,6 +1938,73 @@ impl ActiveAdmission<'_> {
         Ok(())
     }
 
+    /// Covers `checkpoint` past for `reason`, extending `run` when the frame
+    /// continues it. Callers flush `run` before anything else moves the
+    /// cursor, so the run always starts at the expected cursor.
+    async fn cover(
+        &self,
+        expected_cursor: &mut Option<ObservationSourceCursorV1>,
+        run: &mut Option<CoverageRun>,
+        checkpoint: JsonlCheckpoint,
+        reason: ObservationCoverageReason,
+    ) -> TranscriptIngestResult<()> {
+        if let Some(current) = run.as_mut()
+            && current.reason == reason
+            && current.checkpoint.end_offset == checkpoint.offset
+        {
+            current.checkpoint = JsonlCheckpoint::new(
+                current.checkpoint.offset,
+                checkpoint.end_offset,
+                checkpoint.resume_fingerprint,
+            );
+            return Ok(());
+        }
+        self.flush_coverage(expected_cursor, run).await?;
+        *run = Some(CoverageRun { checkpoint, reason });
+        Ok(())
+    }
+
+    /// Writes `run` as one advance. Live hook ingest owns the same frontier
+    /// and can cover a prefix of the run first; the advance then loses its
+    /// compare-and-swap to a cursor inside the run, and the rest is covered
+    /// from there, as one advance per frame would have converged.
+    async fn flush_coverage(
+        &self,
+        expected_cursor: &mut Option<ObservationSourceCursorV1>,
+        run: &mut Option<CoverageRun>,
+    ) -> TranscriptIngestResult<()> {
+        let Some(mut run) = run.take() else {
+            return Ok(());
+        };
+        loop {
+            let Err(error) = self
+                .advance_coverage(expected_cursor, run.checkpoint, run.reason, None)
+                .await
+            else {
+                return Ok(());
+            };
+            let Ok(Some(actual)) = self
+                .admission
+                .get_source_cursor(&self.source, &self.scope)
+                .await
+            else {
+                return Err(error);
+            };
+            if actual.generation() != self.generation
+                || actual.position() <= run.checkpoint.offset
+                || actual.position() >= run.checkpoint.end_offset
+            {
+                return Err(error);
+            }
+            run.checkpoint = JsonlCheckpoint::new(
+                actual.position(),
+                run.checkpoint.end_offset,
+                run.checkpoint.resume_fingerprint,
+            );
+            *expected_cursor = Some(actual);
+        }
+    }
+
     /// Whether the peer that won a cursor CAS already covered this range.
     ///
     /// Live hook ingest and the catch-up sweep own the same `(source, scope)`
@@ -2403,6 +2481,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     let mut pending: Vec<DurableJsonlFrame> = Vec::new();
     let mut pending_bytes = 0_u64;
     let mut pending_start_state: Option<State> = None;
+    let mut coverage_run: Option<CoverageRun> = None;
 
     async fn flush_pending<State: Clone>(
         active: &ActiveAdmission<'_>,
@@ -2656,15 +2735,15 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 .next()
                 .ok_or(TranscriptIngestError::InvalidFrameState { provider })?;
             active
-                .advance_coverage(
+                .cover(
                     &mut expected_cursor,
+                    &mut coverage_run,
                     JsonlCheckpoint::new(
                         skipped.offset,
                         skipped.end_offset,
                         skipped.resume_fingerprint,
                     ),
                     skipped_reason(skipped.reason),
-                    None,
                 )
                 .await?;
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
@@ -2749,7 +2828,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 )
                 .await?;
                 active
-                    .advance_coverage(&mut expected_cursor, checkpoint, reason, None)
+                    .cover(&mut expected_cursor, &mut coverage_run, checkpoint, reason)
                     .await?;
                 progress.frames_skipped = progress.frames_skipped.saturating_add(1);
                 if before_decode {
@@ -2762,6 +2841,9 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 return Err(TranscriptIngestError::InvalidFrameState { provider });
             }
         };
+        active
+            .flush_coverage(&mut expected_cursor, &mut coverage_run)
+            .await?;
         let frame_bytes = u64::try_from(frame.bytes.len())
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?;
         if !pending.is_empty()
@@ -2846,19 +2928,22 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     if !active.cancellation.is_cancelled() {
         for skipped in skipped {
             active
-                .advance_coverage(
+                .cover(
                     &mut expected_cursor,
+                    &mut coverage_run,
                     JsonlCheckpoint::new(
                         skipped.offset,
                         skipped.end_offset,
                         skipped.resume_fingerprint,
                     ),
                     skipped_reason(skipped.reason),
-                    None,
                 )
                 .await?;
             progress.frames_skipped = progress.frames_skipped.saturating_add(1);
         }
+        active
+            .flush_coverage(&mut expected_cursor, &mut coverage_run)
+            .await?;
     } else {
         return Err(TranscriptIngestError::Cancelled { provider });
     }

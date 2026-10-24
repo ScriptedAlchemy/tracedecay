@@ -171,6 +171,11 @@ const MAX_PAGE_SIZE = 1_000;
 const MAX_OPAQUE_CURSOR_BYTES = 4_096;
 const MAX_RESUME_TOKEN_BYTES = 4_096;
 const MAX_REQUEST_ID_BYTES = 512;
+// Match the Rust SDK's raw-line and retained event/id/data policy. Accepted
+// identifiers (512 bytes), test names (1 KiB), frontiers and terminal receipts
+// fit comfortably within 64 KiB, including JSON escaping. Raw line endings
+// count too; one additional byte detects overflow without retaining it.
+const MAX_SSE_FRAME_BYTES = 64 * 1024;
 const MAX_U64 = 18_446_744_073_709_551_615n;
 const UTF8_ENCODER = new TextEncoder();
 
@@ -369,16 +374,38 @@ async function* parseSse(
 ): AsyncGenerator<SseFrame> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  let buffer = "";
+  const lineBuffer = new Uint8Array(MAX_SSE_FRAME_BYTES);
+  let lineBytes = 0;
+  let previousLineBytes = 0;
+  let skipLf = false;
   let eventType = "";
+  let eventBytes = 0;
   let lastEventId = initialLastEventId ?? "";
+  let idBytes = UTF8_ENCODER.encode(lastEventId).byteLength;
   let data: string[] = [];
+  let dataBytes = 0;
   let pendingFields = false;
   let retryDelayMs: number | undefined;
+
+  const oversized = () => new TraceDecayMalformedResponseError(
+    `the daemon returned an SSE line or frame exceeding ${MAX_SSE_FRAME_BYTES} bytes`,
+    { payload: { limitBytes: MAX_SSE_FRAME_BYTES } },
+  );
+  const decodeUtf8 = (bytes: Uint8Array, stream: boolean): string => {
+    try {
+      return decoder.decode(bytes, { stream });
+    } catch (cause) {
+      throw new TraceDecayMalformedResponseError(
+        "the daemon returned malformed UTF-8 event-stream data",
+        { payload: cause },
+      );
+    }
+  };
 
   const consumeLine = (line: string): SseFrame | null => {
     if (line === "") {
       pendingFields = false;
+      eventBytes = 0;
       if (data.length === 0) {
         eventType = "";
         return null;
@@ -391,6 +418,7 @@ async function* parseSse(
       };
       eventType = "";
       data = [];
+      dataBytes = 0;
       return result;
     }
     if (line.startsWith(":")) {
@@ -403,16 +431,29 @@ async function* parseSse(
     if (fieldValue.startsWith(" ")) {
       fieldValue = fieldValue.slice(1);
     }
+    const valueBytes = UTF8_ENCODER.encode(fieldValue).byteLength;
+    if (
+      (field === "event" || field === "id" || field === "data") &&
+      eventBytes + idBytes + dataBytes + valueBytes + 1 > MAX_SSE_FRAME_BYTES
+    ) {
+      // Keep the Rust client's conservative replacement allowance and count
+      // the separator before extending data. Persistent IDs retain their
+      // charge across empty frames and dispatch boundaries.
+      throw oversized();
+    }
     switch (field) {
       case "event":
         eventType = fieldValue;
+        eventBytes = valueBytes;
         break;
       case "id":
         if (!fieldValue.includes("\0")) {
           lastEventId = fieldValue;
+          idBytes = valueBytes;
         }
         break;
       case "data":
+        dataBytes += valueBytes + (data.length === 0 ? 0 : 1);
         data.push(fieldValue);
         break;
       case "retry":
@@ -428,65 +469,40 @@ async function* parseSse(
     return null;
   };
 
-  const lines = function* (atEnd: boolean): Generator<string> {
-    for (;;) {
-      let boundary = -1;
-      for (let index = 0; index < buffer.length; index += 1) {
-        if (buffer[index] === "\r" || buffer[index] === "\n") {
-          boundary = index;
-          break;
-        }
-      }
-      if (boundary < 0) {
-        return;
-      }
-      if (buffer[boundary] === "\r" && boundary === buffer.length - 1 && !atEnd) {
-        return;
-      }
-      const line = buffer.slice(0, boundary);
-      const width =
-        buffer[boundary] === "\r" && buffer[boundary + 1] === "\n" ? 2 : 1;
-      buffer = buffer.slice(boundary + width);
-      yield line;
-    }
-  };
-
   try {
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) {
-        try {
-          buffer += decoder.decode();
-        } catch (cause) {
-          throw new TraceDecayMalformedResponseError(
-            "the daemon returned malformed UTF-8 event-stream data",
-            { payload: cause },
-          );
-        }
-        for (const line of lines(true)) {
-          const frame = consumeLine(line);
-          if (frame !== null) {
-            yield frame;
-          }
-        }
+        decodeUtf8(lineBuffer.subarray(0, lineBytes), false);
         break;
       }
-      try {
-        buffer += decoder.decode(chunk.value, { stream: true });
-      } catch (cause) {
-        throw new TraceDecayMalformedResponseError(
-          "the daemon returned malformed UTF-8 event-stream data",
-          { payload: cause },
-        );
-      }
-      for (const line of lines(false)) {
+      // Inspect each incoming byte once and copy only into the bounded line.
+      // A transport may supply a huge chunk; never decode or retain it whole.
+      for (let index = 0; index < chunk.value.length; index += 1) {
+        const byte = chunk.value[index];
+        if (skipLf) {
+          skipLf = false;
+          if (byte === 10) {
+            if (previousLineBytes === MAX_SSE_FRAME_BYTES) throw oversized();
+            continue;
+          }
+        }
+        if (lineBytes === MAX_SSE_FRAME_BYTES) throw oversized();
+        lineBuffer[lineBytes++] = byte;
+        if (byte !== 10 && byte !== 13) continue;
+        // Decode the delimiter too, so a malformed code point cannot straddle
+        // lines. One decoder preserves BOM handling for the whole stream.
+        const line = decodeUtf8(lineBuffer.subarray(0, lineBytes), true).slice(0, -1);
+        previousLineBytes = lineBytes;
+        lineBytes = 0;
+        skipLf = byte === 13;
         const frame = consumeLine(line);
         if (frame !== null) {
           yield frame;
         }
       }
     }
-    if (buffer.length > 0 || pendingFields || data.length > 0) {
+    if (lineBytes > 0 || pendingFields || data.length > 0) {
       throw new TraceDecayDisconnectedError(
         "operation stream ended with an incomplete SSE event",
       );

@@ -3,15 +3,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_domain::{
-    DiversityPolicy, EvidenceRole, ExactClass, HydrationReceipt, PublicRetrieverStatus,
-    RankingDecisionKind, RetrievalBudgetUsage, RetrievalFailure, RetrieverKind, RetrieverOutcome,
-    ScoreDomainCalibrationV1,
+    CompactCandidate, DiversityPolicy, EvidenceRole, ExactClass, FusionProfile, HydrationReceipt,
+    PublicRetrieverStatus, RankingDecisionKind, RetrievalBudgetUsage, RetrievalFailure,
+    RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1,
 };
 
 use super::{
     batch, budget, candidate, composition_lanes, exact_candidate, id, no_caps, profile, request,
 };
-use crate::retrieval::fusion::{CompositionKernel, FusionStageInput};
+use crate::retrieval::fusion::{CompositionKernel, FusionStageError, FusionStageInput};
 use crate::retrieval::hydrate::{
     CanonicalLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
     HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
@@ -141,6 +141,204 @@ fn fusion_retains_every_occurrence_evidence_pair_and_contribution() {
         fused.occurrences[1].retriever_evidence_anchor
     );
     assert_eq!(fused.utility_micros, 500_000);
+    assert!(output.dedupe_decisions.is_empty());
+    assert!(
+        fused
+            .decisions
+            .iter()
+            .all(|decision| { decision.kind != RankingDecisionKind::SameSourceDuplicateCollapse })
+    );
+}
+
+fn same_source_candidates(name: &str) -> [CompactCandidate; 2] {
+    let lexical = candidate(RetrieverKind::Lexical, name, 100_000, 0);
+    let mut graph = candidate(RetrieverKind::Graph, name, 800_000, 0);
+    graph.source_occurrence_id = lexical.source_occurrence_id.clone();
+    graph.retriever_evidence_anchor = lexical.retriever_evidence_anchor.clone();
+    graph.freshness = lexical.freshness.clone();
+    [lexical, graph]
+}
+
+fn duplicate_accounting_input(
+    fusion_profile: FusionProfile,
+    candidates: Vec<CompactCandidate>,
+) -> FusionStageInput {
+    FusionStageInput {
+        profile: fusion_profile,
+        lanes: composition_lanes(
+            RetrieverKind::QUERY_FALLBACK_LANES
+                .into_iter()
+                .map(|lane| {
+                    (
+                        lane,
+                        RetrieverOutcome::Complete(batch(
+                            candidates
+                                .iter()
+                                .filter(|candidate| candidate.retriever == lane)
+                                .cloned()
+                                .collect(),
+                            "same-source evidence",
+                        )),
+                    )
+                })
+                .collect(),
+        ),
+    }
+}
+
+#[test]
+fn same_source_duplicate_accounting_keeps_filtered_rows_in_the_census() {
+    let [mut lexical, mut graph] = same_source_candidates("threshold");
+    lexical.logical_copy_cluster_id = Some(id("copy.filtered"));
+    lexical.logical_copy_evidence_anchor = Some(id("copy-evidence.filtered"));
+    graph.logical_copy_cluster_id = Some(id("copy.retained"));
+    graph.logical_copy_evidence_anchor = Some(id("copy-evidence.retained"));
+    let occurrence = lexical.source_occurrence_id.clone();
+    let mut fusion_profile = profile();
+    fusion_profile
+        .minimum_calibrated_feature_micros
+        .insert(RetrieverKind::Lexical, 200_000);
+
+    let output = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &duplicate_accounting_input(fusion_profile, vec![lexical, graph]),
+            &no_caps(),
+        )
+        .unwrap();
+
+    assert_eq!(output.ranked_candidates.len(), 1);
+    assert_eq!(output.dedupe_decisions.len(), 1);
+    let recorded = &output.dedupe_decisions[0];
+    assert_eq!(recorded.kept_occurrence, occurrence);
+    assert_eq!(recorded.collapsed_occurrences, vec![occurrence.clone()]);
+    assert_eq!(recorded.copy_cluster, Some(id("copy.filtered")));
+    assert_eq!(
+        recorded.decision.detail,
+        format!(
+            "collapsed 1 duplicate occurrence rows for {occurrence}; retained every retriever contribution"
+        )
+    );
+    let fused = &output.ranked_candidates[0].candidate;
+    assert_eq!(fused.contributions.len(), 1);
+    assert_eq!(fused.contributions[0].retriever, RetrieverKind::Graph);
+    assert_eq!(fused.occurrences.len(), 1);
+    assert_eq!(
+        fused.occurrences[0].logical_copy_cluster_id,
+        Some(id("copy.retained"))
+    );
+    assert!(fused.decisions.contains(&recorded.decision));
+}
+
+#[test]
+fn same_source_duplicates_without_any_surviving_occurrence_refuse() {
+    let mut fusion_profile = profile();
+    for lane in [RetrieverKind::Lexical, RetrieverKind::Graph] {
+        fusion_profile
+            .minimum_calibrated_feature_micros
+            .insert(lane, 900_000);
+    }
+    let input =
+        duplicate_accounting_input(fusion_profile, same_source_candidates("filtered").into());
+    assert_eq!(
+        CompositionKernel::new(id("ranking.fixture.v1")).compose(&input, &no_caps()),
+        Err(FusionStageError::Contract(
+            "same-source collapse decision lost its fused candidate".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn same_source_duplicate_decisions_use_the_first_surviving_fusion_identity() {
+    for filter_duplicate_group in [false, true] {
+        let [lexical, graph] = same_source_candidates("z-duplicate");
+        let mut earlier = exact_candidate("a-first", 500_000);
+        earlier.source_occurrence_id = lexical.source_occurrence_id.clone();
+        earlier.retriever_evidence_anchor = lexical.retriever_evidence_anchor.clone();
+        earlier.freshness = lexical.freshness.clone();
+        let mut fusion_profile = profile();
+        if filter_duplicate_group {
+            for lane in [RetrieverKind::Lexical, RetrieverKind::Graph] {
+                fusion_profile
+                    .minimum_calibrated_feature_micros
+                    .insert(lane, 900_000);
+            }
+        }
+        let input = duplicate_accounting_input(fusion_profile, vec![graph, earlier, lexical]);
+        let output = CompositionKernel::new(id("ranking.fixture.v1"))
+            .compose(&input, &no_caps())
+            .unwrap();
+        assert_eq!(output.dedupe_decisions.len(), 1);
+        assert_eq!(
+            output.ranked_candidates.len(),
+            if filter_duplicate_group { 1 } else { 2 }
+        );
+        for ranked in &output.ranked_candidates {
+            let carries_decision =
+                ranked.candidate.decisions.iter().any(|decision| {
+                    decision.kind == RankingDecisionKind::SameSourceDuplicateCollapse
+                });
+            assert_eq!(
+                carries_decision,
+                ranked.candidate.anchor_id.as_str() == "anchor.a-first",
+                "the first surviving occurrence owns the decision, even when its fusion identity differs"
+            );
+        }
+    }
+}
+
+#[test]
+fn fusion_refusals_follow_candidate_order_before_duplicate_resolution() {
+    let kernel = CompositionKernel::new(id("ranking.fixture.v1"));
+    for lexical_first in [false, true] {
+        let lexical = candidate(
+            RetrieverKind::Lexical,
+            if lexical_first { "a-first" } else { "z-last" },
+            800_000,
+            0,
+        );
+        let graph = candidate(
+            RetrieverKind::Graph,
+            if lexical_first { "z-last" } else { "a-first" },
+            800_000,
+            0,
+        );
+        let mut fusion_profile = profile();
+        fusion_profile.calibrations.remove(&RetrieverKind::Lexical);
+        fusion_profile
+            .minimum_calibrated_feature_micros
+            .insert(RetrieverKind::Graph, 1_000_001);
+        let mut input = duplicate_accounting_input(fusion_profile, vec![lexical, graph]);
+        let expected = if lexical_first {
+            FusionStageError::ProfileLaneMismatch
+        } else {
+            FusionStageError::InvalidCalibratedFeature
+        };
+        for _ in 0..2 {
+            assert_eq!(kernel.compose(&input, &no_caps()), Err(expected.clone()));
+            input.lanes.reverse();
+        }
+    }
+
+    // A filtered duplicate group cannot report an orphan before calibration
+    // of a later candidate has had the opportunity to refuse the whole batch.
+    let [lexical, graph] = same_source_candidates("a-filtered");
+    let mut fusion_profile = profile();
+    for lane in [RetrieverKind::Lexical, RetrieverKind::Graph] {
+        fusion_profile
+            .minimum_calibrated_feature_micros
+            .insert(lane, 900_000);
+    }
+    fusion_profile
+        .minimum_calibrated_feature_micros
+        .insert(RetrieverKind::ExactLiteral, 1_000_001);
+    let input = duplicate_accounting_input(
+        fusion_profile,
+        vec![lexical, graph, exact_candidate("z-invalid", 500_000)],
+    );
+    assert_eq!(
+        kernel.compose(&input, &no_caps()),
+        Err(FusionStageError::InvalidCalibratedFeature)
+    );
 }
 
 #[test]

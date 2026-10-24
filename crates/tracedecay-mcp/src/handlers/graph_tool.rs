@@ -36,7 +36,7 @@ use crate::handlers::graph::{
 use crate::handlers::grep::{compute_grep, render_grep};
 use crate::handlers::health::{
     compute_dependency_depth, compute_dsm, compute_gini, compute_health, compute_test_map,
-    compute_test_risk, render_dsm_md,
+    compute_test_risk, render_dsm_md, test_map_reads_one_node,
 };
 use crate::handlers::hook_runtime::decode_hook_runtime_request;
 use crate::handlers::info::{
@@ -48,7 +48,9 @@ use crate::handlers::support::{
     decode_primitive_request, generic_tool_result, rendered_tool_result, text_tool_result,
     unknown_tool_error,
 };
-use crate::handlers::verified_read::{VerifiedGraphOpen, verified_read_operation as read};
+use crate::handlers::verified_read::{
+    VerifiedGraphOpen, VerifiedGraphRead, verified_read_operation as read,
+};
 use crate::tools::response_trailers::{CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, ResponseTrailer};
 use crate::tools::{render, renderers};
 use crate::{McpToolContext, ToolResult};
@@ -97,9 +99,11 @@ pub async fn compute_graph_tool(
             compute_context(ctx, || open(operation.clone()), args, scope_prefix).await
         }
         ApplicationSurfaceOperation::Impact => {
-            compute_impact(&open(read("impact")?).await?, args).await
+            compute_impact(&open(read("impact")?.engine_only()).await?, args).await
         }
-        ApplicationSurfaceOperation::Node => compute_node(&open(read("node")?).await?, args).await,
+        ApplicationSurfaceOperation::Node => {
+            compute_node(&open(read("node")?.engine_only()).await?, args).await
+        }
         ApplicationSurfaceOperation::Similar => compute_similar(ctx, args).await,
         ApplicationSurfaceOperation::Redundancy => compute_redundancy(ctx, args).await,
         ApplicationSurfaceOperation::RenamePreview => {
@@ -215,7 +219,7 @@ pub async fn compute_graph_tool(
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("invalid source metadata operation: {error}"),
                 })?;
-            let graph = open(operation).await?;
+            let graph = open(VerifiedGraphRead::catalog(operation)).await?;
             // The freshness read names the latest text generation, which can
             // run ahead of the generation this verified graph serves. Attach
             // the omission block only when it describes the same sealed
@@ -267,7 +271,14 @@ async fn compute_health_report(
     } else {
         "health_read"
     };
-    let graph = open(read(graph_operation)?).await?;
+    let read = read(graph_operation)?;
+    let read =
+        if operation == ApplicationSurfaceOperation::TestMap && test_map_reads_one_node(&args) {
+            read.engine_only()
+        } else {
+            read
+        };
+    let graph = open(read).await?;
     let completion = match operation {
         ApplicationSurfaceOperation::TestMap => compute_test_map(&graph, args).await,
         ApplicationSurfaceOperation::TestRisk => {

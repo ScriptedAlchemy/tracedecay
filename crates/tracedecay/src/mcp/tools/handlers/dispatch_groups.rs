@@ -1,6 +1,6 @@
 use serde_json::Value;
+use tracedecay_contracts::RetainedSurfaceOperation;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
-use tracedecay_contracts::{ApplicationOperation, RetainedSurfaceOperation};
 use tracedecay_graph_query::VerifiedGraphQueryRequest;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
@@ -23,7 +23,8 @@ use tracedecay_dashboard_api::AdmittedDoctorReportV1;
 use tracedecay_mcp::handlers::health as portable_health;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::handlers::{
-    VerifiedGraphOpenFuture, decode_primitive_request, unknown_tool_error, verified_read_operation,
+    VerifiedGraphOpenFuture, VerifiedGraphRead, decode_primitive_request, unknown_tool_error,
+    verified_read_operation,
 };
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
@@ -64,16 +65,20 @@ async fn admitted_graph_query(
 /// the same `served_code_graph` slot.
 fn verified_graph_open<'o>(
     options: &'o ToolCallRegistryOptions<'_>,
-) -> impl Fn(ApplicationOperation) -> VerifiedGraphOpenFuture<'o> + Sync + 'o {
-    move |operation| -> VerifiedGraphOpenFuture<'o> {
-        Box::pin(admitted_graph_query_for_operation(options, operation))
+) -> impl Fn(VerifiedGraphRead) -> VerifiedGraphOpenFuture<'o> + Sync + 'o {
+    move |read| -> VerifiedGraphOpenFuture<'o> {
+        Box::pin(admitted_graph_query_for_operation(options, read))
     }
 }
 
 async fn admitted_graph_query_for_operation(
     options: &ToolCallRegistryOptions<'_>,
-    operation: ApplicationOperation,
+    read: VerifiedGraphRead,
 ) -> Result<tracedecay_graph_query::VerifiedGraphQuery> {
+    let VerifiedGraphRead {
+        operation,
+        readiness,
+    } = read;
     let Some(port) = options.verified_graph_query_port.as_deref() else {
         return Err(graph_read_unavailable(
             "the exact project verified graph query is not mounted",
@@ -96,12 +101,10 @@ async fn admitted_graph_query_for_operation(
     // through this one open, so a slow span here is admission contention or a
     // stale generation, never handler work.
     let query = tracing::Instrument::instrument(
-        port.open(VerifiedGraphQueryRequest::new(
-            &operation,
-            request_id,
-            deadline,
-            cancellation,
-        )),
+        port.open(
+            VerifiedGraphQueryRequest::new(&operation, request_id, deadline, cancellation)
+                .with_readiness(readiness),
+        ),
         tracing::trace_span!("mcp.dispatch.graph_query_admission"),
     )
     .await?;

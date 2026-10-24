@@ -7,6 +7,7 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::{DaemonInvocationService, RegisteredRetainedRequestContextError};
 use tracedecay_automation_runtime::automation::effect_runtime::contract_error;
@@ -22,6 +23,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::native_runtime;
 
 pub mod recovery_composition;
 
@@ -47,63 +49,78 @@ pub async fn prepare(
     if !request.validate() {
         return Err(contract_error("automation run identity is empty"));
     }
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
-            .map_err(contract_error)?;
-    let context = match invocation
-        .registered_retained_request_context(
-            project_root,
-            request_id.clone(),
-            deadline,
-            cancellation.context(),
-            observed_at,
-            &operation,
-        )
+    // The caller may abandon this wait after queueing a journal write. Every
+    // preparation entry point must retain the exact project until that write
+    // returns, including scheduler and dashboard callers without a socket lease.
+    let lease = invocation
+        .project_runtimes
+        .admit_request(project_root, None)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "automation preparation project runtime is unavailable".to_owned(),
+        })?;
+    let owner: Arc<dyn Send + Sync> = Arc::new(lease);
+    native_runtime::BLOCKING_WORK_OWNER
+        .scope(owner, async move {
+            let operation =
+                retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+                    .map_err(contract_error)?;
+            let context = match invocation
+                .registered_retained_request_context(
+                    project_root,
+                    request_id.clone(),
+                    deadline,
+                    cancellation.context(),
+                    observed_at,
+                    &operation,
+                )
+                .await
+            {
+                Ok(context) => context,
+                Err(RegisteredRetainedRequestContextError::Application(problem)) => {
+                    let envelope = ApplicationProblemEnvelope::new(
+                        operation.result_contract().clone(),
+                        request_id,
+                        problem,
+                    )
+                    .map_err(contract_error)?;
+                    return Ok(AutomationEffectAdmission::PreAdmissionProblem(envelope));
+                }
+                Err(RegisteredRetainedRequestContextError::Runtime(error)) => return Err(error),
+            };
+            // Runtime prepare retains journal and authority state; keep that frame
+            // out of scheduler and dashboard callers.
+            let prepared: Pin<
+                Box<dyn Future<Output = Result<AutomationEffectAdmission>> + Send + '_>,
+            > = Box::pin(AutomationEffectAuthority::prepare(
+                AdmittedAutomationEffectRequest {
+                    context,
+                    cancellation: cancellation.clone(),
+                    observed_at,
+                    configuration_digest,
+                    request,
+                    dashboard_root: dashboard_root.to_path_buf(),
+                },
+                || memory.project_memory_owner(),
+                |run_id, read_control| async move {
+                    memory
+                        .project_memory_application()
+                        .map_err(|error| {
+                            contract_error(format!(
+                                "canonical memory automation receipt recovery failed: {error}"
+                            ))
+                        })?
+                        .project_memory_automation_run_receipts(run_id, &read_control)
+                        .await
+                        .map_err(|error| {
+                            contract_error(format!(
+                                "canonical memory automation receipt recovery failed: {error}"
+                            ))
+                        })
+                },
+            ));
+            prepared.await
+        })
         .await
-    {
-        Ok(context) => context,
-        Err(RegisteredRetainedRequestContextError::Application(problem)) => {
-            let envelope = ApplicationProblemEnvelope::new(
-                operation.result_contract().clone(),
-                request_id,
-                problem,
-            )
-            .map_err(contract_error)?;
-            return Ok(AutomationEffectAdmission::PreAdmissionProblem(envelope));
-        }
-        Err(RegisteredRetainedRequestContextError::Runtime(error)) => return Err(error),
-    };
-    // Runtime prepare retains journal and authority state; keep that frame
-    // out of scheduler and dashboard callers.
-    let prepared: Pin<Box<dyn Future<Output = Result<AutomationEffectAdmission>> + Send + '_>> =
-        Box::pin(AutomationEffectAuthority::prepare(
-            AdmittedAutomationEffectRequest {
-                context,
-                cancellation: cancellation.clone(),
-                observed_at,
-                configuration_digest,
-                request,
-                dashboard_root: dashboard_root.to_path_buf(),
-            },
-            || memory.project_memory_owner(),
-            |run_id, read_control| async move {
-                memory
-                    .project_memory_application()
-                    .map_err(|error| {
-                        contract_error(format!(
-                            "canonical memory automation receipt recovery failed: {error}"
-                        ))
-                    })?
-                    .project_memory_automation_run_receipts(run_id, &read_control)
-                    .await
-                    .map_err(|error| {
-                        contract_error(format!(
-                            "canonical memory automation receipt recovery failed: {error}"
-                        ))
-                    })
-            },
-        ));
-    prepared.await
 }
 
 /// The stable request identity of one automation-scheduler run: a requested

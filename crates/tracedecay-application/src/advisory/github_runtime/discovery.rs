@@ -17,6 +17,7 @@ use super::{
     GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
     GitHubRepositoryTargetV1,
 };
+use crate::delivery::ProjectDeliveryProviderMountGateV1;
 use crate::http_agent::http_agent;
 
 const GITHUB_DISCOVERY_PAGE_SIZE_V1: usize = 100;
@@ -197,7 +198,7 @@ pub enum GitHubPullRequestDiscoveryKindV1 {
     NotAttempted,
 }
 
-/// The GitHub source of one project as status reports it.
+/// The GitHub source of one project as pull-request discovery observed it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubSourceStatusV1 {
@@ -256,31 +257,165 @@ impl GitHubSourceStatusV1 {
     }
 }
 
-type GitHubSourceStatusRegistryV1 = Mutex<BTreeMap<PathBuf, GitHubSourceStatusV1>>;
+/// Why the daemon holds no pull-request discovery observation for a project.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubSourceUnobservedV1 {
+    /// Project open has not resolved this checkout's `origin` in this daemon.
+    Unresolved,
+    #[serde(rename = "no_github_origin")]
+    NoGitHubOrigin,
+    /// The advisory owner, which runs pull-request discovery, mounts only on
+    /// an attached branch, and a checkout is reopened only by a daemon
+    /// restart.
+    DetachedHead,
+    /// The branch is attached but has no exact commit to discover against.
+    UnbornHead,
+    HeadUnavailable,
+    AccessRefused,
+    SourceAccessUnavailable,
+    /// `origin` is a GitHub repository whose discovery waits for the advisory
+    /// owner, which mounts after the first sealed code-index generation.
+    AwaitingAdvisoryOwner,
+    /// The canonical advisory mount ended without publishing its owner.
+    AdvisoryMountFailed,
+}
 
-fn github_source_status_registry_v1() -> &'static GitHubSourceStatusRegistryV1 {
-    static REGISTRY: OnceLock<GitHubSourceStatusRegistryV1> = OnceLock::new();
+impl GitHubSourceUnobservedV1 {
+    /// What the operator reads, including the remedy when there is one.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Unresolved => {
+                "project open has not resolved this checkout's GitHub origin in this daemon yet"
+            }
+            Self::NoGitHubOrigin => {
+                "the checkout's `origin` remote is missing or does not name a GitHub repository"
+            }
+            Self::DetachedHead => {
+                "origin is a GitHub repository, but HEAD is detached: pull-request discovery runs only on an attached branch; check out a branch, then restart the daemon (`tracedecay daemon restart`) so it reopens this checkout"
+            }
+            Self::UnbornHead => {
+                "origin is a GitHub repository, but the attached branch has no commit yet: create a commit, then restart the daemon (`tracedecay daemon restart`) so pull-request discovery can use its exact head"
+            }
+            Self::HeadUnavailable => {
+                "origin is a GitHub repository, but this checkout's HEAD could not be read: repair its Git metadata, then restart the daemon (`tracedecay daemon restart`) so it reopens this checkout"
+            }
+            Self::AccessRefused => {
+                "the configured GitHub credential for this repository was refused (rejected, missing, or write-capable); fix the credential, then restart the daemon (`tracedecay daemon restart`)"
+            }
+            Self::SourceAccessUnavailable => {
+                "the project's GitHub source-access configuration could not be opened"
+            }
+            Self::AwaitingAdvisoryOwner => {
+                "origin is a GitHub repository; pull-request discovery runs when the advisory feedback cycle mounts after the first sealed code-index generation, and it has not mounted in this daemon"
+            }
+            Self::AdvisoryMountFailed => {
+                "origin is a GitHub repository, but its advisory feedback cycle ended without publishing the owner that runs pull-request discovery"
+            }
+        }
+    }
+}
+
+impl From<ProjectDeliveryProviderMountGateV1> for GitHubSourceUnobservedV1 {
+    fn from(gate: ProjectDeliveryProviderMountGateV1) -> Self {
+        match gate {
+            ProjectDeliveryProviderMountGateV1::NoGitRemote => Self::NoGitHubOrigin,
+            ProjectDeliveryProviderMountGateV1::GitHubAccessRefused => Self::AccessRefused,
+            ProjectDeliveryProviderMountGateV1::GitHubSourceAccessUnavailable => {
+                Self::SourceAccessUnavailable
+            }
+        }
+    }
+}
+
+/// The GitHub source of one project as status reports it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GitHubSourceReadingV1 {
+    Observed(GitHubSourceStatusV1),
+    Unobserved {
+        state: GitHubSourceUnobservedV1,
+        reason: String,
+    },
+}
+
+impl GitHubSourceReadingV1 {
+    pub fn unobserved(cause: GitHubSourceUnobservedV1) -> Self {
+        Self::Unobserved {
+            state: cause,
+            reason: cause.reason().to_owned(),
+        }
+    }
+}
+
+/// Authority to update the exact reading a project-open owner recorded.
+/// Keeping its allocation alive distinguishes even identical newer readings.
+pub struct GitHubSourceReadingReceiptV1 {
+    project_root: PathBuf,
+    reading: Arc<GitHubSourceReadingV1>,
+}
+
+type GitHubSourceReadingRegistryV1 = Mutex<BTreeMap<PathBuf, Arc<GitHubSourceReadingV1>>>;
+
+fn github_source_reading_registry_v1() -> &'static GitHubSourceReadingRegistryV1 {
+    static REGISTRY: OnceLock<GitHubSourceReadingRegistryV1> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// Retains the latest GitHub source observation of the project at
-/// `project_root`, replacing the one a previous open recorded.
-pub fn record_github_source_status_v1(project_root: &Path, status: GitHubSourceStatusV1) {
-    github_source_status_registry_v1()
+/// Retains the latest GitHub source reading of the project at
+/// `project_root`, replacing the one a previous open recorded. Returns the
+/// exact-write authority for that owner's subsequent mount outcome.
+pub fn record_github_source_reading_v1(
+    project_root: &Path,
+    reading: GitHubSourceReadingV1,
+) -> GitHubSourceReadingReceiptV1 {
+    let reading = Arc::new(reading);
+    github_source_reading_registry_v1()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(project_root.to_path_buf(), status);
+        .insert(project_root.to_path_buf(), Arc::clone(&reading));
+    GitHubSourceReadingReceiptV1 {
+        project_root: project_root.to_path_buf(),
+        reading,
+    }
 }
 
-/// The GitHub source observation the project at `project_root` last
-/// recorded. `None` means none was observed in this daemon: the checkout has
-/// no GitHub `origin`, or its advisory owner has not mounted yet.
-pub fn github_source_status_v1(project_root: &Path) -> Option<GitHubSourceStatusV1> {
-    github_source_status_registry_v1()
+/// Carries the canonical mount's fixed safe failure message into a reading
+/// that was waiting for that owner. The transition is atomic with discovery
+/// writes: a late failure must preserve a newer open's pending reading, an
+/// observation, or a specific access gate.
+pub fn record_github_source_advisory_mount_failure_v1(
+    receipt: &GitHubSourceReadingReceiptV1,
+    reason: &'static str,
+) {
+    let mut registry = github_source_reading_registry_v1()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(reading) = registry.get_mut(&receipt.project_root)
+        && Arc::ptr_eq(reading, &receipt.reading)
+        && matches!(
+            reading.as_ref(),
+            GitHubSourceReadingV1::Unobserved {
+                state: GitHubSourceUnobservedV1::AwaitingAdvisoryOwner,
+                ..
+            }
+        )
+    {
+        *reading = Arc::new(GitHubSourceReadingV1::Unobserved {
+            state: GitHubSourceUnobservedV1::AdvisoryMountFailed,
+            reason: reason.to_owned(),
+        });
+    }
+}
+
+/// The GitHub source reading the project at `project_root` last recorded.
+pub fn github_source_reading_v1(project_root: &Path) -> GitHubSourceReadingV1 {
+    github_source_reading_registry_v1()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
-        .cloned()
+        .map(|reading| reading.as_ref().clone())
+        .unwrap_or_else(|| GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::Unresolved))
 }
 
 /// Discovers the unique pull request filed against `owner/repository` whose
@@ -792,6 +927,79 @@ mod tests {
     use super::*;
 
     const FORK_HEAD_FIXTURE: &str = include_str!("../fixtures/fork_head_pull_request.json");
+
+    #[test]
+    fn advisory_mount_failure_rejects_a_superseded_pending_reading() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        let pending =
+            GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::AwaitingAdvisoryOwner);
+        let older = record_github_source_reading_v1(&project, pending.clone());
+        let current = record_github_source_reading_v1(&project, pending.clone());
+
+        record_github_source_advisory_mount_failure_v1(&older, "The older mount stopped");
+        assert_eq!(
+            github_source_reading_v1(&project),
+            pending,
+            "an older mount must not replace an identical pending reading written by a reopen"
+        );
+        record_github_source_advisory_mount_failure_v1(&current, "The current mount stopped");
+        assert_eq!(
+            github_source_reading_v1(&project),
+            GitHubSourceReadingV1::Unobserved {
+                state: GitHubSourceUnobservedV1::AdvisoryMountFailed,
+                reason: "The current mount stopped".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn advisory_mount_failure_preserves_observations_gates_and_other_projects() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        let other_project = directory.path().join("other-project");
+        let pending =
+            GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::AwaitingAdvisoryOwner);
+        let receipt = record_github_source_reading_v1(&project, pending.clone());
+        record_github_source_reading_v1(&other_project, pending.clone());
+
+        record_github_source_advisory_mount_failure_v1(&receipt, "The advisory mount stopped");
+        assert_eq!(
+            github_source_reading_v1(&project),
+            GitHubSourceReadingV1::Unobserved {
+                state: GitHubSourceUnobservedV1::AdvisoryMountFailed,
+                reason: "The advisory mount stopped".to_owned(),
+            }
+        );
+        assert_eq!(github_source_reading_v1(&other_project), pending);
+
+        let observed = GitHubSourceReadingV1::Observed(GitHubSourceStatusV1::observed(
+            "owner",
+            "repository",
+            &GitHubReadOnlyCredentialV1::anonymous(),
+            None,
+        ));
+        for retained in [
+            observed,
+            GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::AccessRefused),
+            GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::SourceAccessUnavailable),
+            GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::NoGitHubOrigin),
+        ] {
+            let receipt = record_github_source_reading_v1(&project, retained.clone());
+            record_github_source_advisory_mount_failure_v1(&receipt, "The advisory mount stopped");
+            assert_eq!(github_source_reading_v1(&project), retained);
+        }
+        let unresolved = directory.path().join("unresolved");
+        let receipt = record_github_source_reading_v1(
+            &unresolved,
+            GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::Unresolved),
+        );
+        record_github_source_advisory_mount_failure_v1(&receipt, "The advisory mount stopped");
+        assert_eq!(
+            github_source_reading_v1(&unresolved),
+            GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::Unresolved)
+        );
+    }
 
     fn found(number: u64, base: &str) -> GitHubExactCommitDiscoveryOutcomeV1 {
         GitHubExactCommitDiscoveryOutcomeV1::Found(GitHubExactCommitPullRequestV1 {

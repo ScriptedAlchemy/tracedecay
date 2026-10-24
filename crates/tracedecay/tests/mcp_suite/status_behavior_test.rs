@@ -253,8 +253,8 @@ async fn tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_i
     assert_eq!(
         compact["github_source"],
         json!({
-            "state": "absent",
-            "reason": "the checkout has no GitHub origin, or its advisory owner has not mounted in this daemon",
+            "state": "no_github_origin",
+            "reason": "the checkout's `origin` remote is missing or does not name a GitHub repository",
         })
     );
 

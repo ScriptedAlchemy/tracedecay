@@ -13,8 +13,9 @@ use std::time::Duration;
 use serde::Serialize;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
-    CodeGraphSymbolRefV1, InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
+    CodeGraphInteractiveReader, CodeGraphProjectionStore, CodeGraphReadCostMeter,
+    CodeGraphReadinessRequirement, CodeGraphSymbolRefV1, InteractiveCatalogReaderLeaseV1,
+    UnresolvedCallerGapsV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
@@ -1783,6 +1784,23 @@ macro_rules! prepare_graph_callable_query_or_return {
         $request:expr,
         $operation:expr,
         [$($parameter:literal => $value:expr),* $(,)?]
+    ) => {
+        prepare_graph_callable_query_or_return!(
+            $registry,
+            $context,
+            $request,
+            $operation,
+            seed: None,
+            [$($parameter => $value),*]
+        )
+    };
+    (
+        $registry:expr,
+        $context:expr,
+        $request:expr,
+        $operation:expr,
+        seed: $seed:expr,
+        [$($parameter:literal => $value:expr),* $(,)?]
     ) => {{
         let Ok(query_binding) = prepared_query_binding($operation, vec![
             $(canonical_sha256(&$value).map(|digest| ($parameter, digest))),*
@@ -1796,6 +1814,7 @@ macro_rules! prepare_graph_callable_query_or_return {
                 &$request.meta.page,
                 $request.meta.temporal,
                 query_binding.clone(),
+                $seed,
             )
             .await
         {
@@ -1872,6 +1891,10 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(PreparedCallableQueryV1 { latest, query })
     }
 
+    /// `seed` names the symbol a seeded query starts from. Whether it exists
+    /// is a point read the engine serves, so an absent seed opens the reader
+    /// without waiting for a released catalog, and the query refuses it as
+    /// not found.
     async fn prepare_graph_callable_query(
         &self,
         context: &RetrievalPortContext<'_>,
@@ -1879,6 +1902,7 @@ impl CodeIndexSchedulerRegistryV1 {
         page: &tracedecay_contracts::PageRequest,
         temporal: TemporalModeV1,
         query_binding: CursorBindingV1,
+        seed: Option<&str>,
     ) -> Result<PreparedGraphCallableQueryV1, CallableCodeCursorError> {
         let authority = self
             .query_authority_for_scope(context.request.scope())
@@ -1914,9 +1938,18 @@ impl CodeIndexSchedulerRegistryV1 {
         // a reader on a store it never waited out.
         let mut catalog_retain = None;
         if let Some(budget) = remaining_generation_resolution_wait(context.request) {
+            let requirement = match seed {
+                Some(seed) if !seed_is_served(&store, &latest, seed, budget).await? => {
+                    CodeGraphReadinessRequirement::Engine
+                }
+                _ => CodeGraphReadinessRequirement::Catalog,
+            };
+            // The seed read spent part of the request; the wait gets the rest.
+            let budget =
+                remaining_generation_resolution_wait(context.request).unwrap_or(Duration::ZERO);
             let waiting = Arc::clone(&store);
             match native_runtime::spawn_blocking(move || {
-                waiting.await_rewarm_and_retain_for(budget, CodeGraphReadinessRequirement::Catalog)
+                waiting.await_rewarm_and_retain_for(budget, requirement)
             })
             .await
             {
@@ -1952,6 +1985,35 @@ impl CodeIndexSchedulerRegistryV1 {
             cursor_retention,
         })
     }
+}
+
+/// Whether `seed` names a symbol `latest` serves, read once the engine is
+/// resident. A malformed seed is not served; the query refuses it as invalid.
+async fn seed_is_served(
+    store: &Arc<CodeGraphProjectionStore>,
+    latest: &LatestCodeTextGenerationV1,
+    seed: &str,
+    budget: Duration,
+) -> Result<bool, CallableCodeCursorError> {
+    let Ok(seed) = typed::<SymbolOccurrenceId>(seed) else {
+        return Ok(false);
+    };
+    let probing = Arc::clone(store);
+    let generation = latest.metadata().manifest().generation_id.clone();
+    native_runtime::spawn_blocking(move || {
+        let _engine = probing
+            .await_rewarm_and_retain_for(budget, CodeGraphReadinessRequirement::Engine)
+            .map_err(|_| CallableCodeCursorError::Unavailable)?;
+        let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
+            Arc::new(tracedecay_graph_db::NeverCancelled);
+        probing
+            .interactive_reader_with_cancellation(&generation, Arc::clone(&cancellation))
+            .and_then(|reader| reader.symbol_summary(&seed, cancellation))
+            .map(|summary| summary.is_some())
+            .map_err(|_| CallableCodeCursorError::Unavailable)
+    })
+    .await
+    .map_err(|_| CallableCodeCursorError::Unavailable)?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2366,12 +2428,19 @@ fn disclose_symbol_omissions<T>(
     }
 }
 
+#[derive(Clone, Copy)]
+enum GraphRelationDirection {
+    Outgoing,
+    Incoming,
+    Callers,
+}
+
 #[tracing::instrument(name = "query.graph.relation_keys", level = "trace", skip_all)]
 fn graph_relation_keys(
     reader: &CodeGraphInteractiveReader,
     start: &SymbolOccurrenceId,
     kinds: &[RelationEdgeKindV1],
-    reverse: bool,
+    direction: GraphRelationDirection,
     maximum_depth: u32,
     scope: &tracedecay_contracts::CodeQueryScope,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
@@ -2394,15 +2463,23 @@ fn graph_relation_keys(
             complete = false;
             break;
         }
-        let step = reader
-            .relation_keys(
+        let step = match direction {
+            GraphRelationDirection::Callers => reader.caller_keys(
                 &frontier,
                 kinds,
-                reverse,
                 remaining.saturating_add(1),
                 Arc::clone(&cancellation),
-            )
-            .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
+            ),
+            GraphRelationDirection::Incoming | GraphRelationDirection::Outgoing => reader
+                .relation_keys(
+                    &frontier,
+                    kinds,
+                    matches!(direction, GraphRelationDirection::Incoming),
+                    remaining.saturating_add(1),
+                    Arc::clone(&cancellation),
+                ),
+        }
+        .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         if step.truncated {
             complete = false;
         }
@@ -2932,6 +3009,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_callees",
+                seed: Some(request.node_id.as_str()),
                 [
                     "node_id" => &request.node_id,
                     "maximum_depth" => request.maximum_depth,
@@ -2951,7 +3029,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &prepared.reader,
                 &start,
                 &[RelationEdgeKindV1::Calls],
-                false,
+                GraphRelationDirection::Outgoing,
                 request.maximum_depth,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3275,7 +3353,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &prepared.reader,
                     &target.occurrence,
                     &[RelationEdgeKindV1::Implements],
-                    true,
+                    GraphRelationDirection::Incoming,
                     1,
                     &request.scope,
                     Arc::clone(&cancellation),
@@ -3319,6 +3397,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_type_hierarchy",
+                seed: Some(request.node_id.as_str()),
                 [
                     "node_id" => &request.node_id,
                     "maximum_depth" => request.maximum_depth,
@@ -3337,7 +3416,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &prepared.reader,
                 &start,
                 &[RelationEdgeKindV1::Implements, RelationEdgeKindV1::Extends],
-                false,
+                GraphRelationDirection::Outgoing,
                 request.maximum_depth,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3384,6 +3463,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_callers",
+                seed: Some(request.node_id.as_str()),
                 [
                     "node_id" => &request.node_id,
                     "maximum_depth" => request.maximum_depth,
@@ -3403,7 +3483,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &prepared.reader,
                 &start,
                 &CALLER_AND_REFERENCE_KINDS,
-                true,
+                GraphRelationDirection::Callers,
                 request.maximum_depth,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3460,6 +3540,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_impact",
+                seed: Some(request.node_id.as_str()),
                 [
                     "node_id" => &request.node_id,
                     "maximum_depth" => request.maximum_depth,
@@ -3486,7 +3567,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     RelationEdgeKindV1::Extends,
                     RelationEdgeKindV1::Annotates,
                 ],
-                true,
+                GraphRelationDirection::Incoming,
                 request.maximum_depth,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3820,6 +3901,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 context,
                 request,
                 "code_references",
+                seed: Some(request.node_id.as_str()),
                 [
                     "node_id" => &request.node_id,
                     "scope" => &request.scope,
@@ -3837,7 +3919,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &prepared.reader,
                 &start,
                 &CALLER_AND_REFERENCE_KINDS,
-                true,
+                GraphRelationDirection::Incoming,
                 1,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3885,6 +3967,7 @@ fn navigation_symbol_query<'a>(
             context,
             request,
             operation,
+            seed: Some(request.node_id.as_str()),
             [
                 "node_id" => &request.node_id,
                 "scope" => &request.scope,
@@ -3931,7 +4014,7 @@ fn navigation_symbol_query<'a>(
                 &prepared.reader,
                 &start,
                 &[RelationEdgeKindV1::TypeOf],
-                false,
+                GraphRelationDirection::Outgoing,
                 1,
                 &request.scope,
                 Arc::clone(&cancellation),

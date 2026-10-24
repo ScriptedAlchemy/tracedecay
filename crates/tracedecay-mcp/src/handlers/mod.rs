@@ -48,6 +48,8 @@ pub use support::{
     require_object_args, require_positive_limit, text_tool_result, tool_json, unique_file_paths,
     unknown_tool_error,
 };
-pub use verified_read::{VerifiedGraphOpen, VerifiedGraphOpenFuture, verified_read_operation};
+pub use verified_read::{
+    VerifiedGraphOpen, VerifiedGraphOpenFuture, VerifiedGraphRead, verified_read_operation,
+};
 pub use work::handle_work;
 pub use workflow_family::handle_workflow;

@@ -20,12 +20,12 @@ use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     CandidateContribution, CandidateSetDigest, CompactCandidate, ComponentRevision,
     EphemeralSanitizedQueryViewV1, ExactClass, FixedPointScore, FusedCandidate, FusionProfile,
-    LogicalEvidenceId, OccurrenceProvenance, PrivacyDomainId, PublicRetrieverStatus, QueryDigest,
-    QueryMac, QueryNormalizationRevision, RankedCandidate, RankingDecision, RankingDecisionKind,
-    RetrievalAnchorId, RetrievalContractError, RetrievalCursor, RetrievalCursorKeyId,
-    RetrievalError, RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
-    UtcMicros, canonical_sha256,
+    LogicalCopyClusterId, LogicalEvidenceId, OccurrenceProvenance, PrivacyDomainId,
+    PublicRetrieverStatus, QueryDigest, QueryMac, QueryNormalizationRevision, RankedCandidate,
+    RankingDecision, RankingDecisionKind, RetrievalAnchorId, RetrievalContractError,
+    RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch,
+    RetrieverContinuation, RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId,
+    SourceFreshness, SourceOccurrenceId, UtcMicros, canonical_sha256,
 };
 use zeroize::Zeroizing;
 
@@ -615,12 +615,9 @@ impl CompositionKernel {
         anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
     ) -> Result<CompositionOutputV1, FusionStageError> {
         let admitted = admitted_lanes(input, required_lanes)?;
-        let (compact, dedupe_decisions) = self
-            .dedupe
-            .collapse_compact_candidates(admitted.candidates)
-            .map_err(|error| FusionStageError::Contract(error.to_string()))?;
-        let mut fused = self.fusion.fuse_compact(&input.profile, compact)?;
-        attach_same_source_decisions(&mut fused, &dedupe_decisions)?;
+        let (fused, dedupe_decisions) = self
+            .fusion
+            .fuse_compact(&input.profile, admitted.candidates)?;
         // One sort with the final comparator establishes the order every
         // later stage preserves; representative selection and diversity caps
         // only filter it.
@@ -883,6 +880,14 @@ fn public_status(outcome: &RetrieverOutcome<RetrieverBatch<()>>) -> PublicRetrie
     }
 }
 
+struct SameSourceRows {
+    evidence_anchor: RetrievalAnchorId,
+    anchor_id: RetrievalAnchorId,
+    logical_evidence_id: LogicalEvidenceId,
+    copy_cluster: Option<LogicalCopyClusterId>,
+    count: usize,
+}
+
 /// Checked fixed-point implementation of the fusion stage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeterministicFixedPointFusion {
@@ -901,11 +906,35 @@ impl DeterministicFixedPointFusion {
         &self,
         profile: &FusionProfile,
         mut candidates: Vec<CompactCandidate>,
-    ) -> Result<Vec<FusedCandidate>, FusionStageError> {
+    ) -> Result<(Vec<FusedCandidate>, Vec<DedupeDecisionV1>), FusionStageError> {
+        stage_counters::record_compact_sort();
         candidates.sort_by(compact_candidate_cmp);
         let mut fused = BTreeMap::<(RetrievalAnchorId, LogicalEvidenceId), FusedCandidate>::new();
+        // Each lane returns an occurrence at most once. Its local grouping
+        // therefore retains at most one small entry per admitted lane, never
+        // another candidate payload or a second sorted compact batch.
+        let mut source_rows = HashMap::<SourceOccurrenceId, Vec<SameSourceRows>>::new();
 
         for candidate in candidates {
+            // Count admitted lane rows before calibration. The canonical
+            // fusion order visits the lowest retriever for each group first.
+            let groups = source_rows
+                .entry(candidate.source_occurrence_id.clone())
+                .or_default();
+            match groups.iter_mut().find(|group| {
+                group.anchor_id == candidate.anchor_id
+                    && group.logical_evidence_id == candidate.logical_evidence_id
+                    && group.evidence_anchor == candidate.retriever_evidence_anchor
+            }) {
+                Some(group) => group.count += 1,
+                None => groups.push(SameSourceRows {
+                    evidence_anchor: candidate.retriever_evidence_anchor.clone(),
+                    anchor_id: candidate.anchor_id.clone(),
+                    logical_evidence_id: candidate.logical_evidence_id.clone(),
+                    copy_cluster: candidate.logical_copy_cluster_id.clone(),
+                    count: 1,
+                }),
+            }
             let calibration_profile_id = profile
                 .calibrations
                 .get(&candidate.retriever)
@@ -987,10 +1016,51 @@ impl DeterministicFixedPointFusion {
         }
 
         let mut fused = fused.into_values().collect::<Vec<_>>();
+        let mut duplicate_decisions = Vec::new();
         for candidate in &mut fused {
             candidate.utility_micros = lane_saturated_utility_micros(&candidate.contributions)?;
             candidate.occurrences.sort_by(occurrence_cmp);
             candidate.occurrences.dedup();
+            for occurrence in &candidate.occurrences {
+                // A shared pair belongs to its first surviving fused identity,
+                // including when the identity that supplied duplicates was
+                // filtered out. Consume its accounting at this existing pass.
+                let Some(groups) = source_rows.get_mut(&occurrence.source_occurrence_id) else {
+                    continue;
+                };
+                for group in groups.extract_if(.., |group| {
+                    group.evidence_anchor == occurrence.retriever_evidence_anchor
+                }) {
+                    if group.count == 1 {
+                        continue;
+                    }
+                    let decision = RankingDecision {
+                        kind: RankingDecisionKind::SameSourceDuplicateCollapse,
+                        retriever: None,
+                        policy_anchor: None,
+                        evidence_anchor: Some(group.evidence_anchor),
+                        detail: format!(
+                            "collapsed {} duplicate occurrence rows for {}; retained every retriever contribution",
+                            group.count - 1,
+                            occurrence.source_occurrence_id,
+                        ),
+                    };
+                    candidate.decisions.push(decision.clone());
+                    duplicate_decisions.push((
+                        (group.anchor_id, group.logical_evidence_id),
+                        DedupeDecisionV1 {
+                            kept_occurrence: occurrence.source_occurrence_id.clone(),
+                            collapsed_occurrences: vec![
+                                occurrence.source_occurrence_id.clone();
+                                group.count - 1
+                            ],
+                            collapsed_candidates: Vec::new(),
+                            copy_cluster: group.copy_cluster,
+                            decision,
+                        },
+                    ));
+                }
+            }
             candidate.contributions.sort_by(contribution_cmp);
             candidate.freshness.sort_by(freshness_cmp);
             candidate.freshness.dedup();
@@ -998,7 +1068,30 @@ impl DeterministicFixedPointFusion {
             candidate.decisions.dedup();
             candidate.validate()?;
         }
-        Ok(fused)
+        if source_rows.values().flatten().any(|group| group.count > 1) {
+            return Err(FusionStageError::Contract(
+                "same-source collapse decision lost its fused candidate".to_owned(),
+            ));
+        }
+        // Only emitted explanations need this public order; the full compact
+        // candidate vector has already had its sole sort at fusion admission.
+        duplicate_decisions.sort_by(|(left_identity, left), (right_identity, right)| {
+            left.kept_occurrence
+                .cmp(&right.kept_occurrence)
+                .then_with(|| {
+                    left.decision
+                        .evidence_anchor
+                        .cmp(&right.decision.evidence_anchor)
+                })
+                .then_with(|| left_identity.cmp(right_identity))
+        });
+        Ok((
+            fused,
+            duplicate_decisions
+                .into_iter()
+                .map(|(_, decision)| decision)
+                .collect(),
+        ))
     }
 
     /// Sort once with the final comparator and record each candidate's
@@ -1212,58 +1305,6 @@ fn ranked_comparator_records(
         .collect()
 }
 
-fn attach_same_source_decisions(
-    candidates: &mut [FusedCandidate],
-    decisions: &[DedupeDecisionV1],
-) -> Result<(), FusionStageError> {
-    // Index occurrences by their `(source_occurrence_id,
-    // retriever_evidence_anchor)` pair once, so each recorded decision resolves
-    // its fused candidate in O(1) instead of rescanning the full fused slice
-    // per decision. `or_insert` keeps the first candidate (in slice order) that
-    // owns a matching occurrence, mirroring the prior `iter_mut().find(..)`
-    // first-match semantics exactly.
-    let mut occurrence_index: HashMap<(&SourceOccurrenceId, &RetrievalAnchorId), usize> =
-        HashMap::new();
-    for (position, candidate) in candidates.iter().enumerate() {
-        for occurrence in &candidate.occurrences {
-            occurrence_index
-                .entry((
-                    &occurrence.source_occurrence_id,
-                    &occurrence.retriever_evidence_anchor,
-                ))
-                .or_insert(position);
-        }
-    }
-
-    let mut targets = Vec::with_capacity(decisions.len());
-    for recorded in decisions {
-        let position = recorded
-            .decision
-            .evidence_anchor
-            .as_ref()
-            .and_then(|anchor| {
-                occurrence_index
-                    .get(&(&recorded.kept_occurrence, anchor))
-                    .copied()
-            })
-            .ok_or_else(|| {
-                FusionStageError::Contract(
-                    "same-source collapse decision lost its fused candidate".to_owned(),
-                )
-            })?;
-        targets.push(position);
-    }
-    drop(occurrence_index);
-
-    for (recorded, position) in decisions.iter().zip(targets) {
-        let candidate = &mut candidates[position];
-        candidate.decisions.push(recorded.decision.clone());
-        candidate.decisions.sort_by(decision_cmp);
-        candidate.decisions.dedup();
-    }
-    Ok(())
-}
-
 pub fn digest_candidate_set(
     candidates: &[RankedCandidate],
 ) -> Result<CandidateSetDigest, RetrievalError> {
@@ -1424,154 +1465,257 @@ fn current_utc_micros() -> Result<UtcMicros, RetrievalError> {
 }
 
 #[cfg(test)]
-mod attach_same_source_decisions_tests {
+pub(super) mod same_source_fusion_tests {
     use super::*;
-    use tracedecay_domain::{EvidenceRole, FreshnessCompatibilityV1, RetrievalSourceRoleV1};
+    use crate::retrieval::dedupe::DedupeStageError;
 
-    use tracedecay_domain::test_fixtures::id;
-
-    fn freshness() -> SourceFreshness {
-        SourceFreshness {
-            source_namespace: id("namespace.code"),
-            source_instance: id("source.fixture"),
-            source_watermark: Some(7),
-            projection_watermark: Some(7),
-            observed_at: UtcMicros(7),
-            source_generation: Some(1),
-            generation_lag: Some(0),
-            compatibility: FreshnessCompatibilityV1::Current,
-            policy_revision: id("policy.v1"),
+    // Preserve the former split pipeline as an independent oracle. It keeps
+    // pre-calibration duplicate accounting, first-survivor attachment, and
+    // refusal ordering observable while production owns them inside fusion.
+    fn legacy_collapse_compact_candidates(
+        mut candidates: Vec<CompactCandidate>,
+    ) -> Result<(Vec<CompactCandidate>, Vec<DedupeDecisionV1>), DedupeStageError> {
+        candidates.sort_by(|left, right| {
+            left.source_occurrence_id
+                .cmp(&right.source_occurrence_id)
+                .then_with(|| {
+                    left.retriever_evidence_anchor
+                        .cmp(&right.retriever_evidence_anchor)
+                })
+                .then_with(|| left.anchor_id.cmp(&right.anchor_id))
+                .then_with(|| left.logical_evidence_id.cmp(&right.logical_evidence_id))
+                .then_with(|| left.retriever.cmp(&right.retriever))
+        });
+        let mut decisions = Vec::new();
+        let mut index = 0;
+        while index < candidates.len() {
+            let first = &candidates[index];
+            let mut end = index + 1;
+            while end < candidates.len()
+                && candidates[end].source_occurrence_id == first.source_occurrence_id
+                && candidates[end].retriever_evidence_anchor == first.retriever_evidence_anchor
+                && candidates[end].anchor_id == first.anchor_id
+                && candidates[end].logical_evidence_id == first.logical_evidence_id
+            {
+                end += 1;
+            }
+            let selected = &candidates[index];
+            if end - index > 1 {
+                let decision = RankingDecision {
+                    kind: RankingDecisionKind::SameSourceDuplicateCollapse,
+                    retriever: None,
+                    policy_anchor: None,
+                    evidence_anchor: Some(selected.retriever_evidence_anchor.clone()),
+                    detail: format!(
+                        "collapsed {} duplicate occurrence rows for {}; retained every retriever contribution",
+                        end - index - 1,
+                        selected.source_occurrence_id
+                    ),
+                };
+                decisions.push(DedupeDecisionV1 {
+                    kept_occurrence: selected.source_occurrence_id.clone(),
+                    collapsed_occurrences: candidates[index + 1..end]
+                        .iter()
+                        .map(|candidate| candidate.source_occurrence_id.clone())
+                        .collect(),
+                    collapsed_candidates: Vec::new(),
+                    copy_cluster: selected.logical_copy_cluster_id.clone(),
+                    decision,
+                });
+            }
+            index = end;
         }
+        Ok((candidates, decisions))
     }
+    fn legacy_fuse_compact(
+        profile: &FusionProfile,
+        mut candidates: Vec<CompactCandidate>,
+    ) -> Result<Vec<FusedCandidate>, FusionStageError> {
+        candidates.sort_by(compact_candidate_cmp);
+        let mut fused = BTreeMap::<(RetrievalAnchorId, LogicalEvidenceId), FusedCandidate>::new();
 
-    fn occurrence(name: &str) -> OccurrenceProvenance {
-        OccurrenceProvenance {
-            source_occurrence_id: id::<SourceOccurrenceId>(&format!("occurrence.{name}")),
-            file_occurrence_id: None,
-            retriever_evidence_anchor: RetrievalAnchorId::new(format!("evidence.{name}"))
-                .expect("valid evidence anchor"),
-            source_namespace: id("namespace.code"),
-            repository_id: None,
-            session_or_thread_id: None,
-            logical_copy_cluster_id: None,
-            logical_copy_evidence_anchor: None,
-            evidence_role: EvidenceRole::Primary,
-            freshness: freshness(),
+        for candidate in candidates {
+            let calibration_profile_id = profile
+                .calibrations
+                .get(&candidate.retriever)
+                .cloned()
+                .ok_or(FusionStageError::ProfileLaneMismatch)?;
+            let weight_micros = *profile
+                .weights_micros
+                .get(&candidate.retriever)
+                .ok_or(FusionStageError::ProfileLaneMismatch)?;
+            let calibration = profile
+                .score_domain_calibrations
+                .get(&candidate.score_domain)
+                .ok_or(FusionStageError::ProfileLaneMismatch)?;
+            if calibration.calibration_profile_id != calibration_profile_id
+                || calibration.score_domain != candidate.score_domain
+            {
+                return Err(FusionStageError::ProfileLaneMismatch);
+            }
+            let calibrated_feature_micros = calibration.calibrate(candidate.raw_score)?;
+            let minimum_calibrated_feature_micros = profile
+                .minimum_calibrated_feature_micros
+                .get(&candidate.retriever)
+                .copied()
+                .unwrap_or(0);
+            if minimum_calibrated_feature_micros > 1_000_000 {
+                return Err(FusionStageError::InvalidCalibratedFeature);
+            }
+            if calibrated_feature_micros < minimum_calibrated_feature_micros {
+                continue;
+            }
+            let weighted_contribution_micros =
+                FixedPointScore(u64::from(calibrated_feature_micros))
+                    .checked_weight(weight_micros)?;
+            let exact_class = candidate.exact_class();
+            let occurrence = occurrence_from(&candidate);
+            let contribution = CandidateContribution {
+                retriever: candidate.retriever,
+                retriever_revision: candidate.retriever_revision.clone(),
+                source_occurrence_id: candidate.source_occurrence_id.clone(),
+                ordinal_rank: candidate.ordinal_rank,
+                raw_score: candidate.raw_score,
+                score_domain: candidate.score_domain.clone(),
+                calibration_profile_id,
+                calibrated_feature_micros,
+                weight_micros,
+                weighted_contribution_micros,
+            };
+            let key = (
+                candidate.anchor_id.clone(),
+                candidate.logical_evidence_id.clone(),
+            );
+            let entry = fused.entry(key).or_insert_with(|| FusedCandidate {
+                anchor_id: candidate.anchor_id.clone(),
+                logical_evidence_id: candidate.logical_evidence_id.clone(),
+                occurrences: Vec::new(),
+                exact_class,
+                source_role: candidate.source_role,
+                utility_micros: 0,
+                contributions: Vec::new(),
+                freshness: Vec::new(),
+                decisions: Vec::new(),
+            });
+            entry.exact_class = strongest_exact_class(entry.exact_class, exact_class);
+            if candidate.source_role.admission_rank() < entry.source_role.admission_rank() {
+                entry.source_role = candidate.source_role;
+            }
+            entry.occurrences.push(occurrence);
+            entry.contributions.push(contribution);
+            entry.freshness.push(candidate.freshness.clone());
+            if exact_class != ExactClass::Approximate {
+                entry.decisions.push(RankingDecision {
+                    kind: RankingDecisionKind::ExactTierAdmission,
+                    retriever: Some(RetrieverKind::ExactLiteral),
+                    policy_anchor: Some(profile.evaluation_result_anchor.clone()),
+                    evidence_anchor: Some(candidate.retriever_evidence_anchor.clone()),
+                    detail: "validated exact admission proof".to_owned(),
+                });
+            }
         }
-    }
 
-    fn fused(occurrences: Vec<OccurrenceProvenance>) -> FusedCandidate {
-        FusedCandidate {
-            anchor_id: RetrievalAnchorId::new(format!(
-                "anchor.{}",
-                occurrences[0].source_occurrence_id.as_str()
-            ))
-            .expect("valid anchor"),
-            logical_evidence_id: id::<LogicalEvidenceId>("logical.fixture"),
-            occurrences,
-            exact_class: ExactClass::Approximate,
-            source_role: RetrievalSourceRoleV1::default(),
-            utility_micros: 0,
-            contributions: Vec::new(),
-            freshness: Vec::new(),
-            decisions: Vec::new(),
+        let mut fused = fused.into_values().collect::<Vec<_>>();
+        for candidate in &mut fused {
+            candidate.utility_micros = lane_saturated_utility_micros(&candidate.contributions)?;
+            candidate.occurrences.sort_by(occurrence_cmp);
+            candidate.occurrences.dedup();
+            candidate.contributions.sort_by(contribution_cmp);
+            candidate.freshness.sort_by(freshness_cmp);
+            candidate.freshness.dedup();
+            candidate.decisions.sort_by(decision_cmp);
+            candidate.decisions.dedup();
+            candidate.validate()?;
         }
+        Ok(fused)
     }
-
-    fn same_source_decision(name: &str, detail: &str) -> DedupeDecisionV1 {
-        DedupeDecisionV1 {
-            kept_occurrence: id::<SourceOccurrenceId>(&format!("occurrence.{name}")),
-            collapsed_occurrences: Vec::new(),
-            collapsed_candidates: Vec::new(),
-            copy_cluster: None,
-            decision: RankingDecision {
-                kind: RankingDecisionKind::SameSourceDuplicateCollapse,
-                retriever: None,
-                policy_anchor: None,
-                evidence_anchor: Some(
-                    RetrievalAnchorId::new(format!("evidence.{name}"))
-                        .expect("valid evidence anchor"),
-                ),
-                detail: detail.to_owned(),
-            },
+    fn legacy_attach_same_source_decisions(
+        candidates: &mut [FusedCandidate],
+        decisions: &[DedupeDecisionV1],
+    ) -> Result<(), FusionStageError> {
+        // Index occurrences by their `(source_occurrence_id,
+        // retriever_evidence_anchor)` pair once, so each recorded decision resolves
+        // its fused candidate in O(1) instead of rescanning the full fused slice
+        // per decision. `or_insert` keeps the first candidate (in slice order) that
+        // owns a matching occurrence, mirroring the prior `iter_mut().find(..)`
+        // first-match semantics exactly.
+        let mut occurrence_index: HashMap<(&SourceOccurrenceId, &RetrievalAnchorId), usize> =
+            HashMap::new();
+        for (position, candidate) in candidates.iter().enumerate() {
+            for occurrence in &candidate.occurrences {
+                occurrence_index
+                    .entry((
+                        &occurrence.source_occurrence_id,
+                        &occurrence.retriever_evidence_anchor,
+                    ))
+                    .or_insert(position);
+            }
         }
+
+        let mut targets = Vec::with_capacity(decisions.len());
+        for recorded in decisions {
+            let position = recorded
+                .decision
+                .evidence_anchor
+                .as_ref()
+                .and_then(|anchor| {
+                    occurrence_index
+                        .get(&(&recorded.kept_occurrence, anchor))
+                        .copied()
+                })
+                .ok_or_else(|| {
+                    FusionStageError::Contract(
+                        "same-source collapse decision lost its fused candidate".to_owned(),
+                    )
+                })?;
+            targets.push(position);
+        }
+        drop(occurrence_index);
+
+        for (recorded, position) in decisions.iter().zip(targets) {
+            let candidate = &mut candidates[position];
+            candidate.decisions.push(recorded.decision.clone());
+            candidate.decisions.sort_by(decision_cmp);
+            candidate.decisions.dedup();
+        }
+        Ok(())
     }
-
-    #[test]
-    fn attaches_each_decision_to_the_first_matching_candidate() {
-        let mut candidates = vec![fused(vec![occurrence("a")]), fused(vec![occurrence("b")])];
-        let decisions = vec![
-            same_source_decision("b", "collapsed-b"),
-            same_source_decision("a", "collapsed-a"),
-        ];
-
-        attach_same_source_decisions(&mut candidates, &decisions)
-            .expect("decisions attach to their fused candidate");
-
-        assert_eq!(candidates[0].decisions.len(), 1);
-        assert_eq!(candidates[0].decisions[0].detail, "collapsed-a");
-        assert_eq!(candidates[1].decisions.len(), 1);
-        assert_eq!(candidates[1].decisions[0].detail, "collapsed-b");
-    }
-
-    #[test]
-    fn resolves_the_first_candidate_when_two_share_an_occurrence_key() {
-        // Two candidates carry an occurrence with the identical
-        // (source_occurrence_id, evidence anchor) key. The decision must attach
-        // to the first candidate in slice order, matching the prior
-        // `iter_mut().find(..)` first-match semantics the index preserves.
-        let mut candidates = vec![
-            fused(vec![occurrence("shared")]),
-            fused(vec![occurrence("shared")]),
-        ];
-        let decisions = vec![same_source_decision("shared", "collapsed-shared")];
-
-        attach_same_source_decisions(&mut candidates, &decisions)
-            .expect("decision attaches to the first matching candidate");
-
-        assert_eq!(candidates[0].decisions.len(), 1);
-        assert!(candidates[1].decisions.is_empty());
-    }
-
-    #[test]
-    fn sorts_and_dedups_decisions_attached_to_one_candidate() {
-        let mut candidates = vec![fused(vec![occurrence("a")])];
-        let decisions = vec![
-            same_source_decision("a", "z-detail"),
-            same_source_decision("a", "z-detail"),
-            same_source_decision("a", "a-detail"),
-        ];
-
-        attach_same_source_decisions(&mut candidates, &decisions).expect("decisions attach");
-
-        // Identical decisions collapse; the survivors are ordered by
-        // decision_cmp (detail ascending as the final tie-break).
-        let details: Vec<_> = candidates[0]
-            .decisions
-            .iter()
-            .map(|decision| decision.detail.as_str())
-            .collect();
-        assert_eq!(details, vec!["a-detail", "z-detail"]);
-    }
-
-    #[test]
-    fn missing_candidate_is_a_contract_error() {
-        let mut candidates = vec![fused(vec![occurrence("a")])];
-        let decisions = vec![same_source_decision("missing", "orphan")];
-
-        let error = attach_same_source_decisions(&mut candidates, &decisions)
-            .expect_err("a decision without a fused candidate is a contract violation");
-        assert!(matches!(error, FusionStageError::Contract(_)));
-    }
-
-    #[test]
-    fn decision_without_evidence_anchor_is_a_contract_error() {
-        let mut candidates = vec![fused(vec![occurrence("a")])];
-        let mut decision = same_source_decision("a", "no-anchor");
-        decision.decision.evidence_anchor = None;
-
-        let error = attach_same_source_decisions(&mut candidates, &[decision])
-            .expect_err("a decision without an evidence anchor cannot bind a candidate");
-        assert!(matches!(error, FusionStageError::Contract(_)));
+    pub(in crate::retrieval) fn legacy_compose(
+        kernel: &CompositionKernel,
+        input: &FusionStageInput,
+        policy: &tracedecay_domain::DiversityPolicy,
+        anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
+    ) -> Result<CompositionOutputV1, FusionStageError> {
+        let admitted = admitted_lanes(
+            input,
+            &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
+        )?;
+        let (compact, mut dedupe_decisions) =
+            legacy_collapse_compact_candidates(admitted.candidates)
+                .map_err(|error| FusionStageError::Contract(error.to_string()))?;
+        let mut fused = legacy_fuse_compact(&input.profile, compact)?;
+        legacy_attach_same_source_decisions(&mut fused, &dedupe_decisions)?;
+        let (ordered, comparator_records) = kernel.fusion.order_fused(fused, anchor_tiers);
+        let (deduped, mut copies) = kernel
+            .dedupe
+            .select_representatives_with_decisions(ordered)
+            .map_err(|error| FusionStageError::Contract(error.to_string()))?;
+        let (ranked_candidates, diversity_decisions) = kernel
+            .diversity
+            .apply_caps(policy, deduped)
+            .map_err(map_diversity_error)?;
+        let comparator_records = ranked_comparator_records(&ranked_candidates, comparator_records)?;
+        dedupe_decisions.append(&mut copies);
+        Ok(CompositionOutputV1 {
+            profile_id: input.profile.profile_id.clone(),
+            ranked_candidates,
+            comparator_records,
+            internal_lane_outcomes: admitted.internal_lane_outcomes,
+            public_lane_statuses: admitted.public_lane_statuses,
+            freshness: admitted.freshness,
+            lane_checkpoints: admitted.lane_checkpoints,
+            dedupe_decisions,
+            diversity_decisions,
+        })
     }
 }

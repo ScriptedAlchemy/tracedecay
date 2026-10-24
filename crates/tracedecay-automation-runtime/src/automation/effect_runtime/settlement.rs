@@ -1206,7 +1206,11 @@ impl AutomationEffectAuthority {
         let indexed = admission.clone();
         let reservation =
             tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
-                let _span = tracing::trace_span!("daemon.automation.effect.reserve").entered();
+                let _span = tracing::trace_span!(
+                    "daemon.automation.effect.reserve",
+                    run_id = %requested.request.run_id,
+                )
+                .entered();
                 {
                     reserve_or_replay_indexed_blocking(
                         &reserve_path,
