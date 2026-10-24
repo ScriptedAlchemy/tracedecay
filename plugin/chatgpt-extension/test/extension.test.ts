@@ -509,16 +509,16 @@ export function taxTotal(invoices: Invoice[]): number {
     await fixture.stopDaemon();
     const stale = await fixture.readAuthority();
     expect(stale?.pid).toBe(before?.pid);
-    const dead = await bridge.daemonState();
-    expect(dead).toMatchObject({ state: "disconnected", failure: { kind: "disconnected", code: "daemon_exited" } });
-    const direct = await call("tracedecay_inspect_symbol", { project_id: billingProjectId, node_id: "symbol.v1.sha256:0000" });
-    if (direct.page === "failure") {
-      expect(["disconnected", "unavailable"]).toContain(direct.failure.kind);
-    } else {
-      // `tracedecay serve` relaunched the daemon: the view must name the new process, not the dead one.
-      if (direct.page !== "symbol") throw new Error(JSON.stringify(direct));
-      expect(direct.provenance?.authority?.daemon_pid).not.toBe(before?.pid);
-      expect(direct.symbol).toMatchObject({ state: "failed", failure: { kind: "not_found" } });
+    const diagnostics = new DaemonBridge({ binary: fixture.binary, profileRoot: fixture.profileRoot, env: fixture.env, cwd: fixture.home });
+    try {
+      const dead = await diagnostics.daemonState();
+      expect(dead).toMatchObject({ state: "disconnected", failure: { kind: "disconnected", code: "daemon_exited" } });
+    } finally {
+      await diagnostics.close();
     }
+    await expect(bridge.daemonState()).rejects.toMatchObject({ failure: { kind: "unavailable", code: "bridge_closed" } });
+    const direct = await call("tracedecay_inspect_symbol", { project_id: billingProjectId, node_id: "symbol.v1.sha256:0000" });
+    expect(direct).toMatchObject({ page: "failure", failure: { kind: "unavailable", code: "bridge_closed" } });
+    expect((await fixture.readAuthority())?.process_run_id).toBe(before?.process_run_id);
   });
 });
