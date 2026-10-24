@@ -34,6 +34,7 @@ fn sanitize_data(raw: &str) -> String {
 
 fn assert_fixed_point(sanitized: &str) {
     let replayed = sanitize_structured_text(sanitized).expect("replay scan runs");
+    assert!(replayed.quarantine_findings().is_empty());
     assert_eq!(
         replayed.sanitized_text(),
         sanitized,
@@ -154,6 +155,80 @@ fn escaped_json_keys_are_replaced_byte_exactly() {
     assert_eq!(
         text,
         r#"{"TraceDecay-redacted-key-1": "TraceDecay-redacted-sensitive-field", "ok": "y"}"#
+    );
+}
+
+#[test]
+fn nested_escaped_json_keys_are_redacted_under_a_flagged_parent() {
+    let secret = PASSPHRASES[0];
+    let raw = format!(
+        r#"{{"{secret}":{{"violin-pocket-ju\u006egle-quartz-island-778":true,"ordinary":"private-value"}}}}"#
+    );
+    let original: Value = serde_json::from_str(&raw).expect("real JSON with an escaped nested key");
+    assert_eq!(original[secret][secret], true);
+
+    let text = sanitize_data(&raw);
+    let parsed: Value = serde_json::from_str(&text).expect("redaction keeps valid JSON");
+    assert!(
+        !serde_json::to_string(&parsed).unwrap().contains(secret),
+        "{text}"
+    );
+    assert!(
+        !text.contains("private-value"),
+        "forced value redaction survives: {text}"
+    );
+    assert_fixed_point(&text);
+}
+
+fn assert_repeated_toml_keys_are_redacted_or_withheld(raw: &str) {
+    let original: toml::Value = toml::from_str(raw).expect("valid repeated TOML path components");
+    assert!(original.as_table().unwrap().contains_key(PASSPHRASES[0]));
+    let sanitized =
+        match sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData) {
+            Ok(sanitized) => sanitized,
+            Err(DetectionError::CredentialKeyQuarantine) => {
+                return;
+            }
+            Err(error) => panic!("expected exact redaction or typed key quarantine: {error}"),
+        };
+    assert_eq!(
+        sanitized.receipt().disposition(),
+        SanitizerDispositionV1::Redacted
+    );
+    let text = String::from_utf8(sanitized.into_parts().0).unwrap();
+    let parsed: toml::Value = toml::from_str(&text).expect("redacted TOML remains valid");
+    assert!(
+        !toml::to_string(&parsed).unwrap().contains(PASSPHRASES[0]),
+        "{text}"
+    );
+    assert_fixed_point(&text);
+}
+
+#[test]
+fn repeated_escaped_toml_dotted_keys_do_not_leave_decoded_secrets() {
+    let raw = concat!(
+        "\"violin-pocket-ju\\u006egle-quartz-island-778\".a=true\n",
+        "\"violin-pocket-ju\\u006egle-quartz-island-778\".b=true\n",
+    );
+    assert_repeated_toml_keys_are_redacted_or_withheld(raw);
+    assert_eq!(
+        sanitize_lcm_payload_text(raw).map(|_| ()),
+        Err(DetectionError::CredentialKeyQuarantine)
+    );
+}
+
+#[test]
+fn repeated_escaped_toml_quoted_headers_do_not_leave_decoded_secrets() {
+    let raw = concat!(
+        "[\"violin-pocket-ju\\u006egle-quartz-island-778\".a]\nx=true\n",
+        "[\"violin-pocket-ju\\u006egle-quartz-island-778\".b]\nx=true\n",
+    );
+    assert_repeated_toml_keys_are_redacted_or_withheld(raw);
+    // LCM's existing JSON-intent guard withholds a leading `["` before the
+    // structured-source route gets to identify the quoted TOML header.
+    assert_eq!(
+        sanitize_lcm_payload_text(raw).map(|_| ()),
+        Err(DetectionError::StructuredQuarantine)
     );
 }
 
