@@ -7,7 +7,8 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
 use tracedecay_application::advisory::github_runtime::{
-    GitHubPullRequestDiscoveryKindV1, GitHubSourceStatusV1,
+    GitHubPullRequestDiscoveryKindV1, GitHubSourceReadingV1, GitHubSourceStatusV1,
+    GitHubSourceUnobservedV1,
 };
 use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
@@ -399,9 +400,8 @@ async fn handle_status_command_within(
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default();
-    let github_source: Option<GitHubSourceStatusV1> = daemon_status
+    let github_source: Option<GitHubSourceReadingV1> = daemon_status
         .get("github_source")
-        .filter(|source| source.get("state") != Some(&Value::from("absent")))
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
@@ -430,8 +430,16 @@ async fn handle_status_command_within(
                     }
                 }
             }
-            if let Some(source) = &github_source {
-                println!("{}", github_source_line(source));
+            match &github_source {
+                Some(GitHubSourceReadingV1::Observed(source)) => {
+                    println!("{}", github_source_line(source));
+                }
+                Some(GitHubSourceReadingV1::Unobserved { state, reason })
+                    if *state != GitHubSourceUnobservedV1::NoGitHubOrigin =>
+                {
+                    println!("GitHub source: {reason}");
+                }
+                Some(GitHubSourceReadingV1::Unobserved { .. }) | None => {}
             }
         }
     };

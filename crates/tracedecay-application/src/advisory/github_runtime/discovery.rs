@@ -17,6 +17,7 @@ use super::{
     GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
     GitHubRepositoryTargetV1,
 };
+use crate::delivery::ProjectDeliveryProviderMountGateV1;
 use crate::http_agent::http_agent;
 
 const GITHUB_DISCOVERY_PAGE_SIZE_V1: usize = 100;
@@ -197,7 +198,7 @@ pub enum GitHubPullRequestDiscoveryKindV1 {
     NotAttempted,
 }
 
-/// The GitHub source of one project as status reports it.
+/// The GitHub source of one project as pull-request discovery observed it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubSourceStatusV1 {
@@ -256,31 +257,107 @@ impl GitHubSourceStatusV1 {
     }
 }
 
-type GitHubSourceStatusRegistryV1 = Mutex<BTreeMap<PathBuf, GitHubSourceStatusV1>>;
+/// Why the daemon holds no pull-request discovery observation for a project.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubSourceUnobservedV1 {
+    /// Project open has not resolved this checkout's `origin` in this daemon.
+    Unresolved,
+    #[serde(rename = "no_github_origin")]
+    NoGitHubOrigin,
+    /// The advisory owner, which runs pull-request discovery, mounts only on
+    /// an attached branch, and a checkout is reopened only by a daemon
+    /// restart.
+    DetachedHead,
+    AccessRefused,
+    SourceAccessUnavailable,
+    /// `origin` is a GitHub repository whose discovery waits for the advisory
+    /// owner, which mounts after the first sealed code-index generation.
+    AwaitingAdvisoryOwner,
+}
 
-fn github_source_status_registry_v1() -> &'static GitHubSourceStatusRegistryV1 {
-    static REGISTRY: OnceLock<GitHubSourceStatusRegistryV1> = OnceLock::new();
+impl GitHubSourceUnobservedV1 {
+    /// What the operator reads, including the remedy when there is one.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Unresolved => {
+                "project open has not resolved this checkout's GitHub origin in this daemon yet"
+            }
+            Self::NoGitHubOrigin => {
+                "the checkout's `origin` remote is missing or does not name a GitHub repository"
+            }
+            Self::DetachedHead => {
+                "origin is a GitHub repository, but HEAD is detached: pull-request discovery runs only on an attached branch; check out a branch, then restart the daemon (`tracedecay daemon restart`) so it reopens this checkout"
+            }
+            Self::AccessRefused => {
+                "the configured GitHub credential for this repository was refused (rejected, missing, or write-capable); fix the credential, then restart the daemon (`tracedecay daemon restart`)"
+            }
+            Self::SourceAccessUnavailable => {
+                "the project's GitHub source-access configuration could not be opened"
+            }
+            Self::AwaitingAdvisoryOwner => {
+                "origin is a GitHub repository; pull-request discovery runs when the advisory feedback cycle mounts after the first sealed code-index generation, and it has not mounted in this daemon"
+            }
+        }
+    }
+}
+
+impl From<ProjectDeliveryProviderMountGateV1> for GitHubSourceUnobservedV1 {
+    fn from(gate: ProjectDeliveryProviderMountGateV1) -> Self {
+        match gate {
+            ProjectDeliveryProviderMountGateV1::NoGitRemote => Self::NoGitHubOrigin,
+            ProjectDeliveryProviderMountGateV1::GitHubAccessRefused => Self::AccessRefused,
+            ProjectDeliveryProviderMountGateV1::GitHubSourceAccessUnavailable => {
+                Self::SourceAccessUnavailable
+            }
+        }
+    }
+}
+
+/// The GitHub source of one project as status reports it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GitHubSourceReadingV1 {
+    Observed(GitHubSourceStatusV1),
+    Unobserved {
+        state: GitHubSourceUnobservedV1,
+        reason: String,
+    },
+}
+
+impl GitHubSourceReadingV1 {
+    pub fn unobserved(cause: GitHubSourceUnobservedV1) -> Self {
+        Self::Unobserved {
+            state: cause,
+            reason: cause.reason().to_owned(),
+        }
+    }
+}
+
+type GitHubSourceReadingRegistryV1 = Mutex<BTreeMap<PathBuf, GitHubSourceReadingV1>>;
+
+fn github_source_reading_registry_v1() -> &'static GitHubSourceReadingRegistryV1 {
+    static REGISTRY: OnceLock<GitHubSourceReadingRegistryV1> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// Retains the latest GitHub source observation of the project at
+/// Retains the latest GitHub source reading of the project at
 /// `project_root`, replacing the one a previous open recorded.
-pub fn record_github_source_status_v1(project_root: &Path, status: GitHubSourceStatusV1) {
-    github_source_status_registry_v1()
+pub fn record_github_source_reading_v1(project_root: &Path, reading: GitHubSourceReadingV1) {
+    github_source_reading_registry_v1()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(project_root.to_path_buf(), status);
+        .insert(project_root.to_path_buf(), reading);
 }
 
-/// The GitHub source observation the project at `project_root` last
-/// recorded. `None` means none was observed in this daemon: the checkout has
-/// no GitHub `origin`, or its advisory owner has not mounted yet.
-pub fn github_source_status_v1(project_root: &Path) -> Option<GitHubSourceStatusV1> {
-    github_source_status_registry_v1()
+/// The GitHub source reading the project at `project_root` last recorded.
+pub fn github_source_reading_v1(project_root: &Path) -> GitHubSourceReadingV1 {
+    github_source_reading_registry_v1()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
         .cloned()
+        .unwrap_or_else(|| GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::Unresolved))
 }
 
 /// Discovers the unique pull request filed against `owner/repository` whose

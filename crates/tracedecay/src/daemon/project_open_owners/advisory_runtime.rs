@@ -11,10 +11,11 @@ use tokio::sync::watch;
 use tracedecay_application::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
     GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-    GitHubSourceStatusV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
-    RegisteredGitHubReadOnlyCredentialV1, discover_exact_commit_pull_request_v1,
-    github_repository_from_remote_v1, public_repository_read_credential_v1,
-    record_github_source_status_v1, resolve_registered_github_read_only_credential_v1,
+    GitHubSourceReadingV1, GitHubSourceStatusV1, GitHubSourceUnobservedV1,
+    ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
+    discover_exact_commit_pull_request_v1, github_repository_from_remote_v1,
+    public_repository_read_credential_v1, record_github_source_reading_v1,
+    resolve_registered_github_read_only_credential_v1,
 };
 use tracedecay_application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
@@ -1853,6 +1854,18 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         .head(),
         Ok(GitHeadStateV1::Attached { .. })
     ) {
+        let github_origin = tracedecay_runtime_core::git::git_remote_url(project_root)
+            .as_deref()
+            .and_then(github_repository_from_remote_v1)
+            .is_some();
+        record_github_source_reading_v1(
+            project_root,
+            GitHubSourceReadingV1::unobserved(if github_origin {
+                GitHubSourceUnobservedV1::DetachedHead
+            } else {
+                GitHubSourceUnobservedV1::NoGitHubOrigin
+            }),
+        );
         register_project_query_authority(
             invocation,
             project_root,
@@ -2423,6 +2436,10 @@ async fn register_project_delivery_read_authority(
         .await
     {
         Ok(access) => {
+            record_github_source_reading_v1(
+                project_root,
+                GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::AwaitingAdvisoryOwner),
+            );
             let review_bodies = github_anchor_authorities_arc_v1(
                 state.database.clone(),
                 project_root.to_path_buf(),
@@ -2680,7 +2697,24 @@ struct ProductionGitHubProviderAccessV1 {
     http: GitHubHttpReadConfigV1,
 }
 
+/// Resolves the provider access and records the gate that refused it as this
+/// project's GitHub source reading.
 async fn resolve_production_github_provider_access(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+) -> std::result::Result<ProductionGitHubProviderAccessV1, ProjectDeliveryProviderMountGateV1> {
+    let access = open_production_github_provider_access(invocation, project_root, state).await;
+    if let Err(gate) = &access {
+        record_github_source_reading_v1(
+            project_root,
+            GitHubSourceReadingV1::unobserved((*gate).into()),
+        );
+    }
+    access
+}
+
+async fn open_production_github_provider_access(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
@@ -2902,7 +2936,7 @@ async fn discover_production_pull_request(
         repository = %source.repository,
         project = %project_root.display(),
     );
-    record_github_source_status_v1(project_root, source);
+    record_github_source_reading_v1(project_root, GitHubSourceReadingV1::Observed(source));
     match &discovery {
         Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => tracing::info!(
             event = "github_pull_request_discovery",

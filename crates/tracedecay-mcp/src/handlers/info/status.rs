@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_application::advisory::github_runtime::github_source_status_v1;
+use tracedecay_application::advisory::github_runtime::github_source_reading_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_MOUNT_FAILED, CodeGraphServingReadinessV1, CodeIndexOmittedSourcesV1,
@@ -481,13 +481,7 @@ pub async fn compute_status(
     };
     let (code_index_freshness, code_index_freshness_warning, retrieval_serving) =
         code_index_freshness_status(freshness_payload.as_ref());
-    let github_source = match github_source_status_v1(ctx.project_root()) {
-        Some(source) => serde_json::to_value(&source)?,
-        None => json!({
-            "state": "absent",
-            "reason": "the checkout has no GitHub origin, or its advisory owner has not mounted in this daemon",
-        }),
-    };
+    let github_source = serde_json::to_value(github_source_reading_v1(ctx.project_root()))?;
     let storage_health = if request.include_storage_health {
         let mut storage_health = serde_json::to_value(
             tracing::Instrument::instrument(
