@@ -317,7 +317,8 @@ for (const mode of ["local", "remote"]) {
     for await (const event of client.streamOperation(operationId, {
       resume: {
         resumeToken: frontier.resume_token,
-        nextSequence: frontier.next_sequence,
+        // Only open was consumed; the frontier is the producer's watermark.
+        nextSequence: 0,
       },
     })) {
       resumed.push(event);
