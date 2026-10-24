@@ -1,7 +1,10 @@
+use std::cmp::{Ordering, Reverse};
+use std::collections::BTreeMap;
+
 use tracedecay_domain::{
-    EvidenceRole, ExactClass, FreshnessCompatibilityV1, FusedCandidate, OccurrenceProvenance,
-    RankingDecision, RankingDecisionKind, RetrievalAnchorId, RetrievalSourceRoleV1,
-    SourceFreshness, UtcMicros,
+    CandidateContribution, EvidenceRole, ExactClass, FixedPointScore, FreshnessCompatibilityV1,
+    FusedCandidate, OccurrenceProvenance, RankedCandidate, RankingDecision, RankingDecisionKind,
+    RetrievalAnchorId, RetrievalSourceRoleV1, RetrieverKind, SourceFreshness, UtcMicros,
 };
 
 use super::{composition_lanes, corpus_lanes, id, mixed_caps, no_caps, profile};
@@ -9,8 +12,280 @@ use crate::retrieval::fusion::{
     CompositionKernel, CompositionOutputV1, DeterministicFixedPointFusion, FusionStageInput,
     digest_candidate_set,
 };
-use crate::retrieval::ordering::{compare_fused, decision_cmp};
+use crate::retrieval::ordering::{OrderedFusedCandidates, decision_cmp};
 use crate::retrieval::stage_counters;
+
+// The former comparator remains an independent test oracle. Production
+// comparison reads only prepared records; this intentionally reconstructs
+// each tie-break vector from the candidate, as the original implementation did.
+fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Ordering {
+    fn canonical<T: Ord>(items: impl Iterator<Item = T>) -> Vec<T> {
+        let mut items = items.collect::<Vec<_>>();
+        items.sort();
+        items.dedup();
+        items
+    }
+    let exact = |class| -> u8 {
+        match class {
+            ExactClass::ExactMessage => 0,
+            ExactClass::ExactLiteralPhrase => 1,
+            ExactClass::Approximate => 2,
+        }
+    };
+    let validity = |candidate: &FusedCandidate| -> u8 {
+        candidate
+            .freshness
+            .iter()
+            .map(|freshness| match freshness.compatibility {
+                FreshnessCompatibilityV1::Current => 4,
+                FreshnessCompatibilityV1::Unknown => 3,
+                FreshnessCompatibilityV1::Stale => 2,
+                FreshnessCompatibilityV1::Missing => 1,
+                FreshnessCompatibilityV1::Incompatible => 0,
+            })
+            .max()
+            .unwrap_or(0)
+    };
+    exact(left.exact_class)
+        .cmp(&exact(right.exact_class))
+        .then_with(|| {
+            left.source_role
+                .admission_rank()
+                .cmp(&right.source_role.admission_rank())
+        })
+        .then_with(|| right.utility_micros.cmp(&left.utility_micros))
+        .then_with(|| validity(right).cmp(&validity(left)))
+        .then_with(|| {
+            canonical(
+                left.contributions
+                    .iter()
+                    .filter(|value| value.weight_micros > 0)
+                    .map(|value| {
+                        (
+                            value.retriever,
+                            &value.score_domain,
+                            Reverse(value.raw_score),
+                        )
+                    }),
+            )
+            .cmp(&canonical(
+                right
+                    .contributions
+                    .iter()
+                    .filter(|value| value.weight_micros > 0)
+                    .map(|value| {
+                        (
+                            value.retriever,
+                            &value.score_domain,
+                            Reverse(value.raw_score),
+                        )
+                    }),
+            ))
+        })
+        .then_with(|| {
+            canonical(
+                left.occurrences
+                    .iter()
+                    .map(|value| &value.retriever_evidence_anchor),
+            )
+            .cmp(&canonical(
+                right
+                    .occurrences
+                    .iter()
+                    .map(|value| &value.retriever_evidence_anchor),
+            ))
+        })
+        .then_with(|| {
+            canonical(
+                left.occurrences
+                    .iter()
+                    .map(|value| &value.source_occurrence_id),
+            )
+            .cmp(&canonical(
+                right
+                    .occurrences
+                    .iter()
+                    .map(|value| &value.source_occurrence_id),
+            ))
+        })
+}
+
+fn ranking_key_variants() -> Vec<FusedCandidate> {
+    let mut base = generation_scoped_hit("shared", "generation-a", "shared");
+    base.freshness = vec![base.occurrences[0].freshness.clone()];
+    base.contributions = [RetrieverKind::Lexical, RetrieverKind::Graph]
+        .into_iter()
+        .map(|retriever| CandidateContribution {
+            retriever,
+            retriever_revision: id("retriever.fixture"),
+            source_occurrence_id: base.occurrences[0].source_occurrence_id.clone(),
+            ordinal_rank: 0,
+            raw_score: FixedPointScore(1_000_000),
+            score_domain: id(&format!("score.{}", retriever.as_str())),
+            calibration_profile_id: id("calibration.fixture"),
+            calibrated_feature_micros: 1_000_000,
+            weight_micros: 1_000_000,
+            weighted_contribution_micros: 1_000_000,
+        })
+        .collect();
+    let variant = |name: &str, update: fn(&mut FusedCandidate)| {
+        let mut candidate = base.clone();
+        candidate.anchor_id = id(&format!("anchor.{name}"));
+        candidate.logical_evidence_id = id(&format!("logical.{name}"));
+        candidate.decisions.push(RankingDecision {
+            kind: RankingDecisionKind::ComparatorProvenance,
+            retriever: None,
+            policy_anchor: None,
+            evidence_anchor: None,
+            detail: name.to_owned(),
+        });
+        update(&mut candidate);
+        candidate
+    };
+    vec![
+        variant("base", |_| {}),
+        variant("exact-message", |value| {
+            value.exact_class = ExactClass::ExactMessage
+        }),
+        variant("exact-phrase", |value| {
+            value.exact_class = ExactClass::ExactLiteralPhrase
+        }),
+        variant("definition", |value| {
+            value.source_role = RetrievalSourceRoleV1::ProductionDefinition
+        }),
+        variant("higher-utility", |value| value.utility_micros += 1),
+        variant("unknown", |value| {
+            value.freshness[0].compatibility = FreshnessCompatibilityV1::Unknown
+        }),
+        variant("stale", |value| {
+            value.freshness[0].compatibility = FreshnessCompatibilityV1::Stale
+        }),
+        variant("missing", |value| {
+            value.freshness[0].compatibility = FreshnessCompatibilityV1::Missing
+        }),
+        variant("incompatible", |value| {
+            value.freshness[0].compatibility = FreshnessCompatibilityV1::Incompatible
+        }),
+        variant("no-freshness", |value| value.freshness.clear()),
+        variant("stronger-raw", |value| {
+            value.contributions[0].raw_score = FixedPointScore(2_000_000)
+        }),
+        variant("other-domain", |value| {
+            value.contributions[0].score_domain = id("score.unrelated");
+            value.contributions[0].raw_score = FixedPointScore(u64::MAX);
+        }),
+        variant("other-retriever", |value| {
+            value.contributions[1].retriever = RetrieverKind::ExactLiteral
+        }),
+        variant("zero-weight", |value| {
+            let mut disabled = value.contributions[0].clone();
+            disabled.weight_micros = 0;
+            disabled.raw_score = FixedPointScore(u64::MAX);
+            value.contributions.push(disabled);
+        }),
+        variant("duplicate-evidence", |value| {
+            value.contributions.push(value.contributions[0].clone());
+            value.occurrences.push(value.occurrences[0].clone());
+            value.contributions.reverse();
+        }),
+        variant("other-anchor", |value| {
+            value.occurrences[0].retriever_evidence_anchor = id("evidence.omega")
+        }),
+        variant("other-generation", |value| {
+            value.occurrences[0].source_occurrence_id = id("code-chunk:generation-b:shared")
+        }),
+        variant("equal-key-metadata", |_| {}),
+        variant("higher-tier", |value| value.utility_micros = 0),
+    ]
+}
+
+#[test]
+fn prepared_ranking_keys_match_the_original_order_with_one_normalization() {
+    let fusion = DeterministicFixedPointFusion::new(id("ranking.fixture.v1"));
+    let anchor_tiers: BTreeMap<RetrievalAnchorId, u32> = BTreeMap::from([
+        (id("anchor.higher-tier"), 2),
+        (id("anchor.exact-message"), 1),
+    ]);
+    let variants = ranking_key_variants();
+    let variant = |name: &str| {
+        variants
+            .iter()
+            .find(|candidate| candidate.anchor_id.as_str() == name)
+            .unwrap()
+    };
+    assert_eq!(
+        compare_fused(variant("anchor.base"), variant("anchor.equal-key-metadata")),
+        Ordering::Equal,
+        "metadata and decisions must not invent another identity discriminator"
+    );
+    assert_eq!(
+        compare_fused(variant("anchor.base"), variant("anchor.other-generation")),
+        Ordering::Less,
+        "generation-scoped occurrence identity remains the final discriminator"
+    );
+    for distinct_utilities in [false, true] {
+        for permutation in 0..variants.len() * 2 {
+            let mut input = variants.clone();
+            if distinct_utilities {
+                for (index, candidate) in input.iter_mut().enumerate() {
+                    candidate.utility_micros += index as u64;
+                }
+            }
+            input.rotate_left(permutation % variants.len());
+            if permutation % 2 != 0 {
+                input.reverse();
+            }
+            let mut expected = input.clone();
+            expected.sort_by(|left, right| {
+                Reverse(anchor_tiers.get(&left.anchor_id).copied().unwrap_or(0))
+                    .cmp(&Reverse(
+                        anchor_tiers.get(&right.anchor_id).copied().unwrap_or(0),
+                    ))
+                    .then_with(|| compare_fused(left, right))
+            });
+
+            stage_counters::reset();
+            let (actual, records) = OrderedFusedCandidates::sort(input, |candidate| {
+                fusion.comparator_record(
+                    candidate,
+                    anchor_tiers.get(&candidate.anchor_id).copied().unwrap_or(0),
+                )
+            });
+            let work = stage_counters::snapshot();
+            let actual = actual.into_vec();
+            assert_eq!(
+                actual, expected,
+                "permutation {permutation}, distinct utilities {distinct_utilities}"
+            );
+            assert_eq!(work.comparator_records, actual.len());
+            assert_eq!(work.ranking_evidence_normalizations, 3 * actual.len());
+            assert_eq!(records.len(), actual.len());
+            for (candidate, record) in actual.iter().zip(&records) {
+                assert_eq!(
+                    *record,
+                    fusion.comparator_record(candidate, record.anchor_tier)
+                );
+                assert!(record.domain_scores.len() <= candidate.contributions.len());
+                assert!(record.retriever_evidence_anchors.len() <= candidate.occurrences.len());
+                assert!(record.source_occurrence_ids.len() <= candidate.occurrences.len());
+            }
+            let ranked = |candidates: Vec<FusedCandidate>| {
+                candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, candidate)| RankedCandidate {
+                        candidate,
+                        final_ordinal: index as u32,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                digest_candidate_set(&ranked(actual)).unwrap(),
+                digest_candidate_set(&ranked(expected)).unwrap(),
+            );
+        }
+    }
+}
 
 fn compose_corpus(policy: &tracedecay_domain::DiversityPolicy) -> CompositionOutputV1 {
     CompositionKernel::new(id("ranking.fixture.v1"))
@@ -65,6 +340,11 @@ fn composition_sorts_once_and_keeps_one_provenance_per_fused_candidate() {
         work.comparator_records,
         output.ranked_candidates.len() + collapsed.len(),
         "one comparator record per fused candidate, surviving or collapsed"
+    );
+    assert_eq!(
+        work.ranking_evidence_normalizations,
+        3 * work.comparator_records,
+        "domain scores, evidence anchors and occurrence identities normalize once per fused candidate"
     );
 
     // Survivors are in comparator order without any later re-sort.
