@@ -417,14 +417,27 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(tracing::Instrument::instrument(
             async move {
                 let cancellation = request_graph_cancellation(context.request);
-                let reader = match open_code_graph(
-                    self.code_graph.as_ref(),
-                    context.request,
-                    now_observed(),
-                    Arc::clone(&cancellation),
-                )
-                .await
-                {
+                // A shortest path walks call edges between two point-read
+                // endpoints, all served by the engine, so the read does not
+                // wait for a released catalog to warm again.
+                let opened = self
+                    .code_graph
+                    .open(
+                        CodeGraphReadRequest::new(
+                            context.request,
+                            now_observed(),
+                            Arc::clone(&cancellation),
+                        )
+                        .with_readiness(CodeGraphReadinessRequirement::Engine),
+                    )
+                    .await;
+                let reader = match opened.and_then(|graph| {
+                    graph.reader_with_cancellation(
+                        context.request,
+                        now_observed(),
+                        Arc::clone(&cancellation),
+                    )
+                }) {
                     Ok(reader) => reader,
                     Err(error) => {
                         return graph_read_outcome(&error, EvidenceDomain::Graph, now_observed());
@@ -451,6 +464,38 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         now_observed(),
                     );
                 };
+                for (endpoint, code, message) in [
+                    (
+                        &from,
+                        "application.call-chain.from-node-not-found",
+                        "from_node_id is not in the admitted graph",
+                    ),
+                    (
+                        &to,
+                        "application.call-chain.to-node-not-found",
+                        "to_node_id is not in the admitted graph",
+                    ),
+                ] {
+                    match reader.symbol_summary(endpoint, Arc::clone(&cancellation)) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return refused(
+                                PrimitiveFailureKind::NotFoundOrNotAuthorized,
+                                code,
+                                message,
+                                EvidenceDomain::Graph,
+                                now_observed(),
+                            );
+                        }
+                        Err(error) => {
+                            return graph_read_outcome(
+                                &map_projection_error(error),
+                                EvidenceDomain::Graph,
+                                now_observed(),
+                            );
+                        }
+                    }
+                }
                 let path = match reader.shortest_path(
                     &from,
                     &to,

@@ -10,8 +10,9 @@ use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader,
-    CodeGraphRankedNeighborsV1, CodeGraphReadCostMeter, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
+    CodeGraphRankedNeighborsV1, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
+    CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1, CodeGraphSymbolPredicate,
+    CodeGraphSymbolSummaryV1,
 };
 use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestCostReceiptV1,
@@ -42,6 +43,8 @@ pub struct VerifiedGraphQueryRequest<'a> {
     pub request_id: RequestId,
     pub deadline: Deadline,
     pub cancellation: &'a CancellationSignal,
+    /// The residency the read's answer needs before the open returns.
+    pub readiness: CodeGraphReadinessRequirement,
 }
 
 impl<'a> VerifiedGraphQueryRequest<'a> {
@@ -56,7 +59,13 @@ impl<'a> VerifiedGraphQueryRequest<'a> {
             request_id,
             deadline,
             cancellation,
+            readiness: CodeGraphReadinessRequirement::Catalog,
         }
+    }
+
+    pub fn with_readiness(mut self, readiness: CodeGraphReadinessRequirement) -> Self {
+        self.readiness = readiness;
+        self
     }
 }
 
@@ -327,6 +336,12 @@ impl VerifiedGraphQuery {
         self.reader
             .has_unresolved_callers(targets, None, Arc::clone(&self.cancellation))
             .map_err(GraphQueryError::from)
+    }
+
+    /// Whether the generation's catalog is built and serving; never starts
+    /// or waits on a build.
+    pub fn catalog_is_resident(&self) -> bool {
+        self.reader.catalog_is_resident()
     }
 
     pub fn symbol_summary(
@@ -708,6 +723,7 @@ pub async fn open_verified_graph_query(
         request.cancellation,
         projection.open(
             CodeGraphReadRequest::new(&context, observed_at, Arc::clone(&graph_cancellation))
+                .with_readiness(request.readiness)
                 .with_deadline(request.deadline.clone())
                 .with_live_cancellation(request.cancellation),
         ),

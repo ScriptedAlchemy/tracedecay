@@ -70,6 +70,22 @@ pub(crate) fn node_not_found_result(
     node_id: &str,
     occurrence: &SymbolOccurrenceId,
 ) -> Result<PrimitiveNotFoundV1> {
+    // The nearest symbols come from a scan of the whole catalog. A read
+    // answered from the engine while a released catalog warms again says so
+    // instead of waiting out that warm to name an absent node.
+    if !graph.catalog_is_resident() {
+        return Ok(PrimitiveNotFoundV1 {
+            status: "not_found".to_owned(),
+            reason_code: "node_not_found".to_owned(),
+            node_id: node_id.to_owned(),
+            message: format!(
+                "Node not found: {node_id}; nearest-symbol suggestions are unavailable while \
+                 the code graph catalog warms"
+            ),
+            suggestions: Vec::new(),
+            freshness: None,
+        });
+    }
     let query = occurrence.as_str();
     let max_distance = (query.chars().count() / 3).clamp(1, 3);
     let nearest = RefCell::new(BTreeMap::<(usize, String), SymbolOccurrenceId>::new());
