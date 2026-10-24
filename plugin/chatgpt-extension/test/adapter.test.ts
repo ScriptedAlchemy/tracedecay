@@ -1,12 +1,13 @@
-import { Client, InMemoryTransport, type CallToolResult } from "@modelcontextprotocol/client";
+import { Client, InMemoryTransport, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { request as httpRequest } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import type { DaemonBridge } from "../src/server/bridge.js";
-import { createExtensionServer } from "../src/server/main.js";
+import { DaemonBridge } from "../src/server/bridge.js";
+import { createExtensionServer, serveLoopbackHttp } from "../src/server/main.js";
 import { DaemonFailure, ServeSession } from "../src/server/serve-client.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,6 +52,48 @@ describe("embedded server entry", () => {
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).toContain("tracedecay_workspace");
   }, 30_000);
+});
+
+describe("loopback HTTP transport", () => {
+  it.each(["127.0.0.1", "::1"])("returns a typed disconnected workspace over %s", async (address) => {
+    const root = await mkdtemp(path.join(tmpdir(), "td-explorer-http-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const bridge = new DaemonBridge({ binary: path.join(root, "absent-binary"), profileRoot: path.join(root, "profile"), env: {}, cwd: root });
+    cleanups.push(() => bridge.close());
+    const token = "test-loopback-token";
+    const http = await serveLoopbackHttp(() => createExtensionServer({ bridge, assets: ASSETS }), address, 0, token);
+    cleanups.push(() => http.close());
+    const client = new Client({ name: "http-transport-test", version: "0.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(http.url), {
+      requestInit: { headers: { authorization: `Bearer ${token}` } },
+    }));
+    cleanups.push(() => client.close());
+
+    expect(client.getServerVersion()?.name).toBe("tracedecay-chatgpt-extension");
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("tracedecay_workspace");
+    const result = await client.callTool({ name: "tracedecay_workspace", arguments: {} });
+    expect(result.isError ?? false).toBe(false);
+    expect(result.structuredContent).toMatchObject({
+      page: "projects",
+      daemon: { state: "disconnected", failure: { code: "daemon_authority_absent" } },
+      projects: { state: "failed", failure: { code: "daemon_authority_absent" } },
+    });
+
+    const unauthorized = await fetch(http.url, { method: "POST" });
+    expect(unauthorized.status).toBe(401);
+    const foreignStatus = await new Promise<number>((resolve, reject) => {
+      const request = httpRequest(http.url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, host: "foreign.example" },
+      }, (response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      });
+      request.on("error", reject);
+      request.end();
+    });
+    expect(foreignStatus).toBe(403);
+  });
 });
 
 describe("serve session", () => {
