@@ -13,7 +13,7 @@ use tracedecay_contracts::{
     ApplicationOperation, CancellationContext, CancellationSignal, Deadline, IdempotencyKey,
     RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationAdmissionV1,
     SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditInvocationV1,
-    SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1, now_micros,
+    SourceEditReconciliationInvocationV1, now_micros,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
@@ -405,74 +405,6 @@ impl ProjectSourceEditOwnerV1 {
     }
 
     #[tracing::instrument(
-        name = "daemon.project.source_edit_rollback",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn rollback(
-        &self,
-        request_id: RequestId,
-        invocation: SourceEditRollbackInvocationV1,
-        deadline: Deadline,
-        cancellation: CancellationSignal,
-    ) -> std::result::Result<
-        tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
-        SourceEditOwnerError,
-    > {
-        let SourceEditRollbackInvocationV1 {
-            effect_id,
-            original_idempotency_key,
-            idempotency_key,
-            original_input_digest,
-            expected_state,
-        } = invocation;
-        self.mutation.authorize_mutation()?;
-        let observed_at = now_micros();
-        let operation = tracedecay_contracts::source_edit_rollback_operation()
-            .map_err(source_edit_contract_error)?;
-        let access = self
-            .authorization
-            .current_access(observed_at)
-            .await
-            .map_err(|_| source_edit_authority_error())?;
-        let context = source_edit_request_context(
-            &access,
-            request_id,
-            &operation,
-            observed_at,
-            deadline,
-            cancellation.context(),
-        )?;
-        let effect_control = SourceEditEffectControlV1::for_request(&context, cancellation);
-        let current = self
-            .authorization
-            .current_authority(&context, &operation, observed_at)
-            .await
-            .map_err(|_| source_edit_authority_error())?;
-        let request = tracedecay_contracts::SourceEditRollbackRequestV1 {
-            context,
-            authority: current.receipt.clone(),
-            effect_id,
-            original_idempotency_key,
-            idempotency_key,
-            original_input_digest,
-            expected_state,
-            proof: current.proof,
-            observed_at,
-        };
-        tracedecay_source_edit::execute_source_edit_rollback_with_control(
-            self.runtime.as_ref(),
-            &operation,
-            request,
-            &self.authorization,
-            &effect_control,
-        )
-        .await
-        .and_then(source_edit_surface_result)
-        .map_err(SourceEditOwnerError::ExecutionFailed)
-    }
-
-    #[tracing::instrument(
         name = "daemon.project.source_edit_reconciliation",
         level = "trace",
         skip_all
@@ -488,7 +420,7 @@ impl ProjectSourceEditOwnerV1 {
         SourceEditOwnerError,
     > {
         let SourceEditReconciliationInvocationV1 {
-            kind,
+            original_operation,
             effect_id,
             idempotency_key,
             attempt_idempotency_key,
@@ -521,7 +453,7 @@ impl ProjectSourceEditOwnerV1 {
         let request = tracedecay_contracts::SourceEditReconciliationRequestV1 {
             context,
             authority: current.receipt.clone(),
-            kind,
+            original_operation,
             effect_id,
             idempotency_key,
             attempt_idempotency_key,

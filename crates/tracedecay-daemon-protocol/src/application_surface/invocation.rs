@@ -96,7 +96,6 @@ impl ApplicationSurfaceRequest {
             Self::ContextScout(request) => tagged_body(request),
             Self::SourceEdit(request) => body(request),
             Self::SourceEditReconcile(request) => body(request),
-            Self::SourceEditRollback(request) => body(request),
             Self::Retained(request) => body(request),
             Self::GraphTool(arguments) => Ok(Value::Object(arguments)),
         }
@@ -122,9 +121,6 @@ pub fn parse_application_surface_invocation_payload(
             .map_err(ApplicationSurfaceAdapterError::invalid_request),
         ApplicationSurfaceOperation::SourceEditReconcile => serde_json::from_value(payload)
             .map(ApplicationSurfaceRequest::SourceEditReconcile)
-            .map_err(ApplicationSurfaceAdapterError::invalid_request),
-        ApplicationSurfaceOperation::SourceEditRollback => serde_json::from_value(payload)
-            .map(ApplicationSurfaceRequest::SourceEditRollback)
             .map_err(ApplicationSurfaceAdapterError::invalid_request),
         operation if super::is_source_edit_operation(operation) => serde_json::from_value(payload)
             .map(ApplicationSurfaceRequest::SourceEdit)
@@ -174,8 +170,7 @@ pub fn application_surface_cancellation_policy(
         | ApplicationSurfaceOperation::InsertAtSymbol
         | ApplicationSurfaceOperation::MoveSymbol
         | ApplicationSurfaceOperation::RenameSymbol
-        | ApplicationSurfaceOperation::SourceEditReconcile
-        | ApplicationSurfaceOperation::SourceEditRollback => {
+        | ApplicationSurfaceOperation::SourceEditReconcile => {
             InvocationCancellationPolicy::AuthoritativeEffect
         }
         _ => InvocationCancellationPolicy::ReadOnly,
@@ -330,15 +325,6 @@ fn daemon_invocation_request(
         ),
         ApplicationSurfaceRequest::SourceEditReconcile(request) => {
             DaemonInvocationRequest::source_edit_reconcile(
-                request_id,
-                request,
-                observed_at,
-                deadline,
-                cancellation,
-            )
-        }
-        ApplicationSurfaceRequest::SourceEditRollback(request) => {
-            DaemonInvocationRequest::source_edit_rollback(
                 request_id,
                 request,
                 observed_at,
@@ -984,7 +970,6 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::MoveSymbol
         | ApplicationSurfaceOperation::RenameSymbol
         | ApplicationSurfaceOperation::SourceEditReconcile
-        | ApplicationSurfaceOperation::SourceEditRollback
         | ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

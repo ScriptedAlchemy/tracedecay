@@ -27,7 +27,7 @@ The retained product rules are:
 
 The remaining product work is the official lifecycle and feedback journey,
 OpenCode duplicate-analyzer prevention, selected cross-platform lifecycle and
-rollback combinations, real Cline-family route or unavailable proof, and the
+partial-failure combinations, real Cline-family route or unavailable proof, and the
 Cursor Core component-ownership conflict (its code repair landed 2026-08-07,
 drift distinct from conflict, transaction as sole writer, drift-converges
 acceptance test, leaving only the operator install/upgrade/doctor
@@ -59,16 +59,16 @@ interruption.
 
 1. The lifecycle operation discovers the host, existing TraceDecay ownership,
    third-party claims, protocol compatibility, and the requested components.
-2. A dry run reports exact files/settings it owns, conflicts, backups, and the
-   rollback plan. Ambiguous ownership or a competing plugin requires explicit
+2. A dry run reports exact files/settings it owns, conflicts, and the
+   forward mutation plan. Ambiguous ownership or a competing plugin requires explicit
    confirmation; discovery never grants authority.
 3. Apply verifies the embedded bundle's schema, version, declared capabilities,
    content digest, and pinned configuration revision, writes only
    TraceDecay-owned state atomically, records a receipt, and verifies native
    registration. The digest detects corruption; it is not a separate origin or
    release-signing authority.
-4. On failure, rollback restores the backup and leaves unrelated host
-   configuration untouched. Repair replays the same ownership-aware operation;
+4. On failure, completed writes remain in place and the error reports the
+   failed step. Repair replays the same ownership-aware operation;
    uninstall removes only TraceDecay-owned state.
 
 ### Edit and stop feedback
@@ -167,25 +167,24 @@ write-capable or indeterminate credential scopes fail before network access.
 
 - Edit Hermes YAML with `yaml-edit`; use each supported host's official
   SDK/plugin/registration API where it exists; and route every resulting
-  change through the existing atomic-write, backup, compare-and-swap,
-  lifecycle receipt, and rollback kernel. This replaces bespoke YAML/string
+  change through existing atomic writes, expected-state checks, and
+  lifecycle receipts. This replaces bespoke YAML/string
   patching and host-local write choreography while retaining ownership,
-  unrelated configuration, exact prior state, dry run, confirmation,
+  unrelated configuration, dry run, confirmation,
   interrupted repair, and uninstall semantics.
 - If a host has no proven official mutation API, or `yaml-edit` cannot
   round-trip the exact supported Hermes document without collateral change,
   keep the component unavailable/read-only and emit the typed remediation.
   Do not silently fall back to raw replacement or a second lifecycle engine.
-- Provide callable install, update, repair, backup/restore, and uninstall
-  operations with dry run, explicit confirmation, idempotency, receipts, and
-  rollback.
+- Provide callable install, update, repair, and uninstall operations with
+  dry run, explicit confirmation, idempotency, and receipts. Do not retain
+  file preimages or implement undo.
 - Treat Kimi Code plugin/global registrations and OpenCode plugin, LSP, MCP,
   agent, skill, command, and instruction/rules artifacts as lifecycle-owned
   components. Agent-referenced prompt files follow the agent component;
   command prompt templates follow the command component; and `AGENTS.md`
-  follows instruction/rules ownership. Dry run, repair, and rollback preserve
-  all unrelated host configuration and restore the exact prior analyzer
-  selection.
+  follows instruction/rules ownership. Dry run and repair preserve unrelated
+  host configuration and respect analyzer ownership.
 - Use `configure -> dry-run -> confirm -> apply` for host lifecycle changes
   over Plan 20's protected configuration mutation. Apply uses the exact
   confirmed change plan and expected base revision; stale or unauthorized
@@ -354,7 +353,7 @@ missing capability named in its reason code ships, for Kilo that means a
   does not remove a supported component, host command/tool/skill/agent/hook,
   agent-owned referenced prompt file, instruction/rules content, LSP
   configuration, delivery capability, refresh/query mode, receipt/failure/
-  quarantine behavior, lifecycle operation, configuration flow, rollback,
+  quarantine behavior, lifecycle operation, configuration flow,
   compatibility obligation, or safety semantic.
 
 ## Direct acceptance
@@ -373,20 +372,20 @@ missing capability named in its reason code ships, for Kilo that means a
   without automatic editor diagnostics.
 - OpenCode conformance starts the TraceDecay custom LSP with an existing
   language analyzer present and proves exactly one analyzer owns that language
-  before, during, and after install, repair, rollback, and uninstall while
+  before, during, and after install, repair, and uninstall while
   TraceDecay findings still project.
 - Core-only and each optional companion install, update, repair, and uninstall
   independently. Interrupted and repeated operations converge; corrupt
   content, schema/version/capability mismatch, protocol skew, ownership
-  conflicts, and partial installs fail before unsafe mutation and roll back
-  only TraceDecay-owned state.
+  conflicts, and partial installs refuse unsafe mutation. Completed changes
+  remain in place when a later step fails.
 - Platform-substrate tests cover path handling, atomic writes, file modes,
-  process discovery, locking, interruption boundaries, and rollback on every
+  process discovery, locking, interruption boundaries, and partial failures on every
   supported operating system independently of host branding.
 - Selected real host/OS/fault combinations cover each distinct native
   registration mechanism and lifecycle risk. They include Kimi Code and
   OpenCode, competing ownership, interruption on both sides of the commit
-  boundary, partial component failure, restart, and feedback rollback without
+  boundary, partial component failure, and forward recovery after restart without
   requiring a Cartesian host-by-OS-by-fault matrix.
 - Official install, upgrade, repair, and uninstall operations, not hand edits or
   test-only installers, verify native registration, real feedback delivery,

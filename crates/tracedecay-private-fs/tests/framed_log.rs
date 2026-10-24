@@ -94,6 +94,7 @@ fn prepared_publish_is_private_and_readable_through_the_adapter() {
             assert!(temporary.exists(), "prepare observes the staging file");
             Ok(())
         },
+        tracedecay_private_fs::framed_log::replace_via_rename,
         DirectorySyncPolicy::TolerateUnsupported,
     )
     .expect("prepared publish");
@@ -182,6 +183,7 @@ mod windows_publication {
                     permissions.set_readonly(true);
                     fs::set_permissions(temporary, permissions)
                 },
+                tracedecay_private_fs::framed_log::replace_via_rename,
                 DirectorySyncPolicy::Strict,
             )
         };

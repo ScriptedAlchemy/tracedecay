@@ -259,7 +259,6 @@ application_surface_operations! {
     MoveSymbol => "move_symbol";
     RenameSymbol => "rename_symbol";
     SourceEditReconcile => "source_edit_reconcile";
-    SourceEditRollback => "source_edit_rollback";
     FactStoreCurate => "fact_store_curate";
     FactStoreAdd => "fact_store_add";
     FactStoreSearch => "fact_store_search";

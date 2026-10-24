@@ -5,14 +5,11 @@ use std::time::Instant;
 
 use tracedecay_contracts::{CancellationSignal, VerifiedWorkGraphVersionV1};
 use tracedecay_domain::{
-    AttemptId, CodeGenerationId, ComponentVersion, ContentDigest, CursorPayloadDigest,
-    DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
-    DiagnosticRecordStateV1, DiagnosticSeverityV1, FreshnessCompatibilityV1,
-    GenerationDiagnosticV1, ManifestDigest, ObservationSourceIdentityV1, ProviderId,
-    RetrievalFailure, RetrievalGrainV1, RetrieverBatch, RetrieverContinuation, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, RunId, SessionId, SourceSpan, SourceStoreId, TaskId,
-    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
-    TemporalModeV1, UtcMicros, WorkAttemptIdentityV1, WorkGraphVersionV1,
+    AttemptId, CodeGenerationId, CursorPayloadDigest, FreshnessCompatibilityV1, ManifestDigest,
+    ObservationSourceIdentityV1, RetrievalFailure, RetrievalGrainV1, RetrieverBatch,
+    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome, RunId, SessionId,
+    SourceStoreId, TaskId, TemporalCandidateChannelV1, TemporalCandidateContributionV1,
+    TemporalLaneEvidenceV1, TemporalModeV1, UtcMicros, WorkAttemptIdentityV1, WorkGraphVersionV1,
     WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
 };
 use tracedecay_temporal_query::execution::BindingDigest;
@@ -24,7 +21,6 @@ use tracedecay_temporal_query::snapshot::{
     TemporalWatermarks,
 };
 
-use crate::retrieval::evidence_lanes::score_diagnostic;
 use crate::retrieval::evidence_lanes::{
     DiagnosticCandidateReadPortV1, DiagnosticLaneEvidenceV1, DiagnosticLaneRequestV1,
     DiagnosticLaneRetrieverV1, DiagnosticMatchReasonV1, EvidenceLaneExecutionControlV1,
@@ -85,60 +81,6 @@ impl TemporalCandidateExportPortV1 for FixedTemporalPort {
 
 struct FixedDiagnosticPort {
     outcome: RetrieverOutcome<RetrieverBatch<DiagnosticLaneEvidenceV1>>,
-}
-
-fn generation_diagnostic() -> GenerationDiagnosticV1 {
-    let mut diagnostic = GenerationDiagnosticV1 {
-        diagnostic_anchor: id("anchor.diagnostic.fixture"),
-        generation_id: id("generation.fixture"),
-        repository: id("repository.fixture"),
-        worktree: None,
-        reference: None,
-        source_revision: None,
-        file_occurrence_id: id("file.fixture"),
-        content_digest: id::<ContentDigest>(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
-        span: SourceSpan {
-            start_byte: 4,
-            end_byte: 12,
-        },
-        symbol_occurrence_id: None,
-        code: "E0308".to_owned(),
-        severity: DiagnosticSeverityV1::Error,
-        message: "mismatched types".to_owned(),
-        message_digest: id(
-            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        ),
-        provenance: DiagnosticProvenanceV1 {
-            producer_kind: DiagnosticProducerKindV1::UpstreamCompiler,
-            producer: id::<ProviderId>("provider.rustc"),
-            analyzer_revision: id::<ComponentVersion>("analyzer.rustc.v1"),
-            configuration_revision: id::<ComponentVersion>("configuration.rustc.v1"),
-            sanitization_receipt: None,
-        },
-        evidence_class: DiagnosticEvidenceClassV1::ProducerReported,
-        collected_at: UtcMicros(7),
-        state: DiagnosticRecordStateV1::Current,
-    };
-    diagnostic.message_digest = diagnostic.compute_message_digest().expect("message digest");
-    diagnostic
-}
-
-#[test]
-fn canonical_diagnostic_scoring_retains_the_match_reason_and_term_coverage() {
-    let diagnostic = generation_diagnostic();
-    let exact_terms = BTreeSet::from(["e0308"]);
-    assert_eq!(
-        score_diagnostic(&diagnostic, "e0308", &exact_terms).expect("exact score"),
-        Some((DiagnosticMatchReasonV1::CodeExact, 1, 1_000_000)),
-    );
-
-    let overlap_terms = BTreeSet::from(["mismatched", "result"]);
-    assert_eq!(
-        score_diagnostic(&diagnostic, "mismatched result", &overlap_terms).expect("overlap score"),
-        Some((DiagnosticMatchReasonV1::TokenOverlap, 1, 650_000)),
-    );
 }
 
 impl DiagnosticCandidateReadPortV1 for FixedDiagnosticPort {

@@ -1,9 +1,3 @@
-//! Application adapter for the production Plan 25 code-index owner.
-//!
-//! The daemon/application request context remains the sole source of
-//! cancellation and deadline state. This adapter does not decode controls
-//! from client data or create a second publication authority.
-
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{
@@ -17,11 +11,9 @@ use tracedecay_domain::CodeGenerationId;
 use tracedecay_code_index::{
     chunks::CodeIndexImportEvidenceV1, production::CodeIndexExecutionControlV1,
 };
-use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
 };
-use tracedecay_session_memory::context::{RequestInterruption, application_request_interruption};
 
 /// One admitted lazy-index request, pinned to the graph generation whose
 /// verified parser evidence motivated it.
@@ -89,39 +81,6 @@ pub trait CodeIndexIgnoredDependencyAdmissionPortV1: Send + Sync {
         &'a self,
         request: CodeIndexIgnoredDependencyAdmissionRequestV1<'a>,
     ) -> CodeIndexIgnoredDependencyAdmissionFutureV1<'a>;
-}
-
-/// Adapt one already-authorized application request to synchronous code-index
-/// checkpoints. The owner checks this control before and after every bounded
-/// extraction/chunking stage and before atomic publication.
-pub struct RequestContextCodeIndexControlV1<'a> {
-    context: &'a RequestContext,
-    cancellation: &'a CancellationToken,
-}
-
-impl<'a> RequestContextCodeIndexControlV1<'a> {
-    pub fn new(context: &'a RequestContext, cancellation: &'a CancellationToken) -> Self {
-        Self {
-            context,
-            cancellation,
-        }
-    }
-}
-
-impl CodeIndexExecutionControlV1 for RequestContextCodeIndexControlV1<'_> {
-    fn is_cancelled(&self) -> bool {
-        matches!(
-            application_request_interruption(self.context, self.cancellation),
-            Some(RequestInterruption::Cancelled)
-        )
-    }
-
-    fn is_deadline_exceeded(&self) -> bool {
-        matches!(
-            application_request_interruption(self.context, self.cancellation),
-            Some(RequestInterruption::DeadlineExceeded)
-        )
-    }
 }
 
 /// Daemon-owned cancellation fence for one immutable snapshot build.

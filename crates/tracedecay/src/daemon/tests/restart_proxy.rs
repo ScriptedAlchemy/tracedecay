@@ -337,6 +337,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
     let rebound_profile = profile.clone();
     let rebound_endpoint = endpoint.clone();
     let (unbound_tx, unbound_rx) = tokio::sync::oneshot::channel();
+    let (rebound_tx, rebound_rx) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(async move {
         answer_one_proxy_request(first_listener, &first_token, 1).await;
         drop(first_authority);
@@ -354,6 +355,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
         .expect("second daemon authority");
         let second_token = second_authority.auth_token().to_string();
         assert_ne!(first_token, second_token, "daemon restart must rotate auth");
+        rebound_tx.send(()).expect("notify restarted daemon ready");
         answer_one_proxy_request(second_listener, &second_token, 2).await;
     });
 
@@ -387,6 +389,11 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
 
     unbound_rx.await.expect("first daemon should unlink socket");
     sender.send(request(2)).expect("send second request");
+    // Queue the request during the outage, then measure its response after the
+    // fixture has finished binding and durably publishing the rotated authority.
+    rebound_rx
+        .await
+        .expect("restarted daemon should publish rotated authority");
     let second = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
         .await
         .expect("second response timed out")

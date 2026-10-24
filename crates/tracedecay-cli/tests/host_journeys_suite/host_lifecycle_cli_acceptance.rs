@@ -137,18 +137,14 @@ const OPENCODE_CONFIGS: &[(&str, &[u8])] = &[(
 "#,
 )];
 /// Gemini's shared settings file is host-owned under the extension model:
-/// TraceDecay only observes it so a lifecycle can roll back whatever the host
-/// CLI changed there. It is seeded with a foreign server so a run that started
-/// merging it again would be caught.
+/// A foreign server detects unintended changes by the host CLI.
 const GEMINI_CONFIGS: &[(&str, &[u8])] = &[(
     ".gemini/settings.json",
     br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}},"theme":"dark"}
 "#,
 )];
 /// Copilot's MCP registry is host-owned: `copilot mcp add|remove` is its only
-/// writer. TraceDecay reads it to guard operator-owned peers and to record the
-/// bytes rollback restores. Seeding a foreign server means a run that started
-/// merging the document itself would be caught.
+/// writer. A foreign server detects unintended changes to operator-owned peers.
 const COPILOT_CONFIGS: &[(&str, &[u8])] = &[(
     ".copilot/mcp-config.json",
     br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}}}
@@ -248,7 +244,7 @@ impl IsolatedCli {
         } else {
             TempDir::new().unwrap()
         };
-        let project = TempDir::new().unwrap();
+        let project = TempDir::new_in(home.path().parent().unwrap()).unwrap();
         let profile = home.path().join(".tracedecay-test-profile");
         let bin_dir = home.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -282,9 +278,7 @@ impl IsolatedCli {
             .args(args)
             .current_dir(self.project.path())
             .env("PATH", hermetic_path(&[&self.bin_dir]))
-            // Python stand-ins must not mutate the home with interpreter
-            // caches during exact host install/uninstall restoration checks.
-            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("TMPDIR", self.home.path().parent().unwrap())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -588,29 +582,6 @@ fn owned_bytes(
     snapshot
 }
 
-fn assert_snapshot_eq(
-    host: &str,
-    phase: &str,
-    observed: &BTreeMap<PathBuf, Vec<u8>>,
-    expected: &BTreeMap<PathBuf, Vec<u8>>,
-) {
-    assert_eq!(
-        observed.keys().collect::<Vec<_>>(),
-        expected.keys().collect::<Vec<_>>()
-    );
-    for (path, expected) in expected {
-        let observed = &observed[path];
-        assert_eq!(
-            observed,
-            expected,
-            "{host} {phase} changed {} (observed {}, expected {})",
-            path.display(),
-            hex::encode(Sha256::digest(observed)),
-            hex::encode(Sha256::digest(expected))
-        );
-    }
-}
-
 fn packet_request(packet: &str, identity: &str) -> Vec<u8> {
     let packet: serde_json::Value = serde_json::from_str(packet).unwrap();
     let request = packet["events"]
@@ -816,12 +787,12 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             .flat_map(|component| &component.artifacts)
             .next()
             .expect("managed artifact for interrupted repair");
+        let expected_after_repair = owned_bytes(&cli, &repaired_receipt, &originals);
         fs::write(
             cli.home.path().join(&pending_mutation.relative_path),
-            b"operator state that the failed repair must restore",
+            b"operator-corrupted managed artifact",
         )
         .unwrap();
-        let before_interruption = owned_bytes(&cli, &repaired_receipt, &originals);
         let receipt_before_interruption =
             serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
         let mut interrupted = cli.command(&["reinstall"]);
@@ -834,8 +805,8 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         );
         assert_eq!(
             owned_bytes(&cli, &repaired_receipt, &originals),
-            before_interruption,
-            "{} interrupted repair did not restore configs/artifacts byte-for-byte",
+            expected_after_repair,
+            "{} interrupted repair did not preserve its published files",
             case.id
         );
         assert_eq!(
@@ -847,67 +818,6 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         assert_success(case.id, "post-interruption repair", cli.run(&["reinstall"]));
         let repaired_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &repaired_receipt);
-
-        let state = cli
-            .home
-            .path()
-            .join(format!("{}-feedback-rollback.json", case.id));
-        // Pi has no feedback route to switch: its extension is the whole
-        // registration, so the feedback-rollback leg has nothing to rehearse.
-        if case.host != HostKindV1::Pi {
-            let dry_run = cli.run_with_env(
-                &["feedback-rollback", "dry-run", "--agent", case.id],
-                "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-                "next",
-            );
-            assert!(
-                !String::from_utf8_lossy(&dry_run.stdout).contains(" 0 mutation(s)"),
-                "{} feedback route planned no real byte mutation",
-                case.id
-            );
-            assert_success(case.id, "feedback rollback dry-run", dry_run);
-            let before_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
-            assert_success(
-                case.id,
-                "feedback rollback apply",
-                cli.run_with_env(
-                    &[
-                        "feedback-rollback",
-                        "apply",
-                        "--agent",
-                        case.id,
-                        "--state",
-                        state.to_str().unwrap(),
-                        "--yes",
-                    ],
-                    "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-                    "next",
-                ),
-            );
-            let applied_feedback = owned_bytes(&cli, &repaired_receipt, &originals);
-            assert_ne!(
-                applied_feedback, before_feedback,
-                "{} feedback apply did not change any owned bytes",
-                case.id
-            );
-            assert_success(
-                case.id,
-                "feedback rollback restore",
-                cli.run(&[
-                    "feedback-rollback",
-                    "restore",
-                    "--state",
-                    state.to_str().unwrap(),
-                    "--yes",
-                ]),
-            );
-            assert_snapshot_eq(
-                case.id,
-                "feedback rollback",
-                &owned_bytes(&cli, &latest_receipt(&cli, case.host), &originals),
-                &before_feedback,
-            );
-        }
 
         assert_success(
             case.id,
@@ -1263,88 +1173,6 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
     assert_dashboard_absent();
     assert_success(case.id, "reinstall", cli.run(&["reinstall"]));
     assert_dashboard_absent();
-}
-
-#[test]
-fn feedback_policy_failure_precedes_apply_and_restore_mutations() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::Hermes);
-    let originals = seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "install --no-dashboard",
-        cli.run(&["install", "--agent", case.id, "--no-dashboard"]),
-    );
-    let receipt = latest_receipt(&cli, case.host);
-    let before_apply = owned_bytes(&cli, &receipt, &originals);
-    let config_path = cli.profile.join("config.toml");
-    let valid_config = fs::read(&config_path).unwrap();
-    let corrupt_config =
-        b"installed_agents = [\"hermes\"]\nagent_dashboard_enabled = { hermes = false\n";
-    let state = cli.home.path().join("hermes-policy-feedback.json");
-    let apply_args = [
-        "feedback-rollback",
-        "apply",
-        "--agent",
-        case.id,
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ];
-
-    fs::write(&config_path, corrupt_config).unwrap();
-    let refused_apply = cli.run_with_env(
-        &apply_args,
-        "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-        "next",
-    );
-    assert!(!refused_apply.status.success());
-    assert!(!state.exists());
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), before_apply);
-
-    fs::write(&config_path, &valid_config).unwrap();
-    assert_success(
-        case.id,
-        "feedback apply",
-        cli.run_with_env(
-            &apply_args,
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "next",
-        ),
-    );
-    let applied = owned_bytes(&cli, &receipt, &originals);
-    assert_ne!(applied, before_apply);
-    assert!(
-        applied
-            .values()
-            .any(|bytes| bytes.ends_with(b"\nfeedback-route:next\n")),
-        "feedback activation replaced the exact applied target bytes"
-    );
-
-    fs::write(&config_path, corrupt_config).unwrap();
-    let refused_restore = cli.run(&[
-        "feedback-rollback",
-        "restore",
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    assert!(!refused_restore.status.success());
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), applied);
-
-    fs::write(&config_path, valid_config).unwrap();
-    assert_success(
-        case.id,
-        "feedback restore",
-        cli.run(&[
-            "feedback-rollback",
-            "restore",
-            "--state",
-            state.to_str().unwrap(),
-            "--yes",
-        ]),
-    );
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), before_apply);
 }
 
 /// Codex activation is part of the component transaction: without its CLI
@@ -2328,9 +2156,113 @@ fn update_plugin_with_no_integration_refuses_instead_of_exiting_zero() {
     assert!(stderr.contains("tracedecay install"), "{stderr}");
 }
 
-/// Rollback bytes live only in the process that staged them, so a killed
-/// install leaves whatever it wrote and nothing to recover from: no journal,
-/// backup, or copy of any host config. The next install converges over it.
+#[test]
+fn failed_opencode_install_preserves_creation_ownership_through_retry_and_uninstall() {
+    for original in [None, Some(b"{\"theme\":\"dark\"}\n".as_slice())] {
+        let cli = IsolatedCli::new();
+        let case = host_case(HostKindV1::OpenCode);
+        let config_dir = cli.home.path().join(".config/opencode");
+        let config_path = config_dir.join("opencode.json");
+        fs::create_dir_all(&config_dir).unwrap();
+        if let Some(original) = original {
+            fs::write(&config_path, original).unwrap();
+        }
+
+        let failed = cli.run_with_env(&["install", "--agent", case.id], VERIFY_FAILURE_ENV, "1");
+        assert!(
+            !failed.status.success(),
+            "injected verification failure unexpectedly succeeded"
+        );
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        assert!(config.pointer("/mcp/servers/tracedecay").is_some());
+        assert!(
+            latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
+                .unwrap()
+                .is_none()
+        );
+        let ownership = latest_host_component_receipt_at(
+            &cli.lifecycle_root(),
+            case.host,
+            HostComponentV1::Core,
+        )
+        .unwrap()
+        .expect("failed install retains component ownership");
+        let creation = ownership
+            .created_config
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|creation| creation.relative_path == ".config/opencode/opencode.json")
+            .expect("failed install retains config creation facts");
+        assert_eq!(creation.created_file, original.is_none());
+        assert!(
+            creation
+                .created_containers
+                .iter()
+                .any(|path| path == "/mcp")
+        );
+
+        assert_success(
+            case.id,
+            "retry install",
+            cli.run(&["install", "--agent", case.id]),
+        );
+        let installed = latest_receipt(&cli, case.host);
+        assert_receipt_digests(&cli, &installed);
+        let ownership_before_uninstall = latest_host_component_receipt_at(
+            &cli.lifecycle_root(),
+            case.host,
+            HostComponentV1::Core,
+        )
+        .unwrap();
+        let failed = cli.run_with_env(&["uninstall", "--agent", case.id], VERIFY_FAILURE_ENV, "1");
+        assert!(!failed.status.success());
+        assert_eq!(latest_receipt(&cli, case.host), installed);
+        assert_eq!(
+            latest_host_component_receipt_at(
+                &cli.lifecycle_root(),
+                case.host,
+                HostComponentV1::Core,
+            )
+            .unwrap(),
+            ownership_before_uninstall
+        );
+
+        assert_success(
+            case.id,
+            "retry uninstall",
+            cli.run(&["uninstall", "--agent", case.id]),
+        );
+        if let Some(original) = original {
+            assert_eq!(fs::read(&config_path).unwrap(), original);
+        } else {
+            assert!(
+                !config_path.exists(),
+                "retry lost ownership of the created config"
+            );
+        }
+        for artifact in installed
+            .component_receipts
+            .iter()
+            .flat_map(|component| &component.artifacts)
+        {
+            assert!(!cli.home.path().join(&artifact.relative_path).exists());
+        }
+        let remaining = fs::read_dir(config_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remaining.len(),
+            usize::from(original.is_some()),
+            "{remaining:?}"
+        );
+    }
+}
+
+/// A killed install leaves completed writes in place. The next install
+/// converges without a saved copy of the previous host configuration.
 #[test]
 fn killed_install_keeps_no_rollback_state_and_the_next_install_converges() {
     let cli = IsolatedCli::new();
@@ -2449,458 +2381,4 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
         "Claude symlink refusal omitted actionable remediation: {stderr}"
     );
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
-}
-
-#[test]
-fn stale_feedback_registration_refuses_before_artifact_or_receipt_effects() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let state = cli.home.path().join("opencode-feedback-rollback.json");
-    assert_success(
-        case.id,
-        "feedback apply",
-        cli.run_with_env(
-            &[
-                "feedback-rollback",
-                "apply",
-                "--agent",
-                case.id,
-                "--state",
-                state.to_str().unwrap(),
-                "--yes",
-            ],
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "next",
-        ),
-    );
-
-    // The Core registration for OpenCode is the prompt-rules file.
-    let config_path = cli.home.path().join(".config/opencode/AGENTS.md");
-    let mut rules = fs::read_to_string(&config_path).unwrap();
-    rules.push_str("\noperator concurrent edit: preserve\n");
-    fs::write(&config_path, rules).unwrap();
-    let active_receipt = latest_receipt(&cli, case.host);
-    let artifact_snapshot = owned_bytes(&cli, &active_receipt, &originals);
-    let receipt_snapshot = serde_json::to_vec(&active_receipt).unwrap();
-    let config_snapshot = fs::read(&config_path).unwrap();
-    let state_snapshot = fs::read(&state).unwrap();
-
-    let refused = cli.run(&[
-        "feedback-rollback",
-        "restore",
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    assert!(
-        !refused.status.success(),
-        "stale restore unexpectedly succeeded"
-    );
-    assert_eq!(
-        owned_bytes(&cli, &active_receipt, &originals),
-        artifact_snapshot,
-        "stale registration changed managed artifacts"
-    );
-    assert_eq!(
-        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
-        receipt_snapshot,
-        "stale registration changed the durable receipt"
-    );
-    assert_eq!(
-        fs::read(&config_path).unwrap(),
-        config_snapshot,
-        "stale registration was overwritten"
-    );
-    assert_eq!(
-        fs::read(&state).unwrap(),
-        state_snapshot,
-        "stale restore mutated its recovery state"
-    );
-}
-
-#[test]
-fn killed_feedback_switch_recovers_from_durable_effect_identity() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let before_receipt = latest_receipt(&cli, case.host);
-    #[cfg(unix)]
-    let permission_path = cli.home.path().join(
-        &before_receipt
-            .component_receipts
-            .iter()
-            .find(|receipt| receipt.component == HostComponentV1::Core)
-            .unwrap()
-            .artifacts[0]
-            .relative_path,
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&permission_path, fs::Permissions::from_mode(0o640)).unwrap();
-    }
-    let before = owned_bytes(&cli, &before_receipt, &originals);
-    let before_core =
-        latest_host_component_receipt_at(&cli.lifecycle_root(), case.host, HostComponentV1::Core)
-            .unwrap()
-            .unwrap();
-    let state = cli.home.path().join("killed-feedback-rollback.json");
-    let mut command = cli.command(&[
-        "feedback-rollback",
-        "apply",
-        "--agent",
-        case.id,
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    let killed = command
-        .env("TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION", "killed")
-        .env("TRACEDECAY_TEST_ABORT_AFTER_FEEDBACK_SWITCH", "1")
-        .output()
-        .unwrap();
-    assert!(
-        !killed.status.success(),
-        "feedback fault subprocess did not abort"
-    );
-    assert_ne!(
-        owned_bytes(&cli, &before_receipt, &originals),
-        before,
-        "feedback fault boundary did not cross an artifact mutation"
-    );
-    assert_ne!(
-        latest_host_component_receipt_at(&cli.lifecycle_root(), case.host, HostComponentV1::Core)
-            .unwrap()
-            .unwrap(),
-        before_core,
-        "feedback fault boundary did not publish its component receipt"
-    );
-
-    assert_success(
-        case.id,
-        "feedback restart recovery",
-        cli.run(&[
-            "feedback-rollback",
-            "restore",
-            "--state",
-            state.to_str().unwrap(),
-            "--yes",
-        ]),
-    );
-    assert_eq!(owned_bytes(&cli, &before_receipt, &originals), before);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        assert_eq!(
-            fs::metadata(permission_path).unwrap().permissions().mode() & 0o777,
-            0o640
-        );
-    }
-}
-
-#[test]
-fn newer_feedback_receipt_refuses_before_restore_effects() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let state = cli.home.path().join("receipt-cas-feedback-rollback.json");
-    assert_success(
-        case.id,
-        "feedback apply",
-        cli.run_with_env(
-            &[
-                "feedback-rollback",
-                "apply",
-                "--agent",
-                case.id,
-                "--state",
-                state.to_str().unwrap(),
-                "--yes",
-            ],
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "receipt-cas",
-        ),
-    );
-    let receipt = latest_receipt(&cli, case.host);
-    let receipt_path = cli
-        .lifecycle_root()
-        .join(".tracedecay-host-bundle-v1")
-        .join(format!(
-            "component-set-receipt.{}.v1.json",
-            hex::encode(receipt.operation_id)
-        ));
-    let mut receipt_json: serde_json::Value =
-        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
-    receipt_json["operation_id"] = serde_json::to_value([91_u8; 16]).unwrap();
-    fs::write(&receipt_path, serde_json::to_vec(&receipt_json).unwrap()).unwrap();
-    let before = owned_bytes(&cli, &receipt, &originals);
-    let receipt_before = fs::read(&receipt_path).unwrap();
-    let state_before = fs::read(&state).unwrap();
-
-    let refused = cli.run(&[
-        "feedback-rollback",
-        "restore",
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    assert!(!refused.status.success(), "newer receipt was overwritten");
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), before);
-    assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
-    assert_eq!(fs::read(&state).unwrap(), state_before);
-}
-
-/// Ages the installed OpenCode Core registration (the marker-delimited prompt
-/// rules in `AGENTS.md`), so the next registration activation has a real
-/// rewrite to publish.
-fn stale_opencode_core_registration(cli: &IsolatedCli) {
-    let path = cli.home.path().join(".config/opencode/AGENTS.md");
-    let rules = fs::read_to_string(&path).unwrap();
-    assert!(rules.contains("`tracedecay_context`"), "{rules}");
-    fs::write(
-        &path,
-        rules.replacen("`tracedecay_context`", "`stale_tracedecay_context`", 1),
-    )
-    .unwrap();
-}
-
-#[test]
-fn killed_feedback_registration_recovers_without_applied_marker() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    stale_opencode_core_registration(&cli);
-    let receipt = latest_receipt(&cli, case.host);
-    let before = owned_bytes(&cli, &receipt, &originals);
-    let state = cli.home.path().join("killed-registration-feedback.json");
-    let mut command = cli.command(&[
-        "feedback-rollback",
-        "apply",
-        "--agent",
-        case.id,
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "registration-kill",
-        )
-        .env("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE", "1")
-        .output()
-        .unwrap();
-    assert!(
-        !killed.status.success(),
-        "registration fault subprocess did not abort"
-    );
-    assert_ne!(owned_bytes(&cli, &receipt, &originals), before);
-
-    assert_success(
-        case.id,
-        "registration restart recovery",
-        cli.run(&[
-            "feedback-rollback",
-            "restore",
-            "--state",
-            state.to_str().unwrap(),
-            "--yes",
-        ]),
-    );
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), before);
-}
-
-#[test]
-fn killed_feedback_registration_rejects_later_operator_edit() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    stale_opencode_core_registration(&cli);
-    let state = cli.home.path().join("killed-registration-stale.json");
-    let mut command = cli.command(&[
-        "feedback-rollback",
-        "apply",
-        "--agent",
-        case.id,
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "registration-stale",
-        )
-        .env("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE", "1")
-        .output()
-        .unwrap();
-    assert!(!killed.status.success());
-
-    // The Core registration for OpenCode is the prompt-rules file.
-    let rules_path = cli.home.path().join(".config/opencode/AGENTS.md");
-    let mut rules = fs::read_to_string(&rules_path).unwrap();
-    rules.push_str("\noperator edit after kill\n");
-    fs::write(&rules_path, rules).unwrap();
-    let receipt = latest_receipt(&cli, case.host);
-    let before = owned_bytes(&cli, &receipt, &originals);
-    let state_before = fs::read(&state).unwrap();
-
-    let refused = cli.run(&[
-        "feedback-rollback",
-        "restore",
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    assert!(!refused.status.success());
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), before);
-    assert_eq!(fs::read(&state).unwrap(), state_before);
-}
-
-#[cfg(unix)]
-#[test]
-fn killed_feedback_registration_rejects_metadata_only_drift() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    stale_opencode_core_registration(&cli);
-    let state = cli.home.path().join("killed-registration-metadata.json");
-    let mut command = cli.command(&[
-        "feedback-rollback",
-        "apply",
-        "--agent",
-        case.id,
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "registration-metadata",
-        )
-        .env("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE", "1")
-        .output()
-        .unwrap();
-    assert!(!killed.status.success());
-
-    // The Core registration for OpenCode is the prompt-rules file.
-    let config_path = cli.home.path().join(".config/opencode/AGENTS.md");
-    let current_mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
-    let drifted_mode = if current_mode == 0o600 { 0o640 } else { 0o600 };
-    fs::set_permissions(&config_path, fs::Permissions::from_mode(drifted_mode)).unwrap();
-    let bytes_after_kill = fs::read(&config_path).unwrap();
-    let refused = cli.run(&[
-        "feedback-rollback",
-        "restore",
-        "--state",
-        state.to_str().unwrap(),
-        "--yes",
-    ]);
-    assert!(!refused.status.success());
-    assert_eq!(fs::read(&config_path).unwrap(), bytes_after_kill);
-    assert_eq!(
-        fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-        drifted_mode
-    );
-}
-
-#[test]
-fn killed_feedback_restore_converges_on_restart() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let receipt = latest_receipt(&cli, case.host);
-    let before = owned_bytes(&cli, &receipt, &originals);
-    let state = cli.home.path().join("killed-restore-feedback.json");
-    assert_success(
-        case.id,
-        "feedback apply",
-        cli.run_with_env(
-            &[
-                "feedback-rollback",
-                "apply",
-                "--agent",
-                case.id,
-                "--state",
-                state.to_str().unwrap(),
-                "--yes",
-            ],
-            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
-            "restore-kill",
-        ),
-    );
-    let killed = cli.run_with_env(
-        &[
-            "feedback-rollback",
-            "restore",
-            "--state",
-            state.to_str().unwrap(),
-            "--yes",
-        ],
-        "TRACEDECAY_TEST_ABORT_AFTER_FEEDBACK_RESTORE",
-        "1",
-    );
-    assert!(
-        !killed.status.success(),
-        "restore fault subprocess did not abort"
-    );
-    assert_eq!(
-        owned_bytes(&cli, &receipt, &originals),
-        before,
-        "restore receipt boundary was not reached after artifact restoration"
-    );
-
-    assert_success(
-        case.id,
-        "restore restart recovery",
-        cli.run(&[
-            "feedback-rollback",
-            "restore",
-            "--state",
-            state.to_str().unwrap(),
-            "--yes",
-        ]),
-    );
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), before);
 }

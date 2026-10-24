@@ -212,7 +212,7 @@ fn refresh_replaces_an_existing_registration_and_preserves_an_operator_owned_pee
 
 #[cfg(unix)]
 #[test]
-fn failed_refresh_restores_the_exact_previous_registration() {
+fn failed_refresh_keeps_the_removal_and_reports_partial_change() {
     let home = tempfile::tempdir().unwrap();
     let bin_dir = tempfile::tempdir().unwrap();
     let log = bin_dir.path().join("invocations.log");
@@ -238,10 +238,20 @@ fn failed_refresh_restores_the_exact_previous_registration() {
             && error.to_string().contains("exit code 17"),
         "the replacement failure must retain Copilot's diagnosis: {error}"
     );
+    assert!(
+        error
+            .to_string()
+            .contains("previous TraceDecay MCP registration was removed")
+    );
+    let remaining: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+    assert_eq!(remaining["mcpServers"]["other"]["command"], "other");
+    assert!(remaining["mcpServers"].get("tracedecay").is_none());
     assert_eq!(
-        std::fs::read(&mcp_path).unwrap(),
-        original,
-        "a failed remove-then-add refresh must restore the exact prior registration"
+        std::fs::read_dir(mcp_path.parent().unwrap())
+            .unwrap()
+            .count(),
+        1
     );
     assert_eq!(
         recorded_invocations(&log),

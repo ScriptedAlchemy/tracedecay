@@ -2,7 +2,6 @@
 //! plus the Windows file-handle identity primitive that shares this crate's
 //! cold, dependency-light position.
 
-use std::fs::File;
 use std::io;
 
 pub mod capability_dir;
@@ -23,55 +22,14 @@ pub mod windows_file;
 #[cfg(windows)]
 mod windows_rewrite_witness;
 
-/// A private-file creation failure that distinguishes pre-creation errors from
-/// validation errors on an already-created exact file handle.
-#[derive(Debug)]
-pub struct PrivateFileCreationFailure {
-    error: io::Error,
-    file: Option<File>,
-}
-
-impl PrivateFileCreationFailure {
-    pub(crate) fn before_creation(error: io::Error) -> Self {
-        Self { error, file: None }
-    }
-
-    pub(crate) fn after_creation(error: io::Error, file: File) -> Self {
-        Self {
-            error,
-            file: Some(file),
-        }
-    }
-
-    /// Returns only the underlying error, releasing any retained file handle.
-    pub fn into_error(self) -> io::Error {
-        let Self { error, file } = self;
-        drop(file);
-        error
-    }
-}
-
-impl std::fmt::Display for PrivateFileCreationFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(formatter)
-    }
-}
-
-impl std::error::Error for PrivateFileCreationFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
-    }
-}
-
 #[cfg(windows)]
 pub mod windows;
 
 #[cfg(windows)]
 pub use windows::{
-    available_space, create_private_directory, create_private_file, create_private_file_retained,
-    make_private_directory, make_private_file, open_private_directory, open_private_file,
-    replace_file_atomically, validate_directory_path, validate_private_directory,
-    validate_private_file,
+    available_space, create_private_directory, create_private_file, make_private_directory,
+    make_private_file, open_private_directory, open_private_file, replace_file_atomically,
+    validate_directory_path, validate_private_directory, validate_private_file,
 };
 
 #[cfg(unix)]
@@ -111,16 +69,8 @@ mod unix {
         Ok(file)
     }
 
-    pub fn create_private_file(path: &Path) -> io::Result<fs::File> {
-        create_private_file_retained(path).map_err(crate::PrivateFileCreationFailure::into_error)
-    }
-
-    /// Creates a new private file and returns its exact handle with any
-    /// post-creation validation failure.
     #[tracing::instrument(name = "private_fs.create_file", level = "trace", skip_all)]
-    pub fn create_private_file_retained(
-        path: &Path,
-    ) -> Result<fs::File, crate::PrivateFileCreationFailure> {
+    pub fn create_private_file(path: &Path) -> io::Result<fs::File> {
         let mut options = fs::OpenOptions::new();
         options
             .read(true)
@@ -128,15 +78,8 @@ mod unix {
             .create_new(true)
             .mode(0o600)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-        let file = options
-            .open(path)
-            .map_err(normalize_no_follow_error)
-            .map_err(crate::PrivateFileCreationFailure::before_creation)?;
-        if let Err(error) = validate_handle(&file, false, 0o600) {
-            return Err(crate::PrivateFileCreationFailure::after_creation(
-                error, file,
-            ));
-        }
+        let file = options.open(path).map_err(normalize_no_follow_error)?;
+        validate_handle(&file, false, 0o600)?;
         Ok(file)
     }
 
@@ -272,9 +215,9 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::{
-    available_space, create_private_directory, create_private_file, create_private_file_retained,
-    make_private_directory, make_private_file, open_private_directory, open_private_file,
-    validate_directory_path, validate_private_directory, validate_private_file,
+    available_space, create_private_directory, create_private_file, make_private_directory,
+    make_private_file, open_private_directory, open_private_file, validate_directory_path,
+    validate_private_directory, validate_private_file,
 };
 
 #[cfg(not(any(unix, windows)))]

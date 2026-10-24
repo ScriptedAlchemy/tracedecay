@@ -144,26 +144,24 @@ fn interrupted_manifest_atomic_write_keeps_v1_authoritative_and_public_retry_com
     };
     write_pending_materialization(&host_io, &dir, &pending).unwrap();
 
-    let blocked_intent_root = temp.path().join("blocked-write-intent-root");
-    fs::write(&blocked_intent_root, b"not a directory").unwrap();
-    let error =
-        tracedecay_agent_hosts::agents::with_host_config_write_intents(blocked_intent_root, || {
-            apply_pending_materialization(&host_io, &dir, &pending)
-        })
-        .unwrap_err();
-    match error {
-        TraceDecayError::Config { message } => {
-            assert!(
-                message.contains("failed to atomically replace"),
-                "{message}"
-            );
-            assert!(
-                message.contains("could not create host config write intent directory"),
-                "{message}"
-            );
-        }
-        other => panic!("expected typed atomic-write error, got {other:?}"),
-    }
+    let interrupted_io = HostIo {
+        write_json: |path, value| {
+            if path
+                .file_name()
+                .is_some_and(|name| name == MATERIALIZATION_MANIFEST_FILE)
+            {
+                return Err(TraceDecayError::Config {
+                    message: "manifest publication interrupted".to_owned(),
+                });
+            }
+            tracedecay_agent_hosts::agents::safe_write_json_file(path, value)
+        },
+        ..production_host_io()
+    };
+    assert!(matches!(
+        apply_pending_materialization(&interrupted_io, &dir, &pending),
+        Err(TraceDecayError::Config { message }) if message == "manifest publication interrupted"
+    ));
 
     assert_eq!(fs::read(&manifest_path).unwrap(), v1_manifest_bytes);
     assert!(pending_path.is_file());

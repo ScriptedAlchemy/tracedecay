@@ -21,7 +21,7 @@ const PENDING_OPERATOR_ACTION_EXIT: i32 = 75;
 /// drives. Like the real hosts, a removal that leaves a file semantically as
 /// it was before the matching add restores that file's original bytes, and a
 /// file the add created is deleted again, so any residue is TraceDecay's.
-const FAKE_NATIVE_HOST: &str = r##"#!/usr/bin/env python3
+const FAKE_NATIVE_HOST: &str = r##"#!/usr/bin/env -S python3 -B
 import json
 import os
 import pathlib

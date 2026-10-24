@@ -145,39 +145,6 @@ impl Database {
         }
     }
 
-    pub async fn size(&self) -> Result<u64> {
-        let mut rows = self
-            .inner
-            .conn
-            .query(
-                "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
-                (),
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to get database size: {error}"),
-                operation: "size".to_owned(),
-            })?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to read database size row: {error}"),
-                operation: "size".to_owned(),
-            })?
-            .ok_or_else(|| TraceDecayError::Database {
-                message: "no result from page size query".to_owned(),
-                operation: "size".to_owned(),
-            })?;
-        let size = row
-            .get::<i64>(0)
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to read size value: {error}"),
-                operation: "size".to_owned(),
-            })?;
-        Ok(size as u64)
-    }
-
     pub async fn quick_check(&self) -> Result<bool> {
         Ok(self.quick_check_report().await?.is_none())
     }
