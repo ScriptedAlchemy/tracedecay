@@ -1025,6 +1025,8 @@ def main():
             'load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")\n'
             'load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")\n'
         )
+        if name == "tracedecay-sdk":
+            out.append('load("@aspect_rules_js//js:defs.bzl", "js_library")\n')
 
         if lib_t:
             for (vkind, closure), vfmap in sorted(
@@ -1385,6 +1387,12 @@ def main():
             # compares its output with the checked-in Rust descriptors.
             out += [
                 'exports_files(["src/bin/generate.rs", "src/codegen.rs", "src/operations.rs"],',
+                '    visibility = ["//visibility:public"],',
+                ')\n',
+                # rules_js copies shared test data in its owning package.
+                'js_library(',
+                '    name = "sse_framing_fixture",',
+                '    srcs = ["tests/fixtures/sse-framing.json"],',
                 '    visibility = ["//visibility:public"],',
                 ')\n',
             ]

@@ -90,3 +90,20 @@ installing code. Prerelease package versions publish under the `beta`
 dist-tag; stable versions take `latest`. Setting `TRACEDECAY_SDK_TARBALL` to
 a prebuilt tarball path makes `test:installed` exercise that tarball instead
 of packing its own.
+
+## Event-stream framing limits
+
+The TypeScript and Rust clients use the same 64 KiB allowance for each raw SSE
+line, including its CR/LF ending, and for the UTF-8 event, ID and data bytes
+retained for a frame. Data-line separators count toward the frame allowance;
+replacement fields use the Rust client's conservative one-byte allowance.
+An inherited last-event ID stays charged until replaced or cleared. Canonical
+accepted-operation metadata, test-result names (at most 1 KiB), progress,
+frontiers, gaps and terminal receipts fit within this policy.
+
+The TypeScript client scans transport bytes once into a bounded line buffer,
+including when a transport supplies one large chunk. One byte of lookahead
+detects a line overflow. Oversized comments and unknown fields are refused too.
+Overflow throws `TraceDecayMalformedResponseError` with `payload.limitBytes`,
+cancels the response body and never reconnects or delivers the oversized frame.
+Transport-owned chunks are outside the parser's retained-state allowance.
