@@ -3564,6 +3564,303 @@ fn parse_sse_frames(body: &str) -> Vec<(String, Option<u64>, Value)> {
         .collect()
 }
 
+struct SdkOperationServer {
+    endpoint: String,
+    requested_cursors: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+/// Exercise the real publication authority and SSE adapter over HTTP. Cutoffs
+/// close selected responses after complete adapter frames, including open-only
+/// disconnects, without inventing frontiers or event payloads in the fixture.
+async fn serve_operation_authority_for_sdk(
+    authority: OperationEventAuthority,
+    context: RequestContext,
+    cutoffs: Vec<usize>,
+) -> SdkOperationServer {
+    use axum::extract::Query;
+    use futures_util::StreamExt;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    let requested_cursors = Arc::new(Mutex::new(Vec::new()));
+    let recorded_cursors = requested_cursors.clone();
+    let route = format!(
+        "/projects/project.sdk/application/operations/{}/events",
+        context.request_id().as_str()
+    );
+    let router = axum::Router::new().route(
+        &route,
+        axum::routing::get(move |Query(query): Query<BTreeMap<String, String>>| {
+            let authority = authority.clone();
+            let context = context.clone();
+            let requested_cursors = recorded_cursors.clone();
+            let cutoffs = cutoffs.clone();
+            async move {
+                let next_sequence = query
+                    .get("next_sequence")
+                    .map_or(0, |value| value.parse().expect("numeric SDK cursor"));
+                let resume_token = query
+                    .get("resume_token")
+                    .map(tracedecay_contracts::ResumeToken::new)
+                    .transpose()
+                    .expect("canonical SDK resume token");
+                let cutoff = {
+                    let mut cursors = requested_cursors.lock().expect("record SDK cursors");
+                    let cutoff = cutoffs.get(cursors.len()).copied();
+                    cursors.push(next_sequence);
+                    cutoff
+                };
+                let subscription = authority
+                    .subscribe(
+                        &OperationId::from_request(context.request_id().clone()),
+                        &context,
+                        UtcMicros(106),
+                        next_sequence,
+                        resume_token.as_ref(),
+                    )
+                    .await
+                    .expect("authorize SDK resume against actual retained history");
+                let (correlation_id, frontier, stream) = subscription.into_sse_parts();
+                let response = sse_response(correlation_id, frontier, stream).into_response();
+                match cutoff {
+                    Some(frames) => {
+                        let (parts, body) = response.into_parts();
+                        axum::response::Response::from_parts(
+                            parts,
+                            Body::from_stream(body.into_data_stream().take(frames)),
+                        )
+                    }
+                    None => response,
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind SDK conformance server");
+    let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    SdkOperationServer {
+        endpoint,
+        requested_cursors,
+        shutdown,
+        task,
+    }
+}
+
+fn completed_operation_receipt(context: &RequestContext) -> OperationReceipt {
+    OperationReceipt {
+        started_at: UtcMicros(100),
+        ended_at: UtcMicros(105),
+        effective_deadline: context.deadline().clone(),
+        cancellation: None,
+        budget: OperationBudgetUsage::default(),
+        termination: OperationTermination::Completed,
+    }
+}
+
+#[tokio::test]
+async fn sdk_reconnects_use_delivered_cursors_with_real_operation_authority() {
+    use tracedecay_sdk::client::{Client, ConnectionMode, StreamOptions, StreamResume};
+
+    for (suffix, retained, progress_count, cutoffs, cursors, sequences) in [
+        (
+            "sdk-open",
+            8,
+            1,
+            vec![1, 1],
+            vec![0, 0, 0],
+            vec!["0", "1", "2"],
+        ),
+        (
+            "sdk-delivered",
+            8,
+            1,
+            vec![2, 1],
+            vec![0, 1, 1],
+            vec!["0", "1", "2"],
+        ),
+        (
+            "sdk-gap",
+            2,
+            4,
+            vec![2, 1],
+            vec![0, 4, 4],
+            vec!["0", "4", "5"],
+        ),
+    ] {
+        let authority = OperationEventAuthority::new(OperationStreamConfig {
+            retained_event_capacity: retained,
+            max_operations: 1,
+            max_subscribers_per_operation: 1,
+        })
+        .expect("operation authority");
+        let context = operation_context(suffix);
+        let emitter = authority
+            .begin(&context, OperationKind::GitPreview, UtcMicros(100))
+            .await
+            .expect("begin actual retained operation");
+        for completed in 1..=progress_count {
+            emitter
+                .progress(completed, Some(progress_count))
+                .await
+                .expect("publish progress");
+        }
+        emitter
+            .terminal(completed_operation_receipt(&context))
+            .await
+            .expect("publish completion");
+        let server = serve_operation_authority_for_sdk(authority, context.clone(), cutoffs).await;
+        let endpoint = server.endpoint.clone();
+        let operation_id = context.request_id().as_str().to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let client =
+                Client::builder(ConnectionMode::local(&endpoint, "project.sdk", "sdk-token"))
+                    .build()
+                    .expect("SDK client");
+            let events = client
+                .stream_operation(
+                    &operation_id,
+                    StreamOptions {
+                        resume: None,
+                        max_reconnects: 2,
+                    },
+                )
+                .expect("open SDK stream")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("consume retained history");
+            let frontier = &events[0].data["data"]["frontier"];
+            assert_eq!(frontier["next_sequence"], progress_count + 2);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter_map(|event| event.id.as_deref())
+                    .collect::<Vec<_>>(),
+                sequences
+            );
+            assert_eq!(events.last().expect("terminal event").event, "completed");
+            let replay = client
+                .stream_operation(
+                    &operation_id,
+                    StreamOptions {
+                        resume: Some(StreamResume {
+                            token: frontier["resume_token"]
+                                .as_str()
+                                .expect("real authority token")
+                                .to_owned(),
+                            next_sequence: progress_count + 2,
+                        }),
+                        max_reconnects: 2,
+                    },
+                )
+                .expect("resume past terminal")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("consume canonical terminal replay");
+            assert_eq!(
+                replay
+                    .iter()
+                    .map(|event| event.event.as_str())
+                    .collect::<Vec<_>>(),
+                ["open", "completed"]
+            );
+            assert_eq!(
+                replay[1].id.as_deref(),
+                Some((progress_count + 1).to_string().as_str())
+            );
+        })
+        .await;
+        server.shutdown.send(()).expect("stop conformance server");
+        server
+            .task
+            .await
+            .expect("join conformance server")
+            .expect("serve conformance HTTP");
+        result.expect("SDK conformance client completed");
+        let mut expected_cursors = cursors;
+        expected_cursors.push(progress_count + 2);
+        assert_eq!(
+            *server.requested_cursors.lock().expect("recorded cursors"),
+            expected_cursors
+        );
+    }
+}
+
+#[tokio::test]
+async fn sdk_observes_live_accepted_zero_before_operation_completion() {
+    use tracedecay_sdk::client::{Client, ConnectionMode, StreamOptions};
+
+    let authority = OperationEventAuthority::new(OperationStreamConfig {
+        retained_event_capacity: 4,
+        max_operations: 1,
+        max_subscribers_per_operation: 1,
+    })
+    .expect("live operation authority");
+    let context = operation_context("sdk-live");
+    let emitter = authority
+        .begin(&context, OperationKind::GitPreview, UtcMicros(100))
+        .await
+        .expect("begin live operation");
+    let server = serve_operation_authority_for_sdk(authority, context.clone(), Vec::new()).await;
+    let endpoint = server.endpoint.clone();
+    let operation_id = context.request_id().as_str().to_owned();
+    let (accepted, observed_accepted) = tokio::sync::oneshot::channel();
+    let consumer = tokio::task::spawn_blocking(move || {
+        let client = Client::builder(ConnectionMode::local(&endpoint, "project.sdk", "sdk-token"))
+            .build()
+            .expect("SDK client");
+        let mut stream = client
+            .stream_operation(&operation_id, StreamOptions::default())
+            .expect("live SDK stream");
+        let open = stream
+            .next()
+            .expect("opening frame")
+            .expect("valid opening frame");
+        assert_eq!(open.data["data"]["frontier"]["next_sequence"], 1);
+        let event = stream
+            .next()
+            .expect("accepted frame")
+            .expect("valid accepted frame");
+        assert_eq!(event.id.as_deref(), Some("0"));
+        assert_eq!(event.data["data"]["item"]["kind"], "accepted");
+        accepted.send(()).expect("report accepted delivery");
+        let terminal = stream
+            .next()
+            .expect("terminal frame")
+            .expect("valid terminal frame");
+        assert_eq!(terminal.event, "completed");
+        assert_eq!(terminal.id.as_deref(), Some("1"));
+        assert!(stream.next().is_none());
+    });
+    observed_accepted
+        .await
+        .expect("SDK consumes accepted before producer completes");
+    emitter
+        .terminal(completed_operation_receipt(&context))
+        .await
+        .expect("publish live completion");
+    let result = consumer.await;
+    server.shutdown.send(()).expect("stop conformance server");
+    server
+        .task
+        .await
+        .expect("join conformance server")
+        .expect("serve conformance HTTP");
+    result.expect("live SDK consumer completed");
+    assert_eq!(
+        *server.requested_cursors.lock().expect("recorded cursors"),
+        [0]
+    );
+}
+
 #[tokio::test]
 async fn cancellation_capacity_resume() {
     let authority = OperationEventAuthority::new(OperationStreamConfig {
