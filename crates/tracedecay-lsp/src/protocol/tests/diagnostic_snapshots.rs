@@ -684,7 +684,7 @@ fn shutdown_releases_ready_snapshots_and_retires_late_completions() {
 
     harness.runtime.complete_next();
     harness.session.flush_due(harness.now_ms);
-    assert!(harness.messages().is_empty());
+    assert_eq!(harness.messages(), Vec::<Value>::new());
     assert!(matches!(
         harness.session.diagnostics.provider.adapter.document_diagnostics(&root, pending_uri, None),
         DiagnosticSnapshotOutcome::Partial { coverage, .. } if coverage == "refresh-required"
@@ -743,7 +743,7 @@ fn assert_completed_refresh_is_not_polled_again(harness: &mut Harness) {
             .load(Ordering::SeqCst),
         reads
     );
-    assert!(harness.messages().is_empty());
+    assert_eq!(harness.messages(), Vec::<Value>::new());
 }
 
 #[test]
