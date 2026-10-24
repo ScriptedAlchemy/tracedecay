@@ -556,12 +556,6 @@ impl TraceDecay {
                 ),
             ));
         }
-        // A store enrolled at a detached HEAD before init bootstrapped its
-        // metadata there converges on its next writable open.
-        branch::bootstrap_default_branch_meta(project_root, &store_layout.data_root)?;
-        let (serving_branch, fallback_warning) =
-            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
-
         // Registered mounts perform the exact final-schema admission. Project
         // open never repairs, rebuilds, or indexes the graph inline; retained
         // code-index activation is owned by the daemon after publication.
@@ -573,6 +567,13 @@ impl TraceDecay {
             DatabaseAccessMode::ReadWrite,
         )
         .await?;
+
+        // Bootstrap only after graph admission so rejected stores retain their
+        // metadata. A store enrolled at a detached HEAD before init bootstrapped
+        // its metadata there converges on its next writable open.
+        branch::bootstrap_default_branch_meta(project_root, &store_layout.data_root)?;
+        let (serving_branch, fallback_warning) =
+            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
 
         install_usecase_runtime_configuration_authority()?;
         let (config, opened) = open_runtime_configuration_for_registered_database(
