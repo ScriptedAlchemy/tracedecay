@@ -7,13 +7,194 @@
 //! publication failure leaves every file byte-identical to its preimage.
 
 use crate::support::{
-    ProductionSourceEditFixture, extract_first_json_content,
+    ProductionSourceEditFixture, close_production_source_edit_fixture, extract_first_json_content,
     init_production_source_edit_project as init_test_project, test_temp_dir,
 };
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
+use tracedecay_contracts::retrieval::SymbolGraphScope;
+use tracedecay_contracts::{
+    CallableCodeSurfaceMeta, CodeCallersSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodeQueryScope, ResultProjection, RetrievalOrder, UNPINNED_LATEST_GENERATION_SENTINEL,
+};
+use tracedecay_domain::CodeGenerationId;
+
+const REEXPORT_LIB: &str = "mod schema;\n\npub use schema::{install_schema};\n";
+const REEXPORT_SCHEMA: &str = "pub fn install_schema() {}\n";
+
+fn rust_reexport_project(project: &Path) {
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"reexport_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/lib.rs"), REEXPORT_LIB).unwrap();
+    fs::write(project.join("src/schema.rs"), REEXPORT_SCHEMA).unwrap();
+}
+
+#[tokio::test]
+async fn rust_reexport_dependency_without_calls_retains_the_importing_file() {
+    let dir = test_temp_dir();
+    let project = dir.path().join("project");
+    rust_reexport_project(&project);
+    let fixture = init_test_project(&project).await;
+    let _node = preview_node(&fixture, "install_schema").await;
+
+    let answer = call_json(
+        &fixture,
+        "tracedecay_file_dependents",
+        json!({"file": "src/schema.rs"}),
+    )
+    .await;
+    let evidence = &answer["outcome"]["value"];
+    assert_eq!(
+        evidence["payload"]["dependent_files"],
+        json!(["src/lib.rs"]),
+        "the re-export alone is a dependency: {answer}"
+    );
+    assert_eq!(evidence["coverage"]["completeness"], "complete", "{answer}");
+    close_production_source_edit_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn rust_reexport_rename_preserves_the_bound_site_through_guarded_apply() {
+    let dir = test_temp_dir();
+    let project = dir.path().join("project");
+    rust_reexport_project(&project);
+    let fixture = init_test_project(&project).await;
+    let node = preview_node(&fixture, "install_schema").await;
+    let preview = preview_rename(&fixture, &node, "create_schema").await;
+    assert_eq!(visible_hazards(&preview), json!([]), "{preview}");
+    assert!(
+        preview["sites"].as_array().unwrap().iter().any(|site| {
+            site["kind"] == "reexport"
+                && site["file"] == "src/lib.rs"
+                && site["expected_bytes"] == "install_schema"
+                && site["replacement_bytes"] == "create_schema"
+                && site["disposition"] == "changed"
+        }),
+        "the re-export must be an exact rename site: {preview}"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/lib.rs")).unwrap(),
+        REEXPORT_LIB
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/schema.rs")).unwrap(),
+        REEXPORT_SCHEMA
+    );
+
+    let applied = call_json(
+        &fixture,
+        "tracedecay_rename_symbol",
+        accepted_apply_args(&node, "create_schema", &preview, "rename.rust-reexport"),
+    )
+    .await;
+    assert_eq!(applied["success"], true, "{applied}");
+    assert_eq!(
+        fs::read_to_string(project.join("src/lib.rs")).unwrap(),
+        "mod schema;\n\npub use schema::{create_schema};\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/schema.rs")).unwrap(),
+        "pub fn create_schema() {}\n"
+    );
+    close_production_source_edit_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn rust_reexport_callers_keep_functions_without_module_declarations() {
+    let dir = test_temp_dir();
+    let project = dir.path().join("project");
+    rust_reexport_project(&project);
+    fs::write(
+        project.join("src/lib.rs"),
+        format!("{REEXPORT_LIB}\npub fn open() {{ install_schema(); }}\npub fn callback() -> impl Fn() {{ || install_schema() }}\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(project.join("consumer/src")).unwrap();
+    fs::write(
+        project.join("consumer/Cargo.toml"),
+        "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nreexport_fixture = { path = \"..\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("consumer/src/lib.rs"),
+        "use reexport_fixture::install_schema;\npub fn start() { install_schema(); }\n",
+    )
+    .unwrap();
+    let fixture = init_test_project(&project).await;
+    let node = preview_node(&fixture, "install_schema").await;
+    let arguments = serde_json::to_value(CodeCallersSurfaceRequest {
+        node_id: node["id"].as_str().unwrap().to_owned(),
+        maximum_depth: 3,
+        scope: SymbolGraphScope::default(),
+        meta: CallableCodeSurfaceMeta {
+            projection: ResultProjection::Evidence,
+            order: RetrievalOrder::SourcePosition,
+            cursor: None,
+        },
+    })
+    .unwrap();
+    let answer = call_json(&fixture, "tracedecay_callers", arguments).await;
+    let evidence = &answer["outcome"]["value"];
+    let mut callers = evidence["payload"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("caller items missing: {answer}"))
+        .iter()
+        .map(|item| {
+            item["symbol"]["qualified_name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    callers.sort();
+    assert_eq!(
+        callers,
+        [
+            "consumer/src/lib.rs::start",
+            "src/lib.rs::callback",
+            "src/lib.rs::open"
+        ],
+        "{answer}"
+    );
+    assert_eq!(evidence["coverage"]["completeness"], "complete", "{answer}");
+    let references = call_json(
+        &fixture,
+        "tracedecay_code_references",
+        serde_json::to_value(CodeNavigationSurfaceRequest {
+            node_id: node["id"].as_str().unwrap().to_owned(),
+            scope: CodeQueryScope::new(
+                CodeGenerationId::new(UNPINNED_LATEST_GENERATION_SENTINEL).unwrap(),
+                None,
+            )
+            .unwrap(),
+            meta: CallableCodeSurfaceMeta {
+                projection: ResultProjection::Evidence,
+                order: RetrievalOrder::SourcePosition,
+                cursor: None,
+            },
+        })
+        .unwrap(),
+    )
+    .await;
+    assert!(
+        references["outcome"]["value"]["payload"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["symbol"]["qualified_name"] == "src/lib.rs::schema"
+                    && item["edge_kind"] == "uses"
+            }),
+        "public references retain the re-export owner that callers exclude: {references}"
+    );
+    close_production_source_edit_fixture(fixture).await;
+}
 
 const PRICING_BEFORE: &str = r#"//! pricing
 pub struct LineItem {
