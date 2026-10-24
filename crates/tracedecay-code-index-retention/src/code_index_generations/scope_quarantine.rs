@@ -325,7 +325,7 @@ impl ScopeQuarantineAuthority {
                 if actual != expected || directory_identity(&staged).map_err(storage)? != expected {
                     return Err(identity_changed(&scope.scope_hash, "before unlink"));
                 }
-                remove_open_dir_all_nofollow(staged, &mut || Ok(())).map_err(|error| {
+                remove_open_dir_all_nofollow(staged).map_err(|error| {
                     mutation_failed(
                         "scope quarantine unlink",
                         &scope_target(&scope.scope_hash),

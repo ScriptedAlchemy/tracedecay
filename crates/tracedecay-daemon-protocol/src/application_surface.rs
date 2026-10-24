@@ -46,8 +46,8 @@ use tracedecay_contracts::{
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
     ConfigurationWireRequestV1, HealthReadRequest, NativeIntegrationSurfaceRequest,
     ObservatoryReadRequestV1, PrimitiveCodeSurfaceRequest, SessionLookupRequest,
-    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
-    SourceLinesRequest, configuration_wire_request_from_invocation_payload,
+    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceLinesRequest,
+    configuration_wire_request_from_invocation_payload,
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, CatalogValidationError, IdentifierError,
@@ -245,7 +245,6 @@ pub enum ApplicationSurfaceRequest {
     ContextScout(ContextScoutSurfaceRequestV1),
     SourceEdit(SourceEditInvocationV1),
     SourceEditReconcile(SourceEditReconciliationInvocationV1),
-    SourceEditRollback(SourceEditRollbackInvocationV1),
     Retained(RetainedSurfaceRequestV1),
     /// A graph or port read's argument object. Its owning handler decodes the
     /// typed request so argument diagnostics stay the handler's own.
@@ -469,10 +468,6 @@ impl ApplicationSurfaceRequest {
                 | (
                     Self::SourceEditReconcile(_),
                     ApplicationSurfaceOperation::SourceEditReconcile
-                )
-                | (
-                    Self::SourceEditRollback(_),
-                    ApplicationSurfaceOperation::SourceEditRollback
                 )
         )
     }
@@ -828,8 +823,7 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::InsertAtSymbol
         | ApplicationSurfaceOperation::MoveSymbol
         | ApplicationSurfaceOperation::RenameSymbol
-        | ApplicationSurfaceOperation::SourceEditReconcile
-        | ApplicationSurfaceOperation::SourceEditRollback => {
+        | ApplicationSurfaceOperation::SourceEditReconcile => {
             parse_source_edit_arguments(operation, &value)
                 .map_err(ApplicationSurfaceAdapterError::invalid_request)
         }

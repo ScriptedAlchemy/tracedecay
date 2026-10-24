@@ -28,9 +28,7 @@ pub(super) const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
 pub(super) const HOST_BUNDLE_LOCK_FILE: &str = "writer.v1.lock";
 pub(super) const MAX_CONTROL_FILE_BYTES: usize = 256 * 1024;
 
-/// Load the newest durable aggregate receipt for one host. This is used by
-/// the official feedback rollback CLI to bind the currently installed route
-/// to a compiled target without accepting an external bundle.
+/// Load the newest durable aggregate receipt for one host.
 pub fn latest_host_component_set_receipt_at(
     lifecycle_root: &Path,
     host: HostKindV1,
@@ -458,11 +456,10 @@ pub(super) fn superseded_identities(component: HostComponentV1) -> Vec<HostCompo
 
 /// Every receipt one component's lifecycle must account for on one host.
 pub(super) struct ComponentReceiptsV1 {
-    /// The component's own receipt as read. Restored verbatim on rollback.
+    /// The component's own receipt as read.
     pub(super) own: Option<HostBundleInstallReceiptV1>,
     /// Receipts of the other identities sharing the route, as read (live or
-    /// uninstall). Retired after the own receipt is written; restored verbatim
-    /// on rollback.
+    /// uninstall). Retired after the own receipt is written.
     pub(super) superseded: Vec<HostBundleInstallReceiptV1>,
     /// Ownership evidence for planning, always in the planned identity: the
     /// live receipt whose artifacts all match disk (own first), else the live

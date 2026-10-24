@@ -1101,6 +1101,7 @@ mod tests {
                 .context_scout_owner()
                 .expect("Context Scout owner starts with the project"),
         );
+        #[cfg(target_os = "linux")]
         let graph_db = opened.db_path().to_string_lossy().into_owned();
 
         drop(opened);

@@ -56,19 +56,11 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "kind": {
+            "original_operation": {
                 "type": "string",
-                "enum": [
-                    "str_replace",
-                    "multi_str_replace",
-                    "insert_at",
-                    "ast_grep_rewrite",
-                    "replace_symbol",
-                    "insert_at_symbol",
-                    "move_symbol",
-                    "rename_symbol"
-                ],
-                "description": "Original source-edit operation kind retained in the uncertain journal."
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "Canonical UseCaseId from the original effect receipt's operation field. It identifies the retained effect without invoking the original operation."
             },
             "effect_id": {
                 "type": "string",
@@ -86,7 +78,7 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512,
-                "description": "A new idempotency key for this reconciliation attempt. It must differ from the original edit key; exact retries replay this attempt's receipt."
+                "description": "A new idempotency key for this reconciliation attempt. It must differ from the original edit key; exact retries replay this attempt's receipt. Use a fresh attempt key to refresh an inspection."
             },
             "input_digest": {
                 "type": "string",
@@ -95,88 +87,49 @@ pub(super) fn source_edit_reconcile_schema() -> Value {
             },
             "disposition": {
                 "type": "string",
-                "enum": ["confirm_committed", "confirm_rolled_back"],
-                "description": "Independent inspection conclusion. Reconciliation verifies the live candidate-file digest."
+                "enum": ["inspect", "confirm_committed", "confirm_unchanged", "acknowledge_partial"],
+                "description": "Inspect returns files and observed_state without concluding the original effect. Conclusions verify the live candidate-file digest."
             },
             "committed_state": {
                 "type": "string",
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "description": "Exact independently observed committed-state digest; required only for confirm_committed."
             },
+            "observed_state": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Exact observed_state returned by inspect; required only for acknowledge_partial."
+            },
             "confirm": {
                 "type": "boolean",
-                "const": true,
-                "description": "Caller attestation that this concludes a retained uncertain effect without retrying it. Set true after your own inspection; do not ask a human to confirm a reversible file-state conclusion."
+                "description": "Caller attestation that this concludes a retained uncertain effect without retrying it. Set true after your own inspection; do not ask a human to confirm the observed file state."
             }
         },
         "required": [
-            "kind",
+            "original_operation",
             "effect_id",
             "idempotency_key",
             "attempt_idempotency_key",
             "input_digest",
-            "disposition",
-            "confirm"
+            "disposition"
         ],
-        "allOf": [{
-            "if": {
-                "properties": {
-                    "disposition": {"const": "confirm_committed"}
-                },
-                "required": ["disposition"]
+        "allOf": [
+            {
+                "if": {"properties": {"disposition": {"const": "inspect"}}, "required": ["disposition"]},
+                "then": {"not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
             },
-            "then": {"required": ["committed_state"]},
-            "else": {"not": {"required": ["committed_state"]}}
-        }]
-    })
-}
-
-pub(super) fn source_edit_rollback_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "effect_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512,
-                "description": "Exact effect ID from the completed move_symbol receipt."
+            {
+                "if": {"properties": {"disposition": {"const": "confirm_committed"}}, "required": ["disposition"]},
+                "then": {"properties": {"confirm": {"const": true}}, "required": ["committed_state", "confirm"], "not": {"required": ["observed_state"]}}
             },
-            "original_idempotency_key": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512,
-                "description": "Original caller-provided move_symbol idempotency key."
+            {
+                "if": {"properties": {"disposition": {"const": "acknowledge_partial"}}, "required": ["disposition"]},
+                "then": {"properties": {"confirm": {"const": true}}, "required": ["observed_state", "confirm"], "not": {"required": ["committed_state"]}}
             },
-            "idempotency_key": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 512,
-                "description": "A fresh key for this rollback effect. Exact retries replay its durable receipt."
-            },
-            "original_input_digest": {
-                "type": "string",
-                "pattern": "^sha256:[0-9a-f]{64}$",
-                "description": "Exact input digest from the completed move_symbol receipt."
-            },
-            "expected_state": {
-                "type": "string",
-                "pattern": "^sha256:[0-9a-f]{64}$",
-                "description": "Exact committed-state digest from the completed move_symbol receipt. Rollback is refused unless the workspace still matches it."
-            },
-            "confirm": {
-                "type": "boolean",
-                "const": true,
-                "description": "Caller attestation that this restores the retained preimages. Set true yourself; do not pause for a human when the receipt already authorizes the rollback."
+            {
+                "if": {"properties": {"disposition": {"const": "confirm_unchanged"}}, "required": ["disposition"]},
+                "then": {"properties": {"confirm": {"const": true}}, "required": ["confirm"], "not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
             }
-        },
-        "required": [
-            "effect_id",
-            "original_idempotency_key",
-            "idempotency_key",
-            "original_input_digest",
-            "expected_state",
-            "confirm"
         ]
     })
 }
@@ -611,52 +564,44 @@ mod tests {
         assert_eq!(
             schema["required"],
             json!([
-                "kind",
+                "original_operation",
                 "effect_id",
                 "idempotency_key",
                 "attempt_idempotency_key",
                 "input_digest",
-                "disposition",
-                "confirm"
+                "disposition"
             ])
         );
-        assert_eq!(schema["properties"]["confirm"]["const"], json!(true));
+        assert!(schema["properties"]["confirm"].get("const").is_none());
+        for conclusion in &schema["allOf"].as_array().unwrap()[1..] {
+            assert_eq!(
+                conclusion["then"]["properties"]["confirm"]["const"],
+                json!(true)
+            );
+        }
         assert_eq!(
-            schema["allOf"][0]["then"]["required"],
-            json!(["committed_state"])
+            schema["allOf"][1]["then"]["required"],
+            json!(["committed_state", "confirm"])
         );
         assert_eq!(
-            schema["allOf"][0]["if"]["properties"]["disposition"]["const"],
+            schema["allOf"][1]["if"]["properties"]["disposition"]["const"],
             json!("confirm_committed")
         );
         assert_eq!(
-            schema["allOf"][0]["else"]["not"]["required"],
-            json!(["committed_state"])
-        );
-    }
-
-    #[test]
-    fn source_edit_rollback_requires_original_and_fresh_effect_identity() {
-        let schema = handwritten("tracedecay_source_edit_rollback").input_schema;
-        assert_eq!(schema["additionalProperties"], json!(false));
-        assert_eq!(
-            schema["required"],
+            schema["properties"]["disposition"]["enum"],
             json!([
-                "effect_id",
-                "original_idempotency_key",
-                "idempotency_key",
-                "original_input_digest",
-                "expected_state",
-                "confirm"
+                "inspect",
+                "confirm_committed",
+                "confirm_unchanged",
+                "acknowledge_partial"
             ])
         );
-        assert_eq!(schema["properties"]["confirm"]["const"], json!(true));
         assert_eq!(
-            schema["properties"]["original_input_digest"]["pattern"],
-            "^sha256:[0-9a-f]{64}$"
+            schema["allOf"][2]["then"]["required"],
+            json!(["observed_state", "confirm"])
         );
         assert_eq!(
-            schema["properties"]["expected_state"]["pattern"],
+            schema["properties"]["observed_state"]["pattern"],
             "^sha256:[0-9a-f]{64}$"
         );
     }

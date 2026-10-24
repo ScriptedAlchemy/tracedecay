@@ -733,21 +733,15 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
          opt-in via `dry_run: false` with a fresh `idempotency_key`, the \
          preview's exact `accepted_preview` manifest, and that `expected_state`. \
          The apply refuses stale identity, manifest, or drifted files before any \
-         write, and a partial failure restores every preimage.",
+         write. A multi-file partial failure leaves already-published files in place and reports the partial effect.",
     )
     .schema(edit::rename_symbol_schema),
     write(
         "tracedecay_source_edit_reconcile",
         "Reconcile Source Edit",
-        "ADMIN: conclude one retained source-edit EffectUnknown after you inspect the exact current candidate-file state yourself. This never retries the edit. Pass confirm=true as your own attestation of that inspection. Do not pause for a human to confirm a file-state conclusion you can verify.",
+        "ADMIN: inspect or conclude one retained source-edit EffectUnknown without changing source files. Use disposition=inspect to obtain candidate paths and observed_state. Use a fresh attempt_idempotency_key for a fresh inspection; exact retries replay the prior observation. After inspecting the files, pass confirm=true with confirm_committed, confirm_unchanged, or acknowledge_partial and its observed_state. This never retries the edit.",
     )
     .schema(edit::source_edit_reconcile_schema),
-    write(
-        "tracedecay_source_edit_rollback",
-        "Roll Back Source Edit",
-        "Restore the exact private preimages retained for one completed move_symbol effect. This is a journaled inverse effect, not a second semantic move. It refuses stale or foreign workspace bytes and requires the original effect receipt identity.",
-    )
-    .schema(edit::source_edit_rollback_schema),
     read(
         "tracedecay_find_exact_symbol",
         "Exact Symbol Lookup",

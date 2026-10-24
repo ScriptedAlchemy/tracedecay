@@ -21,8 +21,7 @@
 //!
 //! That is the same host-capability shape already adopted for `codex mcp add`
 //! in [`super::mcp_registry`]: this module never authors `config.toml`; it
-//! drives Codex's own command and records the exact post-command bytes for
-//! rollback. The MCP-only / Core split is unchanged: a `Core`-bearing set
+//! drives Codex's own command. A `Core`-bearing set
 //! takes this plugin path, and an MCP-only set still uses the MCP registry
 //! so a plugin user does not also get a standalone `tracedecay` server.
 //!
@@ -95,10 +94,7 @@ fn plugin_selector(marketplace_name: &str) -> String {
 ///
 /// The region snapshot is a preservation guard: Codex owns the merge, but a
 /// buggy or changed host command must not discard an operator's other plugins,
-/// MCP servers, or hook-trust records. The exact post-command bytes of
-/// `config.toml` and of every managed versioned-cache registration path are
-/// recorded through the active host transaction so rollback can restore the
-/// pre-command surface when the command fails or a later step rejects it.
+/// MCP servers, or hook-trust records.
 #[tracing::instrument(
     name = "hosts.agent.codex.plugin_registry_step",
     level = "trace",
@@ -112,9 +108,9 @@ fn run_codex_plugin_step(
 ) -> Result<()> {
     let config_path = codex_config_path(home);
     let owned_key = plugin_selector(marketplace_name);
-    let (_, regions_before) = read_config_observation(&config_path, &owned_key)?;
+    let regions_before = read_config_observation(&config_path, &owned_key)?;
     let outcome = crate::agents::host_cli::run_host_cli(codex_cli, args, home)?;
-    let (observed_bytes, regions_after) = read_config_observation(&config_path, &owned_key)?;
+    let regions_after = read_config_observation(&config_path, &owned_key)?;
     if regions_before != regions_after {
         let invocation = format!("{} {}", codex_cli.display(), args.join(" "));
         return Err(TraceDecayError::Config {
@@ -126,14 +122,6 @@ fn run_codex_plugin_step(
             ),
         });
     }
-    crate::agents::record_host_config_observation_bytes(&config_path, observed_bytes.as_deref())?;
-    // `codex plugin add`/`remove` also materialize or drop the versioned
-    // cache tree. Those paths are Core registration inventory, but the host
-    // CLI writes them outside TraceDecay's safe_write, so without an explicit
-    // observation rollback's intent check refuses with StalePreview and never
-    // restores sibling registration files (including the managed-agent
-    // ownership manifest) byte-for-byte.
-    super::record_codex_cached_plugin_registration_intents(home)?;
     if outcome.succeeded() {
         return Ok(());
     }
@@ -156,19 +144,13 @@ struct CodexPluginPreservedRegionsV1 {
     hooks: Option<toml::Value>,
 }
 
-fn read_config_observation(
-    path: &Path,
-    owned_key: &str,
-) -> Result<(Option<Vec<u8>>, CodexPluginPreservedRegionsV1)> {
-    let (bytes, config) = read_config_table(path)?;
-    Ok((
-        bytes,
-        CodexPluginPreservedRegionsV1 {
-            plugin_peers: table_peers(&config, CODEX_PLUGINS_KEY, owned_key, path)?,
-            mcp_servers: config.get(CODEX_MCP_SERVERS_KEY).cloned(),
-            hooks: config.get(CODEX_HOOKS_KEY).cloned(),
-        },
-    ))
+fn read_config_observation(path: &Path, owned_key: &str) -> Result<CodexPluginPreservedRegionsV1> {
+    let config = read_config_table(path)?;
+    Ok(CodexPluginPreservedRegionsV1 {
+        plugin_peers: table_peers(&config, CODEX_PLUGINS_KEY, owned_key, path)?,
+        mcp_servers: config.get(CODEX_MCP_SERVERS_KEY).cloned(),
+        hooks: config.get(CODEX_HOOKS_KEY).cloned(),
+    })
 }
 
 #[cfg(test)]

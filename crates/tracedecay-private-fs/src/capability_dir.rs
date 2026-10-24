@@ -8,6 +8,7 @@
 use std::ffi::OsStr;
 use std::io;
 
+#[cfg(windows)]
 use cap_fs_ext::DirExt;
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
@@ -182,29 +183,27 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
     }
 }
 
-/// Recursively removes an already-open directory without following symlinks,
-/// so an entry swapped for a symlink cannot redirect cleanup outside the
-/// tree. `interrupt` runs before every child operation; returning an error
-/// stops the descent and leaves the remaining entries in place for a later
-/// reconciliation.
-pub fn remove_open_dir_all_nofollow(
-    directory: Dir,
-    interrupt: &mut dyn FnMut() -> io::Result<()>,
-) -> io::Result<()> {
-    interrupt()?;
-    for entry in directory.read_dir(".")? {
-        interrupt()?;
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            let name = entry.file_name();
-            let child = directory.open_dir_nofollow(&name)?;
-            remove_open_dir_all_nofollow(child, interrupt)?;
-        } else {
-            entry.remove_file()?;
-        }
+/// Removes the held directory without following child symlinks.
+pub fn remove_open_dir_all_nofollow(directory: Dir) -> io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        directory.remove_open_dir_all()
     }
-    interrupt()?;
-    directory.remove_open_dir()
+    #[cfg(windows)]
+    {
+        // cap-std's Windows recursive removal drops its capability before
+        // descending. Keep ours open until its children have been removed.
+        for entry in directory.read_dir(".")? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let child = directory.open_dir_nofollow(entry.file_name())?;
+                remove_open_dir_all_nofollow(child)?;
+            } else {
+                entry.remove_file()?;
+            }
+        }
+        directory.remove_open_dir()
+    }
 }
 
 #[cfg(all(
@@ -268,30 +267,13 @@ mod tests {
         std::os::unix::fs::symlink(external.path(), tree.join("escape"))
             .expect("plant symlink escape");
 
-        remove_open_dir_all_nofollow(open(&tree), &mut || Ok(()))
-            .expect("recursive removal consumes the tree");
+        remove_open_dir_all_nofollow(open(&tree)).expect("recursive removal consumes the tree");
 
         assert!(!tree.exists());
         assert_eq!(
             std::fs::read(external.path().join("sentinel")).expect("sentinel survives"),
             b"preserve"
         );
-    }
-
-    #[test]
-    fn interrupted_removal_stops_and_retains_remaining_entries() {
-        let root = tempfile::tempdir().expect("create interrupt fixture");
-        let tree = root.path().join("tree");
-        std::fs::create_dir(&tree).expect("create tree");
-        std::fs::write(tree.join("file"), b"bytes").expect("write file");
-
-        let error = remove_open_dir_all_nofollow(open(&tree), &mut || {
-            Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-        })
-        .expect_err("interruption must surface");
-
-        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-        assert!(tree.join("file").exists());
     }
 
     #[test]

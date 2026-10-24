@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tracedecay_contracts::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemDetailV1,
     CancellationContext, CancellationSignal, Deadline, RequestId, SafeDiagnostic,
-    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
+    SourceEditInvocationV1, SourceEditReconciliationInvocationV1,
 };
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
@@ -120,30 +120,6 @@ pub(super) async fn execute_source_edit_reconcile(
     };
     let result = owner
         .reconcile(typed_request_id, request, deadline, cancellation)
-        .await;
-    source_edit_response(request_id, &owner, result)
-}
-
-pub(super) async fn execute_source_edit_rollback(
-    request_id: String,
-    owner: Option<Arc<ProjectSourceEditOwnerV1>>,
-    request: SourceEditRollbackInvocationV1,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
-) -> DaemonInvocationResponse {
-    let (owner, typed_request_id, cancellation) = match admit_source_edit(
-        &request_id,
-        owner,
-        "The daemon-owned source edit rollback authority is unavailable",
-        observed_at,
-        &cancellation,
-    ) {
-        Ok(admitted) => admitted,
-        Err(response) => return *response,
-    };
-    let result = owner
-        .rollback(typed_request_id, request, deadline, cancellation)
         .await;
     source_edit_response(request_id, &owner, result)
 }

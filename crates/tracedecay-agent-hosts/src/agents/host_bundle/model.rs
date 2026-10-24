@@ -9,8 +9,7 @@ use tracedecay_host_integration::host_bundle_stale_preview;
 
 use super::planner::{HostBundleLifecycleRequestV1, HostBundleMutationPlanV1};
 use super::{
-    HostBundleArtifactContentV1, HostBundleError, HostBundleInstallReceiptV1,
-    HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
+    HostBundleArtifactContentV1, HostBundleError, HostBundleLifecycleOpV1, HostBundleManifestV1,
     HostCapabilityV1, HostComponentV1, HostKindV1,
 };
 
@@ -31,8 +30,7 @@ pub struct HostComponentSetEntryV1 {
     pub contents: Vec<HostBundleArtifactContentV1>,
 }
 
-/// The complete, host-specific component set that must be committed or rolled
-/// back as one lifecycle boundary.
+/// The complete, host-specific component set verified by one lifecycle operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostComponentSetV1 {
     pub host: HostKindV1,
@@ -90,15 +88,6 @@ pub struct CompetingHostExtensionClaimV1 {
     pub evidence_digest: [u8; 32],
 }
 
-/// Explicit host-level rollback handoff returned by a dry run.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostBundleRollbackSeamV1 {
-    pub operation_id: [u8; 16],
-    pub host: HostKindV1,
-    pub component: HostComponentV1,
-    pub replaced_relative_paths: Vec<String>,
-}
-
 /// Read-only lifecycle result. Producing this value verifies the embedded
 /// first-party manifest and exact ownership observations but never opens a
 /// writer, creates a control directory, or writes a receipt.
@@ -107,26 +96,11 @@ pub struct HostBundleLifecyclePreviewV1 {
     pub plan: HostBundleMutationPlanV1,
     pub confirmation_required: bool,
     pub competing_extension_claims: Vec<CompetingHostExtensionClaimV1>,
-    pub rollback: HostBundleRollbackSeamV1,
-}
-
-/// Injected lifecycle storage boundary. The concrete no-follow writer below
-/// implements this trait, while daemon wiring can provide its opened authority
-/// without exposing a filesystem path or mutation capability to callers.
-pub trait HostBundleLifecycleStorageV1 {
-    fn execute_lifecycle<V: HostBundleVerificationAdapterV1>(
-        &mut self,
-        manifest: &HostBundleManifestV1,
-        request: &HostBundleExecutionRequestV1,
-        contents: &[HostBundleArtifactContentV1],
-        verifier: &V,
-    ) -> Result<HostBundleInstallReceiptV1, HostBundleError>;
 }
 
 /// Host-native registration boundary coordinated with an artifact component
-/// set. Implementations snapshot their bounded registration state in memory
-/// during `stage`; the aggregate writer invokes these hooks in reverse when the
-/// running operation fails.
+/// set. Implementations observe registration state during `stage` and verify
+/// the applied state before the aggregate receipt is published.
 pub trait HostComponentSetRegistrationV1 {
     /// Exact revision of the host registration state that this adapter may
     /// mutate. Concrete host adapters hash their bounded native config;
@@ -154,7 +128,7 @@ pub trait HostComponentSetRegistrationV1 {
 
     /// Bind the adapter to the confirmed preview immediately before staging.
     /// Implementations may retain the revision and recheck it while capturing
-    /// their rollback snapshot.
+    /// the expected registration revision.
     fn confirm_preview(
         &mut self,
         component_set: &HostComponentSetV1,
@@ -231,14 +205,6 @@ pub trait HostComponentSetRegistrationV1 {
     }
 
     fn commit(
-        &mut self,
-        _component_set: &HostComponentSetV1,
-        _request: &HostComponentSetExecutionRequestV1,
-    ) -> Result<(), HostBundleError> {
-        Ok(())
-    }
-
-    fn rollback(
         &mut self,
         _component_set: &HostComponentSetV1,
         _request: &HostComponentSetExecutionRequestV1,

@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, ProtectedApplyRequest,
-    ProtectedChange, ProtectedChangePlan, SettingKey,
+    ConfigurationRevisionId, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
+    SettingKey,
 };
 
 use crate::config::{
@@ -137,15 +137,6 @@ impl ProjectConfigurationRuntime {
             .store
             .observed_component_configuration(RUNTIME_CONFIGURATION_COMPONENT.to_owned())
     }
-
-    pub fn installed_mutation_authorization(
-        &self,
-    ) -> std::result::Result<
-        &Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
-        ConfigurationError,
-    > {
-        self.authorities.installed_mutation_authorization()
-    }
 }
 
 /// Production daemon client for the retained project configuration runtime.
@@ -158,8 +149,8 @@ pub struct ProductionConfigurationDaemonClient {
     control_plane: SharedConfigurationControlPlane,
 }
 
-/// Read and mutation operations come straight from the control plane; the
-/// client only adds the typed `set`/`unset`/`batch` conveniences and `current`.
+/// Read and mutation operations come straight from the control plane, with
+/// runtime materialization helpers for current configuration.
 impl std::ops::Deref for ProductionConfigurationDaemonClient {
     type Target = dyn ConfigurationControlPlane + Send + Sync;
 
@@ -169,52 +160,6 @@ impl std::ops::Deref for ProductionConfigurationDaemonClient {
 }
 
 impl ProductionConfigurationDaemonClient {
-    pub fn set(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        layer: ConfigurationLayerIdV1,
-        key: SettingKey,
-        value: ConfigurationValueV1,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.mutate_direct(
-            authority,
-            DirectConfigurationMutation::Set {
-                layer,
-                key,
-                value: Box::new(value),
-            },
-            expected_revision,
-        )
-    }
-
-    pub fn unset(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        layer: ConfigurationLayerIdV1,
-        key: SettingKey,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.mutate_direct(
-            authority,
-            DirectConfigurationMutation::Unset { layer, key },
-            expected_revision,
-        )
-    }
-
-    pub fn batch(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        mutations: Vec<DirectConfigurationMutation>,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        self.mutate_direct(
-            authority,
-            DirectConfigurationMutation::Batch { mutations },
-            expected_revision,
-        )
-    }
-
     /// Reads the validated durable snapshot without compiling indexing and
     /// synchronization settings. Consumers revalidating an existing pin need
     /// its revision and contents, rather than another runtime materialization.

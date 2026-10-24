@@ -100,7 +100,6 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::MoveSymbol
         | ApplicationSurfaceOperation::RenameSymbol
         | ApplicationSurfaceOperation::SourceEditReconcile
-        | ApplicationSurfaceOperation::SourceEditRollback
         | ApplicationSurfaceOperation::Context
         | ApplicationSurfaceOperation::Node
         | ApplicationSurfaceOperation::Impact

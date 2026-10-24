@@ -870,8 +870,7 @@ impl CommandFamily {
             Commands::Install { .. }
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
-            | Commands::Uninstall { .. }
-            | Commands::FeedbackRollback { .. } => Self::Agent,
+            | Commands::Uninstall { .. } => Self::Agent,
             Commands::HookPreToolUse
             | Commands::HookPromptSubmit
             | Commands::HookStop
@@ -1526,23 +1525,6 @@ async fn dispatch_agent_command(
 
     let (operation, agent, local, no_dashboard, automation, git_hook, catalog_profile) =
         match command {
-            Commands::FeedbackRollback { mut action } => {
-                if host_bundle.component.is_some() || host_bundle.dry_run {
-                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "feedback-rollback does not accept host-component selectors"
-                            .to_string(),
-                    });
-                }
-                match &mut action {
-                    crate::cli::FeedbackRollbackAction::Apply { yes, .. }
-                    | crate::cli::FeedbackRollbackAction::Restore { yes, .. } => {
-                        *yes |= host_bundle.yes;
-                    }
-                    crate::cli::FeedbackRollbackAction::DryRun { .. } => {}
-                }
-                agent_cmd::handle_feedback_rollback_command(profile, action).await?;
-                return Ok(agent_cmd::HostLifecycleCompletion::Complete);
-            }
             Commands::Install {
                 agent,
                 local,
@@ -1876,7 +1858,6 @@ impl CommandStartupPolicy {
             Commands::Install { .. }
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
-            | Commands::FeedbackRollback { .. }
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }

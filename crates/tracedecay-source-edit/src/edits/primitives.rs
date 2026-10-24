@@ -89,7 +89,7 @@ pub(super) async fn commit_or_preview_edit(
     dry_run: bool,
 ) -> Result<Option<String>> {
     if dry_run {
-        capture_planned_source_edit(rel_path, Some(original), Some(modified));
+        capture_planned_source_edit(rel_path, Some(original), modified);
         return Ok(Some(bounded_region_diff(
             original,
             modified,
@@ -97,7 +97,7 @@ pub(super) async fn commit_or_preview_edit(
             MAX_PREVIEW_DIFF_LINES,
         )));
     }
-    validate_planned_source_edit(rel_path, Some(original), Some(modified))?;
+    validate_planned_source_edit(rel_path, Some(original), modified)?;
     file.publish(
         rel_path,
         Some(original),
