@@ -435,3 +435,68 @@ fn typescript_ambiguous_local_calls_do_not_poison_imported_call_resolution() {
         assert!(!graph.callees_partial("ts/app.ts::clear"));
     }
 }
+
+/// Every symbol the callers surface lists for `qualified_name`: the incoming
+/// call and reference relations it reads.
+fn callers_and_references(graph: &SealedGraph, qualified_name: &str) -> Vec<String> {
+    let mut sources = graph
+        .reader
+        .callers(
+            &[graph.symbol(qualified_name)],
+            &[
+                RelationEdgeKindV1::Calls,
+                RelationEdgeKindV1::Uses,
+                RelationEdgeKindV1::TypeOf,
+                RelationEdgeKindV1::Annotates,
+            ],
+            1_000,
+            Arc::new(NeverCancelled),
+        )
+        .expect("caller read")
+        .into_iter()
+        .flatten()
+        .map(|edge| {
+            edge.neighbor
+                .metadata
+                .expect("caller metadata")
+                .qualified_name
+        })
+        .collect::<Vec<_>>();
+    sources.sort();
+    sources
+}
+
+#[test]
+fn a_rust_module_declaration_is_not_a_caller_of_what_its_parent_reexports() {
+    let graph = sealed_graph_of(&[
+        (
+            "runtime/Cargo.toml",
+            "[package]\nname = \"runtime\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "runtime/src/lib.rs",
+            "mod workflow;\n\npub use workflow::install_schema;\n",
+        ),
+        (
+            "runtime/src/workflow.rs",
+            "mod schema;\n\npub use schema::{SCHEMA_VERSION, install_schema};\n\npub fn open() {\n    install_schema();\n}\n",
+        ),
+        (
+            "runtime/src/workflow/schema.rs",
+            "pub const SCHEMA_VERSION: u32 = 1;\n\npub fn install_schema() {}\n",
+        ),
+        (
+            "store/Cargo.toml",
+            "[package]\nname = \"store\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "store/src/lib.rs",
+            "use runtime::install_schema;\n\npub fn start() {\n    install_schema();\n}\n",
+        ),
+    ]);
+
+    assert_eq!(
+        callers_and_references(&graph, "runtime/src/workflow/schema.rs::install_schema"),
+        ["runtime/src/workflow.rs::open", "store/src/lib.rs::start"]
+    );
+}
