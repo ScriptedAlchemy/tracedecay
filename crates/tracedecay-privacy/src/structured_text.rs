@@ -1025,17 +1025,22 @@ pub fn sanitize_code_source_bytes(
 }
 
 /// Effective LCM-payload detector revision: the pinned sanitizer contract
-/// bound to a digest of the compiled credential rule documents.
+/// bound to the credential rule documents and detector algorithm.
 ///
 /// The contract string names the receipt shape and never changes with a rule
 /// refresh, so it cannot tell an at-rest rescan whether previously accepted
-/// bytes were evaluated under the current rules. This revision changes exactly
-/// when the vendored catalogue or the local supplement changes, which is
-/// exactly when a completed-rescan watermark must invalidate.
+/// bytes were evaluated under the current rules and algorithm. Both kinds of
+/// detector change must invalidate a completed-rescan watermark.
 pub fn lcm_payload_detector_revision() -> &'static str {
+    // Advance this input when detector semantics change independently of the
+    // rule documents. Restored strict entropy must recheck previously exempt
+    // compound tokens without changing the receipt contract.
+    const ALGORITHM_REVISION: &[u8] = b"strict-entropy.1";
     static REVISION: OnceLock<String> = OnceLock::new();
     REVISION.get_or_init(|| {
-        let digest = super::length_prefixed_sha256_hex(&super::rules::rule_document_bytes());
+        let [catalogue, supplement] = super::rules::rule_document_bytes();
+        let digest =
+            super::length_prefixed_sha256_hex(&[catalogue, supplement, ALGORITHM_REVISION]);
         format!("{LCM_PAYLOAD_SANITIZER_VERSION_V1}+rules.{}", &digest[..16])
     })
 }

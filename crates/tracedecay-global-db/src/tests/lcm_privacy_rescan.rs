@@ -227,6 +227,51 @@ fn payload_dir_holds(storage_root: &std::path::Path, needle: &str) -> bool {
 }
 
 #[asupersync::test]
+async fn entropy_algorithm_upgrade_invalidates_completed_inline_and_external_rescans() {
+    // The rules-only revision shipped before name-position-aware entropy.
+    const PRIOR_REVISION: &str = "privacy.lcm-payload.v1+rules.a0ee654364a595f4";
+    let harness = RegisteredGlobalDbHarness::open("lcm-entropy-upgrade").await;
+    let root = harness.registered.db_path().parent().unwrap().to_path_buf();
+    seed_session(&harness, "entropy-upgrade").await;
+    let phrase = "RocketButtonStapleBridgeYellowOrange90";
+    let content = format!("the deploy phrase is {phrase} for prod");
+    let current = sanitize_lcm_payload_text(&content).expect("current entropy detector runs");
+    assert!(!current.sanitized_text().contains(phrase));
+    seed_legacy_inline_row(&harness, "entropy-upgrade", "inline", &content).await;
+    let reference =
+        seed_legacy_external_row(&harness, "entropy-upgrade", "external", &content).await;
+    let old_path = payload::payload_dir(&root).join(reference);
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    schema::set_gc_meta(&transaction, LCM_PRIVACY_RESCAN_META_KEY, PRIOR_REVISION)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let result = harness
+        .registered
+        .lcm_privacy_rescan_raw_messages()
+        .await
+        .unwrap();
+    let LcmPrivacyRescanOutcomeV1::Completed(receipt) = result else {
+        panic!("a prior entropy algorithm cannot vouch for current privacy: {result:?}");
+    };
+    assert_eq!(receipt.scanned_rows, 2);
+    assert_eq!(receipt.remediated_rows, 2);
+    assert_ne!(receipt.detector_revision, PRIOR_REVISION);
+    assert_eq!(count_rows_holding(&harness, phrase).await, 0);
+    assert!(!payload_dir_holds(&root, phrase));
+    assert!(!old_path.exists());
+    assert_eq!(
+        harness
+            .registered
+            .lcm_privacy_rescan_raw_messages()
+            .await
+            .unwrap(),
+        LcmPrivacyRescanOutcomeV1::AlreadyCurrent
+    );
+}
+
+#[asupersync::test]
 async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
     let harness = RegisteredGlobalDbHarness::open("lcm-privacy-rescan").await;
     let storage_root = harness
