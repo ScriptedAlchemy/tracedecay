@@ -235,6 +235,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
 ) {
     let mut retry_attempt = 0u32;
     let mut summary_retry_attempt = 0u32;
+    let mut summary_recheck = false;
     let mut history_priority_passes = 0u32;
     let mut history_release = None;
     let mut granted_history_admission = None;
@@ -265,11 +266,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 history_requested = false;
                 projection_requested = true;
             }
-            if !projection_requested && !history_requested {
+            if !projection_requested && !history_requested && !summary_recheck {
                 break;
             }
+            summary_recheck = false;
             state.begin_pass();
-            state.pass_count.fetch_add(1, Ordering::AcqRel);
+            if projection_requested || history_requested {
+                state.pass_count.fetch_add(1, Ordering::AcqRel);
+            }
             // A granted turn this iteration does not spend on history is
             // returned before the summary page queues for a permit of its own.
             let granted = granted_history_admission
@@ -426,7 +430,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         // registered to receive one.
                         state.mark_worker_idle();
                         state.idle.notify_waiters();
-                        let Some(permit) = live_projection
+                        let Some((permit, _)) = live_projection
                             .wait_for(&mut admission, &mut projection_joins, &mut report, true)
                             .await
                         else {
@@ -466,13 +470,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                             ),
                         };
                         tokio::pin!(page);
-                        let Some(result) = live_projection
+                        let Some((result, recheck)) = live_projection
                             .wait_for(&mut page, &mut projection_joins, &mut report, false)
                             .await
                         else {
                             return;
                         };
                         drop(permit);
+                        summary_recheck = recheck;
                         result
                     };
                     match summary_result {
@@ -921,7 +926,7 @@ impl LiveProjectionDuringSummary<'_> {
         joins: &mut Vec<SessionProjectionJoin>,
         report: &mut SessionTemporalRefreshPassReport,
         waiting_for_admission: bool,
-    ) -> Option<F::Output>
+    ) -> Option<(F::Output, bool)>
     where
         F: Future + Send,
         F::Output: Send,
@@ -1022,13 +1027,10 @@ impl LiveProjectionDuringSummary<'_> {
                 self.state.idle.notify_waiters();
             }
         };
-        // A running page may have read its inputs before the consumed wake;
-        // admission has not started that page yet. Retain its convergence pass
-        // only after completion so live projection cannot consume it again.
-        if summary_pass_owed && !self.state.cancelled.load(Ordering::Acquire) {
-            self.state.requeue_projection();
-        }
-        Some(result)
+        // A running page may have read its inputs before the consumed wake.
+        // Its follow-up needs summary convergence, not another projection of
+        // the frontier this wake already served. Admission has no page yet.
+        Some((result, summary_pass_owed))
     }
 }
 
@@ -2279,16 +2281,15 @@ mod tests {
                 .await
                 .expect("held stage must settle")
                 .expect("worker must join");
-            assert_eq!(completed, (!cancel).then_some(()), "{name}");
-            assert_eq!(state.pass_count.load(Ordering::Acquire), 1, "{name}");
             assert_eq!(
-                state.take_dirty(),
-                owes_convergence,
+                completed,
+                (!cancel).then_some(((), owes_convergence)),
                 "{name}: a consumed wake still owes convergence after a running page"
             );
+            assert_eq!(state.pass_count.load(Ordering::Acquire), 1, "{name}");
             assert!(
                 !state.take_dirty(),
-                "{name}: the wake must retain only one follow-up pass"
+                "{name}: summary convergence must not replay the consumed projection"
             );
         }
     }
@@ -2369,7 +2370,10 @@ mod tests {
         assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
         assert!(!worker.is_finished(), "the summary stage remains in flight");
         finish.notify_one();
-        assert_eq!(worker.await.expect("summary stage completes"), Some(17));
+        assert_eq!(
+            worker.await.expect("summary stage completes"),
+            Some((17, true))
+        );
     }
 
     /// A lease the store has fenced resubmits the identical request on every
