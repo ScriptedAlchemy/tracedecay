@@ -1885,4 +1885,7 @@ mod idle_history_reads_journey_test;
 mod source_body_readiness_journey_test;
 
 #[cfg(test)]
+mod unknown_node_id_readiness_journey_test;
+
+#[cfg(test)]
 mod drop_shutdown_journey_test;
