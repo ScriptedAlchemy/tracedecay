@@ -83,6 +83,10 @@ impl McpServer {
                 .project_application_retrieval
                 .as_ref()
                 .map(|mounted| mounted.identity.clone()),
+            project_session_projection_status: self
+                .project_session_refresh_wake
+                .as_ref()
+                .map(super::construction::refresh_worker_serving_port),
             daemon_user_profile_id: self
                 .profile_identity
                 .as_ref()
