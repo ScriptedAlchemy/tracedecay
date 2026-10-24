@@ -222,9 +222,26 @@ pub struct StatusMemoryV1 {
     pub shed_order: Vec<String>,
     pub retained_bytes: u64,
     pub unmeasured_owners: usize,
+    /// Resident bytes no retained owner accounts for: `resident_bytes` minus
+    /// the daemon-wide `retained_bytes`. Work in flight, the runtime, SQLite
+    /// page caches, and allocator-held pages are here. `None` until resident
+    /// memory is observed.
+    pub unattributed_bytes: Option<u64>,
+    /// Bytes admitted work has reserved daemon-wide: the admission model of
+    /// in-flight builds and decodes, not a measurement.
+    pub reserved_bytes: u64,
+    /// `reserved_bytes` per component, largest first.
+    pub reservations: Vec<StatusMemoryReservationV1>,
     /// This project's retained owners; other projects' belong to the
     /// daemon-wide Doctor inventory.
     pub owners: Vec<StatusMemoryOwnerV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusMemoryReservationV1 {
+    pub component: String,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]

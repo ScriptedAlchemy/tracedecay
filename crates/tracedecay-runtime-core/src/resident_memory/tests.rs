@@ -17,7 +17,7 @@ use super::{
     RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
-    resident_memory_authority_v1,
+    process_admission_reservations_v1, resident_memory_authority_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -442,6 +442,62 @@ fn key(
         generation_id: CodeGenerationId::new(generation).expect("valid generation id"),
         component: ResidentMemoryComponentIdV1::new(component).expect("valid component id"),
     }
+}
+
+#[test]
+fn process_reservations_sum_every_production_ledger_until_released() {
+    const COMPONENT: &str = "process-reservation-sum-fixture";
+    let reserved = |component: &str| {
+        process_admission_reservations_v1()
+            .components
+            .iter()
+            .find(|(id, _)| id.as_str() == component)
+            .map_or(0, |(_, bytes)| *bytes)
+    };
+    let first = Arc::new(ProcessResidentMemoryV1::new(bytes(1_000)));
+    let second = Arc::new(ProcessResidentMemoryV1::new(bytes(1_000)));
+    let detached = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(1_000),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(1_000),
+            Arc::new(|| None),
+        )),
+    ));
+    let one = first
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", COMPONENT),
+            bytes(5),
+        )
+        .expect("first ledger admits");
+    let two = second
+        .reserve(
+            key("project-b", "worktree-b", "generation-b", COMPONENT),
+            bytes(3),
+        )
+        .expect("second ledger admits");
+    let _unregistered = detached
+        .reserve(
+            key("project-c", "worktree-c", "generation-c", COMPONENT),
+            bytes(7),
+        )
+        .expect("fixture ledger admits");
+
+    assert_eq!(
+        reserved(COMPONENT),
+        8,
+        "both production ledgers count and a fixture-bound ledger does not"
+    );
+    assert!(process_admission_reservations_v1().reserved_bytes >= 8);
+
+    drop(one);
+    assert_eq!(
+        reserved(COMPONENT),
+        3,
+        "a released reservation leaves the sum"
+    );
+    drop(two);
+    drop(second);
+    assert_eq!(reserved(COMPONENT), 0);
 }
 
 #[test]
