@@ -17,7 +17,7 @@ use super::{
     RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
     ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
-    resident_memory_authority_v1,
+    process_admission_reservations_v1, resident_memory_authority_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -442,6 +442,114 @@ fn key(
         generation_id: CodeGenerationId::new(generation).expect("valid generation id"),
         component: ResidentMemoryComponentIdV1::new(component).expect("valid component id"),
     }
+}
+
+#[test]
+fn process_reservations_sum_every_production_ledger_until_released() {
+    const COMPONENT: &str = "process-reservation-sum-fixture";
+    let reserved = |component: &str| {
+        process_admission_reservations_v1()
+            .components
+            .iter()
+            .find(|(id, _)| id.as_str() == component)
+            .map_or(0, |(_, bytes)| *bytes)
+    };
+    let first = Arc::new(ProcessResidentMemoryV1::new(bytes(1_000)));
+    let second = Arc::new(ProcessResidentMemoryV1::new(bytes(1_000)));
+    let detached = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(1_000),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(1_000),
+            Arc::new(|| None),
+        )),
+    ));
+    let one = first
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", COMPONENT),
+            bytes(5),
+        )
+        .expect("first ledger admits");
+    let two = second
+        .reserve(
+            key("project-b", "worktree-b", "generation-b", COMPONENT),
+            bytes(3),
+        )
+        .expect("second ledger admits");
+    let _unregistered = detached
+        .reserve(
+            key("project-c", "worktree-c", "generation-c", COMPONENT),
+            bytes(7),
+        )
+        .expect("fixture ledger admits");
+
+    assert_eq!(
+        reserved(COMPONENT),
+        8,
+        "both production ledgers count and a fixture-bound ledger does not"
+    );
+    assert!(process_admission_reservations_v1().reserved_bytes >= 8);
+
+    drop(one);
+    assert_eq!(
+        reserved(COMPONENT),
+        3,
+        "a released reservation leaves the sum"
+    );
+    drop(two);
+    drop(second);
+    assert_eq!(reserved(COMPONENT), 0);
+}
+
+#[test]
+fn cached_process_sample_preserves_raw_rss_without_resampling() {
+    let next_sample = Arc::new(Mutex::new(None::<ProcessResidentSampleV1>));
+    let reads = Arc::new(AtomicU64::new(0));
+    let pressure = ResidentMemoryPressureV1::with_sampler(bytes(10_000), {
+        let next_sample = Arc::clone(&next_sample);
+        let reads = Arc::clone(&reads);
+        Arc::new(move || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            *next_sample.lock().expect("sample lock")
+        })
+    });
+    assert_eq!(pressure.last_sample(), None);
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert!(pressure.sample_and_publish().is_none());
+    assert_eq!(pressure.last_sample(), None);
+
+    let sample = ProcessResidentSampleV1 {
+        resident_bytes: 1_200,
+        unreclaimable_bytes: 700,
+        swapped_bytes: 300,
+        cgroup_headroom_bytes: Some(6_000),
+    };
+    *next_sample.lock().expect("sample lock") = Some(sample);
+    pressure.sample_and_publish().expect("successful sample");
+    let sampled_reads = reads.load(Ordering::SeqCst);
+    assert_eq!(pressure.last_sample(), Some(sample));
+    assert_eq!(
+        pressure
+            .last_sample()
+            .expect("cached sample")
+            .resident_bytes,
+        1_200
+    );
+    assert_eq!(pressure.state().observed_bytes(), Some(4_000));
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        sampled_reads,
+        "cached accounting must not resample or run pressure reclaimers"
+    );
+
+    *next_sample.lock().expect("sample lock") = None;
+    assert!(pressure.sample_and_publish().is_none());
+    assert_eq!(reads.load(Ordering::SeqCst), sampled_reads + 1);
+    assert_eq!(
+        pressure.last_sample(),
+        Some(sample),
+        "a failed sample preserves the last good reading"
+    );
+    assert_eq!(pressure.state().observed_bytes(), Some(4_000));
 }
 
 #[test]

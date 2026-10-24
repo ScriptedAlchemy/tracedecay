@@ -208,11 +208,13 @@ pub enum StatusSessionGitEvidenceUnavailableV1 {
     ReadFailed,
 }
 
-/// The daemon's resident memory as one project sees it.
+/// The daemon's memory admission and resident accounting as one project sees it.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusMemoryV1 {
     pub status: StatusMemoryPressureV1,
+    /// Observed admission occupancy: anonymous/shared process pages plus swap,
+    /// constrained by shared cgroup headroom. This is not raw process RSS.
     pub resident_bytes: Option<u64>,
     pub limit_bytes: u64,
     pub high_watermark_bytes: u64,
@@ -222,9 +224,27 @@ pub struct StatusMemoryV1 {
     pub shed_order: Vec<String>,
     pub retained_bytes: u64,
     pub unmeasured_owners: usize,
+    /// Raw process RSS from the last successful canonical sample minus the
+    /// daemon-wide measured `retained_bytes`, saturating at zero. Unlike
+    /// `resident_bytes`, this excludes swap and shared cgroup pressure. Work in
+    /// flight, runtime allocations, SQLite page caches, and allocator-held pages
+    /// can contribute. `None` until a resident sample has been published.
+    pub unattributed_bytes: Option<u64>,
+    /// Bytes admitted work has reserved daemon-wide: the admission model of
+    /// in-flight builds and decodes, not a measurement.
+    pub reserved_bytes: u64,
+    /// `reserved_bytes` per component, largest first.
+    pub reservations: Vec<StatusMemoryReservationV1>,
     /// This project's retained owners; other projects' belong to the
     /// daemon-wide Doctor inventory.
     pub owners: Vec<StatusMemoryOwnerV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusMemoryReservationV1 {
+    pub component: String,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
