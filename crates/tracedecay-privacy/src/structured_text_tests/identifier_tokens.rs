@@ -140,3 +140,69 @@ fn credential_material_in_object_keys_is_still_quarantined() {
         assert_eq!(error, DetectionError::CredentialKeyQuarantine, "key {key}");
     }
 }
+
+/// Words joined into a passphrase are not a name: wherever the token is a
+/// value or free text, the entropy check must still withhold it.
+const PASSPHRASES: [&str; 7] = [
+    "violin-pocket-jungle-quartz-island-778",
+    "window_quartz_kitchen_silver_silver_785",
+    "staplebuttonforesthammerkitchenwindow169",
+    "RocketButtonStapleBridgeYellowOrange90",
+    "MySuperSecretPasswordForProduction2024Admin",
+    "FigalKuwozJibekPunukBomajJajicSajinKatuw42",
+    "fusegunazojitikurihimabavefiwopilode7",
+];
+
+#[test]
+fn passphrase_shaped_tokens_in_free_text_are_redacted() {
+    for passphrase in PASSPHRASES {
+        for raw in [
+            format!("the deploy phrase is {passphrase} for prod\n"),
+            format!("# note\n\n    {passphrase}\n"),
+            format!("let s = \"{passphrase}\";\n"),
+        ] {
+            let sanitized =
+                sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::CodeOrProse)
+                    .expect("free text sanitizes");
+            let text = String::from_utf8_lossy(sanitized.sanitized_bytes());
+
+            assert!(!text.contains(passphrase), "{passphrase} survived: {text}");
+            assert_eq!(
+                sanitized.receipt().disposition(),
+                SanitizerDispositionV1::Redacted
+            );
+        }
+    }
+}
+
+#[test]
+fn passphrase_shaped_tokens_as_json_values_are_redacted() {
+    for passphrase in PASSPHRASES {
+        let raw = format!(
+            "{{\"WorkDuplicateAdjudicationAppendOutcomeV1\": {{\"note\": \"{passphrase}\"}}, \"list\": [\"{passphrase}\"]}}\n"
+        );
+
+        let sanitized =
+            sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+                .expect("a credential-shaped value is redacted in place");
+        let text = String::from_utf8_lossy(sanitized.sanitized_bytes());
+
+        assert!(!text.contains(passphrase), "{passphrase} survived: {text}");
+        assert!(text.contains("WorkDuplicateAdjudicationAppendOutcomeV1"));
+    }
+}
+
+#[test]
+fn identifiers_in_rust_declaration_and_path_positions_are_preserved() {
+    let raw = "pub enum WorkDuplicateAdjudicationAppendOutcomeV1 {\n    \
+               Appended(GitHubReadOnlyCredentialAuthorityOutcomeV1),\n}\n\
+               fn adjudicate() -> WorkDuplicateAdjudicationAppendOutcomeV1 {\n    \
+               crate::GitHubReadOnlyCredentialAuthorityOutcomeV1::new()\n}\n\
+               struct MAXIMUM_WORKFLOW_PAYLOAD_JSON_BYTES_FOR_GRAPH_V2;\n\
+               type Alias = Vec<ExecutionGitHubStackCapabilityReadingV1>;\n";
+
+    let sanitized = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::CodeOrProse)
+        .expect("ordinary Rust sanitizes");
+
+    assert_eq!(String::from_utf8_lossy(sanitized.sanitized_bytes()), raw);
+}
