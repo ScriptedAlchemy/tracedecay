@@ -171,6 +171,8 @@ export function createNativeDiagnosticsPayload(
     uri,
     version: Number.isSafeInteger(version) ? version : 0,
     diagnostics: diagnostics
+      // Match the receiver's ASCII-insensitive producer prefix before the cap.
+      .filter((diagnostic) => !/^tracedecay/i.test(diagnostic.source ?? ""))
       .slice(0, MAX_NATIVE_DIAGNOSTICS_PER_DOCUMENT)
       .map((diagnostic) => {
         const code =
