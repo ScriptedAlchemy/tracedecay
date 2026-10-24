@@ -6099,6 +6099,12 @@ export function lookupFixture(pathname: string, search = ''): unknown {
   return FIXTURES[pathname];
 }
 
+/** SSE has no JSON payload; both fixture transports use the same exact
+ * global and project-gateway routes for its empty stream. */
+export function isFixtureEventStream(pathname: string): boolean {
+  return /^\/api\/(?:projects\/[^/]+\/)?events$/.test(pathname);
+}
+
 /* ==========================================================================
  * /api/plugins/analytics/{underused,diagnostics} (analytics_api.rs
  * `underused` / `diagnostics_summary`). Consumed by AgentsPage.

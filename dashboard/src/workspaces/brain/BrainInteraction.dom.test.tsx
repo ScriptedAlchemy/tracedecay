@@ -1,3 +1,4 @@
+import { MemoryRouter, useLocation } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -29,7 +30,12 @@ const project = (id: string) => ({
 const projects = [project('p1'), project('p2')];
 const groups = [{ label: 'repo', git_common_dir: '/repo/.git', branches: [], project_count: 2, projects }];
 
-function mount() {
+function Address() {
+  const location = useLocation();
+  return <output aria-label="Brain address">{location.pathname}{location.search}</output>;
+}
+
+function mount(entry = '/brain') {
   vi.stubGlobal(
     'fetch',
     vi.fn(
@@ -54,7 +60,7 @@ function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const content = (
     <QueryClientProvider client={client}>
-      <BrainPage />
+      <MemoryRouter initialEntries={[entry]}><BrainPage /><Address /></MemoryRouter>
     </QueryClientProvider>
   );
   return { ...render(content), client };
@@ -64,10 +70,33 @@ afterEach(() => {
   stream.pulses = [];
   stream.revision = 0;
   useScope.getState().selectAllProjects();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe('Brain exact interaction identity', () => {
+  it('opens the neural canvas and switches views without losing inspection or query scope', async () => {
+    mount('/brain?scope=all');
+    const neural = await screen.findByRole('button', { name: 'Neural' });
+    expect(neural.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.focus(screen.getByRole('button', { name: /^p2/ }));
+    const reads = vi.mocked(fetch).mock.calls.length;
+
+    for (const [label, value] of [['Points', 'points'], ['Atlas', 'atlas'], ['Luminous', 'sigma'], ['Neural', 'neural']] as const) {
+      fireEvent.click(screen.getByRole('button', { name: label }));
+      expect(screen.getByRole('button', { name: label }).getAttribute('aria-pressed')).toBe('true');
+      expect(screen.getByLabelText('Brain address').textContent).toBe(`/brain?scope=all&field=${value}`);
+      expect(within(screen.getByRole('region', { name: 'Inspected project' })).getByText('/p2')).toBeTruthy();
+      expect(useScope.getState().scope.kind).toBe('all');
+    }
+    expect(vi.mocked(fetch).mock.calls.length).toBe(reads);
+  });
+
+  it.each([['neural', 'Neural'], ['sigma', 'Luminous'], ['points', 'Points'], ['atlas', 'Atlas']])('reopens the field=%s link', async (field, label) => {
+    mount(`/brain?field=${field}`);
+    expect((await screen.findByRole('button', { name: label })).getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('shares pointer and keyboard inspection without scope changes', async () => {
     mount();
     fireEvent.pointerEnter(await screen.findByRole('button', { name: /^p1/ }));
@@ -95,7 +124,7 @@ describe('Brain exact interaction identity', () => {
     stream.revision = 1;
     view.rerender(
       <QueryClientProvider client={view.client}>
-        <BrainPage />
+        <MemoryRouter><BrainPage /></MemoryRouter>
       </QueryClientProvider>,
     );
     fireEvent.click(screen.getByText(/Inspect admitted events/));

@@ -25,6 +25,7 @@ export interface TemporalPalette {
   ready: string;
   dim: string;
   light: boolean;
+  highContrast: boolean;
 }
 
 /** Fallbacks are only reached if a token is missing; they mirror the dark set. */
@@ -48,6 +49,7 @@ export function resolveTemporalPalette(element: HTMLElement): TemporalPalette {
   const token = (name: string): string =>
     style.getPropertyValue(name).trim() || FALLBACK[name] || '#888888';
   const light = document.documentElement.dataset['theme'] === 'light';
+  const highContrast = document.documentElement.dataset['contrast'] === 'more';
   const signal = token('--raw-graph-accent');
   return {
     field: token('--raw-graph-substrate'),
@@ -64,6 +66,7 @@ export function resolveTemporalPalette(element: HTMLElement): TemporalPalette {
     ready: token('--raw-state-ready'),
     dim: token('--raw-graph-dim'),
     light,
+    highContrast,
   };
 }
 

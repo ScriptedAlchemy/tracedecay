@@ -23,6 +23,7 @@ import { ScopedBrain } from './ScopedBrain.tsx';
 import { ProjectInspector } from './ProjectInspector.tsx';
 import { BrainField, FieldLegend } from './BrainField.tsx';
 import { buildRegistryScene } from './registryScene.ts';
+import { BrainFieldViewSwitcher, useBrainFieldView, type BrainFieldView } from './fieldView.tsx';
 import {
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
@@ -32,11 +33,12 @@ import {
  * is selected.
  *
  * Unscoped, the question is "what does this daemon look after?" and the answer
- * is the project list, with recency and mass stated as text (see `field.ts`).
+ * is a canvas of projects with recency and mass measured by `field.ts`.
  *
  * Scoped, the question becomes "what does TraceDecay know about THIS project?",
  * which is a different surface entirely (see `ScopedBrain.tsx`). */
 export function BrainPage() {
+  const [fieldView, setFieldView] = useBrainFieldView();
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [registryFilter, setRegistryFilter] = useState('');
   const [repositoryView, setRepositoryView] = useState<string | null>(null);
@@ -156,11 +158,12 @@ export function BrainPage() {
               </span>
               {viewedRepository ? <button type="button" className="td-hit ml-auto text-2xs underline" onClick={() => setRepositoryView(null)}>Registry overview</button> : null}
             </div>
+            <BrainFieldViewSwitcher active={fieldView} onSelect={setFieldView} />
             {/* The field is the page; readouts, the inspector and the exact
               * registry list sit in the rail beside it. */}
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
               <section aria-label="Registry field" className="flex min-h-[70vw] flex-1 flex-col p-3 max-md:min-h-min md:min-h-[60vh] lg:min-h-0">
-                <RegistryFieldCanvas groups={groups} repository={viewedRepository} inspectedId={inspectedId} onInspect={setInspectedId} />
+                <RegistryFieldCanvas variant={fieldView} groups={groups} repository={viewedRepository} inspectedId={inspectedId} onInspect={setInspectedId} />
               </section>
               <aside aria-label="Registry readouts" className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-96 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0">
                 <RegistryFieldView groups={groups} repository={viewedRepository} onInspect={setInspectedId} />
@@ -246,11 +249,13 @@ function RegistryFieldView({
 /** The measured registry field. Rebuilt only
  * when the registry's measurements change, never per live pulse. */
 function RegistryFieldCanvas({
+  variant,
   groups,
   repository,
   inspectedId,
   onInspect,
 }: {
+  variant: BrainFieldView;
   groups: ProjectRepoGroup[];
   repository?: ProjectRepoGroup;
   inspectedId: string | null;
@@ -277,6 +282,7 @@ function RegistryFieldCanvas({
   const projectCount = scene.bodies.filter((body) => body.role === 'body').length;
   return (
     <BrainField
+      variant={variant}
       scene={scene}
       inspectedId={inspectedId}
       onInspect={onInspect}
@@ -289,7 +295,7 @@ function RegistryFieldCanvas({
       ariaLabel={repository
         ? `${repository.label} repository in camera focus: ${repository.projects.length} registered projects; other projects recede. The project registry beside it is the exact equivalent.`
         : `Registry field: ${projectCount} projects across recency columns. The project registry beside it is the exact equivalent.`}
-      legend={<FieldLegend scene={scene} />}
+      legend={<FieldLegend scene={scene} variant={variant} />}
     />
   );
 }

@@ -5,8 +5,9 @@
  * authorities into a `JourneyProjection`, `layout.ts` turns that projection
  * plus a viewport into a `TemporalSceneModel`, and the scene renderer draws
  * whatever the layout produced and decides nothing. The split is the honesty
- * boundary named in the V2 implementation reference: time is X, hierarchy is
- * Y, and coordinates never depend on which renderer is drawing them.
+ * boundary named in the V2 implementation reference: time is X and hierarchy
+ * supplies the lane identities. A presentation projection may curve Y, but
+ * canvas, SVG, picking and the minimap consume that same derived geometry.
  *
  * Nothing in this file has a plausible default. If an authority did not carry
  * a quantity, it is `null` here and the surface says so.
@@ -321,6 +322,41 @@ export interface SceneNode {
   /** Half of the pixel gap to the nearest neighbour on the same lane, so a
    * dense lane never lets a later hit region cover an earlier centre. */
   readonly halfHit: number;
+  /** Source-family color in the spindle presentation; grade remains separate. */
+  readonly color?: string;
+  /** Collision-resolved glyph visibility. The exact event remains selectable. */
+  readonly glyphVisible?: boolean;
+  /** Curved-field hit radius, bounded by the nearest other event center. */
+  readonly hitRadius?: number;
+}
+
+export interface ScenePoint {
+  readonly x: number;
+  readonly y: number;
+}
+
+/** One real session, including a member of a collapsed branch. */
+export interface SceneFiber {
+  readonly id: string;
+  readonly ownerLaneId: string;
+  readonly familyId: string;
+  readonly color: string;
+  readonly label: string;
+  readonly provider: string;
+  readonly grade: EvidenceGrade;
+  readonly focus: FocusTreatment;
+  readonly endSource: LaneEndSource;
+  readonly points: readonly ScenePoint[];
+}
+
+export interface SceneSpindle {
+  /** Full loaded extent, never the moving viewport or replay boundary. */
+  readonly extent: JourneyExtent;
+  readonly top: number;
+  readonly height: number;
+  readonly fibers: readonly SceneFiber[];
+  /** Readable label slots. The branch navigator retains every identity. */
+  readonly labelLaneIds: ReadonlySet<string>;
 }
 
 type ScenePathKind =
@@ -343,6 +379,9 @@ export interface ScenePath {
   readonly basis: string | null;
   readonly focus: FocusTreatment;
   readonly controls: readonly number[];
+  /** Canonically sampled geometry, when the path is a curved filament. */
+  readonly points?: readonly ScenePoint[];
+  readonly color?: string;
   /** Measured message weight in `[0,1]` for lane paths; null otherwise. */
   readonly weight: number | null;
 }
@@ -378,6 +417,7 @@ export interface SceneInterval {
   readonly grade: EvidenceGrade;
   readonly tone: 'candidate' | 'overlap' | 'conflict' | null;
   readonly ref: string | null;
+  readonly points?: readonly ScenePoint[];
 }
 
 export interface SceneGap {
@@ -427,7 +467,15 @@ export interface MinimapBin {
 export interface SceneMinimap {
   /** Bins span the full projection extent, not the window. */
   readonly bins: readonly MinimapBin[];
-  readonly lanes: readonly { id: string; y: number; x0: number; x1: number; endSource: LaneEndSource }[];
+  readonly lanes: readonly {
+    id: string;
+    y: number;
+    x0: number;
+    x1: number;
+    endSource: LaneEndSource;
+    points?: readonly ScenePoint[];
+    color?: string;
+  }[];
   /** The current window projected into minimap pixels. */
   readonly window: { readonly x0: number; readonly x1: number };
   readonly width: number;
@@ -438,6 +486,7 @@ export interface SceneCursor {
   readonly x: number;
   readonly laneId: string;
   readonly xBasis: XBasis;
+  readonly y?: number;
 }
 
 interface SceneCounts {
@@ -472,6 +521,7 @@ export interface TemporalSceneModel {
   readonly ticks: readonly SceneTick[];
   readonly labels: readonly SceneLabel[];
   readonly minimap: SceneMinimap;
+  readonly spindle?: SceneSpindle;
   readonly cursor: SceneCursor | null;
   readonly counts: SceneCounts;
   /** On a dense page, the hierarchy depth whose branches start bundled;

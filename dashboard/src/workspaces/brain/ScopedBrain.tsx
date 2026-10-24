@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { ScopedField } from './BrainField.tsx';
+import { BrainFieldViewSwitcher, useBrainFieldView } from './fieldView.tsx';
 import {
   CenteredState,
   ReadSection,
@@ -46,6 +47,7 @@ import { SchemaConvergencePanel } from '../observatory/DoctorInspector.tsx';
  *   guesses that a generic failure means "not mounted".
  */
 export function ScopedBrain({ projectId, label }: { projectId: string; label: string }) {
+  const [fieldView, setFieldView] = useBrainFieldView();
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
 
@@ -174,6 +176,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           </span>
         </button>
       </div>
+      <BrainFieldViewSwitcher active={fieldView} onSelect={setFieldView} />
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         {/* Same stacking rule as the all-projects field: natural height in the
           * narrow column (the shell's `main` is the scroll container), split
@@ -211,6 +214,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
               const slice = envelope.payload;
               return nodes.length > 0 ? (
                 <ScopedField
+                  variant={fieldView}
                   nodes={nodes}
                   edges={edges}
                   inspectedId={inspectedId}

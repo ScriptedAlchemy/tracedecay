@@ -459,6 +459,7 @@ export function placeLabels(
   candidates: readonly (readonly LabelCandidate[])[],
   obstacles: readonly LabelCandidate[] = [],
   gap = 2,
+  bounds?: Bounds,
 ): LabelCandidate[] {
   const kept: LabelCandidate[] = [];
   const overlaps = (a: LabelCandidate, b: LabelCandidate) =>
@@ -469,6 +470,8 @@ export function placeLabels(
   for (const positions of candidates) {
     const clear = positions.find(
       (position) =>
+        (!bounds || (position.x >= bounds.x0 && position.y >= bounds.y0 &&
+          position.x + position.width <= bounds.x1 && position.y + position.height <= bounds.y1)) &&
         !kept.some((box) => overlaps(position, box)) &&
         !obstacles.some((box) => box.id !== position.id && overlaps(position, box)),
     );

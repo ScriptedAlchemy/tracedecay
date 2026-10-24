@@ -521,6 +521,57 @@ function linkedTemporal(ordered = false) {
 }
 
 describe('LoomPage', () => {
+  it('reserves readable session labels and usable timeline space at a narrow measured width', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 300, bottom: 600, width: 300, height: 600, toJSON: () => ({}),
+    });
+    const { container } = renderLoom();
+    const session = await screen.findByRole('button', { name: 'Open session Deliver Git primitive runtime' });
+    await waitFor(() => expect(Number(session.querySelector('rect')?.getAttribute('width'))).toBeGreaterThan(70));
+    expect(session.querySelector('text')?.textContent).toContain('Deliver');
+    expect(session.querySelector('title')?.textContent).toContain('Deliver Git primitive runtime');
+    const field = container.querySelector('[data-field-background]')!;
+    expect(Number(field.getAttribute('x'))).toBeGreaterThan(100);
+    expect(Number(field.getAttribute('width'))).toBeGreaterThan(100);
+    fireEvent.click(session);
+    await waitFor(() => expect(new URLSearchParams(screen.getByTestId('loom-url').textContent ?? '').get('loomSession')).toBe(LANE('cursor', 'sess-open')));
+  });
+
+  it('switches visual views without losing the selected thread, replay, filters or time window', async () => {
+    const params = new URLSearchParams({
+      scope: 'project-loom',
+      loomSession: LANE('cursor', 'sess-open'),
+      loomEvent: 'm1',
+      loomWindow: `${NOW - 10_800},${NOW - 3600}`,
+      loomHide: 'commit',
+      loomRenderer: 'strata',
+    });
+    renderLoom(
+      { ...HAPPY, '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) } },
+      `/loom?${params}`,
+    );
+    const views = within(await screen.findByRole('group', { name: 'Loom view' }));
+    await screen.findAllByText('Reading the reconciliation path.');
+    expect(views.getByRole('button', { name: 'Strata' }).getAttribute('aria-pressed')).toBe('true');
+    const visibleEvents = () => Array.from(document.querySelectorAll('[data-event]'), (node) => [
+      node.getAttribute('data-event'), node.getAttribute('data-grade'),
+    ]);
+    const before = visibleEvents();
+    expect(before.length).toBeGreaterThan(0);
+
+    for (const [label, value] of [['Weave', null], ['Rails', 'rail'], ['Strata', 'strata']] as const) {
+      await userEvent.click(views.getByRole('button', { name: label }));
+      expect(views.getByRole('button', { name: label }).getAttribute('aria-pressed')).toBe('true');
+      const restored = new URLSearchParams(screen.getByTestId('loom-url').textContent ?? '');
+      expect(restored.get('loomRenderer')).toBe(value);
+      for (const key of ['scope', 'loomSession', 'loomEvent', 'loomWindow', 'loomHide']) {
+        expect(restored.get(key)).toBe(params.get(key));
+      }
+      expect(visibleEvents()).toEqual(before);
+      expect(document.querySelectorAll('[data-event][data-kind="commit"]')).toHaveLength(0);
+    }
+  });
+
   it('restores encounter selection without clearing thread or replay URL state', async () => {
     const thread = encodeURIComponent(LANE('cursor', 'sess-open'));
     const encounter = PROXIMITY.page.encounters[0]!.encounter_id;
@@ -581,11 +632,11 @@ describe('LoomPage', () => {
     expect(spawns[0]!.querySelector('title')?.textContent).toContain('tool-parent-7');
     expect(spawns[0]!.querySelector('title')?.textContent).toContain('fork placed at the child start');
     // The curve leaves the parent lane at the child's recorded start: the spawn
-    // glyph and the child's session-start glyph share one x. Hit rects are
-    // centred on the node, so equal centres means equal x + width/2.
+    // glyph and the child's session-start glyph share one exact time anchor,
+    // including after their Y positions are projected into the spindle.
     const childStart = document.querySelector(`[data-event="start:${LANE('cursor', 'sess-closed').replace(/"/g, '\\"')}"]`)!;
-    const centre = (rect: Element) => Number(rect.getAttribute('x')) + Number(rect.getAttribute('width')) / 2;
-    expect(centre(spawns[0]!.querySelector('rect')!)).toBeCloseTo(centre(childStart.querySelector('rect')!), 3);
+    expect(Number(spawns[0]!.querySelector('[data-event-hit]')!.getAttribute('cx')))
+      .toBeCloseTo(Number(childStart.querySelector('[data-event-hit]')!.getAttribute('cx')), 3);
     // The cross-provider child is not linked: no second curve, and the legend
     // names both the missing handoff authority and the truncated parentage.
     expect(screen.getByRole('list', { name: 'Evidence gaps' }).textContent).toContain('handoff unavailable');
@@ -605,6 +656,26 @@ describe('LoomPage', () => {
     expect(spawn.querySelector('title')?.textContent).toContain('child start precedes parent start');
   });
 
+  it('counts missing-parent subagents inside the distinct loaded population', async () => {
+    const temporal = linkedTemporal(true);
+    const hierarchy = hierarchyFor([
+      treeNode('sess-open', null), treeNode('sess-closed', 'sess-open'),
+      treeNode('sess-hollow', 'outside-page', 'codex', 'missing_parent'),
+    ], { missing_parent_count: 1 });
+    renderLoom({
+      ...HAPPY,
+      '/api/loom/temporal': { status: 200, body: {
+        ...temporal,
+        payload: { ...temporal.payload, sessions: temporal.payload.sessions.map((session) => ({ ...session, is_subagent: session.session_id !== 'sess-open' })) },
+      } },
+      '/api/plugins/analytics/subagent-tree': { status: 200, body: readyEnvelope(hierarchy) },
+    });
+    await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
+    const agentReading = screen.getByText('agents').parentElement!;
+    expect(within(agentReading).getByText('3', { exact: true })).toBeTruthy();
+    expect(within(agentReading).getByText('2 included subagents · unique within this loaded page')).toBeTruthy();
+  });
+
   it('collapses a branch into a bundle and keeps the URL, table and field in step', async () => {
     const hierarchy = hierarchyFor([treeNode('sess-open', null), treeNode('sess-closed', 'sess-open')]);
     renderLoom({
@@ -617,13 +688,16 @@ describe('LoomPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Collapse branch Deliver Git primitive runtime' }));
     expect(screen.getByTestId('loom-url').textContent).toContain('loomCollapsed=');
     expect(document.querySelectorAll('[data-lane-row]')).toHaveLength(2);
-    expect(document.querySelector('[data-cluster]')).not.toBeNull();
+    expect(document.querySelectorAll('[data-spindle-fiber]')).toHaveLength(3);
+    const childFiber = [...document.querySelectorAll('[data-spindle-fiber]')].find((fiber) => fiber.getAttribute('data-spindle-fiber') === LANE('cursor', 'sess-closed'))!;
+    expect(childFiber.getAttribute('data-spindle-owner')).toBe(LANE('cursor', 'sess-open'));
     // The exact table keeps the hidden child as a row and says where it went.
     expect(document.querySelectorAll('[data-navigator-lane]')).toHaveLength(3);
     expect(document.querySelectorAll('[data-navigator-hidden="true"]')).toHaveLength(1);
     expect(screen.getByText('in bundle')).toBeTruthy();
-    // The bundle's count names its population: one descendant session.
-    expect(screen.getByRole('button', { name: /Expand branch Deliver Git primitive runtime · 1 sessions/ })).toBeTruthy();
+    // The label toggle and exact table keep the branch action while its real
+    // member remains a separately selectable filament.
+    expect(screen.getByRole('button', { name: 'Expand branch Deliver Git primitive runtime' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Expand Deliver Git primitive runtime in navigator' }));
     expect(screen.getByTestId('loom-url').textContent).not.toContain('loomCollapsed=');
     expect(document.querySelectorAll('[data-lane-row]')).toHaveLength(3);
@@ -647,10 +721,15 @@ describe('LoomPage', () => {
       '/api/plugins/analytics/subagent-tree': { status: 200, body: readyEnvelope(hierarchyFor(nodes)) },
     });
     await screen.findByRole('button', { name: 'Select session Dense 0' });
-    expect(document.querySelectorAll('[data-cluster]')).toHaveLength(30);
-    expect(document.querySelectorAll('[data-lane-row]')).toHaveLength(30);
+    expect(document.querySelectorAll('[data-spindle-fiber]')).toHaveLength(60);
+    expect(document.querySelectorAll('[data-navigator-hidden="true"]')).toHaveLength(30);
+    expect(document.querySelectorAll('[data-lane-row]').length).toBeGreaterThan(0);
+    expect(document.querySelectorAll('[data-lane-row]').length).toBeLessThan(30);
     fireEvent.click(screen.getByRole('button', { name: 'Expand Dense 0 in navigator' }));
     expect(screen.getByTestId('loom-url').textContent).toContain('loomExpanded=');
+    expect(document.querySelectorAll('[data-spindle-fiber]')).toHaveLength(60);
+    expect(document.querySelectorAll('[data-navigator-hidden="true"]')).toHaveLength(29);
+    fireEvent.click(screen.getByRole('button', { name: 'Rails' }));
     expect(document.querySelectorAll('[data-cluster]')).toHaveLength(29);
     expect(document.querySelectorAll('[data-lane-row]')).toHaveLength(31);
   });

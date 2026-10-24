@@ -279,10 +279,12 @@ export function layoutLanes(
   const ticks =
     span === null
       ? []
-      : Array.from({ length: tickCount }, (_, index) => {
-          const at = span.start + ((span.end - span.start) * index) / (tickCount - 1);
-          return { x: xOf(at), at };
-        });
+      : span.start === span.end
+        ? [{ x: xOf(span.start), at: span.start }]
+        : Array.from({ length: tickCount }, (_, index) => {
+            const at = span.start + ((span.end - span.start) * index) / (tickCount - 1);
+            return { x: xOf(at), at };
+          });
 
   return { width, height: Math.max(viewport.height, y + 8), x0, x1, rowHeight: ROW_HEIGHT, span, ticks, lanes, threads, hiddenLinks, omitted };
 }

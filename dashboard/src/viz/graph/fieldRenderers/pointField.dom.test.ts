@@ -1,8 +1,9 @@
 import { fireEvent } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ActivationField } from '../activation.ts';
-import { createPointField } from './pointField.ts';
-import { fitCamera, sampleFieldPalette, toScreen, type FieldScene, type SceneBody } from './scene.ts';
+import { createLuminousField, createNeuralField, createPointField } from './pointField.ts';
+import { buildNeuralBody } from './neuralBody.ts';
+import { fitCamera, sampleFieldPalette, toScreen, type FieldRendererFactory, type FieldScene, type SceneBody } from './scene.ts';
 
 const WIDTH = 800;
 const HEIGHT = 600;
@@ -34,7 +35,7 @@ const SCENE: FieldScene = {
   neighbors: new Map(),
 };
 
-function mount(onHover: (id: string | null) => void): HTMLCanvasElement {
+function mount(onHover: (id: string | null) => void, create: FieldRendererFactory = createPointField, onSelect = vi.fn(), scene = SCENE): HTMLCanvasElement {
   const context = new Proxy(
     {},
     {
@@ -56,14 +57,14 @@ function mount(onHover: (id: string | null) => void): HTMLCanvasElement {
   Object.defineProperty(container, 'clientWidth', { value: WIDTH });
   Object.defineProperty(container, 'clientHeight', { value: HEIGHT });
   document.body.appendChild(container);
-  createPointField({
+  create({
     container,
-    scene: SCENE,
+    scene,
     field: new ActivationField(),
     palette: sampleFieldPalette(container),
     isReduced: () => true,
     onHover,
-    onSelect: () => {},
+    onSelect,
   });
   return container.querySelector('canvas')!;
 }
@@ -110,5 +111,41 @@ describe('point field hover', () => {
     fireEvent.pointerMove(canvas, { clientX: ex, clientY: ey });
     fireEvent.pointerLeave(canvas);
     expect(onHover.mock.calls).toEqual([['a'], [null]]);
+  });
+
+  it.each([['luminous', createLuminousField], ['neural', createNeuralField]] as const)('picks and clears the same exact bodies in the restored %s view', (_, create) => {
+    const onHover = vi.fn();
+    const onSelect = vi.fn();
+    const canvas = mount(onHover, create, onSelect);
+    const [ax, ay] = at(0, 1);
+    fireEvent.pointerMove(canvas, { clientX: ax, clientY: ay });
+    expect(onHover).toHaveBeenLastCalledWith('a');
+    fireEvent.click(canvas, { clientX: ax, clientY: ay });
+    expect(onSelect).toHaveBeenLastCalledWith('a');
+    fireEvent.pointerLeave(canvas);
+    expect(onHover).toHaveBeenLastCalledWith(null);
+  });
+
+  it('picks the visible Neural root beyond the measured disc and clears outside its envelope', () => {
+    const core = { ...body('core', 0, 0), radius: 0.2 };
+    const scene: FieldScene = { ...SCENE, bodies: [core], extent: { x: [-1, 1], y: [-1, 1] } };
+    const onHover = vi.fn();
+    const onSelect = vi.fn();
+    const canvas = mount(onHover, createNeuralField, onSelect, scene);
+    const camera = fitCamera(scene.extent, WIDTH, HEIGHT, { top: 24, right: 24, bottom: 24, left: 24 });
+    const geometry = buildNeuralBody({ id: core.id, radius: core.radius, depth: 0 });
+    const [x, rootY] = toScreen(camera, core.x, core.y - geometry.depthReach);
+    // The prominent basal knot falls outside the old disc-only hit target.
+    expect(geometry.depthReach * camera.scale).toBeGreaterThan(core.radius * camera.scale + 5);
+    fireEvent.pointerMove(canvas, { clientX: x, clientY: rootY });
+    expect(onHover).toHaveBeenLastCalledWith('core');
+    fireEvent.click(canvas, { clientX: x, clientY: rootY });
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith('core');
+
+    const [emptyX, emptyY] = toScreen(camera, core.x, core.y - core.radius * 3);
+    fireEvent.pointerMove(canvas, { clientX: emptyX, clientY: emptyY });
+    expect(onHover).toHaveBeenLastCalledWith(null);
+    fireEvent.click(canvas, { clientX: emptyX, clientY: emptyY });
+    expect(onSelect).toHaveBeenCalledTimes(1);
   });
 });
