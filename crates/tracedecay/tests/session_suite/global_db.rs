@@ -1589,6 +1589,110 @@ async fn session_ingest_health_can_filter_by_provider() {
     assert_eq!(claude_health.pending_bytes, 300);
 }
 
+fn claude_transcript_record(project: &Path, uuid: &str, text: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "cwd": project,
+            "sessionId": "backlog-session",
+            "uuid": uuid,
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {"role": "user", "content": text},
+        })
+    )
+}
+
+async fn ingest_claude_history(db: &HostAdmissionTestRuntimeV1, home: &Path, project: &Path) {
+    tracedecay_sessions::runtime::hosts::claude_observation::ingest_source_with_observations_with_admission(
+        &tracedecay_sessions::runtime::hosts::claude::ClaudeSource::with_home(home),
+        project,
+        tracedecay_domain::ObservationScopeV1::Profile,
+        &db.facade(),
+        None,
+        tracedecay_sessions::observation::ObservationCancellation::default(),
+    )
+    .await
+    .expect("claude history ingest");
+}
+
+/// The backlog is what the ingest pipeline has not yet admitted: a transcript
+/// read to its end is drained, appended bytes stay pending until the next
+/// ingest admits them, and a rewritten file is pending in full.
+#[tokio::test]
+async fn session_ingest_health_measures_backlog_against_admitted_source_cursors() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let transcript_dir = home.join(".claude/projects/-backlog");
+    std::fs::create_dir_all(&transcript_dir).unwrap();
+    let transcript = transcript_dir.join("backlog-session.jsonl");
+    std::fs::write(
+        &transcript,
+        claude_transcript_record(&project, "backlog-1", "first prompt"),
+    )
+    .unwrap();
+    let db = open_isolated_db(&tmp).await;
+
+    ingest_claude_history(&db, &home, &project).await;
+    let drained = db.session_ingest_health().await;
+    assert_eq!(drained.tracked_transcripts, 1);
+    assert_eq!(
+        (drained.pending_transcripts, drained.pending_bytes),
+        (0, 0),
+        "an ingested transcript has no backlog"
+    );
+    let mtime = std::fs::metadata(&transcript)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(
+        drained.last_ingest_unix,
+        Some(i64::try_from(mtime).unwrap())
+    );
+
+    let appended = claude_transcript_record(&project, "backlog-2", "appended prompt");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    let appended_health = db.session_ingest_health().await;
+    assert_eq!(appended_health.pending_transcripts, 1);
+    assert_eq!(appended_health.pending_bytes, appended.len() as u64);
+    assert_eq!(
+        appended_health.max_transcript_pending_bytes,
+        appended.len() as u64
+    );
+
+    ingest_claude_history(&db, &home, &project).await;
+    let caught_up = db.session_ingest_health().await;
+    assert_eq!(
+        (caught_up.pending_transcripts, caught_up.pending_bytes),
+        (0, 0)
+    );
+
+    let replacement = claude_transcript_record(&project, "backlog-3", "rewritten history");
+    let staged = transcript_dir.join("backlog-session.jsonl.next");
+    std::fs::write(&staged, &replacement).unwrap();
+    std::fs::rename(&staged, &transcript).unwrap();
+    let rewritten = db.session_ingest_health().await;
+    assert_eq!(rewritten.pending_transcripts, 1);
+    assert_eq!(
+        rewritten.pending_bytes,
+        replacement.len() as u64,
+        "a rewritten file's earlier cursor does not cover it"
+    );
+
+    let other_provider = db.session_ingest_health_for_provider(Some("cursor")).await;
+    assert_eq!(other_provider.tracked_transcripts, 0);
+}
+
 #[tokio::test]
 async fn hook_analytics_import_is_incremental_and_idempotent() {
     use tracedecay_application::analytics_bridge::HookImportSource;
