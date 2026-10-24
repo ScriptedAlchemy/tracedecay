@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::watch;
+use tracedecay_application::advisory::github_runtime::{
+    GitHubSourceReadingReceiptV1, record_github_source_advisory_mount_failure_v1,
+};
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
 
 use super::super::{project_open_lsp_scope_grant, register_production_lsp_owner};
@@ -44,8 +47,8 @@ pub(in crate::daemon::project_open_owners) enum AdvisoryMountFailureV1 {
 }
 
 impl AdvisoryMountFailureV1 {
-    pub(in crate::daemon::project_open_owners) fn problem(self) -> ApplicationProblem {
-        let message = match self {
+    fn message(self) -> &'static str {
+        match self {
             Self::CodeIndexDisabled => {
                 "The code index was disabled when this checkout opened, so the advisory feedback cycle never mounted"
             }
@@ -64,12 +67,15 @@ impl AdvisoryMountFailureV1 {
             Self::Abandoned => {
                 "The advisory feedback cycle mount stopped before publishing its owner"
             }
-        };
+        }
+    }
+
+    pub(in crate::daemon::project_open_owners) fn problem(self) -> ApplicationProblem {
         ApplicationProblem::Unavailable {
             classification: ApplicationUnavailableClassV1::Authority,
             diagnostic: SafeDiagnostic {
                 code: "feedback.advisory-cycle.mount-failed".to_owned(),
-                message: message.to_owned(),
+                message: self.message().to_owned(),
             },
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::ContactAdministrator],
@@ -81,25 +87,38 @@ impl AdvisoryMountFailureV1 {
 /// The advisory mount's sole write handle on its published state. Dropping it
 /// before a verdict publishes `Failed(Abandoned)`, so no placeholder waits on
 /// a mount that no longer runs.
-pub(in crate::daemon::project_open_owners) struct AdvisoryMountPublisherV1(
-    watch::Sender<AdvisoryMountStateV1>,
-);
+pub(in crate::daemon::project_open_owners) struct AdvisoryMountPublisherV1 {
+    sender: watch::Sender<AdvisoryMountStateV1>,
+    github_source_reading: Option<GitHubSourceReadingReceiptV1>,
+}
 
 impl AdvisoryMountPublisherV1 {
-    pub(in crate::daemon::project_open_owners) fn channel()
-    -> (Self, watch::Receiver<AdvisoryMountStateV1>) {
+    pub(in crate::daemon::project_open_owners) fn channel(
+        github_source_reading: Option<GitHubSourceReadingReceiptV1>,
+    ) -> (Self, watch::Receiver<AdvisoryMountStateV1>) {
         let (sender, receiver) = watch::channel(AdvisoryMountStateV1::Mounting);
-        (Self(sender), receiver)
+        (
+            Self {
+                sender,
+                github_source_reading,
+            },
+            receiver,
+        )
     }
 
     pub(in crate::daemon::project_open_owners) fn publish(&self, state: AdvisoryMountStateV1) {
-        self.0.send_replace(state);
+        if let AdvisoryMountStateV1::Failed(failure) = state
+            && let Some(receipt) = &self.github_source_reading
+        {
+            record_github_source_advisory_mount_failure_v1(receipt, failure.message());
+        }
+        self.sender.send_replace(state);
     }
 }
 
 impl Drop for AdvisoryMountPublisherV1 {
     fn drop(&mut self) {
-        self.0.send_if_modified(|state| {
+        let abandoned = self.sender.send_if_modified(|state| {
             let open = matches!(
                 state,
                 AdvisoryMountStateV1::AwaitingGeneration | AdvisoryMountStateV1::Mounting
@@ -109,6 +128,12 @@ impl Drop for AdvisoryMountPublisherV1 {
             }
             open
         });
+        if abandoned && let Some(receipt) = &self.github_source_reading {
+            record_github_source_advisory_mount_failure_v1(
+                receipt,
+                AdvisoryMountFailureV1::Abandoned.message(),
+            );
+        }
     }
 }
 

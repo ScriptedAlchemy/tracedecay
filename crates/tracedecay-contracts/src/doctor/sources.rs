@@ -1128,8 +1128,7 @@ pub enum GitHubSourceReadV1 {
         repository: String,
         state: GitHubSourceStateV1,
     },
-    /// No GitHub source was observed: the checkout has no GitHub `origin`,
-    /// or its advisory owner has not mounted in this daemon.
+    /// No pull-request discovery observed a GitHub source; status names why.
     Absent,
 }
 

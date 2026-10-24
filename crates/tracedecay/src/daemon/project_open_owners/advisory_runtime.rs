@@ -11,10 +11,11 @@ use tokio::sync::watch;
 use tracedecay_application::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
     GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-    GitHubSourceStatusV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
+    GitHubSourceReadingReceiptV1, GitHubSourceReadingV1, GitHubSourceStatusV1,
+    GitHubSourceUnobservedV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
     RegisteredGitHubReadOnlyCredentialV1, discover_exact_commit_pull_request_v1,
     github_repository_from_remote_v1, public_repository_read_credential_v1,
-    record_github_source_status_v1, resolve_registered_github_read_only_credential_v1,
+    record_github_source_reading_v1, resolve_registered_github_read_only_credential_v1,
 };
 use tracedecay_application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
@@ -34,7 +35,7 @@ use tracedecay_application::advisory::{
 };
 use tracedecay_application::delivery::{
     ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
-    ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
+    ProjectDeliveryReadHandleV1, ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
     gated_project_delivery_read_handle_v1, open_project_delivery_read_authority_v1,
 };
 use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
@@ -1844,15 +1845,30 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
     state: ProjectOpenDependentOwnerState,
 ) -> Result<()> {
     let mut state = state;
-    if !matches!(
-        tracedecay_application::git_intelligence::NativeGitIntelligence::new(
+    let head_unobserved =
+        match tracedecay_application::git_intelligence::NativeGitIntelligence::new(
             project_root,
             state.scope.repository_id.clone(),
             state.scope.worktree_id.clone(),
         )
-        .head(),
-        Ok(GitHeadStateV1::Attached { .. })
-    ) {
+        .head()
+        {
+            Ok(GitHeadStateV1::Attached { .. }) => None,
+            Ok(GitHeadStateV1::Detached { .. }) => Some(GitHubSourceUnobservedV1::DetachedHead),
+            Ok(GitHeadStateV1::Unborn { .. }) => Some(GitHubSourceUnobservedV1::UnbornHead),
+            Err(_) => Some(GitHubSourceUnobservedV1::HeadUnavailable),
+        };
+    if let Some(head_unobserved) = head_unobserved {
+        let github_origin = tracedecay_runtime_core::git::git_remote_url(project_root)
+            .as_deref()
+            .and_then(github_repository_from_remote_v1)
+            .is_some();
+        let cause = if github_origin {
+            head_unobserved
+        } else {
+            GitHubSourceUnobservedV1::NoGitHubOrigin
+        };
+        record_github_source_reading_v1(project_root, GitHubSourceReadingV1::unobserved(cause));
         register_project_query_authority(
             invocation,
             project_root,
@@ -1865,12 +1881,13 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
             event = "project_open_owner_phase",
             project = %project_root.display(),
             phase = "feedback_advisory_unavailable",
-            reason = "the admitted checkout has no attached branch",
+            reason = cause.reason(),
         );
         return Ok(());
     }
-    register_project_delivery_read_authority(invocation, project_root, &state).await?;
-    let (mount_publisher, mount_state) = AdvisoryMountPublisherV1::channel();
+    let github_source_reading =
+        register_project_delivery_read_authority(invocation, project_root, &state).await?;
+    let (mount_publisher, mount_state) = AdvisoryMountPublisherV1::channel(github_source_reading);
     // Proximity is a typed read over session/git correlation and the current
     // code graph. Like Delivery, it must be available before a sealed
     // generation mounts the full advisory cycle, otherwise HTTP
@@ -2401,7 +2418,7 @@ async fn register_project_delivery_read_authority(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
-) -> Result<()> {
+) -> Result<Option<GitHubSourceReadingReceiptV1>> {
     let feedback_scope = match resolve_project_feedback_scope_v1(project_root, &state.scope) {
         Ok(scope) => scope,
         Err(error) => {
@@ -2416,13 +2433,21 @@ async fn register_project_delivery_read_authority(
                 reason = %error,
                 "project-open delivery read has no resolvable feedback scope"
             );
-            return Ok(());
+            return Ok(None);
         }
     };
-    let handle = match resolve_production_github_provider_access(invocation, project_root, state)
-        .await
+    let (handle, github_source_reading) = match resolve_production_github_provider_access(
+        invocation,
+        project_root,
+        state,
+    )
+    .await
     {
         Ok(access) => {
+            let receipt = record_github_source_reading_v1(
+                project_root,
+                GitHubSourceReadingV1::unobserved(GitHubSourceUnobservedV1::AwaitingAdvisoryOwner),
+            );
             let review_bodies = github_anchor_authorities_arc_v1(
                 state.database.clone(),
                 project_root.to_path_buf(),
@@ -2434,7 +2459,7 @@ async fn register_project_delivery_read_authority(
                 evidence: authorities.github_anchors,
                 source_access: Arc::clone(&access.source_access),
             });
-            match open_project_delivery_read_authority_v1(ProjectDeliveryReadOpenV1 {
+            let handle = match open_project_delivery_read_authority_v1(ProjectDeliveryReadOpenV1 {
                 database: state.database.clone(),
                 profile_id: state.session_db.binding().shard_id.profile_id.clone(),
                 resolved_scope: state.scope.clone(),
@@ -2458,9 +2483,10 @@ async fn register_project_delivery_read_authority(
                         project = %project_root.display(),
                         "project-open delivery read authority could not open its retained stores"
                     );
-                    return Ok(());
+                    return Ok(Some(receipt));
                 }
-            }
+            };
+            (handle, Some(receipt))
         }
         Err(gate) => {
             tracing::info!(
@@ -2469,9 +2495,22 @@ async fn register_project_delivery_read_authority(
                 project = %project_root.display(),
                 gate = ?gate,
             );
-            gated_project_delivery_read_handle_v1(feedback_scope, gate)
+            (
+                gated_project_delivery_read_handle_v1(feedback_scope, gate),
+                None,
+            )
         }
     };
+    publish_project_delivery_read_authority(invocation, project_root, state, handle).await?;
+    Ok(github_source_reading)
+}
+
+async fn publish_project_delivery_read_authority(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+    handle: ProjectDeliveryReadHandleV1,
+) -> Result<()> {
     let source_access =
         project_open_source_access_authority().map_err(|error| TraceDecayError::Config {
             message: format!("project-open delivery source access is invalid: {error}"),
@@ -2491,7 +2530,8 @@ async fn register_project_delivery_read_authority(
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open delivery read registration failed: {error}"),
-        })
+        })?;
+    Ok(())
 }
 
 /// Registers the feedback-proximity read owner for this admitted checkout as
@@ -2680,7 +2720,24 @@ struct ProductionGitHubProviderAccessV1 {
     http: GitHubHttpReadConfigV1,
 }
 
+/// Resolves the provider access and records the gate that refused it as this
+/// project's GitHub source reading.
 async fn resolve_production_github_provider_access(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+) -> std::result::Result<ProductionGitHubProviderAccessV1, ProjectDeliveryProviderMountGateV1> {
+    let access = open_production_github_provider_access(invocation, project_root, state).await;
+    if let Err(gate) = &access {
+        record_github_source_reading_v1(
+            project_root,
+            GitHubSourceReadingV1::unobserved((*gate).into()),
+        );
+    }
+    access
+}
+
+async fn open_production_github_provider_access(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
@@ -2902,7 +2959,7 @@ async fn discover_production_pull_request(
         repository = %source.repository,
         project = %project_root.display(),
     );
-    record_github_source_status_v1(project_root, source);
+    record_github_source_reading_v1(project_root, GitHubSourceReadingV1::Observed(source));
     match &discovery {
         Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)) => tracing::info!(
             event = "github_pull_request_discovery",

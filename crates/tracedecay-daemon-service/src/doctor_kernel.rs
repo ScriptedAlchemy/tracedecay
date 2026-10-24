@@ -11,7 +11,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracedecay_application::advisory::github_runtime::github_source_status_v1;
+use tracedecay_application::advisory::github_runtime::{
+    GitHubSourceReadingV1, github_source_reading_v1,
+};
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
 use tracedecay_configuration::config::{PinnedRuntimeConfiguration, setting_findings};
@@ -1345,12 +1347,12 @@ pub fn production_doctor_report_reader(
                 },
                 host,
                 advisory_feedback,
-                github_source: match github_source_status_v1(&project_root) {
-                    Some(source) => GitHubSourceReadV1::Observed {
+                github_source: match github_source_reading_v1(&project_root) {
+                    GitHubSourceReadingV1::Observed(source) => GitHubSourceReadV1::Observed {
                         repository: source.repository,
                         state: source.state,
                     },
-                    None => GitHubSourceReadV1::Absent,
+                    GitHubSourceReadingV1::Unobserved { .. } => GitHubSourceReadV1::Absent,
                 },
                 language_server,
                 code_index,

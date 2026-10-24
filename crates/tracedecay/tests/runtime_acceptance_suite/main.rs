@@ -14,6 +14,7 @@ mod canonical_git_observation_correlation;
 #[allow(clippy::unwrap_used)]
 mod cross_host_handoff_test;
 mod daemon_runtime_acceptance;
+mod github_source_status_acceptance;
 mod grafeo_restart_acceptance;
 mod host_event_fixture_test;
 mod lifecycle_production_authority_test;
