@@ -501,6 +501,58 @@ fn process_reservations_sum_every_production_ledger_until_released() {
 }
 
 #[test]
+fn cached_process_sample_preserves_raw_rss_without_resampling() {
+    let next_sample = Arc::new(Mutex::new(None::<ProcessResidentSampleV1>));
+    let reads = Arc::new(AtomicU64::new(0));
+    let pressure = ResidentMemoryPressureV1::with_sampler(bytes(10_000), {
+        let next_sample = Arc::clone(&next_sample);
+        let reads = Arc::clone(&reads);
+        Arc::new(move || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            *next_sample.lock().expect("sample lock")
+        })
+    });
+    assert_eq!(pressure.last_sample(), None);
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert!(pressure.sample_and_publish().is_none());
+    assert_eq!(pressure.last_sample(), None);
+
+    let sample = ProcessResidentSampleV1 {
+        resident_bytes: 1_200,
+        unreclaimable_bytes: 700,
+        swapped_bytes: 300,
+        cgroup_headroom_bytes: Some(6_000),
+    };
+    *next_sample.lock().expect("sample lock") = Some(sample);
+    pressure.sample_and_publish().expect("successful sample");
+    let sampled_reads = reads.load(Ordering::SeqCst);
+    assert_eq!(pressure.last_sample(), Some(sample));
+    assert_eq!(
+        pressure
+            .last_sample()
+            .expect("cached sample")
+            .resident_bytes,
+        1_200
+    );
+    assert_eq!(pressure.state().observed_bytes(), Some(4_000));
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        sampled_reads,
+        "cached accounting must not resample or run pressure reclaimers"
+    );
+
+    *next_sample.lock().expect("sample lock") = None;
+    assert!(pressure.sample_and_publish().is_none());
+    assert_eq!(reads.load(Ordering::SeqCst), sampled_reads + 1);
+    assert_eq!(
+        pressure.last_sample(),
+        Some(sample),
+        "a failed sample preserves the last good reading"
+    );
+    assert_eq!(pressure.state().observed_bytes(), Some(4_000));
+}
+
+#[test]
 fn reservation_tracks_exact_identity_and_releases_on_drop() {
     let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
     let canonical = key("project-a", "worktree-a", "generation-a", "canonical");

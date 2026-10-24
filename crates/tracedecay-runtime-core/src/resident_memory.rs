@@ -758,6 +758,19 @@ impl ResidentMemoryPressureV1 {
         Some((sample, self.publish_sample(sample)))
     }
 
+    /// Last successful kernel sample, without sampling or running reclaimers.
+    /// Admission occupancy can include swap and shared cgroup pressure; this
+    /// cached sample retains the raw process RSS for resident accounting.
+    /// `None` until a sample has been published. A failed sample leaves the
+    /// last successful observation standing.
+    #[must_use]
+    pub fn last_sample(&self) -> Option<ProcessResidentSampleV1> {
+        *self
+            .observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Publish a fresh admission sample without running pressure reclaimers.
     ///
     /// Capture and graph checkpoints run on the indexing pool. A reclaimer

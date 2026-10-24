@@ -281,8 +281,9 @@ fn memory_value(
             .to_vec(),
         retained_bytes: report.measured_bytes,
         unmeasured_owners: report.unmeasured_owners,
-        unattributed_bytes: resident_bytes
-            .map(|resident| resident.saturating_sub(report.measured_bytes)),
+        unattributed_bytes: pressure
+            .last_sample()
+            .map(|sample| sample.resident_bytes.saturating_sub(report.measured_bytes)),
         reserved_bytes: reservations.reserved_bytes,
         reservations: reservation_rows(reservations),
         owners,
@@ -1447,6 +1448,84 @@ mod tests {
 
         assert_eq!(memory.resident_bytes, None);
         assert_eq!(memory.unattributed_bytes, None);
+    }
+
+    fn assert_status_remainder_uses_process_rss(
+        sample: tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1,
+    ) {
+        use std::sync::Arc;
+        use tracedecay_runtime_core::resident_memory::{
+            ProcessAdmissionReservationsV1, ResidentMemoryPressureV1, ResidentOwnerKindV1,
+            ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
+        };
+
+        let limit = 10 * 1024 * 1024 * 1024;
+        let pressure = ResidentMemoryPressureV1::with_sampler(
+            std::num::NonZeroU64::new(limit).expect("limit"),
+            Arc::new(move || Some(sample)),
+        );
+        pressure.sample_and_publish().expect("sample published");
+        let owners = Arc::new(ResidentOwnersV1::new(std::time::Duration::from_mins(10)));
+        let owner: Arc<dyn ResidentOwnerV1> = Arc::new(HeldDecode);
+        let project = tracedecay_domain::ProjectId::new("project.fixture").expect("project id");
+        let _registration = owners
+            .register(
+                ResidentOwnerScopeV1 {
+                    project_id: project.clone(),
+                    worktree_id: tracedecay_domain::WorktreeId::new("worktree.fixture")
+                        .expect("worktree id"),
+                },
+                ResidentOwnerKindV1::DecodedGeneration,
+                Arc::downgrade(&owner),
+            )
+            .expect("register owner");
+        let memory = super::memory_value(
+            &pressure,
+            &owners,
+            &ProcessAdmissionReservationsV1::default(),
+            None,
+            std::time::Instant::now(),
+            &project,
+        );
+
+        assert!(sample.admission_bytes(limit) > sample.resident_bytes);
+        assert_eq!(
+            memory.resident_bytes,
+            Some(sample.admission_bytes(limit)),
+            "the shipped admission-occupancy field keeps its semantics"
+        );
+        assert_eq!(memory.retained_bytes, 4_096);
+        assert_eq!(
+            memory.unattributed_bytes,
+            Some(sample.resident_bytes - 4_096),
+            "only process RSS no retained owner holds belongs in the resident remainder"
+        );
+    }
+
+    #[test]
+    fn status_memory_remainder_excludes_shared_cgroup_occupancy() {
+        const MIB: u64 = 1024 * 1024;
+        assert_status_remainder_uses_process_rss(
+            tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
+                resident_bytes: 100 * MIB,
+                unreclaimable_bytes: 80 * MIB,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: Some(1024 * MIB),
+            },
+        );
+    }
+
+    #[test]
+    fn status_memory_remainder_excludes_swapped_pages() {
+        const MIB: u64 = 1024 * 1024;
+        assert_status_remainder_uses_process_rss(
+            tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
+                resident_bytes: 100 * MIB,
+                unreclaimable_bytes: 80 * MIB,
+                swapped_bytes: 700 * MIB,
+                cgroup_headroom_bytes: None,
+            },
+        );
     }
 
     #[test]
