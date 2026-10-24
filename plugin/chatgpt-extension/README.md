@@ -9,7 +9,8 @@ contracts. It adds no DTOs, database, policy store, or write API.
 
 From a ChatGPT conversation or the plugin's global entrypoint you can:
 
-- Pick a project from the daemon's isolated profile registry.
+- Pick a recent project or search the daemon's isolated profile registry by
+  project path, alias, id, or default branch.
 - Search code symbols by name.
 - Inspect a symbol with its callers, callees, impact, and a bounded call
   graph.
@@ -44,7 +45,7 @@ not-found-or-not-authorized problem rather than an empty success.
 Inside the server a `DaemonBridge` reads through `@tracedecay/sdk` (the
 workspace's generated operation contracts, never hand-edited):
 
-- Registry operations (`project_list`, `project_context`) use a projectless
+- Registry operations (`project_list`, `project_search`, `project_context`) use a projectless
   `RegistryClient` over a profile-scoped `tracedecay serve` session; it takes
   no base URL, project id, or token.
 - MCP-transport project operations (`search`, `node`, `impact`,
@@ -64,11 +65,20 @@ workspace's generated operation contracts, never hand-edited):
 - `tracedecay_workspace` (global UI entrypoint): daemon state + project list.
 - `tracedecay_thread_panel` (thread/conversation UI entrypoint).
 - `tracedecay_list_projects`: up to 10 recent registered projects (app-only).
+- `tracedecay_search_projects`: up to 10 matching registered projects
+  (app-only); an empty query returns to recent projects. Listings preserve
+  the daemon's limit and truncation signal. Summary counts describe the
+  returned page. Refine a search when more matches exist than are shown.
 - `tracedecay_search_code`: symbol search, returns node ids, generation, and
   freshness.
 - `tracedecay_inspect_symbol`: symbol detail with callers/callees/impact,
   bounded graph, provenance, and an `openai/deepLink` back into the app.
 - `search_mentions`: `@`-mention search, where the host supports mentions.
+
+The picker keeps search available while a request is pending. Replacing a
+query or navigating cancels the prior MCP request; late responses cannot
+replace the current results or selected project. Mention search continues
+to read only four recent projects and up to eight symbols per project.
 
 ## Packaging
 
@@ -89,12 +99,17 @@ staged bundle runs against the exact binary that installed it.
 
 ## Verification
 
-- `pnpm typecheck` runs `tsc --noEmit` over server, app, and tests.
+- `pnpm typecheck` runs `tsc --noEmit` over server and shared view types.
+- `pnpm exec vitest run test/adapter.test.ts test/project-discovery.test.ts
+  test/project-picker.test.ts test/serve-client.test.ts
+  test/bridge-lifecycle.test.ts` checks the extension adapters, project
+  discovery, DOM interactions, cancellation, and shutdown without a daemon.
 - `pnpm test` runs the vitest integration suite against a real daemon,
   covering project registration, search, symbol inspection, callers/callees,
   denied/not-found/disconnected states, and the authority token never
-  leaving the server. Requires `target/debug/tracedecay`
-  (`cargo build -p tracedecay-cli --bin tracedecay`) or `TRACEDECAY_BIN`.
+  leaving the server, including discovery beyond the recent-project page.
+  Set `TRACEDECAY_BIN` to the CLI built with
+  `bazel build //crates/tracedecay-cli:tracedecay__test`.
 - `pnpm test:browser` runs the Playwright suite against the real `embedded` app
   inside a sandboxed iframe on the maintained `AppBridge` host. It covers
   project connection, search, symbol inspection, graph browsing, sending

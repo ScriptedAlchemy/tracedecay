@@ -21,7 +21,7 @@ tsc_bin.tsc_test(
 vitest_bin.vitest_test(
     name = "adapter_test",
     data = [":sources", ":node_modules", "//sdks/typescript:dist"],
-    args = ["run", "test/adapter.test.ts"],
+    args = ["run", "test/adapter.test.ts", "test/project-discovery.test.ts", "test/project-picker.test.ts"],
     chdir = package_name(),
 )
 

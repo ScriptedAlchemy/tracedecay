@@ -96,7 +96,7 @@ beforeAll(async () => {
   client = await newClient();
   const projects = await waitFor("registered fixture projects", async () => {
     const state = await call("tracedecay_workspace");
-    return state.page === "projects" && state.projects.state === "ready" ? state.projects.data : null;
+    return state.page === "projects" && state.projects.state === "ready" ? state.projects.data.projects : null;
   });
   const billingProject = projects.find((project) => project.project_root === billing.root);
   const shippingProject = projects.find((project) => project.project_root === shipping.root);
@@ -121,6 +121,7 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
       "tracedecay_inspect_symbol",
       "tracedecay_list_projects",
       "tracedecay_search_code",
+      "tracedecay_search_projects",
       "tracedecay_thread_panel",
       "tracedecay_workspace",
     ]);
@@ -130,6 +131,7 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     expect(workspace._meta?.["ui/resourceUri"]).toBe(UI_RESOURCE_URI);
     expect(thread._meta).toMatchObject({ ui: { resourceUri: UI_RESOURCE_URI }, "openai/ui": { entrypoints: [{ type: "thread" }] } });
     expect(byName.get("tracedecay_list_projects")!._meta).toMatchObject({ ui: { visibility: ["app"] } });
+    expect(byName.get("tracedecay_search_projects")!._meta).toMatchObject({ ui: { visibility: ["app"] } });
     for (const tool of tools.tools) expect(tool.annotations?.readOnlyHint ?? tool.name === "search_mentions").toBeTruthy();
 
     const resources = await client.listResources();
@@ -173,6 +175,7 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
         "tracedecay_inspect_symbol",
         "tracedecay_list_projects",
         "tracedecay_search_code",
+        "tracedecay_search_projects",
         "tracedecay_thread_panel",
         "tracedecay_workspace",
       ]);
@@ -186,7 +189,7 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
       if (!isViewState(state) || state.page !== "projects") throw new Error(JSON.stringify(state));
       expect(state.daemon.state).toBe("connected");
       if (state.projects.state !== "ready") throw new Error(JSON.stringify(state.projects));
-      expect(state.projects.data.map((project) => project.project_root).sort()).toEqual([billing.root, shipping.root].sort());
+      expect(state.projects.data.projects.map((project) => project.project_root).sort()).toEqual([billing.root, shipping.root].sort());
     } finally {
       await packaged.close();
       const uninstall = spawnSync(fixture.binary, ["uninstall", "--agent", "chatgpt"], {
@@ -201,10 +204,10 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     if (state.page !== "projects") throw new Error(`unexpected page ${state.page}`);
     expect(state.daemon.state).toBe("connected");
     if (state.projects.state !== "ready") throw new Error(`projects ${state.projects.state}: ${JSON.stringify(state.projects)}`);
-    const roots = state.projects.data.map((project) => project.project_root).sort();
+    const roots = state.projects.data.projects.map((project) => project.project_root).sort();
     expect(roots).toEqual([billing.root, shipping.root].sort());
-    expect(state.projects.data.find((project) => project.project_root === billing.root)!.project_id).toBe(billingProjectId);
-    expect(state.projects.data.find((project) => project.project_root === shipping.root)!.project_id).toBe(shippingProjectId);
+    expect(state.projects.data.projects.find((project) => project.project_root === billing.root)!.project_id).toBe(billingProjectId);
+    expect(state.projects.data.projects.find((project) => project.project_root === shipping.root)!.project_id).toBe(shippingProjectId);
     expect(billingProjectId).toMatch(/^proj_/u);
     expect(shippingProjectId).not.toBe(billingProjectId);
   });
@@ -463,7 +466,7 @@ export function taxTotal(invoices: Invoice[]): number {
     const repo = await fixture.createRepo("retired", { "src/billing.ts": BILLING_SOURCE });
     fixture.initProject(repo.root);
     fixture.sync(repo.root);
-    const project = (await bridge.listProjects()).find((entry) => entry.project_root === repo.root)!;
+    const project = (await bridge.listProjects()).projects.find((entry) => entry.project_root === repo.root)!;
     await bridge.search(project.project_id, "computeTotal", 20);
     await fixture.stopDaemon();
     const forgotten = spawnSync(fixture.binary, ["--yes", "projects", "forget", project.project_id], {
@@ -471,17 +474,42 @@ export function taxTotal(invoices: Invoice[]): number {
     });
     expect(forgotten.status, forgotten.stderr).toBe(0);
     await fixture.startDaemon();
-    expect((await bridge.listProjects()).some((entry) => entry.project_id === project.project_id)).toBe(false);
+    expect((await bridge.listProjects()).projects.some((entry) => entry.project_id === project.project_id)).toBe(false);
     await expect(bridge.resolveProject(project.project_id)).rejects.toMatchObject({ failure: { kind: "denied", code: "project_not_registered" } });
     await expect(bridge.search(project.project_id, "computeTotal", 20)).rejects.toMatchObject({ failure: { kind: "denied", code: "project_not_registered" } });
   });
 
-  it("resolves registered projects beyond the registry's bounded listing", async () => {
+  it("discovers and selects registered projects beyond the bounded recent listing", async () => {
     for (let index = 0; index < 26; index += 1) {
       const repo = await fixture.createRepo(`listing-${index}`, { "src/shipping.ts": SECOND_PROJECT_SOURCE });
       fixture.initProject(repo.root);
     }
-    expect((await bridge.listProjects()).some((entry) => entry.project_id === billingProjectId)).toBe(false);
+
+    const recent = await call("tracedecay_list_projects");
+    if (recent.page !== "projects" || recent.projects.state !== "ready") throw new Error(JSON.stringify(recent));
+    expect(recent.query).toBe("");
+    expect(recent.projects.data).toMatchObject({ limit: 10, truncated: true, summary: { project_count: 10, truncated: true } });
+    expect(recent.projects.data.projects).toHaveLength(10);
+    expect(recent.projects.data.projects.some((entry) => entry.project_id === billingProjectId)).toBe(false);
+
+    const found = await call("tracedecay_search_projects", { query: "BiLlInG" });
+    if (found.page !== "projects" || found.projects.state !== "ready") throw new Error(JSON.stringify(found));
+    expect(found.query).toBe("BiLlInG");
+    expect(found.projects.data).toMatchObject({ limit: 10, truncated: false });
+    const selected = found.projects.data.projects.find((entry) => entry.project_root === billing.root);
+    expect(selected).toMatchObject({ project_id: billingProjectId, project_root: billing.root });
+    if (selected === undefined) throw new Error("older billing project was not found");
+    const opened = await call("tracedecay_search_code", { project_id: selected.project_id, query: "" });
+    expect(opened).toMatchObject({ page: "search", project: { project_id: billingProjectId, project_root: billing.root } });
+
+    const broad = await call("tracedecay_search_projects", { query: "listing-" });
+    if (broad.page !== "projects" || broad.projects.state !== "ready") throw new Error(JSON.stringify(broad));
+    expect(broad.projects.data).toMatchObject({ limit: 10, truncated: true, summary: { project_count: 10, truncated: true } });
+    expect(broad.projects.data.projects).toHaveLength(10);
+    const missing = await call("tracedecay_search_projects", { query: "no-such-registered-project" });
+    expect(missing).toMatchObject({ page: "projects", query: "no-such-registered-project", projects: { state: "empty" } });
+
+    // A known id remains usable independently of the bounded discovery list.
     expect(await bridge.resolveProject(billingProjectId)).toMatchObject({ project_id: billingProjectId, project_root: billing.root });
     expect((await bridge.search(billingProjectId, "computeTotal", 20)).results.length).toBeGreaterThan(0);
   });
