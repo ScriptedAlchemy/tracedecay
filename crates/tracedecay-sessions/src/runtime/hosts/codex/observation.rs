@@ -32,7 +32,7 @@ use crate::runtime::jsonl_observation_admission::{
     SharedJsonlFileIdentity, admit_jsonl_observations, reserve_shared_jsonl_page,
     shared_jsonl_background_cpu, shared_jsonl_file_identity, shared_jsonl_preparation_capacity,
 };
-use crate::runtime::shared::TranscriptScopeMatcher;
+use crate::runtime::shared::{ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::source::{JsonlIoAccounting, TranscriptIngestError, TranscriptIngestResult};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
@@ -43,6 +43,8 @@ mod meta_cache_tests;
 mod retired_source_tests;
 #[cfg(test)]
 mod rollout_source_tests;
+#[cfg(test)]
+mod scope_resolution_tests;
 
 const CODEX_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 pub const CODEX_HOOK_MAX_NEW_BYTES: u64 = crate::runtime::source::MAX_JSONL_RECORD_BYTES as u64;
@@ -291,6 +293,7 @@ pub async fn try_admit_codex_jsonl_observations_for_project_with_admission_and_c
         max_new_bytes,
         None,
         cancellation,
+        &ProjectRootMatcherCache::default(),
     )
     .await
 }
@@ -316,6 +319,7 @@ pub(crate) async fn try_admit_codex_jsonl_observations_for_project_window(
         ),
         Some(crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW),
         cancellation,
+        &ProjectRootMatcherCache::default(),
     )
     .await
 }
@@ -356,6 +360,7 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission_and_c
         max_new_bytes,
         None,
         cancellation,
+        &ProjectRootMatcherCache::default(),
     )
     .await
 }
@@ -381,14 +386,12 @@ impl CodexObservationAdmission<'_> {
         }
     }
 
-    /// Resolve this rollout's scope boundary once, so the per-record admission
-    /// test does not re-resolve the git identity of an unchanging root.
-    pub(super) fn scope_matcher(&self) -> TranscriptScopeMatcher {
+    pub(super) fn scope_roots(&self) -> CodexScopeRoots {
         match self {
-            Self::Project { root, .. } => TranscriptScopeMatcher::project(root),
+            Self::Project { root, .. } => CodexScopeRoots::Project(root.to_path_buf()),
             Self::Profile {
                 registered_roots, ..
-            } => TranscriptScopeMatcher::profile(registered_roots),
+            } => CodexScopeRoots::Profile(registered_roots.to_vec()),
         }
     }
 
@@ -422,6 +425,22 @@ impl CodexObservationAdmission<'_> {
     }
 }
 
+/// The roots a scope's boundary resolves against, owned so the boundary can
+/// resolve off the polling worker.
+pub(super) enum CodexScopeRoots {
+    Project(PathBuf),
+    Profile(Vec<PathBuf>),
+}
+
+impl CodexScopeRoots {
+    pub(super) fn matcher(&self, matchers: &ProjectRootMatcherCache) -> TranscriptScopeMatcher {
+        match self {
+            Self::Project(root) => TranscriptScopeMatcher::project_cached(root, matchers),
+            Self::Profile(roots) => TranscriptScopeMatcher::profile_cached(roots, matchers),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CodexAdmissionState {
     context: CodexContextState,
@@ -437,6 +456,7 @@ struct CodexAdmissionContext<'a> {
     native_thread_id: Option<&'a str>,
     rollout: CodexRolloutFile<'a>,
     cancellation: &'a ObservationCancellation,
+    matchers: &'a ProjectRootMatcherCache,
 }
 
 fn replay_identity(session_id: &str, domain: &[u8]) -> String {
@@ -609,6 +629,7 @@ async fn try_admit_codex_jsonl_observations(
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
     cancellation: &ObservationCancellation,
+    matchers: &ProjectRootMatcherCache,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
     if cancellation.is_cancelled() {
         return Ok(CodexJsonlAdmissionProgress {
@@ -633,6 +654,7 @@ async fn try_admit_codex_jsonl_observations(
         native_thread_id: native_thread_id.as_deref(),
         rollout,
         cancellation,
+        matchers,
     };
     let scope = admission_scope.scope();
     // Held across the cursor read and the admit below: both are one pass over
@@ -657,12 +679,14 @@ async fn admit_codex_jsonl_page(
         native_thread_id,
         rollout,
         cancellation,
+        matchers,
     } = context;
     let scope = admission_scope.scope();
     // Resolving the scope runs git for the root. An unchanged rollout admits
     // no frame and must not pay it on every pass.
     let resolved_scope = OnceLock::new();
-    let scope_matcher = || resolved_scope.get_or_init(|| admission_scope.scope_matcher());
+    let scope_matcher =
+        || resolved_scope.get_or_init(|| admission_scope.scope_roots().matcher(matchers));
     let mut request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
