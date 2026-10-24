@@ -332,6 +332,9 @@ pub fn looks_high_entropy_token(token: &str) -> bool {
     {
         return false;
     }
+    if is_compound_identifier(token) {
+        return false;
+    }
 
     let mut counts = [0usize; 256];
     for byte in token.bytes() {
@@ -346,6 +349,123 @@ pub fn looks_high_entropy_token(token: &str) -> bool {
             .sum::<u128>();
     entropy_sum * 1_000 >= len * u128::from(MIN_TOKEN_ENTROPY_PER_MILLE) * ENTROPY_SCALE
 }
+
+/// Whether `token` reads as a compound identifier or path, such as
+/// `WorkDuplicateAdjudicationAppendOutcomeV1`,
+/// `clone_peak_rss_added_at_most_1_gib_for_39582_symbols`, or
+/// `index-bench/clone-envelope-20260915-fingerprint-staging`.
+///
+/// Per-character entropy cannot separate these from credentials: a long
+/// identifier draws on as many distinct characters as a random token. Its
+/// words can. Identifier words are long, pronounceable, and consistently
+/// cased, while a random token of the same length breaks into short,
+/// case-flipping fragments with digits scattered through them. Base64 padding
+/// and alphabet (`+`, `=`) never occur in identifiers.
+fn is_compound_identifier(token: &str) -> bool {
+    if token.bytes().any(|byte| matches!(byte, b'+' | b'=')) {
+        return false;
+    }
+    let mut words = 0usize;
+    let mut letters = 0usize;
+    let mut short_words = 0usize;
+    let mut vowelless_words = 0usize;
+    let mut digit_runs = 0usize;
+    for component in token
+        .split(['/', '_', '-'])
+        .filter(|component| !component.is_empty())
+    {
+        let component = component.as_bytes();
+        let has_lowercase = component.iter().any(u8::is_ascii_lowercase);
+        let screaming = {
+            let letters_end = component
+                .iter()
+                .position(|byte| !byte.is_ascii_uppercase())
+                .unwrap_or(component.len());
+            component[letters_end..].iter().all(u8::is_ascii_digit)
+        };
+        let mut index = 0usize;
+        while index < component.len() {
+            if component[index].is_ascii_digit() {
+                while index < component.len() && component[index].is_ascii_digit() {
+                    index += 1;
+                }
+                digit_runs += 1;
+                continue;
+            }
+            let start = index;
+            let end = if component[index].is_ascii_uppercase() {
+                let mut upper_end = index;
+                while upper_end < component.len() && component[upper_end].is_ascii_uppercase() {
+                    upper_end += 1;
+                }
+                let title_follows = component.get(upper_end).is_some_and(u8::is_ascii_lowercase);
+                if title_follows && upper_end - index > 1 {
+                    upper_end - 1
+                } else if title_follows {
+                    lowercase_run_end(component, upper_end)
+                } else {
+                    upper_end
+                }
+            } else if index == 0 {
+                lowercase_run_end(component, index)
+            } else {
+                // Only a component's first word may open lowercase; one that
+                // follows a digit run (`7kq`) is a random fragment.
+                return false;
+            };
+            index = end;
+            let word = &component[start..end];
+            let version_marker = word.len() == 1
+                && word[0].is_ascii_uppercase()
+                && component.get(end).is_some_and(u8::is_ascii_digit);
+            if version_marker {
+                continue;
+            }
+            let acronym = word.iter().all(u8::is_ascii_uppercase);
+            if acronym && word.len() > MAX_ACRONYM_LENGTH && (has_lowercase || !screaming) {
+                return false;
+            }
+            if has_consonant_cluster(word) {
+                return false;
+            }
+            words += 1;
+            letters += word.len();
+            short_words += usize::from(word.len() <= 2);
+            vowelless_words += usize::from(word.len() >= 2 && !word.iter().any(is_vowel));
+        }
+    }
+    words > 0
+        && short_words <= MAX_SHORT_WORDS
+        && vowelless_words <= MAX_VOWELLESS_WORDS
+        && digit_runs <= MAX_DIGIT_RUNS
+        && letters * 10 >= words * MIN_MEAN_WORD_LENGTH_TENTHS
+}
+
+fn lowercase_run_end(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index].is_ascii_lowercase() {
+        index += 1;
+    }
+    index
+}
+
+fn is_vowel(byte: &u8) -> bool {
+    matches!(
+        byte.to_ascii_lowercase(),
+        b'a' | b'e' | b'i' | b'o' | b'u' | b'y'
+    )
+}
+
+fn has_consonant_cluster(word: &[u8]) -> bool {
+    word.split(is_vowel)
+        .any(|cluster| cluster.len() > MAX_CONSONANT_CLUSTER)
+}
+
+const MAX_ACRONYM_LENGTH: usize = 4;
+const MAX_CONSONANT_CLUSTER: usize = 4;
+const MAX_SHORT_WORDS: usize = 2;
+const MAX_VOWELLESS_WORDS: usize = 2;
+const MAX_DIGIT_RUNS: usize = 2;
+const MIN_MEAN_WORD_LENGTH_TENTHS: usize = 35;
 
 const MIN_TOKEN_LENGTH: usize = 36;
 const MIN_TOKEN_ENTROPY_PER_MILLE: u32 = 4_200;
@@ -709,5 +829,77 @@ mod tests {
             .expect("structured path metadata");
         assert_eq!(sanitized["path"], metadata["path"]);
         assert!(!sanitized["source"].as_str().unwrap().contains(credential));
+    }
+
+    #[test]
+    fn compound_identifiers_are_not_high_entropy_tokens() {
+        for identifier in [
+            "WorkDuplicateAdjudicationAppendOutcomeV1",
+            "GitHubReadOnlyCredentialAuthorityOutcomeV1",
+            "RootScopeOutcomeV1_for_Nullable_string",
+            "clone_peak_rss_added_at_most_1_gib_for_39582_symbols",
+            "benchmark_data/index-bench/clone-envelope-20260915-fingerprint-staging",
+            "MAXIMUM_WORKFLOW_PAYLOAD_JSON_BYTES_FOR_GRAPH_V2",
+        ] {
+            assert!(entropy_bits_per_mille(identifier) >= Some(MIN_TOKEN_ENTROPY_PER_MILLE));
+            assert!(!looks_high_entropy_token(identifier), "{identifier}");
+        }
+    }
+
+    #[test]
+    fn identifier_words_do_not_launder_random_material() {
+        for token in [
+            "session_token_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ",
+            "WorkDuplicateAdjudication/x7Kq2mZ9vB4nR6cX1jH8pL3d",
+            "AppendOutcomeV1_aGVsbG8gd29ybGQgc2VjcmV0IHRva2Vu",
+            "ARiz6HYp7Iq8_Jr9-KsALtBMuCNvDOwEPxFQyGRzHS0ITaJU",
+        ] {
+            assert!(looks_high_entropy_token(token), "{token}");
+        }
+    }
+
+    /// Uniform random tokens at the length floor rarely decompose into
+    /// identifier words; the exemption must stay a rounding error against
+    /// them, not a gap a generated credential falls through.
+    #[test]
+    fn random_tokens_are_almost_never_exempted_as_identifiers() {
+        let alphabets: [&[u8]; 4] = [
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+            b"abcdefghijklmnopqrstuvwxyz0123456789",
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        let mut eligible = 0usize;
+        let mut exempted = 0usize;
+        for alphabet in alphabets {
+            for _ in 0..5_000 {
+                let token: String = (0..MIN_TOKEN_LENGTH)
+                    .map(|_| char::from(alphabet[next(alphabet.len())]))
+                    .collect();
+                let entropy_eligible = token.bytes().any(|byte| byte.is_ascii_alphabetic())
+                    && token.bytes().any(|byte| byte.is_ascii_digit())
+                    && !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && entropy_bits_per_mille(&token) >= Some(MIN_TOKEN_ENTROPY_PER_MILLE);
+                if entropy_eligible {
+                    eligible += 1;
+                    exempted += usize::from(!looks_high_entropy_token(&token));
+                }
+            }
+        }
+        assert!(
+            eligible > 15_000,
+            "fixture produced {eligible} eligible tokens"
+        );
+        assert!(
+            exempted * 10_000 < eligible,
+            "{exempted} of {eligible} random tokens were exempted"
+        );
     }
 }
