@@ -1,14 +1,16 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::tempdir;
 use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, CancellationStage, Deadline, EffectTermination,
-    IdempotencyKey, RequestContext, SourceEditAuthorizationAdmissionV1,
-    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditKind, SourceEditRequest,
-    source_edit_operation,
+    IdempotencyKey, OperationTermination, ReconciliationState, RequestContext,
+    SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
+    SourceEditKind, SourceEditRequest, source_edit_operation,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_query::request_graph_cancellation;
@@ -18,6 +20,8 @@ use super::test_support::{
     fixture_graph, fixture_request, fixture_request_for_edit, fixture_symbol_code_graph, git,
 };
 use crate::execute::resolve_source_edit_preview;
+use crate::file_authority::with_before_publish_hook;
+use crate::journal::{SourceEditDurability, SourceEditJournalStateV1};
 use crate::{
     SourceEditApplicationResult, SourceEditEffectControlV1, SourceEditOutcome, execute_source_edit,
     execute_source_edit_with_control, preview_source_edit_expected_state,
@@ -504,6 +508,154 @@ async fn move_symbol_preserves_restricted_reexports_in_preview_and_apply() {
 #[tokio::test]
 async fn move_symbol_still_removes_an_unused_private_import() {
     assert_move_import_ownership("use crate::model::Widget;", "Widget", false).await;
+}
+
+#[tokio::test]
+async fn move_symbol_preserves_a_destination_created_at_publication() {
+    let project = tempdir().unwrap();
+    let source_directory = project.path().join("src");
+    fs::create_dir_all(&source_directory).unwrap();
+    let source_path = source_directory.join("lib.rs");
+    let destination_path = source_directory.join("relocated.rs");
+    let original_source = b"pub fn keep() {}\n\npub fn moved() {}\n";
+    let foreign_destination = b"pub fn independently_created() {}\n";
+    fs::write(&source_path, original_source).unwrap();
+    git(
+        project.path(),
+        &["init", "--quiet", "--initial-branch=main"],
+    );
+    git(project.path(), &["add", "src/lib.rs"]);
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    let (graph, _) = fixture_graph(project.path()).await;
+    let code_graph = fixture_symbol_code_graph(
+        "src/lib.rs",
+        std::str::from_utf8(original_source).unwrap(),
+        "pub fn moved() {}",
+        "moved",
+        "moved",
+    );
+    let mut request = fixture_request_for_edit(
+        SourceEditRequest::MoveSymbol {
+            symbol: "moved".to_owned(),
+            dest_file: "src/relocated.rs".to_owned(),
+            dry_run: false,
+            update_references: false,
+        },
+        "source-edit.move-late-destination",
+    );
+    let operation = source_edit_operation(request.edit.kind()).unwrap();
+    let authorization = fixture_authorization(&request);
+    let mut preview_request = request.clone();
+    preview_request.idempotency_key =
+        IdempotencyKey::new("source-edit.move-late-destination-preview").unwrap();
+    preview_request.edit = preview_request.edit.with_dry_run(true);
+    let preview = execute_source_edit(
+        &graph,
+        &code_graph,
+        &operation,
+        preview_request,
+        &authorization,
+    )
+    .await
+    .unwrap();
+    assert!(preview.dry_run);
+    assert!(preview.outcome.success());
+    assert!(!destination_path.exists());
+    assert_eq!(fs::read(&source_path).unwrap(), original_source);
+    request.expected_state = preview.expected_state;
+
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&hook_calls);
+    let competing_destination = destination_path.clone();
+    let result = with_before_publish_hook(
+        move || {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            let mut competitor = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&competing_destination)
+                .unwrap();
+            competitor.write_all(foreign_destination).unwrap();
+            competitor.sync_all().unwrap();
+        },
+        execute_source_edit(
+            &graph,
+            &code_graph,
+            &operation,
+            request.clone(),
+            &authorization,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+    let assert_preserved_files = || {
+        assert_eq!(fs::read(&destination_path).unwrap(), foreign_destination);
+        assert_eq!(fs::read(&source_path).unwrap(), original_source);
+        let mut names = fs::read_dir(&source_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["lib.rs".to_owned(), "relocated.rs".to_owned()],
+            "refused publication must clean up its staging file"
+        );
+    };
+    assert_preserved_files();
+    assert!(matches!(
+        &result.outcome,
+        SourceEditOutcome::EffectUnknown { .. }
+    ));
+
+    // Recovery must preserve the foreign file rather than treating it as the
+    // requested postimage or retrying the move over it.
+    let replay = execute_source_edit(
+        &graph,
+        &code_graph,
+        &operation,
+        request.clone(),
+        &authorization,
+    )
+    .await
+    .unwrap();
+    assert!(replay.replayed);
+    assert_preserved_files();
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+    for observed in [&result, &replay] {
+        assert!(!observed.outcome.success());
+        let effect = observed.effect.as_ref().unwrap();
+        assert_eq!(
+            effect.execution.termination,
+            OperationTermination::EffectUnknown
+        );
+        assert_eq!(effect.receipt.outcome, EffectTermination::EffectUnknown);
+        assert_eq!(effect.reconciliation, ReconciliationState::Pending);
+        assert!(effect.receipt.committed_state.is_none());
+    }
+    let durability = SourceEditDurability::for_graph(&graph);
+    let journal = durability.load_journal().unwrap().unwrap();
+    assert!(matches!(journal.state, SourceEditJournalStateV1::Prepared));
+    assert_eq!(journal.expected_state, request.expected_state);
+    assert_eq!(journal.effect_id, result.effect.as_ref().unwrap().effect_id);
+    let retained = durability
+        .load_receipt(&request.idempotency_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(&retained.effect, replay.effect.as_ref().unwrap());
 }
 
 /// Admits like the fixture authorization, but parks the first admission until

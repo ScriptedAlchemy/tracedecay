@@ -48,6 +48,7 @@ mod mounts;
 mod remote_recovery;
 mod retained_hook_tasks;
 mod terminal_tasks;
+mod verified_sealed_segments;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -2699,6 +2700,14 @@ pub struct DaemonSessionRuntimeRegistryV1 {
             Weak<code_graph::CodeGraphShardPublicationLocksV1>,
         >,
     >,
+    /// Per project publication shard, the sealed segments its graph
+    /// publications already proved; see `project_verified_segments`.
+    code_graph_verified_segments: StdMutex<
+        BTreeMap<
+            tracedecay_store::StoreShardIdV1,
+            Arc<verified_sealed_segments::VerifiedSealedSegmentsV1>,
+        >,
+    >,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     /// Registered stores whose last attach was refused with a typed reset.
     /// The refused store stays unmounted, so every open re-runs admission and
@@ -2752,6 +2761,7 @@ const _: fn(&DaemonSessionRuntimeRegistryV1) = |value| {
         remote_recovery_authorities,
         project_owners,
         code_graph_publication_gates,
+        code_graph_verified_segments,
         registered_schema_convergence,
         reset_required_stores,
         lost_store_files,
@@ -2782,6 +2792,7 @@ const _: fn(&DaemonSessionRuntimeRegistryV1) = |value| {
     assert_send_sync(remote_recovery_authorities);
     assert_send_sync(project_owners);
     assert_send_sync(code_graph_publication_gates);
+    assert_send_sync(code_graph_verified_segments);
     assert_send_sync(registered_schema_convergence);
     assert_send_sync(reset_required_stores);
     assert_send_sync(lost_store_files);
