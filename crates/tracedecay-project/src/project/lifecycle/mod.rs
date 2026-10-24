@@ -16,7 +16,6 @@ use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
 use tracedecay_runtime_core::branch;
-use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 #[cfg(any(test, feature = "test-helpers"))]
@@ -357,8 +356,6 @@ impl TraceDecay {
         // Computed once and reused below (for `active_branch`) instead of
         // calling `branch::current_branch` twice for the same project root.
         let active_branch = branch::current_branch(project_root);
-        let (serving_branch, fallback_warning) =
-            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
         let db = Self::mount_project_graph(
             runtime_registry.as_ref(),
             project_root,
@@ -379,14 +376,9 @@ impl TraceDecay {
         let configuration_runtime = Arc::new(configuration_runtime);
         storage::write_store_manifest(&store_layout)?;
 
-        // Bootstrap branch metadata if we can detect a default branch
-        let default_branch = active_branch.as_ref().and_then(|_| {
-            branch::detect_default_branch(project_root).or_else(|| active_branch.clone())
-        });
-        if let Some(ref default) = default_branch {
-            let meta = BranchMeta::new(default);
-            let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
-        }
+        branch::bootstrap_default_branch_meta(project_root, &store_layout.data_root)?;
+        let (serving_branch, fallback_warning) =
+            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
 
         let mut ts = Self {
             db,
@@ -554,8 +546,6 @@ impl TraceDecay {
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
         let db_path = store_layout.graph_db_path.clone();
-        let (serving_branch, fallback_warning) =
-            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
 
         if !db_path.exists() {
             return Err(TraceDecayError::project_open(
@@ -566,6 +556,11 @@ impl TraceDecay {
                 ),
             ));
         }
+        // A store enrolled at a detached HEAD before init bootstrapped its
+        // metadata there converges on its next writable open.
+        branch::bootstrap_default_branch_meta(project_root, &store_layout.data_root)?;
+        let (serving_branch, fallback_warning) =
+            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
 
         // Registered mounts perform the exact final-schema admission. Project
         // open never repairs, rebuilds, or indexes the graph inline; retained

@@ -214,7 +214,7 @@ fn seed_profile_databases(
             data_dest.join("store_manifest.json"),
         )?;
         rebind_store_manifest(&data_dest, &project_id, project_root)?;
-        // As project init does: an existing store never bootstraps it.
+        // As project init does.
         if let Some(default_branch) = detect_default_branch(project_root) {
             save_branch_meta(&data_dest, &BranchMeta::new(&default_branch))?;
         }
