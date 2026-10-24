@@ -4,7 +4,7 @@ use crate::runtime::source::{JsonlPrefixRecovery, TranscriptDiscoveryBounds};
 use serde_json::json;
 use tracedecay_capture::claude as canonical;
 use tracedecay_runtime_core::git_discovery::{
-    GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
+    GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
 };
 
 fn identify(path: &Path) -> Option<ClaudeSourceScanIdentity> {
@@ -554,18 +554,10 @@ static UNKNOWN_PATH_ATTEMPTS: std::sync::atomic::AtomicUsize =
 
 fn retrying_identity(path: &Path) -> GitRepositoryIdentityOutcome {
     use std::sync::atomic::Ordering;
-    let root = path
-        .ancestors()
-        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
-        .unwrap_or(path);
     if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 1 {
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
     }
-    GitRepositoryIdentityOutcome::Resolved(GitRepositoryIdentity {
-        worktree_root: root.to_path_buf(),
-        git_dir: root.join(".git"),
-        common_dir: root.join(".git"),
-    })
+    discover_repository_identity_cli_first(path)
 }
 
 #[test]
@@ -576,6 +568,14 @@ fn claude_unknown_membership_retries_without_advancing_cursor() {
     let project_root = temp.path().join("repo");
     let nested_cwd = project_root.join("packages/app");
     std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+    let initialized = std::process::Command::new(
+        tracedecay_runtime_core::git::try_git_program().expect("git executable"),
+    )
+    .args(["init", "--quiet"])
+    .current_dir(&project_root)
+    .status()
+    .expect("initialize repository");
+    assert!(initialized.success());
     let transcript = temp.path().join("retry.jsonl");
     std::fs::write(
         &transcript,

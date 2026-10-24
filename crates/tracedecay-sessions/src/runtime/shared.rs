@@ -12,9 +12,11 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tracedecay_domain::collapse_whitespace;
 use tracedecay_lcm::message_storage_text;
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::git_discovery::{
-    GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
+    GitRepositoryIdentity, GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
 };
+use tracedecay_runtime_core::git_repository::try_repository_topology;
 
 pub use crate::{StoredCursor, TranscriptIngestStats};
 
@@ -153,21 +155,20 @@ struct ProjectRootMatcherCacheEntry {
     unknown_retry_after: Mutex<Option<Instant>>,
 }
 
-/// A project root with its git worktree/common-dir resolutions computed once,
-/// so repeated membership tests (e.g. one per discovered workflow run) do not
-/// re-resolve the fixed project side. A single [`ProjectRootMatcher::contains`]
-/// call is exactly equivalent to [`path_belongs_to_project`], which is a thin
-/// wrapper over it.
+/// A project root with its owning profile and reusable Git identities.
+/// Membership revalidates current topology, while non-Git discovery always
+/// consults the captured owner's current enrollment.
 #[derive(Debug)]
 pub struct ProjectRootMatcher {
     root: PathBuf,
     identity: GitRepositoryIdentityOutcome,
     identity_resolver: GitIdentityResolver,
-    path_membership: Mutex<HashMap<PathBuf, bool>>,
+    source_profile: Option<ProfileRoot>,
+    path_identities: Mutex<HashMap<PathBuf, GitRepositoryIdentity>>,
 }
 
 impl ProjectRootMatcher {
-    /// Resolve the fixed project-side git identity once.
+    /// Capture the source owner and resolve the initial project-side Git identity.
     pub fn new(project_root: &Path) -> Self {
         Self::new_with_identity_resolver(project_root, discover_repository_identity_cli_first)
     }
@@ -177,47 +178,93 @@ impl ProjectRootMatcher {
         project_root: &Path,
         identity_resolver: GitIdentityResolver,
     ) -> Self {
+        Self::with_profile(
+            project_root,
+            identity_resolver,
+            crate::runtime::transcript_source_profile(),
+        )
+    }
+
+    fn with_profile(
+        project_root: &Path,
+        identity_resolver: GitIdentityResolver,
+        source_profile: Option<ProfileRoot>,
+    ) -> Self {
         Self {
             root: project_root.to_path_buf(),
             identity: identity_resolver(project_root),
             identity_resolver,
-            path_membership: Mutex::new(HashMap::new()),
+            source_profile,
+            path_identities: Mutex::new(HashMap::new()),
         }
     }
 
     /// True when `path` belongs to this project: it is the root, shares the
     /// project's git worktree or common dir, or discovers back to the root.
-    /// Each distinct path is resolved once for this matcher, so repeated
-    /// transcript rows with the same cwd do not repeatedly discover/open git.
+    /// Unchanged Git identities are reused after topology validation. Non-Git
+    /// profile enrollment is discovered live rather than caching its verdict.
     pub fn contains(&self, path: &Path) -> bool {
         self.contains_status(path) == ProjectMembership::Match
     }
 
     pub fn contains_status(&self, path: &Path) -> ProjectMembership {
-        if let Some(belongs) = self
-            .path_membership
+        // A matcher may outlive its cache entry (for example across a rollout
+        // window). Its captured owner stays fixed, but repository identity must
+        // still describe the filesystem that is being attributed now.
+        if !self.identity.is_unknown() && !self.identity_is_current() {
+            return Self::with_profile(
+                &self.root,
+                self.identity_resolver,
+                self.source_profile.clone(),
+            )
+            .contains_uncached(path);
+        }
+        self.contains_uncached(path)
+    }
+
+    fn identity_is_current(&self) -> bool {
+        match &self.identity {
+            GitRepositoryIdentityOutcome::Resolved(identity) => {
+                repository_identity_is_current(&self.root, identity)
+            }
+            // Absence has no filesystem or profile enrollment revision. The
+            // canonical resolver's no-Git path is cheap and must stay live.
+            GitRepositoryIdentityOutcome::NotRepository => false,
+            GitRepositoryIdentityOutcome::Unknown(_) => false,
+        }
+    }
+
+    fn path_identity(&self, path: &Path) -> GitRepositoryIdentityOutcome {
+        let cached = self
+            .path_identities
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(path)
-            .copied()
+            .cloned();
+        if let Some(identity) = cached
+            && repository_identity_is_current(path, &identity)
         {
-            return ProjectMembership::from_bool(belongs);
+            return GitRepositoryIdentityOutcome::Resolved(identity);
         }
-
-        let belongs = self.contains_uncached(path);
-        if let Some(definitive) = belongs.definitive() {
-            self.path_membership
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(path.to_path_buf(), definitive);
+        let identity = (self.identity_resolver)(path);
+        let mut identities = self
+            .path_identities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let GitRepositoryIdentityOutcome::Resolved(resolved) = &identity {
+            identities.insert(path.to_path_buf(), resolved.clone());
+        } else {
+            identities.remove(path);
         }
-        belongs
+        identity
     }
 
     fn contains_uncached(&self, path: &Path) -> ProjectMembership {
-        self.contains_uncached_with(path, self.identity_resolver, |path: &Path| {
-            crate::runtime::transcript_source_profile()?.discover_project_root(path)
-        })
+        self.contains_uncached_with(
+            path,
+            |path| self.path_identity(path),
+            |path: &Path| self.source_profile.as_ref()?.discover_project_root(path),
+        )
     }
 
     #[tracing::instrument(name = "sessions.shared.membership_resolve", level = "trace", skip_all)]
@@ -265,6 +312,35 @@ impl ProjectRootMatcher {
     }
 }
 
+/// Reuse the canonical checkout topology cache, which revalidates both the
+/// `.git` target and `commondir` before returning a retained root. Subdirectories
+/// additionally need a cheap marker walk: a newly nested repository supersedes
+/// the previously discovered outer checkout.
+fn repository_identity_is_current(path: &Path, identity: &GitRepositoryIdentity) -> bool {
+    let Ok(existing) = nearest_existing_ancestor(path).canonicalize() else {
+        return false;
+    };
+    let mut reached_root = false;
+    for ancestor in existing.ancestors() {
+        if ancestor == identity.worktree_root {
+            reached_root = true;
+            break;
+        }
+        if !matches!(ancestor.join(".git").try_exists(), Ok(false)) {
+            return false;
+        }
+    }
+    if !reached_root {
+        return false;
+    }
+    let Ok(topology) = try_repository_topology(&identity.worktree_root) else {
+        return false;
+    };
+    topology.worktree_root.as_ref() == Some(&identity.worktree_root)
+        && topology.git_dir == identity.git_dir
+        && topology.common_dir == identity.common_dir
+}
+
 /// A transcript's working directory may since have been deleted. Git cannot
 /// probe a missing directory, so it would stay undecidable forever, while the
 /// directory still lies inside whatever worktree its nearest surviving
@@ -279,16 +355,22 @@ pub(crate) fn nearest_existing_ancestor(path: &Path) -> &Path {
         .unwrap_or(path)
 }
 
-/// Source-lifetime cache of project matchers keyed by canonical project root.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectRootMatcherCacheKey {
+    root: PathBuf,
+    source_profile: Option<ProfileRoot>,
+}
+
+/// Source-lifetime cache keyed by canonical project root and exact source profile.
 ///
 /// A source parses many transcript files for the same project. Keeping the
 /// matcher here avoids reopening the same git repository once per file while
-/// retaining per-path membership caching inside [`ProjectRootMatcher`]. An
+/// revalidating retained Git identities inside [`ProjectRootMatcher`]. An
 /// `Unknown` (timed-out) identity is served from cache only for a cooldown,
 /// after which the next lookup re-resolves it.
 #[derive(Clone, Debug)]
 pub struct ProjectRootMatcherCache {
-    matchers: Arc<Mutex<HashMap<PathBuf, Arc<ProjectRootMatcherCacheEntry>>>>,
+    matchers: Arc<Mutex<HashMap<ProjectRootMatcherCacheKey, Arc<ProjectRootMatcherCacheEntry>>>>,
     identity_resolver: GitIdentityResolver,
 }
 
@@ -315,27 +397,46 @@ impl ProjectRootMatcherCache {
     }
 
     fn get_at(&self, project_root: &Path, now: Instant) -> Arc<ProjectRootMatcher> {
-        let key = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf());
+        let profile = crate::runtime::transcript_source_profile();
+        let key = ProjectRootMatcherCacheKey {
+            root: project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.to_path_buf()),
+            source_profile: profile.clone(),
+        };
         loop {
-            let entry = self
-                .matchers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(key.clone())
-                .or_insert_with(|| {
-                    Arc::new(ProjectRootMatcherCacheEntry {
-                        matcher: Arc::new(ProjectRootMatcher::new_with_identity_resolver(
-                            project_root,
-                            self.identity_resolver,
-                        )),
-                        unknown_retry_after: Mutex::new(None),
-                    })
-                })
-                .clone();
+            let (entry, inserted) = {
+                let mut matchers = self.matchers.lock().unwrap_or_else(PoisonError::into_inner);
+                match matchers.entry(key.clone()) {
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        (entry.get().clone(), false)
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let value = Arc::new(ProjectRootMatcherCacheEntry {
+                            matcher: Arc::new(ProjectRootMatcher::with_profile(
+                                project_root,
+                                self.identity_resolver,
+                                profile.clone(),
+                            )),
+                            unknown_retry_after: Mutex::new(None),
+                        });
+                        entry.insert(value.clone());
+                        (value, true)
+                    }
+                }
+            };
             if !entry.matcher.identity.is_unknown() {
-                return entry.matcher.clone();
+                if inserted || entry.matcher.identity_is_current() {
+                    return entry.matcher.clone();
+                }
+                let mut matchers = self.matchers.lock().unwrap_or_else(PoisonError::into_inner);
+                if matchers
+                    .get(&key)
+                    .is_some_and(|cached| Arc::ptr_eq(cached, &entry))
+                {
+                    matchers.remove(&key);
+                }
+                continue;
             }
 
             let should_retry = {

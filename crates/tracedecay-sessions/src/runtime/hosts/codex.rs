@@ -63,7 +63,7 @@ use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{LazyLock, Mutex, OnceLock, PoisonError};
 
 use asupersync::channel::watch;
 use sha2::{Digest, Sha256};
@@ -82,7 +82,7 @@ use crate::runtime::jsonl_observation_admission::{
     SharedJsonlPathPin, install_shared_jsonl_preparation_authority, pin_shared_jsonl_paths,
     reserve_shared_jsonl_bytes,
 };
-use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
+use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, TranscriptCursorKey, TranscriptDiscoveryBounds,
     TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
@@ -113,8 +113,18 @@ pub(crate) fn codex_rollout_project_membership(
     project_root: &Path,
 ) -> Option<ProjectMembership> {
     let meta = session_meta(path)?;
-    Some(TranscriptScopeMatcher::project(project_root).membership(Some(&meta.cwd)))
+    Some(
+        TranscriptScopeMatcher::project_cached(project_root, &CODEX_SCOPE_MATCHERS)
+            .membership(Some(&meta.cwd)),
+    )
 }
+
+/// Every Codex consumer shares profile-scoped root and cwd identities across
+/// rollout windows. Unchanged Git topology reuses identity resolution after
+/// filesystem revalidation; non-Git enrollment is checked live. A timed-out
+/// (`Unknown`) identity still re-resolves after the cache's cooldown.
+static CODEX_SCOPE_MATCHERS: LazyLock<ProjectRootMatcherCache> =
+    LazyLock::new(ProjectRootMatcherCache::default);
 
 const PROVIDER: &str = "codex";
 /// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` → date dirs add depth.

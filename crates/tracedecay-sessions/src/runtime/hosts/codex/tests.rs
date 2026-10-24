@@ -29,6 +29,7 @@ mod goal_event_tests {
         try_admit_codex_jsonl_observations_for_project_with_admission,
     };
     use crate::runtime::ingest::project_provider::ProjectProviderRun;
+    use crate::runtime::shared::ProjectRootMatcherCache;
     use crate::runtime::source::{HostProviderCoverage, read_host_provider_coverage};
     use crate::runtime::{SessionProvider, with_transcript_source_profile};
 
@@ -62,17 +63,20 @@ mod goal_event_tests {
             project_id,
         };
         assert_eq!(project.scope(), linked.scope());
-        assert!(project.scope_matcher().accepts(Some(&project_src)));
-        assert!(!project.scope_matcher().accepts(Some(&other)));
+        let matchers = ProjectRootMatcherCache::default();
+        let project_matcher = project.scope_roots().matcher(&matchers);
+        assert!(project_matcher.accepts(Some(&project_src)));
+        assert!(!project_matcher.accepts(Some(&other)));
 
         let registered = vec![project_root];
         let profile = CodexObservationAdmission::Profile {
             session_id: Some("session-1"),
             registered_roots: &registered,
         };
-        assert!(!profile.scope_matcher().accepts(Some(&project_src)));
-        assert!(profile.scope_matcher().accepts(Some(&other)));
-        assert!(profile.scope_matcher().accepts(None));
+        let profile_matcher = profile.scope_roots().matcher(&matchers);
+        assert!(!profile_matcher.accepts(Some(&project_src)));
+        assert!(profile_matcher.accepts(Some(&other)));
+        assert!(profile_matcher.accepts(None));
         assert!(profile.accepts_session("session-1"));
         assert!(!profile.accepts_session("session-2"));
     }
