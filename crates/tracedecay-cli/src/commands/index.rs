@@ -7,7 +7,7 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildProgressV1, CodeIndexReadinessWaitOutcomeV1,
-    CodeIndexWorktreeFreshnessV1,
+    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
@@ -254,7 +254,8 @@ const INIT_WAIT_SLICE: Duration = Duration::from_millis(INIT_WAIT_SLICE_MS);
 /// How long `init --wait` keeps waiting once the daemon stops reporting work
 /// toward the first generation. Capture, extraction, and graph publication
 /// publish no build progress for minutes on a large repository, so liveness
-/// is the scheduler's own in-flight claim, not a progress counter.
+/// is the scheduler's own indexing, restore, or verification claim, not a
+/// progress counter.
 const INIT_WAIT_STALL_WINDOW: Duration = Duration::from_secs(120);
 
 fn init_queued_not_ready_receipt(project_path: &Path) -> String {
@@ -337,7 +338,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = tracedecay_domain::errors::Result<serde_json::Value>>,
 {
-    let mut stalled_since: Option<Instant> = None;
+    let mut idle_window = FirstGenerationIdleWindow::new(stall_window);
     loop {
         let payload = read_slice().await?;
         let last_state = match first_generation_wait_outcome(&payload)? {
@@ -386,21 +387,18 @@ where
             .as_deref()
             .map(|progress| format!(" ({progress})"))
             .unwrap_or_default();
-        match FirstGenerationStall::of(worktree.as_deref().map_err(String::as_str)) {
-            None => stalled_since = None,
-            Some(stall) => {
-                let since = *stalled_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= stall_window {
-                    return Err(first_generation_wait_refusal(
-                        CODE_INDEX_READINESS_WAIT_TIMED_OUT,
-                        format!(
-                            "init --wait stopped waiting for the first generation: {stall} for \
-                             {}s; last state: {last_state}{progress_suffix}",
-                            stall_window.as_secs()
-                        ),
-                    ));
-                }
-            }
+        if let Some(stall) = idle_window.observe(
+            FirstGenerationStall::of(worktree.as_deref().map_err(String::as_str)),
+            Instant::now(),
+        ) {
+            return Err(first_generation_wait_refusal(
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+                format!(
+                    "init --wait stopped waiting for the first generation: {stall} for \
+                     {}s; last state: {last_state}{progress_suffix}",
+                    stall_window.as_secs()
+                ),
+            ));
         }
         eprintln!("first generation not ready yet: {last_state}{progress_suffix}");
     }
@@ -430,7 +428,43 @@ impl FirstGenerationStall {
         {
             return Some(Self::Blocked(reason));
         }
-        (!worktree.rebuild_in_flight).then_some(Self::NoPassInFlight)
+        // The canonical ladder excludes bounded restore and source
+        // verification from rebuilds; both still own readiness work.
+        let readiness_in_flight = worktree.rebuild_in_flight
+            || matches!(
+                worktree.staleness_state,
+                Some(CodeIndexStalenessStateV1::Restoring | CodeIndexStalenessStateV1::Verifying)
+            );
+        (!readiness_in_flight).then_some(Self::NoPassInFlight)
+    }
+}
+
+/// Only continuous idle observations spend the stall window. An active
+/// readiness owner clears the window even if it publishes no new progress.
+struct FirstGenerationIdleWindow {
+    stalled_since: Option<Instant>,
+    stall_window: Duration,
+}
+
+impl FirstGenerationIdleWindow {
+    fn new(stall_window: Duration) -> Self {
+        Self {
+            stalled_since: None,
+            stall_window,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        stall: Option<FirstGenerationStall>,
+        now: Instant,
+    ) -> Option<FirstGenerationStall> {
+        let Some(stall) = stall else {
+            self.stalled_since = None;
+            return None;
+        };
+        let since = *self.stalled_since.get_or_insert(now);
+        (now.duration_since(since) >= self.stall_window).then_some(stall)
     }
 }
 
@@ -531,14 +565,17 @@ async fn code_index_reconciliation_is_optional(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod daemon_precondition_tests {
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tracedecay_contracts::code_index_freshness::{
         CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
-        CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
-        CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+        CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
+        CodeIndexBuildProgressV1, CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1,
+        CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitOutcomeV1,
+        CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
     };
     use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
     use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_mcp::handlers::info::readiness_wait_outcome;
 
     pub(super) struct SocketEnvGuard {
         previous: Option<std::ffi::OsString>,
@@ -624,6 +661,35 @@ mod daemon_precondition_tests {
         }
     }
 
+    fn readiness_worktree(state: CodeIndexStalenessStateV1) -> CodeIndexWorktreeFreshnessV1 {
+        let restoring = state == CodeIndexStalenessStateV1::Restoring;
+        let ladder = CodeIndexFreshnessLadderV1::project(CodeIndexFreshnessLadderInputsV1 {
+            ready: !restoring,
+            refresh_in_flight: state != CodeIndexStalenessStateV1::Fresh,
+            restore_in_flight: restoring,
+            source_change_pending: false,
+            parked: None,
+            source_verified: Some(true),
+            hook_hint_count: Some(0),
+            sources_omitted: false,
+        });
+        assert!(!ladder.rebuild_in_flight);
+        assert_eq!(ladder.staleness_state, state);
+        CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/repo".to_owned(),
+            latest_generation_id: Some("generation.v1.first".to_owned()),
+            code_graph_serving: Some(if restoring {
+                CodeGraphServingReadinessV1::Pending
+            } else {
+                CodeGraphServingReadinessV1::Ready
+            }),
+            staleness_state: Some(ladder.staleness_state),
+            rebuild_in_flight: ladder.rebuild_in_flight,
+            coverage: ladder.coverage,
+            ..CodeIndexWorktreeFreshnessV1::default()
+        }
+    }
+
     fn progress(
         completed_files: u64,
         blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
@@ -664,6 +730,42 @@ mod daemon_precondition_tests {
             payload["code_index_freshness"] = serde_json::to_value(freshness).unwrap();
         }
         payload
+    }
+
+    fn pending_status(worktree: CodeIndexWorktreeFreshnessV1) -> serde_json::Value {
+        // `ready` in the ladder means a serving generation exists. Ready
+        // waits also require authoritative source freshness and a settled
+        // owner, so even verification with an activated graph is pending.
+        assert_eq!(
+            worktree.readiness(CodeIndexReadinessTargetV1::Ready),
+            CodeIndexReadinessV1::Pending
+        );
+        let outcome = readiness_wait_outcome(CodeIndexReadinessWaitReadV1::TimedOut {
+            last: Some(Box::new(worktree.clone())),
+        });
+        let CodeIndexReadinessWaitOutcomeV1::TimedOut { ref last_state } = outcome else {
+            panic!("a timed-out wait retains its last state");
+        };
+        serde_json::json!({
+            "code_index_freshness": {"status": last_state, "worktree": worktree},
+            "wait": outcome,
+        })
+    }
+
+    fn ready_status() -> serde_json::Value {
+        let worktree = readiness_worktree(CodeIndexStalenessStateV1::Fresh);
+        assert_eq!(
+            worktree.readiness(CodeIndexReadinessTargetV1::Ready),
+            CodeIndexReadinessV1::Reached
+        );
+        status(
+            readiness_wait_outcome(CodeIndexReadinessWaitReadV1::Reached {
+                reading: Box::new(worktree.clone()),
+            }),
+            Some(StatusCodeIndexFreshnessV1::Current {
+                worktree: Box::new(worktree),
+            }),
+        )
     }
 
     fn warming(worktree: CodeIndexWorktreeFreshnessV1) -> Option<StatusCodeIndexFreshnessV1> {
@@ -755,6 +857,83 @@ mod daemon_precondition_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_holds_while_restoring_without_build_progress() {
+        let restoring = pending_status(readiness_worktree(CodeIndexStalenessStateV1::Restoring));
+        let (result, reads) = hold_over(
+            vec![restoring.clone(), restoring, ready_status()],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_ok(), "restore owns readiness work: {result:?}");
+        assert_eq!(reads, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_holds_while_verifying_without_build_progress() {
+        let verifying = pending_status(readiness_worktree(CodeIndexStalenessStateV1::Verifying));
+        let (result, reads) = hold_over(
+            vec![verifying.clone(), verifying, ready_status()],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "verification owns readiness work: {result:?}"
+        );
+        assert_eq!(reads, 3);
+    }
+
+    #[test]
+    fn first_generation_idle_window_restarts_after_readiness_work() {
+        let started = Instant::now();
+        let idle = building(false);
+        let mut uninterrupted =
+            super::FirstGenerationIdleWindow::new(super::INIT_WAIT_STALL_WINDOW);
+        for seconds in [0, 119] {
+            assert_eq!(
+                uninterrupted.observe(
+                    super::FirstGenerationStall::of(Ok(&idle)),
+                    started + Duration::from_secs(seconds),
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            uninterrupted.observe(
+                super::FirstGenerationStall::of(Ok(&idle)),
+                started + Duration::from_secs(120),
+            ),
+            Some(super::FirstGenerationStall::NoPassInFlight)
+        );
+
+        for active in [
+            readiness_worktree(CodeIndexStalenessStateV1::Restoring),
+            readiness_worktree(CodeIndexStalenessStateV1::Verifying),
+            building(true),
+        ] {
+            let mut window = super::FirstGenerationIdleWindow::new(super::INIT_WAIT_STALL_WINDOW);
+            let mut observe = |worktree, seconds| {
+                window.observe(
+                    super::FirstGenerationStall::of(Ok(worktree)),
+                    started + Duration::from_secs(seconds),
+                )
+            };
+            assert_eq!(observe(&idle, 0), None);
+            assert_eq!(observe(&idle, 119), None);
+            assert_eq!(observe(&active, 120), None);
+            // Capture or authentication may legitimately report no progress
+            // for longer than a status slice or the idle window.
+            assert_eq!(observe(&active, 1_515), None);
+            assert_eq!(observe(&idle, 1_545), None);
+            assert_eq!(observe(&idle, 1_664), None);
+            assert_eq!(
+                observe(&idle, 1_665),
+                Some(super::FirstGenerationStall::NoPassInFlight)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn first_generation_wait_names_the_stall_that_ended_it() {
         let mut blocked = building(true);
         blocked.progress = Some(progress(
@@ -781,6 +960,25 @@ mod daemon_precondition_tests {
         }
     }
 
+    #[test]
+    fn active_readiness_owner_does_not_mask_blocked_progress() {
+        for mut worktree in [
+            readiness_worktree(CodeIndexStalenessStateV1::Restoring),
+            readiness_worktree(CodeIndexStalenessStateV1::Verifying),
+        ] {
+            worktree.progress = Some(progress(
+                40,
+                Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+            ));
+            assert_eq!(
+                super::FirstGenerationStall::of(Ok(&worktree)),
+                Some(super::FirstGenerationStall::Blocked(
+                    CodeIndexBuildBlockedReasonV1::ResidentMemory
+                ))
+            );
+        }
+    }
+
     /// A stall shorter than the window is ridden out: the window restarts
     /// once the daemon reports work again.
     #[tokio::test(flavor = "current_thread")]
@@ -798,7 +996,22 @@ mod daemon_precondition_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn first_generation_wait_ends_at_once_on_a_terminal_state() {
+        let mut refused = readiness_worktree(CodeIndexStalenessStateV1::Verifying);
+        refused.code_graph_serving = Some(CodeGraphServingReadinessV1::Refused {
+            reason: "graph activation failed".to_owned(),
+        });
+        let CodeIndexReadinessV1::Unreachable { reason } =
+            refused.readiness(CodeIndexReadinessTargetV1::Ready)
+        else {
+            panic!("a graph refusal must make a ready wait unreachable");
+        };
         for payload in [
+            status(
+                readiness_wait_outcome(CodeIndexReadinessWaitReadV1::Unreachable { reason }),
+                Some(StatusCodeIndexFreshnessV1::Stale {
+                    worktree: Box::new(refused),
+                }),
+            ),
             status(
                 CodeIndexReadinessWaitOutcomeV1::Unavailable {
                     reason: "code_index_convergence_parked".to_owned(),
