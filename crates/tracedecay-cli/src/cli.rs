@@ -157,9 +157,10 @@ pub enum Commands {
         /// could be adopted at this root.
         #[arg(long)]
         fresh: bool,
-        /// Hold until the first code generation is ready. Without this flag,
-        /// init returns a typed not-ready receipt once reconciliation is
-        /// requested and the index continues in the background.
+        /// Hold until the first code generation is ready, for as long as the
+        /// daemon reports indexing in flight. Without this flag, init returns
+        /// a typed not-ready receipt once reconciliation is requested and the
+        /// index continues in the background.
         #[arg(long)]
         wait: bool,
     },

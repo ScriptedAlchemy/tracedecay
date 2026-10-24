@@ -72,7 +72,10 @@ immediately afterwards can still show `project_open.state=converging` and
 `graph_statistics.state=unavailable` with exit 0 — that is a typed
 not-ready reading, not a usable project. Pass `tracedecay init --wait` to
 block until the first generation is ready, or poll `status` until
-`graph_statistics.state` is available.
+`graph_statistics.state` is available. `--wait` holds for as long as the
+daemon reports indexing in flight. It exits 75 when the daemon reports no work
+toward the generation for two minutes, and fails at once when convergence is
+parked or the code-index mount failed.
 
 The daemon comes first. `tracedecay init` is brokered through the
 daemon-owned code-index scheduler, so without a running daemon it refuses

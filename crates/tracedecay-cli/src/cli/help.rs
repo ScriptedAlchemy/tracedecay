@@ -31,7 +31,10 @@ pub(crate) const INIT_LONG_ABOUT: &str = "\
 Enrolls the repository and requests its first code generation. Returns once \
 the daemon accepts the request; the default receipt is typed `not_ready` / \
 `code_index_reconciliation_requested` and indexing continues in the \
-background. Pass `--wait` to hold until that generation is ready. Check \
+background. Pass `--wait` to hold until that generation is ready: it holds \
+while the daemon reports indexing in flight, exits 75 after two minutes with \
+no reported work toward the generation, and fails at once when convergence \
+is parked or the code-index mount failed. Check \
 `tracedecay status --json` for current generation coverage: converging or \
 unavailable is not ready, and exit 0 alone does not establish readiness. Requires a \
 running daemon: init is brokered through the daemon-owned code-index \

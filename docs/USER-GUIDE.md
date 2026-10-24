@@ -114,7 +114,10 @@ Confirm the daemon with `tracedecay daemon status` and re-run `init`.
 first code generation. The default command returns a typed not-ready receipt
 (`first generation not ready` / `code_index_reconciliation_requested`) once
 that request is queued; the generation publishes in the background. Pass
-`--wait` to hold until it is ready. Project facts, sessions, and lossless LCM
+`--wait` to hold until it is ready. `--wait` keeps holding while the daemon
+reports indexing in flight, exits 75 after two minutes in which it reports no
+work toward the generation, and fails at once on a parked convergence or a
+failed code-index mount. Project facts, sessions, and lossless LCM
 remain project-wide; code generations retain exact repository, checkout,
 worktree, ref, commit/tree, snapshot, and generation provenance. Storage is
 daemon-owned (an explicit local `.tracedecay/` install is only a location
