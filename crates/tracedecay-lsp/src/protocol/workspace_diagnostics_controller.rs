@@ -207,6 +207,10 @@ where
                 &document.uri,
                 document.diagnostics.upstream.clone(),
                 document.diagnostics.tracedecay.clone(),
+                self.lifecycle
+                    .gateway
+                    .capabilities()
+                    .document_diagnostics_data,
             );
             let diagnostic_identity = merged
                 .items
@@ -255,13 +259,7 @@ where
             } else {
                 DocumentDiagnosticReport::full(
                     identity.result_id.clone(),
-                    self.visible_diagnostics(
-                        merged.items,
-                        self.lifecycle
-                            .gateway
-                            .capabilities()
-                            .document_diagnostics_data,
-                    ),
+                    self.scope_diagnostic_related_information(merged.items),
                 )
             };
             let mut item = document_diagnostic_report_value(report, serialization);

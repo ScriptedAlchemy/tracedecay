@@ -1,11 +1,243 @@
 use super::super::*;
-use super::{initialize, session};
+use super::{Feedback, Semantics, initialize, session};
 use crate::PublicationDelivery;
 use crate::analyzer::broker::DiagnosticSeverity;
 use crate::diagnostics::{
     DiagnosticSource, GatewayDiagnosticRelatedInformation, LspPosition, LspRange,
 };
-use crate::overlay::{MAX_OVERLAY_BYTES, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS};
+use crate::overlay::{MAX_OVERLAY_BYTES, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS, OverlaySnapshot};
+use crate::provider::GenerationDiagnostics;
+use crate::workspace_diagnostics::{
+    WorkspaceDiagnosticSnapshotOutcome, WorkspaceDocumentDiagnostics,
+    WorkspaceGenerationDiagnostics,
+};
+use tracedecay_domain::ContentDigest;
+use tracedecay_domain::test_fixtures::digest;
+
+struct DiagnosticFixture(GenerationDiagnostics);
+
+impl DiagnosticSnapshotPort for DiagnosticFixture {
+    fn document_diagnostics(
+        &self,
+        _root: &AdmittedRoot,
+        _uri: &str,
+        _overlay: Option<&OverlaySnapshot>,
+    ) -> DiagnosticSnapshotOutcome {
+        DiagnosticSnapshotOutcome::Ready {
+            diagnostics: self.0.clone(),
+            completed_operation_id: None,
+        }
+    }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        true
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        _workspace: &AuthorizedLspWorkspace,
+        _root: &AdmittedRoot,
+        _overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        WorkspaceDiagnosticSnapshotOutcome::Ready {
+            diagnostics: WorkspaceGenerationDiagnostics {
+                code_generation_id: "diagnostic-generation".to_owned(),
+                snapshot_digest: digest('d'),
+                documents: vec![WorkspaceDocumentDiagnostics {
+                    uri: "file:///root/a.rs".to_owned(),
+                    version: None,
+                    content_digest: ContentDigest::of_bytes(b"fn a() {}"),
+                    diagnostics: self.0.clone(),
+                }],
+            },
+            completed_operation_id: None,
+        }
+    }
+}
+
+fn diagnostic_batch(
+    upstream_count: usize,
+    tracedecay_count: usize,
+    upstream_first: bool,
+) -> GenerationDiagnostics {
+    let lane = |source: DiagnosticSource, count: usize, line| {
+        (0..count)
+            .map(|index| GatewayDiagnostic {
+                uri: "file:///root/a.rs".to_owned(),
+                range: LspRange {
+                    start: LspPosition { line, character: 0 },
+                    end: LspPosition { line, character: 1 },
+                },
+                severity: Some(DiagnosticSeverity::Warning),
+                code: None,
+                code_description_uri: None,
+                message: format!("{} finding {index:03}", source.wire_name()),
+                source,
+                related_information: Vec::new(),
+                data: None,
+            })
+            .collect()
+    };
+    GenerationDiagnostics {
+        generation: 9,
+        authority_digest: digest('e'),
+        upstream: lane(
+            DiagnosticSource::Upstream,
+            upstream_count,
+            u32::from(!upstream_first),
+        ),
+        tracedecay: lane(
+            DiagnosticSource::TraceDecayGitHub,
+            tracedecay_count,
+            u32::from(upstream_first),
+        ),
+    }
+}
+
+fn assert_diagnostic_delivery(
+    snapshot: GenerationDiagnostics,
+    cursor_native: bool,
+    data_support: bool,
+    expected: (usize, DiagnosticSource),
+) {
+    let workspace = AuthorizedLspWorkspace::new(
+        Some(digest('c')),
+        vec![AdmittedRoot::authorized("file:///root", digest('a'))],
+    )
+    .unwrap();
+    let capabilities = GatewayCapabilities {
+        supports_workspace_diagnostics: true,
+        ..GatewayCapabilities::default()
+    };
+    let upstream = UpstreamCapabilities {
+        supports_diagnostics: true,
+        ..UpstreamCapabilities::default()
+    };
+    let effective =
+        negotiate_capabilities(&ClientCapabilities::default(), &capabilities, &upstream);
+    let mut session = DaemonLspProtocolSession::from_workspace_ports(
+        workspace,
+        effective,
+        capabilities,
+        upstream,
+        Feedback::default(),
+        Semantics,
+        DiagnosticFixture(snapshot.clone()),
+    );
+    let mut request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "rootUri": "file:///root",
+            "capabilities": {
+                "general": { "positionEncodings": ["utf-16"] },
+                "textDocument": {
+                    "publishDiagnostics": { "versionSupport": true, "dataSupport": data_support },
+                    "diagnostic": {},
+                },
+            },
+        },
+    });
+    if cursor_native {
+        request["params"]["initializationOptions"] =
+            json!({ "tracedecay": { "mode": "cursor-native", "context": true } });
+    }
+    session.handle_payload(&serde_json::to_vec(&request).unwrap(), 0);
+    let initialized: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert!(initialized.get("error").is_none(), "{initialized}");
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+        1,
+    );
+    session.drain_outbound();
+
+    let assert_items = |items: &Value, expected: (usize, DiagnosticSource)| {
+        let items = items.as_array().expect("diagnostic items");
+        assert_eq!(items.len(), expected.0);
+        assert!(
+            items
+                .iter()
+                .all(|item| item["source"] == expected.1.wire_name())
+        );
+        let messages = items
+            .iter()
+            .map(|item| item["message"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(messages.windows(2).all(|pair| pair[0] < pair[1]));
+    };
+    assert!(session.publish_complete_snapshot("file:///root/a.rs", 1, snapshot.clone()));
+    let publication: Value = session
+        .drain_outbound()
+        .iter()
+        .map(|bytes| serde_json::from_slice(bytes).unwrap())
+        .find(|message: &Value| message["method"] == "textDocument/publishDiagnostics")
+        .expect("push report");
+    assert_items(&publication["params"]["diagnostics"], expected);
+
+    session.handle_payload(br#"{"jsonrpc":"2.0","id":2,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":"file:///root/a.rs"}}}"#, 2);
+    let document: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_items(&document["result"]["items"], expected);
+
+    session.handle_payload(br#"{"jsonrpc":"2.0","id":3,"method":"workspace/diagnostic","params":{"previousResultIds":[]}}"#, 3);
+    let workspace: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    let report = &workspace["result"]["items"][0];
+    assert_items(&report["items"], expected);
+    let result_id = report["resultId"].as_str().unwrap();
+    session.handle_payload(
+        &serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": 4, "method": "workspace/diagnostic",
+            "params": { "previousResultIds": [{ "uri": "file:///root/a.rs", "value": result_id }] },
+        }))
+        .unwrap(),
+        4,
+    );
+    let repeated: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(repeated["result"]["items"][0]["kind"], "unchanged");
+    assert_eq!(session.diagnostics.provider.0.upstream, snapshot.upstream);
+    assert_eq!(
+        session.diagnostics.provider.0.tracedecay,
+        snapshot.tracedecay
+    );
+}
+
+#[test]
+fn cursor_native_reports_do_not_spend_the_limit_on_hidden_upstream_findings() {
+    assert_diagnostic_delivery(
+        diagnostic_batch(MAX_DOCUMENT_DIAGNOSTICS, 1, true),
+        true,
+        true,
+        (1, DiagnosticSource::TraceDecayGitHub),
+    );
+}
+
+#[test]
+fn ordinary_clients_keep_the_combined_diagnostic_limit() {
+    assert_diagnostic_delivery(
+        diagnostic_batch(MAX_DOCUMENT_DIAGNOSTICS, 1, true),
+        false,
+        true,
+        (MAX_DOCUMENT_DIAGNOSTICS, DiagnosticSource::Upstream),
+    );
+}
+
+#[test]
+fn clients_without_diagnostic_data_do_not_spend_the_limit_on_hidden_managed_findings() {
+    assert_diagnostic_delivery(
+        diagnostic_batch(1, MAX_DOCUMENT_DIAGNOSTICS, false),
+        false,
+        false,
+        (1, DiagnosticSource::Upstream),
+    );
+}
+
+#[test]
+fn cursor_native_reports_still_bound_eligible_findings() {
+    assert_diagnostic_delivery(
+        diagnostic_batch(MAX_DOCUMENT_DIAGNOSTICS, MAX_DOCUMENT_DIAGNOSTICS + 1, true),
+        true,
+        true,
+        (MAX_DOCUMENT_DIAGNOSTICS, DiagnosticSource::TraceDecayGitHub),
+    );
+}
 
 #[test]
 fn save_flushes_pending_overlay_diagnostics() {
@@ -115,7 +347,7 @@ fn related_locations_are_limited_to_the_admitted_root() {
         data: None,
     };
 
-    let visible = session.visible_diagnostics(vec![diagnostic], true);
+    let visible = session.scope_diagnostic_related_information(vec![diagnostic]);
     assert_eq!(visible[0].related_information.len(), 1);
     assert_eq!(
         visible[0].related_information[0].uri,
@@ -147,13 +379,14 @@ fn managed_diagnostics_require_negotiated_data_identity() {
         data: None,
     };
 
-    let visible = session.visible_diagnostics(
-        vec![
-            diagnostic(DiagnosticSource::Upstream),
-            diagnostic(DiagnosticSource::TraceDecayGitHub),
-        ],
-        false,
-    );
+    let visible = session
+        .merge_document_diagnostics(
+            "file:///root/a.rs",
+            vec![diagnostic(DiagnosticSource::Upstream)],
+            vec![diagnostic(DiagnosticSource::TraceDecayGitHub)],
+            false,
+        )
+        .items;
 
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].source, DiagnosticSource::Upstream);
@@ -248,6 +481,11 @@ fn cursor_native_diagnostics_are_merged_but_not_republished() {
             .unwrap()
             .is_empty(),
         "Cursor-native clients must not receive their own diagnostics back"
+    );
+    assert_eq!(
+        session.diagnostics.native_upstream["file:///root/a.rs"].diagnostics[0].message,
+        "native diagnostic",
+        "presentation filtering preserves native evidence for context and analysis"
     );
     let projected_only = br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"tracedecay-github","message":"projected diagnostic"}]}}"#;
     session.handle_payload(projected_only, 62);
