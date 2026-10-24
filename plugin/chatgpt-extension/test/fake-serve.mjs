@@ -2,6 +2,7 @@
 // Stands in for `tracedecay serve` where a test needs exact daemon tool results.
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import path from "node:path";
 import { z } from "zod";
 
 const server = new McpServer({ name: "fake-tracedecay-serve", version: "0.0.0" });
@@ -17,6 +18,38 @@ const responseBodies = new Map([
   ["page_limit", JSON.stringify({ value: "x".repeat(1_100) })],
 ]);
 const retrieveRequests = [];
+
+const projectRoot = process.env.TRACEDECAY_TEST_PROJECT_ROOT ?? process.cwd();
+const project = {
+  project_id: "proj_fixture",
+  label: "fixture",
+  project_root: projectRoot,
+  canonical_root: projectRoot,
+  display_root: projectRoot,
+  created_at: 1,
+  last_seen_at: 1,
+  head_branch: "main",
+  default_branch: "main",
+};
+const registryPath = path.join(projectRoot, "global.db");
+
+server.registerTool("tracedecay_project_list", { inputSchema: { limit: z.number().int().positive() } }, async ({ limit }) => ({
+  content: [{ type: "text", text: JSON.stringify({
+    status: "ok", title: "Registered projects", registry_path: registryPath,
+    limit, truncated: false, projects: [project], project_tree: [],
+    summary: { project_count: 1, repo_count: 1, truncated: false },
+  }) }],
+}));
+
+server.registerTool("tracedecay_project_context", { inputSchema: { project_selector: z.object({ project_id: z.string() }) } }, async ({ project_selector }) => ({
+  content: [{ type: "text", text: JSON.stringify(project_selector.project_id === project.project_id
+    ? { status: "ok", project, is_active: true, aliases: [], stores: [], registry_path: registryPath }
+    : { status: "not_found", project: null, aliases: [], stores: [], registry_path: registryPath }) }],
+}));
+
+server.registerTool("tracedecay_node", { inputSchema: { node_id: z.string() } }, async ({ node_id }) => ({
+  content: [{ type: "text", text: JSON.stringify({ status: "not_found", reason_code: "node_not_found", node_id, message: `Node not found: ${node_id}` }) }],
+}));
 
 function scalarCount(text) {
   let count = 0;

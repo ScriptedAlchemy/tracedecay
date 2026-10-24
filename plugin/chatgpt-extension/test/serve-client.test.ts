@@ -1,6 +1,8 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonFailure, ServeSession } from "../src/server/serve-client.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -10,18 +12,32 @@ const MAX_RESPONSE_HANDLE_BYTES = 1024 * 1024;
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  try {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  } finally {
+    vi.restoreAllMocks();
+  }
 });
 
-function session(): ServeSession {
-  const serve = new ServeSession({
+function createSession(): ServeSession {
+  return new ServeSession({
     binary: FAKE_SERVE,
     projectRoot: null,
     env: { ...process.env, PATH: `${path.dirname(NODE_BINARY)}${path.delimiter}${process.env.PATH ?? ""}` },
     cwd: PACKAGE_ROOT,
   });
+}
+
+function session(): ServeSession {
+  const serve = createSession();
   cleanups.push(() => serve.close());
   return serve;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
 }
 
 async function rejection(promise: Promise<unknown>): Promise<unknown> {
@@ -37,6 +53,192 @@ async function retrieveOffsets(serve: ServeSession, handle: string): Promise<num
   const result = await serve.callJson("retrieve_calls", { handle });
   return (result as { readonly offsets: number[] }).offsets;
 }
+
+describe("serve session shutdown", () => {
+  it("refuses connection, calls, and tool discovery after closing an unused session", async () => {
+    const start = vi.spyOn(StdioClientTransport.prototype, "start");
+    const serve = session();
+    await serve.close();
+
+    const results = await Promise.allSettled([
+      serve.connect(),
+      serve.callJson("plain_read", {}),
+      serve.listToolNames(),
+    ]);
+    expect(results).toHaveLength(3);
+    expect(start).not.toHaveBeenCalled();
+    for (const result of results) {
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") {
+        expect(result.reason).toBeInstanceOf(DaemonFailure);
+        expect(result.reason.failure.code).toBe("serve_closed");
+      }
+    }
+  });
+
+  it("joins concurrent close calls while the owned child is being closed", async () => {
+    const serve = session();
+    await serve.connect();
+    const entered = deferred<StdioClientTransport>();
+    const release = deferred<void>();
+    const originalClose = StdioClientTransport.prototype.close;
+    const close = vi.spyOn(StdioClientTransport.prototype, "close").mockImplementation(async function (this: StdioClientTransport) {
+      entered.resolve(this);
+      await release.promise;
+      await originalClose.call(this);
+    });
+    const first = serve.close();
+    const transport = await entered.promise;
+    let childExited = false;
+    const onclose = transport.onclose;
+    transport.onclose = () => { childExited = true; onclose?.(); };
+    const second = serve.close();
+    try {
+      expect(serve.closed).toBe(true);
+      expect(transport.pid).not.toBeNull();
+      expect(second).toBe(first);
+      expect(close).toHaveBeenCalledTimes(1);
+      await expect(serve.listToolNames()).rejects.toMatchObject({ failure: { code: "serve_closed" } });
+    } finally {
+      release.resolve();
+      await Promise.all([first, second]);
+    }
+    expect(childExited).toBe(true);
+    expect(transport.pid).toBeNull();
+  });
+
+  it("keeps a failed cleanup visible to every close caller", async () => {
+    // No connection is opened: the injected failure concerns cleanup ownership.
+    const serve = createSession();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const error = new Error("session cleanup failed");
+    const originalClose = Client.prototype.close;
+    const close = vi.spyOn(Client.prototype, "close")
+      .mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        throw error;
+      })
+      .mockImplementation(originalClose);
+    const first = serve.close();
+    await entered.promise;
+    const second = serve.close();
+    release.resolve();
+    expect(await Promise.allSettled([first, second])).toEqual([
+      { status: "rejected", reason: error },
+      { status: "rejected", reason: error },
+    ]);
+    await expect(serve.close()).rejects.toBe(error);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles an in-progress connection before shutdown completes", async () => {
+    const spawned = deferred<StdioClientTransport>();
+    const releaseStart = deferred<void>();
+    const transportClosed = deferred<void>();
+    const originalStart = StdioClientTransport.prototype.start;
+    const originalClose = StdioClientTransport.prototype.close;
+    vi.spyOn(StdioClientTransport.prototype, "start").mockImplementation(async function (this: StdioClientTransport) {
+      await originalStart.call(this);
+      spawned.resolve(this);
+      await releaseStart.promise;
+    });
+    vi.spyOn(StdioClientTransport.prototype, "close").mockImplementation(async function (this: StdioClientTransport) {
+      await originalClose.call(this);
+      transportClosed.resolve();
+    });
+    const serve = session();
+    const order: string[] = [];
+    const connecting = serve.connect().then(
+      () => { order.push("connected"); return null; },
+      (error: unknown) => { order.push("connection refused"); return error; },
+    );
+    const transport = await spawned.promise;
+    expect(transport.pid).not.toBeNull();
+    let childExited = false;
+    const onclose = transport.onclose;
+    transport.onclose = () => { childExited = true; onclose?.(); };
+    const closing = serve.close().then(() => { order.push("closed"); });
+    try {
+      await transportClosed.promise;
+      releaseStart.resolve();
+      const [error] = await Promise.all([connecting, closing]);
+      expect(error).toBeInstanceOf(DaemonFailure);
+      expect(order).toEqual(["connection refused", "closed"]);
+      expect(childExited).toBe(true);
+      expect(transport.pid).toBeNull();
+    } finally {
+      releaseStart.resolve();
+      await Promise.allSettled([connecting, closing]);
+    }
+  });
+
+  it("drains a child started by a connection already accepted before shutdown", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const originalConnect = Client.prototype.connect;
+    vi.spyOn(Client.prototype, "connect").mockImplementation(async function (this: Client, transport, options) {
+      entered.resolve();
+      await release.promise;
+      await originalConnect.call(this, transport, options);
+    });
+    let transport: StdioClientTransport | null = null;
+    let childExited = false;
+    const originalStart = StdioClientTransport.prototype.start;
+    vi.spyOn(StdioClientTransport.prototype, "start").mockImplementation(async function (this: StdioClientTransport) {
+      transport = this;
+      const onclose = this.onclose;
+      this.onclose = () => { childExited = true; onclose?.(); };
+      await originalStart.call(this);
+    });
+    const serve = session();
+    const connecting = serve.connect().then(() => null, (error: unknown) => error);
+    await entered.promise;
+    const closing = serve.close();
+    try {
+      expect(transport).toBeNull();
+      release.resolve();
+      const [error] = await Promise.all([connecting, closing]);
+      expect(error).toBeInstanceOf(DaemonFailure);
+      expect((error as DaemonFailure).failure.code).toBe("serve_closed");
+      expect(childExited).toBe(true);
+      expect(transport).toMatchObject({ pid: null });
+    } finally {
+      release.resolve();
+      await Promise.allSettled([connecting, closing]);
+    }
+  });
+
+  it("waits for child exit when the SDK already started handshake-failure cleanup", async () => {
+    const handshakeError = new Error("initialize refused");
+    vi.spyOn(Client.prototype, "request").mockRejectedValueOnce(handshakeError);
+    const spawned = deferred<StdioClientTransport>();
+    const exited = deferred<void>();
+    let childExited = false;
+    const originalStart = StdioClientTransport.prototype.start;
+    vi.spyOn(StdioClientTransport.prototype, "start").mockImplementation(async function (this: StdioClientTransport) {
+      const onclose = this.onclose;
+      this.onclose = () => { childExited = true; exited.resolve(); onclose?.(); };
+      await originalStart.call(this);
+      spawned.resolve(this);
+    });
+    const serve = session();
+    try {
+      await expect(serve.connect()).rejects.toMatchObject({
+        failure: { code: "serve_spawn_failed" },
+        cause: handshakeError,
+      });
+      const transport = await spawned.promise;
+      expect(transport.pid).toBeNull();
+      expect(childExited).toBe(false);
+      await serve.close();
+      expect(childExited).toBe(true);
+    } finally {
+      await exited.promise;
+    }
+  });
+});
 
 describe("response handle reassembly", () => {
   it("reconstructs multipage JSON using Unicode scalar offsets", async () => {

@@ -106,6 +106,7 @@ function controlFrames() {
 describe('layout requests from the canvas', () => {
   it('drops a superseded layout that finishes after its replacement', async () => {
     mockCanvas();
+    const { flush } = controlFrames();
     const { painter, requests } = fakePainter();
     const first = sceneOf('a');
     const second = sceneOf('a', 'b');
@@ -120,17 +121,31 @@ describe('layout requests from the canvas', () => {
       requests[1]!.resolve({ tag: 'second' });
       await requests[1]!.settled;
     });
-    await waitFor(() =>
-      expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready'),
-    );
-    await waitFor(() => expect(painter.draw).toHaveBeenCalled());
+    expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready');
+    flush();
+    expect(painter.draw).toHaveBeenCalled();
     await act(async () => {
       requests[0]!.resolve({ tag: 'first' });
       await requests[0]!.settled;
     });
+    flush();
 
     const drawn = vi.mocked(painter.draw).mock.calls.map((call) => call[0].tag);
     expect(new Set(drawn)).toEqual(new Set(['second']));
+
+    // Historical draws alone can miss stale state that the paint guard refuses.
+    // A selection change must still produce a fresh draw of the current layout.
+    vi.mocked(painter.draw).mockClear();
+    view.rerender(renderCanvas({ scene: second, painter, selectedId: 'b' }));
+    flush();
+    expect(painter.draw).toHaveBeenCalled();
+    for (const [layout, scene, frame] of vi.mocked(painter.draw).mock.calls) {
+      expect(layout.tag).toBe('second');
+      expect(scene).toBe(second);
+      expect(frame.selected).toBe('b');
+    }
+    expect(requests).toHaveLength(2);
+    view.unmount();
   });
 
   it('aborts the pending request on unmount', async () => {
@@ -249,36 +264,69 @@ describe('layout requests from the canvas', () => {
     await act(async () => {
       requests[1]!.resolve({ tag: 'obsolete' });
       await requests[1]!.settled;
-      requests[0]!.reject(new Error('older layout failed'));
-      await requests[0]!.settled.catch(() => {});
+    });
+    flush();
+    const obsoleteError = new Error('older layout failed');
+    await act(async () => {
+      requests[0]!.reject(obsoleteError);
+      await expect(requests[0]!.settled).rejects.toBe(obsoleteError);
     });
     flush();
     expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready');
+    expect(screen.queryByText(obsoleteError.message, { exact: false })).toBeNull();
     for (const [layout, scene] of vi.mocked(painter.draw).mock.calls) {
       expect(layout.tag).toBe('third');
       expect(scene).toBe(third);
     }
+    vi.mocked(painter.draw).mockClear();
+    view.rerender(renderCanvas({ scene: third, painter, selectedId: 'c' }));
+    flush();
+    expect(painter.draw).toHaveBeenCalled();
+    for (const [layout, scene, frame] of vi.mocked(painter.draw).mock.calls) {
+      expect(layout.tag).toBe('third');
+      expect(scene).toBe(third);
+      expect(frame.selected).toBe('c');
+    }
+    expect(requests).toHaveLength(3);
     view.unmount();
   });
 
-  it('cancels queued frames on unmount and does not requeue a late layout', async () => {
-    mockCanvas();
-    const { frames, flush } = controlFrames();
-    const { painter, requests } = fakePainter();
-    const view = render(renderCanvas({ scene: sceneOf('a'), painter }));
-    await waitFor(() => expect(requests).toHaveLength(1));
-    expect(frames.size).toBeGreaterThan(0);
-    view.unmount();
-    expect(requests[0]!.signal!.aborted).toBe(true);
-    expect(frames.size).toBe(0);
-    await act(async () => {
-      requests[0]!.resolve({ tag: 'too late' });
-      await requests[0]!.settled;
-    });
-    flush();
-    expect(frames.size).toBe(0);
-    expect(painter.draw).not.toHaveBeenCalled();
-  });
+  it.each(['resolution', 'rejection'] as const)(
+    'cancels queued frames on unmount and does not requeue a late %s',
+    async (settlement) => {
+      mockCanvas();
+      const { frames, flush } = controlFrames();
+      const { painter, requests } = fakePainter();
+      const view = render(renderCanvas({ scene: sceneOf('a'), painter }));
+      await waitFor(() => expect(requests).toHaveLength(1));
+      const request = requests[0]!;
+      expect(request.signal!.aborted).toBe(false);
+      expect(frames.size).toBeGreaterThan(0);
+      view.unmount();
+      expect(request.signal!.aborted).toBe(true);
+      expect(frames.size).toBe(0);
+      const frameRequests = vi.mocked(window.requestAnimationFrame).mock.calls.length;
+
+      await act(async () => {
+        if (settlement === 'resolution') {
+          request.resolve({ tag: 'too late' });
+          await request.settled;
+        } else {
+          const error = new Error('layout rejected after unmount');
+          request.reject(error);
+          // Handle only the fixture's promise; Vitest still observes unhandled
+          // errors from the component's separate completion chain.
+          await expect(request.settled).rejects.toBe(error);
+        }
+      });
+      expect(window.requestAnimationFrame).toHaveBeenCalledTimes(frameRequests);
+      expect(frames.size).toBe(0);
+      flush();
+      expect(frames.size).toBe(0);
+      expect(painter.draw).not.toHaveBeenCalled();
+    },
+  );
+
   it('never mixes a queued old painter with a new scene and layout', async () => {
     mockCanvas();
     const { frames, flush } = controlFrames();

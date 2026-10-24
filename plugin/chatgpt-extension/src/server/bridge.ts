@@ -51,19 +51,26 @@ export class DaemonBridge {
   readonly #projects = new Map<string, ProjectHandle>();
   readonly #pending = new Map<string, Promise<ProjectHandle>>();
   #closing = false;
+  #closePromise: Promise<void> | null = null;
 
   constructor(options: BridgeOptions) {
     this.#options = options;
   }
 
   async authority(): Promise<AuthorityLookup> {
-    return readDaemonAuthority(this.#options.profileRoot);
+    this.#assertOpen();
+    const lookup = await readDaemonAuthority(this.#options.profileRoot);
+    this.#assertOpen();
+    return lookup;
   }
 
   async daemonState(): Promise<DaemonState> {
+    this.#assertOpen();
     const lookup = await this.authority();
+    this.#assertOpen();
     if (lookup.kind !== "available") return { state: "disconnected", failure: lookup.failure };
     const unreachable = await probeDaemon(lookup.record);
+    this.#assertOpen();
     if (unreachable !== null) return { state: "disconnected", failure: unreachable };
     return {
       state: "connected",
@@ -74,42 +81,58 @@ export class DaemonBridge {
   }
 
   async #requireAuthority(): Promise<DaemonAuthorityRecord> {
+    this.#assertOpen();
     const lookup = await this.authority();
+    this.#assertOpen();
     if (lookup.kind !== "available") throw new DaemonFailure(lookup.failure);
     return lookup.record;
   }
 
-  #registrySession(): ServeSession {
-    if (this.#registry === null || this.#registry.closed) {
-      this.#registry = new ServeSession({
-        binary: this.#options.binary,
-        projectRoot: null,
-        env: this.#options.env,
-        cwd: this.#options.cwd,
-      });
+  async #registrySession(): Promise<ServeSession> {
+    for (;;) {
+      this.#assertOpen();
+      const current = this.#registry;
+      if (current === null) {
+        this.#registry = new ServeSession({
+          binary: this.#options.binary,
+          projectRoot: null,
+          env: this.#options.env,
+          cwd: this.#options.cwd,
+        });
+        return this.#registry;
+      }
+      if (!current.closed) return current;
+      // A failed handshake can mark the session closed before its child exits.
+      // Keep that owner published while retries and shutdown join its cleanup.
+      await current.close();
+      this.#assertOpen();
+      if (this.#registry === current) this.#registry = null;
     }
-    return this.#registry;
   }
 
   #registryClient(): RegistryClient {
-    return new RegistryClient((toolName, request, signal) => this.#registrySession().callJson(toolName, request, signal));
+    return new RegistryClient(async (toolName, request, signal) => {
+      const session = await this.#registrySession();
+      this.#assertOpen();
+      return session.callJson(toolName, request, signal);
+    });
   }
 
   async listProjects(signal?: AbortSignal): Promise<readonly ProjectRef[]> {
     await this.#requireAuthority();
     const client = this.#registryClient();
-    const listed = await runSdk(() => client.projectList({ limit: 10 }, signal));
+    const listed = await this.#runSdk(() => client.projectList({ limit: 10 }, signal));
     return listed.projects.map(projectRef);
   }
 
   async resolveProject(projectId: string, signal?: AbortSignal): Promise<ProjectRef> {
     await this.#requireAuthority();
     const client = this.#registryClient();
-    const context = await runSdk(() => client.projectContext({ project_selector: { project_id: projectId } }, signal));
+    const context = await this.#runSdk(() => client.projectContext({ project_selector: { project_id: projectId } }, signal));
     if (context.status === "not_found") {
       const cached = this.#projects.get(projectId);
-      this.#projects.delete(projectId);
       await cached?.session.close();
+      if (this.#projects.get(projectId) === cached) this.#projects.delete(projectId);
       throw new DaemonFailure({
         kind: "denied",
         code: "project_not_registered",
@@ -120,8 +143,9 @@ export class DaemonBridge {
   }
 
   async #handle(projectId: string, signal?: AbortSignal): Promise<ProjectHandle> {
-    if (this.#closing) throw bridgeClosed();
+    this.#assertOpen();
     const project = await this.resolveProject(projectId, signal);
+    this.#assertOpen();
     let pending = this.#pending.get(projectId);
     if (pending === undefined) {
       // One acquisition at a time per project: two concurrent callers must not
@@ -143,11 +167,15 @@ export class DaemonBridge {
   async #acquire(project: ProjectRef): Promise<ProjectHandle> {
     const projectId = project.project_id;
     const record = await this.#requireAuthority();
+    this.#assertOpen();
     const cached = this.#projects.get(projectId);
     if (cached !== undefined) {
       if (!cached.session.closed && cached.authority.process_run_id === record.process_run_id && cached.project.project_root === project.project_root) return cached;
-      this.#projects.delete(projectId);
+      // A retiring session remains owned until cleanup succeeds, including
+      // when close() starts while this acquisition is awaiting it.
       await cached.session.close();
+      if (this.#projects.get(projectId) === cached) this.#projects.delete(projectId);
+      this.#assertOpen();
     }
     const baseUrl = httpBaseUrl(record);
     if (baseUrl === null) {
@@ -172,39 +200,33 @@ export class DaemonBridge {
       },
     });
     const handle: ProjectHandle = { project, session, client, authority: record };
-    if (this.#closing) {
-      // Shutdown raced this acquisition: never cache the child or let it
-      // outlive close().
-      await session.close();
-      throw bridgeClosed();
-    }
     this.#projects.set(projectId, handle);
     return handle;
   }
 
   async status(projectId: string, signal?: AbortSignal): Promise<{ status: OperationApplicationStatusResult; authority: DaemonAuthorityRecord }> {
     const { client, authority } = await this.#handle(projectId, signal);
-    return { status: await runSdk(() => client.operations.status({}, optional(signal))), authority };
+    return { status: await this.#runSdk(() => client.operations.status({}, optional(signal))), authority };
   }
 
   async search(projectId: string, query: string, limit: number, signal?: AbortSignal): Promise<OperationApplicationSearchResult> {
     const { client } = await this.#handle(projectId, signal);
-    return runSdk(() => client.operations.search({ query, limit, prefer_symbol: true }, optional(signal)));
+    return this.#runSdk(() => client.operations.search({ query, limit, prefer_symbol: true }, optional(signal)));
   }
 
   async node(projectId: string, nodeId: string, signal?: AbortSignal): Promise<OperationApplicationNodeResult> {
     const { client } = await this.#handle(projectId, signal);
-    return runSdk(() => client.operations.node({ node_id: nodeId }, optional(signal)));
+    return this.#runSdk(() => client.operations.node({ node_id: nodeId }, optional(signal)));
   }
 
   async impact(projectId: string, nodeId: string, maxDepth: number, signal?: AbortSignal): Promise<OperationApplicationImpactResult> {
     const { client } = await this.#handle(projectId, signal);
-    return runSdk(() => client.operations.impact({ node_id: nodeId, max_depth: maxDepth }, optional(signal)));
+    return this.#runSdk(() => client.operations.impact({ node_id: nodeId, max_depth: maxDepth }, optional(signal)));
   }
 
   async callers(projectId: string, nodeId: string, depth: number, signal?: AbortSignal): Promise<OperationApplicationCodeCallersResult> {
     const { client } = await this.#handle(projectId, signal);
-    return runSdk(() =>
+    return this.#runSdk(() =>
       client.operations.code_callers(
         { node_id: nodeId, maximum_depth: depth, meta: { order: "stable_identity", projection: "summary" } },
         optional(signal),
@@ -220,7 +242,7 @@ export class DaemonBridge {
     signal?: AbortSignal,
   ): Promise<OperationApplicationCodeCalleesResult> {
     const { client } = await this.#handle(projectId, signal);
-    return runSdk(() =>
+    return this.#runSdk(() =>
       client.operations.code_callees(
         {
           node_id: nodeId,
@@ -235,7 +257,7 @@ export class DaemonBridge {
 
   async symbolSearch(projectId: string, query: string, signal?: AbortSignal): Promise<OperationApplicationCodeSymbolSearchResult> {
     const { client } = await this.#handle(projectId, signal);
-    return runSdk(() =>
+    return this.#runSdk(() =>
       client.operations.code_symbol_search(
         {
           query,
@@ -248,16 +270,42 @@ export class DaemonBridge {
     ).then(payloadOf);
   }
 
-  async close(): Promise<void> {
+  #assertOpen(): void {
+    if (this.#closing) throw bridgeClosed();
+  }
+
+  async #runSdk<T>(operation: () => Promise<T>): Promise<T> {
+    // HTTP operations bypass ServeSession, so admission must be checked here
+    // even when the handle was acquired before shutdown began.
+    this.#assertOpen();
+    try {
+      const result = await operation();
+      this.#assertOpen();
+      return result;
+    } catch (error) {
+      throw new DaemonFailure(failureFromSdk(error), { cause: error });
+    }
+  }
+
+  close(): Promise<void> {
+    if (this.#closePromise !== null) return this.#closePromise;
     this.#closing = true;
-    // In-flight acquisitions close their own children once they see the flag;
-    // wait for them so a session created mid-race cannot escape shutdown.
+    this.#closePromise = this.#closeSessions();
+    return this.#closePromise;
+  }
+
+  async #closeSessions(): Promise<void> {
+    // No continuation may admit work after #closing is set. Drain acquisitions
+    // before collecting their published or still-retiring sessions.
     await Promise.allSettled([...this.#pending.values()]);
     const sessions = [...this.#projects.values()].map((handle) => handle.session);
     if (this.#registry !== null) sessions.push(this.#registry);
     this.#projects.clear();
     this.#registry = null;
-    await Promise.all(sessions.map((session) => session.close()));
+    const results = await Promise.allSettled(sessions.map(async (session) => session.close()));
+    const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "extension bridge session cleanup failed");
   }
 }
 
@@ -306,14 +354,6 @@ function payloadOf<T>(envelope: HttpSuccess<T>): T {
     });
   }
   return payload;
-}
-
-async function runSdk<T>(operation: () => Promise<T>): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    throw new DaemonFailure(failureFromSdk(error), { cause: error });
-  }
 }
 
 export function failureFromSdk(error: unknown): Failure {
