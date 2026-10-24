@@ -1130,10 +1130,7 @@ mod tests {
         assert!(audit.unmounted.is_empty());
         let note = audit.note.expect("config omission");
         assert!(note.contains("rsbuild.config.ts"), "{note}");
-        assert!(
-            note.contains("could not be parsed without syntax errors"),
-            "{note}"
-        );
+        assert!(note.contains("contains syntax errors"), "{note}");
     }
 
     /// A `package.json` script names the file it runs, and that file is an
