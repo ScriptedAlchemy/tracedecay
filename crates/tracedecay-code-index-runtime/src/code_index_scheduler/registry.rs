@@ -49,6 +49,7 @@ use super::{
 };
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1;
 
 #[cfg(test)]
 mod cold_read_wake_tests;
@@ -1688,6 +1689,81 @@ impl MemoryRefusalRetryV1 {
 
     fn waiting(&self) -> bool {
         self.waiting.load(Ordering::Acquire)
+    }
+}
+
+/// The measured process size a reconcile refused for resident memory started
+/// from: it needed more headroom than that left it.
+///
+/// Its own release returns the process to about where it started, and the
+/// watermark latch clearing behind that release advances the admission
+/// headroom epoch. Retrying on that epoch rebuilt the same refused pass
+/// forever (issue #4505), so admission headroom retries the pass only once
+/// the process measures below this. The bound registers with the authority,
+/// so a sample under it advances the epoch even with the latch already clear.
+struct RefusedReconcileStartV1(AtomicU64);
+
+impl Default for RefusedReconcileStartV1 {
+    fn default() -> Self {
+        Self(AtomicU64::new(u64::MAX))
+    }
+}
+
+impl RefusedReconcileStartV1 {
+    /// A pass that began under `started` was refused for memory. Only a pass
+    /// that itself carried the process over the watermark is bounded: a
+    /// ledger refusal, or one admitted while already over, is lifted by the
+    /// release or the latch clearing it waits on.
+    fn refused(
+        &self,
+        started: ResidentMemoryPressureStateV1,
+        resident_memory: &Arc<resident_memory::ProcessResidentMemoryV1>,
+    ) {
+        if started.is_over_budget() || !resident_memory.pressure().state().is_over_budget() {
+            return;
+        }
+        if let Some(started_bytes) = started.observed_bytes() {
+            self.0.fetch_min(started_bytes, Ordering::AcqRel);
+            self.register(resident_memory);
+        }
+    }
+
+    fn clear(&self) {
+        self.0.store(u64::MAX, Ordering::Release);
+    }
+
+    /// Whether the process now measures below where the refused pass
+    /// started. Waiters settle together, so an epoch another waiter settled
+    /// re-registers this bound before it reads as no.
+    fn admits_retry(
+        &self,
+        resident_memory: &Arc<resident_memory::ProcessResidentMemoryV1>,
+    ) -> bool {
+        let started_bytes = self.0.load(Ordering::Acquire);
+        if started_bytes == u64::MAX {
+            return true;
+        }
+        let admits = resident_memory
+            .pressure()
+            .state()
+            .observed_bytes()
+            .is_none_or(|observed| observed < started_bytes);
+        if !admits {
+            self.register(resident_memory);
+        }
+        admits
+    }
+
+    fn register(&self, resident_memory: &Arc<resident_memory::ProcessResidentMemoryV1>) {
+        let started_bytes = self.0.load(Ordering::Acquire);
+        if started_bytes == u64::MAX {
+            return;
+        }
+        let ceiling = resident_memory.pressure().limit_bytes();
+        resident_memory.wait_for_headroom(
+            ceiling.saturating_sub(started_bytes.saturating_sub(1)),
+            ceiling,
+        );
     }
 }
 
