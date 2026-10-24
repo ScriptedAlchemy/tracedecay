@@ -7,11 +7,14 @@
 //! The scan in the parent module stays provider-neutral: it reads rows, hands
 //! each one to the registered recognizers, and never names a provider.
 
+use std::io::ErrorKind;
 use std::pin::Pin;
 use std::time::Duration;
 
 use serde_json::Value;
+use tracedecay_contracts::automation::AgentTaskFailureClass;
 use tracedecay_domain::configuration::{LcmSummarizerExecutableV1, LcmSummarizerExecutablesV1};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationFactV1};
 
 use tracedecay_lcm::{LcmError, LcmSummaryRequest};
@@ -318,7 +321,12 @@ async fn cursor_agent_summary(
     })
     .await
     .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?
-    .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?;
+    .map_err(|error| match error {
+        TraceDecayError::Io(error) if error.kind() == ErrorKind::TimedOut => {
+            LcmError::DeadlineExceeded.into()
+        }
+        _ => SummaryResolutionError::Unavailable("cursor_agent_unavailable"),
+    })?;
     Ok(AuthoritativeSummary {
         text,
         route: "cursor_agent".to_string(),
@@ -364,7 +372,10 @@ async fn codex_app_server_summary(
     })
     .await
     .map_err(|_| SummaryResolutionError::Unavailable("codex_app_server_unavailable"))?
-    .map_err(|_| SummaryResolutionError::Unavailable("codex_app_server_unavailable"))?;
+    .map_err(|error| match error.class {
+        AgentTaskFailureClass::Timeout => LcmError::DeadlineExceeded.into(),
+        _ => SummaryResolutionError::Unavailable("codex_app_server_unavailable"),
+    })?;
     Ok(AuthoritativeSummary {
         text: result.text,
         route: result.model.map_or_else(
