@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::collections::BTreeSet;
+use std::fmt::Debug;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -40,6 +41,8 @@ use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
 use tracedecay_daemon_service::{
     DaemonInvocationProblem, ProjectRuntimePublicationStateV1, RegisteredRetainedRuntime,
 };
+use tracing::field::{Field, Visit};
+use tracing::span::Attributes;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -101,18 +104,66 @@ const PREPARATION_RELEASE_DEADLINE: Duration = Duration::from_mins(1);
 
 #[derive(Default)]
 struct CuratorPreparationPause {
+    run_id: &'static str,
     release: Mutex<Option<mpsc::Receiver<()>>>,
     entered: tokio::sync::Notify,
 }
 
 struct PauseCuratorPreparation(Arc<CuratorPreparationPause>);
 
+struct CuratorPreparationRun(bool);
+
+struct CuratorPreparationRunVisitor<'a> {
+    expected: &'a str,
+    matches: bool,
+}
+
+impl Visit for CuratorPreparationRunVisitor<'_> {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "run_id" {
+            self.matches = value == self.expected;
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        if field.name() == "run_id" {
+            self.matches = format!("{value:?}") == self.expected;
+        }
+    }
+}
+
 impl<S> Layer<S> for PauseCuratorPreparation
 where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
 {
+    fn on_new_span(
+        &self,
+        attributes: &Attributes<'_>,
+        id: &tracing::span::Id,
+        context: Context<'_, S>,
+    ) {
+        if attributes.metadata().name() != "daemon.automation.effect.reserve" {
+            return;
+        }
+        let mut run = CuratorPreparationRunVisitor {
+            expected: self.0.run_id,
+            matches: false,
+        };
+        attributes.record(&mut run);
+        context
+            .span(id)
+            .unwrap()
+            .extensions_mut()
+            .insert(CuratorPreparationRun(run.matches));
+    }
+
     fn on_enter(&self, id: &tracing::span::Id, context: Context<'_, S>) {
-        if context.span(id).unwrap().metadata().name() != "daemon.automation.effect.reserve" {
+        let span = context.span(id).unwrap();
+        if !span
+            .extensions()
+            .get::<CuratorPreparationRun>()
+            .is_some_and(|run| run.0)
+        {
             return;
         }
         if let Some(release) = self.0.release.lock().unwrap().take() {
@@ -128,6 +179,7 @@ where
 /// journal write it already queued must keep the exact project owner alive.
 #[tokio::test]
 async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutdown() {
+    const REQUEST_ID: &str = "request.socket-curator-preparation-shutdown";
     const CHILD: &str = "TRACEDECAY_TEST_CURATOR_PREPARATION_SHUTDOWN_CHILD";
     if std::env::var_os(CHILD).is_none() {
         // A global subscriber follows the real reserve onto its native
@@ -149,7 +201,10 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
         return;
     }
 
-    let pause = Arc::new(CuratorPreparationPause::default());
+    let pause = Arc::new(CuratorPreparationPause {
+        run_id: REQUEST_ID,
+        ..CuratorPreparationPause::default()
+    });
     tracing::subscriber::set_global_default(
         tracing_subscriber::registry().with(PauseCuratorPreparation(Arc::clone(&pause))),
     )
@@ -187,7 +242,7 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
 
     let (release, release_rx) = mpsc::channel();
     *pause.release.lock().unwrap() = Some(release_rx);
-    let request_id = "request.socket-curator-preparation-shutdown";
+    let request_id = REQUEST_ID;
     let observed_at = tracedecay_contracts::clock::now_micros();
     let request = DaemonInvocationRequest::retained_application(
         request_id,
@@ -262,6 +317,161 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
     )
     .expect("durable curator reservation");
     assert_eq!(record["admission"]["request"]["run_id"], request_id);
+}
+
+#[tokio::test]
+async fn aborted_automation_preparation_keeps_its_writer_owned_through_shutdown() {
+    const CHILD: &str = "TRACEDECAY_TEST_AUTOMATION_PREPARATION_SHUTDOWN_CHILD";
+    const RUN_ID: &str = "run.curator-preparation-shutdown";
+    if std::env::var_os(CHILD).is_none() {
+        let test_name = format!(
+            "{}::aborted_automation_preparation_keeps_its_writer_owned_through_shutdown",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name, "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("run isolated automation preparation shutdown journey");
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "automation preparation shutdown journey failed: {output:?}"
+        );
+        return;
+    }
+
+    let pause = Arc::new(CuratorPreparationPause {
+        run_id: RUN_ID,
+        ..CuratorPreparationPause::default()
+    });
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(PauseCuratorPreparation(Arc::clone(&pause))),
+    )
+    .expect("isolated automation preparation subscriber");
+    let (_temp, _database_scope, engine, handshake) =
+        committed_fixture("automation-preparation-shutdown").await;
+    super::prewarm_test_profile_runtime(&engine.store_administration).await;
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("project server");
+    let cg = server.cg().await;
+    let project_root = cg.project_root().to_path_buf();
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    drop(server);
+    let pinned = cg
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("configuration");
+    let digest = tracedecay_automation_runtime::automation::effect_runtime::pinned_automation_configuration_digest(
+        pinned.revision_id(),
+        &pinned.snapshot().effective_behavior_digest,
+        &pinned.snapshot().resolution_provenance_digest,
+    ).expect("pinned automation configuration");
+    let request_id =
+        tracedecay_daemon_service::automation_effect::scheduler_automation_request_id(Some(RUN_ID))
+            .expect("scheduler request identity");
+    let expected_request_id = request_id.as_str().to_owned();
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active(format!("cancel.{expected_request_id}"))
+            .expect("scheduler cancellation");
+    let observed_at = tracedecay_contracts::now_micros();
+    let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("scheduler deadline");
+    let options =
+        tracedecay_automation_runtime::automation::runner::MemoryCuratorAutomationOptions::default(
+        );
+    let request =
+        tracedecay_automation_runtime::automation::effect_runtime::memory_curator_run_request(
+            RUN_ID,
+            options.fact_review_limit,
+            options.min_confidence,
+        )
+        .expect("curator request");
+    let registry = engine.invocation.service.project_runtimes.clone();
+    let service = engine.invocation.service.clone();
+    let (release, release_rx) = mpsc::channel();
+    *pause.release.lock().unwrap() = Some(release_rx);
+    let prepare_dashboard_root = dashboard_root.clone();
+    let preparation = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+        // Scheduler and dashboard callers use this shared production boundary,
+        // without the socket caller's accepted-run lease or task-local scope.
+        let admission = Box::pin(tracedecay_daemon_service::automation_effect::prepare(
+            &service,
+            &cg,
+            &project_root,
+            &prepare_dashboard_root,
+            request_id,
+            deadline,
+            &cancellation,
+            observed_at,
+            digest,
+            request,
+        )).await.expect("automation preparation");
+        assert!(matches!(admission, tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Execute(_)));
+    }).expect("native automation preparation");
+    tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, pause.entered.notified())
+        .await
+        .expect("the exact automation reservation writer is paused");
+    let run_id = tracedecay_domain::RunId::new(RUN_ID).expect("curator run identity");
+    let journal_key = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.automation-run.terminal-key.v1",
+        &run_id,
+    ))
+    .expect("curator journal key");
+    let journal_path = dashboard_root.join("automation_effects").join(format!(
+        "{}.json",
+        journal_key.as_str().trim_start_matches("sha256:")
+    ));
+    assert!(!journal_path.exists(), "the reservation I/O is paused");
+    preparation.abort();
+    let stopped = tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, preparation.wait())
+        .await
+        .expect("aborted preparation wait joins");
+    assert!(matches!(
+        stopped,
+        tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Cancelled
+    ));
+
+    let (drain_waiting, drain_is_waiting) = tokio::sync::oneshot::channel();
+    registry.arm_shutdown_drain_waiting(drain_waiting);
+    let shutdown_engine = engine.clone();
+    let mut shutdown = tokio::spawn(async move { shutdown_engine.shutdown_all().await });
+    tokio::select! {
+        result = &mut shutdown => panic!(
+            "shutdown returned while the automation writer was live: {result:?}"
+        ),
+        waiting = tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, drain_is_waiting) => {
+            waiting.expect("shutdown reaches the project runtime drain")
+                .expect("the automation reservation still owns the project drain");
+        }
+    }
+    assert!(!shutdown.is_finished());
+    assert!(!journal_path.exists(), "the writer is still paused");
+    release
+        .send(())
+        .expect("release the automation reservation writer");
+    let shutdown = tokio::time::timeout(PREPARATION_RELEASE_DEADLINE, shutdown)
+        .await
+        .expect("the writer releases project shutdown")
+        .expect("shutdown task");
+    assert!(
+        shutdown
+            .background
+            .owners
+            .iter()
+            .any(|owner| owner.name == "invocation" && owner.status.is_clean()),
+        "{shutdown:?}"
+    );
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(journal_path).expect("reservation completed before shutdown"),
+    )
+    .expect("durable automation reservation");
+    assert_eq!(record["admission"]["request"]["run_id"], RUN_ID);
+    assert_eq!(record["admission"]["request_id"], expected_request_id);
 }
 
 // Each surface check constructs its future inside its own function and returns
