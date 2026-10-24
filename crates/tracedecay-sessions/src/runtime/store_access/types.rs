@@ -48,15 +48,17 @@ pub struct SessionIngestHealth {
     pub provider_coverage: Vec<SessionProviderCoverage>,
     /// Transcripts referenced by sessions that still exist on disk.
     pub tracked_transcripts: u64,
-    /// Transcripts with un-ingested appended bytes.
+    /// Transcripts with bytes past the committed source cursor of their
+    /// current file generation; a rewritten file is pending in full.
     pub pending_transcripts: u64,
-    /// Total un-ingested bytes across pending transcripts.
+    /// Total unadmitted bytes across pending transcripts.
     pub pending_bytes: u64,
     /// Largest single-transcript backlog. The hook ingest caps are
     /// per-transcript, so this (not the total) decides whether the hooks can
     /// still drain the backlog on their own.
     pub max_transcript_pending_bytes: u64,
-    /// Newest transcript mtime recorded at ingest time (Unix seconds).
+    /// Newest modification time (Unix seconds) of a transcript admitted to
+    /// its end.
     pub last_ingest_unix: Option<i64>,
 }
 
