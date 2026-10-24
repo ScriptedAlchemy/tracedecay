@@ -179,16 +179,14 @@ fn toml_secret_keys_become_bare_placeholders() {
 }
 
 #[test]
-fn credential_keys_redact_in_place_on_the_lcm_text_route() {
+fn credential_keys_redact_in_place_on_code_source_and_lcm_text_routes() {
     let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
     let raw = format!("{credential_key} = \"ordinary-value\"\nregion = \"us-east\"\n");
+    let expected = "TraceDecay-redacted-key-1 = \"TraceDecay-redacted-sensitive-field\"\nregion = \"us-east\"\n";
 
+    assert_eq!(sanitize_data(&raw), expected);
     let sanitized = sanitize_lcm_payload_text(&raw).expect("key redacts in place");
-
-    assert_eq!(
-        sanitized.sanitized_text(),
-        "TraceDecay-redacted-key-1 = \"TraceDecay-redacted-sensitive-field\"\nregion = \"us-east\"\n"
-    );
+    assert_eq!(sanitized.sanitized_text(), expected);
 }
 
 /// YAML is parsed without key spans, so a key cannot be located byte-exactly
