@@ -293,16 +293,30 @@ fn sanitize_structured_text_with(
     // redaction keeps its format label only if it still parses as the input's
     // format. Parser spans replace exactly the value token.
     let text_located = candidates.iter().any(|candidate| candidate.text_located);
-    let reparses = || {
-        matches!(
-            parse_structured_text(&sanitized_text),
-            Ok(Some(ref reparsed)) if reparsed.format == parsed.format
-        )
-    };
-    let reparsed = (text_located || !keys.redactions.is_empty()).then(reparses);
-    // A rewritten key leaves the document valid unless the key also occurs
-    // where the parser reported no span (a TOML table named in two headers),
-    // whose raw-scan redaction breaks the syntax. Such a document is withheld.
+    let reparsed = (text_located || !keys.redactions.is_empty()).then(|| {
+        let Ok(Some(reparsed)) = parse_structured_text(&sanitized_text) else {
+            return false;
+        };
+        if reparsed.format != parsed.format {
+            return false;
+        }
+        if !keys.redactions.is_empty() {
+            // TOML's semantic table merges repeated path components and can
+            // report only one occurrence's span. Valid syntax alone cannot
+            // prove every escaped occurrence was replaced. Inspect all keys
+            // decoded by the canonical parser before allowing durable output.
+            TreeFieldCollector {
+                policy: &policy,
+                patterns,
+                fields: TreeFields::default(),
+                quarantine_findings: &mut quarantine_findings,
+            }
+            .quarantine_remaining_keys(&reparsed.value);
+        }
+        true
+    });
+    // Some unlocated occurrences instead make the raw-scan rewrite invalid.
+    // They retain the same typed key quarantine.
     if !keys.redactions.is_empty() && reparsed == Some(false) {
         for key in &keys.redactions {
             redact_text(
@@ -758,7 +772,7 @@ struct TreeFieldCollector<'a> {
 impl TreeFieldCollector<'_> {
     fn document(&mut self, node: DocumentNode<'_>) {
         match node {
-            DocumentNode::Object(fields) => self.object(fields),
+            DocumentNode::Object(fields) => self.object(fields, None),
             DocumentNode::Array(items) => {
                 for item in items {
                     self.detected_scalars(item, "$");
@@ -768,7 +782,11 @@ impl TreeFieldCollector<'_> {
         }
     }
 
-    fn object(&mut self, fields: Vec<(DocumentKey<'_>, DocumentNode<'_>)>) {
+    fn object(
+        &mut self,
+        fields: Vec<(DocumentKey<'_>, DocumentNode<'_>)>,
+        sensitive_parent: Option<(&str, SanitizationDetectorOriginV1)>,
+    ) {
         let evidence: Vec<_> = fields
             .iter()
             .map(|(key, _)| self.key_evidence(key))
@@ -802,7 +820,9 @@ impl TreeFieldCollector<'_> {
                     self.scalars(
                         child,
                         &placeholder,
-                        origin.unwrap_or(SanitizationDetectorOriginV1::BuiltInDetectorKernel),
+                        origin
+                            .or(sensitive_parent.map(|(_, origin)| origin))
+                            .unwrap_or(SanitizationDetectorOriginV1::BuiltInDetectorKernel),
                     );
                     self.fields.keys.redactions.push(KeyRedaction {
                         span,
@@ -813,8 +833,11 @@ impl TreeFieldCollector<'_> {
                 (_, evidence, _) => {
                     self.quarantine_findings
                         .extend(evidence.into_iter().flatten());
-                    match origin {
-                        Some(origin) => self.scalars(child, &key.name, origin),
+                    match origin
+                        .map(|origin| (key.name.as_ref(), origin))
+                        .or(sensitive_parent)
+                    {
+                        Some((key, origin)) => self.scalars(child, key, origin),
                         None => self.detected_scalars(child, &key.name),
                     }
                 }
@@ -835,6 +858,29 @@ impl TreeFieldCollector<'_> {
         redact_text(&mut probe, "$", self.patterns, &mut findings, action).then_some(findings)
     }
 
+    fn quarantine_remaining_keys(&mut self, value: &Value) {
+        match value {
+            Value::Object(fields) => {
+                for (name, child) in fields {
+                    let key = DocumentKey {
+                        name: Cow::Borrowed(name),
+                        span: None,
+                    };
+                    if let Some(evidence) = self.key_evidence(&key) {
+                        self.quarantine_findings.extend(evidence);
+                    }
+                    self.quarantine_remaining_keys(child);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.quarantine_remaining_keys(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn scalars(&mut self, node: DocumentNode<'_>, key: &str, origin: SanitizationDetectorOriginV1) {
         match node {
             DocumentNode::Scalar(value) => {
@@ -848,11 +894,7 @@ impl TreeFieldCollector<'_> {
                     decoded_value_matched,
                 });
             }
-            DocumentNode::Object(fields) => {
-                for (_, child) in fields {
-                    self.scalars(child, key, origin);
-                }
-            }
+            DocumentNode::Object(fields) => self.object(fields, Some((key, origin))),
             DocumentNode::Array(items) => {
                 for item in items {
                     self.scalars(item, key, origin);
@@ -877,7 +919,7 @@ impl TreeFieldCollector<'_> {
                     });
                 }
             }
-            DocumentNode::Object(fields) => self.object(fields),
+            DocumentNode::Object(fields) => self.object(fields, None),
             DocumentNode::Array(items) => {
                 for item in items {
                     self.detected_scalars(item, key);
