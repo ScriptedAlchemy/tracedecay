@@ -1608,6 +1608,121 @@ async fn session_ingest_health_measures_backlog_against_admitted_source_cursors(
     assert_eq!(other_provider.tracked_transcripts, 0);
 }
 
+struct IngestedClaudeBacklog {
+    db: HostAdmissionTestRuntimeV1,
+    home: std::path::PathBuf,
+    project: std::path::PathBuf,
+    transcript: std::path::PathBuf,
+    first: String,
+    second: String,
+    _tmp: TempDir,
+}
+
+impl IngestedClaudeBacklog {
+    async fn new() -> Self {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript_dir = home.join(".claude/projects/-backlog");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join("backlog-session.jsonl");
+        let first = claude_transcript_record(&project, "backlog-1", "head prompt");
+        let second = claude_transcript_record(&project, "backlog-2", "old prompt");
+        std::fs::write(&transcript, format!("{first}{second}")).unwrap();
+        let db = open_isolated_db(&tmp).await;
+        ingest_claude_history(&db, &home, &project).await;
+        let health = db.session_ingest_health().await;
+        assert_eq!(health.tracked_transcripts, 1);
+        assert_eq!((health.pending_transcripts, health.pending_bytes), (0, 0));
+        Self {
+            db,
+            home,
+            project,
+            transcript,
+            first,
+            second,
+            _tmp: tmp,
+        }
+    }
+
+    fn rewrite_later_record(&self) {
+        let rewritten = self
+            .second
+            .replace("backlog-2", "backlog-3")
+            .replace("old prompt", "new prompt");
+        assert_eq!(rewritten.len(), self.second.len());
+        // Writing the existing path preserves the inode and the entire first
+        // line, so only the committed prefix proves this rewrite happened.
+        std::fs::write(&self.transcript, format!("{}{rewritten}", self.first)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn session_ingest_health_detects_same_length_later_record_rewrite() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    fixture.rewrite_later_record();
+    let health = fixture.db.session_ingest_health().await;
+    assert_eq!(health.pending_transcripts, 1);
+    assert_eq!(
+        health.pending_bytes,
+        (fixture.first.len() + fixture.second.len()) as u64
+    );
+}
+
+#[tokio::test]
+async fn session_ingest_health_detects_truncation_preserving_the_first_record() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    std::fs::write(&fixture.transcript, &fixture.first).unwrap();
+    let health = fixture.db.session_ingest_health().await;
+    assert_eq!(health.pending_transcripts, 1);
+    assert_eq!(health.pending_bytes, fixture.first.len() as u64);
+}
+
+#[tokio::test]
+async fn session_ingest_health_recognizes_readmitted_rewritten_generation() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    fixture.rewrite_later_record();
+    ingest_claude_history(&fixture.db, &fixture.home, &fixture.project).await;
+    let health = fixture.db.session_ingest_health().await;
+    assert_eq!(health.tracked_transcripts, 1);
+    assert_eq!((health.pending_transcripts, health.pending_bytes), (0, 0));
+}
+
+#[tokio::test]
+async fn session_ingest_health_recognizes_renamed_committed_prefix() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    let staged = fixture.transcript.with_extension("next");
+    std::fs::write(&staged, format!("{}{}", fixture.first, fixture.second)).unwrap();
+    std::fs::rename(staged, &fixture.transcript).unwrap();
+    let health = fixture.db.session_ingest_health().await;
+    assert_eq!(health.tracked_transcripts, 1);
+    assert_eq!((health.pending_transcripts, health.pending_bytes), (0, 0));
+    ingest_claude_history(&fixture.db, &fixture.home, &fixture.project).await;
+    let readmitted = fixture.db.session_ingest_health().await;
+    assert_eq!(
+        (readmitted.pending_transcripts, readmitted.pending_bytes),
+        (0, 0)
+    );
+}
+
+#[tokio::test]
+async fn session_ingest_health_refuses_unreadable_transcript_contents() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    std::fs::remove_file(&fixture.transcript).unwrap();
+    std::fs::create_dir(&fixture.transcript).unwrap();
+    assert!(std::fs::metadata(&fixture.transcript).unwrap().is_dir());
+    let error = fixture
+        .db
+        .session_ingest_health_for_test(HostAdmissionScope::Profile, None)
+        .await
+        .expect_err("accessible metadata must not hide a transcript read failure");
+    assert!(matches!(
+        error,
+        tracedecay_domain::errors::TraceDecayError::Database { .. }
+    ));
+}
+
 #[tokio::test]
 async fn hook_analytics_import_is_incremental_and_idempotent() {
     use tracedecay_application::analytics_bridge::HookImportSource;

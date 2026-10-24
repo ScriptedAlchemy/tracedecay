@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceCursorV1};
 use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, Value};
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
@@ -19,7 +20,7 @@ use tracedecay_lcm::retrieval_content::{
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
 use super::super::shared::{durable_project_path_key, path_identity_key};
-use super::super::source::{HostProviderCoverage, jsonl_file_identity};
+use super::super::source::{HostProviderCoverage, jsonl_prefix_digest};
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -108,10 +109,10 @@ pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, t
 type WorkflowFactRow = (String, Option<String>, Option<String>);
 
 /// Cursors the observation authority committed for one logical source.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AdmittedSource {
-    /// `(generation, byte_offset)` of each file-byte cursor.
-    file_bytes: Vec<(u64, u64)>,
+    /// Each file-byte cursor retains the checkpoint proving its consumed prefix.
+    file_bytes: Vec<ObservationSourceCursorV1>,
     /// The source is also ordered by something other than file bytes, so its
     /// progress is not a byte offset into the transcript.
     other_ordering: bool,
@@ -119,45 +120,76 @@ struct AdmittedSource {
 
 #[derive(Clone, Copy)]
 enum TranscriptProgress {
-    /// No cursor covers the file's current generation: never ingested, or
+    /// No cursor proves the file's consumed prefix: never ingested, or
     /// rewritten since its cursor was committed.
     Unadmitted,
-    /// The current generation is admitted through this byte offset.
+    /// An unchanged committed prefix is admitted through this byte offset.
     AdmittedThrough(u64),
     /// Progress is measured in rows or snapshots, not transcript bytes.
     NotByteOrdered,
 }
 
-/// Reads the transcript's metadata and resolves which committed cursor covers
-/// it. A cursor applies only to the file generation it was committed for, the
-/// same rule ingest uses to decide between resuming and rescanning.
+/// Resolves progress through the same committed prefix digest ingest resumes
+/// from. A physical replacement can retain its prefix, while an in-place rewrite
+/// can change it without changing the file identity or length.
 fn transcript_progress(
     path: &Path,
-    sources: &[&AdmittedSource],
-) -> Option<(std::fs::Metadata, TranscriptProgress)> {
-    let metadata = std::fs::metadata(path).ok()?;
+    sources: &[AdmittedSource],
+) -> std::io::Result<Option<(std::fs::Metadata, TranscriptProgress)>> {
     let mut cursors = sources
         .iter()
-        .flat_map(|source| source.file_bytes.iter().copied())
-        .peekable();
-    let progress = if cursors.peek().is_none() {
-        if sources.iter().any(|source| source.other_ordering) {
-            TranscriptProgress::NotByteOrdered
-        } else {
-            TranscriptProgress::Unadmitted
-        }
+        .flat_map(|source| source.file_bytes.iter())
+        .collect::<Vec<_>>();
+    cursors.sort_unstable_by_key(|cursor| std::cmp::Reverse(cursor.byte_offset()));
+    let mut file = if cursors.is_empty() {
+        None
     } else {
-        let generation = jsonl_file_identity(path).ok()?;
-        cursors
-            .filter(|(cursor_generation, _)| *cursor_generation == generation)
-            .map(|(_, byte_offset)| byte_offset)
-            .max()
-            .map_or(
-                TranscriptProgress::Unadmitted,
-                TranscriptProgress::AdmittedThrough,
-            )
+        match std::fs::File::open(path) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
     };
-    Some((metadata, progress))
+    let metadata = match file
+        .as_ref()
+        .map_or_else(|| std::fs::metadata(path), std::fs::File::metadata)
+    {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "transcript path is not a regular file",
+        ));
+    }
+    let progress = if let Some(file) = file.as_mut() {
+        let mut progress = TranscriptProgress::Unadmitted;
+        for cursor in cursors {
+            let Some((_, fingerprint)) = cursor.file_identity().zip(cursor.resume_fingerprint())
+            else {
+                continue;
+            };
+            let offset = cursor.byte_offset();
+            if offset > metadata.len() {
+                continue;
+            }
+            let (digest, _) = jsonl_prefix_digest(file, offset)?;
+            if digest.fingerprint(offset) == fingerprint {
+                // Descending offsets make the first valid checkpoint the
+                // maximum; smaller candidates need no further prefix reads.
+                progress = TranscriptProgress::AdmittedThrough(offset);
+                break;
+            }
+        }
+        progress
+    } else if sources.iter().any(|source| source.other_ordering) {
+        TranscriptProgress::NotByteOrdered
+    } else {
+        TranscriptProgress::Unadmitted
+    };
+    Ok(Some((metadata, progress)))
 }
 
 fn modified_unix_seconds(metadata: &std::fs::Metadata) -> Option<i64> {
@@ -185,7 +217,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         provider: Option<&str>,
     ) -> Result<SessionIngestHealth, String> {
         let mut health = SessionIngestHealth::default();
-        // Store-scale scan interleaved with per-row filesystem metadata reads.
+        // Store-scale scan interleaved with filesystem prefix validation.
         // Holding one pinned snapshot across the whole walk parks a general
         // reader worker for the entire scan; page with short-held query leases
         // instead. The filesystem side of this health estimate is already read
@@ -344,48 +376,65 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             if page.is_empty() {
                 break;
             }
-            for (path, sessions) in &page {
-                let sources = sessions
-                    .iter()
-                    .filter_map(|session| admitted.get(session))
-                    .collect::<Vec<_>>();
-                // Opaque non-Unicode locations cannot be resolved from this
-                // display field; like missing files, they remain untracked.
-                let Some((metadata, progress)) = ({
-                    let _span =
-                        tracing::trace_span!("global_db.registered_sessions.ingest_stat").entered();
-                    transcript_progress(Path::new(path), &sources)
-                }) else {
-                    continue;
-                };
-                health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
-                let pending = match progress {
-                    TranscriptProgress::Unadmitted => metadata.len(),
-                    TranscriptProgress::AdmittedThrough(offset) => {
-                        metadata.len().saturating_sub(offset)
-                    }
-                    TranscriptProgress::NotByteOrdered => 0,
-                };
-                if pending > 0 {
-                    health.pending_transcripts = health.pending_transcripts.saturating_add(1);
-                    health.pending_bytes = health.pending_bytes.saturating_add(pending);
-                    health.max_transcript_pending_bytes =
-                        health.max_transcript_pending_bytes.max(pending);
-                } else if matches!(progress, TranscriptProgress::AdmittedThrough(_))
-                    && let Some(modified) = modified_unix_seconds(&metadata)
-                {
-                    health.last_ingest_unix = Some(
-                        health
-                            .last_ingest_unix
-                            .map_or(modified, |previous| previous.max(modified)),
-                    );
-                }
-            }
+            let page_len = page.len();
             after_path = page
                 .last()
                 .map(|(path, _)| path.clone())
                 .ok_or_else(|| "session ingest health page unexpectedly empty".to_owned())?;
-            if page.len() < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
+            let page = page
+                .into_iter()
+                .map(|(path, sessions)| {
+                    let sources = sessions
+                        .iter()
+                        .filter_map(|session| admitted.get(session).cloned())
+                        .collect::<Vec<_>>();
+                    (path, sources)
+                })
+                .collect::<Vec<_>>();
+            // Prefix checks can read historical transcripts in full. One
+            // owned page leaves the async worker and holds no database lease.
+            health = native_runtime::spawn_owned_blocking(move || {
+                for (path, sources) in page {
+                    // Opaque non-Unicode locations cannot be resolved from
+                    // this display field; missing files remain untracked.
+                    let Some((metadata, progress)) = ({
+                        let _span =
+                            tracing::trace_span!("global_db.registered_sessions.ingest_stat")
+                                .entered();
+                        transcript_progress(Path::new(&path), &sources).map_err(|error| {
+                            format!("failed to read transcript ingest progress for {path}: {error}")
+                        })?
+                    }) else {
+                        continue;
+                    };
+                    health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
+                    let pending = match progress {
+                        TranscriptProgress::Unadmitted => metadata.len(),
+                        TranscriptProgress::AdmittedThrough(offset) => {
+                            metadata.len().saturating_sub(offset)
+                        }
+                        TranscriptProgress::NotByteOrdered => 0,
+                    };
+                    if pending > 0 {
+                        health.pending_transcripts = health.pending_transcripts.saturating_add(1);
+                        health.pending_bytes = health.pending_bytes.saturating_add(pending);
+                        health.max_transcript_pending_bytes =
+                            health.max_transcript_pending_bytes.max(pending);
+                    } else if matches!(progress, TranscriptProgress::AdmittedThrough(_))
+                        && let Some(modified) = modified_unix_seconds(&metadata)
+                    {
+                        health.last_ingest_unix = Some(
+                            health
+                                .last_ingest_unix
+                                .map_or(modified, |previous| previous.max(modified)),
+                        );
+                    }
+                }
+                Ok::<_, String>(health)
+            })
+            .await
+            .map_err(|error| format!("session ingest health filesystem task failed: {error}"))??;
+            if page_len < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
                 break;
             }
         }
@@ -452,9 +501,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                     ))
                     .or_default();
                 if cursor.ordering_domain() == ObservationOrderingDomainV1::FileBytes {
-                    entry
-                        .file_bytes
-                        .push((cursor.generation().file_id(), cursor.byte_offset()));
+                    entry.file_bytes.push(cursor);
                 } else {
                     entry.other_ordering = true;
                 }
