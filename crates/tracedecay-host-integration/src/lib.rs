@@ -31,8 +31,8 @@ pub use evidence::{
 pub use manifest::{
     HOST_BUNDLE_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleArtifactV1,
     HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
-    MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS, MAX_IDENTIFIER_BYTES, MAX_MANIFEST_ARTIFACTS,
-    MAX_RELATIVE_PATH_BYTES, validate_identifier, validate_relative_install_path,
+    MAX_HOST_COMPONENTS, MAX_IDENTIFIER_BYTES, MAX_MANIFEST_ARTIFACTS, MAX_RELATIVE_PATH_BYTES,
+    validate_identifier, validate_relative_install_path,
 };
 pub use receipt::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleInstallReceiptV1, HostBundleReceiptArtifactV1,
@@ -124,7 +124,7 @@ pub enum HostBundleError {
     InvalidObservedState,
     #[error("Hermes must bind exactly one user TraceDecay profile")]
     InvalidHermesProfileBinding,
-    #[error("bundle artifact content is missing, oversized, duplicated, or digest-mismatched")]
+    #[error("bundle artifact content is missing, duplicated, or digest-mismatched")]
     ArtifactContentMismatch,
     #[error("host bundle receipt is invalid")]
     ReceiptCorrupted,

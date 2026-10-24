@@ -172,7 +172,10 @@ export function childEnv(env: NodeJS.ProcessEnv): Record<string, string> {
 export class ServeSession {
   readonly #client: Client;
   readonly #transport: StdioClientTransport;
+  readonly #transportClosed: Promise<void>;
   #connected: Promise<void> | null = null;
+  #closing: Promise<void> | null = null;
+  #childStarted = false;
   #closed = false;
 
   constructor(private readonly options: ServeSessionOptions) {
@@ -188,9 +191,12 @@ export class ServeSession {
       stderr: "inherit",
     });
     this.#client = new Client({ name: "tracedecay-chatgpt-extension", version: "0.0.0" });
-    this.#transport.onclose = () => {
-      this.#closed = true;
-    };
+    this.#transportClosed = new Promise((resolve) => {
+      this.#transport.onclose = () => {
+        this.#closed = true;
+        resolve();
+      };
+    });
   }
 
   get closed(): boolean {
@@ -198,6 +204,7 @@ export class ServeSession {
   }
 
   async connect(): Promise<void> {
+    this.#assertOpen();
     if (this.#connected === null) {
       this.#connected = this.#client.connect(this.#transport).catch((error: unknown) => {
         this.#closed = true;
@@ -210,8 +217,12 @@ export class ServeSession {
           { cause: error },
         );
       });
+      // Client.connect starts stdio synchronously. A failed handshake can
+      // clear its PID before the SDK's unawaited child cleanup finishes.
+      this.#childStarted = this.#transport.pid !== null;
     }
     await this.#connected;
+    this.#assertOpen();
   }
 
   serverInfo(): { name: string; version: string } | null {
@@ -221,6 +232,7 @@ export class ServeSession {
 
   async listToolNames(): Promise<readonly string[]> {
     await this.connect();
+    this.#assertOpen();
     const listed = await this.#client.listTools();
     return listed.tools.map((tool) => tool.name);
   }
@@ -232,9 +244,7 @@ export class ServeSession {
    */
   async callJson(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     await this.connect();
-    if (this.#closed) {
-      throw new DaemonFailure({ kind: "disconnected", code: "serve_closed", message: "tracedecay serve exited" });
-    }
+    this.#assertOpen();
     const result = await this.#callTool({ name: toolName, arguments: { ...args, format: "json" } }, signal);
     for (const item of result.content) {
       if (item.type === "text" && item.text.startsWith(REPEATED_QUERY_HINT_PREFIX)) relayedHints.getStore()?.push(item.text);
@@ -326,6 +336,7 @@ export class ServeSession {
   }
 
   async #callTool(params: { readonly name: string; readonly arguments: Record<string, unknown> }, signal?: AbortSignal): Promise<CallToolResult> {
+    this.#assertOpen();
     if (signal?.aborted) throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
     try {
       const result = await this.#client.callTool(params, { ...(signal === undefined ? {} : { signal }) });
@@ -337,9 +348,43 @@ export class ServeSession {
     }
   }
 
-  async close(): Promise<void> {
+  #assertOpen(): void {
+    if (this.#closed) {
+      throw new DaemonFailure({ kind: "disconnected", code: "serve_closed", message: "tracedecay serve exited" });
+    }
+  }
+
+  close(): Promise<void> {
     this.#closed = true;
-    await this.#client.close();
+    this.#closing ??= this.#close();
+    return this.#closing;
+  }
+
+  async #close(): Promise<void> {
+    // Abort an active handshake before joining it. The transport clears its
+    // PID before the child exits, so retain the actual close notification.
+    const transportExited = this.#childStarted || this.#transport.pid !== null ? this.#transportClosed : null;
+    const [transportResult] = await Promise.allSettled([
+      (async () => {
+        await this.#transport.close();
+        await transportExited;
+      })(),
+      this.#connected,
+    ]);
+    // A pending connect may attach/start the transport after shutdown began.
+    // Close the client after it settles, even when the first cleanup failed.
+    const clientTransportExited = this.#childStarted || this.#transport.pid !== null ? this.#transportClosed : null;
+    const [clientResult] = await Promise.allSettled([
+      (async () => {
+        await this.#client.close();
+        await clientTransportExited;
+      })(),
+    ]);
+    const errors = [transportResult, clientResult].flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "Failed to close tracedecay serve session");
   }
 }
 

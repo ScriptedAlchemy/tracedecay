@@ -28,7 +28,7 @@ use super::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleError,
     HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
     HostBundleReceiptArtifactV1, HostBundleVerificationAdapterV1, HostComponentSetReceiptV1,
-    HostComponentV1, HostKindV1, MAX_ARTIFACT_CONTENT_BYTES, validate_relative_install_path,
+    HostComponentV1, HostKindV1, validate_relative_install_path,
 };
 
 static HOST_BUNDLE_TEMP_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -749,11 +749,7 @@ pub(super) fn read_regular_nofollow(
     name: &str,
 ) -> Result<Option<Vec<u8>>, HostBundleError> {
     match parent.symlink_metadata(name) {
-        Ok(metadata) if metadata.file_type().is_file() => {
-            if metadata.len() > MAX_ARTIFACT_CONTENT_BYTES as u64 {
-                return Err(HostBundleError::ArtifactContentMismatch);
-            }
-        }
+        Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(host_bundle_storage_failure!()),
@@ -764,13 +760,8 @@ pub(super) fn read_regular_nofollow(
         .open_with(name, &options)
         .map_err(|_| HostBundleError::UnsafeInstallPath)?;
     let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(MAX_ARTIFACT_CONTENT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
+    file.read_to_end(&mut bytes)
         .map_err(|_| host_bundle_storage_failure!())?;
-    if bytes.len() > MAX_ARTIFACT_CONTENT_BYTES {
-        return Err(HostBundleError::ArtifactContentMismatch);
-    }
     Ok(Some(bytes))
 }
 
@@ -798,7 +789,7 @@ pub(super) fn atomic_write_nofollow(
     bytes: &[u8],
     replace_existing: bool,
 ) -> Result<(), HostBundleError> {
-    if !is_safe_component(name) || bytes.len() > MAX_ARTIFACT_CONTENT_BYTES {
+    if !is_safe_component(name) {
         return Err(HostBundleError::ArtifactContentMismatch);
     }
     match parent.symlink_metadata(name) {

@@ -336,8 +336,8 @@ impl WorkflowArtifactStorePort for WorkSqliteJobStorage<'_> {
         payload: &WorkflowArtifactPayload,
     ) -> Result<WorkflowArtifactPersistOutcome, WorkflowArtifactStoreError> {
         let digest = payload.artifact().digest().as_str();
-        let byte_length = i64::try_from(payload.artifact().byte_length())
-            .map_err(|_| WorkflowArtifactStoreError::Oversized)?;
+        let byte_length =
+            i64::try_from(payload.artifact().byte_length()).map_err(artifact_store_unavailable)?;
         if let Some(stored) = stored_payload_tx(self.transaction, digest)? {
             return if stored.as_slice() == payload.bytes() {
                 Ok(WorkflowArtifactPersistOutcome::Replayed)

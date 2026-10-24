@@ -603,35 +603,6 @@ mod tests {
     }
 
     #[test]
-    fn first_party_plugin_assets_fit_host_bundle_artifact_bound() {
-        use tracedecay_host_integration::MAX_ARTIFACT_CONTENT_BYTES;
-
-        let owned = |files: Vec<(&'static str, &'static str)>| {
-            files
-                .into_iter()
-                .map(|(relative, contents)| (relative, contents.to_string()))
-                .collect::<Vec<_>>()
-        };
-        for (host, files) in [
-            ("claude", owned(claude_files())),
-            ("cursor", owned(cursor_files())),
-            ("cursor-native", cursor_native_extension_files().unwrap()),
-            ("codex", codex_files().unwrap()),
-            ("kimi", owned(kimi_files())),
-            ("chatgpt", chatgpt_files().unwrap()),
-            ("opencode-agent", owned(opencode_agent_files())),
-        ] {
-            for (relative, contents) in files {
-                assert!(
-                    contents.len() <= MAX_ARTIFACT_CONTENT_BYTES,
-                    "{host} {relative} is {} bytes, exceeds MAX_ARTIFACT_CONTENT_BYTES ({MAX_ARTIFACT_CONTENT_BYTES})",
-                    contents.len()
-                );
-            }
-        }
-    }
-
-    #[test]
     fn gzip_explorer_and_cursor_extension_roundtrip_source_files() {
         let chatgpt = chatgpt_files().unwrap();
         let cursor = cursor_native_extension_files().unwrap();

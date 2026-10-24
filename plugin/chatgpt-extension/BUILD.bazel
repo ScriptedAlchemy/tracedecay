@@ -31,3 +31,10 @@ vitest_bin.vitest_test(
     args = ["run", "test/serve-client.test.ts"],
     chdir = package_name(),
 )
+
+vitest_bin.vitest_test(
+    name = "bridge_lifecycle_test",
+    data = [":sources", ":node_modules", "//sdks/typescript:dist"],
+    args = ["run", "test/bridge-lifecycle.test.ts"],
+    chdir = package_name(),
+)

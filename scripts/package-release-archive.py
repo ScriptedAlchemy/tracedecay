@@ -42,7 +42,7 @@ def write_tar_gz(
             with tarfile.open(
                 fileobj=compressed,
                 mode="w",
-                format=tarfile.USTAR_FORMAT,
+                format=tarfile.PAX_FORMAT,
             ) as archive:
                 for entry_name, payload, mode in entries:
                     entry = tarfile.TarInfo(entry_name)

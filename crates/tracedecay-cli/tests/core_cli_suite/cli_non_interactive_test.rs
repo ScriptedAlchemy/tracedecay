@@ -1425,13 +1425,18 @@ impl Drop for StopHttpObservation<'_> {
 }
 
 fn observe_http_connections(action: impl FnOnce(SocketAddr)) -> usize {
+    assert!(
+        crate::common::in_child_test(),
+        "HTTP observation requires an isolated test process"
+    );
     let listener = TcpListener::bind("127.0.0.1:0").expect("controlled loopback proxy");
     listener.set_nonblocking(true).expect("nonblocking proxy");
     let address = listener.local_addr().expect("proxy address");
     let stop = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let stop_observation = StopHttpObservation(&stop);
-        let observer = scope.spawn(|| {
+        let stop = &stop;
+        let observer = scope.spawn(move || {
             let mut accepted = 0;
             loop {
                 match listener.accept() {
@@ -1459,10 +1464,32 @@ fn observe_http_connections(action: impl FnOnce(SocketAddr)) -> usize {
 
 #[test]
 fn http_observation_counts_connections_and_releases_its_listener_on_unwind() {
+    if !crate::common::in_child_test() {
+        let invoked = AtomicBool::new(false);
+        let refusal = std::panic::catch_unwind(|| {
+            observe_http_connections(|_| invoked.store(true, Ordering::SeqCst));
+        });
+        assert!(
+            refusal.is_err(),
+            "HTTP observation requires an isolated test process"
+        );
+        assert!(!invoked.load(Ordering::SeqCst));
+        crate::common::rerun_test_in_child(
+            "cli_non_interactive_test::http_observation_counts_connections_and_releases_its_listener_on_unwind",
+            &[],
+        );
+        return;
+    }
+    let normal_address = OnceLock::new();
     let accepted = observe_http_connections(|address| {
+        normal_address.set(address).expect("one listener");
         drop(TcpStream::connect(address).expect("controlled connection"));
     });
     assert_eq!(accepted, 1, "a completed connection must be observed");
+    assert!(
+        TcpStream::connect(*normal_address.get().expect("listener was created")).is_err(),
+        "the scoped listener must close before observation returns"
+    );
 
     let address = OnceLock::new();
     let failure = std::panic::catch_unwind(|| {

@@ -259,13 +259,6 @@ where
     }
 }
 
-/// Upper bound on one durable workflow artifact payload.
-///
-/// Artifacts enter only declared bounded channels; the bound is enforced both
-/// when a payload is persisted and when it is hydrated back, so an
-/// out-of-contract row can never silently re-enter execution.
-pub const MAX_WORKFLOW_ARTIFACT_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024;
-
 const WORKFLOW_ARTIFACT_PAYLOAD_DIGEST_DOMAIN: &[u8] =
     b"tracedecay.application.workflow-artifact-payload.v1";
 
@@ -288,8 +281,6 @@ pub fn workflow_artifact_payload_digest(
 pub enum WorkflowArtifactStoreError {
     #[error("workflow artifact payload does not match its declared reference")]
     DigestMismatch,
-    #[error("workflow artifact payload exceeds the admitted byte bound")]
-    Oversized,
     #[error("workflow artifact payload conflicts with an already persisted payload")]
     PayloadConflict,
     #[error("workflow artifact payload is absent from the durable store")]
@@ -315,15 +306,10 @@ impl WorkflowArtifactPayload {
         artifact: WorkArtifactRefV1,
         bytes: Vec<u8>,
     ) -> Result<Self, WorkflowArtifactStoreError> {
-        // The decode/verify phase of artifact hydration and persistence: a
-        // canonical framed SHA-256 over up to 4 MiB, distinct from the store
-        // I/O around it.
+        // Verify the declared content identity independently of the store I/O.
         {
             let _span = tracing::trace_span!("application.workflow.artifact.verify").entered();
             {
-                if artifact.byte_length() > MAX_WORKFLOW_ARTIFACT_PAYLOAD_BYTES {
-                    return Err(WorkflowArtifactStoreError::Oversized);
-                }
                 if bytes.len() as u64 != artifact.byte_length()
                     || &workflow_artifact_payload_digest(&bytes)? != artifact.digest()
                 {
@@ -429,4 +415,41 @@ pub struct WorkflowRunCancelRequest {
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRunGetRequest {
     pub run_id: RunId,
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{WorkArtifactId, WorkArtifactRefV1};
+
+    use crate::{
+        WorkflowArtifactPayload, WorkflowArtifactStoreError, workflow_artifact_payload_digest,
+    };
+
+    #[test]
+    fn large_artifact_roundtrips_and_verifies_content_identity() {
+        let bytes = vec![b'x'; 5 * 1024 * 1024];
+        let artifact = WorkArtifactRefV1::new(
+            WorkArtifactId::new("artifact.workflow.large").unwrap(),
+            workflow_artifact_payload_digest(&bytes).unwrap(),
+            bytes.len() as u64,
+        )
+        .unwrap();
+        let payload = WorkflowArtifactPayload::new(artifact.clone(), bytes.clone()).unwrap();
+        let encoded = serde_json::to_vec(&payload).unwrap();
+        let decoded: WorkflowArtifactPayload = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, payload);
+
+        let mut changed = bytes;
+        changed[0] = b'y';
+        assert_eq!(
+            WorkflowArtifactPayload::new(artifact.clone(), changed.clone()).unwrap_err(),
+            WorkflowArtifactStoreError::DigestMismatch
+        );
+        changed[0] = b'x';
+        changed.pop();
+        assert_eq!(
+            WorkflowArtifactPayload::new(artifact, changed).unwrap_err(),
+            WorkflowArtifactStoreError::DigestMismatch
+        );
+    }
 }

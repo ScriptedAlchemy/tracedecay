@@ -812,6 +812,8 @@ jobs:
           //sdks/typescript:typecheck //sdks/typescript:unit_test
           //plugin/chatgpt-extension:typecheck
           //plugin/chatgpt-extension:adapter_test
+          //plugin/chatgpt-extension:serve_client_test
+          //plugin/chatgpt-extension:bridge_lifecycle_test
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
