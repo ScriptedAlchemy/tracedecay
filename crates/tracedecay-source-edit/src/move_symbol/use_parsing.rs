@@ -17,8 +17,14 @@ pub(super) struct UseLeaf {
 
 /// A parsed `use` statement from a source file.
 pub(super) struct UseStatement {
-    /// The full statement text (single physical line).
+    /// The exact declaration text, including its visibility and any newlines.
     pub(super) text: String,
+    /// A syntax-verified destination-stable argument, without visibility or
+    /// a semicolon. Relative, attributed and unverified imports need a hint.
+    portable_path: Option<String>,
+    /// Syntax proves this is a private declaration without attached outer
+    /// attributes or docs. Unverified declarations never authorize removal.
+    pub(super) removable: bool,
     /// 1-based line of the statement.
     pub(super) line: u32,
     /// Whether the statement is a glob import (`use a::*;`).
@@ -69,27 +75,43 @@ pub(super) fn parse_use_statements(source: &str) -> Vec<UseStatement> {
 ///
 /// `self::` and `super::` are relative to the source module and would silently
 /// change meaning after a move, so they require an explicit hint instead of
-/// auto-insertion. A source `pub use` is reduced to a private `use`: the moved
-/// body needs the binding, not a new public re-export from the destination.
-pub(super) fn portable_dependency_import(statement: &str) -> Option<String> {
-    let trimmed = statement.trim();
-    let (path, was_public) = trimmed
-        .strip_prefix("pub use ")
-        .map(|path| (path, true))
-        .or_else(|| trimmed.strip_prefix("use ").map(|path| (path, false)))?;
-    let path = path.trim_start();
-    if path == "self;"
-        || path.starts_with("self::")
-        || path == "super;"
-        || path.starts_with("super::")
-    {
-        return None;
+/// auto-insertion. Any source re-export becomes a private destination `use`:
+/// the moved body needs the binding, not a new exported name.
+pub(super) fn portable_dependency_import(statement: &UseStatement) -> Option<String> {
+    let path = statement.portable_path.as_deref()?;
+    Some(format!("use {path};"))
+}
+
+fn source_relative_use_path(node: TsNode<'_>) -> bool {
+    if let Some(path) = node.child_by_field_name("path") {
+        return source_relative_use_path(path);
     }
-    Some(if was_public {
-        format!("use {path}")
-    } else {
-        trimmed.to_string()
-    })
+    match node.kind() {
+        "self" | "super" => true,
+        "use_list" => {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .any(source_relative_use_path)
+        }
+        _ => false,
+    }
+}
+
+fn has_outer_attributes(node: TsNode<'_>) -> bool {
+    let mut previous = node.prev_named_sibling();
+    while let Some(sibling) = previous {
+        match sibling.kind() {
+            "attribute_item" => return true,
+            "line_comment" | "block_comment" => {
+                if sibling.child_by_field_name("outer").is_some() {
+                    return true;
+                }
+                previous = sibling.prev_named_sibling();
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Tree-sitter path: collect every `use_declaration` node (top-level and inside
@@ -101,19 +123,36 @@ fn parse_use_statements_ts(source: &str) -> Option<Vec<UseStatement>> {
     parser.set_language(&language).ok()?;
     let tree = parser.parse(source, None)?;
     let mut out = Vec::new();
-    collect_use_declarations(tree.root_node(), source.as_bytes(), &mut out);
+    let root = tree.root_node();
+    collect_use_declarations(root, source.as_bytes(), !root.has_error(), &mut out);
     Some(out)
 }
 
 /// Recursive pre-order walk collecting `use_declaration` nodes into parsed
 /// [`UseStatement`]s.
-fn collect_use_declarations(node: TsNode<'_>, src: &[u8], out: &mut Vec<UseStatement>) {
+fn collect_use_declarations(
+    node: TsNode<'_>,
+    src: &[u8],
+    syntax_complete: bool,
+    out: &mut Vec<UseStatement>,
+) {
     if node.kind() == "use_declaration" {
         if let Ok(text) = node.utf8_text(src)
-            && let Some((glob, leaves)) = parse_use_bindings(text)
+            && let Some(argument) = node.child_by_field_name("argument")
+            && let Ok(path) = argument.utf8_text(src)
+            && let Some((glob, leaves)) = parse_use_bindings(path)
         {
+            let mut cursor = node.walk();
+            let plain_declaration = syntax_complete && !has_outer_attributes(node);
+            let removable = plain_declaration
+                && !node
+                    .named_children(&mut cursor)
+                    .any(|child| child.kind() == "visibility_modifier");
             out.push(UseStatement {
                 text: text.to_string(),
+                portable_path: (plain_declaration && !source_relative_use_path(argument))
+                    .then(|| path.to_string()),
+                removable,
                 line: node.start_position().row as u32 + 1,
                 glob,
                 leaves,
@@ -125,7 +164,7 @@ fn collect_use_declarations(node: TsNode<'_>, src: &[u8], out: &mut Vec<UseState
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
-            collect_use_declarations(cursor.node(), src, out);
+            collect_use_declarations(cursor.node(), src, syntax_complete, out);
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -134,13 +173,24 @@ fn collect_use_declarations(node: TsNode<'_>, src: &[u8], out: &mut Vec<UseState
 }
 
 /// Fallback line scan (grammar unavailable): one physical line per statement.
-/// Misses multi-line grouped imports but never fails the move.
+/// Misses multi-line grouped imports and never authorizes import deletion.
 fn parse_use_statements_linescan(source: &str) -> Vec<UseStatement> {
     let mut out = Vec::new();
     for (idx, raw) in source.lines().enumerate() {
-        if let Some((glob, leaves)) = parse_use_bindings(raw) {
+        let line = raw.trim();
+        let Some(path) = line
+            .strip_prefix("pub use ")
+            .or_else(|| line.strip_prefix("use "))
+            .and_then(|path| path.trim().strip_suffix(';'))
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if let Some((glob, leaves)) = parse_use_bindings(path) {
             out.push(UseStatement {
                 text: raw.to_string(),
+                portable_path: None,
+                removable: false,
                 line: (idx + 1) as u32,
                 glob,
                 leaves,
@@ -150,16 +200,10 @@ fn parse_use_statements_linescan(source: &str) -> Vec<UseStatement> {
     out
 }
 
-/// Parses the bindings out of a single `use` statement's text (possibly
-/// multi-line). Accepts `use ...;` and `pub use ...;`. Returns `None` for lines
-/// that are not a complete `use` statement or that bring nothing into scope.
-fn parse_use_bindings(stmt_text: &str) -> Option<(bool, Vec<UseLeaf>)> {
-    let line = stmt_text.trim();
-    let after_use = line
-        .strip_prefix("pub use ")
-        .or_else(|| line.strip_prefix("use "))?
-        .trim();
-    let body = after_use.strip_suffix(';')?;
+/// Parses bindings from the import argument, after the syntax authority has
+/// separated visibility and the declaration boundary.
+fn parse_use_bindings(body: &str) -> Option<(bool, Vec<UseLeaf>)> {
+    let body = body.trim();
     let glob = body.contains('*');
     let leaves: Vec<UseLeaf> = if let Some(open) = body.find('{') {
         let inner = body[open + 1..].trim_end().trim_end_matches('}');
@@ -198,7 +242,16 @@ mod tests {
 
     use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_with};
 
-    use super::{body_identifiers, parse_use_statements, portable_dependency_import};
+    use super::{
+        body_identifiers, parse_use_statements, parse_use_statements_linescan,
+        portable_dependency_import,
+    };
+
+    fn dependency_import(source: &str) -> Option<String> {
+        let statements = parse_use_statements(source);
+        assert_eq!(statements.len(), 1, "expected one import: {source}");
+        portable_dependency_import(&statements[0])
+    }
 
     #[test]
     fn body_identifiers_collects_names_not_numbers() {
@@ -227,27 +280,125 @@ mod tests {
     #[test]
     fn portable_dependency_import_rejects_source_relative_paths() {
         assert_eq!(
-            portable_dependency_import("use crate::shared::Thing;").as_deref(),
+            dependency_import("use crate::shared::Thing;").as_deref(),
             Some("use crate::shared::Thing;")
         );
         assert_eq!(
-            portable_dependency_import("use external_crate::Thing;").as_deref(),
+            dependency_import("use external_crate::Thing;").as_deref(),
             Some("use external_crate::Thing;")
         );
-        assert_eq!(portable_dependency_import("use self::Thing;"), None);
-        assert_eq!(portable_dependency_import("use super::Thing;"), None);
+        assert_eq!(dependency_import("use self::Thing;"), None);
+        assert_eq!(dependency_import("use super::Thing;"), None);
+        assert_eq!(dependency_import("use super::parent::Thing;"), None);
+        assert_eq!(dependency_import("pub(crate) use super::Thing;"), None);
+        for statement in [
+            "pub(crate) use super ::Thing;",
+            "pub(crate) use super /* parent */ ::Thing as Alias;",
+            "pub(self) use self :: Thing;",
+            "pub(crate) use {self::Thing};",
+        ] {
+            assert_eq!(dependency_import(statement), None, "{statement}");
+        }
         assert_eq!(
-            portable_dependency_import("use super::parent::Thing;"),
-            None
+            dependency_import("pub(crate) use crate::shared::{self as Shared};").as_deref(),
+            Some("use crate::shared::{self as Shared};")
         );
     }
 
     #[test]
     fn portable_dependency_import_does_not_create_a_new_reexport() {
         assert_eq!(
-            portable_dependency_import("pub use crate::shared::Thing;").as_deref(),
+            dependency_import("pub use crate::shared::Thing;").as_deref(),
             Some("use crate::shared::Thing;")
         );
+    }
+
+    #[test]
+    fn import_visibility_and_destination_path_come_from_syntax() {
+        for (statement, removable, path) in [
+            ("use crate::shared::Thing;", true, "crate::shared::Thing"),
+            (
+                "pub use crate::shared::Thing;",
+                false,
+                "crate::shared::Thing",
+            ),
+            (
+                "pub(crate) use crate::shared::Thing as PublicThing;",
+                false,
+                "crate::shared::Thing as PublicThing",
+            ),
+            (
+                "pub(in crate::api) use crate::shared::Thing;",
+                false,
+                "crate::shared::Thing",
+            ),
+            (
+                "pub(self) use crate::shared::Thing;",
+                false,
+                "crate::shared::Thing",
+            ),
+            (
+                "pub\nuse crate::shared::Thing;",
+                false,
+                "crate::shared::Thing",
+            ),
+            (
+                "pub /* exported binding */ use crate::shared::Thing;",
+                false,
+                "crate::shared::Thing",
+            ),
+        ] {
+            let imports = parse_use_statements(statement);
+            assert_eq!(imports.len(), 1, "{statement}");
+            assert_eq!(imports[0].text, statement);
+            assert_eq!(imports[0].removable, removable, "{statement}");
+            assert_eq!(
+                portable_dependency_import(&imports[0]),
+                Some(format!("use {path};")),
+                "{statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_syntax_and_fallback_do_not_authorize_import_removal() {
+        let incomplete = parse_use_statements("use crate::shared::Thing;\nfn broken(");
+        assert_eq!(incomplete.len(), 1);
+        assert!(!incomplete[0].removable);
+        assert!(portable_dependency_import(&incomplete[0]).is_none());
+
+        let fallback = parse_use_statements_linescan(
+            "use crate::shared::Thing;\npub use crate::shared::Other;\n",
+        );
+        assert_eq!(fallback.len(), 2);
+        assert!(fallback.iter().all(|statement| !statement.removable));
+        assert!(
+            fallback
+                .iter()
+                .all(|statement| portable_dependency_import(statement).is_none())
+        );
+    }
+
+    #[test]
+    fn attributed_imports_require_manual_dependency_handling() {
+        for source in [
+            "#[cfg(any())]\nuse\tcrate::shared::Thing;",
+            "#[allow(unused_imports)]\n// explanation\nuse crate::shared::Thing;",
+            "/// Public dependency documentation.\nuse crate::shared::Thing;",
+            "/** Public dependency documentation. */\nuse crate::shared::Thing;",
+        ] {
+            let statements = parse_use_statements(source);
+            assert_eq!(statements.len(), 1, "{source}");
+            assert!(!statements[0].removable, "{source}");
+            assert!(
+                portable_dependency_import(&statements[0]).is_none(),
+                "{source}"
+            );
+        }
+        let ordinary_comment = parse_use_statements("// explanation\nuse crate::shared::Thing;");
+        assert_eq!(ordinary_comment.len(), 1);
+        assert!(ordinary_comment[0].removable);
+        assert!(portable_dependency_import(&ordinary_comment[0]).is_some());
     }
 
     /// Mirror `analyze_dependencies`' scan: mask comments/strings (preserving

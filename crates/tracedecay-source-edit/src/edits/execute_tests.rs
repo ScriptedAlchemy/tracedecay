@@ -1,4 +1,6 @@
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::AtomicUsize;
 
 use tempfile::tempdir;
@@ -9,13 +11,15 @@ use tracedecay_contracts::{
     source_edit_operation,
 };
 use tracedecay_domain::UtcMicros;
+use tracedecay_graph_query::request_graph_cancellation;
 
 use super::test_support::{
     CancelBeforeEffectAuthorization, FixtureSourceEditAuthorization, fixture_authorization,
     fixture_graph, fixture_request, fixture_request_for_edit, fixture_symbol_code_graph, git,
 };
+use crate::execute::resolve_source_edit_preview;
 use crate::{
-    SourceEditApplicationResult, SourceEditEffectControlV1, execute_source_edit,
+    SourceEditApplicationResult, SourceEditEffectControlV1, SourceEditOutcome, execute_source_edit,
     execute_source_edit_with_control, preview_source_edit_expected_state,
 };
 
@@ -314,6 +318,192 @@ async fn move_symbol_publishes_and_replays_without_retaining_source_bodies() {
     .unwrap();
     assert!(!receipt.contains("Dependency"));
     assert!(!receipt.contains("pub fn"));
+}
+
+fn assert_import_fixture_compiles(project: &Path) {
+    let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Command::new(compiler)
+        .current_dir(project)
+        .args([
+            "--edition=2024",
+            "--crate-type=lib",
+            "--crate-name=move_import_fixture",
+            "--emit=metadata",
+            "-o",
+            "checked.rmeta",
+            "src/lib.rs",
+        ])
+        .output()
+        .expect("compile the independent consumer of the moved symbol's dependency");
+    assert!(
+        output.status.success(),
+        "fixture must remain valid Rust: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn assert_move_import_ownership(import: &str, binding: &str, preserve: bool) {
+    let project = tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    let moved_symbol = format!("pub fn moved(value: {binding}) -> {binding} {{\n    value\n}}");
+    let original_source = format!("{import}\n\n{moved_symbol}\n\npub fn remains() {{}}\n");
+    let original_destination = "pub fn marker() {}\n";
+    // This module never refers to `moved`; its dependency on the original
+    // export path must survive moving that function to a different module.
+    let consumer_type = if preserve {
+        format!("crate::api::{binding}")
+    } else {
+        "crate::model::Widget".to_owned()
+    };
+    let consumer =
+        format!("pub fn accept(value: {consumer_type}) -> {consumer_type} {{\n    value\n}}\n");
+    for (path, content) in [
+        (
+            "src/lib.rs",
+            "pub mod api;\npub mod consumer;\npub mod model;\npub mod relocated;\n",
+        ),
+        ("src/api.rs", original_source.as_str()),
+        ("src/model.rs", "pub struct Widget;\n"),
+        ("src/relocated.rs", original_destination),
+        ("src/consumer.rs", consumer.as_str()),
+    ] {
+        fs::write(project.path().join(path), content).unwrap();
+    }
+    assert_import_fixture_compiles(project.path());
+
+    let (graph, _) = fixture_graph(project.path()).await;
+    let code_graph = fixture_symbol_code_graph(
+        "src/api.rs",
+        &original_source,
+        &moved_symbol,
+        "moved",
+        "api::moved",
+    );
+    let mut request = fixture_request_for_edit(
+        SourceEditRequest::MoveSymbol {
+            symbol: "moved".to_owned(),
+            dest_file: "src/relocated.rs".to_owned(),
+            dry_run: false,
+            update_references: false,
+        },
+        "source-edit.move-import-ownership",
+    );
+    let preview = resolve_source_edit_preview(
+        &graph,
+        &code_graph,
+        &request.context,
+        request.observed_at,
+        request_graph_cancellation(&request.context),
+        request.edit.clone(),
+    )
+    .await
+    .unwrap();
+    let SourceEditOutcome::Move(preview_move) = &preview.outcome else {
+        panic!("expected MoveSymbol preview, got {:?}", preview.outcome);
+    };
+    assert!(preview_move.success, "{}", preview_move.message);
+    let dependency_import = if binding == "Widget" {
+        "use crate::model::Widget;".to_owned()
+    } else {
+        format!("use crate::model::Widget as {binding};")
+    };
+    assert_eq!(preview_move.applied_imports, vec![dependency_import]);
+    let removed = preview_move
+        .impact
+        .iter()
+        .filter(|hint| hint.kind == "orphaned_import_removed")
+        .collect::<Vec<_>>();
+    assert_eq!(removed.len(), usize::from(!preserve), "{import}");
+    let planned_source = preview
+        .planned_files
+        .iter()
+        .find(|file| file.relative_path == "src/api.rs")
+        .unwrap();
+    assert_eq!(
+        planned_source.intended.lines().any(|line| line == import),
+        preserve,
+        "preview must preserve exported bindings and remove only private orphans: {import}"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("src/api.rs")).unwrap(),
+        original_source,
+        "preview must not modify the source"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("src/relocated.rs")).unwrap(),
+        original_destination,
+        "preview must not modify the destination"
+    );
+
+    request.expected_state = preview.expected_state.unwrap();
+    let operation = source_edit_operation(SourceEditKind::MoveSymbol).unwrap();
+    let authorization = fixture_authorization(&request);
+    let applied = execute_source_edit(&graph, &code_graph, &operation, request, &authorization)
+        .await
+        .unwrap();
+    assert!(applied.outcome.success(), "{}", applied.outcome.message());
+    assert_eq!(
+        applied.effect.as_ref().unwrap().receipt.outcome,
+        EffectTermination::Completed
+    );
+    let SourceEditOutcome::Move(applied_move) = &applied.outcome else {
+        panic!("expected MoveSymbol result, got {:?}", applied.outcome);
+    };
+    assert_eq!(applied_move.applied_imports, preview_move.applied_imports);
+    assert_eq!(
+        applied_move
+            .impact
+            .iter()
+            .filter(|hint| hint.kind == "orphaned_import_removed")
+            .count(),
+        usize::from(!preserve)
+    );
+    for planned in &preview.planned_files {
+        assert_eq!(
+            fs::read_to_string(project.path().join(&planned.relative_path)).unwrap(),
+            planned.intended,
+            "apply must publish the exact preview for {}",
+            planned.relative_path
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(project.path().join("src/consumer.rs")).unwrap(),
+        consumer,
+        "the independent consumer is outside the requested edit"
+    );
+    assert_import_fixture_compiles(project.path());
+}
+
+#[tokio::test]
+async fn move_symbol_preserves_public_reexport_in_preview_and_apply() {
+    assert_move_import_ownership("pub use crate::model::Widget;", "Widget", true).await;
+}
+
+#[tokio::test]
+async fn move_symbol_preserves_aliased_reexport_in_preview_and_apply() {
+    assert_move_import_ownership(
+        "pub use crate::model::Widget as PublicWidget;",
+        "PublicWidget",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn move_symbol_preserves_restricted_reexports_in_preview_and_apply() {
+    for visibility in ["pub(crate)", "pub(in crate)"] {
+        assert_move_import_ownership(
+            &format!("{visibility} use crate::model::Widget;"),
+            "Widget",
+            true,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn move_symbol_still_removes_an_unused_private_import() {
+    assert_move_import_ownership("use crate::model::Widget;", "Widget", false).await;
 }
 
 /// Admits like the fixture authorization, but parks the first admission until
