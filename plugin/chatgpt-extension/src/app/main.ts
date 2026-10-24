@@ -573,15 +573,16 @@ function renderBody(): Node[] {
 
 function render(): void {
   const focused = document.activeElement;
+  const projectControl = focused instanceof HTMLElement && focused.closest('[data-testid="project-search-form"]') !== null ? focused.dataset["testid"] : undefined;
   const projectInput = focused instanceof HTMLInputElement && focused.dataset["testid"] === "project-search-input" ? focused : null;
-  const selection = projectInput === null ? null : [projectInput.selectionStart, projectInput.selectionEnd] as const;
+  const selection = projectInput === null ? null : [projectInput.selectionStart, projectInput.selectionEnd, projectInput.selectionDirection] as const;
   mount.replaceChildren(renderHeader(currentView()), ...renderBody());
   mount.dataset["phase"] = screen.phase;
   mount.dataset["page"] = currentView()?.page ?? "";
-  if (selection !== null) {
-    const replacement = mount.querySelector<HTMLInputElement>('[data-testid="project-search-input"]');
+  if (projectControl !== undefined) {
+    const replacement = mount.querySelector<HTMLElement>(`[data-testid="${projectControl}"]`);
     replacement?.focus({ preventScroll: true });
-    replacement?.setSelectionRange(...selection);
+    if (replacement instanceof HTMLInputElement && selection !== null) replacement.setSelectionRange(...selection);
   }
 }
 

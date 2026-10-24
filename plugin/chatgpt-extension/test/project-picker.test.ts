@@ -211,6 +211,26 @@ describe("project picker DOM", () => {
     expect(document.querySelector('[data-testid="loading"]')).toBeNull();
   });
 
+  it.each(["project-search-submit", "project-search-recent"])("keeps keyboard focus on %s through loading and results", async (testId) => {
+    pushView(projectsView([project(0)], "older"));
+    const control = element<HTMLButtonElement>(testId);
+    // jsdom does not perform native keyboard activation. Focus the tab stop
+    // and dispatch the click that Enter/Space generates on a button.
+    control.focus();
+    control.click();
+    const request = requests.at(-1)!;
+    const query = testId === "project-search-submit" ? "older" : "";
+    expect(request).toMatchObject({ name: "tracedecay_search_projects", args: { query } });
+    expect(control.isConnected).toBe(false);
+    expect(document.activeElement).toBe(element(testId));
+    await deliver(request, projectsView([project(11)], query));
+    expect(document.activeElement).toBe(element(testId));
+    // The restored control remains usable for the next keyboard activation.
+    element<HTMLButtonElement>(testId).click();
+    expect(requests).toHaveLength(2);
+    expect(document.activeElement).toBe(element(testId));
+  });
+
   it("keeps focus and the complete draft when typing successive characters over a pending query", async () => {
     pushView(projectsView([project(0)]));
     const first = submitProjectQuery("older");
