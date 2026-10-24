@@ -653,7 +653,7 @@ impl ResumeDigest {
     /// displacing `file_id` / generation, which would collapse rewrite and
     /// file-identity detection. A first append after a durable resume must
     /// therefore re-walk `[0, cursor)` to rebuild this digest.
-    fn fingerprint(&self, position: u64) -> u64 {
+    pub(in crate::runtime) fn fingerprint(&self, position: u64) -> u64 {
         let mut hasher = self.hasher.clone();
         hasher.update(position.to_le_bytes());
         digest_prefix_u64(hasher.finalize())

@@ -67,7 +67,6 @@ use std::sync::{LazyLock, Mutex, OnceLock, PoisonError};
 
 use asupersync::channel::watch;
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
@@ -84,8 +83,8 @@ use crate::runtime::jsonl_observation_admission::{
 };
 use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::source::{
-    FileDiscoveryLimit, FileDiscoveryReport, TranscriptCursorKey, TranscriptDiscoveryBounds,
-    TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
+    FileDiscoveryLimit, FileDiscoveryReport, TranscriptDiscoveryBounds, TranscriptIngestError,
+    TranscriptIngestResult, TranscriptSource,
 };
 
 #[cfg(test)]
@@ -2806,17 +2805,6 @@ fn hash_path(hasher: &mut Sha256, path: &Path) {
     #[cfg(not(any(unix, windows)))]
     hasher.update(path.as_os_str().as_encoded_bytes());
     hasher.update([0]);
-}
-
-/// The checkpoint identity is independent of the transcript's display location.
-pub(crate) fn codex_cursor_key(transcript_path: &Path) -> TranscriptCursorKey {
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.codex.transcript-cursor.v2\0");
-    hash_path(&mut hasher, transcript_path);
-    TranscriptCursorKey::opaque(format!(
-        "codex-v2:{}",
-        encode_lowercase_hex(&hasher.finalize())
-    ))
 }
 
 impl TranscriptSource for CodexSource {

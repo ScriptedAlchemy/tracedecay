@@ -258,28 +258,6 @@ mod tests {
                 ))
                 .await
         );
-        database
-            .set_parse_offset(
-                cursor_path.to_str().unwrap(),
-                ParseOffset {
-                    byte_offset: 4,
-                    mtime: 100,
-                    file_id: 0,
-                },
-            )
-            .await
-            .unwrap();
-        database
-            .set_parse_offset(
-                claude_path.to_str().unwrap(),
-                ParseOffset {
-                    byte_offset: 20,
-                    mtime: 200,
-                    file_id: 0,
-                },
-            )
-            .await
-            .unwrap();
         for frontier in [
             "host-frontier://kimi/discovery/v1",
             "host-frontier://opencode/sql-rowid/v1",
@@ -323,9 +301,9 @@ mod tests {
         assert_eq!(runtime_surface.observed_providers, ["cursor"]);
         assert_eq!(runtime_surface.tracked_transcripts, 1);
         assert_eq!(runtime_surface.pending_transcripts, 1);
-        assert_eq!(runtime_surface.pending_bytes, 6);
-        assert_eq!(runtime_surface.max_transcript_pending_bytes, 6);
-        assert_eq!(runtime_surface.last_ingest_unix, Some(100));
+        assert_eq!(runtime_surface.pending_bytes, 10);
+        assert_eq!(runtime_surface.max_transcript_pending_bytes, 10);
+        assert_eq!(runtime_surface.last_ingest_unix, None);
         assert_eq!(
             all_providers.observed_providers,
             ["claude", "cursor", "kimi", "opencode"]

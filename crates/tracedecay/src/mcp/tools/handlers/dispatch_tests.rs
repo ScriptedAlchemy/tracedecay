@@ -432,28 +432,6 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
                 .await
         );
     }
-    database
-        .set_parse_offset(
-            cursor_path.to_str().unwrap(),
-            tracedecay_global_db::ParseOffset {
-                byte_offset: 4,
-                mtime: 100,
-                file_id: 0,
-            },
-        )
-        .await
-        .unwrap();
-    database
-        .set_parse_offset(
-            claude_path.to_str().unwrap(),
-            tracedecay_global_db::ParseOffset {
-                byte_offset: 20,
-                mtime: 200,
-                file_id: 0,
-            },
-        )
-        .await
-        .unwrap();
     let options = || {
         ToolCallRegistryOptions {
             registered_project_session_db: runtime.registered_database_arc(
@@ -499,8 +477,8 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         runtime_result["cursor_session_ingest"]
     );
     assert_eq!(status["session_ingest"]["tracked_transcripts"], 1);
-    assert_eq!(status["session_ingest"]["pending_bytes"], 6);
-    assert_eq!(status["session_ingest"]["last_ingest_unix"], 100);
+    assert_eq!(status["session_ingest"]["pending_bytes"], 10);
+    assert_eq!(status["session_ingest"]["last_ingest_unix"], Value::Null);
 
     cg.checkpoint().await.unwrap();
     cg.close();
