@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.93](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.92...v1.0.0-beta.93) (2026-10-24)
+
+
+### Features
+
+* **edits:** remove file undo and automatic restoration ([#4472](https://github.com/ScriptedAlchemy/tracedecay/issues/4472)) ([4098533](https://github.com/ScriptedAlchemy/tracedecay/commit/4098533106a89f5e5fe395622e13414314c5c671))
+
+
+### Bug Fixes
+
+* **automation:** refuse incomplete stored job documents ([#4468](https://github.com/ScriptedAlchemy/tracedecay/issues/4468)) ([645131b](https://github.com/ScriptedAlchemy/tracedecay/commit/645131b5c338d7e50f02486d3015407017d0ce87))
+* **cli:** hold init --wait while the first generation is in flight ([#4494](https://github.com/ScriptedAlchemy/tracedecay/issues/4494)) ([722f7cc](https://github.com/ScriptedAlchemy/tracedecay/commit/722f7ccd83bc42b9cfe3a1dd722a44f97e08eeaa))
+* **code-index:** keep a read-reseated graph across parks ([#4499](https://github.com/ScriptedAlchemy/tracedecay/issues/4499)) ([e9a3355](https://github.com/ScriptedAlchemy/tracedecay/commit/e9a3355fa1975ce46f3cd33b640622d92d0aac6d))
+* **cursor:** apply diagnostic caps after lane selection ([#4491](https://github.com/ScriptedAlchemy/tracedecay/issues/4491)) ([96994d0](https://github.com/ScriptedAlchemy/tracedecay/commit/96994d0587c659c98d7c9897ca6b23cd7dbe736a))
+* **extension:** make bridge shutdown terminal ([#4486](https://github.com/ScriptedAlchemy/tracedecay/issues/4486)) ([9b8789c](https://github.com/ScriptedAlchemy/tracedecay/commit/9b8789c94cf9a2d527a680be1e6997f96c057bbb))
+* **graph:** preserve import evidence in caller traversal ([#4509](https://github.com/ScriptedAlchemy/tracedecay/issues/4509)) ([6ed67ce](https://github.com/ScriptedAlchemy/tracedecay/commit/6ed67ce8fde9d45a89ad9a53e9d9982ae251d0e2))
+* **graph:** resolve node ids before waiting on a released catalog ([#4498](https://github.com/ScriptedAlchemy/tracedecay/issues/4498)) ([ba7493d](https://github.com/ScriptedAlchemy/tracedecay/commit/ba7493d0744ea0fd42309286d6bda2c3164f3d8e))
+* **health:** share SCC analysis and count cycle edges exactly ([#4466](https://github.com/ScriptedAlchemy/tracedecay/issues/4466)) ([69ece22](https://github.com/ScriptedAlchemy/tracedecay/commit/69ece22393a0d0039f7f79b79b5d1077d0761ff1))
+* **privacy:** stop treating compound identifiers as secrets ([36eedb3](https://github.com/ScriptedAlchemy/tracedecay/commit/36eedb3ee7cd127ad6f9106b201df47998e0a2e4))
+* **privacy:** stop treating compound identifiers as secrets ([d869740](https://github.com/ScriptedAlchemy/tracedecay/commit/d869740986811ca92be4c51ab16c3cfdae53562d)), closes [#4451](https://github.com/ScriptedAlchemy/tracedecay/issues/4451)
+* **runtime:** batch session skips and retain preparation writers ([#4495](https://github.com/ScriptedAlchemy/tracedecay/issues/4495)) ([fc598cb](https://github.com/ScriptedAlchemy/tracedecay/commit/fc598cba885191feb2b2d216e83834ea1b8c9de8))
+* **sdk:** bound SSE frames and scan fragmented lines once ([#4501](https://github.com/ScriptedAlchemy/tracedecay/issues/4501)) ([1d7e794](https://github.com/ScriptedAlchemy/tracedecay/commit/1d7e794f0dea4498905564d3ad253548727383ee))
+* **sdk:** own JSON response bodies through cancellation ([#4487](https://github.com/ScriptedAlchemy/tracedecay/issues/4487)) ([ef2809e](https://github.com/ScriptedAlchemy/tracedecay/commit/ef2809ec73e88e4f620a77130892256bd0a4a8b5))
+* **sdk:** refuse enrolled remote redirects ([#4471](https://github.com/ScriptedAlchemy/tracedecay/issues/4471)) ([c9b1d4c](https://github.com/ScriptedAlchemy/tracedecay/commit/c9b1d4c690fcbccdd4cfbf3cafb189d0527fc9d7))
+* **sessions:** measure catch-up backlog from source cursors ([#4497](https://github.com/ScriptedAlchemy/tracedecay/issues/4497)) ([f5078ee](https://github.com/ScriptedAlchemy/tracedecay/commit/f5078ee2c32111e3cc900921db02da8ddd40cd0b))
+* **sessions:** mount detached checkouts' session retrieval ([#4496](https://github.com/ScriptedAlchemy/tracedecay/issues/4496)) ([10b5d95](https://github.com/ScriptedAlchemy/tracedecay/commit/10b5d958c87b4b15f8074767da559f544bbb3d8e))
+* **sessions:** resolve Codex scope once, off the polling worker ([#4500](https://github.com/ScriptedAlchemy/tracedecay/issues/4500)) ([4ff7319](https://github.com/ScriptedAlchemy/tracedecay/commit/4ff7319eee248f77cc3f7e44716e7d91a724e202))
+* **source-edit:** preserve concurrently created destinations ([#4504](https://github.com/ScriptedAlchemy/tracedecay/issues/4504)) ([5d1defa](https://github.com/ScriptedAlchemy/tracedecay/commit/5d1defae526c31db0a737e92b0c81760773bc366)), closes [#4415](https://github.com/ScriptedAlchemy/tracedecay/issues/4415)
+* **source-edit:** preserve reexports when moving symbols ([#4493](https://github.com/ScriptedAlchemy/tracedecay/issues/4493)) ([0c9337f](https://github.com/ScriptedAlchemy/tracedecay/commit/0c9337f494f5c9ddabae100df9375e9804b15a2b))
+* **status:** report resident memory no retained owner holds ([#4503](https://github.com/ScriptedAlchemy/tracedecay/issues/4503)) ([c75a45d](https://github.com/ScriptedAlchemy/tracedecay/commit/c75a45d73e0c9d1931e008cd0f2fed3184ba18b0))
+* **status:** report why no GitHub source was observed ([#4492](https://github.com/ScriptedAlchemy/tracedecay/issues/4492)) ([9819426](https://github.com/ScriptedAlchemy/tracedecay/commit/981942674d91d158dde18d01702a8c68cf704c4a))
+* **test:** complete daemon and HTTP fixture teardown ([58949d0](https://github.com/ScriptedAlchemy/tracedecay/commit/58949d0e94e0cb373b45358fa08cb89c732249ef))
+
+
+### Performance Improvements
+
+* **code-graph:** reread only re-sealed segments when proving a seal ([#4523](https://github.com/ScriptedAlchemy/tracedecay/issues/4523)) ([a201387](https://github.com/ScriptedAlchemy/tracedecay/commit/a201387aab7d14c9c897913f5c4dd77afa202b05))
+
+
+### Reverts
+
+* **privacy:** restore entropy redaction for compound identifiers ([#4512](https://github.com/ScriptedAlchemy/tracedecay/issues/4512)) ([b0c2a1d](https://github.com/ScriptedAlchemy/tracedecay/commit/b0c2a1d0040b32d821b49c9ce44dec541fed030b))
+
 ## [1.0.0-beta.92](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.91...v1.0.0-beta.92) (2026-10-23)
 
 
