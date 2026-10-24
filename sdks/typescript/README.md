@@ -45,6 +45,23 @@ admission. `UNAVAILABLE_OPERATIONS` reports cataloged operations that still
 lack a canonical schema or SDK transport without creating callable methods.
 Malformed or unavailable contracts fail closed.
 
+## HTTP cancellation and failures
+
+Pass an `AbortSignal` in the operation options or in
+`cancelOperation(operationId, { signal })`. Caller cancellation raises
+`TraceDecayAbortError` with the original signal reason as its `cause`, including
+when headers have arrived and the SDK is still reading the body. The SDK
+cancels unread response data and releases its reader.
+
+Body I/O failures raise `TraceDecayDisconnectedError`. Completely received but
+invalid JSON or application envelopes raise `TraceDecayMalformedResponseError`.
+Authentication and origin refusals retain their distinct 401/403 statuses on
+`TraceDecayAuthenticationError`; their bodies are cancelled without being read.
+
+Unary HTTP operations are not automatically retried. A disconnected or aborted
+response does not prove that an effect was rolled back or never committed.
+Use `cancelOperation` to explicitly request cancellation of a running operation.
+
 ## Publishing
 
 `pnpm test` runs the fast, mock-server unit suite only; it does not by itself
