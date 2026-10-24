@@ -1,5 +1,6 @@
 //! Work counters the composition-stage tests assert on: fused sort passes,
-//! comparator-record builds, and diversity cap-key derivations.
+//! comparator-record builds, ranking evidence normalization, and diversity
+//! cap-key derivations.
 //!
 //! Outside `cfg(test)` every recorder is an empty inline function and no
 //! counter state exists. Under test the counters are thread-local, so each
@@ -12,6 +13,7 @@ use std::cell::Cell;
 thread_local! {
     static FUSED_SORTS: Cell<usize> = const { Cell::new(0) };
     static COMPARATOR_RECORDS: Cell<usize> = const { Cell::new(0) };
+    static RANKING_EVIDENCE_NORMALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static CAP_KEY_DERIVATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -22,6 +24,7 @@ thread_local! {
 pub(super) struct StageWork {
     pub fused_sorts: usize,
     pub comparator_records: usize,
+    pub ranking_evidence_normalizations: usize,
     pub cap_key_derivations: usize,
 }
 
@@ -29,6 +32,7 @@ pub(super) struct StageWork {
 pub(super) fn reset() {
     FUSED_SORTS.with(|count| count.set(0));
     COMPARATOR_RECORDS.with(|count| count.set(0));
+    RANKING_EVIDENCE_NORMALIZATIONS.with(|count| count.set(0));
     CAP_KEY_DERIVATIONS.with(|count| count.set(0));
 }
 
@@ -37,6 +41,7 @@ pub(super) fn snapshot() -> StageWork {
     StageWork {
         fused_sorts: FUSED_SORTS.with(Cell::get),
         comparator_records: COMPARATOR_RECORDS.with(Cell::get),
+        ranking_evidence_normalizations: RANKING_EVIDENCE_NORMALIZATIONS.with(Cell::get),
         cap_key_derivations: CAP_KEY_DERIVATIONS.with(Cell::get),
     }
 }
@@ -56,6 +61,12 @@ pub(super) fn record_fused_sort() {
 pub(super) fn record_comparator_record() {
     #[cfg(test)]
     bump(&COMPARATOR_RECORDS);
+}
+
+#[inline]
+pub(super) fn record_ranking_evidence_normalization() {
+    #[cfg(test)]
+    bump(&RANKING_EVIDENCE_NORMALIZATIONS);
 }
 
 #[inline]
