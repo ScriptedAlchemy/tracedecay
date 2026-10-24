@@ -25,6 +25,8 @@ use tracedecay_graph_db::{
 use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
 use tracedecay_store::{GraphProjectionIdentityV1, StoreShardIdV1};
 
+use super::verified_sealed_segments::{SealedSegmentFingerprintV1, VerifiedSealedSegmentsV1};
+
 const SEAL_READ_CHECK_BYTES: usize = 64 * 1024;
 
 fn classify_sealed_generation_decode_error(
@@ -951,6 +953,60 @@ fn read_partitioned_segment(
         })
 }
 
+/// Read a whole segment and report the identity of the file the bytes came
+/// from, so a proof that hashes them can vouch for that file afterwards.
+fn read_fingerprinted_segment(
+    segment_path: &std::path::Path,
+    expected_size: u64,
+    buffer: &mut Vec<u8>,
+) -> Result<Option<SealedSegmentFingerprintV1>, CodeIndexProductionErrorV1> {
+    let path_metadata = segment_path.symlink_metadata().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment is unavailable: {error}"
+        ))
+    })?;
+    if !path_metadata.file_type().is_file() || path_metadata.len() != expected_size {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment identity does not match its manifest".to_owned(),
+        ));
+    }
+    let length = usize::try_from(expected_size).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment range exceeds addressable memory".to_owned(),
+        )
+    })?;
+    let mut file = File::open(segment_path).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment cannot be opened: {error}"
+        ))
+    })?;
+    let file_metadata = file.metadata().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment metadata cannot be read: {error}"
+        ))
+    })?;
+    buffer.clear();
+    buffer.resize(length, 0);
+    file.read_exact(buffer).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment read failed: {error}"
+        ))
+    })?;
+    Ok(same_file_identity(&path_metadata, &file_metadata)
+        .then(|| SealedSegmentFingerprintV1::of(&file_metadata))
+        .flatten())
+}
+
+fn segment_path(
+    segments_root: &std::path::Path,
+    digest: &ManifestDigest,
+) -> Result<PathBuf, CodeIndexProductionErrorV1> {
+    let digest_hex = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
+    })?;
+    Ok(segments_root.join(format!("segment-{digest_hex}.json")))
+}
+
 #[tracing::instrument(
     name = "daemon.session_registry.seal.verify",
     level = "trace",
@@ -982,12 +1038,14 @@ fn verify_checked_seal_bundle(
     path: &std::path::Path,
     segments_root: &std::path::Path,
     expected_digest: &str,
+    verified: &VerifiedSealedSegmentsV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
     verify_checked_seal_bundle_with_evidence_barrier(
         path,
         segments_root,
         expected_digest,
+        verified,
         check,
         || {},
     )
@@ -997,6 +1055,7 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     path: &std::path::Path,
     segments_root: &std::path::Path,
     expected_digest: &str,
+    verified: &VerifiedSealedSegmentsV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
     evidence_barrier: impl FnOnce(),
 ) -> Result<(), GraphDbError> {
@@ -1036,9 +1095,14 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     let mut pinned_evidence = None;
     let mut evidence_barrier = Some(evidence_barrier);
     let mut interruption = None;
+    let proof = std::cell::RefCell::new(verified.begin(segments_root));
     let verified =
         tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
         &manifest,
+        |digest, expected_size| {
+            segment_path(segments_root, digest)
+                .is_ok_and(|path| proof.borrow_mut().already_verified(digest, expected_size, &path))
+        },
         |request, buffer| {
             if let Err(error) = (check)() {
                 if matches!(error, GraphDbError::Cancelled | GraphDbError::DeadlineExceeded) {
@@ -1052,8 +1116,17 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
             }
             match request {
                 tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
-                    ..
-                } => read_partitioned_segment(segments_root, request, buffer),
+                    digest,
+                    size_bytes,
+                } => {
+                    let fingerprint = read_fingerprinted_segment(
+                        &segment_path(segments_root, digest)?,
+                        size_bytes,
+                        buffer,
+                    )?;
+                    proof.borrow_mut().hashed(digest, fingerprint);
+                    Ok(())
+                }
                 tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
                     ..
                 } => {
@@ -1093,7 +1166,9 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
             message: format!("sealed generation component verification failed: {error}"),
         });
     }
-    (check)()
+    (check)()?;
+    proof.into_inner().commit();
+    Ok(())
 }
 
 /// Proves that the durable source backing an already-decoded generation still
@@ -1103,6 +1178,7 @@ pub(super) fn verify_sealed_generation_source_from_roots(
     generations_root: &std::path::Path,
     replay_root: &std::path::Path,
     sealed_state_digest: &SealedGraphStateDigest,
+    verified: &VerifiedSealedSegmentsV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
     let digest = sha256_hex_suffix(sealed_state_digest.as_str())
@@ -1119,7 +1195,7 @@ pub(super) fn verify_sealed_generation_source_from_roots(
         digest,
         check,
         |path, expected_digest, check| {
-            verify_checked_seal_bundle(path, &segments_root, expected_digest, check)
+            verify_checked_seal_bundle(path, &segments_root, expected_digest, verified, check)
         },
     )
 }
@@ -1441,9 +1517,10 @@ mod tests {
     };
 
     use super::{
-        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, read_verified_seal_manifest,
-        spill_sealed_generation_graph_from_roots, validate_sealed_generation_metadata,
-        verify_checked_seal, verify_checked_seal_bundle_with_evidence_barrier,
+        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, VerifiedSealedSegmentsV1,
+        read_verified_seal_manifest, spill_sealed_generation_graph_from_roots,
+        validate_sealed_generation_metadata, verify_checked_seal,
+        verify_checked_seal_bundle_with_evidence_barrier,
         verify_sealed_generation_source_from_roots,
     };
     use tracedecay_code_index_runtime::code_index_scheduler::{
@@ -1744,6 +1821,7 @@ mod tests {
                 &generations_root,
                 &replay_root,
                 &sealed_state_digest,
+                &VerifiedSealedSegmentsV1::default(),
                 check,
             )
         };
@@ -1813,6 +1891,7 @@ mod tests {
                 &generations_root,
                 &replay_root,
                 &sealed_state_digest,
+                &VerifiedSealedSegmentsV1::default(),
                 &two_second_check(),
             )
         };
@@ -1911,6 +1990,7 @@ mod tests {
                 &generations_root,
                 &replay_root,
                 &sealed_state_digest,
+                &VerifiedSealedSegmentsV1::default(),
                 &|| {
                     if retire_mid_read && checks.fetch_add(1, Ordering::SeqCst) == 5 {
                         std::fs::rename(&pool_seal, &staged).unwrap();
@@ -1959,6 +2039,7 @@ mod tests {
                 &fixture.pool_manifest,
                 &fixture.segments_root,
                 &fixture.digest,
+                &VerifiedSealedSegmentsV1::default(),
                 &|| {
                     if checks.fetch_add(1, Ordering::SeqCst) == manifest_checks {
                         if retire_seal {
@@ -2087,6 +2168,186 @@ mod tests {
             repository,
             generation,
         }
+    }
+
+    #[test]
+    fn inherited_segment_proof_rejects_wrong_manifest_extent() {
+        let fixture = partitioned_seal_fixture("inherited-extent");
+        let verified = VerifiedSealedSegmentsV1::default();
+        let generations_root = fixture.scope_root.join("code-generations-v1");
+        let replay_root = fixture.pool_manifest.parent().unwrap();
+        let first_manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fixture.pool_manifest).unwrap()).unwrap();
+        verify_sealed_generation_source_from_roots(
+            &generations_root,
+            replay_root,
+            &SealedGraphStateDigest::try_from(format!("sha256:{}", fixture.digest)).unwrap(),
+            &verified,
+            &|| Ok(()),
+        )
+        .unwrap();
+
+        std::fs::rename(
+            &fixture.pool_manifest,
+            generations_root.join(fixture.pool_manifest.file_name().unwrap()),
+        )
+        .unwrap();
+        let project_root = fixture
+            ._temporary
+            .path()
+            .join("project")
+            .canonicalize()
+            .unwrap();
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            fixture.project.clone(),
+            &project_root,
+            fixture.scope_root.clone(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("src/alpha.rs"),
+            "pub fn changed_alpha(value: usize) -> usize { value + 7 }\n",
+        )
+        .unwrap();
+        scheduler.reconcile_now().unwrap();
+        assert_ne!(
+            scheduler
+                .latest_complete()
+                .unwrap()
+                .generation()
+                .manifest()
+                .generation_id,
+            fixture.generation
+        );
+        drop(scheduler);
+        let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+            &std::fs::read(fixture.scope_root.join("active-code-generation-v1.json")).unwrap(),
+        )
+        .unwrap();
+        let successor_path = generations_root.join(pointer.generation_file);
+        let mut successor: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&successor_path).unwrap()).unwrap();
+        let inherited = successor["generation"]["file_segments"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|segment| {
+                first_manifest["generation"]["file_segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|prior| prior["segment_digest"] == segment["segment_digest"])
+            })
+            .expect("a one-file successor inherits an unchanged segment");
+        inherited["segment_size_bytes"] =
+            (inherited["segment_size_bytes"].as_u64().unwrap() + 1).into();
+        // Authenticate the changed descriptor at both seal layers so only
+        // the segment extent can distinguish the warm and cold proofs.
+        let state_digest = tracedecay_domain::ManifestDigest::from_sha256_bytes(&Sha256::digest(
+            serde_json::to_vec(&successor["generation"]).unwrap(),
+        ))
+        .unwrap();
+        successor["state_digest"] = state_digest.as_str().into();
+        let bytes = serde_json::to_vec(&successor).unwrap();
+        let digest =
+            tracedecay_domain::ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes)).unwrap();
+        let mut permissions = std::fs::metadata(&successor_path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&successor_path, permissions).unwrap();
+        std::fs::write(&successor_path, bytes).unwrap();
+        std::fs::rename(
+            successor_path,
+            generations_root.join(format!(
+                "generation-{}.json",
+                sha256_hex_suffix(digest.as_str()).unwrap()
+            )),
+        )
+        .unwrap();
+        let digest = SealedGraphStateDigest::try_from(digest.as_str().to_owned()).unwrap();
+        let prove = |record: &VerifiedSealedSegmentsV1| {
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                replay_root,
+                &digest,
+                record,
+                &|| Ok(()),
+            )
+        };
+        let cold = prove(&VerifiedSealedSegmentsV1::default());
+        assert!(
+            matches!(cold, Err(GraphDbError::Corrupt { .. })),
+            "{cold:?}"
+        );
+        let warm = prove(&verified);
+        assert!(
+            matches!(warm, Err(GraphDbError::Corrupt { .. })),
+            "{warm:?}"
+        );
+    }
+
+    /// A successor shares almost every segment with the generation proven
+    /// before it. Platforms with trustworthy file fingerprints skip unchanged
+    /// segments; other platforms reread them. Both refuse a corrupt rewrite.
+    #[test]
+    fn a_repeated_source_proof_reads_only_segments_whose_file_changed() {
+        let fixture = partitioned_seal_fixture("repeated-proof");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fixture.pool_manifest).unwrap()).unwrap();
+        let generation = &manifest["generation"];
+        let unchanged_segments = generation["file_segments"].as_array().unwrap().len()
+            + generation["code_graph_pages"].as_array().unwrap().len();
+        let verified = VerifiedSealedSegmentsV1::default();
+        let checks = AtomicUsize::new(0);
+        let prove = || {
+            checks.store(0, Ordering::SeqCst);
+            let proven = verify_checked_seal_bundle_with_evidence_barrier(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &verified,
+                &|| {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                || {},
+            );
+            (proven, checks.load(Ordering::SeqCst))
+        };
+
+        let (first, first_reads) = prove();
+        assert_eq!(first, Ok(()));
+        let (second, second_reads) = prove();
+        assert_eq!(second, Ok(()));
+        if cfg!(unix) {
+            assert!(
+                first_reads >= second_reads + unchanged_segments,
+                "the second proof read {second_reads} times after the first read {first_reads}; \
+                 none of the {unchanged_segments} unchanged segments may be read again"
+            );
+        } else {
+            assert_eq!(
+                second_reads, first_reads,
+                "without trustworthy file fingerprints every proof must reread every segment"
+            );
+        }
+
+        let page_digest = generation["code_graph_pages"][0]["page_digest"]
+            .as_str()
+            .unwrap();
+        let page = fixture.segments_root.join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(page_digest).unwrap()
+        ));
+        let mut bytes = std::fs::read(&page).unwrap();
+        bytes[0] ^= 1;
+        let mut permissions = std::fs::metadata(&page).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&page, permissions).unwrap();
+        std::fs::write(&page, &bytes).unwrap();
+        assert!(matches!(prove().0, Err(GraphDbError::Corrupt { .. })));
     }
 
     #[test]
@@ -2350,6 +2611,7 @@ mod tests {
             &fixture.pool_manifest,
             &fixture.segments_root,
             &fixture.digest,
+            &VerifiedSealedSegmentsV1::default(),
             &|| {
                 if evidence_ranges_started.load(Ordering::SeqCst) {
                     interrupted_range_checks.fetch_add(1, Ordering::SeqCst);

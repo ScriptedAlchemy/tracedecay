@@ -263,6 +263,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             remote_recovery_authorities: Mutex::new(BTreeMap::new()),
             project_owners: super::ProjectRuntimeOwnerRegistryV1::default(),
             code_graph_publication_gates: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            code_graph_verified_segments: std::sync::Mutex::new(BTreeMap::new()),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
             reset_required_stores: std::sync::Mutex::new(BTreeMap::new()),
             lost_store_files: std::sync::Mutex::new(BTreeMap::new()),
