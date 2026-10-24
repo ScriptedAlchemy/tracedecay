@@ -215,7 +215,8 @@ pub(crate) async fn move_symbol(
         &dest_original,
         dest_module.as_deref(),
     );
-    let dest_modified = build_dest_content(&dest_original, &applied_imports, &moved_text);
+    let dest_modified =
+        build_dest_content(&dest_rel, &dest_original, &applied_imports, &moved_text)?;
 
     let mut impact = analysis.hints;
     impact.extend(
