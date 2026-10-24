@@ -745,7 +745,7 @@ export class TraceDecayClient {
       return await this.doFetch(url, init);
     } catch (cause) {
       if (signal?.aborted) {
-        throw new TraceDecayAbortError(signal.reason ?? cause);
+        throw new TraceDecayAbortError(signal.reason);
       }
       throw new TraceDecayDisconnectedError(
         `transport failure requesting ${url.pathname}`,
@@ -758,43 +758,92 @@ export class TraceDecayClient {
     response: Response,
     expectedBinding?: string,
     expectedRequestId?: string,
+    signal?: AbortSignal,
   ): Promise<unknown> {
-    if (response.status === 401 || response.status === 403) {
-      throw new TraceDecayAuthenticationError(response.status);
-    }
-    if (!hasMediaType(response, "application/json")) {
-      const payload = await response.text();
-      throw new TraceDecayMalformedResponseError(
-        "the daemon returned JSON with an invalid media type",
-        { status: response.status, payload },
-      );
-    }
-    const envelope = parseJson(await response.text(), response.status);
-    if (isRecord(envelope) && envelope.kind === "problem") {
-      const problemEnvelope = envelope.value;
-      if (!isHttpProblemEnvelope(problemEnvelope)) {
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let fullyRead = false;
+    let cancellation: Promise<void> | undefined;
+    const cancel = () => {
+      cancellation ??= reader?.cancel(signal?.reason) ??
+        response.body?.cancel(signal?.reason) ?? Promise.resolve();
+      return cancellation;
+    };
+    const onAbort = () => {
+      // The finally block joins this same cleanup while preserving the abort.
+      void cancel().catch(() => undefined);
+    };
+    try {
+      if (signal?.aborted) throw new TraceDecayAbortError(signal.reason);
+      if (response.status === 401 || response.status === 403) {
+        throw new TraceDecayAuthenticationError(response.status);
+      }
+      if (!hasMediaType(response, "application/json")) {
         throw new TraceDecayMalformedResponseError(
-          "the daemon returned a malformed problem envelope",
-          { status: response.status, payload: problemEnvelope },
+          "the daemon returned JSON with an invalid media type",
+          { status: response.status },
         );
       }
-      const validBinding =
-        expectedBinding === undefined ||
-        applicationProblemBindingMatches(problemEnvelope, [expectedBinding]);
-      if (
-        response.ok ||
-        !validBinding ||
-        (expectedRequestId !== undefined && problemEnvelope.request_id !== expectedRequestId) ||
-        !applicationProblemStatusMatches(response.status, problemEnvelope.problem.kind)
-      ) {
-        throw new TraceDecayMalformedResponseError(
-          "the daemon returned a malformed problem envelope",
-          { status: response.status, payload: problemEnvelope },
+      let text = "";
+      try {
+        reader = response.body?.getReader();
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) throw new TraceDecayAbortError(signal.reason);
+        if (reader !== undefined) {
+          const decoder = new TextDecoder();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (signal?.aborted) throw new TraceDecayAbortError(signal.reason);
+            if (done) break;
+            text += decoder.decode(value, { stream: true });
+          }
+          text += decoder.decode();
+        }
+        fullyRead = true;
+      } catch (cause) {
+        if (signal?.aborted) throw new TraceDecayAbortError(signal.reason);
+        throw new TraceDecayDisconnectedError(
+          "transport failure reading the daemon response body",
+          cause,
         );
       }
-      throw problemError(response.status, problemEnvelope);
+      // Complete malformed documents are protocol failures, not transport loss.
+      const envelope = parseJson(text, response.status);
+      if (isRecord(envelope) && envelope.kind === "problem") {
+        const problemEnvelope = envelope.value;
+        if (!isHttpProblemEnvelope(problemEnvelope)) {
+          throw new TraceDecayMalformedResponseError(
+            "the daemon returned a malformed problem envelope",
+            { status: response.status, payload: problemEnvelope },
+          );
+        }
+        const validBinding =
+          expectedBinding === undefined ||
+          applicationProblemBindingMatches(problemEnvelope, [expectedBinding]);
+        if (
+          response.ok ||
+          !validBinding ||
+          (expectedRequestId !== undefined && problemEnvelope.request_id !== expectedRequestId) ||
+          !applicationProblemStatusMatches(response.status, problemEnvelope.problem.kind)
+        ) {
+          throw new TraceDecayMalformedResponseError(
+            "the daemon returned a malformed problem envelope",
+            { status: response.status, payload: problemEnvelope },
+          );
+        }
+        throw problemError(response.status, problemEnvelope);
+      }
+      return envelope;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+      try {
+        if (!fullyRead) await cancel();
+      } catch {
+        // Every incomplete-body exit already carries an abort, transport, or
+        // response refusal. Cleanup must not replace that primary failure.
+      } finally {
+        reader?.releaseLock();
+      }
     }
-    return envelope;
   }
 
   async #requestOperation<Request, Result>(
@@ -870,6 +919,7 @@ export class TraceDecayClient {
       response,
       descriptor.bindingId,
       options.requestId,
+      options.signal,
     );
     if (!isRecord(envelope) || envelope.kind !== "success") {
       throw new TraceDecayMalformedResponseError(
@@ -979,7 +1029,7 @@ export class TraceDecayClient {
       let streamFailed = false;
       try {
         if (!response.ok || response.body === null) {
-          await this.readJson(response);
+          await this.readJson(response, undefined, undefined, options.signal);
           throw new TraceDecayMalformedResponseError(
             "the daemon did not open an SSE stream",
             { status: response.status },
@@ -1098,7 +1148,7 @@ export class TraceDecayClient {
       },
       options.signal,
     );
-    const value = await this.readJson(response);
+    const value = await this.readJson(response, undefined, undefined, options.signal);
     if (!isRecord(value)) {
       throw new TraceDecayMalformedResponseError(
         "the daemon returned a malformed cancellation response",
