@@ -8,7 +8,7 @@ mod test_map;
 pub use dsm::{compute_dsm, render_dsm_md};
 pub use reports::{compute_dependency_depth, compute_gini, compute_health};
 pub use runtime::{collect_database_snapshot, compute_runtime};
-pub use test_map::{compute_test_map, compute_test_risk};
+pub use test_map::{compute_test_map, compute_test_risk, test_map_reads_one_node};
 
 use std::collections::{HashMap, HashSet};
 

@@ -322,6 +322,13 @@ fn test_map_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail)
 }
 
+/// A one-node test map walks callers out from that symbol, which the engine
+/// serves; only a file target needs the catalog's per-file census.
+pub fn test_map_reads_one_node(args: &Value) -> bool {
+    decode_primitive_request::<TestMapSurfaceRequestV1>(args, "tracedecay_test_map")
+        .is_ok_and(|request| matches!(test_map_target(&request), Ok(TestMapTarget::NodeId(_))))
+}
+
 fn test_map_target(request: &TestMapSurfaceRequestV1) -> Result<TestMapTarget<'_>> {
     if let Some(file) = request.file.as_deref() {
         Ok(TestMapTarget::File(file))

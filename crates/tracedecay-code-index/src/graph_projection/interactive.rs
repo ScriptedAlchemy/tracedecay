@@ -536,6 +536,16 @@ impl CodeGraphInteractiveReader {
         &self.generation
     }
 
+    /// Whether the catalog is built and serving, read without starting or
+    /// waiting on a build. An answer that needs only the engine uses this to
+    /// leave out catalog-only extras while a released catalog re-warms.
+    pub fn catalog_is_resident(&self) -> bool {
+        matches!(
+            self.catalog.state.try_read().as_deref(),
+            Ok(InteractiveCatalogState::Ready(_))
+        )
+    }
+
     /// This reader with every store read it serves counted on `cost`.
     #[must_use]
     pub fn metered(&self, cost: &CodeGraphReadCostMeter) -> Self {

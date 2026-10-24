@@ -5,8 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolBindingV1,
-    CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
+    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
+    CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
 };
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_contracts::retrieval::{
@@ -172,7 +172,13 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let graph = match open_graph(&self.code_graph, context).await {
+                let graph = match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Catalog,
+                )
+                .await
+                {
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
@@ -257,7 +263,13 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let graph = match open_graph(&self.code_graph, context).await {
+                let graph = match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Catalog,
+                )
+                .await
+                {
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
@@ -339,7 +351,13 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let graph = match open_graph(&self.code_graph, context).await {
+                let graph = match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Catalog,
+                )
+                .await
+                {
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
@@ -411,7 +429,13 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let graph = match open_graph(&self.code_graph, context).await {
+                let graph = match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Catalog,
+                )
+                .await
+                {
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
@@ -519,7 +543,13 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let graph = match open_graph(&self.code_graph, context).await {
+                let graph = match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Engine,
+                )
+                .await
+                {
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
@@ -645,13 +675,36 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let graph = match open_graph(&self.code_graph, context).await {
-                    Ok(graph) => graph,
-                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
-                };
                 let seed = match relation_seed(&request.node_id) {
                     Ok(seed) => seed,
                     Err(failure) => return failed_with(context, failure),
+                };
+                // Whether the seed exists is a point read the engine serves,
+                // so an absent seed is answered before the read waits for a
+                // released catalog that only the caller walk needs.
+                match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Engine,
+                )
+                .await
+                {
+                    Ok(engine) => {
+                        if let Some(failure) = absent_seed(&engine, &seed) {
+                            return failed_with(context, failure);
+                        }
+                    }
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
+                }
+                let graph = match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Catalog,
+                )
+                .await
+                {
+                    Ok(graph) => graph,
+                    Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
                 let (records, unresolved) = match relation_traversal(
                     &graph.reader,
@@ -741,7 +794,13 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let graph = match open_graph(&self.code_graph, context).await {
+                let graph = match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Catalog,
+                )
+                .await
+                {
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
@@ -863,7 +922,13 @@ where
                         Ok(claim) => claim,
                         Err(failure) => return failed_with(context, failure),
                     };
-                let graph = match open_graph(&self.code_graph, context).await {
+                let graph = match open_graph(
+                    &self.code_graph,
+                    context,
+                    CodeGraphReadinessRequirement::Catalog,
+                )
+                .await
+                {
                     Ok(graph) => graph,
                     Err(error) => return failed_with(context, code_graph_read_failure(&error)),
                 };
@@ -922,14 +987,18 @@ struct OpenSymbolGraph {
 async fn open_graph(
     port: &Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     context: SymbolGraphPortContext<'_>,
+    readiness: CodeGraphReadinessRequirement,
 ) -> Result<OpenSymbolGraph, tracedecay_graph_query::CodeGraphReadError> {
     let cancellation = tracedecay_graph_query::request_graph_cancellation(context.request);
     let verified = port
-        .open(tracedecay_graph_query::CodeGraphReadRequest::new(
-            context.request,
-            context.observed_at,
-            Arc::clone(&cancellation),
-        ))
+        .open(
+            tracedecay_graph_query::CodeGraphReadRequest::new(
+                context.request,
+                context.observed_at,
+                Arc::clone(&cancellation),
+            )
+            .with_readiness(readiness),
+        )
         .await?;
     let freshness = verified.freshness();
     let cost = CodeGraphReadCostMeter::start();
