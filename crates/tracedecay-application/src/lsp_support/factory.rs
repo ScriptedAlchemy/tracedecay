@@ -486,6 +486,17 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
         )
     }
 
+    fn retire_document_refresh(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        operation_id: &str,
+    ) -> bool {
+        self.roots
+            .get(root.uri())
+            .is_some_and(|port| port.retire_document_refresh(root, document_uri, operation_id))
+    }
+
     fn supports_workspace_diagnostics(&self) -> bool {
         !self.roots.is_empty()
             && self

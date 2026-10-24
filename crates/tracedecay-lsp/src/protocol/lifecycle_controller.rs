@@ -264,6 +264,7 @@ where
                 }
             }
         }
+        self.clear_document_diagnostics();
         self.lifecycle.overlays.clear();
         self.diagnostics.debounce.clear();
         self.outbound.queue.clear();
@@ -274,7 +275,6 @@ where
         self.diagnostics.cursor_native_mode = false;
         self.diagnostics.refresh_request = None;
         self.diagnostics.refresh_needed = false;
-        self.diagnostics.active_refreshes.clear();
         self.diagnostics.workspace_results.clear();
         self.diagnostics.workspace_snapshots.clear();
         self.diagnostics.workspace_failures.clear();
@@ -292,6 +292,17 @@ where
     pub(super) fn clear_removed_workspace_root_state(&mut self, removed: &[AdmittedRoot]) {
         let belongs_to_removed_root =
             |uri: &str| removed.iter().any(|root| root.contains_document(uri));
+        let diagnostic_documents = self
+            .diagnostics
+            .active_refreshes
+            .keys()
+            .chain(self.diagnostics.document_snapshots.keys())
+            .filter(|uri| belongs_to_removed_root(uri))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for uri in diagnostic_documents {
+            self.invalidate_document_diagnostics(&uri);
+        }
         let request_ids = self
             .semantic
             .pending
@@ -326,9 +337,6 @@ where
             .retain(|uri, _| !belongs_to_removed_root(uri));
         self.diagnostics
             .native_upstream
-            .retain(|uri, _| !belongs_to_removed_root(uri));
-        self.diagnostics
-            .active_refreshes
             .retain(|uri, _| !belongs_to_removed_root(uri));
         self.diagnostics
             .workspace_results
@@ -449,6 +457,9 @@ where
         self.cancel_pending_operations();
         match self.lifecycle.control.shutdown() {
             Ok(()) => {
+                self.clear_document_diagnostics();
+                self.diagnostics.published.clear();
+                self.diagnostics.debounce.clear();
                 let _ = self.enqueue_value(success_response(response_id, Value::Null));
             }
             Err(_) => {
