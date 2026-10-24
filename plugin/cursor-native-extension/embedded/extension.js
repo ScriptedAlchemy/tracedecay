@@ -26185,7 +26185,8 @@ function createNativeDiagnosticsPayload(uri, version, diagnostics) {
     return {
         uri,
         version: Number.isSafeInteger(version) ? version : 0,
-        diagnostics: diagnostics.slice(0, MAX_NATIVE_DIAGNOSTICS_PER_DOCUMENT).map((diagnostic)=>{
+        diagnostics: diagnostics// Match the receiver's ASCII-insensitive producer prefix before the cap.
+        .filter((diagnostic)=>!/^tracedecay/i.test(diagnostic.source ?? "")).slice(0, MAX_NATIVE_DIAGNOSTICS_PER_DOCUMENT).map((diagnostic)=>{
             const code = diagnostic.code === undefined ? undefined : truncateUtf8(String(diagnostic.code), MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES);
             const message = truncateUtf8(diagnostic.message, MAX_NATIVE_DIAGNOSTIC_MESSAGE_BYTES) || "Cursor diagnostic";
             return {

@@ -12,7 +12,19 @@ import {
   resolveInstalledTraceDecayBinary,
   traceDecayInitializationOptions,
   toLspDiagnosticSeverity,
+  type NativeDiagnosticInput,
 } from "../src/nativeDiagnostics.js";
+
+function nativeDiagnostic(source?: string, index = 0): NativeDiagnosticInput {
+  return {
+    range: {
+      start: { line: index, character: 0 },
+      end: { line: index, character: 1 },
+    },
+    source,
+    message: `Finding ${index}`,
+  };
+}
 
 test("serializes bounded native diagnostics without raw diagnostic data", () => {
   const payload = createNativeDiagnosticsPayload(
@@ -80,6 +92,78 @@ test("caps diagnostic count and message size", () => {
         MAX_NATIVE_DIAGNOSTIC_MESSAGE_BYTES,
     ),
   );
+});
+
+test("own publications do not displace a retained native finding", () => {
+  const uri = "file:///workspace/src/example.ts";
+  const native = nativeDiagnostic("typescript");
+  const before = createNativeDiagnosticsPayload(uri, 8, [native]);
+  const after = createNativeDiagnosticsPayload(uri, 8, [
+    ...Array.from({ length: MAX_NATIVE_DIAGNOSTICS_PER_DOCUMENT }, (_, index) =>
+      nativeDiagnostic("tracedecay", index),
+    ),
+    native,
+  ]);
+
+  assert.deepEqual(after, before);
+});
+
+test("caps eligible native findings in their original interleaved order", () => {
+  const native = Array.from(
+    { length: MAX_NATIVE_DIAGNOSTICS_PER_DOCUMENT + 1 },
+    (_, index) => nativeDiagnostic(index % 2 === 0 ? "typescript" : "eslint", index),
+  );
+  const payload = createNativeDiagnosticsPayload(
+    "file:///workspace/src/example.ts",
+    9,
+    native.flatMap((diagnostic, index) => [
+      nativeDiagnostic("TraceDecay-CI", index),
+      diagnostic,
+    ]),
+  );
+
+  assert.deepEqual(
+    payload.diagnostics.map(({ source, message }) => ({ source, message })),
+    native
+      .slice(0, MAX_NATIVE_DIAGNOSTICS_PER_DOCUMENT)
+      .map(({ source, message }) => ({ source, message })),
+  );
+});
+
+test("matches the receiver's source-prefix ownership without inspecting messages", () => {
+  const ownedSources = [
+    "tracedecay",
+    "TRACEDECAY",
+    "TrAcEdEcAy-github",
+    "tracedecay-ci",
+    "tracedecay-proximity",
+    "tracedecayOther",
+  ];
+  const nativeSources = [undefined, "", "typescript", "trace", "x-tracedecay", " tracedecay"];
+  const payload = createNativeDiagnosticsPayload(
+    "file:///workspace/src/example.ts",
+    10,
+    [...ownedSources, ...nativeSources].map((source) => ({
+      ...nativeDiagnostic(source),
+      message: "tracedecay appears in this native diagnostic message",
+    })),
+  );
+
+  assert.deepEqual(
+    payload.diagnostics.map(({ source }) => source),
+    nativeSources.map((source) => source || "cursor"),
+  );
+});
+
+test("empty and own-only inputs still publish an explicit native clear", () => {
+  const uri = "file:///workspace/src/example.ts";
+  for (const diagnostics of [[], [nativeDiagnostic("TraceDecay-CI")]]) {
+    assert.deepEqual(createNativeDiagnosticsPayload(uri, 11, diagnostics), {
+      uri,
+      version: 11,
+      diagnostics: [],
+    });
+  }
 });
 
 test("prioritizes admitted documents before the notification cap", () => {

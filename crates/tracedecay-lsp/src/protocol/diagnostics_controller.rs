@@ -335,18 +335,19 @@ where
             generation,
             version,
         );
-        let merged =
-            self.merge_document_diagnostics(uri, diagnostics.upstream, diagnostics.tracedecay);
+        let merged = self.merge_document_diagnostics(
+            uri,
+            diagnostics.upstream,
+            diagnostics.tracedecay,
+            self.lifecycle
+                .gateway
+                .capabilities()
+                .document_diagnostics_data,
+        );
         let value = document_diagnostic_report_value(
             DocumentDiagnosticReport::full(
                 result_id.clone(),
-                self.visible_diagnostics(
-                    merged.items,
-                    self.lifecycle
-                        .gateway
-                        .capabilities()
-                        .document_diagnostics_data,
-                ),
+                self.scope_diagnostic_related_information(merged.items),
             ),
             DiagnosticSerializationCapabilities::pull(self.lifecycle.gateway.capabilities()),
         );
@@ -577,7 +578,15 @@ where
         {
             return false;
         }
-        let merged = self.merge_document_diagnostics(uri, snapshot.upstream, snapshot.tracedecay);
+        let merged = self.merge_document_diagnostics(
+            uri,
+            snapshot.upstream,
+            snapshot.tracedecay,
+            self.lifecycle
+                .gateway
+                .capabilities()
+                .publish_diagnostics_data,
+        );
         if self
             .lifecycle
             .gateway
@@ -587,13 +596,7 @@ where
                 uri,
                 version,
                 generation,
-                self.visible_diagnostics(
-                    merged.items,
-                    self.lifecycle
-                        .gateway
-                        .capabilities()
-                        .publish_diagnostics_data,
-                ),
+                self.scope_diagnostic_related_information(merged.items),
             )
         {
             return false;
@@ -624,18 +627,25 @@ where
         &self,
         uri: &str,
         mut upstream: Vec<GatewayDiagnostic>,
-        tracedecay: Vec<GatewayDiagnostic>,
+        mut tracedecay: Vec<GatewayDiagnostic>,
+        supports_diagnostic_data: bool,
     ) -> DiagnosticMerge {
-        if let Some(native) = self.diagnostics.native_upstream.get(uri) {
+        // The count limit belongs to this client's presentation. Keep native
+        // evidence in its snapshot without spending slots on a hidden lane.
+        if self.diagnostics.cursor_native_mode {
+            upstream.clear();
+        } else if let Some(native) = self.diagnostics.native_upstream.get(uri) {
             upstream.extend(native.diagnostics.iter().cloned());
+        }
+        if !supports_diagnostic_data {
+            tracedecay.clear();
         }
         DiagnosticMerge::for_document(uri, upstream, tracedecay)
     }
 
-    pub(super) fn visible_diagnostics(
+    pub(super) fn scope_diagnostic_related_information(
         &self,
         mut diagnostics: Vec<GatewayDiagnostic>,
-        supports_diagnostic_data: bool,
     ) -> Vec<GatewayDiagnostic> {
         for diagnostic in &mut diagnostics {
             diagnostic.related_information.retain(|related| {
@@ -646,12 +656,6 @@ where
             });
         }
         diagnostics
-            .into_iter()
-            .filter(|diagnostic| {
-                (!self.diagnostics.cursor_native_mode || diagnostic.source.is_tracedecay())
-                    && (supports_diagnostic_data || !diagnostic.source.is_tracedecay())
-            })
-            .collect()
     }
 
     #[tracing::instrument(name = "lsp_diagnostics_publish", level = "trace", skip_all)]
@@ -966,26 +970,34 @@ mod controller_tests {
         let snapshot = NativeDiagnosticsNotification {
             uri: "file:///root/a.rs".to_owned(),
             version: 1,
-            diagnostics: ["tracedecay-github", "rust-analyzer"]
-                .into_iter()
-                .map(|source| NativeDiagnostic {
-                    range: NativeRange {
-                        start: NativePosition {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: NativePosition {
-                            line: 0,
-                            character: 1,
-                        },
+            diagnostics: [
+                "tracedecay",
+                "TRACEDECAY",
+                "TrAcEdEcAy-github",
+                "tracedecay-ci",
+                "tracedecay-proximity",
+                "tracedecayOther",
+                "rust-analyzer",
+            ]
+            .into_iter()
+            .map(|source| NativeDiagnostic {
+                range: NativeRange {
+                    start: NativePosition {
+                        line: 0,
+                        character: 0,
                     },
-                    severity: Some(2),
-                    code: None,
-                    source: source.to_owned(),
-                    message: format!("from {source}"),
-                    data: None,
-                })
-                .collect(),
+                    end: NativePosition {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+                severity: Some(2),
+                code: None,
+                source: source.to_owned(),
+                message: format!("from {source}"),
+                data: None,
+            })
+            .collect(),
         }
         .into_snapshot()
         .unwrap()
