@@ -758,6 +758,19 @@ impl ResidentMemoryPressureV1 {
         Some((sample, self.publish_sample(sample)))
     }
 
+    /// Last successful kernel sample, without sampling or running reclaimers.
+    /// Admission occupancy can include swap and shared cgroup pressure; this
+    /// cached sample retains the raw process RSS for resident accounting.
+    /// `None` until a sample has been published. A failed sample leaves the
+    /// last successful observation standing.
+    #[must_use]
+    pub fn last_sample(&self) -> Option<ProcessResidentSampleV1> {
+        *self
+            .observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Publish a fresh admission sample without running pressure reclaimers.
     ///
     /// Capture and graph checkpoints run on the indexing pool. A reclaimer
@@ -1415,10 +1428,61 @@ struct ResidentMemoryStateV1 {
     waiting_requests: BTreeMap<u64, u64>,
 }
 
+/// Ledgers bound to the process pressure cell, so a process-wide read can
+/// sum what admitted work holds across every production authority.
+static PROCESS_ADMISSION_LEDGERS_V1: Mutex<Vec<Weak<Mutex<ResidentMemoryStateV1>>>> =
+    Mutex::new(Vec::new());
+
+/// What admitted work has reserved across every production ledger: the
+/// in-flight builds, decodes, and worker slabs the retained-owner inventory
+/// does not hold. Reservations are the admission model, not a measurement.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessAdmissionReservationsV1 {
+    pub reserved_bytes: u64,
+    /// Reserved bytes per component, summed across projects and ledgers.
+    pub components: BTreeMap<ResidentMemoryComponentIdV1, u64>,
+}
+
+/// Sum the reservations of every live production ledger.
+#[must_use]
+pub fn process_admission_reservations_v1() -> ProcessAdmissionReservationsV1 {
+    let ledgers = PROCESS_ADMISSION_LEDGERS_V1
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter_map(Weak::upgrade)
+        .collect::<Vec<_>>();
+    let mut reservations = ProcessAdmissionReservationsV1::default();
+    for ledger in ledgers {
+        let state = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reservations.reserved_bytes = reservations.reserved_bytes.saturating_add(state.used_bytes);
+        let charges = state
+            .charges
+            .iter()
+            .map(|(key, bytes)| (key.component, *bytes))
+            .chain(state.process_shared_charges.iter().map(|(c, b)| (*c, *b)));
+        for (component, bytes) in charges {
+            let total = reservations.components.entry(component).or_default();
+            *total = total.saturating_add(bytes);
+        }
+    }
+    reservations
+}
+
+fn register_process_admission_ledger_v1(state: &Arc<Mutex<ResidentMemoryStateV1>>) {
+    let mut ledgers = PROCESS_ADMISSION_LEDGERS_V1
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ledgers.retain(|ledger| ledger.strong_count() > 0);
+    ledgers.push(Arc::downgrade(state));
+}
+
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
 pub struct ProcessResidentMemoryV1 {
     limit_bytes: NonZeroU64,
-    state: std::sync::Mutex<ResidentMemoryStateV1>,
+    state: Arc<Mutex<ResidentMemoryStateV1>>,
     /// Measured RSS this admission consults before trusting its own model.
     pressure: Arc<ResidentMemoryPressureV1>,
 }
@@ -1437,10 +1501,12 @@ impl fmt::Debug for ProcessResidentMemoryV1 {
 impl ProcessResidentMemoryV1 {
     /// Production constructor: binds the one process-wide measured-RSS cell.
     pub fn new(limit_bytes: NonZeroU64) -> Self {
-        Self::with_pressure(
+        let ledger = Self::with_pressure(
             limit_bytes,
             Arc::clone(process_resident_memory_pressure_v1()),
-        )
+        );
+        register_process_admission_ledger_v1(&ledger.state);
+        ledger
     }
 
     /// Bind an explicit measured-RSS cell instead of the process singleton.
@@ -1451,7 +1517,7 @@ impl ProcessResidentMemoryV1 {
     pub fn with_pressure(limit_bytes: NonZeroU64, pressure: Arc<ResidentMemoryPressureV1>) -> Self {
         Self {
             limit_bytes,
-            state: Mutex::new(ResidentMemoryStateV1::default()),
+            state: Arc::new(Mutex::new(ResidentMemoryStateV1::default())),
             pressure,
         }
     }

@@ -1498,95 +1498,229 @@ async fn search_session_messages_collapses_parent_prompt_copies_from_eight_subag
     assert_eq!(results[0].session.session_id, "parent");
 }
 
-/// `session_ingest_health` must report the un-ingested tail per transcript:
-/// fully-ingested transcripts contribute nothing, partially-ingested ones
-/// contribute their pending bytes, and the per-transcript maximum drives the
-/// stalled-ingest detection in `tracedecay_status` / doctor.
+fn claude_transcript_record(project: &Path, uuid: &str, text: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "user",
+            "cwd": project,
+            "sessionId": "backlog-session",
+            "uuid": uuid,
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {"role": "user", "content": text},
+        })
+    )
+}
+
+async fn ingest_claude_history(db: &HostAdmissionTestRuntimeV1, home: &Path, project: &Path) {
+    tracedecay_sessions::runtime::hosts::claude_observation::ingest_source_with_observations_with_admission(
+        &tracedecay_sessions::runtime::hosts::claude::ClaudeSource::with_home(home),
+        project,
+        tracedecay_domain::ObservationScopeV1::Profile,
+        &db.facade(),
+        None,
+        tracedecay_sessions::observation::ObservationCancellation::default(),
+    )
+    .await
+    .expect("claude history ingest");
+}
+
+/// The backlog is what the ingest pipeline has not yet admitted: a transcript
+/// read to its end is drained, appended bytes stay pending until the next
+/// ingest admits them, and a rewritten file is pending in full.
 #[tokio::test]
-async fn session_ingest_health_reports_pending_transcript_backlog() {
+async fn session_ingest_health_measures_backlog_against_admitted_source_cursors() {
     let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let transcript_dir = home.join(".claude/projects/-backlog");
+    std::fs::create_dir_all(&transcript_dir).unwrap();
+    let transcript = transcript_dir.join("backlog-session.jsonl");
+    std::fs::write(
+        &transcript,
+        claude_transcript_record(&project, "backlog-1", "first prompt"),
+    )
+    .unwrap();
     let db = open_isolated_db(&tmp).await;
+    let mut missing = sample_session("claude", "missing-session", "proj");
+    missing.transcript_path = Some(transcript_dir.join("missing.jsonl").display().to_string());
+    db.upsert_session(&missing).await;
 
-    let drained = tmp.path().join("drained.jsonl");
-    std::fs::write(&drained, "x".repeat(100)).unwrap();
-    let backlogged = tmp.path().join("backlogged.jsonl");
-    std::fs::write(&backlogged, "y".repeat(500)).unwrap();
-    let missing = tmp.path().join("missing.jsonl");
+    ingest_claude_history(&db, &home, &project).await;
+    let drained = db.session_ingest_health().await;
+    assert_eq!(
+        drained.tracked_transcripts, 1,
+        "missing files are untracked"
+    );
+    assert_eq!(
+        (drained.pending_transcripts, drained.pending_bytes),
+        (0, 0),
+        "an ingested transcript has no backlog"
+    );
+    let mtime = std::fs::metadata(&transcript)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(
+        drained.last_ingest_unix,
+        Some(i64::try_from(mtime).unwrap())
+    );
 
-    for (session_id, path) in [
-        ("s-drained", &drained),
-        ("s-backlogged", &backlogged),
-        ("s-missing", &missing),
-    ] {
-        let mut session = sample_session("cursor", session_id, "proj");
-        session.transcript_path = Some(path.to_string_lossy().to_string());
-        db.upsert_session(&session).await;
+    let appended = claude_transcript_record(&project, "backlog-2", "appended prompt");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    let appended_health = db.session_ingest_health().await;
+    assert_eq!(appended_health.pending_transcripts, 1);
+    assert_eq!(appended_health.pending_bytes, appended.len() as u64);
+    assert_eq!(
+        appended_health.max_transcript_pending_bytes,
+        appended.len() as u64
+    );
+
+    ingest_claude_history(&db, &home, &project).await;
+    let caught_up = db.session_ingest_health().await;
+    assert_eq!(
+        (caught_up.pending_transcripts, caught_up.pending_bytes),
+        (0, 0)
+    );
+
+    let replacement = claude_transcript_record(&project, "backlog-3", "rewritten history");
+    let staged = transcript_dir.join("backlog-session.jsonl.next");
+    std::fs::write(&staged, &replacement).unwrap();
+    std::fs::rename(&staged, &transcript).unwrap();
+    let rewritten = db.session_ingest_health().await;
+    assert_eq!(rewritten.pending_transcripts, 1);
+    assert_eq!(
+        rewritten.pending_bytes,
+        replacement.len() as u64,
+        "a rewritten file's earlier cursor does not cover it"
+    );
+
+    let other_provider = db.session_ingest_health_for_provider(Some("cursor")).await;
+    assert_eq!(other_provider.tracked_transcripts, 0);
+}
+
+struct IngestedClaudeBacklog {
+    db: HostAdmissionTestRuntimeV1,
+    home: std::path::PathBuf,
+    project: std::path::PathBuf,
+    transcript: std::path::PathBuf,
+    first: String,
+    second: String,
+    _tmp: TempDir,
+}
+
+impl IngestedClaudeBacklog {
+    async fn new() -> Self {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript_dir = home.join(".claude/projects/-backlog");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join("backlog-session.jsonl");
+        let first = claude_transcript_record(&project, "backlog-1", "head prompt");
+        let second = claude_transcript_record(&project, "backlog-2", "old prompt");
+        std::fs::write(&transcript, format!("{first}{second}")).unwrap();
+        let db = open_isolated_db(&tmp).await;
+        ingest_claude_history(&db, &home, &project).await;
+        let health = db.session_ingest_health().await;
+        assert_eq!(health.tracked_transcripts, 1);
+        assert_eq!((health.pending_transcripts, health.pending_bytes), (0, 0));
+        Self {
+            db,
+            home,
+            project,
+            transcript,
+            first,
+            second,
+            _tmp: tmp,
+        }
     }
 
-    // drained: offset == file size; backlogged: 200 of 500 bytes ingested.
-    let cursor = |byte_offset, mtime| tracedecay_global_db::ParseOffset {
-        byte_offset,
-        mtime,
-        file_id: 0,
-    };
-    db.set_parse_offset(&drained.to_string_lossy(), cursor(100, 1_000))
-        .await;
-    db.set_parse_offset(&backlogged.to_string_lossy(), cursor(200, 2_000))
-        .await;
+    fn rewrite_later_record(&self) {
+        let rewritten = self
+            .second
+            .replace("backlog-2", "backlog-3")
+            .replace("old prompt", "new prompt");
+        assert_eq!(rewritten.len(), self.second.len());
+        // Writing the existing path preserves the inode and the entire first
+        // line, so only the committed prefix proves this rewrite happened.
+        std::fs::write(&self.transcript, format!("{}{rewritten}", self.first)).unwrap();
+    }
+}
 
-    let health = db.session_ingest_health().await;
-    assert_eq!(health.tracked_transcripts, 2, "missing files are skipped");
+#[tokio::test]
+async fn session_ingest_health_detects_same_length_later_record_rewrite() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    fixture.rewrite_later_record();
+    let health = fixture.db.session_ingest_health().await;
     assert_eq!(health.pending_transcripts, 1);
-    assert_eq!(health.pending_bytes, 300);
-    assert_eq!(health.max_transcript_pending_bytes, 300);
     assert_eq!(
-        health.last_ingest_unix,
-        Some(2_000),
-        "the newest recorded ingest mtime should be reported"
+        health.pending_bytes,
+        (fixture.first.len() + fixture.second.len()) as u64
     );
 }
 
 #[tokio::test]
-async fn session_ingest_health_can_filter_by_provider() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_isolated_db(&tmp).await;
+async fn session_ingest_health_detects_truncation_preserving_the_first_record() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    std::fs::write(&fixture.transcript, &fixture.first).unwrap();
+    let health = fixture.db.session_ingest_health().await;
+    assert_eq!(health.pending_transcripts, 1);
+    assert_eq!(health.pending_bytes, fixture.first.len() as u64);
+}
 
-    let cursor_transcript = tmp.path().join("cursor.jsonl");
-    std::fs::write(&cursor_transcript, "x".repeat(100)).unwrap();
-    let claude_transcript = tmp.path().join("claude.jsonl");
-    std::fs::write(&claude_transcript, "y".repeat(500)).unwrap();
+#[tokio::test]
+async fn session_ingest_health_recognizes_readmitted_rewritten_generation() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    fixture.rewrite_later_record();
+    ingest_claude_history(&fixture.db, &fixture.home, &fixture.project).await;
+    let health = fixture.db.session_ingest_health().await;
+    assert_eq!(health.tracked_transcripts, 1);
+    assert_eq!((health.pending_transcripts, health.pending_bytes), (0, 0));
+}
 
-    for (provider, session_id, path) in [
-        ("cursor", "cursor-session", &cursor_transcript),
-        ("claude", "claude-session", &claude_transcript),
-    ] {
-        let mut session = sample_session(provider, session_id, "proj");
-        session.transcript_path = Some(path.to_string_lossy().to_string());
-        db.upsert_session(&session).await;
-    }
+#[tokio::test]
+async fn session_ingest_health_recognizes_renamed_committed_prefix() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    let staged = fixture.transcript.with_extension("next");
+    std::fs::write(&staged, format!("{}{}", fixture.first, fixture.second)).unwrap();
+    std::fs::rename(staged, &fixture.transcript).unwrap();
+    let health = fixture.db.session_ingest_health().await;
+    assert_eq!(health.tracked_transcripts, 1);
+    assert_eq!((health.pending_transcripts, health.pending_bytes), (0, 0));
+    ingest_claude_history(&fixture.db, &fixture.home, &fixture.project).await;
+    let readmitted = fixture.db.session_ingest_health().await;
+    assert_eq!(
+        (readmitted.pending_transcripts, readmitted.pending_bytes),
+        (0, 0)
+    );
+}
 
-    let cursor = |byte_offset, mtime| tracedecay_global_db::ParseOffset {
-        byte_offset,
-        mtime,
-        file_id: 0,
-    };
-    db.set_parse_offset(&cursor_transcript.to_string_lossy(), cursor(100, 1_000))
-        .await;
-    db.set_parse_offset(&claude_transcript.to_string_lossy(), cursor(200, 2_000))
-        .await;
-
-    let all_health = db.session_ingest_health().await;
-    assert_eq!(all_health.pending_transcripts, 1);
-    assert_eq!(all_health.pending_bytes, 300);
-
-    let cursor_health = db.session_ingest_health_for_provider(Some("cursor")).await;
-    assert_eq!(cursor_health.tracked_transcripts, 1);
-    assert_eq!(cursor_health.pending_transcripts, 0);
-
-    let claude_health = db.session_ingest_health_for_provider(Some("claude")).await;
-    assert_eq!(claude_health.tracked_transcripts, 1);
-    assert_eq!(claude_health.pending_transcripts, 1);
-    assert_eq!(claude_health.pending_bytes, 300);
+#[tokio::test]
+async fn session_ingest_health_refuses_unreadable_transcript_contents() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    std::fs::remove_file(&fixture.transcript).unwrap();
+    std::fs::create_dir(&fixture.transcript).unwrap();
+    assert!(std::fs::metadata(&fixture.transcript).unwrap().is_dir());
+    let error = fixture
+        .db
+        .session_ingest_health_for_test(HostAdmissionScope::Profile, None)
+        .await
+        .expect_err("accessible metadata must not hide a transcript read failure");
+    assert!(matches!(
+        error,
+        tracedecay_domain::errors::TraceDecayError::Database { .. }
+    ));
 }
 
 #[tokio::test]

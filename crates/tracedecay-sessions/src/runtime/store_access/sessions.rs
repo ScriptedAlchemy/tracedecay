@@ -1,15 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::Value as JsonValue;
 
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceCursorV1};
 use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, Value};
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
-use crate::runtime::hosts::codex::codex_cursor_key;
 use tracedecay_lcm::raw::{
     message_body_from_record_row, message_body_record_select_columns, message_record_select_columns,
 };
@@ -19,7 +20,7 @@ use tracedecay_lcm::retrieval_content::{
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
 use super::super::shared::{durable_project_path_key, path_identity_key};
-use super::super::source::HostProviderCoverage;
+use super::super::source::{HostProviderCoverage, jsonl_prefix_digest};
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -107,6 +108,99 @@ pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, t
 
 type WorkflowFactRow = (String, Option<String>, Option<String>);
 
+/// Cursors the observation authority committed for one logical source.
+#[derive(Clone, Default)]
+struct AdmittedSource {
+    /// Each file-byte cursor retains the checkpoint proving its consumed prefix.
+    file_bytes: Vec<ObservationSourceCursorV1>,
+    /// The source is also ordered by something other than file bytes, so its
+    /// progress is not a byte offset into the transcript.
+    other_ordering: bool,
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptProgress {
+    /// No cursor proves the file's consumed prefix: never ingested, or
+    /// rewritten since its cursor was committed.
+    Unadmitted,
+    /// An unchanged committed prefix is admitted through this byte offset.
+    AdmittedThrough(u64),
+    /// Progress is measured in rows or snapshots, not transcript bytes.
+    NotByteOrdered,
+}
+
+/// Resolves progress through the same committed prefix digest ingest resumes
+/// from. A physical replacement can retain its prefix, while an in-place rewrite
+/// can change it without changing the file identity or length.
+fn transcript_progress(
+    path: &Path,
+    sources: &[AdmittedSource],
+) -> std::io::Result<Option<(std::fs::Metadata, TranscriptProgress)>> {
+    let mut cursors = sources
+        .iter()
+        .flat_map(|source| source.file_bytes.iter())
+        .collect::<Vec<_>>();
+    cursors.sort_unstable_by_key(|cursor| std::cmp::Reverse(cursor.byte_offset()));
+    let mut file = if cursors.is_empty() {
+        None
+    } else {
+        match std::fs::File::open(path) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    };
+    let metadata = match file
+        .as_ref()
+        .map_or_else(|| std::fs::metadata(path), std::fs::File::metadata)
+    {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "transcript path is not a regular file",
+        ));
+    }
+    let progress = if let Some(file) = file.as_mut() {
+        let mut progress = TranscriptProgress::Unadmitted;
+        for cursor in cursors {
+            let Some((_, fingerprint)) = cursor.file_identity().zip(cursor.resume_fingerprint())
+            else {
+                continue;
+            };
+            let offset = cursor.byte_offset();
+            if offset > metadata.len() {
+                continue;
+            }
+            let (digest, _) = jsonl_prefix_digest(file, offset)?;
+            if digest.fingerprint(offset) == fingerprint {
+                // Descending offsets make the first valid checkpoint the
+                // maximum; smaller candidates need no further prefix reads.
+                progress = TranscriptProgress::AdmittedThrough(offset);
+                break;
+            }
+        }
+        progress
+    } else if sources.iter().any(|source| source.other_ordering) {
+        TranscriptProgress::NotByteOrdered
+    } else {
+        TranscriptProgress::Unadmitted
+    };
+    Ok(Some((metadata, progress)))
+}
+
+fn modified_unix_seconds(metadata: &std::fs::Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
+    let seconds = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    i64::try_from(seconds).ok()
+}
+
 impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
         self.session_ingest_health_for_provider(Some("cursor"))
@@ -123,7 +217,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         provider: Option<&str>,
     ) -> Result<SessionIngestHealth, String> {
         let mut health = SessionIngestHealth::default();
-        // Store-scale scan interleaved with per-row filesystem metadata reads.
+        // Store-scale scan interleaved with filesystem prefix validation.
         // Holding one pinned snapshot across the whole walk parks a general
         // reader worker for the entire scan; page with short-held query leases
         // instead. The filesystem side of this health estimate is already read
@@ -240,11 +334,12 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
         drop(coverage_rows);
+        let admitted = self.admitted_transcript_sources(provider).await?;
         let mut after_path = String::new();
         loop {
             let mut rows = reader
                 .query(
-                    "SELECT transcript_path, json_group_array(DISTINCT provider)
+                    "SELECT transcript_path, json_group_array(json_array(provider, session_id))
                      FROM sessions
                      WHERE (?1 IS NULL OR provider = ?1)
                        AND transcript_path IS NOT NULL
@@ -270,109 +365,153 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 let path = row
                     .get::<String>(0)
                     .map_err(|error| format!("failed to decode transcript path: {error}"))?;
-                let providers_json = row
+                let sessions_json = row
                     .get::<String>(1)
-                    .map_err(|error| format!("failed to decode transcript providers: {error}"))?;
-                let providers: Vec<String> = serde_json::from_str(&providers_json)
-                    .map_err(|error| format!("invalid transcript providers: {error}"))?;
-                page.push((path, providers));
+                    .map_err(|error| format!("failed to decode transcript sessions: {error}"))?;
+                let sessions: Vec<(String, String)> = serde_json::from_str(&sessions_json)
+                    .map_err(|error| format!("invalid transcript sessions: {error}"))?;
+                page.push((path, sessions));
             }
             drop(rows);
             if page.is_empty() {
                 break;
             }
-            // Locations identify files to stat; provider cursor keys identify
-            // checkpoints. Resolve the page in one query without treating an
-            // opaque checkpoint as a filesystem path or reimplementing its hash.
-            let keys: Vec<JsonValue> = page
-                .iter()
-                .flat_map(|(path, providers)| {
-                    providers.iter().map(move |provider| {
-                        // `set_parse_offset` stores every cursor under its
-                        // identity key, so a Windows location must be looked
-                        // up the same way to find its checkpoint.
-                        let key = if provider == "codex" {
-                            codex_cursor_key(Path::new(path)).durable_text()
-                        } else {
-                            path_identity_key(path)
-                        };
-                        serde_json::json!({ "path": path, "key": key })
-                    })
-                })
-                .collect();
-            let keys_json = serde_json::to_string(&keys)
-                .map_err(|error| format!("failed to encode transcript checkpoint keys: {error}"))?;
-            let mut offsets = reader
-                .query(
-                    "SELECT json_extract(requested.value, '$.path'),
-                            COALESCE(MAX(offsets.byte_offset), 0),
-                            COALESCE(MAX(offsets.mtime), 0)
-                     FROM json_each(?1) AS requested
-                     LEFT JOIN parse_offsets AS offsets
-                       ON offsets.file_path = json_extract(requested.value, '$.key')
-                     GROUP BY json_extract(requested.value, '$.path')",
-                    tracedecay_runtime_core::db::engine::params![keys_json],
-                )
-                .await
-                .map_err(|error| format!("failed to query transcript checkpoints: {error}"))?;
-            let mut checkpoints = Vec::with_capacity(page.len());
-            while let Some(row) = offsets
-                .next()
-                .await
-                .map_err(|error| format!("failed to read transcript checkpoint: {error}"))?
-            {
-                let path = row
-                    .get::<String>(0)
-                    .map_err(|error| format!("failed to decode transcript location: {error}"))?;
-                let byte_offset = u64::try_from(
-                    row.get::<i64>(1)
-                        .map_err(|error| format!("failed to decode transcript offset: {error}"))?,
-                )
-                .map_err(|error| format!("invalid transcript offset: {error}"))?;
-                let mtime = u64::try_from(
-                    row.get::<i64>(2)
-                        .map_err(|error| format!("failed to decode transcript mtime: {error}"))?,
-                )
-                .map_err(|error| format!("invalid transcript mtime: {error}"))?;
-                checkpoints.push((path, byte_offset, mtime));
-            }
-            drop(offsets);
-            for (path, byte_offset, mtime) in &checkpoints {
-                // Opaque non-Unicode locations cannot be resolved from this
-                // display field; like missing files, they remain untracked.
-                let Ok(metadata) = ({
-                    let _span =
-                        tracing::trace_span!("global_db.registered_sessions.ingest_stat").entered();
-                    std::fs::metadata(path)
-                }) else {
-                    continue;
-                };
-                health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
-                if *mtime > 0 {
-                    let mtime = i64::try_from(*mtime).unwrap_or(i64::MAX);
-                    health.last_ingest_unix = Some(
-                        health
-                            .last_ingest_unix
-                            .map_or(mtime, |previous| previous.max(mtime)),
-                    );
-                }
-                let pending = metadata.len().saturating_sub(*byte_offset);
-                if pending > 0 {
-                    health.pending_transcripts = health.pending_transcripts.saturating_add(1);
-                    health.pending_bytes = health.pending_bytes.saturating_add(pending);
-                    health.max_transcript_pending_bytes =
-                        health.max_transcript_pending_bytes.max(pending);
-                }
-            }
+            let page_len = page.len();
             after_path = page
                 .last()
                 .map(|(path, _)| path.clone())
                 .ok_or_else(|| "session ingest health page unexpectedly empty".to_owned())?;
-            if page.len() < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
+            let page = page
+                .into_iter()
+                .map(|(path, sessions)| {
+                    let sources = sessions
+                        .iter()
+                        .filter_map(|session| admitted.get(session).cloned())
+                        .collect::<Vec<_>>();
+                    (path, sources)
+                })
+                .collect::<Vec<_>>();
+            // Prefix checks can read historical transcripts in full. One
+            // owned page leaves the async worker and holds no database lease.
+            health = native_runtime::spawn_owned_blocking(move || {
+                for (path, sources) in page {
+                    // Opaque non-Unicode locations cannot be resolved from
+                    // this display field; missing files remain untracked.
+                    let Some((metadata, progress)) = ({
+                        let _span =
+                            tracing::trace_span!("global_db.registered_sessions.ingest_stat")
+                                .entered();
+                        transcript_progress(Path::new(&path), &sources).map_err(|error| {
+                            format!("failed to read transcript ingest progress for {path}: {error}")
+                        })?
+                    }) else {
+                        continue;
+                    };
+                    health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
+                    let pending = match progress {
+                        TranscriptProgress::Unadmitted => metadata.len(),
+                        TranscriptProgress::AdmittedThrough(offset) => {
+                            metadata.len().saturating_sub(offset)
+                        }
+                        TranscriptProgress::NotByteOrdered => 0,
+                    };
+                    if pending > 0 {
+                        health.pending_transcripts = health.pending_transcripts.saturating_add(1);
+                        health.pending_bytes = health.pending_bytes.saturating_add(pending);
+                        health.max_transcript_pending_bytes =
+                            health.max_transcript_pending_bytes.max(pending);
+                    } else if matches!(progress, TranscriptProgress::AdmittedThrough(_))
+                        && let Some(modified) = modified_unix_seconds(&metadata)
+                    {
+                        health.last_ingest_unix = Some(
+                            health
+                                .last_ingest_unix
+                                .map_or(modified, |previous| previous.max(modified)),
+                        );
+                    }
+                }
+                Ok::<_, String>(health)
+            })
+            .await
+            .map_err(|error| format!("session ingest health filesystem task failed: {error}"))??;
+            if page_len < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
                 break;
             }
         }
         Ok(health)
+    }
+
+    /// File-byte progress the observation authority recorded for every source
+    /// in this store's scope, keyed by the `(provider, session_id)` its
+    /// projected session row carries.
+    async fn admitted_transcript_sources(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<HashMap<(String, String), AdmittedSource>, String> {
+        let scope = self
+            .registered_binding()
+            .shard_id
+            .scope
+            .session_scope()
+            .ok_or_else(|| "session ingest health requires a session store".to_owned())?;
+        let scope_json = serde_json::to_string(&scope)
+            .map_err(|error| format!("failed to encode session store scope: {error}"))?;
+        let reader = self.read_connection().background();
+        let mut admitted = HashMap::<(String, String), AdmittedSource>::new();
+        let mut after_source = String::new();
+        loop {
+            let mut rows = reader
+                .query(
+                    "SELECT source_json, cursor_json
+                     FROM source_cursors
+                     WHERE scope_json = ?1 AND source_json > ?2
+                     ORDER BY source_json
+                     LIMIT ?3",
+                    tracedecay_runtime_core::db::engine::params![
+                        scope_json.as_str(),
+                        after_source.as_str(),
+                        SESSION_INGEST_HEALTH_PAGE_SIZE
+                    ],
+                )
+                .await
+                .map_err(|error| format!("failed to query admitted source cursors: {error}"))?;
+            let mut page_len = 0_usize;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| format!("failed to read admitted source cursor: {error}"))?
+            {
+                page_len += 1;
+                after_source = row
+                    .get::<String>(0)
+                    .map_err(|error| format!("failed to decode cursor source: {error}"))?;
+                let cursor: ObservationSourceCursorV1 = serde_json::from_str(
+                    &row.get::<String>(1)
+                        .map_err(|error| format!("failed to decode source cursor: {error}"))?,
+                )
+                .map_err(|error| format!("invalid source cursor: {error}"))?;
+                let source = cursor.source();
+                if provider.is_some_and(|selected| selected != source.provider().as_str()) {
+                    continue;
+                }
+                let entry = admitted
+                    .entry((
+                        source.provider().as_str().to_owned(),
+                        source.session_id().as_str().to_owned(),
+                    ))
+                    .or_default();
+                if cursor.ordering_domain() == ObservationOrderingDomainV1::FileBytes {
+                    entry.file_bytes.push(cursor);
+                } else {
+                    entry.other_ordering = true;
+                }
+            }
+            drop(rows);
+            if page_len < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
+                break;
+            }
+        }
+        Ok(admitted)
     }
 
     #[tracing::instrument(

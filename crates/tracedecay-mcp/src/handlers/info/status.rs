@@ -15,8 +15,8 @@ use tracedecay_contracts::retrieval::{
     ActiveProjectBranchV1, ActiveProjectResolutionSourceV1, ActiveProjectResultV1,
     ActiveProjectStorageV1, ProjectStatusV1, StatusAdmissionV1, StatusBranchMismatchV1,
     StatusCodeIndexFreshnessV1, StatusGitStalenessUnavailableV1, StatusGitStalenessV1,
-    StatusHookReplayV1, StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryV1,
-    StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
+    StatusHookReplayV1, StatusMemoryOwnerV1, StatusMemoryPressureV1, StatusMemoryReservationV1,
+    StatusMemoryV1, StatusResultV1, StatusRetrievalServingV1, StatusSchemaConvergenceStateV1,
     StatusSchemaConvergenceV1, StatusServingConditionV1, StatusServingFreshnessV1,
     StatusSessionGitEvidenceUnavailableV1, StatusSessionGitEvidenceV1, StatusSurfaceRequestV1,
 };
@@ -25,8 +25,9 @@ use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{GlobalDbGitCorrelationStore, RegisteredGlobalDb, SessionIngestHealth};
 use tracedecay_runtime_core::resident_memory::{
-    RESIDENT_OWNER_SHED_ORDER_V1, ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
-    ResidentOwnerKindV1, ResidentOwnersV1, process_resident_memory_pressure_v1,
+    ProcessAdmissionReservationsV1, RESIDENT_OWNER_SHED_ORDER_V1, ResidentMemoryPressureStateV1,
+    ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnersV1,
+    process_admission_reservations_v1, process_resident_memory_pressure_v1,
     process_resident_owners_v1, sampled_memory_pressure_some_avg10_v1,
 };
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
@@ -217,6 +218,7 @@ fn project_memory_value(project_id: &ProjectId) -> StatusMemoryV1 {
     memory_value(
         pressure,
         process_resident_owners_v1(),
+        &process_admission_reservations_v1(),
         sampled_memory_pressure_some_avg10_v1(),
         std::time::Instant::now(),
         project_id,
@@ -226,6 +228,7 @@ fn project_memory_value(project_id: &ProjectId) -> StatusMemoryV1 {
 fn memory_value(
     pressure: &ResidentMemoryPressureV1,
     owners: &ResidentOwnersV1,
+    reservations: &ProcessAdmissionReservationsV1,
     psi_some_avg10: Option<f64>,
     now: std::time::Instant,
     project_id: &ProjectId,
@@ -278,8 +281,29 @@ fn memory_value(
             .to_vec(),
         retained_bytes: report.measured_bytes,
         unmeasured_owners: report.unmeasured_owners,
+        unattributed_bytes: pressure
+            .last_sample()
+            .map(|sample| sample.resident_bytes.saturating_sub(report.measured_bytes)),
+        reserved_bytes: reservations.reserved_bytes,
+        reservations: reservation_rows(reservations),
         owners,
     }
+}
+
+fn reservation_rows(
+    reservations: &ProcessAdmissionReservationsV1,
+) -> Vec<StatusMemoryReservationV1> {
+    let mut rows = reservations
+        .components
+        .iter()
+        .filter(|(_, bytes)| **bytes > 0)
+        .map(|(component, bytes)| StatusMemoryReservationV1 {
+            component: component.as_str().to_owned(),
+            bytes: *bytes,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.bytes));
+    rows
 }
 
 /// Serialize the generation census exactly as the CLI decoder reads it back.
@@ -1320,6 +1344,7 @@ mod tests {
         let memory = super::memory_value(
             &pressure,
             &owners,
+            &tracedecay_runtime_core::resident_memory::ProcessAdmissionReservationsV1::default(),
             Some(1.5),
             std::time::Instant::now(),
             &project,
@@ -1338,6 +1363,9 @@ mod tests {
                 "shed_order": ["retained_parses", "superseded_generation", "graph_catalog", "decoded_generation", "graph_engine", "session"],
                 "retained_bytes": 8_192,
                 "unmeasured_owners": 0,
+                "unattributed_bytes": 0,
+                "reserved_bytes": 0,
+                "reservations": [],
                 "owners": [{
                     "project_id": "project.fixture",
                     "kind": "decoded_generation",
@@ -1352,6 +1380,151 @@ mod tests {
                     "protected": true,
                 }],
             })
+        );
+    }
+
+    #[test]
+    fn status_memory_attributes_resident_bytes_no_owner_holds() {
+        use tracedecay_runtime_core::resident_memory::{
+            ProcessAdmissionReservationsV1, ResidentMemoryComponentIdV1, ResidentMemoryPressureV1,
+            ResidentOwnersV1,
+        };
+        let pressure =
+            ResidentMemoryPressureV1::new(std::num::NonZeroU64::new(10_000).expect("limit"));
+        pressure.publish_observed_resident_bytes(6_000);
+        let component = |id| ResidentMemoryComponentIdV1::new(id).expect("component id");
+        let reservations = ProcessAdmissionReservationsV1 {
+            reserved_bytes: 3_500,
+            components: [
+                (component("code-index-build-workers-v1"), 1_000),
+                (component("code-graph-sealed-build-v1"), 2_500),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let memory = super::memory_value(
+            &pressure,
+            &ResidentOwnersV1::new(std::time::Duration::from_mins(10)),
+            &reservations,
+            None,
+            std::time::Instant::now(),
+            &tracedecay_domain::ProjectId::new("project.fixture").expect("project id"),
+        );
+
+        assert_eq!(memory.owners, []);
+        assert_eq!(memory.retained_bytes, 0);
+        assert_eq!(
+            memory.unattributed_bytes,
+            Some(6_000),
+            "resident memory no owner holds is reported, not hidden behind an empty owner list"
+        );
+        assert_eq!(memory.reserved_bytes, 3_500);
+        assert_eq!(
+            serde_json::to_value(&memory.reservations).expect("reservations serialize"),
+            serde_json::json!([
+                {"component": "code-graph-sealed-build-v1", "bytes": 2_500},
+                {"component": "code-index-build-workers-v1", "bytes": 1_000},
+            ])
+        );
+    }
+
+    #[test]
+    fn status_memory_reports_no_remainder_before_resident_memory_is_observed() {
+        let pressure = tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
+            std::num::NonZeroU64::new(10_000).expect("limit"),
+        );
+
+        let memory = super::memory_value(
+            &pressure,
+            &tracedecay_runtime_core::resident_memory::ResidentOwnersV1::new(
+                std::time::Duration::from_mins(10),
+            ),
+            &tracedecay_runtime_core::resident_memory::ProcessAdmissionReservationsV1::default(),
+            None,
+            std::time::Instant::now(),
+            &tracedecay_domain::ProjectId::new("project.fixture").expect("project id"),
+        );
+
+        assert_eq!(memory.resident_bytes, None);
+        assert_eq!(memory.unattributed_bytes, None);
+    }
+
+    fn assert_status_remainder_uses_process_rss(
+        sample: tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1,
+    ) {
+        use std::sync::Arc;
+        use tracedecay_runtime_core::resident_memory::{
+            ProcessAdmissionReservationsV1, ResidentMemoryPressureV1, ResidentOwnerKindV1,
+            ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
+        };
+
+        let limit = 10 * 1024 * 1024 * 1024;
+        let pressure = ResidentMemoryPressureV1::with_sampler(
+            std::num::NonZeroU64::new(limit).expect("limit"),
+            Arc::new(move || Some(sample)),
+        );
+        pressure.sample_and_publish().expect("sample published");
+        let owners = Arc::new(ResidentOwnersV1::new(std::time::Duration::from_mins(10)));
+        let owner: Arc<dyn ResidentOwnerV1> = Arc::new(HeldDecode);
+        let project = tracedecay_domain::ProjectId::new("project.fixture").expect("project id");
+        let _registration = owners
+            .register(
+                ResidentOwnerScopeV1 {
+                    project_id: project.clone(),
+                    worktree_id: tracedecay_domain::WorktreeId::new("worktree.fixture")
+                        .expect("worktree id"),
+                },
+                ResidentOwnerKindV1::DecodedGeneration,
+                Arc::downgrade(&owner),
+            )
+            .expect("register owner");
+        let memory = super::memory_value(
+            &pressure,
+            &owners,
+            &ProcessAdmissionReservationsV1::default(),
+            None,
+            std::time::Instant::now(),
+            &project,
+        );
+
+        assert!(sample.admission_bytes(limit) > sample.resident_bytes);
+        assert_eq!(
+            memory.resident_bytes,
+            Some(sample.admission_bytes(limit)),
+            "the shipped admission-occupancy field keeps its semantics"
+        );
+        assert_eq!(memory.retained_bytes, 4_096);
+        assert_eq!(
+            memory.unattributed_bytes,
+            Some(sample.resident_bytes - 4_096),
+            "only process RSS no retained owner holds belongs in the resident remainder"
+        );
+    }
+
+    #[test]
+    fn status_memory_remainder_excludes_shared_cgroup_occupancy() {
+        const MIB: u64 = 1024 * 1024;
+        assert_status_remainder_uses_process_rss(
+            tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
+                resident_bytes: 100 * MIB,
+                unreclaimable_bytes: 80 * MIB,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: Some(1024 * MIB),
+            },
+        );
+    }
+
+    #[test]
+    fn status_memory_remainder_excludes_swapped_pages() {
+        const MIB: u64 = 1024 * 1024;
+        assert_status_remainder_uses_process_rss(
+            tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1 {
+                resident_bytes: 100 * MIB,
+                unreclaimable_bytes: 80 * MIB,
+                swapped_bytes: 700 * MIB,
+                cgroup_headroom_bytes: None,
+            },
         );
     }
 
