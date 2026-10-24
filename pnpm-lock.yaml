@@ -294,7 +294,7 @@ importers:
         specifier: ^2.1.2
         version: 2.1.2(@modelcontextprotocol/server@2.4.0)
       '@modelcontextprotocol/server':
-        specifier: ^2.3.1
+        specifier: ^2.4.0
         version: 2.4.0
       '@openai/mcp-extensions':
         specifier: ^0.2.0
