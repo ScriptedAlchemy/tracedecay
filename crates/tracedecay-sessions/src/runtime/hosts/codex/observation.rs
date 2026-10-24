@@ -22,18 +22,23 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use super::PROVIDER;
 use super::context::CodexContextState;
 use super::meta::{CodexMetaWithProvenance, session_meta_with_provenance};
+use super::{CODEX_SCOPE_MATCHERS, PROVIDER};
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::ingest::with_transcript_source_profile_sync;
 use crate::runtime::jsonl_observation_admission::{
-    JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
-    SharedJsonlFileIdentity, admit_jsonl_observations, reserve_shared_jsonl_page,
-    shared_jsonl_background_cpu, shared_jsonl_file_identity, shared_jsonl_preparation_capacity,
+    JsonlFrameAdmission, JsonlObservationAdmissionRequest, JsonlObservationScan,
+    PersistedCursorUpdate, SharedJsonlFileIdentity, admit_jsonl_observations,
+    reserve_shared_jsonl_page, shared_jsonl_background_cpu, shared_jsonl_file_identity,
+    shared_jsonl_preparation_capacity,
 };
-use crate::runtime::shared::TranscriptScopeMatcher;
-use crate::runtime::source::{JsonlIoAccounting, TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::shared::{ProjectRootMatcherCache, TranscriptScopeMatcher};
+use crate::runtime::source::{
+    JsonlIoAccounting, TranscriptIngestError, TranscriptIngestResult,
+    run_blocking_transcript_section,
+};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
@@ -43,6 +48,8 @@ mod meta_cache_tests;
 mod retired_source_tests;
 #[cfg(test)]
 mod rollout_source_tests;
+#[cfg(test)]
+mod scope_resolution_tests;
 
 const CODEX_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 pub const CODEX_HOOK_MAX_NEW_BYTES: u64 = crate::runtime::source::MAX_JSONL_RECORD_BYTES as u64;
@@ -291,6 +298,7 @@ pub async fn try_admit_codex_jsonl_observations_for_project_with_admission_and_c
         max_new_bytes,
         None,
         cancellation,
+        &CODEX_SCOPE_MATCHERS,
     )
     .await
 }
@@ -316,6 +324,7 @@ pub(crate) async fn try_admit_codex_jsonl_observations_for_project_window(
         ),
         Some(crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW),
         cancellation,
+        &CODEX_SCOPE_MATCHERS,
     )
     .await
 }
@@ -356,6 +365,7 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission_and_c
         max_new_bytes,
         None,
         cancellation,
+        &CODEX_SCOPE_MATCHERS,
     )
     .await
 }
@@ -381,15 +391,61 @@ impl CodexObservationAdmission<'_> {
         }
     }
 
-    /// Resolve this rollout's scope boundary once, so the per-record admission
-    /// test does not re-resolve the git identity of an unchanging root.
-    pub(super) fn scope_matcher(&self) -> TranscriptScopeMatcher {
+    pub(super) fn scope_roots(&self) -> CodexScopeRoots {
         match self {
-            Self::Project { root, .. } => TranscriptScopeMatcher::project(root),
+            Self::Project { root, .. } => CodexScopeRoots::Project(root.to_path_buf()),
             Self::Profile {
                 registered_roots, ..
-            } => TranscriptScopeMatcher::profile(registered_roots),
+            } => CodexScopeRoots::Profile(registered_roots.to_vec()),
         }
+    }
+
+    /// Prepare this bounded page's context and scope decisions on the blocking
+    /// pool. The page owns its reservation throughout preparation; only these
+    /// decisions, not filesystem work, are used by frame callbacks and retries.
+    async fn resolve_scope(
+        &self,
+        matchers: &ProjectRootMatcherCache,
+        path: &Path,
+        meta: &super::CodexMeta,
+        scan: JsonlObservationScan,
+    ) -> TranscriptIngestResult<(CodexAdmissionState, u64)> {
+        let roots = self.scope_roots();
+        let profile = crate::runtime::transcript_source_profile();
+        let matchers = matchers.clone();
+        let path = path.to_path_buf();
+        let meta = meta.clone();
+        run_blocking_transcript_section(PROVIDER, move || {
+            with_transcript_source_profile_sync(profile, || {
+                debug_assert!(
+                    scan.frame_bytes().all(|frame| !frame.is_empty()),
+                    "shared JSONL admission never exposes empty native frames"
+                );
+                let matcher = roots.matcher(&matchers);
+                let (context, read) = if scan.resumed && scan.frame_bytes().next().is_some() {
+                    CodexContextState::scan_prior(&path, scan.generation, scan.start_offset, &meta)
+                } else {
+                    (CodexContextState::from_meta(&meta), 0)
+                };
+                let mut scope_verdicts = HashMap::new();
+                scope_verdicts.insert(context.cwd.clone(), matcher.accepts(Some(&context.cwd)));
+                let mut page_context = context.clone();
+                for line in scan.context_frame_bytes() {
+                    page_context.observe_context_line(line, &path, &meta);
+                    scope_verdicts
+                        .entry(page_context.cwd.clone())
+                        .or_insert_with(|| matcher.accepts(Some(&page_context.cwd)));
+                }
+                (
+                    CodexAdmissionState {
+                        context,
+                        scope_verdicts: Arc::new(scope_verdicts),
+                    },
+                    read,
+                )
+            })
+        })
+        .await
     }
 
     pub(super) fn accepts_session(&self, session_id: &str) -> bool {
@@ -422,10 +478,26 @@ impl CodexObservationAdmission<'_> {
     }
 }
 
+/// The roots a scope's boundary resolves against, owned so the boundary can
+/// resolve off the polling worker.
+pub(super) enum CodexScopeRoots {
+    Project(PathBuf),
+    Profile(Vec<PathBuf>),
+}
+
+impl CodexScopeRoots {
+    pub(super) fn matcher(&self, matchers: &ProjectRootMatcherCache) -> TranscriptScopeMatcher {
+        match self {
+            Self::Project(root) => TranscriptScopeMatcher::project_cached(root, matchers),
+            Self::Profile(roots) => TranscriptScopeMatcher::profile_cached(roots, matchers),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CodexAdmissionState {
     context: CodexContextState,
-    scope_verdict: Option<bool>,
+    scope_verdicts: Arc<HashMap<PathBuf, bool>>,
 }
 
 #[derive(Clone, Copy)]
@@ -437,6 +509,7 @@ struct CodexAdmissionContext<'a> {
     native_thread_id: Option<&'a str>,
     rollout: CodexRolloutFile<'a>,
     cancellation: &'a ObservationCancellation,
+    matchers: &'a ProjectRootMatcherCache,
 }
 
 fn replay_identity(session_id: &str, domain: &[u8]) -> String {
@@ -609,6 +682,7 @@ async fn try_admit_codex_jsonl_observations(
     max_new_bytes: Option<u64>,
     max_frames: Option<usize>,
     cancellation: &ObservationCancellation,
+    matchers: &ProjectRootMatcherCache,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
     if cancellation.is_cancelled() {
         return Ok(CodexJsonlAdmissionProgress {
@@ -633,6 +707,7 @@ async fn try_admit_codex_jsonl_observations(
         native_thread_id: native_thread_id.as_deref(),
         rollout,
         cancellation,
+        matchers,
     };
     let scope = admission_scope.scope();
     // Held across the cursor read and the admit below: both are one pass over
@@ -657,12 +732,9 @@ async fn admit_codex_jsonl_page(
         native_thread_id,
         rollout,
         cancellation,
+        matchers,
     } = context;
     let scope = admission_scope.scope();
-    // Resolving the scope runs git for the root. An unchanged rollout admits
-    // no frame and must not pay it on every pass.
-    let resolved_scope = OnceLock::new();
-    let scope_matcher = || resolved_scope.get_or_init(|| admission_scope.scope_matcher());
     let mut request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
@@ -681,25 +753,12 @@ async fn admit_codex_jsonl_page(
     let mut prior_context_bytes = 0;
     let progress = admit_jsonl_observations(
         request,
-        |scan| {
-            debug_assert!(
-                scan.frame_bytes().all(|frame| !frame.is_empty()),
-                "shared JSONL admission never exposes empty native frames"
-            );
-            // The prior context is rebuilt by reading the rollout before its
-            // cursor; a scan with no new frame never consults it.
-            let context = if scan.resumed && scan.frame_bytes().next().is_some() {
-                let (context, read) =
-                    CodexContextState::scan_prior(path, scan.generation, scan.start_offset, meta);
-                prior_context_bytes = read;
-                context
-            } else {
-                CodexContextState::from_meta(meta)
-            };
-            CodexAdmissionState {
-                context,
-                scope_verdict: None,
-            }
+        async |scan| {
+            let (state, read) = admission_scope
+                .resolve_scope(matchers, path, meta, scan)
+                .await?;
+            prior_context_bytes = read;
+            Ok(state)
         },
         |state, _bytes, range, _, prepared, hints| {
             let mut stable_record_id = None;
@@ -709,8 +768,9 @@ async fn admit_codex_jsonl_page(
             // for every one of its frames, and the old order paid a full JSON
             // decode per frame to reach it.
             let in_scope = *state
-                .scope_verdict
-                .get_or_insert_with(|| scope_matcher().accepts(Some(state.context.cwd.as_path())));
+                .scope_verdicts
+                .get(&state.context.cwd)
+                .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
             if !in_scope && !hints.may_change_codex_context {
                 return Ok(JsonlFrameAdmission::non_durable_before_decode(
                     ObservationCoverageReason::OutOfScope,
@@ -719,16 +779,14 @@ async fn admit_codex_jsonl_page(
             let Some(prepared) = prepared else {
                 return Ok(JsonlFrameAdmission::needs_preparation());
             };
+            let mut missing_scope = false;
             let parsed = normalize_prepared_observation_record_v1(prepared, |native| {
-                if state.context.observe_context_record(native, path, meta) {
-                    // Only a context record can move the rollout's cwd,
-                    // so the memoized verdict is dropped exactly when it
-                    // can no longer be trusted.
-                    state.scope_verdict = None;
-                }
-                if !*state.scope_verdict.get_or_insert_with(|| {
-                    scope_matcher().accepts(Some(state.context.cwd.as_path()))
-                }) {
+                state.context.observe_context_record(native, path, meta);
+                let Some(in_scope) = state.scope_verdicts.get(&state.context.cwd) else {
+                    missing_scope = true;
+                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                };
+                if !in_scope {
                     non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
@@ -754,6 +812,9 @@ async fn admit_codex_jsonl_page(
                 stable_record_id = Some(record_id);
                 Ok(envelope)
             });
+            if missing_scope {
+                return Err(TranscriptIngestError::InvalidFrameState { provider: PROVIDER });
+            }
             match parsed {
                 Ok(parsed) => {
                     let record_id = stable_record_id

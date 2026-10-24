@@ -508,6 +508,56 @@ async fn project_status_lists_only_its_own_memory_owners_and_the_doctor_lists_ev
     harness.shutdown().await;
 }
 
+/// A non-Git project has no graph scope and so no project session retrieval
+/// identity, but the daemon still mounts its session refresh worker. Status
+/// reports that worker's projection, which converges, not a missing worker.
+#[tokio::test]
+async fn status_reports_the_mounted_refresh_worker_without_a_session_retrieval_identity() {
+    let isolation = test_temp_dir();
+    let project_root = isolation.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project dir");
+    fixture::write_indexed_fixture_sources(&project_root);
+    let harness = Box::pin(
+        crate::support::seeded_composition::open_for_session_retrieval(
+            isolation.path(),
+            [project_root.clone()],
+        ),
+    )
+    .await
+    .expect("production composition harness");
+
+    let started = Instant::now();
+    loop {
+        let status = parse_status(
+            &call_status(
+                &harness,
+                &project_root,
+                json!({ "format": "json", "include_session_ingest": true }),
+            )
+            .await,
+        );
+        let projection = &status["session_projection"];
+        assert_ne!(
+            projection["worker"]["blocker"], "worker_missing",
+            "status blamed a missing refresh worker the daemon mounted: {projection}"
+        );
+        assert_ne!(
+            status["session_history_catch_up"]["progress"]["reason"], "refresh_worker_missing",
+            "catch-up progress blamed a missing refresh worker: {}",
+            status["session_history_catch_up"]
+        );
+        if projection["convergence"]["state"] == "converged" {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the mounted refresh worker never converged: {projection}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    harness.shutdown().await;
+}
+
 /// The whole body behind a truncated response envelope, read back through
 /// `tracedecay_retrieve` the way a host recovers it; an untruncated body is
 /// returned as is.

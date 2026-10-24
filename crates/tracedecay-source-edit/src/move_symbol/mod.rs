@@ -487,7 +487,7 @@ async fn analyze_dependencies(
             continue;
         }
         if stmt.leaves.len() == 1 && !stmt.glob {
-            if let Some(import) = portable_dependency_import(&stmt.text) {
+            if let Some(import) = portable_dependency_import(&stmt) {
                 out.auto_imports.push(import);
             } else {
                 out.hints.push(MoveHint {
@@ -495,7 +495,7 @@ async fn analyze_dependencies(
                     file: dest_rel.to_string(),
                     line: None,
                     detail: format!(
-                        "moved body uses a source-relative import from {source_rel}: `{}`",
+                        "moved body uses an import from {source_rel} that cannot be safely relocated: `{}`",
                         stmt.text.trim()
                     ),
                     suggestion: Some(format!(
@@ -504,10 +504,16 @@ async fn analyze_dependencies(
                     )),
                 });
             }
-            // Orphaned-import: source no longer needs it after the move,
-            // so the move removes it instead of leaving a dead import.
+            // A re-export belongs to the source module's API even when its
+            // last local user moves away. Only a syntax-verified private
+            // declaration occupying a whole residual line is removable.
             let leaf = &stmt.leaves[0].binding;
-            if !source_identifiers.contains(leaf) {
+            if stmt.removable
+                && !source_identifiers.contains(leaf)
+                && source_modified
+                    .lines()
+                    .any(|line| line.trim() == stmt.text.trim())
+            {
                 out.orphaned_source_imports
                     .push(stmt.text.trim().to_string());
                 out.hints.push(MoveHint {

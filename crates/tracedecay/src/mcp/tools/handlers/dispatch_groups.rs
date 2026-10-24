@@ -389,10 +389,12 @@ async fn compute_project_info(
             let snapshots = admitted_status_snapshots(options).await;
             let ctx = admitted_tool_context_for(options, &project, &snapshots)?;
             let session_projection = options
-                .dashboard_session_retrieval_service
+                .project_session_projection_status
                 .as_ref()
-                .and_then(|retrieval| retrieval.projection_serving_status())
-                .unwrap_or_else(|| RefreshWorkerMissing.serving_status());
+                .map_or_else(
+                    || RefreshWorkerMissing.serving_status(),
+                    |worker| worker.serving_status(),
+                );
             portable_info::compute_status(
                 &ctx,
                 &request,

@@ -6,12 +6,13 @@ use tracedecay_project::project::TraceDecay;
 
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
-    CodeIndexReadinessWaitOutcomeV1,
+    CodeIndexBuildBlockedReasonV1, CodeIndexBuildProgressV1, CodeIndexReadinessWaitOutcomeV1,
+    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
     AdminCliRegistryEmptyV1, AdminCliResultV1, AdminCliSurfaceRequestV1, AdminSyncAdmissionV1,
-    AdminSyncResultV1,
+    AdminSyncResultV1, StatusCodeIndexFreshnessV1,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -244,11 +245,18 @@ async fn brokered_init(
     Ok(())
 }
 
-/// How long `init --wait` holds for the first ready generation after
-/// reconcile is queued. The CLI deadline is slightly longer than the
-/// `wait_for` budget so dispatch cannot refuse `timeout_ms` as oversized.
-const INIT_FIRST_GENERATION_WAIT: Duration = Duration::from_secs(120);
-const INIT_FIRST_GENERATION_WAIT_MS: u64 = 110_000;
+/// One `init --wait` status read holds the `wait_for` gate this long. A first
+/// generation can take many slices; each slice stays well inside the status
+/// dispatch ceiling.
+const INIT_WAIT_SLICE_MS: u64 = 30_000;
+const INIT_WAIT_SLICE: Duration = Duration::from_millis(INIT_WAIT_SLICE_MS);
+
+/// How long `init --wait` keeps waiting once the daemon stops reporting work
+/// toward the first generation. Capture, extraction, and graph publication
+/// publish no build progress for minutes on a large repository, so liveness
+/// is the scheduler's own indexing, restore, or verification claim, not a
+/// progress counter.
+const INIT_WAIT_STALL_WINDOW: Duration = Duration::from_secs(120);
 
 fn init_queued_not_ready_receipt(project_path: &Path) -> String {
     format!(
@@ -284,65 +292,225 @@ async fn wait_for_first_generation(
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<()> {
-    let deadline = Instant::now() + INIT_FIRST_GENERATION_WAIT;
-    let result = tracedecay::daemon::call_default_tool_awaiting_project_open(
-        profile,
-        handshake,
-        "tracedecay_status",
-        serde_json::json!({
-            "format": "json",
-            "wait_for": {"state": "ready", "timeout_ms": INIT_FIRST_GENERATION_WAIT_MS}
-        }),
-        deadline,
+    hold_until_first_generation(
+        || async move {
+            // The transport outlives the slice so its typed outcome arrives.
+            let deadline = Instant::now()
+                + INIT_WAIT_SLICE
+                + tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE;
+            let result = tracedecay::daemon::call_default_tool_awaiting_project_open(
+                profile,
+                handshake,
+                "tracedecay_status",
+                serde_json::json!({
+                    "format": "json",
+                    "wait_for": {"state": "ready", "timeout_ms": INIT_WAIT_SLICE_MS}
+                }),
+                deadline,
+            )
+            .await?;
+            let payload = tracedecay::daemon::recover_truncated_tool_payload(
+                profile,
+                handshake,
+                "tracedecay_status",
+                result,
+                Some(deadline),
+            )
+            .await?;
+            crate::commands::reject_problem_envelope(&payload, "tracedecay_status")?;
+            Ok(payload)
+        },
+        INIT_WAIT_STALL_WINDOW,
     )
     .await?;
-    let payload = tracedecay::daemon::recover_truncated_tool_payload(
-        profile,
-        handshake,
-        "tracedecay_status",
-        result,
-        Some(deadline),
-    )
-    .await?;
-    crate::commands::reject_problem_envelope(&payload, "tracedecay_status")?;
-    require_first_generation_ready(&payload)?;
     eprintln!("{}", init_ready_receipt(project_path));
     Ok(())
 }
 
-fn require_first_generation_ready(
-    payload: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<()> {
-    let wait = payload.get("wait").ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::tool_refused(
-            "tracedecay_status",
-            Some(CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned()),
-            Some("status omitted the requested first-generation readiness proof".to_owned()),
-        )
-    })?;
-    match serde_json::from_value::<CodeIndexReadinessWaitOutcomeV1>(wait.clone())? {
-        CodeIndexReadinessWaitOutcomeV1::Reached => {}
-        CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
-            return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
-                "tracedecay_status",
-                Some(CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned()),
-                Some(format!(
-                    "init --wait timed out before the first generation was ready; last \
-                         state: {last_state}"
-                )),
+/// Repeats bounded `wait_for` status reads until the first generation is
+/// ready. It stops early on a terminal wait outcome, and once the daemon has
+/// reported no work toward the generation for a whole `stall_window`.
+async fn hold_until_first_generation<F, Fut>(
+    mut read_slice: F,
+    stall_window: Duration,
+) -> tracedecay_domain::errors::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = tracedecay_domain::errors::Result<serde_json::Value>>,
+{
+    let mut idle_window = FirstGenerationIdleWindow::new(stall_window);
+    loop {
+        let payload = read_slice().await?;
+        let last_state = match first_generation_wait_outcome(&payload)? {
+            CodeIndexReadinessWaitOutcomeV1::Reached => return Ok(()),
+            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => last_state,
+            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
+                return Err(first_generation_wait_refusal(
+                    CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+                    format!("init --wait cannot reach a ready first generation: {reason}"),
+                ));
+            }
+        };
+        let freshness = payload
+            .get("code_index_freshness")
+            .cloned()
+            .map(serde_json::from_value::<StatusCodeIndexFreshnessV1>)
+            .transpose()?;
+        let worktree = match freshness {
+            Some(StatusCodeIndexFreshnessV1::MountFailed {
+                message,
+                remediation,
+            }) => {
+                return Err(first_generation_wait_refusal(
+                    CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+                    format!(
+                        "init --wait cannot reach a ready first generation: {message}; {remediation}"
+                    ),
+                ));
+            }
+            Some(
+                StatusCodeIndexFreshnessV1::Current { worktree }
+                | StatusCodeIndexFreshnessV1::Stale { worktree }
+                | StatusCodeIndexFreshnessV1::Restoring { worktree }
+                | StatusCodeIndexFreshnessV1::Warming { worktree }
+                | StatusCodeIndexFreshnessV1::Parked { worktree },
+            ) => Ok(worktree),
+            Some(StatusCodeIndexFreshnessV1::Unavailable { reason }) => Err(reason),
+            None => Err("status omitted code_index_freshness".to_owned()),
+        };
+        let progress = worktree
+            .as_ref()
+            .ok()
+            .and_then(|worktree| worktree.progress.as_ref())
+            .map(build_progress_summary);
+        let progress_suffix = progress
+            .as_deref()
+            .map(|progress| format!(" ({progress})"))
+            .unwrap_or_default();
+        if let Some(stall) = idle_window.observe(
+            FirstGenerationStall::of(worktree.as_deref().map_err(String::as_str)),
+            Instant::now(),
+        ) {
+            return Err(first_generation_wait_refusal(
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+                format!(
+                    "init --wait stopped waiting for the first generation: {stall} for \
+                     {}s; last state: {last_state}{progress_suffix}",
+                    stall_window.as_secs()
+                ),
             ));
         }
-        CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
-            return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
-                "tracedecay_status",
-                Some(CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned()),
-                Some(format!(
-                    "init --wait cannot reach a ready first generation: {reason}"
-                )),
-            ));
+        eprintln!("first generation not ready yet: {last_state}{progress_suffix}");
+    }
+}
+
+/// Why the daemon's reading shows no work toward the first generation.
+#[derive(Debug, PartialEq, Eq)]
+enum FirstGenerationStall {
+    /// No code-index scheduler serves the project, for the given reason.
+    Unavailable(String),
+    /// No reconcile pass owns the route and no wake is pending.
+    NoPassInFlight,
+    /// The active build reports it cannot advance.
+    Blocked(CodeIndexBuildBlockedReasonV1),
+}
+
+impl FirstGenerationStall {
+    fn of(worktree: Result<&CodeIndexWorktreeFreshnessV1, &str>) -> Option<Self> {
+        let worktree = match worktree {
+            Ok(worktree) => worktree,
+            Err(reason) => return Some(Self::Unavailable(reason.to_owned())),
+        };
+        if let Some(reason) = worktree
+            .progress
+            .as_ref()
+            .and_then(|progress| progress.blocked_reason)
+        {
+            return Some(Self::Blocked(reason));
+        }
+        // The canonical ladder excludes bounded restore and source
+        // verification from rebuilds; both still own readiness work.
+        let readiness_in_flight = worktree.rebuild_in_flight
+            || matches!(
+                worktree.staleness_state,
+                Some(CodeIndexStalenessStateV1::Restoring | CodeIndexStalenessStateV1::Verifying)
+            );
+        (!readiness_in_flight).then_some(Self::NoPassInFlight)
+    }
+}
+
+/// Only continuous idle observations spend the stall window. An active
+/// readiness owner clears the window even if it publishes no new progress.
+struct FirstGenerationIdleWindow {
+    stalled_since: Option<Instant>,
+    stall_window: Duration,
+}
+
+impl FirstGenerationIdleWindow {
+    fn new(stall_window: Duration) -> Self {
+        Self {
+            stalled_since: None,
+            stall_window,
         }
     }
-    Ok(())
+
+    fn observe(
+        &mut self,
+        stall: Option<FirstGenerationStall>,
+        now: Instant,
+    ) -> Option<FirstGenerationStall> {
+        let Some(stall) = stall else {
+            self.stalled_since = None;
+            return None;
+        };
+        let since = *self.stalled_since.get_or_insert(now);
+        (now.duration_since(since) >= self.stall_window).then_some(stall)
+    }
+}
+
+impl std::fmt::Display for FirstGenerationStall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(reason) => {
+                write!(
+                    formatter,
+                    "no code-index scheduler serves the project ({reason})"
+                )
+            }
+            Self::NoPassInFlight => formatter.write_str("no reconcile pass is in flight"),
+            Self::Blocked(reason) => write!(formatter, "the build is blocked ({reason:?})"),
+        }
+    }
+}
+
+fn build_progress_summary(progress: &CodeIndexBuildProgressV1) -> String {
+    format!(
+        "{:?} {}/{} files",
+        progress.phase, progress.completed_files, progress.total_files
+    )
+}
+
+fn first_generation_wait_outcome(
+    payload: &serde_json::Value,
+) -> tracedecay_domain::errors::Result<CodeIndexReadinessWaitOutcomeV1> {
+    let wait = payload.get("wait").ok_or_else(|| {
+        first_generation_wait_refusal(
+            CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+            "status omitted the requested first-generation readiness proof".to_owned(),
+        )
+    })?;
+    Ok(serde_json::from_value(wait.clone())?)
+}
+
+fn first_generation_wait_refusal(
+    code: &str,
+    message: String,
+) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::tool_refused(
+        "tracedecay_status",
+        Some(code.to_owned()),
+        Some(message),
+    )
 }
 
 /// Asks the project's owner for the operator's code-index reconcile.
@@ -397,11 +565,17 @@ async fn code_index_reconciliation_is_optional(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod daemon_precondition_tests {
     use std::path::Path;
+    use std::time::{Duration, Instant};
     use tracedecay_contracts::code_index_freshness::{
         CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
-        CodeIndexReadinessWaitOutcomeV1,
+        CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
+        CodeIndexBuildProgressV1, CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1,
+        CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitOutcomeV1,
+        CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
     };
+    use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
     use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_mcp::handlers::info::readiness_wait_outcome;
 
     pub(super) struct SocketEnvGuard {
         previous: Option<std::ffi::OsString>,
@@ -472,44 +646,390 @@ mod daemon_precondition_tests {
         );
     }
 
-    #[test]
-    fn first_generation_ready_requires_positive_wait_proof() {
+    fn timed_out() -> CodeIndexReadinessWaitOutcomeV1 {
+        CodeIndexReadinessWaitOutcomeV1::TimedOut {
+            last_state: "warming".to_owned(),
+        }
+    }
+
+    fn building(rebuild_in_flight: bool) -> CodeIndexWorktreeFreshnessV1 {
+        CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/repo".to_owned(),
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            rebuild_in_flight,
+            ..CodeIndexWorktreeFreshnessV1::default()
+        }
+    }
+
+    fn readiness_worktree(state: CodeIndexStalenessStateV1) -> CodeIndexWorktreeFreshnessV1 {
+        let restoring = state == CodeIndexStalenessStateV1::Restoring;
+        let ladder = CodeIndexFreshnessLadderV1::project(CodeIndexFreshnessLadderInputsV1 {
+            ready: !restoring,
+            refresh_in_flight: state != CodeIndexStalenessStateV1::Fresh,
+            restore_in_flight: restoring,
+            source_change_pending: false,
+            parked: None,
+            source_verified: Some(true),
+            hook_hint_count: Some(0),
+            sources_omitted: false,
+        });
+        assert!(!ladder.rebuild_in_flight);
+        assert_eq!(ladder.staleness_state, state);
+        CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/repo".to_owned(),
+            latest_generation_id: Some("generation.v1.first".to_owned()),
+            code_graph_serving: Some(if restoring {
+                CodeGraphServingReadinessV1::Pending
+            } else {
+                CodeGraphServingReadinessV1::Ready
+            }),
+            staleness_state: Some(ladder.staleness_state),
+            rebuild_in_flight: ladder.rebuild_in_flight,
+            coverage: ladder.coverage,
+            ..CodeIndexWorktreeFreshnessV1::default()
+        }
+    }
+
+    fn progress(
+        completed_files: u64,
+        blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
+    ) -> CodeIndexBuildProgressV1 {
+        CodeIndexBuildProgressV1 {
+            generation_id: "generation.v1.first".to_owned(),
+            daemon_incarnation: 1,
+            producer_incarnation: 1,
+            progress_epoch: completed_files + 1,
+            sealed_source_digest: "digest".to_owned(),
+            phase: CodeIndexBuildPhaseV1::SourceScan,
+            committed_pages: completed_files,
+            committed_chunks: 0,
+            committed_imports: 0,
+            committed_payload_bytes: 0,
+            completed_files,
+            total_files: 6_136,
+            completed_lexical_units: 0,
+            total_lexical_units: 0,
+            current_batch_pages: 0,
+            current_batch_payload_bytes: 0,
+            elapsed_micros: 0,
+            last_commit_latency_micros: None,
+            files_per_second: None,
+            lexical_units_per_second: None,
+            estimated_remaining_seconds: None,
+            last_progress_micros: 1,
+            blocked_reason,
+        }
+    }
+
+    fn status(
+        outcome: CodeIndexReadinessWaitOutcomeV1,
+        freshness: Option<StatusCodeIndexFreshnessV1>,
+    ) -> serde_json::Value {
+        let mut payload = serde_json::json!({ "wait": outcome });
+        if let Some(freshness) = freshness {
+            payload["code_index_freshness"] = serde_json::to_value(freshness).unwrap();
+        }
+        payload
+    }
+
+    fn pending_status(worktree: CodeIndexWorktreeFreshnessV1) -> serde_json::Value {
+        // `ready` in the ladder means a serving generation exists. Ready
+        // waits also require authoritative source freshness and a settled
+        // owner, so even verification with an activated graph is pending.
+        assert_eq!(
+            worktree.readiness(CodeIndexReadinessTargetV1::Ready),
+            CodeIndexReadinessV1::Pending
+        );
+        let outcome = readiness_wait_outcome(CodeIndexReadinessWaitReadV1::TimedOut {
+            last: Some(Box::new(worktree.clone())),
+        });
+        let CodeIndexReadinessWaitOutcomeV1::TimedOut { ref last_state } = outcome else {
+            panic!("a timed-out wait retains its last state");
+        };
+        serde_json::json!({
+            "code_index_freshness": {"status": last_state, "worktree": worktree},
+            "wait": outcome,
+        })
+    }
+
+    fn ready_status() -> serde_json::Value {
+        let worktree = readiness_worktree(CodeIndexStalenessStateV1::Fresh);
+        assert_eq!(
+            worktree.readiness(CodeIndexReadinessTargetV1::Ready),
+            CodeIndexReadinessV1::Reached
+        );
+        status(
+            readiness_wait_outcome(CodeIndexReadinessWaitReadV1::Reached {
+                reading: Box::new(worktree.clone()),
+            }),
+            Some(StatusCodeIndexFreshnessV1::Current {
+                worktree: Box::new(worktree),
+            }),
+        )
+    }
+
+    fn warming(worktree: CodeIndexWorktreeFreshnessV1) -> Option<StatusCodeIndexFreshnessV1> {
+        Some(StatusCodeIndexFreshnessV1::Warming {
+            worktree: Box::new(worktree),
+        })
+    }
+
+    /// Runs the `init --wait` loop over scripted status reads and reports
+    /// its result with how many reads it consumed.
+    async fn hold_over(
+        script: Vec<serde_json::Value>,
+        stall_window: Duration,
+    ) -> (tracedecay_domain::errors::Result<()>, usize) {
+        let total = script.len();
+        let mut reads = script.into_iter();
+        let result = super::hold_until_first_generation(
+            || {
+                let next = reads
+                    .next()
+                    .expect("the wait read past the scripted status");
+                async move { Ok(next) }
+            },
+            stall_window,
+        )
+        .await;
+        (result, total - reads.len())
+    }
+
+    fn refusal(result: tracedecay_domain::errors::Result<()>) -> (String, String) {
+        let TraceDecayError::ToolRefused(refusal) = result.expect_err("the wait must refuse")
+        else {
+            panic!("a wait refusal must stay a typed tool refusal");
+        };
+        (
+            refusal.code.unwrap_or_default(),
+            refusal.reason.unwrap_or_default(),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_requires_positive_wait_proof() {
         for payload in [
             serde_json::json!({}),
             serde_json::json!({"wait": null}),
             serde_json::json!({"wait": {"outcome": "unknown"}}),
         ] {
-            assert!(super::require_first_generation_ready(&payload).is_err());
+            let (result, _) = hold_over(vec![payload], Duration::ZERO).await;
+            assert!(result.is_err(), "only a reached outcome proves readiness");
         }
-        let payload = serde_json::json!({
-            "wait": CodeIndexReadinessWaitOutcomeV1::Reached
+        let (result, reads) = hold_over(
+            vec![status(CodeIndexReadinessWaitOutcomeV1::Reached, None)],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(reads, 1);
+    }
+
+    /// A first generation outlives any one `wait_for` budget. The wait holds
+    /// through every timed-out slice in which the daemon reports a pass in
+    /// flight, whether or not the build has published progress yet, and even
+    /// with no stall tolerance at all.
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_holds_while_the_build_is_in_flight() {
+        let mut capturing = building(true);
+        capturing.progress = None;
+        let mut scanning = building(true);
+        scanning.progress = Some(progress(1_112, None));
+        let mut publishing_graph = building(true);
+        publishing_graph.progress = Some(CodeIndexBuildProgressV1 {
+            phase: CodeIndexBuildPhaseV1::GraphPublication,
+            ..progress(6_136, None)
         });
-        assert!(super::require_first_generation_ready(&payload).is_ok());
+        let script = vec![
+            status(timed_out(), warming(capturing.clone())),
+            status(timed_out(), warming(capturing)),
+            status(timed_out(), warming(scanning)),
+            status(timed_out(), warming(publishing_graph.clone())),
+            status(timed_out(), warming(publishing_graph)),
+            status(CodeIndexReadinessWaitOutcomeV1::Reached, None),
+        ];
+        let (result, reads) = hold_over(script, Duration::ZERO).await;
+        assert!(
+            result.is_ok(),
+            "an in-flight build must not end the wait: {result:?}"
+        );
+        assert_eq!(reads, 6, "the wait must read until the generation is ready");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_holds_while_restoring_without_build_progress() {
+        let restoring = pending_status(readiness_worktree(CodeIndexStalenessStateV1::Restoring));
+        let (result, reads) = hold_over(
+            vec![restoring.clone(), restoring, ready_status()],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_ok(), "restore owns readiness work: {result:?}");
+        assert_eq!(reads, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_holds_while_verifying_without_build_progress() {
+        let verifying = pending_status(readiness_worktree(CodeIndexStalenessStateV1::Verifying));
+        let (result, reads) = hold_over(
+            vec![verifying.clone(), verifying, ready_status()],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "verification owns readiness work: {result:?}"
+        );
+        assert_eq!(reads, 3);
     }
 
     #[test]
-    fn first_generation_wait_preserves_timeout_and_unavailable_refusals() {
-        for (outcome, code) in [
-            (
-                CodeIndexReadinessWaitOutcomeV1::TimedOut {
-                    last_state: "warming".to_owned(),
-                },
-                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+    fn first_generation_idle_window_restarts_after_readiness_work() {
+        let started = Instant::now();
+        let idle = building(false);
+        let mut uninterrupted =
+            super::FirstGenerationIdleWindow::new(super::INIT_WAIT_STALL_WINDOW);
+        for seconds in [0, 119] {
+            assert_eq!(
+                uninterrupted.observe(
+                    super::FirstGenerationStall::of(Ok(&idle)),
+                    started + Duration::from_secs(seconds),
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            uninterrupted.observe(
+                super::FirstGenerationStall::of(Ok(&idle)),
+                started + Duration::from_secs(120),
             ),
+            Some(super::FirstGenerationStall::NoPassInFlight)
+        );
+
+        for active in [
+            readiness_worktree(CodeIndexStalenessStateV1::Restoring),
+            readiness_worktree(CodeIndexStalenessStateV1::Verifying),
+            building(true),
+        ] {
+            let mut window = super::FirstGenerationIdleWindow::new(super::INIT_WAIT_STALL_WINDOW);
+            let mut observe = |worktree, seconds| {
+                window.observe(
+                    super::FirstGenerationStall::of(Ok(worktree)),
+                    started + Duration::from_secs(seconds),
+                )
+            };
+            assert_eq!(observe(&idle, 0), None);
+            assert_eq!(observe(&idle, 119), None);
+            assert_eq!(observe(&active, 120), None);
+            // Capture or authentication may legitimately report no progress
+            // for longer than a status slice or the idle window.
+            assert_eq!(observe(&active, 1_515), None);
+            assert_eq!(observe(&idle, 1_545), None);
+            assert_eq!(observe(&idle, 1_664), None);
+            assert_eq!(
+                observe(&idle, 1_665),
+                Some(super::FirstGenerationStall::NoPassInFlight)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_names_the_stall_that_ended_it() {
+        let mut blocked = building(true);
+        blocked.progress = Some(progress(
+            40,
+            Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+        ));
+        for (freshness, stall) in [
+            (warming(building(false)), "no reconcile pass is in flight"),
+            (warming(blocked), "the build is blocked (ResidentMemory)"),
             (
-                CodeIndexReadinessWaitOutcomeV1::Unavailable {
-                    reason: "scheduler unavailable".to_owned(),
-                },
-                CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+                Some(StatusCodeIndexFreshnessV1::Unavailable {
+                    reason: "code_index_scheduler_not_mounted".to_owned(),
+                }),
+                "no code-index scheduler serves the project (code_index_scheduler_not_mounted)",
             ),
         ] {
-            let error =
-                super::require_first_generation_ready(&serde_json::json!({"wait": outcome}))
-                    .expect_err("only reached proves readiness");
-            let TraceDecayError::ToolRefused(refusal) = error else {
-                panic!("wait outcome must retain its typed refusal");
-            };
-            assert_eq!(refusal.code.as_deref(), Some(code));
+            let (result, reads) =
+                hold_over(vec![status(timed_out(), freshness)], Duration::ZERO).await;
+            assert_eq!(reads, 1);
+            let (code, message) = refusal(result);
+            assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT, "{message}");
+            assert!(message.contains(stall), "stall must be named: {message}");
+            assert!(message.contains("last state: warming"), "{message}");
+        }
+    }
+
+    #[test]
+    fn active_readiness_owner_does_not_mask_blocked_progress() {
+        for mut worktree in [
+            readiness_worktree(CodeIndexStalenessStateV1::Restoring),
+            readiness_worktree(CodeIndexStalenessStateV1::Verifying),
+        ] {
+            worktree.progress = Some(progress(
+                40,
+                Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+            ));
+            assert_eq!(
+                super::FirstGenerationStall::of(Ok(&worktree)),
+                Some(super::FirstGenerationStall::Blocked(
+                    CodeIndexBuildBlockedReasonV1::ResidentMemory
+                ))
+            );
+        }
+    }
+
+    /// A stall shorter than the window is ridden out: the window restarts
+    /// once the daemon reports work again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_rides_out_a_stall_inside_the_window() {
+        let script = vec![
+            status(timed_out(), warming(building(false))),
+            status(timed_out(), None),
+            status(timed_out(), warming(building(true))),
+            status(CodeIndexReadinessWaitOutcomeV1::Reached, None),
+        ];
+        let (result, reads) = hold_over(script, Duration::from_secs(3_600)).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(reads, 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_generation_wait_ends_at_once_on_a_terminal_state() {
+        let mut refused = readiness_worktree(CodeIndexStalenessStateV1::Verifying);
+        refused.code_graph_serving = Some(CodeGraphServingReadinessV1::Refused {
+            reason: "graph activation failed".to_owned(),
+        });
+        let CodeIndexReadinessV1::Unreachable { reason } =
+            refused.readiness(CodeIndexReadinessTargetV1::Ready)
+        else {
+            panic!("a graph refusal must make a ready wait unreachable");
+        };
+        for payload in [
+            status(
+                readiness_wait_outcome(CodeIndexReadinessWaitReadV1::Unreachable { reason }),
+                Some(StatusCodeIndexFreshnessV1::Stale {
+                    worktree: Box::new(refused),
+                }),
+            ),
+            status(
+                CodeIndexReadinessWaitOutcomeV1::Unavailable {
+                    reason: "code_index_convergence_parked".to_owned(),
+                },
+                None,
+            ),
+            status(
+                timed_out(),
+                Some(StatusCodeIndexFreshnessV1::MountFailed {
+                    message: "the code-index scheduler could not mount".to_owned(),
+                    remediation: "run `tracedecay sync`".to_owned(),
+                }),
+            ),
+        ] {
+            let (result, reads) = hold_over(vec![payload], Duration::from_secs(3_600)).await;
+            assert_eq!(reads, 1, "a terminal state must not be retried");
+            let (code, message) = refusal(result);
+            assert_eq!(code, CODE_INDEX_READINESS_WAIT_UNAVAILABLE, "{message}");
         }
     }
 }

@@ -3,7 +3,9 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
+use tracedecay_runtime_core::storage::{
+    BRANCH_META_FILENAME, STORE_MANIFEST_FILENAME, pin_fixture_repository_identity,
+};
 
 use crate::common::canonical_existing_path;
 
@@ -169,56 +171,90 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
 
 #[tokio::test]
 async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
-    let dir = TempDir::new().unwrap();
-    let root = canonical_existing_path(dir.path());
-    let home = root.join("home");
-    let profile_root = home.join(".tracedecay");
-    let project = root.join("repo");
-    fs::create_dir_all(&project).unwrap();
-    crate::common::register_process_runtime_ports();
+    for git_project in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let root = canonical_existing_path(dir.path());
+        let home = root.join("home");
+        let profile_root = home.join(".tracedecay");
+        let project = root.join("repo");
+        fs::create_dir_all(&project).unwrap();
+        if git_project {
+            run_git(&project, &["init", "-q", "-b", "main"]);
+            run_git(
+                &project,
+                &[
+                    "-c",
+                    "user.name=TraceDecay Test",
+                    "-c",
+                    "user.email=tracedecay@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "profile reset fixture",
+                ],
+            );
+        }
+        crate::common::register_process_runtime_ports();
 
-    let initialized =
-        init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
-            .await
+        let initialized =
+            init_with_maintenance(&project, &profile_root, profile_options(&profile_root))
+                .await
+                .unwrap();
+        let db_path = initialized.db_path().to_path_buf();
+        let branch_meta_path = initialized
+            .store_layout()
+            .data_root
+            .join(BRANCH_META_FILENAME);
+        drop(initialized);
+        if git_project {
+            fs::remove_file(&branch_meta_path).unwrap();
+        }
+        assert!(
+            !branch_meta_path.exists(),
+            "fixture must have no branch metadata"
+        );
+
+        let incompatible_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1;
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let downgraded = connection
+            .execute(
+                "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = ?2",
+                rusqlite::params![
+                    incompatible_version,
+                    tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT
+                ],
+            )
             .unwrap();
-    let db_path = initialized.db_path().to_path_buf();
-    drop(initialized);
+        assert_eq!(downgraded, 1, "the graph stamp row must exist to downgrade");
+        drop(connection);
 
-    let incompatible_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1;
-    let connection = rusqlite::Connection::open(&db_path).unwrap();
-    let downgraded = connection
-        .execute(
-            "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = ?2",
-            rusqlite::params![
-                incompatible_version,
-                tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT
-            ],
-        )
-        .unwrap();
-    assert_eq!(downgraded, 1, "the graph stamp row must exist to downgrade");
-    drop(connection);
-
-    let error = match open_with_maintenance(&project, &profile_root, profile_options(&profile_root))
-        .await
-    {
-        Ok(_) => panic!("an incompatible profile store must require a reset"),
-        Err(error) => error,
-    };
-    let tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, reason } = error
-    else {
-        panic!("incompatible profile store returned the wrong error: {error}");
-    };
-    assert_eq!(authority, "SQLite store");
-    assert!(
-        reason.contains("created by an incompatible binary")
-            && reason.contains("Remove the store directory"),
-        "reset-required error must explain the fresh-profile remedy: {reason}"
-    );
-    assert_eq!(
-        schema_version(&db_path),
-        incompatible_version,
-        "a rejected store must not be migrated or restamped"
-    );
+        let error =
+            match open_with_maintenance(&project, &profile_root, profile_options(&profile_root))
+                .await
+            {
+                Ok(_) => panic!("an incompatible profile store must require a reset"),
+                Err(error) => error,
+            };
+        let tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, reason } = error
+        else {
+            panic!("incompatible profile store returned the wrong error: {error}");
+        };
+        assert_eq!(authority, "SQLite store");
+        assert!(
+            reason.contains("created by an incompatible binary")
+                && reason.contains("Remove the store directory"),
+            "reset-required error must explain the fresh-profile remedy: {reason}"
+        );
+        assert_eq!(
+            schema_version(&db_path),
+            incompatible_version,
+            "a rejected store must not be migrated or restamped"
+        );
+        assert!(
+            !branch_meta_path.exists(),
+            "a rejected store must not bootstrap branch metadata"
+        );
+    }
 }
 
 #[tokio::test]

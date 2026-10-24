@@ -1101,6 +1101,125 @@ async fn stored_cursor(spy: &SeamSpyAdmission) -> Option<ObservationSourceCursor
         .unwrap()
 }
 
+async fn assert_initializer_stops_before_rewrite(cancel: bool) {
+    let (_temp, path, _) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+        .await
+        .unwrap();
+    let previous = stored_cursor(&spy).await.unwrap();
+    let captures = spy.capture_count();
+    let observations = spy.inner.observations().len();
+    spy.rewrites.lock().unwrap().clear();
+    let replacement = path.with_extension("replacement.jsonl");
+    write_rollout(&replacement, &path.parent().unwrap().join("workspace"));
+    let edited = std::fs::read_to_string(&replacement)
+        .unwrap()
+        .replace("seam contract message", "edited seam contract message");
+    std::fs::write(&replacement, edited).unwrap();
+    std::fs::rename(replacement, &path).unwrap();
+    let source = crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap();
+    let cancellation = ObservationCancellation::default();
+    let task_cancellation = cancellation.clone();
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "codex",
+        &path,
+        &spy,
+        source.clone(),
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    )
+    .with_cancellation(cancellation.clone());
+    let result = super::admit_jsonl_observations(
+        request,
+        async move |_| {
+            tokio::task::yield_now().await;
+            if cancel {
+                task_cancellation.cancel();
+                Ok(())
+            } else {
+                Err(TranscriptIngestError::BlockingScanTaskFailed { provider: "codex" })
+            }
+        },
+        |(), _, _, _, _, _| panic!("failed initialization must not normalize a frame"),
+    )
+    .await;
+    if cancel {
+        assert!(matches!(
+            result,
+            Err(TranscriptIngestError::Cancelled { provider: "codex" })
+        ));
+        let request = super::JsonlObservationAdmissionRequest::new(
+            "codex",
+            &path,
+            &spy,
+            source,
+            ObservationScopeV1::Profile,
+            RetentionClass::new("test").unwrap(),
+        )
+        .with_cancellation(cancellation);
+        let mut initialized = false;
+        let cancelled_before = super::admit_jsonl_observations(
+            request,
+            async |_| {
+                initialized = true;
+                Ok(())
+            },
+            |(), _, _, _, _, _| panic!("cancelled initialization must not normalize a frame"),
+        )
+        .await;
+        assert!(matches!(
+            cancelled_before,
+            Err(TranscriptIngestError::Cancelled { provider: "codex" })
+        ));
+        assert!(
+            !initialized,
+            "pre-existing cancellation must skip initialization"
+        );
+    } else {
+        assert!(matches!(
+            result,
+            Err(TranscriptIngestError::BlockingScanTaskFailed { provider: "codex" })
+        ));
+    }
+    assert!(
+        spy.rewrites.lock().unwrap().is_empty(),
+        "preparation must finish before a durable rewrite begins"
+    );
+    assert_eq!(stored_cursor(&spy).await.as_ref(), Some(&previous));
+    assert_eq!(spy.capture_count(), captures);
+    assert_eq!(spy.inner.observations().len(), observations);
+    let retry =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .unwrap();
+    assert!(
+        retry.frames_persisted > 0,
+        "the unchanged failed frontier must remain retryable"
+    );
+    assert_ne!(
+        stored_cursor(&spy).await.unwrap().generation(),
+        previous.generation()
+    );
+    assert!(
+        spy.rewrites
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, RewriteCall::Begin { .. }))
+    );
+}
+
+#[tokio::test]
+async fn initializer_failure_keeps_rewrite_and_cursor_retryable() {
+    assert_initializer_stops_before_rewrite(false).await;
+}
+
+#[tokio::test]
+async fn initializer_cancellation_keeps_rewrite_and_cursor_retryable() {
+    assert_initializer_stops_before_rewrite(true).await;
+}
+
 #[tokio::test]
 async fn commit_failures_block_typed_and_never_cover_past() {
     for reason in [
@@ -1352,7 +1471,7 @@ async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
 
     let progress = super::admit_jsonl_observations(
         request,
-        |_| (),
+        async |_| Ok(()),
         move |_, bytes, range, _, _, hints| {
             let id = if hints.identity_collision_retry {
                 "record.positional-fallback"
@@ -1468,7 +1587,7 @@ async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_rea
 
     let progress = super::admit_jsonl_observations(
         request,
-        |_| (),
+        async |_| Ok(()),
         move |_, bytes, range, _, _, hints| {
             let native_record_id = ObservationId::new(if hints.identity_collision_retry {
                 "record.positional-fallback-terminal"
@@ -2314,7 +2433,7 @@ async fn admit_identified_records(
     );
     super::admit_jsonl_observations(
         request,
-        |_| (),
+        async |_| Ok(()),
         |_, bytes, range, _, _, _| {
             let native: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let native_record_id = ObservationId::new(native["id"].as_str().unwrap()).unwrap();

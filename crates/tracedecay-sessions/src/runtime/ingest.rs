@@ -14,6 +14,7 @@ pub use failure::{
     classify_claude_observation_failure, classify_transcript_ingest_disposition,
     classify_transcript_ingest_failure,
 };
+pub(crate) use project::with_transcript_source_profile_sync;
 pub use project::{
     home_dir, ingest_project_sources_for_provider,
     ingest_project_sources_for_provider_with_cancellation_and_codex_state,

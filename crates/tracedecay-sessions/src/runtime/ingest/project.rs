@@ -27,7 +27,7 @@ use super::startup::TranscriptIngestOutcome;
 use super::user::provider_selected;
 
 tokio::task_local! {
-    static TRANSCRIPT_SOURCE_PROFILE: ProfileRoot;
+    static TRANSCRIPT_SOURCE_PROFILE: Option<ProfileRoot>;
 }
 
 /// Runs `future` with `profile` as the owner whose agent-host transcripts and
@@ -37,12 +37,24 @@ pub async fn with_transcript_source_profile<F>(profile: ProfileRoot, future: F) 
 where
     F: Future,
 {
-    TRANSCRIPT_SOURCE_PROFILE.scope(profile, future).await
+    TRANSCRIPT_SOURCE_PROFILE.scope(Some(profile), future).await
+}
+
+/// Restores the source's captured authority for synchronous blocking work.
+/// An absent capture masks any enclosing scope rather than adopting its owner.
+pub(crate) fn with_transcript_source_profile_sync<R>(
+    profile: Option<ProfileRoot>,
+    work: impl FnOnce() -> R,
+) -> R {
+    TRANSCRIPT_SOURCE_PROFILE.sync_scope(profile, work)
 }
 
 /// The profile of the enclosing [`with_transcript_source_profile`] scope.
 pub fn transcript_source_profile() -> Option<ProfileRoot> {
-    TRANSCRIPT_SOURCE_PROFILE.try_with(Clone::clone).ok()
+    TRANSCRIPT_SOURCE_PROFILE
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
 }
 
 /// The user home of the enclosing transcript source profile.

@@ -1011,48 +1011,42 @@ impl DeterministicFixedPointFusion {
         candidates: Vec<FusedCandidate>,
         anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
     ) -> (OrderedFusedCandidates, Vec<FusionComparatorRecordV1>) {
-        let mut ordered = OrderedFusedCandidates::sort(candidates, anchor_tiers);
-        let records = ordered
-            .iter_mut()
-            .map(|candidate| {
-                let anchor_tier = anchor_tiers
-                    .get(&candidate.anchor_id)
-                    .copied()
-                    .unwrap_or(0);
-                let record = self.comparator_record(candidate, anchor_tier);
-                candidate.decisions.push(RankingDecision {
-                    kind: RankingDecisionKind::ComparatorProvenance,
-                    retriever: None,
-                    policy_anchor: None,
-                    evidence_anchor: candidate
-                        .occurrences
-                        .first()
-                        .map(|occurrence| occurrence.retriever_evidence_anchor.clone()),
-                    detail: format!(
-                        "anchor_tier={};exact={:?};source_role={};utility={};source_validity={};domain_scores=[{}];evidence_anchors=[{}];occurrences=[{}];revision={}",
-                        record.anchor_tier,
-                        record.exact_class,
-                        record.source_role_rank,
-                        record.utility_micros,
-                        record.source_validity_rank,
-                        record.domain_scores.iter()
-                            .map(|(retriever, domain, score)| format!("{}:{}:{}", retriever.as_str(), domain, score.micros()))
-                            .collect::<Vec<_>>().join(","),
-                        record.retriever_evidence_anchors.iter()
-                            .map(ToString::to_string).collect::<Vec<_>>().join(","),
-                        record
-                            .source_occurrence_ids
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(","),
-                        record.comparator_revision,
-                    ),
-                });
-                candidate.decisions.sort_by(decision_cmp);
-                record
-            })
-            .collect();
+        let (mut ordered, records) = OrderedFusedCandidates::sort(candidates, |candidate| {
+            let anchor_tier = anchor_tiers.get(&candidate.anchor_id).copied().unwrap_or(0);
+            self.comparator_record(candidate, anchor_tier)
+        });
+        for (candidate, record) in ordered.iter_mut().zip(&records) {
+            candidate.decisions.push(RankingDecision {
+                kind: RankingDecisionKind::ComparatorProvenance,
+                retriever: None,
+                policy_anchor: None,
+                evidence_anchor: candidate
+                    .occurrences
+                    .first()
+                    .map(|occurrence| occurrence.retriever_evidence_anchor.clone()),
+                detail: format!(
+                    "anchor_tier={};exact={:?};source_role={};utility={};source_validity={};domain_scores=[{}];evidence_anchors=[{}];occurrences=[{}];revision={}",
+                    record.anchor_tier,
+                    record.exact_class,
+                    record.source_role_rank,
+                    record.utility_micros,
+                    record.source_validity_rank,
+                    record.domain_scores.iter()
+                        .map(|(retriever, domain, score)| format!("{}:{}:{}", retriever.as_str(), domain, score.micros()))
+                        .collect::<Vec<_>>().join(","),
+                    record.retriever_evidence_anchors.iter()
+                        .map(ToString::to_string).collect::<Vec<_>>().join(","),
+                    record
+                        .source_occurrence_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    record.comparator_revision,
+                ),
+            });
+            candidate.decisions.sort_by(decision_cmp);
+        }
         (ordered, records)
     }
 

@@ -244,10 +244,12 @@ fn admit_cursor_jsonl_observations<'a>(
         };
         let progress = admit_jsonl_observations(
             request,
-            |scan| CursorJsonlAdmitState {
-                generation: scan.generation,
-                namespace_replacement: scan.replacement_rescan,
-                carry: TimestampCarry::new(i64::try_from(scan.mtime).ok()),
+            async |scan| {
+                Ok(CursorJsonlAdmitState {
+                    generation: scan.generation,
+                    namespace_replacement: scan.replacement_rescan,
+                    carry: TimestampCarry::new(i64::try_from(scan.mtime).ok()),
+                })
             },
             |state, bytes, range, source_offset, _prepared, hints| {
                 let mut stable_record_id = None;

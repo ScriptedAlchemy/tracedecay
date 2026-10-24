@@ -251,8 +251,8 @@ pub(in crate::runtime) struct JsonlObservationAdmissionProgress {
     pub io: crate::runtime::source::JsonlIoAccounting,
 }
 
-#[derive(Clone, Copy)]
-pub(in crate::runtime) struct JsonlObservationScan<'scan> {
+#[derive(Clone)]
+pub(in crate::runtime) struct JsonlObservationScan {
     pub resumed: bool,
     /// True when a prior cursor existed but the scan restarted at offset 0
     /// (truncate/rename replacement). Callers use this to keep projected
@@ -261,15 +261,25 @@ pub(in crate::runtime) struct JsonlObservationScan<'scan> {
     pub start_offset: u64,
     pub generation: u64,
     pub mtime: u64,
-    frames: &'scan [SharedJsonlFrame],
+    page: Arc<SharedJsonlPage>,
 }
 
-impl JsonlObservationScan<'_> {
+impl JsonlObservationScan {
     /// Raw frames in this exact bounded admission page. Host-specific state
     /// may use this view for decisions that require pairing two native records
-    /// without issuing a second file read or retaining the page bytes.
+    /// without issuing a second file read or copying the page bytes.
     pub fn frame_bytes(&self) -> impl Iterator<Item = &[u8]> {
-        self.frames.iter().map(|frame| frame.bytes.as_ref())
+        self.page.frames.iter().map(|frame| frame.bytes.as_ref())
+    }
+
+    /// Context candidates from this bounded page, with the original page's
+    /// reservation retained when preparation moves to a blocking worker.
+    pub fn context_frame_bytes(&self) -> impl Iterator<Item = &[u8]> {
+        self.page
+            .frames
+            .iter()
+            .filter(|frame| frame.hints.may_change_codex_context)
+            .map(|frame| frame.bytes.as_ref())
     }
 }
 
@@ -2213,7 +2223,7 @@ impl ActiveAdmission<'_> {
 #[tracing::instrument(name = "sessions.observation.admit_jsonl", level = "trace", skip_all)]
 pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     request: JsonlObservationAdmissionRequest<'_>,
-    initialize: impl FnOnce(JsonlObservationScan) -> State,
+    initialize: impl AsyncFnOnce(JsonlObservationScan) -> TranscriptIngestResult<State>,
     mut normalize: impl FnMut(
         &mut State,
         &[u8],
@@ -2348,6 +2358,22 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         return Err(TranscriptIngestError::Cancelled { provider });
     }
     let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
+    let mut state = initialize(JsonlObservationScan {
+        resumed: had_expected_cursor && raw.start_offset > 0,
+        // Derived from the scanned generation rather than this batch's first
+        // offset, so a rewrite that spans several batches keeps namespacing
+        // ids past the batch that started at the file head.
+        replacement_rescan: raw.replacement_generation,
+        start_offset: raw.start_offset,
+        generation: raw.new_cursor.file_id,
+        mtime: raw.new_cursor.mtime,
+        page: Arc::clone(&raw),
+    })
+    .await?;
+    if cancellation.is_cancelled() {
+        return Err(TranscriptIngestError::Cancelled { provider });
+    }
+
     // Recorded before any record of the new generation is captured, so an
     // interrupted pass still leaves the rewrite for a later pass to complete.
     if let Some(previous) = previous_generation
@@ -2364,17 +2390,6 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
                 }
             })?;
     }
-    let mut state = initialize(JsonlObservationScan {
-        resumed: had_expected_cursor && raw.start_offset > 0,
-        // Derived from the scanned generation rather than this batch's first
-        // offset, so a rewrite that spans several batches keeps namespacing
-        // ids past the batch that started at the file head.
-        replacement_rescan: raw.replacement_generation,
-        start_offset: raw.start_offset,
-        generation: raw.new_cursor.file_id,
-        mtime: raw.new_cursor.mtime,
-        frames: &raw.frames,
-    });
     let active = ActiveAdmission {
         provider,
         admission,
