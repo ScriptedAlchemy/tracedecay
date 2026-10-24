@@ -1099,9 +1099,9 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     let verified =
         tracedecay_code_index::production::CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
         &manifest,
-        |digest, _| {
+        |digest, expected_size| {
             segment_path(segments_root, digest)
-                .is_ok_and(|path| proof.borrow_mut().already_verified(digest, &path))
+                .is_ok_and(|path| proof.borrow_mut().already_verified(digest, expected_size, &path))
         },
         |request, buffer| {
             if let Err(error) = (check)() {
@@ -2170,10 +2170,126 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inherited_segment_proof_rejects_wrong_manifest_extent() {
+        let fixture = partitioned_seal_fixture("inherited-extent");
+        let verified = VerifiedSealedSegmentsV1::default();
+        let generations_root = fixture.scope_root.join("code-generations-v1");
+        let replay_root = fixture.pool_manifest.parent().unwrap();
+        let first_manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fixture.pool_manifest).unwrap()).unwrap();
+        verify_sealed_generation_source_from_roots(
+            &generations_root,
+            replay_root,
+            &SealedGraphStateDigest::try_from(format!("sha256:{}", fixture.digest)).unwrap(),
+            &verified,
+            &|| Ok(()),
+        )
+        .unwrap();
+
+        std::fs::rename(
+            &fixture.pool_manifest,
+            generations_root.join(fixture.pool_manifest.file_name().unwrap()),
+        )
+        .unwrap();
+        let project_root = fixture
+            ._temporary
+            .path()
+            .join("project")
+            .canonicalize()
+            .unwrap();
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            fixture.project.clone(),
+            &project_root,
+            fixture.scope_root.clone(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("src/alpha.rs"),
+            "pub fn changed_alpha(value: usize) -> usize { value + 7 }\n",
+        )
+        .unwrap();
+        scheduler.reconcile_now().unwrap();
+        assert_ne!(
+            scheduler
+                .latest_complete()
+                .unwrap()
+                .generation()
+                .manifest()
+                .generation_id,
+            fixture.generation
+        );
+        drop(scheduler);
+        let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+            &std::fs::read(fixture.scope_root.join("active-code-generation-v1.json")).unwrap(),
+        )
+        .unwrap();
+        let successor_path = generations_root.join(pointer.generation_file);
+        let mut successor: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&successor_path).unwrap()).unwrap();
+        let inherited = successor["generation"]["file_segments"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|segment| {
+                first_manifest["generation"]["file_segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|prior| prior["segment_digest"] == segment["segment_digest"])
+            })
+            .expect("a one-file successor inherits an unchanged segment");
+        inherited["segment_size_bytes"] =
+            (inherited["segment_size_bytes"].as_u64().unwrap() + 1).into();
+        // Authenticate the changed descriptor at both seal layers so only
+        // the segment extent can distinguish the warm and cold proofs.
+        let state_digest = tracedecay_domain::ManifestDigest::from_sha256_bytes(&Sha256::digest(
+            serde_json::to_vec(&successor["generation"]).unwrap(),
+        ))
+        .unwrap();
+        successor["state_digest"] = state_digest.as_str().into();
+        let bytes = serde_json::to_vec(&successor).unwrap();
+        let digest =
+            tracedecay_domain::ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes)).unwrap();
+        let mut permissions = std::fs::metadata(&successor_path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&successor_path, permissions).unwrap();
+        std::fs::write(&successor_path, bytes).unwrap();
+        std::fs::rename(
+            successor_path,
+            generations_root.join(format!(
+                "generation-{}.json",
+                sha256_hex_suffix(digest.as_str()).unwrap()
+            )),
+        )
+        .unwrap();
+        let digest = SealedGraphStateDigest::try_from(digest.as_str().to_owned()).unwrap();
+        let prove = |record: &VerifiedSealedSegmentsV1| {
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                replay_root,
+                &digest,
+                record,
+                &|| Ok(()),
+            )
+        };
+        let cold = prove(&VerifiedSealedSegmentsV1::default());
+        assert!(
+            matches!(cold, Err(GraphDbError::Corrupt { .. })),
+            "{cold:?}"
+        );
+        let warm = prove(&verified);
+        assert!(
+            matches!(warm, Err(GraphDbError::Corrupt { .. })),
+            "{warm:?}"
+        );
+    }
+
     /// A successor shares almost every segment with the generation proven
-    /// before it. Proving it again reads none of the segments whose files
-    /// are unchanged since they were hashed, and a segment rewritten on disk
-    /// is read and refused like any other corrupt segment.
+    /// before it. Platforms with trustworthy file fingerprints skip unchanged
+    /// segments; other platforms reread them. Both refuse a corrupt rewrite.
     #[test]
     fn a_repeated_source_proof_reads_only_segments_whose_file_changed() {
         let fixture = partitioned_seal_fixture("repeated-proof");
@@ -2204,11 +2320,18 @@ mod tests {
         assert_eq!(first, Ok(()));
         let (second, second_reads) = prove();
         assert_eq!(second, Ok(()));
-        assert!(
-            first_reads - second_reads >= unchanged_segments,
-            "the second proof read {second_reads} times after the first read {first_reads}; \
-             none of the {unchanged_segments} unchanged segments may be read again"
-        );
+        if cfg!(unix) {
+            assert!(
+                first_reads >= second_reads + unchanged_segments,
+                "the second proof read {second_reads} times after the first read {first_reads}; \
+                 none of the {unchanged_segments} unchanged segments may be read again"
+            );
+        } else {
+            assert_eq!(
+                second_reads, first_reads,
+                "without trustworthy file fingerprints every proof must reread every segment"
+            );
+        }
 
         let page_digest = generation["code_graph_pages"][0]["page_digest"]
             .as_str()

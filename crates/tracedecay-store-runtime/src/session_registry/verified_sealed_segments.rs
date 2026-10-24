@@ -87,8 +87,14 @@ impl VerifiedSealedSegmentsV1 {
 }
 
 impl SealedSegmentProofV1<'_> {
-    /// Whether `path` still names the identity `digest` was proven at.
-    pub(super) fn already_verified(&mut self, digest: &ManifestDigest, path: &Path) -> bool {
+    /// Whether `path` still names the identity `digest` was proven at and
+    /// its byte length matches this manifest's declared extent.
+    pub(super) fn already_verified(
+        &mut self,
+        digest: &ManifestDigest,
+        expected_size: u64,
+        path: &Path,
+    ) -> bool {
         let Some(prior) = self.prior.get(digest).copied() else {
             return false;
         };
@@ -96,7 +102,7 @@ impl SealedSegmentProofV1<'_> {
             .symlink_metadata()
             .ok()
             .and_then(|metadata| SealedSegmentFingerprintV1::of(&metadata));
-        if current != Some(prior) {
+        if current != Some(prior) || prior.len != expected_size {
             return false;
         }
         self.proven.insert(digest.clone(), prior);
