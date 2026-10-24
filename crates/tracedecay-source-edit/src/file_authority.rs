@@ -12,7 +12,7 @@
 //! it leaves the final component free to be a symlink pointing anywhere on the
 //! filesystem.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +22,7 @@ use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use same_file::Handle;
+use tracedecay_private_fs::capability_dir::rename_noreplace;
 use tracedecay_runtime_core::path_safety::{
     normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
 };
@@ -29,6 +30,33 @@ use tracedecay_runtime_core::path_safety::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 static SOURCE_EDIT_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+tokio::task_local! {
+    static BEFORE_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce() + Send>>>;
+    static BEFORE_DIRECTORY_SYNC_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce(&OsStr) -> Result<()> + Send>>>;
+}
+
+#[cfg(test)]
+pub(crate) async fn with_before_publish_hook<T>(
+    hook: impl FnOnce() + Send + 'static,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    BEFORE_PUBLISH_HOOK
+        .scope(std::cell::RefCell::new(Some(Box::new(hook))), future)
+        .await
+}
+
+#[cfg(test)]
+async fn with_before_directory_sync_hook<T>(
+    hook: impl FnOnce(&OsStr) -> Result<()> + Send + 'static,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    BEFORE_DIRECTORY_SYNC_HOOK
+        .scope(std::cell::RefCell::new(Some(Box::new(hook))), future)
+        .await
+}
 
 pub struct SourceEditFileAuthority {
     root: Dir,
@@ -68,8 +96,8 @@ impl SourceEditFileAuthority {
         })
     }
 
-    fn open_optional(&self) -> Result<Option<cap_std::fs::File>> {
-        match self.parent.symlink_metadata(&self.name) {
+    fn open_optional(&self, name: &OsStr) -> Result<Option<cap_std::fs::File>> {
+        match self.parent.symlink_metadata(name) {
             Ok(metadata) if metadata.file_type().is_file() => {}
             Ok(_) => return Err(source_edit_unsafe_path()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -82,15 +110,12 @@ impl SourceEditFileAuthority {
         }
         let mut options = CapOpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
-        let input = self
-            .parent
-            .open_with(&self.name, &options)
-            .map_err(|error| {
-                source_edit_path_error(
-                    "open source edit candidate without following symlinks",
-                    error,
-                )
-            })?;
+        let input = self.parent.open_with(name, &options).map_err(|error| {
+            source_edit_path_error(
+                "open source edit candidate without following symlinks",
+                error,
+            )
+        })?;
         if !input
             .metadata()
             .map_err(|error| source_edit_path_error("inspect opened source edit candidate", error))?
@@ -105,7 +130,7 @@ impl SourceEditFileAuthority {
     /// observed here always belong to the file that is still bound to the
     /// descriptor-scoped parent.
     fn read_optional_with_identity(&self) -> Result<(Option<Vec<u8>>, Option<Handle>)> {
-        let Some(mut input) = self.open_optional()? else {
+        let Some(mut input) = self.open_optional(&self.name)? else {
             return Ok((None, None));
         };
         let identity = Handle::from_file(
@@ -149,7 +174,7 @@ impl SourceEditFileAuthority {
     }
 
     pub(crate) fn current_identity(&self) -> Result<Option<Handle>> {
-        self.open_optional()?
+        self.open_optional(&self.name)?
             .map(|file| {
                 Handle::from_file(file.into_std()).map_err(|error| {
                     source_edit_path_error("identify current source edit candidate", error)
@@ -243,6 +268,7 @@ impl SourceEditFileAuthority {
                     ));
                 }
             };
+            let mut published = false;
             let result = (|| {
                 output.write_all(intended.as_bytes()).map_err(|error| {
                     source_edit_path_error("write source edit temporary file", error)
@@ -262,7 +288,6 @@ impl SourceEditFileAuthority {
                 output.sync_all().map_err(|error| {
                     source_edit_path_error("sync source edit temporary file", error)
                 })?;
-                drop(output);
                 let Some(before_compare) = before_compare.take() else {
                     return Err(TraceDecayError::Config {
                         message: "source edit comparison hook already ran".to_owned(),
@@ -285,17 +310,43 @@ impl SourceEditFileAuthority {
                         ),
                     });
                 }
-                self.parent
-                    .rename(&temporary, &self.parent, &self.name)
-                    .map_err(|error| {
-                        source_edit_path_error("atomically publish source edit candidate", error)
-                    })?;
+                #[cfg(test)]
+                let _ = BEFORE_PUBLISH_HOOK.try_with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().take() {
+                        hook();
+                    }
+                });
+                // Comparing absence does not reserve the name against an
+                // editor or another process that ignores our edit lock.
+                let rename = if expected.is_none() {
+                    rename_noreplace(&self.parent, &temporary, &self.parent, &self.name)
+                } else {
+                    self.parent.rename(&temporary, &self.parent, &self.name)
+                };
+                rename.map_err(|error| {
+                    source_edit_path_error("atomically publish source edit candidate", error)
+                })?;
+                published = true;
+                #[cfg(test)]
+                if let Ok(Some(result)) = BEFORE_DIRECTORY_SYNC_HOOK
+                    .try_with(|hook| hook.borrow_mut().take().map(|hook| hook(&temporary)))
+                {
+                    result?;
+                }
                 sync_source_edit_directory(&self.parent)
             })();
-            if result.is_err() {
-                let _ = self.parent.remove_file(&temporary);
-            }
-            return result;
+            return match result {
+                Err(error) if !published => {
+                    self.remove_owned_temporary(&temporary, output)
+                        .map_err(|cleanup| TraceDecayError::Config {
+                            message: format!("{error}; temporary cleanup failed: {cleanup}"),
+                        })?;
+                    Err(error)
+                }
+                // A successful rename consumed our temporary name. Even if
+                // sync fails, that name can now belong to a different writer.
+                result => result,
+            };
         }
         Err(TraceDecayError::Config {
             message: "could not allocate source edit temporary file".to_owned(),
@@ -306,6 +357,28 @@ impl SourceEditFileAuthority {
         self.parent
             .symlink_metadata(&self.name)
             .map_err(|error| source_edit_path_error("inspect source edit candidate", error))
+    }
+
+    fn remove_owned_temporary(&self, name: &OsStr, staged: cap_std::fs::File) -> Result<()> {
+        // The retained handle identifies the file we created even if another
+        // writer moved it and reused its name before publication failed.
+        let staged = Handle::from_file(staged.into_std()).map_err(|error| {
+            source_edit_path_error("identify source edit temporary file", error)
+        })?;
+        let Some(current) = self.open_optional(name)? else {
+            return Ok(());
+        };
+        let current = Handle::from_file(current.into_std()).map_err(|error| {
+            source_edit_path_error("identify source edit temporary during cleanup", error)
+        })?;
+        if current != staged {
+            return Err(TraceDecayError::Config {
+                message: "source edit temporary was replaced before cleanup".to_owned(),
+            });
+        }
+        self.parent.remove_file(name).map_err(|error| {
+            source_edit_path_error("remove owned source edit temporary file", error)
+        })
     }
 }
 
@@ -344,10 +417,15 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     use tempfile::tempdir;
 
-    use super::{SourceEditFileAuthority, read_source_edit_candidate};
+    use super::{
+        SourceEditFileAuthority, read_source_edit_candidate, with_before_directory_sync_hook,
+        with_before_publish_hook,
+    };
+    use tracedecay_domain::errors::TraceDecayError;
 
     const UNSAFE_PATH: &str =
         "config error: source edit path is not a regular file beneath the authorized worktree";
@@ -444,6 +522,149 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read_to_string(path).unwrap(), "previewed\n");
+    }
+
+    #[tokio::test]
+    async fn new_file_publication_preserves_a_late_creator() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("lib.rs");
+        let file = SourceEditFileAuthority::open(directory.path(), Path::new("lib.rs")).unwrap();
+        let late_path = path.clone();
+
+        let result = with_before_publish_hook(
+            move || {
+                // The final absence comparison has already succeeded. This
+                // writer does not participate in TraceDecay's edit lock.
+                fs::write(late_path, "concurrent creator\n").unwrap();
+            },
+            async { file.publish("lib.rs", None, None, "intended\n", || {}) },
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an absent-file plan cannot replace a late creator"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "concurrent creator\n");
+        let entries = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec!["lib.rs"],
+            "failed publication removes its staging file"
+        );
+    }
+
+    #[test]
+    fn atomic_publication_creates_absent_files_and_replaces_expected_files() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("lib.rs");
+        let file = SourceEditFileAuthority::open(directory.path(), Path::new("lib.rs")).unwrap();
+
+        file.publish("lib.rs", None, None, "created\n", || {})
+            .unwrap();
+        let (created, identity) = file.read_to_string("lib.rs").unwrap();
+        assert_eq!(created, "created\n");
+        file.publish(
+            "lib.rs",
+            Some(&created),
+            Some(&identity),
+            "replaced\n",
+            || {},
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replaced\n");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn publication_failure_preserves_a_replaced_staging_file() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("lib.rs");
+        let file = SourceEditFileAuthority::open(directory.path(), Path::new("lib.rs")).unwrap();
+        let hook_directory = directory.path().to_path_buf();
+        let staged_path = Arc::new(Mutex::new(None));
+        let observed_staged_path = Arc::clone(&staged_path);
+
+        let result = with_before_publish_hook(
+            move || {
+                let entries = fs::read_dir(&hook_directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect::<Vec<_>>();
+                assert_eq!(entries.len(), 1, "only the owned staging file exists");
+                let temporary = &entries[0];
+                fs::rename(temporary, hook_directory.join("displaced.tmp")).unwrap();
+                fs::write(temporary, "foreign staging contents\n").unwrap();
+                fs::write(hook_directory.join("lib.rs"), "concurrent creator\n").unwrap();
+                *observed_staged_path.lock().unwrap() = Some(temporary.clone());
+            },
+            async { file.publish("lib.rs", None, None, "intended\n", || {}) },
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("atomically publish source edit candidate"),
+            "{error}"
+        );
+        assert!(
+            error.contains("temporary was replaced before cleanup"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "concurrent creator\n");
+        assert_eq!(
+            fs::read_to_string(staged_path.lock().unwrap().as_ref().unwrap()).unwrap(),
+            "foreign staging contents\n"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("displaced.tmp")).unwrap(),
+            "intended\n"
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
+    }
+
+    #[tokio::test]
+    async fn directory_sync_failure_does_not_clean_consumed_staging_name() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("lib.rs");
+        let file = SourceEditFileAuthority::open(directory.path(), Path::new("lib.rs")).unwrap();
+        let hook_directory = directory.path().to_path_buf();
+        let reused_path = Arc::new(Mutex::new(None));
+        let observed_reused_path = Arc::clone(&reused_path);
+
+        let result = with_before_directory_sync_hook(
+            move |temporary| {
+                let reused = hook_directory.join(temporary);
+                assert!(!reused.exists(), "rename consumed the staging name");
+                assert_eq!(
+                    fs::read_to_string(hook_directory.join("lib.rs")).unwrap(),
+                    "intended\n"
+                );
+                fs::write(&reused, "foreign staging contents\n").unwrap();
+                *observed_reused_path.lock().unwrap() = Some(reused);
+                Err(TraceDecayError::Config {
+                    message: "injected source edit directory sync failure".to_owned(),
+                })
+            },
+            async { file.publish("lib.rs", None, None, "intended\n", || {}) },
+        )
+        .await;
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected source edit directory sync failure")
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "intended\n");
+        assert_eq!(
+            fs::read_to_string(reused_path.lock().unwrap().as_ref().unwrap()).unwrap(),
+            "foreign staging contents\n"
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     /// A live authority holds the candidate's parent directory open. On Unix
