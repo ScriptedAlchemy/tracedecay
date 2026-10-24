@@ -35,7 +35,7 @@ use tracedecay_application::advisory::{
 };
 use tracedecay_application::delivery::{
     ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
-    ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
+    ProjectDeliveryReadHandleV1, ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
     gated_project_delivery_read_handle_v1, open_project_delivery_read_authority_v1,
 };
 use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
@@ -2501,6 +2501,16 @@ async fn register_project_delivery_read_authority(
             )
         }
     };
+    publish_project_delivery_read_authority(invocation, project_root, state, handle).await?;
+    Ok(github_source_reading)
+}
+
+async fn publish_project_delivery_read_authority(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+    handle: ProjectDeliveryReadHandleV1,
+) -> Result<()> {
     let source_access =
         project_open_source_access_authority().map_err(|error| TraceDecayError::Config {
             message: format!("project-open delivery source access is invalid: {error}"),
@@ -2521,7 +2531,7 @@ async fn register_project_delivery_read_authority(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open delivery read registration failed: {error}"),
         })?;
-    Ok(github_source_reading)
+    Ok(())
 }
 
 /// Registers the feedback-proximity read owner for this admitted checkout as
