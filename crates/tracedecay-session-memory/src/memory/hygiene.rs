@@ -10,7 +10,8 @@ use std::sync::OnceLock;
 
 use tracedecay_privacy::detector_kernel::{
     CredentialPattern, CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError,
-    compile_credential_patterns, looks_high_entropy_token,
+    compile_credential_patterns, introduces_declared_name, is_compound_identifier,
+    looks_high_entropy_token,
 };
 
 fn regex_set() -> Result<&'static [CredentialPattern], &'static CredentialRuleSetError> {
@@ -43,9 +44,12 @@ pub fn detect_secret_like(content: &str) -> Option<String> {
             Err(_) => return Some("credential detector unavailable".to_string()),
         }
     }
+    let mut previous = "";
     for token in content.split_whitespace() {
         let trimmed = token.trim_matches(|character: char| !character.is_ascii_alphanumeric());
-        if looks_high_entropy_token(trimmed) {
+        let declared_name = introduces_declared_name(previous) && is_compound_identifier(trimmed);
+        previous = trimmed;
+        if looks_high_entropy_token(trimmed) && !declared_name {
             return Some("high-entropy token".to_string());
         }
     }
@@ -133,5 +137,26 @@ mod tests {
             secret_reason("Use the sk-test-742913 fixture profile for dry runs"),
             Some("known credential prefix")
         );
+    }
+
+    #[test]
+    fn declared_names_pass_but_passphrases_in_facts_do_not() {
+        for content in [
+            "The enum WorkDuplicateAdjudicationAppendOutcomeV1 gates adjudication",
+            "Renamed `struct GitHubReadOnlyCredentialAuthorityOutcomeV1` last week",
+        ] {
+            assert_eq!(secret_reason(content), None, "{content}");
+        }
+        for content in [
+            "The deploy phrase is RocketButtonStapleBridgeYellowOrange90 for prod",
+            "The enum is violin-pocket-jungle-quartz-island-778 now",
+            "Use MySuperSecretPasswordForProduction2024Admin for the admin login",
+        ] {
+            assert_eq!(
+                secret_reason(content),
+                Some("high-entropy token"),
+                "{content}"
+            );
+        }
     }
 }

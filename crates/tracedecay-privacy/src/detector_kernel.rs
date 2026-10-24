@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use serde_json::Value;
@@ -176,7 +177,113 @@ where
     walk(value, policy, &mut Vec::new(), &mut visit)
 }
 
-pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
+/// Where a scanned text sits in its document, which decides whether a
+/// compound identifier in it is a name or a value.
+///
+/// Entropy alone cannot tell `WorkDuplicateAdjudicationAppendOutcomeV1` from
+/// `RocketButtonStapleBridgeYellowOrange90`: both are words joined together.
+/// Only position can. A token the document uses as a name is exempt; the same
+/// token as a value or in free text is withheld, because passphrases are
+/// exactly such compounds.
+#[derive(Clone, Copy)]
+pub(crate) enum EntropyScope<'a> {
+    /// A value or free text. Nothing is a name.
+    Value,
+    /// The text is an object key.
+    Key,
+    /// The raw text of a parsed document. Tokens that make up one of its
+    /// parsed object keys are names.
+    Document(&'a BTreeSet<String>),
+    /// Source code. Tokens in a declaration, path, call, or type position are
+    /// names.
+    Code,
+}
+
+impl EntropyScope<'_> {
+    fn names(self, text: &str, range: Range<usize>) -> bool {
+        let token = &text[range.clone()];
+        match self {
+            Self::Value => false,
+            Self::Key => is_compound_identifier(token),
+            // A reference to keys (`#/$defs/Name`) is a path of key names.
+            Self::Document(keys) => {
+                token
+                    .split('/')
+                    .filter(|part| !part.is_empty())
+                    .all(|part| keys.contains(part))
+                    && is_compound_identifier(token)
+            }
+            Self::Code => is_code_name_position(text, range) && is_compound_identifier(token),
+        }
+    }
+}
+
+/// The `/`-separated name parts of a parsed object key, for
+/// [`EntropyScope::Document`].
+pub(crate) fn key_tokens(key: &str) -> impl Iterator<Item = &str> {
+    key.split(|c: char| c == '/' || !(c.is_ascii() && token_byte(c as u8)))
+        .filter(|token| !token.is_empty())
+}
+
+const DECLARATION_KEYWORDS: [&str; 15] = [
+    "struct",
+    "enum",
+    "union",
+    "fn",
+    "type",
+    "trait",
+    "impl",
+    "class",
+    "interface",
+    "const",
+    "let",
+    "static",
+    "mod",
+    "use",
+    "extends",
+];
+
+/// Whether `previous` is the word that introduces a declared name.
+pub fn introduces_declared_name(previous: &str) -> bool {
+    DECLARATION_KEYWORDS.contains(&previous)
+}
+
+/// Whether the token at `range` stands where a grammar puts a name, not a
+/// value: after a declaration keyword, beside `::`, after `->`, a call, a
+/// generic or a tuple payload (`Name(`, `<Name`, `Name<`), or a member
+/// (`a.Name`). A quote, a bare space, or sentence punctuation around it is a
+/// value or prose.
+fn is_code_name_position(text: &str, range: Range<usize>) -> bool {
+    let before = &text[..range.start];
+    let after = &text[range.end..];
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let spaced = before.trim_end();
+    if spaced.len() < before.len() {
+        let keyword = spaced
+            .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .next();
+        if keyword.is_some_and(introduces_declared_name) || spaced.ends_with("->") {
+            return true;
+        }
+    }
+    let before_bytes = before.as_bytes();
+    let attached_after_word = |marker: u8| {
+        before_bytes.last() == Some(&marker)
+            && before_bytes.len() >= 2
+            && matches!(before_bytes[before_bytes.len() - 2], byte if is_word(byte) || byte == b'>')
+    };
+    let after_bytes = after.as_bytes();
+    before.ends_with("::")
+        || after.starts_with("::")
+        || before.ends_with("->")
+        || attached_after_word(b'(')
+        || attached_after_word(b'<')
+        || attached_after_word(b'.')
+        || matches!(after_bytes, [b'(' | b'<', ..])
+        || matches!(after_bytes, [b'.', next, ..] if is_word(*next))
+}
+
+pub(crate) fn high_entropy_ranges(text: &str, scope: EntropyScope<'_>) -> Vec<Range<usize>> {
     let bytes = text.as_bytes();
     let mut ranges = Vec::new();
     let mut start = 0usize;
@@ -206,7 +313,10 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
                 }
                 component_start = component_end + 1;
             }
-        } else if looks_high_entropy_token(candidate) && !is_lcm_payload_ref(candidate) {
+        } else if looks_high_entropy_token(candidate)
+            && !is_lcm_payload_ref(candidate)
+            && !scope.names(text, start..end)
+        {
             ranges.push(start..end);
         }
         start = end;
@@ -332,9 +442,6 @@ pub fn looks_high_entropy_token(token: &str) -> bool {
     {
         return false;
     }
-    if is_compound_identifier(token) {
-        return false;
-    }
 
     let mut counts = [0usize; 256];
     for byte in token.bytes() {
@@ -361,7 +468,7 @@ pub fn looks_high_entropy_token(token: &str) -> bool {
 /// cased, while a random token of the same length breaks into short,
 /// case-flipping fragments with digits scattered through them. Base64 padding
 /// and alphabet (`+`, `=`) never occur in identifiers.
-fn is_compound_identifier(token: &str) -> bool {
+pub fn is_compound_identifier(token: &str) -> bool {
     if token.bytes().any(|byte| matches!(byte, b'+' | b'=')) {
         return false;
     }
@@ -588,7 +695,7 @@ mod tests {
         let token = "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE";
         assert!(looks_high_entropy_token(token));
         assert_eq!(
-            high_entropy_ranges(&format!("value: {token}")),
+            high_entropy_ranges(&format!("value: {token}"), EntropyScope::Value),
             vec![7..7 + token.len()]
         );
         assert!(!looks_high_entropy_token(
@@ -608,7 +715,7 @@ mod tests {
             "/private/var/folders/ab/cd0123456789abcdefghijklmnopqrst/T/fe600511-e406-4142-b74a-cbf177c5f2cb/",
         ] {
             assert!(looks_high_entropy_token(path));
-            assert!(high_entropy_ranges(path).is_empty());
+            assert!(high_entropy_ranges(path, EntropyScope::Value).is_empty());
         }
     }
 
@@ -618,7 +725,7 @@ mod tests {
         let path = format!("/private/var/folders/ab/{secret}/T/");
         let start = "/private/var/folders/ab/".len();
         assert_eq!(
-            high_entropy_ranges(&path),
+            high_entropy_ranges(&path, EntropyScope::Value),
             vec![start..start + secret.len()]
         );
     }
@@ -628,7 +735,10 @@ mod tests {
         let secret = "/AbCdEfGhIjKlMnOpQrStUvWxYz01234/56789aBcDeFgHiJkLmNoPqRsTuVwXy";
         assert!(secret.split('/').all(|part| part.len() < 36));
         assert!(looks_high_entropy_token(secret));
-        assert_eq!(high_entropy_ranges(secret), vec![0..secret.len()]);
+        assert_eq!(
+            high_entropy_ranges(secret, EntropyScope::Value),
+            vec![0..secret.len()]
+        );
     }
 
     #[test]
@@ -640,10 +750,16 @@ mod tests {
             "/workspace/artifacts/fe600511-e406-4142-b74a-cbf177c5f2cb/project/src/",
             "/workspace/FE600511-E406-4142-B74A-CBF177C5F2CB/source/",
         ] {
-            assert!(high_entropy_ranges(path).is_empty(), "{path}");
+            assert!(
+                high_entropy_ranges(path, EntropyScope::Value).is_empty(),
+                "{path}"
+            );
         }
         let malformed = "/run/nl/w/fe600511-e406-4142-b74a-cbf177c5f2cg/tmp/";
-        assert_eq!(high_entropy_ranges(malformed), vec![0..malformed.len()]);
+        assert_eq!(
+            high_entropy_ranges(malformed, EntropyScope::Value),
+            vec![0..malformed.len()]
+        );
     }
 
     #[test]
@@ -655,7 +771,7 @@ mod tests {
         ] {
             let path = format!("{prefix}{secret}");
             assert_eq!(
-                high_entropy_ranges(&path),
+                high_entropy_ranges(&path, EntropyScope::Value),
                 vec![prefix.len()..prefix.len() + secret.len()]
             );
         }
@@ -679,7 +795,7 @@ mod tests {
             ] {
                 let path = format!("/workspace/{uuid}/dist/{artifact}");
                 assert_eq!(
-                    high_entropy_ranges(&path),
+                    high_entropy_ranges(&path, EntropyScope::Value),
                     Vec::<Range<usize>>::new(),
                     "{path}"
                 );
@@ -705,7 +821,7 @@ mod tests {
         let path = format!("{prefix}{secret}/source");
         assert!(!looks_high_entropy_token(&path));
         assert_eq!(
-            high_entropy_ranges(&path),
+            high_entropy_ranges(&path, EntropyScope::Value),
             vec![prefix.len()..prefix.len() + secret.len()]
         );
     }
@@ -720,7 +836,7 @@ mod tests {
             assert!(looks_high_entropy_token(&secret));
             let path = format!("{prefix}{secret}/source");
             assert_eq!(
-                high_entropy_ranges(&path),
+                high_entropy_ranges(&path, EntropyScope::Value),
                 vec![prefix.len()..prefix.len() + secret.len()]
             );
         }
@@ -740,7 +856,7 @@ mod tests {
         let path = format!("{prefix}{secret}/source");
         assert!(!looks_high_entropy_token(&path));
         assert_eq!(
-            high_entropy_ranges(&path),
+            high_entropy_ranges(&path, EntropyScope::Value),
             vec![prefix.len()..prefix.len() + secret.len()]
         );
         let metadata = json!({"path": path});
@@ -758,7 +874,7 @@ mod tests {
         let (first, second) = secret.split_once('/').unwrap();
         let separated = format!("/{first}/fe600511-e406-4142-b74a-cbf177c5f2cb/{second}");
         assert!(
-            high_entropy_ranges(&separated).is_empty(),
+            high_entropy_ranges(&separated, EntropyScope::Value).is_empty(),
             "UUID identity must separate the candidate components"
         );
         let compact_secret = "abcdefghijklmnopab/QRSTUVWXYZ012345QR";
@@ -768,7 +884,7 @@ mod tests {
         }
         let compact_path = format!("{prefix}{compact_secret}/source");
         assert_eq!(
-            high_entropy_ranges(&compact_path),
+            high_entropy_ranges(&compact_path, EntropyScope::Value),
             vec![prefix.len()..prefix.len() + compact_secret.len()]
         );
     }
@@ -790,7 +906,7 @@ mod tests {
                 let path = format!("{prefix}{secret}/source");
                 assert!(!looks_high_entropy_token(&path));
                 assert_eq!(
-                    high_entropy_ranges(&path),
+                    high_entropy_ranges(&path, EntropyScope::Value),
                     vec![prefix.len()..prefix.len() + secret.len()],
                     "{payload} split at {split}"
                 );
@@ -814,7 +930,10 @@ mod tests {
         let secret = "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE";
         let path = format!("{prefix}{secret}");
         assert!(!looks_high_entropy_token(&path));
-        assert_eq!(high_entropy_ranges(&path), vec![prefix.len()..path.len()]);
+        assert_eq!(
+            high_entropy_ranges(&path, EntropyScope::Value),
+            vec![prefix.len()..path.len()]
+        );
     }
 
     #[test]
@@ -832,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_identifiers_are_not_high_entropy_tokens() {
+    fn compound_identifiers_are_exempt_only_as_names() {
         for identifier in [
             "WorkDuplicateAdjudicationAppendOutcomeV1",
             "GitHubReadOnlyCredentialAuthorityOutcomeV1",
@@ -841,8 +960,16 @@ mod tests {
             "benchmark_data/index-bench/clone-envelope-20260915-fingerprint-staging",
             "MAXIMUM_WORKFLOW_PAYLOAD_JSON_BYTES_FOR_GRAPH_V2",
         ] {
-            assert!(entropy_bits_per_mille(identifier) >= Some(MIN_TOKEN_ENTROPY_PER_MILLE));
-            assert!(!looks_high_entropy_token(identifier), "{identifier}");
+            assert!(looks_high_entropy_token(identifier), "{identifier}");
+            assert!(is_compound_identifier(identifier), "{identifier}");
+            assert!(
+                high_entropy_ranges(identifier, EntropyScope::Key).is_empty(),
+                "{identifier}"
+            );
+            assert!(
+                !high_entropy_ranges(identifier, EntropyScope::Value).is_empty(),
+                "{identifier}"
+            );
         }
     }
 
@@ -883,13 +1010,9 @@ mod tests {
                 let token: String = (0..MIN_TOKEN_LENGTH)
                     .map(|_| char::from(alphabet[next(alphabet.len())]))
                     .collect();
-                let entropy_eligible = token.bytes().any(|byte| byte.is_ascii_alphabetic())
-                    && token.bytes().any(|byte| byte.is_ascii_digit())
-                    && !token.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    && entropy_bits_per_mille(&token) >= Some(MIN_TOKEN_ENTROPY_PER_MILLE);
-                if entropy_eligible {
+                if looks_high_entropy_token(&token) {
                     eligible += 1;
-                    exempted += usize::from(!looks_high_entropy_token(&token));
+                    exempted += usize::from(is_compound_identifier(&token));
                 }
             }
         }

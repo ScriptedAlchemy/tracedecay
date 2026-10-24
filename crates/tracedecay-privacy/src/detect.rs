@@ -14,9 +14,9 @@ use super::assessment::{
     validate_assessment,
 };
 use super::detector_kernel::{
-    CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError, JsonPathSegment,
-    JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, entropy_bits_per_mille,
-    high_entropy_ranges, visit_json_object_keys, visit_sensitive_json_mut,
+    CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError, EntropyScope,
+    JsonPathSegment, JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy,
+    entropy_bits_per_mille, high_entropy_ranges, visit_json_object_keys, visit_sensitive_json_mut,
 };
 use super::length_prefixed_sha256_hex;
 use super::rules::{CredentialPatternSet, compile_credential_pattern_set};
@@ -529,6 +529,7 @@ pub(crate) fn redact_sensitive_values(
         let mut key_evidence = key.to_string();
         redact_text(
             &mut key_evidence,
+            EntropyScope::Key,
             &structural_location(path),
             patterns,
             &mut quarantine_findings,
@@ -560,6 +561,7 @@ pub(crate) fn redact_sensitive_values(
             }
             JsonVisitMut::String(text) => redact_text(
                 text,
+                EntropyScope::Value,
                 &structural_location(path),
                 patterns,
                 &mut findings,
@@ -703,13 +705,14 @@ fn memory_fact_receipt(
 
 pub(super) fn redact_text(
     text: &mut String,
+    scope: EntropyScope<'_>,
     path: &str,
     patterns: &CredentialPatternSet,
     findings: &mut Vec<SanitizationFindingV1>,
     action: SanitizationActionV1,
 ) -> bool {
     let credentials = redact_credentials(text, path, patterns, findings, action);
-    redact_high_entropy(text, path, findings, action) || credentials
+    redact_high_entropy(text, scope, path, findings, action) || credentials
 }
 
 fn redact_credentials(
@@ -776,11 +779,12 @@ fn redact_credentials(
 
 fn redact_high_entropy(
     text: &mut String,
+    scope: EntropyScope<'_>,
     path: &str,
     findings: &mut Vec<SanitizationFindingV1>,
     action: SanitizationActionV1,
 ) -> bool {
-    let ranges = high_entropy_ranges(text);
+    let ranges = high_entropy_ranges(text, scope);
     let changed = !ranges.is_empty();
     if changed {
         // The score is read before the tokens are replaced, and reports the

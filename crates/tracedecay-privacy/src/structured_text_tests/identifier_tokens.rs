@@ -41,7 +41,8 @@ fn generated_json_schema_type_names_are_not_credential_bearing_keys() {
           "type": "object"
         }
       ]
-    }
+    },
+    "ExecutionGitHubStackCapabilityReadingV1": { "type": "string" }
   }
 }
 "##,

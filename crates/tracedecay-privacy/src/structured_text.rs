@@ -37,7 +37,9 @@ use super::detect::{
     SanitizationActionV1, SanitizationDetectorOriginV1, SanitizationFindingV1, credential_patterns,
     redact_text,
 };
-use super::detector_kernel::{NormalizedSensitiveKey, SensitiveKeyPolicy};
+use super::detector_kernel::{
+    EntropyScope, NormalizedSensitiveKey, SensitiveKeyPolicy, key_tokens,
+};
 use super::length_prefixed_sha256_hex;
 use super::rules::{CredentialPatternSet, CredentialScanBatchV1};
 use super::structured::{
@@ -186,7 +188,7 @@ fn sanitize_structured_text_with(
 
     let parsed = match parse_structured_text(raw) {
         Ok(Some(parsed)) => parsed,
-        Ok(None) => return Ok(raw_only(raw, patterns)),
+        Ok(None) => return Ok(raw_only(raw, EntropyScope::Value, patterns)),
         Err(StructuredTextParseFailureV1::LimitsExceeded) => {
             return Err(DetectionError::ScanLimitExceeded);
         }
@@ -197,14 +199,17 @@ fn sanitize_structured_text_with(
     validate_structured_text_limits(&parsed.value)
         .map_err(detection_error_from_structured_sanitization)?;
 
+    let key_names = document_key_tokens(&parsed);
+    let scope = EntropyScope::Document(&key_names);
+    let detectors = Detectors { patterns, scope };
     let mut quarantine_findings = Vec::new();
     let candidates = if parsed.fields.is_empty() {
-        tree_candidates(raw, &parsed, &policy, patterns, &mut quarantine_findings)
+        tree_candidates(raw, &parsed, &policy, detectors, &mut quarantine_findings)
     } else {
-        line_candidates(raw, &parsed.fields, &policy, patterns)
+        line_candidates(raw, &parsed.fields, &policy, detectors)
     };
     if candidates.is_empty() && quarantine_findings.is_empty() {
-        let mut scanned = raw_only(raw, patterns);
+        let mut scanned = raw_only(raw, scope, patterns);
         scanned.format = Some(parsed.format);
         return Ok(scanned);
     }
@@ -238,6 +243,7 @@ fn sanitize_structured_text_with(
         let mut segment = raw[cursor..span.start].to_owned();
         redact_text(
             &mut segment,
+            scope,
             "$",
             patterns,
             &mut findings,
@@ -250,6 +256,7 @@ fn sanitize_structured_text_with(
     let mut tail = raw[cursor..].to_owned();
     redact_text(
         &mut tail,
+        scope,
         "$",
         patterns,
         &mut findings,
@@ -302,11 +309,39 @@ fn sanitize_structured_text_with(
     })
 }
 
-fn raw_only(raw: &str, patterns: &CredentialPatternSet) -> StructuredTextSanitizationV1 {
+/// The token runs of every object key and line-format field name in the
+/// parsed document: the names its raw text may carry as identifiers.
+fn document_key_tokens(parsed: &ParsedStructuredTextV1) -> BTreeSet<String> {
+    fn collect(value: &Value, names: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, child) in fields {
+                    names.extend(key_tokens(key).map(str::to_owned));
+                    collect(child, names);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, names)),
+            _ => {}
+        }
+    }
+    let mut names = BTreeSet::new();
+    collect(&parsed.value, &mut names);
+    for field in &parsed.fields {
+        names.extend(key_tokens(&field.key).map(str::to_owned));
+    }
+    names
+}
+
+fn raw_only(
+    raw: &str,
+    scope: EntropyScope<'_>,
+    patterns: &CredentialPatternSet,
+) -> StructuredTextSanitizationV1 {
     let mut sanitized_text = raw.to_owned();
     let mut findings = Vec::new();
     redact_text(
         &mut sanitized_text,
+        scope,
         "$",
         patterns,
         &mut findings,
@@ -329,7 +364,7 @@ fn quarantined_structured_text(
     raw: &str,
     patterns: &CredentialPatternSet,
 ) -> StructuredTextSanitizationV1 {
-    let mut sanitized = raw_only(raw, patterns);
+    let mut sanitized = raw_only(raw, EntropyScope::Value, patterns);
     sanitized
         .quarantine_findings
         .push(SanitizationFindingV1::new_with_origin(
@@ -362,11 +397,19 @@ fn ordinal_ranks(candidates: &[SensitiveCandidate]) -> Result<Vec<u32>, Detectio
     Ok(ranks)
 }
 
+/// The credential detectors together with where in the document the scanned
+/// text sits.
+#[derive(Clone, Copy)]
+struct Detectors<'a> {
+    patterns: &'a CredentialPatternSet,
+    scope: EntropyScope<'a>,
+}
+
 fn line_candidates(
     raw: &str,
     fields: &[StructuredTextFieldV1],
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &CredentialPatternSet,
+    detectors: Detectors<'_>,
 ) -> Vec<SensitiveCandidate> {
     let mut candidates = Vec::new();
     for field in fields {
@@ -382,7 +425,7 @@ fn line_candidates(
         let decoded_value_matched = field
             .decoded_value
             .as_deref()
-            .is_some_and(|decoded| trips_a_detector(decoded, patterns));
+            .is_some_and(|decoded| trips_a_detector(decoded, detectors));
         let Some(origin) = key_origin
             .or(decoded_value_matched
                 .then_some(SanitizationDetectorOriginV1::BuiltInDetectorKernel))
@@ -405,13 +448,14 @@ fn line_candidates(
 /// Detects whether an already-decoded value carries a credential the encoded
 /// bytes hid. `Authorization=Bearer%20…` only looks like a bearer token once
 /// the percent escapes are resolved.
-fn trips_a_detector(decoded: &str, patterns: &CredentialPatternSet) -> bool {
+fn trips_a_detector(decoded: &str, detectors: Detectors<'_>) -> bool {
     let mut probe = decoded.to_owned();
     let mut ignored = Vec::new();
     redact_text(
         &mut probe,
+        detectors.scope,
         "$",
-        patterns,
+        detectors.patterns,
         &mut ignored,
         SanitizationActionV1::Redacted,
     )
@@ -421,7 +465,7 @@ fn tree_candidates(
     raw: &str,
     parsed: &ParsedStructuredTextV1,
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &CredentialPatternSet,
+    detectors: Detectors<'_>,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) -> Vec<SensitiveCandidate> {
     let Some(document) = document_node(raw, parsed) else {
@@ -432,7 +476,7 @@ fn tree_candidates(
     collect_tree_fields(
         document,
         policy,
-        patterns,
+        detectors,
         &mut sensitive,
         quarantine_findings,
     );
@@ -665,7 +709,7 @@ struct SensitiveScalar {
 fn collect_tree_fields(
     node: DocumentNode<'_>,
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &CredentialPatternSet,
+    detectors: Detectors<'_>,
     sensitive: &mut Vec<SensitiveScalar>,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) {
@@ -675,19 +719,20 @@ fn collect_tree_fields(
                 let mut key_evidence = key.to_string();
                 redact_text(
                     &mut key_evidence,
+                    EntropyScope::Key,
                     "$",
-                    patterns,
+                    detectors.patterns,
                     quarantine_findings,
                     SanitizationActionV1::Quarantined,
                 );
                 match policy.classify(&NormalizedSensitiveKey::new(&key)) {
-                    Some(origin) => collect_scalars(child, &key, origin, patterns, sensitive),
+                    Some(origin) => collect_scalars(child, &key, origin, detectors, sensitive),
                     None => {
                         collect_detected_scalars(
                             child,
                             &key,
                             policy,
-                            patterns,
+                            detectors,
                             sensitive,
                             quarantine_findings,
                         );
@@ -701,7 +746,7 @@ fn collect_tree_fields(
                     item,
                     "$",
                     policy,
-                    patterns,
+                    detectors,
                     sensitive,
                     quarantine_findings,
                 );
@@ -715,14 +760,14 @@ fn collect_scalars(
     node: DocumentNode<'_>,
     key: &str,
     origin: SanitizationDetectorOriginV1,
-    patterns: &CredentialPatternSet,
+    detectors: Detectors<'_>,
     sensitive: &mut Vec<SensitiveScalar>,
 ) {
     match node {
         DocumentNode::Scalar(value) => {
             let decoded_value_matched = value
                 .decoded_value()
-                .is_some_and(|decoded| trips_a_detector(decoded, patterns));
+                .is_some_and(|decoded| trips_a_detector(decoded, detectors));
             sensitive.push(SensitiveScalar {
                 key: key.to_owned(),
                 value,
@@ -732,12 +777,12 @@ fn collect_scalars(
         }
         DocumentNode::Object(fields) => {
             for (_, child) in fields {
-                collect_scalars(child, key, origin, patterns, sensitive);
+                collect_scalars(child, key, origin, detectors, sensitive);
             }
         }
         DocumentNode::Array(items) => {
             for item in items {
-                collect_scalars(item, key, origin, patterns, sensitive);
+                collect_scalars(item, key, origin, detectors, sensitive);
             }
         }
         DocumentNode::Empty => {}
@@ -748,7 +793,7 @@ fn collect_detected_scalars(
     node: DocumentNode<'_>,
     key: &str,
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &CredentialPatternSet,
+    detectors: Detectors<'_>,
     sensitive: &mut Vec<SensitiveScalar>,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) {
@@ -756,7 +801,7 @@ fn collect_detected_scalars(
         DocumentNode::Scalar(value) => {
             if value
                 .decoded_value()
-                .is_some_and(|decoded| trips_a_detector(decoded, patterns))
+                .is_some_and(|decoded| trips_a_detector(decoded, detectors))
             {
                 sensitive.push(SensitiveScalar {
                     key: key.to_owned(),
@@ -769,7 +814,7 @@ fn collect_detected_scalars(
         DocumentNode::Object(fields) => collect_tree_fields(
             DocumentNode::Object(fields),
             policy,
-            patterns,
+            detectors,
             sensitive,
             quarantine_findings,
         ),
@@ -779,7 +824,7 @@ fn collect_detected_scalars(
                     item,
                     key,
                     policy,
-                    patterns,
+                    detectors,
                     sensitive,
                     quarantine_findings,
                 );
@@ -990,7 +1035,7 @@ pub fn sanitize_code_source_bytes(
         CodeSourceShapeV1::CodeOrProse => {
             let patterns = credential_patterns()?;
             patterns
-                .checked(raw_only(&source, patterns))
+                .checked(raw_only(&source, EntropyScope::Code, patterns))
                 .map_err(|_| DetectionError::Initialization)?
         }
     };
