@@ -57,6 +57,7 @@ export type OperationMethods = {
 
 export interface OperationStreamResume {
   resumeToken: string;
+  /** Next undelivered sequence, not the open frame's publication watermark. */
   nextSequence: number | bigint | string;
 }
 
@@ -162,7 +163,6 @@ interface SseFrame {
 }
 
 interface StreamFrontier {
-  nextSequence: string;
   resumeToken?: string;
 }
 
@@ -343,8 +343,8 @@ function parseJson(text: string, status: number): unknown {
   }
 }
 
-function incrementDecimal(value: string): string | undefined {
-  return /^[0-9]+$/.test(value) ? (BigInt(value) + 1n).toString() : undefined;
+function incrementDecimal(value: string): string {
+  return (BigInt(value) + 1n).toString();
 }
 
 async function waitForReconnect(
@@ -550,6 +550,7 @@ function decodeSse(
       !isRecord(frontier) ||
       !isSafeUnsignedInteger(frontier.next_sequence) ||
       !isSafeUnsignedInteger(frontier.retained_from_sequence) ||
+      frontier.retained_from_sequence > frontier.next_sequence ||
       (frontier.resume_token !== null &&
         typeof frontier.resume_token !== "string")
     ) {
@@ -566,7 +567,6 @@ function decodeSse(
     return {
       event,
       frontier: {
-        nextSequence: String(frontier.next_sequence),
         ...(typeof frontier.resume_token === "string"
           ? { resumeToken: frontier.resume_token }
           : {}),
@@ -614,6 +614,8 @@ function decodeSse(
       !isRecord(gap.frontier) ||
       !isSafeUnsignedInteger(gap.frontier.next_sequence) ||
       !isSafeUnsignedInteger(gap.frontier.retained_from_sequence) ||
+      gap.frontier.retained_from_sequence > gap.frontier.next_sequence ||
+      gap.last_missing_sequence >= gap.frontier.next_sequence ||
       (gap.frontier.resume_token !== null &&
         typeof gap.frontier.resume_token !== "string")
     ) {
@@ -654,7 +656,6 @@ function decodeSse(
       sequence,
       lastSequence: String(gap.last_missing_sequence),
       frontier: {
-        nextSequence: (BigInt(gap.last_missing_sequence as number) + 1n).toString(),
         ...(typeof frontier.resume_token === "string"
           ? { resumeToken: frontier.resume_token }
           : {}),
@@ -1000,10 +1001,6 @@ export class TraceDecayClient {
       throw new TraceDecayProtocolError("maxReconnects must be a non-negative integer");
     }
     let reconnects = 0;
-    let lastSequence =
-      nextSequence === undefined || nextSequence === "0"
-        ? undefined
-        : (BigInt(nextSequence) - 1n).toString();
     let reconnectDelayMs = 0;
 
     for (;;) {
@@ -1064,27 +1061,32 @@ export class TraceDecayClient {
               reconnectDelayMs = frame.retryDelayMs;
             }
             const decoded = decodeSse(frame, response.status, operationId);
-            if (decoded.frontier !== undefined) {
-              nextSequence = decoded.frontier.nextSequence;
-              resumeToken = decoded.frontier.resumeToken;
-            }
             if (decoded.sequence !== undefined) {
+              const expected = nextSequence ?? "0";
+              const next = incrementDecimal(decoded.lastSequence ?? decoded.sequence);
+              const terminal = TERMINAL_EVENTS.has(frame.event);
               if (
-                lastSequence !== undefined &&
-                BigInt(decoded.sequence) <= BigInt(lastSequence)
+                !terminal &&
+                BigInt(decoded.sequence) < BigInt(expected)
               ) {
                 continue;
               }
-              const expected =
-                lastSequence === undefined ? undefined : incrementDecimal(lastSequence);
-              if (expected !== undefined && decoded.sequence !== expected) {
+              // The authority repeats its terminal receipt when a subscriber
+              // resumes exactly one past it. Deliver that completion once.
+              if (decoded.sequence !== expected && !(terminal && next === expected)) {
                 throw new TraceDecayMalformedResponseError(
                   "the daemon returned a non-contiguous SSE sequence",
                   { status: response.status, payload: decoded.event },
                 );
               }
-              lastSequence = decoded.lastSequence ?? decoded.sequence;
-              nextSequence = incrementDecimal(lastSequence);
+              nextSequence = next;
+            } else {
+              // An open frontier describes published history, not delivered
+              // history. Only a sequenced event or gap advances this cursor.
+              nextSequence ??= "0";
+            }
+            if (decoded.frontier !== undefined) {
+              resumeToken = decoded.frontier.resumeToken;
             }
             yield {
               event: frame.event,
