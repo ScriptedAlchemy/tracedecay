@@ -23,7 +23,7 @@ single_version_override(
     ],
     patch_strip = 1,
 )
-bazel_dep(name = "aspect_rules_js", version = "3.5.1")
+bazel_dep(name = "aspect_rules_js", version = "3.5.2")
 # Apply npm_import's directory traversal normalization to extraction actions
 # too, before a remote worker uploads the package TreeArtifact.
 single_version_override(
