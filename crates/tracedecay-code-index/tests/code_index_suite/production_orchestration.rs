@@ -3430,7 +3430,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         buffer.extend_from_slice(&bytes[start..end]);
         Ok(())
     };
-    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
+    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
         .expect("the fixture's own segments must verify against its manifest");
     for (corrupted, _) in PARTITIONED_FORMAT_SEGMENTS {
         let flip = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
@@ -3449,7 +3449,12 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             Ok(())
         };
         assert!(
-            CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, flip).is_err(),
+            CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
+                &manifest,
+                |_, _| false,
+                flip
+            )
+            .is_err(),
             "one flipped byte in segment {corrupted} must fail authentication"
         );
         let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
@@ -3637,7 +3642,8 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
     for refusal in [
         CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest).err(),
         CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest).err(),
-        CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read).err(),
+        CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
+            .err(),
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
             &SharedDecodedContentPoolV1::default(),
@@ -3780,7 +3786,7 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         buffer.extend_from_slice(&bytes[start..end]);
         Ok(())
     };
-    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
+    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
         .expect("a child encoded without reuse must be self-sufficient");
     assert_eq!(
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
