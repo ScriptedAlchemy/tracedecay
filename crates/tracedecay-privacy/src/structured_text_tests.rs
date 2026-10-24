@@ -26,6 +26,7 @@ use super::structured_text::{
 };
 
 mod code_shape;
+mod identifier_tokens;
 
 /// Ordinary words: no credential prefix, no digits, shorter than the entropy
 /// floor, and containing no substring the credential patterns know.
