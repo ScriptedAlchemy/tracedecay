@@ -19,6 +19,37 @@ repositories do not select it. Without a host extension, including under
 The ignored `.bazelrc.local` remains available for later per-checkout overrides;
 command-line options take precedence over rc settings.
 
+## Workstation and remote CPUs share one scheduler
+
+The repository's `fleet` profile sends Rust compilation and test actions to
+NativeLink. A workstation enrolled as a NativeLink worker contributes its CPU
+and memory alongside the other workers. In this setup, Bazel's `remote` label
+means execution through the shared scheduler; it does not mean execution only
+on another physical machine. Ubuntu-main coordinates the pool, while both
+Ubuntu-main and the enrolled Omarchy workstation can execute Linux actions.
+
+Use the normal `bazel build` and `bazel test` commands with the host profile
+above. No per-command Rustc or TestRunner strategy overrides are needed. The
+scheduler admits actions against each worker's advertised capacity and action
+requirements. Keep CPU counts, memory limits, in-flight action limits, private
+addresses, and the client's `--jobs` queue depth in host configuration. A queue
+deeper than the available worker slots lets the shared scheduler distribute
+ready actions; it does not increase the workers' admission limits. Dependency
+chains and memory-intensive links can still leave CPUs idle.
+
+Do not add a competing local dynamic branch on a workstation whose cores are
+already enrolled in that pool: Bazel and NativeLink would independently admit
+work against the same machine. Dynamic execution is useful for a client that
+is not itself a fleet worker, such as a GitHub-hosted runner. That client's
+later `.bazelrc.local` can select dynamic strategies with its own resource
+limits, as the CI setup does for tests. Dynamic execution races duplicate local
+and remote copies; it is not a partition of work between the machines.
+
+Verify distribution using executed-action worker identities or worker metrics,
+not the coordinator address, cache hits, or Bazel's aggregate `remote` count.
+Changing a worker's advertised capacity requires measurement on that host;
+repository settings cannot safely infer its available CPU or RAM.
+
 Use `rbe-linux` on Linux x86_64 clients, or `rbe-macos` on Apple Silicon macOS
 clients. These configurations attach `OSFamily` and `cpu_arch` execution
 properties and matching Bazel constraints to the host platform. The scheduler

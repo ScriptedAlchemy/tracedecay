@@ -112,6 +112,14 @@ build --enable_platform_specific_config
 
 # Host profiles select compatible execution pools; .bazelrc.local can override
 # individual checkouts. Private endpoints and capacity stay outside the repo.
+# A fleet-enrolled workstation contributes through its NativeLink worker.
+# Submit compilation and tests to the common scheduler so it accounts for
+# local and remote worker capacity together, without racing a second local copy.
+# Clients without a local worker (such as hosted CI) may override selected
+# mnemonics with dynamic execution in their later .bazelrc.local profile.
+build:fleet --strategy=Rustc=remote
+build:fleet --strategy=TestRunner=remote
+
 build:rbe-linux --host_platform=//scripts/bazel/platforms:linux_x86_64
 build:rbe-linux --platforms=//scripts/bazel/platforms:linux_x86_64
 build:rbe-linux --extra_toolchains=@zig_sdk//toolchain:linux_amd64_gnu.2.31
