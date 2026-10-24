@@ -11,12 +11,12 @@ TraceDecay host packaging has two independent layers:
 
 Compiled `HostBundleManifestV1` values are the first-party installation
 catalog. A dry run verifies schema, compatibility, and content identity and
-reports owned paths, competing-extension claims, backups, and the
-host-specific rollback seam without opening a writer. Apply,
-update, repair, and uninstall require explicit confirmation and use atomic
-backups, ownership receipts, and interrupted-operation recovery. Unrelated
-host configuration is parsed with the host adapter's JSON/TOML library and is
-never replaced wholesale.
+reports owned paths and competing-extension claims without opening a writer.
+Apply, update, repair, and uninstall use atomic single-file publication and
+ownership receipts. A failure leaves completed changes in place. The next
+install or repair observes that state and converges forward. No previous file
+contents or undo records are retained. Unrelated host configuration is parsed
+with the host adapter's JSON/TOML library and preserved.
 
 ## Host routes
 
@@ -115,11 +115,6 @@ Cursor CLI binaries exist for `hook-cursor-subagent-start` and
 `hook-cursor-before-submit-prompt`; the Cursor bundle does not wire those
 events. Treat them as typed-unavailable unless Cursor grows those adapter
 events.
-
-The feedback rollback switch is a first-party core-component transition. Dry run,
-apply receipt, and restore all bind one exact host. Restoring replays the prior
-compiled core manifest as a repair, so another host or MCP companion keeps
-running and unrelated host configuration remains untouched.
 
 ## First-party catalog
 

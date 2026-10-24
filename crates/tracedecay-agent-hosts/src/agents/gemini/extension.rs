@@ -32,7 +32,7 @@ use serde_json::json;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::agents::serve_args::ServeArgs;
-use crate::agents::{host_cli, load_json_file, record_host_config_observation_bytes};
+use crate::agents::{host_cli, load_json_file};
 
 /// Name of Gemini CLI's lifecycle binary.
 pub(super) const GEMINI_CLI: &str = "gemini";
@@ -127,9 +127,7 @@ pub(super) fn installed_manifest_path(home: &Path) -> PathBuf {
     installed_extension_dir(home).join(EXTENSION_MANIFEST_FILE)
 }
 
-/// Gemini CLI's shared settings file. Host-owned, and under the extension
-/// model no longer a TraceDecay write target, only an observation target, so
-/// a lifecycle transaction can roll back whatever the host CLI changed there.
+/// Gemini CLI's shared settings file, observed for lifecycle verification.
 pub(super) fn settings_path(home: &Path) -> PathBuf {
     gemini_home(home).join("settings.json")
 }
@@ -387,36 +385,13 @@ pub(super) fn host_reported_extensions(home: &Path) -> Result<host_cli::HostCliO
 
 /// Run one `gemini extensions ...` step, converting a failed invocation into
 /// the host's own diagnosis.
-///
-/// The post-command bytes of `~/.gemini/settings.json` are recorded through
-/// the active host transaction, read exactly once, after the child exits, so
-/// the transaction's existing rollback authority can restore the pre-command
-/// document if the command fails or a later verification rejects its effect.
-/// Reading again after recording would let a foreign writer be absorbed into
-/// the transaction's intended state.
 #[tracing::instrument(name = "hosts.agent.gemini.extension_step", level = "trace", skip_all)]
 fn run_gemini_extension_step(gemini: &Path, args: &[&str], home: &Path) -> Result<()> {
-    let settings = settings_path(home);
     let outcome = host_cli::run_host_cli(gemini, args, home)?;
-    let observed = read_optional_bytes(&settings)?;
-    record_host_config_observation_bytes(&settings, observed.as_deref())?;
     if outcome.succeeded() {
         return Ok(());
     }
     Err(TraceDecayError::Config {
         message: outcome.failure_message(),
     })
-}
-
-fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(TraceDecayError::Config {
-            message: format!(
-                "failed to read {} after the Gemini CLI: {error}",
-                path.display()
-            ),
-        }),
-    }
 }

@@ -92,35 +92,6 @@ pub struct HostBundleCliOptions {
     pub adopt: bool,
 }
 
-#[derive(Clone, Debug, Subcommand)]
-pub enum FeedbackRollbackAction {
-    /// Preview switching the installed Core feedback route to this binary's compiled route
-    DryRun {
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: String,
-    },
-    /// Apply the compiled Core feedback route and persist a restart-safe state file
-    Apply {
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: String,
-        /// Durable rollback state file
-        #[arg(long)]
-        state: String,
-        /// Confirm the feedback-route mutation
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Restore the previous Core feedback route from a durable state file
-    Restore {
-        /// Durable rollback state file created by apply
-        #[arg(long)]
-        state: String,
-        /// Confirm the feedback-route restoration
-        #[arg(long)]
-        yes: bool,
-    },
-}
-
 /// Code intelligence for Rust codebases.
 #[derive(Parser)]
 #[command(
@@ -358,16 +329,6 @@ pub enum Commands {
         /// Remove the selected project-local integration from the current directory
         #[arg(long, requires = "agent")]
         local: bool,
-    },
-    /// Dry-run, apply, or restore the direct host feedback-route rollback switch
-    #[command(
-        name = "feedback-rollback",
-        long_about = FEEDBACK_ROLLBACK_LONG_ABOUT,
-        after_help = FEEDBACK_ROLLBACK_AFTER_HELP
-    )]
-    FeedbackRollback {
-        #[command(subcommand)]
-        action: FeedbackRollbackAction,
     },
     /// PreToolUse hook handler (called by Claude Code, not by users directly)
     #[command(name = "hook-pre-tool-use", hide = true)]

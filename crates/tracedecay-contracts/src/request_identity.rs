@@ -86,7 +86,6 @@ impl GlobalOpaqueIdentityKind {
 pub enum GlobalOperationIdentityKind {
     HostArtifact,
     HostComponentSet,
-    HostFeedbackRollback,
 }
 
 impl GlobalOperationIdentityKind {
@@ -94,7 +93,6 @@ impl GlobalOperationIdentityKind {
         match self {
             Self::HostArtifact => b"tracedecay.unique-operation.host-artifact.v1",
             Self::HostComponentSet => b"tracedecay.unique-operation.host-component-set.v1",
-            Self::HostFeedbackRollback => b"tracedecay.unique-operation.host-feedback-rollback.v1",
         }
     }
 }

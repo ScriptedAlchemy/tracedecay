@@ -363,12 +363,70 @@ fn not_found(job_id: &str) -> JsonError {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use std::fs;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
     use super::*;
     use crate::{DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1};
+    use tracedecay_automation_runtime::automation::jobs::jobs_path;
+
+    #[tokio::test]
+    async fn malformed_sibling_refuses_every_crud_write_without_reconcile() {
+        for operation in ["create", "update", "delete"] {
+            let (_project, mut state) =
+                crate::events_api::dashboard_state_fixture("project.dashboard-jobs-lossless-crud")
+                    .await;
+            let reconciles = Arc::new(AtomicUsize::new(0));
+            let reconcile_count = Arc::clone(&reconciles);
+            state.automation_scheduler_reconciler = Some(Arc::new(move || {
+                reconcile_count.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
+                })
+            }));
+            let raw = br#"{"schema_version":1,"jobs":[{"id":"job-a","name":"A","prompt":"Do A"},{"id":"job-b","name":"B","private":"private-job-payload"}]}"#;
+            let path = jobs_path(&state.dashboard_root);
+            fs::write(&path, raw).expect("malformed fixture document writes");
+
+            let result = match operation {
+                "create" => create(
+                    State(state.clone()),
+                    Json(json!({"id":"job-c", "name":"C", "prompt":"Do C"})),
+                )
+                .await
+                .map(|_| ()),
+                "update" => update(
+                    State(state.clone()),
+                    AxumPath("job-a".to_owned()),
+                    Json(json!({"name":"Renamed"})),
+                )
+                .await
+                .map(|_| ()),
+                "delete" => delete(State(state), AxumPath("job-a".to_owned()))
+                    .await
+                    .map(|_| ()),
+                _ => unreachable!(),
+            };
+
+            let (status, body) = result.expect_err("CRUD must refuse a partial stored list");
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{operation}");
+            assert!(
+                !body["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("private-job-payload"),
+                "{operation} leaked stored data: {body:?}"
+            );
+            assert_eq!(
+                fs::read(&path).expect("stored document remains readable"),
+                raw
+            );
+            assert_eq!(reconciles.load(Ordering::SeqCst), 0, "{operation}");
+        }
+    }
 
     #[test]
     fn accepted_user_job_runs_without_a_tokio_runtime() {

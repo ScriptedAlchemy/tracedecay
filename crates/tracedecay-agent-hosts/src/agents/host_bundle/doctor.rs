@@ -412,61 +412,6 @@ pub fn inspect_installed_host_bundle_components_at(
             repair_action: component_repair_action,
         });
     }
-    for entry in fs::read_dir(&control_root)
-        .map_err(|_| host_bundle_storage_failure!())?
-        .filter_map(Result::ok)
-    {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("feedback-rollback.") || !name.ends_with(".v1.json") {
-            continue;
-        }
-        let Some(value) = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        else {
-            components.push(corrupt_component_result(path, None, None));
-            continue;
-        };
-        let Some(host) = value
-            .get("host")
-            .cloned()
-            .and_then(|host| serde_json::from_value::<HostKindV1>(host).ok())
-        else {
-            components.push(corrupt_component_result(path, None, None));
-            continue;
-        };
-        let state_path = value
-            .get("state_path")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("<state-path>");
-        let restore_action = format!(
-            "run `tracedecay feedback-rollback restore --state {} --yes` for {}",
-            state_path,
-            host.descriptor().cli_id()
-        );
-        let component = HostComponentV1::Core;
-        if let Some(result) = components
-            .iter_mut()
-            .find(|result| result.host == Some(host) && result.component == Some(component))
-        {
-            result.state = HostBundleComponentDoctorStateV1::Repairable;
-            result.receipt_path.clone_from(&path);
-            result.repair_action.clone_from(&restore_action);
-        } else {
-            components.push(HostBundleComponentDoctorResultV1 {
-                receipt_path: path,
-                host: Some(host),
-                component: Some(component),
-                state: HostBundleComponentDoctorStateV1::Repairable,
-                registration: None,
-                artifacts: Vec::new(),
-                repair_action: restore_action,
-            });
-        }
-    }
     Ok(HostBundleDoctorReportV1 {
         components,
         ..HostBundleDoctorReportV1::default()

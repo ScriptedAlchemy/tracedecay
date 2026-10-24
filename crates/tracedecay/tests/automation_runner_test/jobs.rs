@@ -21,6 +21,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedule, cron_is_due, parse_schedule,
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
+use tracedecay_domain::errors::TraceDecayError;
 
 fn sample_job(id: &str) -> AutomationJob {
     AutomationJob {
@@ -127,7 +128,7 @@ async fn job_persistence_round_trips() {
 }
 
 #[tokio::test]
-async fn load_jobs_skips_corrupt_entries_without_losing_valid_jobs() {
+async fn load_jobs_refuses_corrupt_entries_without_rewriting_the_document() {
     let temp = tempdir().unwrap();
     let root = temp.path();
     let valid_one = sample_job("valid-one");
@@ -145,15 +146,15 @@ async fn load_jobs_skips_corrupt_entries_without_losing_valid_jobs() {
             valid_two
         ]
     });
-    fs::write(
-        root.join("automation_jobs.json"),
-        serde_json::to_vec_pretty(&document).unwrap(),
-    )
-    .unwrap();
+    let bytes = serde_json::to_vec_pretty(&document).unwrap();
+    let path = root.join("automation_jobs.json");
+    fs::write(&path, &bytes).unwrap();
 
-    let loaded = load_jobs(root).await.unwrap();
-    let ids: Vec<&str> = loaded.iter().map(|job| job.id.as_str()).collect();
-    assert_eq!(ids, vec!["valid-one", "valid-two"]);
+    let error = load_jobs(root).await.unwrap_err();
+    assert!(
+        matches!(error, TraceDecayError::Config { message } if message.contains("invalid job at index 1"))
+    );
+    assert_eq!(fs::read(path).unwrap(), bytes);
 }
 
 #[tokio::test]

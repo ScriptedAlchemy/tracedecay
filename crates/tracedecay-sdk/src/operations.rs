@@ -1391,14 +1391,6 @@ typed_operation!(
     SourceEditReconcile, source_edit_reconcile, "operation.application.source_edit_reconcile", OperationTransport::McpTool { tool_name: "tracedecay_source_edit_reconcile" }, "binding.mcp.source_edit_reconcile.v1", EffectClass::SourceEdit, IdempotencyContract::Required, SdkRequestIdControlV1::ServerMinted, SdkResultSemanticsV1::SchemaOnly, true, &[CancellationPoint::BeforeAdmission, CancellationPoint::BeforeEffect, CancellationPoint::EffectInFlight, CancellationPoint::AfterCommit], 30000, DeadlineBehavior::ReturnEffectReceipt, ReconciliationContract::Required, ReceiptContract::DurableEffect, &[TerminalState::Completed, TerminalState::Cancelled, TerminalState::TimedOut, TerminalState::Failed, TerminalState::EffectUnknown, TerminalState::Partial], "schema.application.source-edit.reconcile.result", 1
 );
 
-pub mod source_edit_rollback {
-    pub type Request = tracedecay_contracts::source_edit::SourceEditRollbackSurfaceRequestV1;
-    pub type Result = tracedecay_contracts::source_edit::SourceEditSurfaceResultV1;
-}
-typed_operation!(
-    SourceEditRollback, source_edit_rollback, "operation.application.source_edit_rollback", OperationTransport::McpTool { tool_name: "tracedecay_source_edit_rollback" }, "binding.mcp.source_edit_rollback.v1", EffectClass::SourceEdit, IdempotencyContract::Required, SdkRequestIdControlV1::ServerMinted, SdkResultSemanticsV1::SchemaOnly, true, &[CancellationPoint::BeforeAdmission, CancellationPoint::BeforeEffect, CancellationPoint::EffectInFlight, CancellationPoint::AfterCommit], 30000, DeadlineBehavior::ReturnEffectReceipt, ReconciliationContract::Required, ReceiptContract::DurableEffect, &[TerminalState::Completed, TerminalState::Cancelled, TerminalState::TimedOut, TerminalState::Failed, TerminalState::EffectUnknown, TerminalState::Partial], "schema.application.source-edit.rollback.result", 1
-);
-
 pub mod application_source_lines {
     pub type Request = tracedecay_contracts::retrieval::SourceLinesRequest;
     pub type Result = tracedecay_contracts::retrieval::SourceLinesResult;

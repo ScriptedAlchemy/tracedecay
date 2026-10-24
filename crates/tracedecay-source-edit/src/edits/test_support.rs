@@ -18,7 +18,7 @@ use tracedecay_contracts::{
     OperationTermination, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext,
     RequestId, ResolvedScope, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
     SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
-    source_edit_reconciliation_operation, source_edit_rollback_operation,
+    source_edit_reconciliation_operation,
 };
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
@@ -310,7 +310,6 @@ pub(super) fn fixture_request_for_edit(
 ) -> SourceEditEffectRequestV1 {
     let operation = source_edit_operation(edit.kind()).unwrap();
     let reconciliation_operation = source_edit_reconciliation_operation().unwrap();
-    let rollback_operation = source_edit_rollback_operation().unwrap();
     let scope = fixture_scope();
     let grant = CapabilityGrantSnapshot::new(
         tracedecay_contracts::CapabilityGrantId::new("grant.edit.fixture").unwrap(),
@@ -323,12 +322,10 @@ pub(super) fn fixture_request_for_edit(
         BTreeSet::from([
             operation.capability_id().clone(),
             reconciliation_operation.capability_id().clone(),
-            rollback_operation.capability_id().clone(),
         ]),
         BTreeSet::from([
             operation.use_case_id().clone(),
             reconciliation_operation.use_case_id().clone(),
-            rollback_operation.use_case_id().clone(),
         ]),
         DisclosureClass::Sensitive,
     )
@@ -503,10 +500,6 @@ impl EffectUnknownFixture {
             .join("source-edit-transactions-v1")
     }
 
-    pub(super) fn write_partial_postimage(&self) {
-        fs::write(self.destination_path(), MOVE_DESTINATION_POSTIMAGE).unwrap();
-    }
-
     pub(super) fn write_all_postimages(&self) {
         fs::write(self.source_path(), MOVE_SOURCE_POSTIMAGE).unwrap();
         fs::write(self.destination_path(), MOVE_DESTINATION_POSTIMAGE).unwrap();
@@ -526,6 +519,19 @@ impl EffectUnknownFixture {
             fs::read(self.destination_path()).unwrap(),
             MOVE_DESTINATION_POSTIMAGE
         );
+    }
+
+    pub(super) fn assert_partial(&self) {
+        assert_eq!(fs::read(self.source_path()).unwrap(), MOVE_SOURCE_PREIMAGE);
+        assert_eq!(
+            fs::read(self.destination_path()).unwrap(),
+            MOVE_DESTINATION_POSTIMAGE
+        );
+    }
+
+    pub(super) fn write_initial_state(&self) {
+        fs::write(self.source_path(), MOVE_SOURCE_PREIMAGE).unwrap();
+        fs::write(self.destination_path(), MOVE_DESTINATION_PREIMAGE).unwrap();
     }
 
     #[cfg(unix)]
@@ -671,6 +677,6 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
         authorization,
         result,
     };
-    fixture.assert_preimages();
+    fixture.assert_partial();
     fixture
 }

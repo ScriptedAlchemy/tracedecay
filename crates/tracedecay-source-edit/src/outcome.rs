@@ -11,14 +11,15 @@ use tracedecay_contracts::source_edit::{
 ///
 /// Receipts intentionally keep no caller-supplied edit text, preview diff,
 /// moved/replaced span, import text, diagnostic text, or impact detail. The
-/// active transaction journal separately retains bounded exact preimages until
-/// commit or rollback so restart recovery can restore the accepted workspace.
+/// active transaction journal also retains only paths, digests, and effect metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEditDurableOutcomeV1 {
     pub(super) operation: tracedecay_tool_catalog::UseCaseId,
     pub(super) success: bool,
     pub(super) files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) observed_state: Option<ManifestDigest>,
     pub(super) change_count: Option<usize>,
     pub(super) line: Option<u32>,
     pub(super) before: Option<bool>,
@@ -33,10 +34,36 @@ pub struct SourceEditDurableOutcomeV1 {
 }
 
 impl SourceEditDurableOutcomeV1 {
+    pub(super) fn inspection(
+        operation: tracedecay_tool_catalog::UseCaseId,
+        files: Vec<String>,
+        observed_state: ManifestDigest,
+    ) -> Self {
+        Self {
+            operation,
+            success: true,
+            files,
+            observed_state: Some(observed_state),
+            change_count: None,
+            line: None,
+            before: None,
+            import_count: None,
+            finding_count: None,
+            failed: false,
+            cancelled: false,
+            timed_out: false,
+            effect_unknown: false,
+            reconciled: false,
+        }
+    }
+
     pub(super) fn from_live(
         operation: &tracedecay_tool_catalog::UseCaseId,
         outcome: &SourceEditOutcome,
     ) -> Self {
+        if let SourceEditOutcome::DurableMetadata(result) = outcome {
+            return result.clone();
+        }
         let (change_count, line, before, import_count, finding_count) = match outcome {
             SourceEditOutcome::MultiEdit(result) => {
                 (Some(result.applied_count), None, None, None, None)
@@ -74,6 +101,7 @@ impl SourceEditDurableOutcomeV1 {
             operation: operation.clone(),
             success: outcome.success(),
             files: outcome.candidate_files(),
+            observed_state: None,
             change_count,
             line,
             before,
@@ -94,7 +122,9 @@ impl SourceEditDurableOutcomeV1 {
             object.insert(
                 "message".to_owned(),
                 Value::String(
-                    if self.failed {
+                    if self.observed_state.is_some() {
+                        "source edit candidate files inspected; original effect remains pending"
+                    } else if self.failed {
                         "source edit failed before the effect"
                     } else if self.cancelled {
                         "source edit was cancelled"
@@ -162,6 +192,9 @@ impl SourceEditOutcome {
             }
             Self::EffectUnknown { message } => message,
             Self::Reconciled { message, .. } => message,
+            Self::DurableMetadata(result) if result.observed_state.is_some() => {
+                "source edit candidate files inspected; original effect remains pending"
+            }
             Self::DurableMetadata(result) if result.failed => {
                 "source edit failed before the effect"
             }
@@ -179,26 +212,6 @@ impl SourceEditOutcome {
         }
     }
 
-    pub fn touched_files(&self, dry_run: bool) -> Vec<String> {
-        if dry_run || !self.success() {
-            return Vec::new();
-        }
-        match self {
-            Self::Edit(result) => vec![result.file_path.clone()],
-            Self::MultiEdit(result) => vec![result.file_path.clone()],
-            Self::Insert(result) => vec![result.file_path.clone()],
-            Self::AstGrep(result) => vec![result.file_path.clone()],
-            Self::Move(result) => vec![result.source_file.clone(), result.dest_file.clone()],
-            Self::Rename(result) => result.files.iter().map(|file| file.file.clone()).collect(),
-            Self::Failed { .. }
-            | Self::Cancelled { .. }
-            | Self::TimedOut { .. }
-            | Self::EffectUnknown { .. } => Vec::new(),
-            Self::Reconciled { .. } => Vec::new(),
-            Self::DurableMetadata(result) => result.files.clone(),
-        }
-    }
-
     pub(super) fn candidate_files(&self) -> Vec<String> {
         match self {
             Self::Edit(result) => vec![result.file_path.clone()],
@@ -213,33 +226,6 @@ impl SourceEditOutcome {
             | Self::EffectUnknown { .. } => Vec::new(),
             Self::Reconciled { .. } => Vec::new(),
             Self::DurableMetadata(result) => result.files.clone(),
-        }
-    }
-
-    pub fn file_path(&self) -> Option<&str> {
-        match self {
-            Self::Edit(result) => Some(&result.file_path),
-            Self::MultiEdit(result) => Some(&result.file_path),
-            Self::Insert(result) => Some(&result.file_path),
-            Self::AstGrep(result) => Some(&result.file_path),
-            Self::Move(_)
-            | Self::Rename(_)
-            | Self::Failed { .. }
-            | Self::Cancelled { .. }
-            | Self::TimedOut { .. }
-            | Self::EffectUnknown { .. }
-            | Self::Reconciled { .. } => None,
-            Self::DurableMetadata(result) if result.files.len() == 1 => {
-                result.files.first().map(String::as_str)
-            }
-            Self::DurableMetadata(_) => None,
-        }
-    }
-
-    pub fn as_move(&self) -> Option<&MoveResult> {
-        match self {
-            Self::Move(result) => Some(result),
-            _ => None,
         }
     }
 

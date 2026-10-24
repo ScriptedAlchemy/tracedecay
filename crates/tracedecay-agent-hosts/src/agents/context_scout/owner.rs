@@ -9,8 +9,8 @@ use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutClaimRequestV1, ContextScoutClaimWindowV1,
     ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1,
-    ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1, ContextScoutLeaseV1,
-    ContextScoutModelBackendV1, ContextScoutModelOutcomeV1, ContextScoutWorkV1,
+    ContextScoutDurableQueueEntryV1, ContextScoutLeaseV1, ContextScoutModelBackendV1,
+    ContextScoutModelOutcomeV1, ContextScoutWorkV1,
 };
 use tracedecay_domain::configuration::{ContextScoutIntentKindV1, ContextScoutIntentSettingsV1};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
@@ -561,39 +561,6 @@ impl ProjectContextScoutOwnerV1 {
             .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
-    #[tracing::instrument(
-        name = "hosts.agent.context_scout.record_feedback",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn record_feedback(
-        &self,
-        receipt: &ContextScoutDeliveryReceiptV1,
-        feedback: ContextScoutFeedbackV1,
-    ) -> ContextScoutDurableStoreOutcomeV1 {
-        self.runtime
-            .lock()
-            .await
-            .record_feedback(receipt, feedback)
-            .await
-            .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
-    }
-
-    pub async fn status(
-        &self,
-        requested: ContextScoutControlV1,
-    ) -> Result<ContextScoutStatusV1, ContextScoutErrorV1> {
-        let configuration = self.configuration.read().await;
-        let control = configuration
-            .as_ref()
-            .ok_or(ContextScoutErrorV1::ConfigurationUnavailable)?
-            .control();
-        if requested != control {
-            return Err(ContextScoutErrorV1::ConfigurationUnavailable);
-        }
-        self.status_for_control(control).await
-    }
-
     pub async fn cancel(
         &self,
         work: ContextScoutWorkV1,
@@ -823,43 +790,6 @@ impl ProjectContextScoutOwnerV1 {
         self.status_for_control(control).await
     }
 
-    #[tracing::instrument(name = "hosts.agent.context_scout.recent", level = "trace", skip_all)]
-    pub async fn recent(
-        &self,
-        protected_session_id: [u8; 32],
-        limit: usize,
-    ) -> Result<ContextScoutRecentStateV1, ContextScoutErrorV1> {
-        let configuration = self.configuration.read().await;
-        let control = configuration
-            .as_ref()
-            .ok_or(ContextScoutErrorV1::ConfigurationUnavailable)?
-            .control();
-        let observed_at =
-            current_utc_micros().ok_or(ContextScoutErrorV1::ConfigurationUnavailable)?;
-        match self
-            .store
-            .recent_for_protected_session(
-                protected_session_id,
-                control.configuration_revision,
-                observed_at,
-                limit,
-            )
-            .await
-        {
-            ContextScoutRecentReadOutcomeV1::Ready(recent)
-                if recent_has_single_exact_address(&recent) =>
-            {
-                Ok(recent)
-            }
-            ContextScoutRecentReadOutcomeV1::Ready(_) => {
-                Err(ContextScoutErrorV1::ConfigurationUnavailable)
-            }
-            ContextScoutRecentReadOutcomeV1::Unavailable => {
-                Err(ContextScoutErrorV1::ConfigurationUnavailable)
-            }
-        }
-    }
-
     pub async fn recent_exact(
         &self,
         address: ContextScoutAddressV1,
@@ -882,18 +812,6 @@ impl ProjectContextScoutOwnerV1 {
                 Err(ContextScoutErrorV1::ConfigurationUnavailable)
             }
         }
-    }
-
-    pub async fn explain(
-        &self,
-        protected_session_id: [u8; 32],
-        limit: usize,
-    ) -> Result<ContextScoutExplanationV1, ContextScoutErrorV1> {
-        let recent = self.recent(protected_session_id, limit).await?;
-        Ok(ContextScoutExplanationV1 {
-            status: status_with_recent(self.configured_status().await?, &recent),
-            recent,
-        })
     }
 
     pub async fn explain_exact(
@@ -983,15 +901,6 @@ impl ProjectContextScoutOwnerV1 {
         let status = self.runtime.lock().await.status(control)?;
         let recent = self.recent_project_state(STARTUP_RECOVERY_LIMIT).await?;
         Ok(status_with_recent(status, &recent))
-    }
-
-    pub async fn claim(
-        &self,
-        address: ContextScoutAddressV1,
-        now: UtcMicros,
-        lease: ContextScoutLeaseV1,
-    ) -> ContextScoutDurableClaimOutcomeV1 {
-        self.store.claim(address, now, lease).await
     }
 
     pub async fn public_claim_mutation(
@@ -1243,27 +1152,6 @@ fn status_with_recent(
         status.last_feedback = delivered.feedback.map(|feedback| feedback.kind);
     }
     status
-}
-
-fn recent_has_single_exact_address(recent: &ContextScoutRecentStateV1) -> bool {
-    let mut address = None;
-    recent
-        .pending
-        .iter()
-        .map(|entry| entry.work.address)
-        .chain(
-            recent
-                .deliveries
-                .iter()
-                .map(|delivery| delivery.entry.work.address),
-        )
-        .all(|candidate| match address {
-            Some(expected) => expected == candidate,
-            None => {
-                address = Some(candidate);
-                true
-            }
-        })
 }
 
 struct InflightContextScoutRunV1<'a> {

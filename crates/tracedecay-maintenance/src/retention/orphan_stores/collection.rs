@@ -188,7 +188,7 @@ impl VerifiedStore {
             root,
             data_root,
         } = self;
-        remove_open_dir_all_nofollow(root, &mut || Ok(())).map_err(|error| {
+        remove_open_dir_all_nofollow(root).map_err(|error| {
             CollectionMutationFailure::from_io_error(
                 CollectionMutationOperation::RecursiveRemove,
                 data_root.clone(),

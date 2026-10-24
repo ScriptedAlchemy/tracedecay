@@ -5,8 +5,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::{
-    PlannedSourceEditFile, SourceEditFileAuthority, SourceEditGraphReadV1,
-    capture_planned_source_edit, publish_planned_source_edit,
+    SourceEditFileAuthority, SourceEditGraphReadV1, capture_planned_source_edit,
+    publish_planned_source_edit,
 };
 use tracedecay_contracts::source_edit::{
     RenameDispositionCountsV1, RenameFileEditV1, RenameHazardKindV1, RenameHazardV1,
@@ -312,7 +312,6 @@ pub(crate) async fn rename_symbol(
         protected_values: Vec::new(),
         impact: RenameImpactV1::default(),
         dry_run,
-        rolled_back: false,
         diff: None,
         message,
     };
@@ -788,7 +787,6 @@ pub(crate) async fn rename_symbol(
             protected_values,
             impact,
             dry_run,
-            rolled_back: false,
             diff: None,
             message: "rename blocked by stale, ambiguous, unsupported, or colliding evidence"
                 .to_owned(),
@@ -798,11 +796,7 @@ pub(crate) async fn rename_symbol(
     if dry_run {
         let mut diff = String::new();
         for file in &planned {
-            capture_planned_source_edit(
-                &file.relative_path,
-                Some(&file.original),
-                Some(&file.modified),
-            );
+            capture_planned_source_edit(&file.relative_path, Some(&file.original), &file.modified);
             if !diff.is_empty() {
                 diff.push('\n');
             }
@@ -832,20 +826,11 @@ pub(crate) async fn rename_symbol(
             protected_values,
             impact,
             dry_run: true,
-            rolled_back: false,
             diff: Some(diff),
             message: edit_success_message(true, "rename previewed"),
         });
     }
 
-    let rollback_files = planned
-        .iter()
-        .map(|file| PlannedSourceEditFile {
-            relative_path: file.relative_path.clone(),
-            expected: Some(file.original.clone()),
-            intended: Some(file.modified.clone()),
-        })
-        .collect::<Vec<_>>();
     let outcome = RenameResult {
         success: true,
         preview_id: Some(identity),
@@ -864,7 +849,6 @@ pub(crate) async fn rename_symbol(
         protected_values,
         impact,
         dry_run: false,
-        rolled_back: false,
         diff: None,
         message: "rename applied".to_owned(),
     };
@@ -872,22 +856,13 @@ pub(crate) async fn rename_symbol(
     {
         let _span = tracing::trace_span!("edits.rename.apply").entered();
         {
-            for file in &rollback_files {
+            for file in &planned {
                 ensure_active(&graph)?;
-                let intended = file
-                    .intended
-                    .as_deref()
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message: format!(
-                            "rename plan lost its postimage for {}",
-                            file.relative_path
-                        ),
-                    })?;
                 publish_planned_source_edit(
                     project_root,
                     &file.relative_path,
-                    file.expected.as_deref(),
-                    intended,
+                    Some(&file.original),
+                    &file.modified,
                 )?;
             }
         }

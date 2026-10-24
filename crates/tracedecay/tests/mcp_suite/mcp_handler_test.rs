@@ -160,8 +160,6 @@ mod skill_view_behavior_test;
 mod skills_automation_test;
 #[cfg(feature = "test-transport")]
 mod source_edit_reconcile_test;
-#[cfg(feature = "test-transport")]
-mod source_edit_rollback_test;
 mod status_runtime_test;
 #[cfg(feature = "test-transport")]
 mod str_replace_behavior_test;

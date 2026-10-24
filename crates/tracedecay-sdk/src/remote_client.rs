@@ -175,7 +175,9 @@ impl EnrolledRemoteClient {
         let authorization =
             HeaderValue::from_bytes([b"Bearer ".as_slice(), credential].concat().as_slice())
                 .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
-        let mut builder = HttpClient::builder().timeout(timeout);
+        let mut builder = HttpClient::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none());
         if endpoint.scheme() == "http" {
             // The loopback-only plaintext admission above is void if a system
             // proxy (`HTTP_PROXY`/`ALL_PROXY`) re-routes the request: the
@@ -458,6 +460,12 @@ fn decode_typed_response<T: Clone + DeserializeOwned>(
     validate_payload: impl Fn(&T) -> bool,
 ) -> Result<RemoteProtocolResponseV1<T>, RemoteClientError> {
     let status = response.status();
+    if status.is_redirection() {
+        return Err(RemoteClientError::Protocol(format!(
+            "remote endpoint returned a redirect (HTTP {}); configure the mounted endpoint directly",
+            status.as_u16()
+        )));
+    }
     let value = response
         .json::<serde_json::Value>()
         .map_err(protocol_error)?;

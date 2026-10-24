@@ -4,36 +4,6 @@ use super::*;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
-#[test]
-fn every_steering_mutation_branch_requires_a_persisted_write_intent() {
-    for (case, original) in steering_mutation_cases() {
-        let root = tempfile::tempdir().unwrap();
-        let steering = root.path().join("tracedecay.md");
-        if let Some(original) = &original {
-            std::fs::write(&steering, original).unwrap();
-        }
-        let blocked_intent_root = root.path().join("blocked-intent-root");
-        std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
-
-        let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
-            install_steering_rules(&steering)
-        })
-        .expect_err(case);
-
-        assert!(
-            error
-                .to_string()
-                .contains("could not create host config write intent directory"),
-            "{case}: unexpected error: {error}"
-        );
-        assert_eq!(
-            std::fs::read(&steering).ok().as_deref(),
-            original.as_deref(),
-            "{case}: failed intent persistence must leave the target byte-identical"
-        );
-    }
-}
-
 fn steering_mutation_cases() -> Vec<(&'static str, Option<Vec<u8>>)> {
     vec![
         (
@@ -116,7 +86,7 @@ fn every_steering_mutation_branch_refuses_a_stale_target() {
         if let Some(original) = original {
             std::fs::write(&steering, original).unwrap();
         }
-        let pause = crate::agents::pause_next_host_config_write_after_validation(&steering);
+        let pause = crate::agents::pause_next_host_config_write_at_publication(&steering);
         let writer_path = steering.clone();
         let writer = std::thread::spawn(move || {
             install_steering_rules(&writer_path).map_err(|error| error.to_string())
@@ -252,35 +222,6 @@ fn steering_uninstall_refuses_a_concurrent_edit_before_empty_deletion() {
 
     assert!(error.contains("changed since it was read"), "{error}");
     assert_eq!(std::fs::read(&steering).unwrap(), foreign);
-}
-
-#[test]
-fn steering_empty_deletion_requires_a_persisted_remove_intent() {
-    let root = tempfile::tempdir().unwrap();
-    let steering = root.path().join("tracedecay.md");
-    let mut facts = Vec::new();
-    crate::agents::recorded_lifecycle(root.path(), &mut facts, false, || {
-        install_steering_rules(&steering)
-    })
-    .unwrap();
-    let original = std::fs::read(&steering).unwrap();
-    let blocked_intent_root = root.path().join("blocked-intent-root");
-    std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
-
-    let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
-        crate::agents::recorded_lifecycle(root.path(), &mut facts, true, || {
-            remove_steering_rules(&steering)
-        })
-    })
-    .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("could not create host config remove intent directory"),
-        "{error}"
-    );
-    assert_eq!(std::fs::read(&steering).unwrap(), original);
 }
 
 #[test]
@@ -429,7 +370,7 @@ fn kiro_component_request(
 }
 
 #[test]
-fn rollback_refuses_a_foreign_registry_write_after_apply() {
+fn verification_refuses_a_foreign_registry_write_after_apply() {
     use crate::agents::host_bundle::{
         HostBundleLifecycleOpV1, HostBundleWriterV1, HostComponentSetRegistrationV1,
         HostComponentSetTransactionV1,
@@ -484,8 +425,8 @@ fn rollback_refuses_a_foreign_registry_write_after_apply() {
     let foreign = br#"{"mcpServers":{"foreign":{"command":"operator"}}}"#;
     std::fs::write(&mcp_path, foreign).unwrap();
     let error = registration
-        .rollback(&component_set.component_set, &request)
-        .expect_err("rollback must refuse to overwrite a later foreign edit");
+        .verify(&component_set.component_set, &request)
+        .expect_err("verification must reject a later foreign edit");
     assert!(
         matches!(
             error,
@@ -496,7 +437,7 @@ fn rollback_refuses_a_foreign_registry_write_after_apply() {
     assert_eq!(
         std::fs::read(&mcp_path).unwrap(),
         foreign,
-        "a refused rollback must leave the later foreign bytes untouched"
+        "verification must leave the later foreign bytes untouched"
     );
 }
 

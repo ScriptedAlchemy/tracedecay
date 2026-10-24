@@ -4,7 +4,7 @@ version = "0.1.0"
 publish = false
 edition.workspace = true
 license = "MIT"
-description = "Durable source-edit preview, apply, rollback, and reconciliation"
+description = "Durable source-edit preview, apply, and reconciliation"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]

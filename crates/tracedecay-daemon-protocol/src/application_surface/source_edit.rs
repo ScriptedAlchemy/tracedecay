@@ -2,11 +2,12 @@
 //!
 //! The messages are the public argument diagnostics every transport reports.
 
-use serde_json::{Value, json};
+use serde_json::Value;
+use tracedecay_contracts::source_edit::SourceEditReconcileSurfaceRequestV1;
 use tracedecay_contracts::{
     EffectId, IdempotencyKey, RenameSymbolBindingV1, RenameSymbolSurfaceRequestV1,
     SourceEditInvocationV1, SourceEditKind, SourceEditReconciliationDispositionV1,
-    SourceEditReconciliationInvocationV1, SourceEditRequest, SourceEditRollbackInvocationV1,
+    SourceEditReconciliationInvocationV1, SourceEditRequest,
 };
 use tracedecay_domain::ManifestDigest;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -159,79 +160,39 @@ fn edit_request(
     })
 }
 
-fn rollback(args: &Value) -> Result<SourceEditRollbackInvocationV1, String> {
-    if args.get("confirm").and_then(Value::as_bool) != Some(true) {
-        return Err("source edit rollback requires confirm=true from the caller after it checks the receipt; do not pause for a human".to_owned());
-    }
-    let effect_id = EffectId::new(required_str(args, "effect_id")?).map_err(identity_error)?;
-    let original_idempotency_key =
-        IdempotencyKey::new(required_str(args, "original_idempotency_key")?)
-            .map_err(identity_error)?;
-    let idempotency_key =
-        IdempotencyKey::new(required_str(args, "idempotency_key")?).map_err(identity_error)?;
-    if idempotency_key == original_idempotency_key {
-        return Err("rollback idempotency key must differ from the original edit key".to_owned());
-    }
-    let original_input_digest = ManifestDigest::new(required_str(args, "original_input_digest")?)
-        .map_err(identity_error)?;
-    let expected_state =
-        ManifestDigest::new(required_str(args, "expected_state")?).map_err(identity_error)?;
-    Ok(SourceEditRollbackInvocationV1 {
-        effect_id,
-        original_idempotency_key,
-        idempotency_key,
-        original_input_digest,
-        expected_state,
-    })
-}
-
 fn reconcile(args: &Value) -> Result<SourceEditReconciliationInvocationV1, String> {
-    if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+    let mut input = args.clone();
+    if let Some(object) = input.as_object_mut() {
+        object.remove("format");
+        object.remove("__mcp_request_id");
+    }
+    let request: SourceEditReconcileSurfaceRequestV1 = serde_json::from_value(input)
+        .map_err(|error| format!("invalid source edit reconciliation request: {error}"))?;
+    if !matches!(
+        request.disposition,
+        SourceEditReconciliationDispositionV1::Inspect {}
+    ) && !request.confirm
+    {
         return Err("source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human".to_owned());
     }
-    let kind = serde_json::from_value::<SourceEditKind>(json!(required_str(args, "kind")?))
-        .map_err(|error| format!("invalid source edit kind: {error}"))?;
-    let effect_id = EffectId::new(required_str(args, "effect_id")?).map_err(identity_error)?;
-    let idempotency_key =
-        IdempotencyKey::new(required_str(args, "idempotency_key")?).map_err(identity_error)?;
+    let effect_id = EffectId::new(request.effect_id).map_err(identity_error)?;
+    let idempotency_key = IdempotencyKey::new(request.idempotency_key).map_err(identity_error)?;
     let attempt_idempotency_key =
-        IdempotencyKey::new(required_str(args, "attempt_idempotency_key")?)
-            .map_err(identity_error)?;
+        IdempotencyKey::new(request.attempt_idempotency_key).map_err(identity_error)?;
     if attempt_idempotency_key == idempotency_key {
         return Err(
             "reconciliation attempt idempotency key must differ from the original edit key"
                 .to_owned(),
         );
     }
-    let input_digest =
-        ManifestDigest::new(required_str(args, "input_digest")?).map_err(identity_error)?;
-    let disposition = match required_str(args, "disposition")? {
-        "confirm_committed" => SourceEditReconciliationDispositionV1::ConfirmCommitted {
-            committed_state: ManifestDigest::new(required_str(args, "committed_state")?)
-                .map_err(identity_error)?,
-        },
-        "confirm_rolled_back" => {
-            if args.get("committed_state").is_some() {
-                return Err(
-                    "committed_state is only valid when disposition is confirm_committed"
-                        .to_owned(),
-                );
-            }
-            SourceEditReconciliationDispositionV1::ConfirmRolledBack
-        }
-        value => {
-            return Err(format!(
-                "invalid source edit reconciliation disposition: {value}"
-            ));
-        }
-    };
+    let input_digest = ManifestDigest::new(request.input_digest).map_err(identity_error)?;
     Ok(SourceEditReconciliationInvocationV1 {
-        kind,
+        original_operation: request.original_operation,
         effect_id,
         idempotency_key,
         attempt_idempotency_key,
         input_digest,
-        disposition,
+        disposition: request.disposition,
     })
 }
 
@@ -248,7 +209,6 @@ pub fn is_source_edit_operation(operation: ApplicationSurfaceOperation) -> bool 
             | ApplicationSurfaceOperation::MoveSymbol
             | ApplicationSurfaceOperation::RenameSymbol
             | ApplicationSurfaceOperation::SourceEditReconcile
-            | ApplicationSurfaceOperation::SourceEditRollback
     )
 }
 
@@ -258,9 +218,6 @@ pub fn parse_source_edit_arguments(
     args: &Value,
 ) -> Result<ApplicationSurfaceRequest, String> {
     match operation {
-        ApplicationSurfaceOperation::SourceEditRollback => {
-            rollback(args).map(ApplicationSurfaceRequest::SourceEditRollback)
-        }
         ApplicationSurfaceOperation::SourceEditReconcile => {
             reconcile(args).map(ApplicationSurfaceRequest::SourceEditReconcile)
         }
@@ -301,8 +258,13 @@ pub(super) const fn source_edit_kind(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+    use serde_json::{Value, json};
+    use tracedecay_contracts::source_edit::SourceEditReconcileSurfaceRequestV1;
+    use tracedecay_contracts::{
+        SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
+    };
+    use tracedecay_domain::ManifestDigest;
+    use tracedecay_tool_catalog::{ApplicationSurfaceOperation, UseCaseId};
 
     use super::parse_source_edit_arguments;
     use crate::application_surface::ApplicationSurfaceRequest;
@@ -341,14 +303,139 @@ mod tests {
     }
 
     #[test]
-    fn rollback_requires_explicit_confirmation() {
-        assert_eq!(
+    fn reconcile_accepts_committed_unchanged_and_partial_observations() {
+        let base = json!({
+            "original_operation": "use-case.application.source-edit.str-replace",
+            "effect_id": "effect.source-edit.reconcile",
+            "idempotency_key": "source-edit.original",
+            "attempt_idempotency_key": "source-edit.reconcile",
+            "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "confirm": true,
+        });
+        for (disposition, digest_field) in [
+            ("confirm_committed", "committed_state"),
+            ("acknowledge_partial", "observed_state"),
+        ] {
+            let mut args = base.clone();
+            args["disposition"] = Value::String(disposition.to_owned());
+            args[digest_field] = Value::String(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            );
+            assert!(matches!(
+                parse_source_edit_arguments(
+                    ApplicationSurfaceOperation::SourceEditReconcile,
+                    &args
+                )
+                .expect("valid observed state"),
+                ApplicationSurfaceRequest::SourceEditReconcile(_)
+            ));
+        }
+        let mut unchanged = base;
+        unchanged["disposition"] = Value::String("confirm_unchanged".to_owned());
+        assert!(matches!(
             parse_source_edit_arguments(
-                ApplicationSurfaceOperation::SourceEditRollback,
-                &json!({})
+                ApplicationSurfaceOperation::SourceEditReconcile,
+                &unchanged
             )
-            .expect_err("confirm is required"),
-            "source edit rollback requires confirm=true from the caller after it checks the receipt; do not pause for a human"
+            .expect("valid unchanged state"),
+            ApplicationSurfaceRequest::SourceEditReconcile(_)
+        ));
+    }
+
+    #[test]
+    fn typed_reconciliation_requests_roundtrip_through_the_public_parser() {
+        let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+        for disposition in [
+            SourceEditReconciliationDispositionV1::Inspect {},
+            SourceEditReconciliationDispositionV1::ConfirmCommitted {
+                committed_state: digest.clone(),
+            },
+            SourceEditReconciliationDispositionV1::ConfirmUnchanged {},
+            SourceEditReconciliationDispositionV1::AcknowledgePartial {
+                observed_state: digest.clone(),
+            },
+        ] {
+            let request = SourceEditReconcileSurfaceRequestV1 {
+                original_operation: UseCaseId::new("use-case.application.source-edit.str-replace")
+                    .unwrap(),
+                effect_id: "effect.source-edit.retained".to_owned(),
+                idempotency_key: "source-edit.original".to_owned(),
+                attempt_idempotency_key: "source-edit.reconciliation".to_owned(),
+                input_digest: digest.to_string(),
+                confirm: !matches!(
+                    disposition,
+                    SourceEditReconciliationDispositionV1::Inspect {}
+                ),
+                disposition: disposition.clone(),
+            };
+            let value = serde_json::to_value(&request).unwrap();
+            let decoded: SourceEditReconcileSurfaceRequestV1 =
+                serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(decoded, request);
+            let mut tool_arguments = value.clone();
+            tool_arguments["format"] = json!("json");
+            tool_arguments["__mcp_request_id"] = json!("request.reconcile");
+            for arguments in [value, tool_arguments] {
+                let ApplicationSurfaceRequest::SourceEditReconcile(parsed) =
+                    parse_source_edit_arguments(
+                        ApplicationSurfaceOperation::SourceEditReconcile,
+                        &arguments,
+                    )
+                    .unwrap()
+                else {
+                    panic!("reconciliation request");
+                };
+                let mut unknown = arguments;
+                unknown["unexpected"] = json!(true);
+                assert!(
+                    parse_source_edit_arguments(
+                        ApplicationSurfaceOperation::SourceEditReconcile,
+                        &unknown,
+                    )
+                    .is_err()
+                );
+                assert_eq!(parsed.disposition, disposition);
+                assert_eq!(parsed.original_operation, request.original_operation);
+                assert_eq!(parsed.effect_id.as_str(), request.effect_id);
+                assert_eq!(parsed.idempotency_key.as_str(), request.idempotency_key);
+                assert_eq!(
+                    parsed.attempt_idempotency_key.as_str(),
+                    request.attempt_idempotency_key
+                );
+                assert_eq!(parsed.input_digest, digest);
+            }
+        }
+    }
+
+    #[test]
+    fn inspection_requires_identity_but_no_conclusion_or_caller_digest() {
+        let mut args = json!({
+            "original_operation": "use-case.application.source-edit.rollback",
+            "effect_id": "effect.source-edit.retained",
+            "idempotency_key": "source-edit.original",
+            "attempt_idempotency_key": "source-edit.inspect",
+            "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "disposition": "inspect",
+        });
+        assert!(matches!(
+            parse_source_edit_arguments(ApplicationSurfaceOperation::SourceEditReconcile, &args)
+                .unwrap(),
+            ApplicationSurfaceRequest::SourceEditReconcile(SourceEditReconciliationInvocationV1 {
+                disposition: SourceEditReconciliationDispositionV1::Inspect {},
+                ..
+            })
+        ));
+        args["observed_state"] = args["input_digest"].clone();
+        assert!(
+            parse_source_edit_arguments(ApplicationSurfaceOperation::SourceEditReconcile, &args)
+                .is_err()
+        );
+        args.as_object_mut().unwrap().remove("observed_state");
+        args["disposition"] = json!("confirm_unchanged");
+        assert!(
+            parse_source_edit_arguments(ApplicationSurfaceOperation::SourceEditReconcile, &args)
+                .is_err()
         );
     }
 

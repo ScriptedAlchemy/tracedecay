@@ -2090,58 +2090,7 @@ class MutationJourneyTests(unittest.TestCase):
         )
         self.assertIn("terminal", note)
 
-    def test_journaled_rollback_consumes_the_move_receipt_and_restores_preimages(self) -> None:
-        """source_edit_rollback's journey mints identities from a real move receipt."""
-        runner = load_runner()
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            (root / "src").mkdir()
-            source = root / "src/lib.rs"
-            moved = "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
-            source.write_text(moved)
-            relocated = root / "src/relocated.rs"
-            relocated.write_text("pub fn relocation_marker() -> i32 { 0 }\n")
-            original = {"src/lib.rs": source.read_text(), "src/relocated.rs": relocated.read_text()}
-            fixture = {
-                "root": str(root),
-                "file": "src/lib.rs",
-                "qualified_name": "src/lib.rs::sweep_anchor",
-            }
-            digest = "sha256:" + "b" * 64
-
-            def call(tool, arguments, _deadline_ms):
-                self.assertEqual(tool, "tracedecay_move_symbol")
-                if arguments.get("dry_run") is True:
-                    return self.response(f'{{"expected_state":"{digest}"}}')
-                source.write_text("")
-                relocated.write_text(original["src/relocated.rs"] + moved)
-                return self.response(
-                    '{"success":true,"effect_id":"effect.move",'
-                    f'"input_digest":"{digest}","committed_state":"{digest}"}}'
-                )
-
-            prepared = runner.prepare_journey(
-                "tracedecay_source_edit_rollback", object(), fixture, lambda _tool: 1_000, call
-            )
-            self.assertIsNotNone(prepared)
-            self.assertEqual(prepared.arguments["effect_id"], "effect.move")
-            self.assertEqual(prepared.arguments["original_input_digest"], digest)
-            self.assertEqual(prepared.arguments["expected_state"], digest)
-            self.assertIs(prepared.arguments["confirm"], True)
-
-            rollback_receipt = self.response(
-                '{"success":true,"reconciled":true,"effect_id":"effect.rollback"}'
-            )
-            with self.assertRaises(Exception):
-                # The workspace still holds the moved bytes: rollback must not
-                # claim preimage restoration.
-                prepared.cleanup(rollback_receipt)
-            source.write_text(original["src/lib.rs"])
-            relocated.write_text(original["src/relocated.rs"])
-            note = prepared.cleanup(rollback_receipt)
-            self.assertIn("preimage restoration verified", note)
-
-    def test_move_journey_rolls_back_from_the_effect_receipt(self) -> None:
+    def test_move_journey_replays_receipt_and_leaves_source_files_moved(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -2151,7 +2100,6 @@ class MutationJourneyTests(unittest.TestCase):
             source.write_text(moved)
             relocated = root / "src/relocated.rs"
             relocated.write_text("pub fn relocation_marker() -> i32 { 0 }\n")
-            original_source = source.read_text()
             original_relocated = relocated.read_text()
             fixture = {
                 "root": str(root),
@@ -2171,17 +2119,12 @@ class MutationJourneyTests(unittest.TestCase):
                         '{"success":true,"replayed":true,"effect_id":"effect.move",'
                         f'"input_digest":"{digest}","committed_state":"{digest}"}}'
                     )
-                self.assertEqual(tool, "tracedecay_source_edit_rollback")
-                self.assertEqual(arguments["effect_id"], "effect.move")
-                source.write_text(original_source)
-                relocated.write_text(original_relocated)
-                return self.response(
-                    '{"success":true,"reconciled":true,"effect_id":"effect.rollback"}'
-                )
+                self.fail(f"unexpected tool call {tool}")
 
             prepared = runner.prepare_journey(
                 "tracedecay_move_symbol", object(), fixture, lambda _tool: 1_000, call
             )
+            self.assertEqual(prepared.settlement, "contained")
             source.write_text("")
             relocated.write_text(original_relocated + moved)
             response = self.response(
@@ -2189,9 +2132,14 @@ class MutationJourneyTests(unittest.TestCase):
                 f'"input_digest":"{digest}","committed_state":"{digest}"}}'
             )
             note = prepared.cleanup(response)
+            observed_source = source.read_text()
+            observed_relocated = relocated.read_text()
 
-        self.assertIn("journaled rollback", note)
+        self.assertIn("replay verified", note)
+        self.assertEqual(observed_source, "")
+        self.assertEqual(observed_relocated, original_relocated + moved)
         self.assertNotIn("tracedecay_by_qualified_name", [tool for tool, _ in calls])
+        self.assertEqual([tool for tool, _ in calls], ["tracedecay_move_symbol", "tracedecay_move_symbol"])
 
     def test_rename_apply_copies_the_preview_capability_verbatim(self) -> None:
         runner = load_runner()
@@ -2243,7 +2191,7 @@ class MutationJourneyTests(unittest.TestCase):
             "tracedecay_rename_preview", "tracedecay_rename_symbol",
         ])
 
-    def test_source_edit_journey_replays_receipt_and_restores_exact_source(self) -> None:
+    def test_source_edit_journey_replays_receipt_and_leaves_edit_in_place(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -2269,11 +2217,6 @@ class MutationJourneyTests(unittest.TestCase):
                             }]
                         }
                     }
-                if arguments.get("old_str") == "value: 8":
-                    source.write_text(
-                        "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
-                    )
-                    return {"result": {"content": [{"type": "text", "text": '{"success":true}'}]}}
                 return {
                     "result": {
                         "content": [{
@@ -2291,6 +2234,7 @@ class MutationJourneyTests(unittest.TestCase):
                 call,
             )
             self.assertIsNotNone(prepared)
+            self.assertEqual(prepared.settlement, "contained")
             source.write_text(
                 "pub fn sweep_anchor() -> SweepType { SweepType { value: 8 } }\n"
             )
@@ -2304,8 +2248,13 @@ class MutationJourneyTests(unittest.TestCase):
                     }
                 }
             )
+            observed_source = source.read_text()
 
-        self.assertEqual(note, "preview/apply/consumer/rollback verified")
+        self.assertEqual(note, "preview/apply/consumer/replay verified")
+        self.assertEqual(
+            observed_source,
+            "pub fn sweep_anchor() -> SweepType { SweepType { value: 8 } }\n",
+        )
         self.assertTrue(all(arguments["format"] == "json" for _, arguments in calls))
 
 

@@ -14,13 +14,17 @@ apply fields.
 - **Move.** `tracedecay_move_symbol` preserves attached docs and attributes, but
   imports are automatic only when unambiguous. Inspect visibility and module
   dependencies; reported callers are not necessarily rewritten by the move.
+  A partial failure can leave published files in place.
 - **Structural rewrite.** `tracedecay_ast_grep_rewrite` uses the same
   in-process ast-grep engine and grammars as structural search.
-- **Rollback.** `tracedecay_source_edit_rollback` uses retained preimages and
-  the committed expected state. Pass the returned operation identity, not a
-  reconstructed path or an inverse semantic move.
-- **Reconcile.** When an interrupted operation has committed effects, run
-  `tracedecay_source_edit_reconcile` before retrying.
+- **Reconcile.** After an interrupted edit, call
+  `tracedecay_source_edit_reconcile` with `disposition: "inspect"` to obtain
+  candidate paths and `observed_state`. Pass the original receipt's `operation`
+  as `original_operation`. Inspect those files, then confirm committed state
+  with `committed_state`, confirm unchanged state, or acknowledge a partial
+  state with the returned `observed_state`. Use a fresh `attempt_idempotency_key`
+  for each fresh inspection or conclusion; exact retries replay the prior
+  attempt. Reconciliation checks the live digest and never writes source files.
 
 For consolidation, compare candidate bodies and behavior directly; a similar
 name does not justify replacing an implementation.

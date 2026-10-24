@@ -419,7 +419,6 @@ fn only_the_foreground_daemon_owns_a_tokio_runtime() {
         &["channel"],
         &["update"],
         &["install"],
-        &["feedback-rollback", "dry-run", "--agent", "claude"],
         &["doctor"],
         &["gain"],
         &["git", "status"],

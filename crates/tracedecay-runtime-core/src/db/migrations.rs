@@ -176,15 +176,6 @@ pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> 
     Ok(())
 }
 
-/// Creates the complete schema from scratch for a brand-new database and
-/// stamps [`SCHEMA_VERSION`]. This is the only way a store comes into
-/// existence: there is no stepwise path to this shape.
-pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
-    let writer = database.writer_connection("create schema").await?;
-    let connection = writer.engine_connection();
-    create_schema_engine_connection(&connection).await
-}
-
 async fn create_schema_engine_connection(conn: &DatabaseEngineWriteConnection) -> Result<()> {
     conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
         .await

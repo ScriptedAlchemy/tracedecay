@@ -484,7 +484,7 @@ changing their transport.
 **Implementation and deletion.**
 
 - Ship asynchronous suggestions, host capability detection, install/upgrade/
-  uninstall, interrupted-lifecycle rollback, and stock-host conformance as
+  uninstall, forward recovery after interruption, and stock-host conformance as
   part of this callable path, including
   Kimi Code manifest/global `PostToolUse` and `Stop` hooks plus MCP and
   skills/commands, and OpenCode local JS/TS plugin events, custom LSP
@@ -524,8 +524,8 @@ custom-LSP duplicate-analyzer avoidance, and truthful provider-unavailable
 behavior,
 including an explicit Cline-family route or evidence-backed typed unavailable
 result. Exercise the official install/upgrade/uninstall flow for Kimi Code and
-OpenCode; prove competing-extension, interrupted-lifecycle,
-host-by-host rollback, and the direct feedback rollback switch. Normal
+OpenCode; prove competing-extension refusal, partial-failure reporting, and
+forward recovery after interrupted lifecycles without file-edit undo. Normal
 Linux/macOS/Windows CI covers supported-host default-feature compatibility.
 
 Dashboard investigation, multi-root scope, remote delivery, and workflow

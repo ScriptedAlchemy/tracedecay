@@ -4,7 +4,7 @@
 //! worktree identity plus optional post-edit diagnostics) and supplies graph
 //! evidence per request as one admitted, generation-pinned
 //! [`SourceEditGraphReadV1`]. Planning, primitives, preview capture,
-//! journaling, rollback, recovery, and reconciliation are owned here and never
+//! journaling, recovery, and reconciliation are owned here and never
 //! delegated back through the port.
 
 use std::future::Future;

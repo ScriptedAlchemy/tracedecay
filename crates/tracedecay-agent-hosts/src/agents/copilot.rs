@@ -29,7 +29,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file,
-    load_jsonc_file, read_optional_config_bytes,
+    load_jsonc_file,
 };
 
 /// Name of GitHub Copilot's own CLI, which owns `~/.copilot/mcp-config.json`.
@@ -120,10 +120,8 @@ impl AgentIntegration for CopilotIntegration {
     ///
     /// `ContextMcp` is the CLI-driven half of this integration: the only file
     /// it mutates is Copilot's own `~/.copilot/mcp-config.json`, and the writer
-    /// is `copilot mcp`, not TraceDecay. Naming that file here is what gives
-    /// the component-set transaction rollback
-    /// authority over the host command's effect; without it the observation
-    /// recorded in `run_mcp_registry_step` would have nothing to restore.
+    /// is `copilot mcp`. Naming the path binds the host command's observed
+    /// effect to the component registration receipt.
     /// Any other component set keeps the default inventory.
     fn host_component_registration_paths(
         &self,
@@ -337,49 +335,25 @@ fn copilot_mcp_add_with(
     serve_args: &ServeArgs,
 ) -> Result<()> {
     let config_path = copilot_cli_mcp_config_path(home);
-    let previous_registration =
-        if super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file) {
-            let bytes = read_optional_config_bytes(&config_path)?.ok_or_else(|| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "{} disappeared while preparing the Copilot MCP refresh",
-                        config_path.display()
-                    ),
-                }
-            })?;
-            let metadata = super::capture_host_file_metadata(&config_path)?;
-            Some((bytes, metadata))
-        } else {
-            None
-        };
-    if previous_registration.is_some() {
+    let refreshing = super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file);
+    if refreshing {
         copilot_mcp_remove_with(copilot_cli, home)?;
     }
     let mut args = vec!["mcp", "add", COPILOT_MCP_SERVER_NAME, "--", tracedecay_bin];
     let launch = serve_args.to_vec(&[]);
     args.extend(launch.iter().map(String::as_str));
     let result = run_mcp_registry_step(copilot_cli, &args, home);
-    let Err(add_error) = result else {
-        return Ok(());
-    };
-    let Some((previous_bytes, previous_metadata)) = previous_registration else {
-        return Err(add_error);
-    };
-    let current_bytes = read_optional_config_bytes(&config_path)?;
-    if let Err(restore_error) = super::text_file_transaction::restore_bytes_file_if_unchanged(
-        &config_path,
-        current_bytes.as_deref(),
-        &previous_bytes,
-        &previous_metadata,
-    ) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{add_error}; restoring the previous Copilot MCP registration also failed: \
-                 {restore_error}"
-            ),
-        });
-    }
-    Err(add_error)
+    result.map_err(|error| {
+        if refreshing {
+            TraceDecayError::Config {
+                message: format!(
+                    "{error}; the previous TraceDecay MCP registration was removed before the failed refresh"
+                ),
+            }
+        } else {
+            error
+        }
+    })
 }
 
 /// Drive Copilot's own registry to drop the tracedecay MCP server.

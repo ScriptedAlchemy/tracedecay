@@ -224,9 +224,7 @@ use native_integration::execute_native_integration;
 use observatory::execute_observatory_read;
 use primitive::*;
 use retained::*;
-use source_edit::{
-    execute_source_edit, execute_source_edit_reconcile, execute_source_edit_rollback,
-};
+use source_edit::{execute_source_edit, execute_source_edit_reconcile};
 use tracedecay_contracts::now_micros;
 use types::*;
 use work::*;

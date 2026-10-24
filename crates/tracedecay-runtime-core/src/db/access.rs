@@ -117,34 +117,6 @@ pub struct OwnedMaintenanceDatabaseScope {
     _lifecycle: crate::lifecycle_lease::LifecycleLease,
 }
 
-impl MaintenanceDatabaseScope<'_> {
-    /// Issues database authority for one exact artifact beneath this retained
-    /// exclusive-maintenance profile scope.
-    pub fn database_authority(&self, db_path: &Path, intent: &str) -> Result<DatabaseAuthority> {
-        let identity = DatabaseIdentity::for_path(db_path)?;
-        if identity.profile_root != self.profile_root {
-            return Err(access_error(
-                intent,
-                db_path,
-                "database artifact belongs to a different maintenance profile",
-            ));
-        }
-        let active = MAINTENANCE_SCOPES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&self.profile_root)
-            .is_some_and(|scope| scope.token == self.token);
-        if !active {
-            return Err(access_error(
-                intent,
-                db_path,
-                "exclusive-maintenance database scope was revoked",
-            ));
-        }
-        DatabaseAuthority::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent)
-    }
-}
-
 impl OwnedMaintenanceDatabaseScope {
     #[cfg(not(test))]
     pub fn lifecycle(&self) -> &crate::lifecycle_lease::LifecycleLease {

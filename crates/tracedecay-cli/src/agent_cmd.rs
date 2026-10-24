@@ -17,11 +17,8 @@ use automation::{
     install_codex_daemon_automation, validate_codex_automation_flags,
     validate_codex_automation_project_path,
 };
-mod feedback_component;
-mod feedback_rollback;
 #[cfg(test)]
 mod mcp_identity_tests;
-pub(crate) use feedback_rollback::handle_feedback_rollback_command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostBundleCliOperation {
@@ -838,10 +835,9 @@ fn dry_run_canonical_component_set(
     }
     for plan in &preview.component_plans {
         eprintln!(
-            "  {:?}: {} mutation(s), rollback={}",
+            "  {:?}: {} mutation(s)",
             plan.component,
-            plan.mutations.len(),
-            plan.rollback_required
+            plan.mutations.len()
         );
         let owned = receipt_owned_paths(
             lifecycle_root,
@@ -1590,9 +1586,8 @@ mod tests {
         );
     }
 
-    /// Homes and lifecycle roots share Bazel's writable filesystem so receipt
-    /// rollback can rename artifacts atomically. The compiled host CLI fixture
-    /// accepts temporary homes and never touches the installed host's state.
+    /// The compiled host CLI fixture accepts temporary homes under Bazel's
+    /// writable directory and never touches the installed host's state.
     fn host_cli_tempdir() -> tempfile::TempDir {
         let root = std::path::PathBuf::from(
             std::env::var_os("TEST_TMPDIR").expect("Bazel writable test directory"),
@@ -1886,14 +1881,6 @@ mod tests {
             request: &HostComponentSetExecutionRequestV1,
         ) -> Result<(), HostBundleError> {
             self.inner.commit(component_set, request)
-        }
-
-        fn rollback(
-            &mut self,
-            component_set: &HostComponentSetV1,
-            request: &HostComponentSetExecutionRequestV1,
-        ) -> Result<(), HostBundleError> {
-            self.inner.rollback(component_set, request)
         }
     }
 
@@ -2550,7 +2537,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_context_component_rollback_preserves_other_opencode_state() {
+    fn explicit_context_component_preserves_other_opencode_state() {
         use tracedecay_agent_hosts::agents::host_bundle::HostComponentSetRegistrationV1;
 
         let home = tempfile::tempdir().unwrap();
@@ -2585,7 +2572,7 @@ mod tests {
             .apply(&component_set.component_set, &request)
             .unwrap();
         registration
-            .rollback(&component_set.component_set, &request)
+            .commit(&component_set.component_set, &request)
             .unwrap();
 
         assert_opencode_non_context_state(&preserved);
@@ -2676,7 +2663,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_core_rollback_restores_every_registration_side_effect() {
+    fn opencode_core_preserves_unrelated_registration_state() {
         use tracedecay_agent_hosts::agents::host_bundle::HostComponentSetRegistrationV1;
 
         let home = tempfile::tempdir().unwrap();
@@ -2717,11 +2704,40 @@ mod tests {
             .apply(&component_set.component_set, &request)
             .unwrap();
         registration
-            .rollback(&component_set.component_set, &request)
+            .commit(&component_set.component_set, &request)
             .unwrap();
 
         assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
-        assert_eq!(std::fs::read(&prompt_path).unwrap(), original_prompt);
+        let expected_home = tempfile::tempdir().unwrap();
+        let expected_prompt_path = expected_home.path().join(".config/opencode/AGENTS.md");
+        let integration = tracedecay_agent_hosts::agents::get_integration("opencode").unwrap();
+        integration
+            .activate_deployed_host_component_registration(
+                &[tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::Core],
+                &tracedecay_agent_hosts::agents::InstallContext {
+                    profile: tracedecay_runtime_core::config::ProfileRoot::under_home(
+                        expected_home.path(),
+                    ),
+                    home: expected_home.path().to_path_buf(),
+                    tracedecay_bin: "tracedecay".to_string(),
+                    project_root: None,
+                    dashboard: false,
+                    serve_args: Default::default(),
+                },
+            )
+            .unwrap();
+        let canonical_prompt = std::fs::read(expected_prompt_path).unwrap();
+        let expected_prompt = [original_prompt.as_slice(), canonical_prompt.as_slice()].concat();
+        let installed_prompt = std::fs::read(&prompt_path).unwrap();
+        let marker = b"## Prefer tracedecay MCP tools";
+        assert_eq!(installed_prompt, expected_prompt);
+        assert_eq!(
+            installed_prompt
+                .windows(marker.len())
+                .filter(|window| *window == marker)
+                .count(),
+            1
+        );
     }
 
     /// The canonical Codex set (Core + ContextMcp) is the whole rendered
@@ -2729,16 +2745,13 @@ mod tests {
     /// omits `.mcp.json` and can never verify as `Current`.
     #[cfg(unix)]
     #[test]
-    fn codex_canonical_rollback_restores_generated_agent_exports_byte_for_byte() {
+    fn codex_verification_failure_preserves_completed_agent_exports() {
         // Core `apply` drives Codex's own `codex plugin add`, which is a hard
         // requirement of that path. Supply the host CLI rather than depending
         // on whatever the machine happens to have installed.
         let codex_cli_dir = tempfile::tempdir().unwrap();
         let _codex_path = install_fake_host_cli(codex_cli_dir.path(), "codex");
         let home = host_cli_tempdir();
-        // Same filesystem as `home`: the receipt transaction backs up a
-        // staged artifact by renaming it into `lifecycle`, and rename cannot
-        // cross a filesystem boundary.
         let lifecycle = host_cli_tempdir();
         // One bin for stage + component-set render + registration activate so
         // Codex hook-trust's safety valve sees matching commands (not
@@ -2829,29 +2842,13 @@ mod tests {
             result.as_ref().err()
         );
 
-        assert_eq!(
+        assert_ne!(
             std::fs::read(&manifest_path).unwrap(),
-            manifest_bytes.as_bytes(),
-            "rollback must restore the ownership manifest: {:?}",
-            result.as_ref().err()
+            manifest_bytes.as_bytes()
         );
-        assert_eq!(std::fs::read(&stale_path).unwrap(), stale_bytes);
-        assert_eq!(std::fs::read(&current_path).unwrap(), current_bytes);
+        assert!(!stale_path.exists());
+        assert_ne!(std::fs::read(&current_path).unwrap(), current_bytes);
         assert_eq!(std::fs::read(&user_path).unwrap(), user_bytes);
-        let mut remaining = std::fs::read_dir(&agents_dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        remaining.sort();
-        assert_eq!(
-            remaining,
-            vec![
-                ".tracedecay-managed-agents.json",
-                "tracedecay-code-explorer.toml",
-                "tracedecay-legacy.toml",
-                "user-agent.toml",
-            ]
-        );
     }
 
     #[test]
@@ -3400,8 +3397,6 @@ mod tests {
     async fn codex_native_removed_retry_cleans_receipt_owned_source() {
         let home = host_cli_tempdir();
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
-        // Same filesystem as `home`: receipt rollback moves artifacts into
-        // `lifecycle` and requires an atomic rename.
         let lifecycle = host_cli_tempdir();
         let tracedecay_bin = "new-tracedecay";
         let component_set = canonical_host_component_set_with_tracedecay_bin(
@@ -3650,7 +3645,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_registration_stage_does_not_run_inverse_rollback_edit() {
+    fn stale_registration_stage_preserves_foreign_config() {
         use tracedecay_agent_hosts::agents::host_bundle::{
             HostBundleError, HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1,
         };
@@ -3696,9 +3691,6 @@ mod tests {
             registration.stage(&component_set.component_set, &request),
             Err(HostBundleError::StalePreview(_))
         ));
-        registration
-            .rollback(&component_set.component_set, &request)
-            .unwrap();
         assert_eq!(
             std::fs::read(registration_path).unwrap(),
             b"{\"external\":true}"
