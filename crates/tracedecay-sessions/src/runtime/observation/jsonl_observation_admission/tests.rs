@@ -73,6 +73,10 @@ struct SeamSpyAdmission {
     /// Commit only the first batched frame, then report the window CAS lost.
     /// The durable cursor then covers a prefix, not the window's last frame.
     peer_covers_batch_prefix: AtomicBool,
+    /// Before the next cover-past advance lands, a peer covers its range up
+    /// to this offset, so the advance loses its compare-and-swap to a cursor
+    /// strictly inside its range.
+    peer_covers_advance_through: Mutex<Option<u64>>,
     rewrites: Mutex<Vec<RewriteCall>>,
 }
 
@@ -859,6 +863,10 @@ impl SeamSpyAdmission {
         self.peer_covers_batch_prefix.store(true, Ordering::SeqCst);
     }
 
+    fn script_peer_covers_advance_through(&self, offset: u64) {
+        *self.peer_covers_advance_through.lock().unwrap() = Some(offset);
+    }
+
     fn peer_won_cursor_cas(&self) -> bool {
         self.peer_wins_next_cursor_cas.swap(false, Ordering::SeqCst)
     }
@@ -956,8 +964,27 @@ impl HostAdmission for SeamSpyAdmission {
             .lock()
             .unwrap()
             .push(advance.clone());
-        self.inner
-            .advance_non_durable_source_cursor(advance, cancellation)
+        let peer_through = self.peer_covers_advance_through.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(offset) = peer_through {
+                let next = advance.next_cursor();
+                let peer = ObservationCursorAdvance::new(
+                    next.source().clone(),
+                    next.scope().clone(),
+                    next.generation(),
+                    advance.expected_cursor().cloned(),
+                    ObservationSourceRangeV1::new(advance.covered().start(), offset).unwrap(),
+                    advance.reason(),
+                )
+                .unwrap();
+                self.inner
+                    .advance_non_durable_source_cursor(peer, cancellation.clone())
+                    .await?;
+            }
+            self.inner
+                .advance_non_durable_source_cursor(advance, cancellation)
+                .await
+        })
     }
 
     fn get_source_cursor<'a>(
@@ -2169,14 +2196,17 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
     .await
     .expect("the retained admission page remains available");
 
-    let reasons = spy
+    let coverage = spy
         .cover_past_advances()
         .iter()
-        .map(ObservationCursorAdvance::reason)
+        .map(|advance| (advance.reason(), advance.covered()))
         .collect::<Vec<_>>();
     assert_eq!(
-        reasons,
-        vec![ObservationCoverageReason::OutOfScope; 3],
+        coverage,
+        vec![(
+            ObservationCoverageReason::OutOfScope,
+            ObservationSourceRangeV1::new(0, len).unwrap()
+        )],
         "an out-of-scope frame that was never decoded cannot be reported as malformed"
     );
     assert_eq!(progress.frames_skipped, 3);
@@ -2220,6 +2250,147 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
             .expect("covered-past frames still advance the frontier")
             .position(),
         len
+    );
+}
+
+/// Writes a session_meta frame and `frames` user messages, returning each
+/// frame's end offset.
+fn write_message_rollout(path: &Path, cwd: &Path, frames: usize) -> Vec<u64> {
+    let mut contents = String::new();
+    let mut ends = Vec::with_capacity(frames + 1);
+    let meta = json!({
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "type": "session_meta",
+        "payload": { "id": SESSION_ID, "cwd": cwd, "model": "gpt-5.5" }
+    });
+    let messages = (0..frames).map(|index| {
+        json!({
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "event_msg",
+            "payload": { "type": "user_message", "message": format!("turn {index}") }
+        })
+    });
+    for frame in std::iter::once(meta).chain(messages) {
+        contents.push_str(&frame.to_string());
+        contents.push('\n');
+        ends.push(u64::try_from(contents.len()).unwrap());
+    }
+    std::fs::write(path, &contents).unwrap();
+    ends
+}
+
+/// A rollout that belongs to another project is skipped frame after frame.
+/// Each cover-past advance is one store write transaction, so the run of
+/// out-of-scope frames must settle as one advance, not one per frame.
+#[tokio::test]
+async fn an_out_of_scope_rollout_is_covered_past_in_one_cursor_write() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    let ends = write_message_rollout(&path, &cwd, 64);
+    let len = *ends.last().unwrap();
+    let spy = SeamSpyAdmission::default();
+
+    let progress = try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &path,
+        None,
+        std::slice::from_ref(&cwd),
+        &spy,
+        None,
+    )
+    .await
+    .expect("an out-of-scope rollout is covered past, not an error");
+
+    assert_eq!(progress.frames_skipped, u64::try_from(ends.len()).unwrap());
+    let coverage = spy
+        .cover_past_advances()
+        .iter()
+        .map(|advance| (advance.reason(), advance.covered()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coverage,
+        vec![(
+            ObservationCoverageReason::OutOfScope,
+            ObservationSourceRangeV1::new(0, len).unwrap()
+        )],
+        "the contiguous out-of-scope run is one cursor write"
+    );
+    assert_eq!(
+        stored_cursor(&spy)
+            .await
+            .expect("frontier advanced")
+            .position(),
+        len
+    );
+
+    let appended = format!(
+        "{}\n",
+        json!({
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": { "type": "user_message", "message": "appended turn" }
+        })
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    let resumed = try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &path,
+        None,
+        std::slice::from_ref(&cwd),
+        &spy,
+        None,
+    )
+    .await
+    .expect("the coalesced cursor resumes");
+    assert!(
+        resumed.resumed,
+        "the run's checkpoint resumes the next pass"
+    );
+    assert_eq!(
+        resumed.bytes_consumed,
+        u64::try_from(appended.len()).unwrap(),
+        "the next pass reads only the appended frame"
+    );
+}
+
+/// A live hook ingest owns the same frontier and can cover a prefix of the
+/// run this sweep read before the run's advance lands. The sweep must cover
+/// the rest from the peer's cursor instead of failing the source.
+#[tokio::test]
+async fn a_run_whose_prefix_a_peer_covered_still_reaches_the_end() {
+    super::install_test_shared_jsonl_preparation_authority();
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    let ends = write_message_rollout(&path, &cwd, 16);
+    let len = *ends.last().unwrap();
+    let spy = SeamSpyAdmission::default();
+    spy.script_peer_covers_advance_through(ends[5]);
+
+    try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &path,
+        None,
+        std::slice::from_ref(&cwd),
+        &spy,
+        None,
+    )
+    .await
+    .expect("a run the peer partly covered must still converge");
+
+    assert_eq!(
+        stored_cursor(&spy)
+            .await
+            .expect("frontier advanced")
+            .position(),
+        len,
+        "the sweep covers the rest of the run from the peer's cursor"
     );
 }
 
