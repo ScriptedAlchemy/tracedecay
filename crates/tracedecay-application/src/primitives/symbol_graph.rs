@@ -1190,6 +1190,15 @@ fn relation_traversal(
         .map_err(|_| ())?;
         let mut next = Vec::new();
         for edge in batches.into_iter().flatten() {
+            // Module-owned imports retain dependency and rename sites, but
+            // their declaration is neither a caller nor a caller frontier.
+            if incoming
+                && edge.edge.kind == RelationEdgeKindV1::Uses
+                && NodeKind::from_str(&edge.neighbor.metadata.as_ref().ok_or(())?.kind)
+                    == Some(NodeKind::Module)
+            {
+                continue;
+            }
             // A directly recursive seed is its own caller and callee; it is
             // listed once and not walked again.
             let direct_recursion = depth == 1

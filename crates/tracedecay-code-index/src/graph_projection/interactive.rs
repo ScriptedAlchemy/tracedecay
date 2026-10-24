@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use tracedecay_contracts::{RequestCostReceiptV1, StorePointReadsV1};
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1,
+    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, NodeKind, RelationEdgeKindV1,
     SanitizedCodeFileV1, SymbolOccurrenceId, repository_path_matches_scope,
 };
 use tracedecay_graph_db::{
@@ -878,6 +878,67 @@ impl CodeGraphInteractiveReader {
         max_relations: usize,
         request_cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<CodeGraphRelationKeysV1, CodeGraphProjectionError> {
+        self.read_relation_keys(
+            seeds,
+            kinds,
+            reverse,
+            max_relations,
+            request_cancellation,
+            None,
+        )
+    }
+
+    /// Incoming caller keys, excluding module-owned import sites while
+    /// preserving them in raw adjacency for references, dependencies and rename.
+    /// The physical fan-out budget and its truncation apply before filtering;
+    /// an empty filtered window can therefore still be truncated.
+    /// The caller's admitted generation must already have a ready catalog.
+    pub fn caller_keys(
+        &self,
+        seeds: &[CodeGraphSymbolRefV1],
+        kinds: &[RelationEdgeKindV1],
+        max_relations: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphRelationKeysV1, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        require_positive(max_relations, "code graph caller key limit")?;
+        let catalog = {
+            let state = self
+                .catalog
+                .state
+                .read()
+                .map_err(|_| catalog_lock_poisoned())?;
+            match &*state {
+                InteractiveCatalogState::Ready(catalog) => Arc::clone(catalog),
+                InteractiveCatalogState::Failed(error) => return Err(error.clone()),
+                InteractiveCatalogState::Cold
+                | InteractiveCatalogState::Released
+                | InteractiveCatalogState::Warming { .. } => {
+                    return Err(CodeGraphProjectionError::Unavailable(
+                        CATALOG_WARMING.to_owned(),
+                    ));
+                }
+            }
+        };
+        self.read_relation_keys(
+            seeds,
+            kinds,
+            true,
+            max_relations,
+            cancellation,
+            Some(catalog),
+        )
+    }
+
+    fn read_relation_keys(
+        &self,
+        seeds: &[CodeGraphSymbolRefV1],
+        kinds: &[RelationEdgeKindV1],
+        reverse: bool,
+        max_relations: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+        caller_catalog: Option<Arc<InteractiveCatalog>>,
+    ) -> Result<CodeGraphRelationKeysV1, CodeGraphProjectionError> {
         let cancellation = self.read_cancellation(request_cancellation)?;
         require_positive(max_relations, "code graph relation key limit")?;
         let starts = seeds.iter().map(|seed| seed.0.clone()).collect::<Vec<_>>();
@@ -923,6 +984,28 @@ impl CodeGraphInteractiveReader {
                         // A kind the caller asked not to see is not a result.
                         // Never treat a dropped admitted row as complete.
                         continue;
+                    }
+                    if kind == RelationEdgeKindV1::Uses
+                        && let Some(catalog) = &caller_catalog
+                    {
+                        let edge = edge_record(relation)?;
+                        let owner =
+                            catalog.symbols.get(&edge.from_occurrence).ok_or_else(|| {
+                                CodeGraphProjectionError::Corrupt(
+                                    "caller import owner has no canonical symbol".to_owned(),
+                                )
+                            })?;
+                        let metadata = owner.metadata.as_ref().ok_or_else(|| {
+                            CodeGraphProjectionError::Unavailable(
+                                "caller import owner has no canonical kind metadata".to_owned(),
+                            )
+                        })?;
+                        if let Some(meter) = &self.meter {
+                            meter.record_catalog_symbols(1);
+                        }
+                        if NodeKind::from_str(&metadata.kind) == Some(NodeKind::Module) {
+                            continue;
+                        }
                     }
                     keys.push(CodeGraphRelationKeyV1 {
                         neighbor: CodeGraphSymbolRefV1(if reverse {

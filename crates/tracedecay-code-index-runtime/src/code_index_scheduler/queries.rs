@@ -2366,12 +2366,19 @@ fn disclose_symbol_omissions<T>(
     }
 }
 
+#[derive(Clone, Copy)]
+enum GraphRelationDirection {
+    Outgoing,
+    Incoming,
+    Callers,
+}
+
 #[tracing::instrument(name = "query.graph.relation_keys", level = "trace", skip_all)]
 fn graph_relation_keys(
     reader: &CodeGraphInteractiveReader,
     start: &SymbolOccurrenceId,
     kinds: &[RelationEdgeKindV1],
-    reverse: bool,
+    direction: GraphRelationDirection,
     maximum_depth: u32,
     scope: &tracedecay_contracts::CodeQueryScope,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
@@ -2394,15 +2401,23 @@ fn graph_relation_keys(
             complete = false;
             break;
         }
-        let step = reader
-            .relation_keys(
+        let step = match direction {
+            GraphRelationDirection::Callers => reader.caller_keys(
                 &frontier,
                 kinds,
-                reverse,
                 remaining.saturating_add(1),
                 Arc::clone(&cancellation),
-            )
-            .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
+            ),
+            GraphRelationDirection::Incoming | GraphRelationDirection::Outgoing => reader
+                .relation_keys(
+                    &frontier,
+                    kinds,
+                    matches!(direction, GraphRelationDirection::Incoming),
+                    remaining.saturating_add(1),
+                    Arc::clone(&cancellation),
+                ),
+        }
+        .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         if step.truncated {
             complete = false;
         }
@@ -2951,7 +2966,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &prepared.reader,
                 &start,
                 &[RelationEdgeKindV1::Calls],
-                false,
+                GraphRelationDirection::Outgoing,
                 request.maximum_depth,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3275,7 +3290,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &prepared.reader,
                     &target.occurrence,
                     &[RelationEdgeKindV1::Implements],
-                    true,
+                    GraphRelationDirection::Incoming,
                     1,
                     &request.scope,
                     Arc::clone(&cancellation),
@@ -3337,7 +3352,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &prepared.reader,
                 &start,
                 &[RelationEdgeKindV1::Implements, RelationEdgeKindV1::Extends],
-                false,
+                GraphRelationDirection::Outgoing,
                 request.maximum_depth,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3403,7 +3418,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &prepared.reader,
                 &start,
                 &CALLER_AND_REFERENCE_KINDS,
-                true,
+                GraphRelationDirection::Callers,
                 request.maximum_depth,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3486,7 +3501,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     RelationEdgeKindV1::Extends,
                     RelationEdgeKindV1::Annotates,
                 ],
-                true,
+                GraphRelationDirection::Incoming,
                 request.maximum_depth,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3837,7 +3852,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &prepared.reader,
                 &start,
                 &CALLER_AND_REFERENCE_KINDS,
-                true,
+                GraphRelationDirection::Incoming,
                 1,
                 &request.scope,
                 Arc::clone(&cancellation),
@@ -3931,7 +3946,7 @@ fn navigation_symbol_query<'a>(
                 &prepared.reader,
                 &start,
                 &[RelationEdgeKindV1::TypeOf],
-                false,
+                GraphRelationDirection::Outgoing,
                 1,
                 &request.scope,
                 Arc::clone(&cancellation),

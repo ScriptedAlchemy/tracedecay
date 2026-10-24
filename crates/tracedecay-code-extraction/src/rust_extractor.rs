@@ -937,8 +937,11 @@ impl RustExtractor {
                     {
                         continue;
                     }
+                    let from_node_id = Self::use_binding_anchor(state, import)
+                        .unwrap_or(id.as_str())
+                        .to_owned();
                     state.unresolved_refs.push(UnresolvedRef {
-                        from_node_id: id.clone(),
+                        from_node_id,
                         reference_name: local_name.to_owned(),
                         reference_kind: EdgeKind::Uses,
                         line: import.start_line,
@@ -1122,6 +1125,22 @@ impl RustExtractor {
 
     fn declares_module(state: &ExtractionState<'_>, name: &str) -> bool {
         state.root_modules.contains_key(name)
+    }
+
+    fn use_binding_anchor<'a>(
+        state: &'a ExtractionState<'_>,
+        import: &ExtractedImportEvidenceV1,
+    ) -> Option<&'a str> {
+        let module = import
+            .module_specifier
+            .strip_prefix("self::")
+            .and_then(|path| path.split("::").next())
+            .or_else(|| {
+                (import.module_specifier == "self")
+                    .then_some(import.imported_name.as_deref())
+                    .flatten()
+            })?;
+        state.root_modules.get(module).map(String::as_str)
     }
 
     /// Modules declared at the file root, including those inside root-level

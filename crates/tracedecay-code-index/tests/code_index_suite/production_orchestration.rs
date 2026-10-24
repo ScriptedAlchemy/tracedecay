@@ -468,6 +468,27 @@ fn cross_file_edges_require_path_binding_evidence() {
             .filter(|edge| &edge.to_occurrence == target)
             .count()
     };
+    let incoming_sites = |target: &SymbolOccurrenceId| {
+        let mut sites = generation
+            .edges()
+            .iter()
+            .filter(|edge| &edge.to_occurrence == target)
+            .map(|edge| (edge.from_occurrence.clone(), edge.kind))
+            .collect::<Vec<_>>();
+        sites.sort();
+        sites
+    };
+    let mut reexport_and_type_sites = vec![
+        (
+            occurrence("crates/tracedecay-contracts/src/feedback/mod.rs::read"),
+            RelationEdgeKindV1::Uses,
+        ),
+        (
+            occurrence("crates/consumer/src/lib.rs::project"),
+            RelationEdgeKindV1::TypeOf,
+        ),
+    ];
+    reexport_and_type_sites.sort();
 
     assert_eq!(incoming(&str_helper), 1, "only the same-file call is real");
     assert_eq!(
@@ -477,11 +498,15 @@ fn cross_file_edges_require_path_binding_evidence() {
     );
     assert_eq!(incoming(&real), 1, "the qualified Rust path remains bound");
     assert_eq!(
-        incoming(&affected_tests),
-        1,
-        "the grouped re-export binds the dependent crate to feedback/read.rs",
+        incoming_sites(&affected_tests),
+        reexport_and_type_sites,
+        "the grouped re-export and dependent parameter type retain their exact owners",
     );
-    assert_eq!(incoming(&feedback_impact), 1);
+    assert_eq!(
+        incoming_sites(&feedback_impact),
+        reexport_and_type_sites,
+        "both grouped bindings preserve the same import and type evidence",
+    );
     assert_eq!(
         incoming(&occurrence(
             "crates/other/src/read.rs::CanonicalAffectedTestsProjectionV1"
