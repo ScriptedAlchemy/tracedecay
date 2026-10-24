@@ -27,10 +27,12 @@ use super::meta::{CodexMetaWithProvenance, session_meta_with_provenance};
 use super::{CODEX_SCOPE_MATCHERS, PROVIDER};
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::ingest::with_transcript_source_profile_sync;
 use crate::runtime::jsonl_observation_admission::{
-    JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
-    SharedJsonlFileIdentity, admit_jsonl_observations, reserve_shared_jsonl_page,
-    shared_jsonl_background_cpu, shared_jsonl_file_identity, shared_jsonl_preparation_capacity,
+    JsonlFrameAdmission, JsonlObservationAdmissionRequest, JsonlObservationScan,
+    PersistedCursorUpdate, SharedJsonlFileIdentity, admit_jsonl_observations,
+    reserve_shared_jsonl_page, shared_jsonl_background_cpu, shared_jsonl_file_identity,
+    shared_jsonl_preparation_capacity,
 };
 use crate::runtime::shared::{ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::source::{
@@ -398,21 +400,50 @@ impl CodexObservationAdmission<'_> {
         }
     }
 
-    /// This rollout's scope boundary and its session cwd's verdict, resolved on
-    /// the blocking pool. A first resolution of a root or cwd runs git, and the
-    /// frame closures that consult the boundary run on the polling worker.
+    /// Prepare this bounded page's context and scope decisions on the blocking
+    /// pool. The page owns its reservation throughout preparation; only these
+    /// decisions, not filesystem work, are used by frame callbacks and retries.
     async fn resolve_scope(
         &self,
         matchers: &ProjectRootMatcherCache,
-        session_cwd: &Path,
-    ) -> TranscriptIngestResult<(TranscriptScopeMatcher, bool)> {
+        path: &Path,
+        meta: &super::CodexMeta,
+        scan: JsonlObservationScan,
+    ) -> TranscriptIngestResult<(CodexAdmissionState, u64)> {
         let roots = self.scope_roots();
+        let profile = crate::runtime::transcript_source_profile();
         let matchers = matchers.clone();
-        let session_cwd = session_cwd.to_path_buf();
+        let path = path.to_path_buf();
+        let meta = meta.clone();
         run_blocking_transcript_section(PROVIDER, move || {
-            let matcher = roots.matcher(&matchers);
-            let in_scope = matcher.accepts(Some(&session_cwd));
-            (matcher, in_scope)
+            with_transcript_source_profile_sync(profile, || {
+                debug_assert!(
+                    scan.frame_bytes().all(|frame| !frame.is_empty()),
+                    "shared JSONL admission never exposes empty native frames"
+                );
+                let matcher = roots.matcher(&matchers);
+                let (context, read) = if scan.resumed && scan.frame_bytes().next().is_some() {
+                    CodexContextState::scan_prior(&path, scan.generation, scan.start_offset, &meta)
+                } else {
+                    (CodexContextState::from_meta(&meta), 0)
+                };
+                let mut scope_verdicts = HashMap::new();
+                scope_verdicts.insert(context.cwd.clone(), matcher.accepts(Some(&context.cwd)));
+                let mut page_context = context.clone();
+                for line in scan.context_frame_bytes() {
+                    page_context.observe_context_line(line, &path, &meta);
+                    scope_verdicts
+                        .entry(page_context.cwd.clone())
+                        .or_insert_with(|| matcher.accepts(Some(&page_context.cwd)));
+                }
+                (
+                    CodexAdmissionState {
+                        context,
+                        scope_verdicts: Arc::new(scope_verdicts),
+                    },
+                    read,
+                )
+            })
         })
         .await
     }
@@ -466,7 +497,7 @@ impl CodexScopeRoots {
 #[derive(Clone)]
 struct CodexAdmissionState {
     context: CodexContextState,
-    scope_verdict: Option<bool>,
+    scope_verdicts: Arc<HashMap<PathBuf, bool>>,
 }
 
 #[derive(Clone, Copy)]
@@ -704,8 +735,6 @@ async fn admit_codex_jsonl_page(
         matchers,
     } = context;
     let scope = admission_scope.scope();
-    let (scope_matcher, session_cwd_in_scope) =
-        admission_scope.resolve_scope(matchers, &meta.cwd).await?;
     let mut request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
@@ -724,28 +753,12 @@ async fn admit_codex_jsonl_page(
     let mut prior_context_bytes = 0;
     let progress = admit_jsonl_observations(
         request,
-        |scan| {
-            debug_assert!(
-                scan.frame_bytes().all(|frame| !frame.is_empty()),
-                "shared JSONL admission never exposes empty native frames"
-            );
-            // The prior context is rebuilt by reading the rollout before its
-            // cursor; a scan with no new frame never consults it.
-            let context = if scan.resumed && scan.frame_bytes().next().is_some() {
-                let (context, read) =
-                    CodexContextState::scan_prior(path, scan.generation, scan.start_offset, meta);
-                prior_context_bytes = read;
-                context
-            } else {
-                CodexContextState::from_meta(meta)
-            };
-            // Any other cwd, from the prior context or a later context record,
-            // resolves on first use through the same cache.
-            let scope_verdict = (context.cwd == meta.cwd).then_some(session_cwd_in_scope);
-            CodexAdmissionState {
-                context,
-                scope_verdict,
-            }
+        async |scan| {
+            let (state, read) = admission_scope
+                .resolve_scope(matchers, path, meta, scan)
+                .await?;
+            prior_context_bytes = read;
+            Ok(state)
         },
         |state, _bytes, range, _, prepared, hints| {
             let mut stable_record_id = None;
@@ -755,8 +768,9 @@ async fn admit_codex_jsonl_page(
             // for every one of its frames, and the old order paid a full JSON
             // decode per frame to reach it.
             let in_scope = *state
-                .scope_verdict
-                .get_or_insert_with(|| scope_matcher.accepts(Some(state.context.cwd.as_path())));
+                .scope_verdicts
+                .get(&state.context.cwd)
+                .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
             if !in_scope && !hints.may_change_codex_context {
                 return Ok(JsonlFrameAdmission::non_durable_before_decode(
                     ObservationCoverageReason::OutOfScope,
@@ -765,17 +779,14 @@ async fn admit_codex_jsonl_page(
             let Some(prepared) = prepared else {
                 return Ok(JsonlFrameAdmission::needs_preparation());
             };
+            let mut missing_scope = false;
             let parsed = normalize_prepared_observation_record_v1(prepared, |native| {
-                if state.context.observe_context_record(native, path, meta) {
-                    // Only a context record can move the rollout's cwd,
-                    // so the memoized verdict is dropped exactly when it
-                    // can no longer be trusted.
-                    state.scope_verdict = None;
-                }
-                if !*state
-                    .scope_verdict
-                    .get_or_insert_with(|| scope_matcher.accepts(Some(state.context.cwd.as_path())))
-                {
+                state.context.observe_context_record(native, path, meta);
+                let Some(in_scope) = state.scope_verdicts.get(&state.context.cwd) else {
+                    missing_scope = true;
+                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                };
+                if !in_scope {
                     non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
@@ -801,6 +812,9 @@ async fn admit_codex_jsonl_page(
                 stable_record_id = Some(record_id);
                 Ok(envelope)
             });
+            if missing_scope {
+                return Err(TranscriptIngestError::InvalidFrameState { provider: PROVIDER });
+            }
             match parsed {
                 Ok(parsed) => {
                     let record_id = stable_record_id

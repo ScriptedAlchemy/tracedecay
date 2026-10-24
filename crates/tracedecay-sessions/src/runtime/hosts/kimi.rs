@@ -761,7 +761,7 @@ pub(crate) async fn capture_kimi_sweep(
                 .with_cancellation(cancellation.clone());
                 let progress = admit_jsonl_observations(
                     request,
-                    |_| (),
+                    async |_| Ok(()),
                     move |(), bytes, range, _, _prepared, _hints| {
                         let native_id =
                             kimi_capture::native_record_id(&native_record_prefix, range)

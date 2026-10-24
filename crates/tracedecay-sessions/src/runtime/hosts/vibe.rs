@@ -319,7 +319,7 @@ async fn capture_vibe_path(
 
     admit_jsonl_observations(
         request,
-        |_| (),
+        async |_| Ok(()),
         move |(), bytes, range, _, _prepared, _hints| {
             let native_record_id = vibe_capture::native_record_id(&native_session_id, range)
                 .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;

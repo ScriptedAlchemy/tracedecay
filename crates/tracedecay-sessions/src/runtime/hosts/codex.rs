@@ -119,9 +119,9 @@ pub(crate) fn codex_rollout_project_membership(
     )
 }
 
-/// Every Codex consumer's scope boundary, resolved once per root and rollout
-/// cwd for the process. Each resolution runs git, and historical catch-up
-/// admits each rollout window by window across passes. A timed-out
+/// Every Codex consumer shares profile-scoped root and cwd identities across
+/// rollout windows. Unchanged Git topology reuses identity resolution after
+/// filesystem revalidation; non-Git enrollment is checked live. A timed-out
 /// (`Unknown`) identity still re-resolves after the cache's cooldown.
 static CODEX_SCOPE_MATCHERS: LazyLock<ProjectRootMatcherCache> =
     LazyLock::new(ProjectRootMatcherCache::default);

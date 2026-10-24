@@ -149,6 +149,21 @@ impl CodexContextState {
         Ok((found, read))
     }
 
+    /// Replay a page's context candidates through the same bounded line
+    /// authority used by resumed prior-context discovery.
+    pub(super) fn observe_context_line(&mut self, line: &[u8], path: &Path, meta: &CodexMeta) {
+        self.apply_context_values(line_context_values(line, &[], 0, path, meta));
+    }
+
+    fn apply_context_values(&mut self, values: ContextValues) {
+        if let Some(cwd) = values.cwd {
+            self.cwd = cwd;
+        }
+        if let Some(model) = values.model {
+            self.model = Some(model);
+        }
+    }
+
     pub(super) fn observe_context_record(
         &mut self,
         record: &Value,
@@ -157,12 +172,7 @@ impl CodexContextState {
     ) -> bool {
         match context_values(record, path, meta) {
             Some(values) => {
-                if let Some(cwd) = values.cwd {
-                    self.cwd = cwd;
-                }
-                if let Some(model) = values.model {
-                    self.model = Some(model);
-                }
+                self.apply_context_values(values);
                 true
             }
             None => false,

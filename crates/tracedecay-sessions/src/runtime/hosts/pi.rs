@@ -851,7 +851,7 @@ async fn admit_session_file(
     .with_cancellation(cancellation.clone());
     admit_jsonl_observations(
         request,
-        |_| (),
+        async |_| Ok(()),
         move |(), bytes, range, _, _prepared, _hints| {
             let mut native_record_id = None;
             let parsed = parse_normalized_observation_record_v1(
