@@ -33,8 +33,7 @@ use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    JsonConfigMutation, load_json_file, read_optional_config_bytes,
-    update_json_config_transactionally,
+    JsonConfigMutation, load_json_file, update_json_config_transactionally,
 };
 
 /// Name of Factory Droid's own CLI, which owns `~/.factory/mcp.json`.
@@ -400,8 +399,8 @@ fn require_droid_cli() -> Result<PathBuf> {
 /// Split from the trait method so tests can supply a fake CLI and an isolated
 /// `HOME` without mutating the process environment. A prior TraceDecay
 /// registration is removed first so a reinstall refreshes the launch surface
-/// instead of failing on the duplicate name; on add failure the previous
-/// document bytes are restored when the host left them unchanged.
+/// instead of failing on the duplicate name. A failed add leaves the removal
+/// in place and reports the host command failure.
 #[tracing::instrument(name = "droid_mcp_install", level = "trace", skip_all)]
 fn droid_mcp_add_with(
     droid_cli: &Path,
@@ -410,22 +409,8 @@ fn droid_mcp_add_with(
     serve_args: &ServeArgs,
 ) -> Result<()> {
     let config_path = droid_mcp_config_path(home);
-    let previous_registration =
-        if super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file) {
-            let bytes = read_optional_config_bytes(&config_path)?.ok_or_else(|| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "{} disappeared while preparing the Droid MCP refresh",
-                        config_path.display()
-                    ),
-                }
-            })?;
-            let metadata = super::capture_host_file_metadata(&config_path)?;
-            Some((bytes, metadata))
-        } else {
-            None
-        };
-    if previous_registration.is_some() {
+    let refreshing = super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file);
+    if refreshing {
         droid_mcp_remove_with(droid_cli, home)?;
     }
     let launch_command = serve_args.command_line(tracedecay_bin);
@@ -445,27 +430,17 @@ fn droid_mcp_add_with(
         DROID_MCP_SERVER_NAME,
         "Droid CLI",
     );
-    let Err(add_error) = result else {
-        return Ok(());
-    };
-    let Some((previous_bytes, previous_metadata)) = previous_registration else {
-        return Err(add_error);
-    };
-    let current_bytes = read_optional_config_bytes(&config_path)?;
-    if let Err(restore_error) = super::text_file_transaction::restore_bytes_file_if_unchanged(
-        &config_path,
-        current_bytes.as_deref(),
-        &previous_bytes,
-        &previous_metadata,
-    ) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{add_error}; restoring the previous Droid MCP registration also failed: \
-                 {restore_error}"
-            ),
-        });
-    }
-    Err(add_error)
+    result.map_err(|error| {
+        if refreshing {
+            TraceDecayError::Config {
+                message: format!(
+                    "{error}; the previous TraceDecay MCP registration was removed before the failed refresh"
+                ),
+            }
+        } else {
+            error
+        }
+    })
 }
 
 /// Drive Droid's own registry to drop the tracedecay MCP server, the exact
@@ -939,7 +914,7 @@ exit 0"#;
 
     #[cfg(unix)]
     #[test]
-    fn failed_refresh_restores_the_exact_previous_registration() {
+    fn failed_refresh_keeps_the_removal_and_reports_partial_change() {
         let home = tempfile::tempdir().unwrap();
         let bin_dir = tempfile::tempdir().unwrap();
         let log = bin_dir.path().join("invocations.log");
@@ -977,6 +952,22 @@ exit 0"#,
                 .contains("replacement registration rejected"),
             "{error}"
         );
-        assert_eq!(std::fs::read_to_string(&mcp_path).unwrap(), original);
+        assert!(
+            error
+                .to_string()
+                .contains("previous TraceDecay MCP registration was removed")
+        );
+        let remaining: Value = serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            remaining["mcpServers"]["peer"]["url"],
+            "https://example.invalid/mcp"
+        );
+        assert!(remaining["mcpServers"].get("tracedecay").is_none());
+        assert_eq!(
+            std::fs::read_dir(mcp_path.parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
     }
 }

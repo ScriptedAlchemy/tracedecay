@@ -6,14 +6,19 @@ import { timeToX } from '../layout.ts';
 import type { SceneDensity } from '../density.ts';
 import type { FocusTreatment, SceneLane, ScenePath, TemporalSceneModel } from '../types.ts';
 
+export type TemporalSceneVariant = 'weave' | 'strata' | 'rail';
+
 export interface SceneFrame {
   readonly model: TemporalSceneModel;
+  readonly variant: TemporalSceneVariant;
   readonly density: SceneDensity | null;
   readonly fieldX0: number;
   readonly fieldX1: number;
   /** Top of the field, below the time ruler. */
   readonly top: number;
   readonly height: number;
+  /** Honor the dashboard's stronger-contrast mode in every rendering layer. */
+  readonly highContrast?: boolean;
 }
 
 /** Below this row height a lane cannot hold a glyph plate and aggregates. */

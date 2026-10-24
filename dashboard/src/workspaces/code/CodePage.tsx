@@ -22,6 +22,7 @@ import { CortexField } from './CortexField.tsx';
 import { CortexInspector } from './CortexInspector.tsx';
 import { SymbolMatches, TopConnectedList, type RowHandlers } from './CortexLedger.tsx';
 import { CortexRegister } from './CortexRegister.tsx';
+import { CORTEX_RENDERERS, CORTEX_RENDERER_DETAILS, readCortexRenderer, writeCortexRenderer } from './cortexRenderers.ts';
 import { IndexFreshness, useIndexFreshness } from './IndexFreshness.tsx';
 import { SharedCodeView } from './SharedCodeView.tsx';
 import { Strata } from './Strata.tsx';
@@ -86,6 +87,7 @@ type LedgerTab = 'symbols' | 'relief';
 export function CodePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const location = readCodeLocation(searchParams);
+  const renderer = readCortexRenderer(searchParams);
   const overview = useEnvelope(
     ['graph', 'overview'],
     `${BASE}/overview`,
@@ -292,6 +294,24 @@ export function CodePage() {
           focusAvailable={focusState === 'available'}
           onSelect={navigateView}
         />
+        {location.view === 'cortex' ? (
+          <label className="flex items-center gap-2 px-2 text-2xs text-text-secondary">
+            Canvas
+            <select
+              aria-label="Cortex canvas view"
+              className="min-h-11 border border-edge-subtle bg-surface-0 px-2 text-xs text-text-primary"
+              value={renderer}
+              onChange={(event) => {
+                const selected = CORTEX_RENDERERS.find((mode) => mode === event.target.value);
+                if (selected) setSearchParams(writeCortexRenderer(searchParams, selected));
+              }}
+            >
+              {CORTEX_RENDERERS.map((mode) => (
+                <option key={mode} value={mode}>{CORTEX_RENDERER_DETAILS[mode].label}</option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         <div className="ml-auto flex min-w-56 max-w-xl flex-1 items-center py-1">
           <SearchField
             value={query}
@@ -321,9 +341,10 @@ export function CodePage() {
           />
         ) : location.view === 'cortex' ? (
           <CortexLens
-            register={<CortexRegister pending={overview.isPending} result={overview.data} />}
+            register={<CortexRegister pending={overview.isPending} result={overview.data} renderer={renderer} />}
             field={
               <CortexField
+                renderer={renderer}
                 pending={subgraph.isPending}
                 result={subgraph.data}
                 selectedId={resolvedFocus?.id ?? null}

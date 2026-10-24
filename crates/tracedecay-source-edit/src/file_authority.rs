@@ -5,7 +5,7 @@
 //! primitive shares.
 //!
 //! This is the one boundary that decides which bytes a preview, an apply, a
-//! state digest, or a crash-recovery rollback may observe. Every path
+//! state digest may observe. Every path
 //! component below the project root is opened with `open_dir_nofollow`, so
 //! neither an intermediate directory nor the final component can redirect the
 //! read through a symlink. Canonicalizing the parent is not enough on its own:
@@ -300,35 +300,6 @@ impl SourceEditFileAuthority {
         Err(TraceDecayError::Config {
             message: "could not allocate source edit temporary file".to_owned(),
         })
-    }
-
-    #[tracing::instrument(name = "edits.file_authority.remove", level = "trace", skip_all)]
-    pub(crate) fn remove(
-        &self,
-        relative_path: &str,
-        expected: &str,
-        expected_identity: &Handle,
-    ) -> Result<()> {
-        self.verify_parent_binding()?;
-        let (current, current_identity) = self.read_optional_with_identity()?;
-        if current.as_deref() != Some(expected.as_bytes()) {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "source edit candidate {relative_path} changed before atomic removal"
-                ),
-            });
-        }
-        if current_identity.as_ref() != Some(expected_identity) {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "source edit candidate {relative_path} was replaced before atomic removal"
-                ),
-            });
-        }
-        self.parent.remove_file(&self.name).map_err(|error| {
-            source_edit_path_error("atomically remove source edit candidate", error)
-        })?;
-        sync_source_edit_directory(&self.parent)
     }
 
     pub fn metadata(&self) -> Result<cap_std::fs::Metadata> {

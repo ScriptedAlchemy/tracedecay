@@ -1,5 +1,4 @@
-//! Aggregate component-set transaction: one registration adapter and one
-//! in-memory rollback boundary spanning every component of a host.
+//! Forward component-set publication through one registration adapter.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -22,7 +21,7 @@ use super::planner::{
     plan_verified_complete_lifecycle_mutation, validate_artifact_contents_for_operation,
 };
 use super::writer::{
-    ArtifactUndo, HostBundleWriterV1, ancestor_directories, read_regular_nofollow,
+    HostBundleWriterV1, ancestor_directories, read_regular_nofollow,
     tracedecay_namespace_directories,
 };
 use super::{
@@ -33,8 +32,7 @@ use super::{
 use crate::agents::with_host_config_creations;
 
 /// Public component-set lifecycle façade over the capability-rooted writer.
-/// It keeps the existing per-component receipt API intact while ensuring the
-/// default host lifecycle has one aggregate rollback boundary.
+/// Completed file publications remain in place if a later component fails.
 pub struct HostComponentSetTransactionV1<'a> {
     writer: &'a mut HostBundleWriterV1,
 }
@@ -153,10 +151,8 @@ impl HostBundleWriterV1 {
         Ok(())
     }
 
-    /// Execute a complete canonical host component set as one operation.
-    /// Every component is preflighted before any owned file changes; receipts
-    /// are published only after all artifacts and the host registration
-    /// authority verify successfully.
+    /// Component receipts retain ownership across failed publication attempts.
+    /// The aggregate receipt records a successfully verified operation.
     pub fn execute_component_set<
         V: HostBundleVerificationAdapterV1,
         R: HostComponentSetRegistrationV1,
@@ -247,16 +243,11 @@ impl HostBundleWriterV1 {
             prepared_artifact_paths(&prepared).chain(registration_paths.iter().map(String::as_str)),
         ));
 
-        let mut undo = Vec::new();
         let result = (|| {
             registration.stage(component_set, request)?;
             for component in &prepared {
                 for mutation in &component.plan.mutations {
-                    if let Some(record) =
-                        self.apply_artifact_mutation(mutation, &component.content_by_path)?
-                    {
-                        undo.push(record);
-                    }
+                    self.apply_artifact_mutation(mutation, &component.content_by_path)?;
                 }
             }
             let (recorded_config, predates_creation_records) = recorded_creations(&prepared);
@@ -266,10 +257,16 @@ impl HostBundleWriterV1 {
                 request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall,
                 || registration.apply(component_set, request),
             );
-            applied?;
-            self.verify_component_set_artifacts(&prepared)?;
-            registration.verify(component_set, request)?;
-
+            let verification = applied.and_then(|()| {
+                self.verify_component_set_artifacts(&prepared)?;
+                registration.verify(component_set, request)
+            });
+            let verification = match verification {
+                Err(error) if request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall => {
+                    return Err(error);
+                }
+                verification => verification,
+            };
             let mut recorded = self.created_directories(&missing_before);
             recorded.extend(
                 prepared
@@ -293,6 +290,7 @@ impl HostBundleWriterV1 {
             for component_receipt in &receipt.component_receipts {
                 self.write_receipt(component_receipt)?;
             }
+            verification?;
             // Retire superseded receipts before the aggregate receipt, which
             // turns a rerun of this operation id into an early-returning replay.
             for superseded in prepared
@@ -305,25 +303,9 @@ impl HostBundleWriterV1 {
             Ok(receipt)
         })();
 
-        match result {
-            Ok(receipt) => {
-                registration.commit(component_set, request)?;
-                Ok(receipt)
-            }
-            Err(error) => Err(
-                match self.rollback_component_set(
-                    component_set,
-                    request,
-                    registration,
-                    &prepared,
-                    &undo,
-                    &missing_before,
-                ) {
-                    Ok(()) => error,
-                    Err(rollback_error) => rollback_error,
-                },
-            ),
-        }
+        let receipt = result?;
+        registration.commit(component_set, request)?;
+        Ok(receipt)
     }
 
     fn preflight_component_set<V: HostBundleVerificationAdapterV1>(
@@ -448,7 +430,8 @@ impl HostBundleWriterV1 {
     ) -> Result<(), HostBundleError> {
         for component in prepared {
             for mutation in &component.plan.mutations {
-                let expected = (mutation.action != HostArtifactActionV1::Remove)
+                let expected = (component.plan.operation != HostBundleLifecycleOpV1::Uninstall
+                    && mutation.action != HostArtifactActionV1::Remove)
                     .then(|| {
                         component
                             .manifest
@@ -479,30 +462,6 @@ impl HostBundleWriterV1 {
             }
         }
         Ok(())
-    }
-
-    fn rollback_component_set<R: HostComponentSetRegistrationV1>(
-        &mut self,
-        component_set: &HostComponentSetV1,
-        request: &HostComponentSetExecutionRequestV1,
-        registration: &mut R,
-        prepared: &[PreparedHostComponentSetComponentV1],
-        undo: &[ArtifactUndo],
-        missing_before: &BTreeSet<String>,
-    ) -> Result<(), HostBundleError> {
-        registration.rollback(component_set, request)?;
-        self.undo_artifact_mutations(undo)?;
-        self.prune_created_directories(&self.created_directories(missing_before))?;
-        for component in prepared.iter().rev() {
-            for superseded in &component.receipts.superseded {
-                self.write_receipt(superseded)?;
-            }
-            match &component.receipts.own {
-                Some(receipt) => self.write_receipt(receipt)?,
-                None => self.remove_receipt(component_set.host, component.manifest.component)?,
-            }
-        }
-        self.remove_component_set_receipt(request.operation_id)
     }
 }
 

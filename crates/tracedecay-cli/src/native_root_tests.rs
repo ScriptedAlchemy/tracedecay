@@ -69,16 +69,6 @@ fn client_families_complete_on_the_native_root_without_tokio() {
             "{args:?}: {error}"
         );
     }
-    let error = run_on_native_root(
-        &profile,
-        &["feedback-rollback", "dry-run", "--agent", "claude"],
-    )
-    .expect_err("no receipt to roll back");
-    assert!(
-        error.to_string().contains("no aggregate host receipt"),
-        "{error}"
-    );
-
     let doctor = native_runtime::block_on(Box::pin(tracedecay::doctor::run_doctor(
         &profile,
         tracedecay::doctor::AdmittedDoctorNetworkProbes {

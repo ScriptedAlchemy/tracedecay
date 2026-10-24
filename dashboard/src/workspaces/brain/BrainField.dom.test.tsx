@@ -4,6 +4,7 @@ import type { ProjectRegistryEntry, ProjectRepoGroup } from '../../contracts/gen
 import { BrainField, FieldLegend } from './BrainField.tsx';
 import { composeRegistryField } from './field.ts';
 import { buildGraphScene, buildRegistryScene } from './registryScene.ts';
+import { registryAtlas } from '../../viz/graph/fieldRenderers/atlas.ts';
 
 const NOW = Date.now() / 1000;
 
@@ -81,6 +82,33 @@ describe('BrainField', () => {
     expect(screen.getByText('The registry field could not draw')).toBeTruthy();
     expect(screen.getByText(/This browser has no 2D canvas context\. The project registry beside it lists the same projects\./)).toBeTruthy();
     expect(screen.queryByRole('group', { name: 'Registry field: 3 projects' })).toBeNull();
+  });
+
+  it('recovers by switching views after a canvas construction failure', () => {
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+    const view = renderField();
+    expect(screen.getByText('The registry field could not draw')).toBeTruthy();
+    stubCanvas();
+    view.rerender(<BrainField variant="atlas" scene={SCENE} inspectedId="core" onInspect={vi.fn()} onSelect={vi.fn()} focus={null} activity ariaLabel="Registry field: 3 projects" legend={null} />);
+    expect(screen.queryByText('The registry field could not draw')).toBeNull();
+    expect(screen.getByRole('group', { name: 'Registry field: 3 projects' }).querySelectorAll('canvas')).toHaveLength(1);
+  });
+
+  it('keeps Atlas projects selectable while their repository is in focus', () => {
+    stubCanvas();
+    vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(Element.prototype, 'clientHeight', 'get').mockReturnValue(600);
+    const onInspect = vi.fn();
+    const onSelect = vi.fn();
+    const view = render(<BrainField variant="atlas" scene={SCENE} inspectedId={null} onInspect={onInspect} onSelect={onSelect} focus={new Set(['core', 'core-wt'])} activity ariaLabel="Registry field: 3 projects" legend={null} />);
+    const canvas = view.container.querySelector('canvas')!;
+    const plate = registryAtlas(SCENE, 800, 600).plates.find((entry) => entry.id === 'core')!;
+    fireEvent.pointerMove(canvas, { clientX: plate.x + plate.w / 2, clientY: plate.y + 15 });
+    expect(onInspect).toHaveBeenLastCalledWith('core');
+    fireEvent.click(canvas, { clientX: plate.x + plate.w / 2, clientY: plate.y + 15 });
+    expect(onSelect).toHaveBeenLastCalledWith('core');
+    fireEvent.pointerLeave(canvas);
+    expect(onInspect).toHaveBeenLastCalledWith(null);
   });
 
   it('walks projects with arrow keys, speaks the reading, and selects with Enter', () => {

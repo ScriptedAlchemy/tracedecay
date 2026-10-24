@@ -366,22 +366,16 @@ pub(crate) fn rendered_host_invocation(program: &Path, args: &[&str]) -> String 
     }
 }
 
-/// Exact registry-document bytes (absent when nothing is registered yet) and
-/// the operator-owned peer MCP server entries read from that document.
-type McpConfigObservation = (Option<Vec<u8>>, serde_json::Map<String, serde_json::Value>);
-
-/// Read a host MCP registry document once: exact bytes for rollback, and peer
-/// servers for the preservation guard. An absent file is a legitimate empty
-/// registry.
-fn read_mcp_config_observation(
+/// Read the operator-owned peer servers. A missing file is an empty registry.
+fn read_mcp_peers(
     path: &Path,
     own_server_name: &str,
     host_label: &str,
-) -> Result<McpConfigObservation> {
+) -> Result<serde_json::Map<String, serde_json::Value>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((None, serde_json::Map::new()));
+            return Ok(serde_json::Map::new());
         }
         Err(error) => {
             return Err(TraceDecayError::Config {
@@ -398,7 +392,7 @@ fn read_mcp_config_observation(
         }
     })?;
     let Some(servers) = config.get("mcpServers") else {
-        return Ok((Some(bytes), serde_json::Map::new()));
+        return Ok(serde_json::Map::new());
     };
     let Some(servers) = servers.as_object() else {
         return Err(TraceDecayError::Config {
@@ -410,19 +404,14 @@ fn read_mcp_config_observation(
         .filter(|(name, _)| name.as_str() != own_server_name)
         .map(|(name, server)| (name.clone(), server.clone()))
         .collect();
-    Ok((Some(bytes), peers))
+    Ok(peers)
 }
 
 /// Run one host `mcp …` registry command with the shared peer-preservation
 /// guard used by Copilot and Droid.
 ///
 /// The host owns the registry merge. A buggy or changed command must not
-/// silently discard an operator's other MCP servers. The exact post-command
-/// bytes are recorded through the active host transaction so rollback can
-/// restore the pre-command document when the command fails or a later
-/// verification step rejects the effect. Snapshot once after the child exits:
-/// reading again after recording would let a foreign writer be absorbed into
-/// the transaction's intended state.
+/// silently discard an operator's other MCP servers.
 #[tracing::instrument(name = "hosts.agent.host_cli.registry_step", level = "trace", skip_all)]
 pub(crate) fn run_mcp_registry_step(
     program: &Path,
@@ -456,11 +445,10 @@ pub(crate) fn run_mcp_registry_step_with_peer_projection(
     host_label: &str,
     project_peers: impl Fn(&mut serde_json::Map<String, serde_json::Value>),
 ) -> Result<()> {
-    let (_, mut peers_before) = read_mcp_config_observation(mcp_path, own_server_name, host_label)?;
+    let mut peers_before = read_mcp_peers(mcp_path, own_server_name, host_label)?;
     project_peers(&mut peers_before);
     let outcome = run_host_cli(program, args, home)?;
-    let (observed_bytes, mut peers_after) =
-        read_mcp_config_observation(mcp_path, own_server_name, host_label)?;
+    let mut peers_after = read_mcp_peers(mcp_path, own_server_name, host_label)?;
     project_peers(&mut peers_after);
     if peers_before != peers_after {
         return Err(TraceDecayError::Config {
@@ -471,7 +459,6 @@ pub(crate) fn run_mcp_registry_step_with_peer_projection(
             ),
         });
     }
-    crate::agents::record_host_config_observation_bytes(mcp_path, observed_bytes.as_deref())?;
     require_host_cli_success(outcome)
 }
 

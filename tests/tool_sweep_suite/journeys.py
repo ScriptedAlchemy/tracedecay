@@ -3146,63 +3146,9 @@ def _source_apply(call: Call, tool: str, arguments: dict[str, Any], deadline: De
     return apply
 
 
-def _source_rollback(
-    call: Call, tool: str, arguments: dict[str, Any], deadline: Deadline,
-) -> None:
-    rollback = _source_apply(call, tool, arguments, deadline)
-    call(tool, rollback, deadline(tool))
-
-
 def _source_snapshot(fixture: dict[str, str], paths: tuple[str, ...]) -> dict[str, str]:
     root = Path(fixture["root"])
     return {path: (root / path).read_text() for path in paths}
-
-
-def _require_snapshot(fixture: dict[str, str], expected: dict[str, str], stage: str) -> None:
-    observed = _source_snapshot(fixture, tuple(expected))
-    if observed != expected:
-        raise JourneyError(f"{stage} did not restore the exact source preimage")
-
-
-def _effect_rollback_arguments(
-    response: dict[str, Any], original_idempotency_key: str,
-) -> dict[str, Any]:
-    effect_id = first_value(response, {"effect_id"})
-    input_digest = first_value(response, {"input_digest"})
-    committed_state = first_value(response, {"committed_state"})
-    if not all(
-        isinstance(value, str) and value
-        for value in (effect_id, input_digest, committed_state)
-    ):
-        raise JourneyError("source-edit receipt omitted the identities rollback consumes")
-    return {
-        "effect_id": effect_id,
-        "original_idempotency_key": original_idempotency_key,
-        "idempotency_key": f"tool-sweep-source-edit-rollback-{time.monotonic_ns()}",
-        "original_input_digest": input_digest,
-        "expected_state": committed_state,
-        "confirm": True,
-        "format": "json",
-    }
-
-
-def _rollback_effect(
-    call: Call,
-    deadline: Deadline,
-    response: dict[str, Any],
-    original_idempotency_key: str,
-) -> None:
-    effect_id = first_value(response, {"effect_id"})
-    rolled_back = call(
-        "tracedecay_source_edit_rollback",
-        _effect_rollback_arguments(response, original_idempotency_key),
-        deadline("tracedecay_source_edit_rollback"),
-    )
-    if not has_true(rolled_back, "success") or not has_true(rolled_back, "reconciled"):
-        raise JourneyError("journaled rollback omitted its reconciled success receipt")
-    rollback_effect = first_value(rolled_back, {"effect_id"})
-    if not isinstance(rollback_effect, str) or not rollback_effect or rollback_effect == effect_id:
-        raise JourneyError("journaled rollback did not mint its own durable effect identity")
 
 
 def _rename_identity(
@@ -3297,28 +3243,17 @@ def _source_edit(
 ) -> PreparedJourney | None:
     file = fixture["file"]
     symbol = fixture["qualified_name"]
-    original = _source_snapshot(fixture, ("src/lib.rs", "src/relocated.rs"))
+    original = _source_snapshot(fixture, (file,))
     forward: dict[str, Any]
-    inverse_tool = "tracedecay_str_replace"
-    inverse: dict[str, Any]
 
     if name == "tracedecay_str_replace":
         forward = {"path": file, "old_str": "value: 7", "new_str": "value: 8"}
-        inverse = {"path": file, "old_str": "value: 8", "new_str": "value: 7"}
     elif name == "tracedecay_multi_str_replace":
         forward = {
             "path": file,
             "replacements": [
                 ["pub trait SweepTrait", "pub trait SweepTraitMutation"],
                 ["pub struct SweepType", "pub struct SweepTypeMutation"],
-            ],
-        }
-        inverse_tool = "tracedecay_multi_str_replace"
-        inverse = {
-            "path": file,
-            "replacements": [
-                ["pub trait SweepTraitMutation", "pub trait SweepTrait"],
-                ["pub struct SweepTypeMutation", "pub struct SweepType"],
             ],
         }
     elif name == "tracedecay_insert_at":
@@ -3329,39 +3264,22 @@ def _source_edit(
             "content": marker,
             "before": False,
         }
-        inverse = {"path": file, "old_str": f"\n{marker}\n", "new_str": "\n"}
     elif name == "tracedecay_ast_grep_rewrite":
         forward = {"path": file, "pattern": "SweepType { value: 7 }", "rewrite": "SweepType { value: 8 }"}
-        inverse_tool = "tracedecay_ast_grep_rewrite"
-        inverse = {"path": file, "pattern": "SweepType { value: 8 }", "rewrite": "SweepType { value: 7 }"}
     elif name == "tracedecay_replace_symbol":
         forward = {
             "symbol": symbol,
             "new_source": "pub fn sweep_anchor() -> SweepType { SweepType { value: 8 } }",
         }
-        inverse_tool = "tracedecay_replace_symbol"
-        inverse = {
-            "symbol": symbol,
-            "new_source": "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }",
-        }
     elif name == "tracedecay_insert_at_symbol":
         marker = "pub fn sweep_inserted() -> i32 { 11 }"
         forward = {"symbol": symbol, "content": marker, "position": "after"}
-        inverse = {"path": file, "old_str": f"\n{marker}\n", "new_str": "\n"}
     elif name == "tracedecay_move_symbol":
         # This producer's ordinary Markdown preview intentionally summarizes
         # the move, while its published JSON contract carries expected_state.
         forward = {
             "symbol": symbol,
             "dest_file": "src/relocated.rs",
-            "dry_run": False,
-            "update_references": False,
-            "format": "json",
-        }
-        inverse_tool = "tracedecay_move_symbol"
-        inverse = {
-            "symbol": symbol,
-            "dest_file": file,
             "dry_run": False,
             "update_references": False,
             "format": "json",
@@ -3374,26 +3292,22 @@ def _source_edit(
             **_rename_identity(call, deadline, fixture["node_id"], renamed),
             "new_name": renamed,
         }
-        inverse_tool = "tracedecay_rename_symbol"
-        # The rename changes the symbol's identity; the rollback identity is
-        # re-minted from the preview producer after the apply (see cleanup).
-        inverse = {"new_name": fixture["symbol"]}
     elif name == "tracedecay_api_migration_apply":
-        return _api_migration(fixture, call, deadline, original)
+        return _api_migration(fixture, call, deadline)
     else:
         return None
 
     apply = _source_apply(call, name, forward, deadline)
 
     def cleanup(response: dict[str, Any]) -> str:
-        current = _source_snapshot(fixture, tuple(original))
-        if current == original:
-            raise JourneyError(f"{name} apply returned success without changing fixture source")
         if not has_true(response, "success"):
             raise JourneyError(f"{name} apply omitted its structured success receipt")
         effect_id = first_value(response, {"effect_id"})
         if not isinstance(effect_id, str) or not effect_id:
             raise JourneyError(f"{name} apply omitted its durable effect identity")
+        current = _source_snapshot(fixture, (file,))
+        if current == original:
+            raise JourneyError(f"{name} apply returned success without changing fixture source")
         if name == "tracedecay_rename_symbol":
             renamed_name = forward["new_name"]
             renamed_qualified = (
@@ -3404,69 +3318,18 @@ def _source_edit(
             renamed_node = _wait_for_code_symbol(
                 call, deadline, renamed_name, renamed_qualified,
             )
-            inverse.update(
-                _rename_identity(
-                    call, deadline, renamed_node["node_id"], forward["old_name"],
-                )
-            )
+            if renamed_node["name"] != renamed_name:
+                raise JourneyError("rename did not publish the requested symbol name")
         replayed = call(name, apply, deadline(name))
         if not has_true(replayed, "replayed"):
             raise JourneyError(f"{name} idempotent retry did not replay its durable receipt")
         if first_value(replayed, {"effect_id"}) != effect_id:
             raise JourneyError(f"{name} idempotent retry changed its durable effect identity")
-        if name == "tracedecay_move_symbol":
-            _rollback_effect(call, deadline, response, apply["idempotency_key"])
-            _require_snapshot(fixture, original, f"{name} rollback")
-            return "preview/apply/consumer/journaled rollback verified"
-        rollback_arguments = inverse
-        _source_rollback(call, inverse_tool, rollback_arguments, deadline)
-        _require_snapshot(fixture, original, f"{name} rollback")
         if name == "tracedecay_rename_symbol":
-            _wait_for_code_symbol(
-                call, deadline, forward["old_name"], forward["qualified_name"],
-            )
-            return "identity/dry-run/apply/reindex/replay/inverse verified"
-        return "preview/apply/consumer/rollback verified"
+            return "identity/dry-run/apply/reindex/replay verified"
+        return "preview/apply/consumer/replay verified"
 
-    return PreparedJourney(apply, cleanup)
-
-
-def _journaled_rollback(
-    fixture: dict[str, str], call: Call, deadline: Deadline,
-) -> PreparedJourney:
-    """Produce one completed move_symbol effect whose receipt mints every
-    rollback identity, then verify the journaled inverse restores the exact
-    retained preimages."""
-    original = _source_snapshot(fixture, ("src/lib.rs", "src/relocated.rs"))
-    forward = {
-        "symbol": fixture["qualified_name"],
-        "dest_file": "src/relocated.rs",
-        "dry_run": False,
-        "update_references": False,
-        "format": "json",
-    }
-    apply = _source_apply(call, "tracedecay_move_symbol", forward, deadline)
-    applied = call("tracedecay_move_symbol", apply, deadline("tracedecay_move_symbol"))
-    if not has_true(applied, "success"):
-        raise JourneyError("rollback producer move did not complete successfully")
-    if _source_snapshot(fixture, tuple(original)) == original:
-        raise JourneyError("rollback producer move did not change fixture source")
-    rollback_arguments = _effect_rollback_arguments(applied, apply["idempotency_key"])
-    effect_id = rollback_arguments["effect_id"]
-
-    def cleanup(response: dict[str, Any]) -> str:
-        if not has_true(response, "success") or not has_true(response, "reconciled"):
-            raise JourneyError("journaled rollback omitted its reconciled success receipt")
-        rollback_effect = first_value(response, {"effect_id"})
-        if not isinstance(rollback_effect, str) or not rollback_effect or rollback_effect == effect_id:
-            raise JourneyError("journaled rollback did not mint its own durable effect identity")
-        _require_snapshot(fixture, original, "source-edit journaled rollback")
-        return "move producer/journaled inverse/preimage restoration verified"
-
-    return PreparedJourney(
-        rollback_arguments,
-        cleanup,
-    )
+    return PreparedJourney(apply, cleanup, settlement="contained")
 
 
 def _api_plan(response: dict[str, Any]) -> dict[str, Any] | None:
@@ -3507,7 +3370,7 @@ def api_migration_plan_arguments(fixture: dict[str, str]) -> dict[str, Any]:
 
 
 def _api_migration(
-    fixture: dict[str, str], call: Call, deadline: Deadline, original: dict[str, str],
+    fixture: dict[str, str], call: Call, deadline: Deadline,
 ) -> PreparedJourney:
     marker = "pub fn sweep_compatibility() -> i32 { 11 }"
     plan_arguments = api_migration_plan_arguments(fixture)
@@ -3551,16 +3414,9 @@ def _api_migration(
             raise JourneyError("api-migration retry did not replay its durable receipt")
         if first_value(replayed, {"effect_id"}) != effect_id:
             raise JourneyError("api-migration retry changed its durable effect identity")
-        _source_rollback(
-            call,
-            "tracedecay_str_replace",
-            {"path": fixture["file"], "old_str": f"\n{marker}\n", "new_str": "\n"},
-            deadline,
-        )
-        _require_snapshot(fixture, original, "api-migration rollback")
-        return "plan/apply/consumer/rollback verified"
+        return "plan/apply/consumer/replay verified"
 
-    return PreparedJourney(apply, cleanup)
+    return PreparedJourney(apply, cleanup, settlement="contained")
 
 
 def profile_refresh_selectors(fixture: dict[str, str]) -> dict[str, Any]:
@@ -4287,6 +4143,4 @@ def prepare(
             return "durable refresh cancel receipt verified terminal"
 
         return PreparedJourney({"handle": handle, **selectors}, cleanup)
-    if name == "tracedecay_source_edit_rollback":
-        return _journaled_rollback(fixture, call, deadline)
     return _source_edit(name, fixture, call, deadline)

@@ -199,7 +199,6 @@ const FAILING_SET_REGISTRATION_VERIFY: HostBundleError =
 #[derive(Default)]
 struct FailingSetRegistration {
     applied: bool,
-    rolled_back: bool,
 }
 
 struct ArtifactOnlyTestRegistration;
@@ -237,19 +236,10 @@ impl HostComponentSetRegistrationV1 for FailingSetRegistration {
     ) -> Result<(), HostBundleError> {
         Err(FAILING_SET_REGISTRATION_VERIFY)
     }
-
-    fn rollback(
-        &mut self,
-        _component_set: &HostComponentSetV1,
-        _request: &HostComponentSetExecutionRequestV1,
-    ) -> Result<(), HostBundleError> {
-        self.rolled_back = true;
-        Ok(())
-    }
 }
 
 #[test]
-fn component_set_transaction_is_idempotent_and_rolls_back_every_component() {
+fn component_set_replays_success_and_preserves_publications_on_failure() {
     let root = tempfile::tempdir().unwrap();
     let initial = component_set(HostKindV1::OpenCode, b"core-v1", b"agent-v1");
     let initial_request =
@@ -299,30 +289,29 @@ fn component_set_transaction_is_idempotent_and_rolls_back_every_component() {
         Err(FAILING_SET_REGISTRATION_VERIFY)
     );
     assert!(failing_registration.applied);
-    assert!(failing_registration.rolled_back);
     assert_eq!(
         std::fs::read(root.path().join("plugins/core.json")).unwrap(),
-        b"core-v1"
+        b"core-v2"
     );
     assert_eq!(
         std::fs::read(root.path().join("plugins/agent.json")).unwrap(),
-        b"agent-v1"
+        b"agent-v2"
     );
     assert_eq!(
         writer
             .load_receipt(HostKindV1::OpenCode, HostComponentV1::Core)
             .unwrap()
-            .expect("previous core receipt remains published")
+            .expect("published core ownership remains recorded")
             .operation_id,
-        [21; 16]
+        [22; 16]
     );
     assert_eq!(
         writer
             .load_receipt(HostKindV1::OpenCode, HostComponentV1::Agent)
             .unwrap()
-            .expect("previous agent receipt remains published")
+            .expect("published agent ownership remains recorded")
             .operation_id,
-        [21; 16]
+        [22; 16]
     );
     let prior_set_receipt = component_set_receipt_file([21; 16]);
     for entry in fs::read_dir(root.path().join(HOST_BUNDLE_CONTROL_DIR)).unwrap() {
@@ -331,17 +320,15 @@ fn component_set_transaction_is_idempotent_and_rolls_back_every_component() {
             name.starts_with("receipt.")
                 || name.starts_with("writer.")
                 || name == prior_set_receipt,
-            "a rolled-back operation leaves no journal, backup, staging, or aggregate receipt: {name}"
+            "a failed operation leaves no backup, staging, or success receipt: {name}"
         );
     }
     drop(writer);
-    HostBundleWriterV1::open(root.path()).expect("reopen after rollback");
+    HostBundleWriterV1::open(root.path()).expect("reopen after failed publication");
 }
 
-/// Rollback puts back every path it can, but never overwrites bytes a second
-/// writer placed at a path mid-operation; that path is a typed conflict.
 #[test]
-fn component_set_rollback_leaves_a_second_writers_bytes_in_place() {
+fn component_set_failure_preserves_foreign_and_published_bytes() {
     let root = tempfile::tempdir().unwrap();
     let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
     let initial = component_set(HostKindV1::OpenCode, b"core-v1", b"agent-v1");
@@ -358,7 +345,6 @@ fn component_set_rollback_leaves_a_second_writers_bytes_in_place() {
         artifact_root: root.path().to_path_buf(),
         relative_path: "plugins/core.json",
         bytes: b"foreign".to_vec(),
-        rolled_back: false,
     };
 
     let error = HostComponentSetTransactionV1::new(&mut writer)
@@ -371,37 +357,56 @@ fn component_set_rollback_leaves_a_second_writers_bytes_in_place() {
         .unwrap_err();
 
     assert!(
-        matches!(error, HostBundleError::OwnershipConflict(_)),
+        matches!(error, HostBundleError::ArtifactContentMismatch),
         "{error}"
     );
-    assert!(registration.rolled_back);
     assert_eq!(
         fs::read(root.path().join("plugins/core.json")).unwrap(),
         b"foreign"
     );
     assert_eq!(
         fs::read(root.path().join("plugins/agent.json")).unwrap(),
-        b"agent-v1",
-        "the untouched path is still put back"
+        b"agent-v2",
+        "the completed publication remains"
     );
     assert_eq!(
         writer
             .load_receipt(HostKindV1::OpenCode, HostComponentV1::Core)
             .unwrap()
-            .expect("the prior receipt was never replaced")
-            .operation_id,
-        [41; 16]
+            .expect("the published artifact digest remains recorded")
+            .artifacts[0]
+            .artifact_digest,
+        <[u8; 32]>::from(Sha256::digest(b"core-v2"))
     );
+    assert_eq!(writer.load_component_set_receipt([42; 16]).unwrap(), None);
+    for operation in [
+        HostBundleLifecycleOpV1::Update,
+        HostBundleLifecycleOpV1::Uninstall,
+    ] {
+        let error = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &repaired,
+                &component_set_request(HostKindV1::OpenCode, operation, 43),
+                &ComponentSetVerifier::from_set(&repaired),
+                &mut ArtifactOnlyTestRegistration,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, HostBundleError::OwnershipConflict(_)),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(root.path().join("plugins/core.json")).unwrap(),
+            b"foreign"
+        );
+    }
 }
 
-/// Stand-in for a concurrent second writer. It rewrites one deployed path
-/// during `apply`, so artifact verification fails afterwards and rollback
-/// has to cope with the foreign bytes.
+/// A concurrent writer changes an artifact during registration.
 struct SecondWriterRegistration {
     artifact_root: PathBuf,
     relative_path: &'static str,
     bytes: Vec<u8>,
-    rolled_back: bool,
 }
 
 impl HostComponentSetRegistrationV1 for SecondWriterRegistration {
@@ -412,15 +417,6 @@ impl HostComponentSetRegistrationV1 for SecondWriterRegistration {
     ) -> Result<(), HostBundleError> {
         fs::write(self.artifact_root.join(self.relative_path), &self.bytes)
             .map_err(|_| host_bundle_storage_failure!())
-    }
-
-    fn rollback(
-        &mut self,
-        _component_set: &HostComponentSetV1,
-        _request: &HostComponentSetExecutionRequestV1,
-    ) -> Result<(), HostBundleError> {
-        self.rolled_back = true;
-        Ok(())
     }
 }
 
@@ -744,144 +740,6 @@ fn confirmed_component_set_rejects_changed_artifact_state_without_overwrite() {
 }
 
 #[test]
-fn feedback_switch_apply_restore_and_aggregate_receipt_share_one_writer() {
-    let root = tempfile::tempdir().unwrap();
-    let previous = manifest(HostKindV1::KimiCode, b"previous");
-    let target = manifest(HostKindV1::KimiCode, b"target");
-    let verifier = ComponentSetVerifier(vec![
-        previous.canonical_digest().unwrap(),
-        target.canonical_digest().unwrap(),
-    ]);
-    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
-    writer
-        .execute(
-            &previous,
-            &execution(
-                HostKindV1::KimiCode,
-                HostBundleLifecycleOpV1::Install,
-                31,
-                true,
-            ),
-            &content(b"previous"),
-            &verifier,
-        )
-        .unwrap();
-    let lifecycle = HostBundleLifecycleRuntimeV1::new(verifier.clone(), writer);
-    let mut switch = FeedbackPathRollbackSwitchV1::new(lifecycle);
-    let apply = switch
-        .feedback_rollback_switch_apply(
-            &previous,
-            &target,
-            &execution(
-                HostKindV1::KimiCode,
-                HostBundleLifecycleOpV1::Update,
-                32,
-                true,
-            ),
-            &content(b"target"),
-            &[],
-        )
-        .unwrap();
-    let mut corrupted_apply = apply.clone();
-    corrupted_apply.apply_receipt.operation_id = [0; 16];
-    assert_eq!(
-        switch.feedback_rollback_switch_restore(
-            &corrupted_apply,
-            &previous,
-            &execution(
-                HostKindV1::KimiCode,
-                HostBundleLifecycleOpV1::Repair,
-                33,
-                true,
-            ),
-            &content(b"previous"),
-            &[],
-        ),
-        Err(HostBundleError::ReceiptCorrupted)
-    );
-    assert_eq!(
-        std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
-        b"target"
-    );
-    let restore = switch
-        .feedback_rollback_switch_restore(
-            &apply,
-            &previous,
-            &execution(
-                HostKindV1::KimiCode,
-                HostBundleLifecycleOpV1::Repair,
-                33,
-                true,
-            ),
-            &content(b"previous"),
-            &[],
-        )
-        .unwrap();
-    let mut writer = switch.into_lifecycle().into_storage();
-    let aggregate = writer
-        .publish_feedback_component_set_receipt(&previous, &restore.restore_receipt)
-        .unwrap();
-    assert_eq!(aggregate.component_manifests, vec![previous]);
-    assert_eq!(
-        std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
-        b"previous"
-    );
-}
-
-#[test]
-fn large_artifacts_complete_the_host_bundle_lifecycle() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("plugins/tracedecay.json");
-    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
-    let mut bytes = vec![0; 3 * 1024 * 1024];
-
-    for (operation, operation_id) in [
-        (HostBundleLifecycleOpV1::Install, 1),
-        (HostBundleLifecycleOpV1::Update, 2),
-        (HostBundleLifecycleOpV1::Repair, 3),
-    ] {
-        bytes.fill(operation_id);
-        let bundle = manifest(HostKindV1::OpenCode, &bytes);
-        let request = execution(HostKindV1::OpenCode, operation, operation_id, true);
-        let catalog = verifier(&bundle);
-
-        dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
-            root.path(),
-            root.path(),
-            &bundle,
-            &request,
-            &catalog,
-            &[],
-        )
-        .unwrap();
-        let receipt = writer
-            .execute(&bundle, &request, &content(&bytes), &catalog)
-            .unwrap();
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        assert_eq!(receipt.operation, operation);
-        assert_eq!(receipt.artifacts[0].artifact_digest, digest);
-        assert!(fs::read(&path).unwrap() == bytes);
-    }
-
-    let bundle = manifest(HostKindV1::OpenCode, &bytes);
-    let receipt = writer
-        .execute(
-            &bundle,
-            &execution(
-                HostKindV1::OpenCode,
-                HostBundleLifecycleOpV1::Uninstall,
-                4,
-                true,
-            ),
-            &[],
-            &verifier(&bundle),
-        )
-        .unwrap();
-    assert!(receipt.artifacts.is_empty());
-    assert!(!path.exists());
-}
-
-#[test]
 fn corruption_and_external_bundle_paths_are_rejected() {
     let root = tempfile::tempdir().unwrap();
     let bundle = manifest(HostKindV1::OpenCode, b"expected");
@@ -1078,7 +936,7 @@ fn install_records_a_byte_identical_receiptless_staged_deploy() {
 }
 
 #[test]
-fn lifecycle_preserves_ownership_receipts_and_rollback_plan() {
+fn lifecycle_preserves_ownership_receipts_and_mutation_plan() {
     let root = tempfile::tempdir().unwrap();
     let first = manifest(HostKindV1::KimiCode, b"first");
     let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
@@ -1115,8 +973,6 @@ fn lifecycle_preserves_ownership_receipts_and_rollback_plan() {
     )
     .unwrap();
     assert!(preview.confirmation_required);
-    assert!(preview.plan.rollback_required);
-    assert_eq!(preview.rollback.replaced_relative_paths.len(), 1);
 
     std::fs::write(root.path().join("plugins/tracedecay.json"), b"foreign").unwrap();
     let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
@@ -1956,44 +1812,6 @@ fn non_interactive_host_missing_artifacts_still_fail() {
     );
 }
 
-#[test]
-fn doctor_surfaces_restart_safe_feedback_rollback_state() {
-    let root = tempfile::tempdir().unwrap();
-    let writer = HostBundleWriterV1::open(root.path()).unwrap();
-    std::fs::write(
-        root.path()
-            .join(HOST_BUNDLE_CONTROL_DIR)
-            .join("feedback-rollback.kimi.v1.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "host": "kimi_code",
-            "status": "applied"
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    drop(writer);
-
-    let report = inspect_installed_host_bundle_components_at(
-        root.path(),
-        root.path(),
-        &CurrentRegistration,
-        crate::agents::TEST_GENERATOR_COMMIT,
-    )
-    .unwrap();
-    assert_eq!(report.components.len(), 1);
-    assert_eq!(report.components[0].host, Some(HostKindV1::KimiCode));
-    assert_eq!(report.components[0].component, Some(HostComponentV1::Core));
-    assert_eq!(
-        report.components[0].state,
-        HostBundleComponentDoctorStateV1::Repairable
-    );
-    assert!(
-        report.components[0]
-            .repair_action
-            .contains("feedback-rollback restore")
-    );
-}
-
 /// A receipt written under an older schema is never migrated: it reads as
 /// `ReinstallRequired` everywhere until an explicitly adopting install
 /// discards it and records a current receipt over the deployed bytes.
@@ -2276,7 +2094,7 @@ fn legacy_receipt_drift_between_preview_and_apply_is_stale() {
 }
 
 #[test]
-fn migration_rollback_restores_legacy_receipt_and_artifact() {
+fn migration_failure_preserves_published_artifact_and_prior_receipt() {
     let root = tempfile::tempdir().unwrap();
     let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
     seed_legacy_mcp_install(root.path(), &writer, b"mcp-v1");
@@ -2294,10 +2112,9 @@ fn migration_rollback_restores_legacy_receipt_and_artifact() {
         Err(FAILING_SET_REGISTRATION_VERIFY)
     );
 
-    assert!(registration.rolled_back);
     assert_eq!(
         std::fs::read(root.path().join(MCP_PATH)).unwrap(),
-        b"mcp-v1"
+        b"mcp-v2"
     );
     assert_eq!(
         std::fs::read(legacy_mcp_receipt_path(root.path())).unwrap(),
@@ -2306,8 +2123,10 @@ fn migration_rollback_restores_legacy_receipt_and_artifact() {
     assert_eq!(
         writer
             .load_receipt(HostKindV1::CursorDesktop, HostComponentV1::ContextMcp)
-            .unwrap(),
-        None
+            .unwrap()
+            .expect("the canonical receipt records the published artifact")
+            .operation_id,
+        [44; 16]
     );
     assert_eq!(writer.load_component_set_receipt([44; 16]).unwrap(), None);
 }
@@ -2390,4 +2209,57 @@ fn doctor_reports_dual_claim_as_one_owner_with_canonical_repair() {
             component.label()
         );
     }
+}
+
+#[test]
+fn large_artifacts_complete_the_host_bundle_lifecycle() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("plugins/tracedecay.json");
+    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+    let mut bytes = vec![0; 3 * 1024 * 1024];
+
+    for (operation, operation_id) in [
+        (HostBundleLifecycleOpV1::Install, 1),
+        (HostBundleLifecycleOpV1::Update, 2),
+        (HostBundleLifecycleOpV1::Repair, 3),
+    ] {
+        bytes.fill(operation_id);
+        let bundle = manifest(HostKindV1::OpenCode, &bytes);
+        let request = execution(HostKindV1::OpenCode, operation, operation_id, true);
+        let catalog = verifier(&bundle);
+
+        dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+            root.path(),
+            root.path(),
+            &bundle,
+            &request,
+            &catalog,
+            &[],
+        )
+        .unwrap();
+        let receipt = writer
+            .execute(&bundle, &request, &content(&bytes), &catalog)
+            .unwrap();
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        assert_eq!(receipt.operation, operation);
+        assert_eq!(receipt.artifacts[0].artifact_digest, digest);
+        assert!(fs::read(&path).unwrap() == bytes);
+    }
+
+    let bundle = manifest(HostKindV1::OpenCode, &bytes);
+    let receipt = writer
+        .execute(
+            &bundle,
+            &execution(
+                HostKindV1::OpenCode,
+                HostBundleLifecycleOpV1::Uninstall,
+                4,
+                true,
+            ),
+            &[],
+            &verifier(&bundle),
+        )
+        .unwrap();
+    assert!(receipt.artifacts.is_empty());
+    assert!(!path.exists());
 }

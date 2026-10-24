@@ -11,7 +11,7 @@ use super::queries::{GraphQueryManager, VerifiedHealthInputsV1};
 use super::scc::tarjan_scc;
 use crate::GraphQueryResult as Result;
 
-pub const HEALTH_DEFINITION: &str = "health.2026-09-12";
+pub const HEALTH_DEFINITION: &str = "health.2026-10-22";
 
 #[derive(Clone, Debug)]
 pub struct VerifiedHealthSnapshotV1 {
@@ -166,9 +166,11 @@ pub fn health_snapshot_from_inputs(inputs: &VerifiedHealthInputsV1) -> VerifiedH
     let adjacency = &inputs.adjacency;
     let files_analyzed = adjacency.len();
     let total_edges = adjacency.values().map(HashSet::len).sum();
-    let (acyclicity, edges_in_cycles) = acyclicity_score(adjacency);
-    let depth_result = dependency_depth(adjacency, 1);
-    let depth = depth_score(depth_result.max_depth, depth_result.ideal_depth);
+    let scc_analysis = SccAnalysis::new(adjacency);
+    let (acyclicity, edges_in_cycles) =
+        acyclicity_score_from_analysis(adjacency, total_edges, &scc_analysis);
+    let depth_analysis = dependency_depth_analysis(&scc_analysis);
+    let depth = depth_score(depth_analysis.max_depth, depth_analysis.ideal_depth);
     let aggregates = &inputs.aggregates;
     let complexity_values = aggregates
         .iter()
@@ -224,8 +226,8 @@ pub fn health_snapshot_from_inputs(inputs: &VerifiedHealthInputsV1) -> VerifiedH
         gini,
         edges_in_cycles,
         total_edges,
-        max_chain: depth_result.max_depth,
-        ideal_chain: depth_result.ideal_depth,
+        max_chain: depth_analysis.max_depth,
+        ideal_chain: depth_analysis.ideal_depth,
         complexity_files,
         incomplete_complexity_symbols,
         modularity_components,
@@ -293,29 +295,80 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
         return (1.0, 0);
     }
 
-    let sccs = tarjan_scc(adj);
+    let analysis = SccAnalysis::new(adj);
+    acyclicity_score_from_analysis(adj, total_edges, &analysis)
+}
 
-    // Build a set of nodes in nontrivial SCCs (size > 1)
-    let mut in_cycle: HashSet<&str> = HashSet::new();
-    for scc in &sccs {
-        if scc.len() > 1 {
-            for node in scc {
-                in_cycle.insert(node.as_str());
+struct SccAnalysis {
+    components: Vec<Vec<String>>,
+    node_to_component: HashMap<String, usize>,
+    condensation: HashMap<usize, HashSet<usize>>,
+}
+
+impl SccAnalysis {
+    fn new<S1: BuildHasher, S2: BuildHasher>(
+        adjacency: &HashMap<String, HashSet<String, S2>, S1>,
+    ) -> Self {
+        if adjacency.is_empty() {
+            return Self {
+                components: Vec::new(),
+                node_to_component: HashMap::new(),
+                condensation: HashMap::new(),
+            };
+        }
+
+        let components = tarjan_scc(adjacency);
+        let mut node_to_component = HashMap::new();
+        for (component_index, component) in components.iter().enumerate() {
+            for node in component {
+                node_to_component.insert(node.clone(), component_index);
             }
         }
+
+        let mut condensation = HashMap::new();
+        for (source, targets) in adjacency {
+            let source_component = node_to_component[source];
+            for target in targets {
+                let target_component = node_to_component[target];
+                if source_component != target_component {
+                    condensation
+                        .entry(source_component)
+                        .or_insert_with(HashSet::new)
+                        .insert(target_component);
+                }
+            }
+        }
+
+        Self {
+            components,
+            node_to_component,
+            condensation,
+        }
+    }
+}
+
+fn acyclicity_score_from_analysis<S1: BuildHasher, S2: BuildHasher>(
+    adjacency: &HashMap<String, HashSet<String, S2>, S1>,
+    total_edges: usize,
+    analysis: &SccAnalysis,
+) -> (f64, usize) {
+    if total_edges == 0 {
+        return (1.0, 0);
     }
 
-    // Count edges where both endpoints are in nontrivial SCCs
-    let edges_in_cycles: usize = adj
+    let edges_in_cycles = adjacency
         .iter()
-        .filter(|(src, _)| in_cycle.contains(src.as_str()))
-        .map(|(_src, targets)| {
+        .map(|(source, targets)| {
+            let source_component = analysis.node_to_component[source];
+            if analysis.components[source_component].len() == 1 {
+                return 0;
+            }
             targets
                 .iter()
-                .filter(|tgt| in_cycle.contains(tgt.as_str()))
+                .filter(|target| analysis.node_to_component[*target] == source_component)
                 .count()
         })
-        .sum();
+        .sum::<usize>();
 
     let score = 1.0 - (edges_in_cycles as f64 / total_edges as f64);
     (score, edges_in_cycles)
@@ -346,17 +399,31 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
     limit: usize,
 ) -> DepthResult {
-    let mut all_nodes: HashSet<String> = adj.keys().cloned().collect();
-    for targets in adj.values() {
-        all_nodes.extend(targets.iter().cloned());
+    let scc_analysis = SccAnalysis::new(adj);
+    let depth_analysis = dependency_depth_analysis(&scc_analysis);
+    let chains = reconstruct_dependency_chains(&scc_analysis, &depth_analysis, limit);
+    DepthResult {
+        max_depth: depth_analysis.max_depth,
+        ideal_depth: depth_analysis.ideal_depth,
+        chains,
     }
-    let file_count = all_nodes.len();
+}
 
+struct DependencyDepthAnalysis {
+    max_depth: usize,
+    ideal_depth: usize,
+    distances: Vec<usize>,
+    predecessors: Vec<usize>,
+}
+
+fn dependency_depth_analysis(analysis: &SccAnalysis) -> DependencyDepthAnalysis {
+    let file_count = analysis.node_to_component.len();
     if file_count == 0 {
-        return DepthResult {
+        return DependencyDepthAnalysis {
             max_depth: 0,
             ideal_depth: 0,
-            chains: Vec::new(),
+            distances: Vec::new(),
+            predecessors: Vec::new(),
         };
     }
 
@@ -365,109 +432,103 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
     } else {
         (file_count as f64).log2().ceil() as usize
     };
-
-    let sccs = tarjan_scc(adj);
-    let mut node_to_scc: HashMap<String, usize> = HashMap::new();
-    for (idx, scc) in sccs.iter().enumerate() {
-        for node in scc {
-            node_to_scc.insert(node.clone(), idx);
-        }
-    }
-
-    let scc_count = sccs.len();
-    let mut scc_adj: HashMap<usize, HashSet<usize>> = HashMap::new();
-    for (src, targets) in adj {
-        let src_scc = node_to_scc[src];
-        for tgt in targets {
-            let tgt_scc = node_to_scc[tgt];
-            if src_scc != tgt_scc {
-                scc_adj.entry(src_scc).or_default().insert(tgt_scc);
-            }
-        }
-    }
-
+    let scc_count = analysis.components.len();
     let mut in_degree = vec![0usize; scc_count];
-    for targets in scc_adj.values() {
-        for &tgt in targets {
-            in_degree[tgt] += 1;
+    for targets in analysis.condensation.values() {
+        for &target in targets {
+            in_degree[target] += 1;
         }
     }
 
-    let mut queue: VecDeque<usize> = (0..scc_count).filter(|&i| in_degree[i] == 0).collect();
-
-    let mut topo_order: Vec<usize> = Vec::new();
-    while let Some(node) = queue.pop_front() {
-        topo_order.push(node);
-        if let Some(neighbors) = scc_adj.get(&node) {
-            for &nb in neighbors {
-                in_degree[nb] -= 1;
-                if in_degree[nb] == 0 {
-                    queue.push_back(nb);
+    let mut queue: VecDeque<usize> = (0..scc_count)
+        .filter(|&index| in_degree[index] == 0)
+        .collect();
+    let mut topo_order = Vec::new();
+    while let Some(component) = queue.pop_front() {
+        topo_order.push(component);
+        if let Some(neighbors) = analysis.condensation.get(&component) {
+            for &neighbor in neighbors {
+                in_degree[neighbor] -= 1;
+                if in_degree[neighbor] == 0 {
+                    queue.push_back(neighbor);
                 }
             }
         }
     }
 
-    let mut dist = vec![0usize; scc_count];
-    let mut pred = vec![usize::MAX; scc_count];
-
-    for &u in &topo_order {
-        if let Some(neighbors) = scc_adj.get(&u) {
-            for &v in neighbors {
-                if dist[u] + 1 > dist[v] {
-                    dist[v] = dist[u] + 1;
-                    pred[v] = u;
+    let mut distances = vec![0usize; scc_count];
+    let mut predecessors = vec![usize::MAX; scc_count];
+    for &source in &topo_order {
+        if let Some(targets) = analysis.condensation.get(&source) {
+            for &target in targets {
+                if distances[source] + 1 > distances[target] {
+                    distances[target] = distances[source] + 1;
+                    predecessors[target] = source;
                 }
             }
         }
     }
 
-    // Rank every SCC before applying the response limit. Reconstructing
-    // only the selected chains keeps small-limit callers proportional to their
-    // requested result count.
-    let max_depth = dist.iter().copied().max().unwrap_or(0);
-    let mut ranked_sccs = (0..scc_count).collect::<Vec<_>>();
+    let max_depth = distances.iter().copied().max().unwrap_or(0);
+    DependencyDepthAnalysis {
+        max_depth,
+        ideal_depth,
+        distances,
+        predecessors,
+    }
+}
+
+#[tracing::instrument(
+    name = "usecases.graph.depth.reconstruct_chains",
+    level = "trace",
+    skip_all
+)]
+fn reconstruct_dependency_chains(
+    analysis: &SccAnalysis,
+    depth: &DependencyDepthAnalysis,
+    limit: usize,
+) -> Vec<DepthChain> {
+    let mut ranked_sccs = (0..analysis.components.len()).collect::<Vec<_>>();
     ranked_sccs.sort_unstable_by(|left, right| {
-        dist[*right]
-            .cmp(&dist[*left])
-            .then_with(|| sccs[*left].iter().min().cmp(&sccs[*right].iter().min()))
+        depth.distances[*right]
+            .cmp(&depth.distances[*left])
+            .then_with(|| {
+                analysis.components[*left]
+                    .iter()
+                    .min()
+                    .cmp(&analysis.components[*right].iter().min())
+            })
     });
     ranked_sccs.truncate(limit);
 
-    let mut results: Vec<DepthChain> = Vec::with_capacity(ranked_sccs.len());
-    for scc_idx in ranked_sccs {
-        let depth = dist[scc_idx];
-
-        let mut chain_sccs: Vec<usize> = Vec::new();
-        let mut cur = scc_idx;
+    let mut chains = Vec::with_capacity(ranked_sccs.len());
+    for component_index in ranked_sccs {
+        let mut chain_components = Vec::new();
+        let mut current = component_index;
         loop {
-            chain_sccs.push(cur);
-            let p = pred[cur];
-            if p == usize::MAX {
+            chain_components.push(current);
+            let predecessor = depth.predecessors[current];
+            if predecessor == usize::MAX {
                 break;
             }
-            cur = p;
+            current = predecessor;
         }
-        chain_sccs.reverse();
+        chain_components.reverse();
 
-        let chain: Vec<String> = chain_sccs.iter().map(|&si| sccs[si][0].clone()).collect();
-
-        let mut scc_files = sccs[scc_idx].clone();
+        let chain = chain_components
+            .iter()
+            .map(|&index| analysis.components[index][0].clone())
+            .collect();
+        let mut scc_files = analysis.components[component_index].clone();
         scc_files.sort();
-        let representative = scc_files[0].clone();
-        results.push(DepthChain {
-            file: representative,
+        chains.push(DepthChain {
+            file: scc_files[0].clone(),
             scc_files,
-            depth,
+            depth: depth.distances[component_index],
             chain,
         });
     }
-
-    DepthResult {
-        max_depth,
-        ideal_depth,
-        chains: results,
-    }
+    chains
 }
 
 /// One directory cluster in the Design Structure Matrix ordering.
@@ -725,9 +786,49 @@ pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
 #[cfg(test)]
 mod panel_tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    use super::{HealthDimension, NoEvidence, health_panel, health_snapshot_from_inputs};
+    use super::{
+        HealthDimension, NoEvidence, dependency_depth, health_panel, health_snapshot_from_inputs,
+    };
     use crate::queries::{VerifiedHealthFileAggregateV1, VerifiedHealthInputsV1};
+
+    struct SpanCapture {
+        next_id: AtomicUsize,
+        names: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl tracing::Subscriber for SpanCapture {
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            self.names
+                .lock()
+                .expect("span name capture")
+                .push(attributes.metadata().name());
+            tracing::span::Id::from_u64(self.next_id.fetch_add(1, Ordering::Relaxed) as u64 + 1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, _: &tracing::Event<'_>) {}
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
 
     fn scope(
         files: &[(&str, &[&str])],
@@ -756,6 +857,69 @@ mod panel_tests {
                 )
                 .collect(),
         }
+    }
+
+    #[test]
+    fn health_snapshot_runs_one_scc_without_reconstructing_chains() {
+        let inputs = scope(
+            &[
+                ("root.rs", &["middle.rs"]),
+                ("middle.rs", &["deepest.rs"]),
+                ("deepest.rs", &[]),
+                ("isolated.rs", &[]),
+            ],
+            &[],
+        );
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let _capture = tracedecay_runtime_core::logging::set_tracing_capture(SpanCapture {
+            next_id: AtomicUsize::new(0),
+            names: Arc::clone(&names),
+        });
+
+        let snapshot = health_snapshot_from_inputs(&inputs);
+        assert_eq!(snapshot.max_chain, 2);
+        assert_eq!(snapshot.ideal_chain, 2);
+        {
+            let spans = names.lock().expect("span name capture");
+            assert_eq!(
+                spans
+                    .iter()
+                    .filter(|name| **name == "usecases.graph.tarjan_scc")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                spans
+                    .iter()
+                    .filter(|name| **name == "usecases.graph.depth.reconstruct_chains")
+                    .count(),
+                0
+            );
+        }
+
+        names.lock().expect("span name capture").clear();
+        let depth = dependency_depth(&inputs.adjacency, 1);
+        assert_eq!(depth.max_depth, 2);
+        assert_eq!(depth.chains.len(), 1);
+        assert_eq!(
+            depth.chains[0].chain,
+            ["root.rs", "middle.rs", "deepest.rs"]
+        );
+        let spans = names.lock().expect("span name capture");
+        assert_eq!(
+            spans
+                .iter()
+                .filter(|name| **name == "usecases.graph.tarjan_scc")
+                .count(),
+            1
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .filter(|name| **name == "usecases.graph.depth.reconstruct_chains")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -851,6 +1015,44 @@ mod panel_tests {
     }
 
     #[test]
+    fn bridge_between_cyclic_components_is_not_counted_as_a_cycle_edge() {
+        let snapshot = health_snapshot_from_inputs(&scope(
+            &[
+                ("a.rs", &["b.rs"]),
+                ("b.rs", &["a.rs", "c.rs"]),
+                ("c.rs", &["d.rs"]),
+                ("d.rs", &["c.rs"]),
+            ],
+            &[],
+        ));
+
+        assert_eq!(snapshot.total_edges, 5);
+        assert_eq!(snapshot.edges_in_cycles, 4);
+        assert!((snapshot.acyclicity - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn merged_cycles_count_every_edge_and_singleton_self_loops_remain_excluded() {
+        let merged = health_snapshot_from_inputs(&scope(
+            &[
+                ("a.rs", &["b.rs"]),
+                ("b.rs", &["a.rs", "c.rs"]),
+                ("c.rs", &["d.rs"]),
+                ("d.rs", &["c.rs", "a.rs"]),
+            ],
+            &[],
+        ));
+        let self_loop = health_snapshot_from_inputs(&scope(&[("loop.rs", &["loop.rs"])], &[]));
+
+        assert_eq!(merged.total_edges, 6);
+        assert_eq!(merged.edges_in_cycles, 6);
+        assert_eq!(merged.acyclicity, 0.0);
+        assert_eq!(self_loop.total_edges, 1);
+        assert_eq!(self_loop.edges_in_cycles, 0);
+        assert_eq!(self_loop.acyclicity, 1.0);
+    }
+
+    #[test]
     fn the_health_definition_pins_its_scores() {
         let aggregate =
             |file: &str, complexity, functions, skipped, dead| VerifiedHealthFileAggregateV1 {
@@ -895,7 +1097,7 @@ mod panel_tests {
         assert_eq!(
             pinned,
             (
-                "health.2026-09-12",
+                "health.2026-10-22",
                 7113,
                 [
                     ("acyclicity", 500_000),

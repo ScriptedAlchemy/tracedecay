@@ -17,16 +17,10 @@ struct RegistrationObservedStateV1 {
     metadata: Option<crate::agents::HostFileMetadataIdentityV1>,
 }
 
-type RegistrationFileBytes = Option<(Vec<u8>, crate::agents::HostFileMetadataIdentityV1)>;
-
-/// Pre-effect registration bytes for the one in-flight operation, held only in
-/// this authority. Nothing is persisted: a restarted process has no copy to
-/// restore, and the next lifecycle run reconciles the host registration.
 struct StagedRegistration {
     operation_id: [u8; 16],
-    files: Vec<(PathBuf, RegistrationFileBytes)>,
+    files: Vec<PathBuf>,
     applied: Option<Vec<RegistrationObservedStateV1>>,
-    effect_started: bool,
 }
 
 pub struct CatalogHostComponentRegistrationAuthority {
@@ -379,27 +373,14 @@ impl CatalogHostComponentRegistrationAuthority {
         component_set: &crate::agents::host_bundle::HostComponentSetV1,
         operation_id: [u8; 16],
     ) -> Result<StagedRegistration, crate::agents::host_bundle::HostBundleError> {
-        let mut files = Vec::new();
-        for path in self.registration_paths(component_set)? {
-            let original = match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err(crate::agents::host_bundle::HostBundleError::UnsafeInstallPath);
-                }
-                Ok(_) => Some((
-                    fs::read(&path).map_err(|_| host_bundle_storage_failure!())?,
-                    crate::agents::capture_host_file_metadata(&path)
-                        .map_err(|_| host_bundle_storage_failure!())?,
-                )),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(_) => return Err(host_bundle_storage_failure!()),
-            };
-            files.push((path, original));
+        let files = self.registration_paths(component_set)?;
+        for path in &files {
+            registration_observed_state(path)?;
         }
         Ok(StagedRegistration {
             operation_id,
             files,
             applied: None,
-            effect_started: false,
         })
     }
 
@@ -421,7 +402,7 @@ impl CatalogHostComponentRegistrationAuthority {
         let applied = staged
             .files
             .iter()
-            .map(|(path, _)| registration_observed_state(path))
+            .map(|path| registration_observed_state(path))
             .collect::<Result<Vec<_>, _>>()?;
         staged.applied = Some(applied);
         Ok(())
@@ -440,7 +421,7 @@ impl CatalogHostComponentRegistrationAuthority {
             .applied
             .as_ref()
             .ok_or(crate::agents::host_bundle::HostBundleError::WrongTarget)?;
-        for ((path, _), expected) in staged.files.iter().zip(applied) {
+        for (path, expected) in staged.files.iter().zip(applied) {
             if registration_observed_state(path)? != *expected {
                 return Err(host_bundle_stale_preview!());
             }
@@ -466,8 +447,6 @@ impl CatalogHostComponentRegistrationAuthority {
                 );
                 self.deferred_activation = None;
                 self.should_apply = true;
-                // Kimi's installer owns what it just wrote, so a later rollback
-                // restores only the registration TraceDecay itself writes.
                 self.staged = Some(self.stage_registration(component_set, operation_id)?);
             }
             Err(crate::agents::kimi::KimiWebRefreshError::NotInstalledFromStagedSource) => {}
@@ -479,52 +458,6 @@ impl CatalogHostComponentRegistrationAuthority {
                         action.remediation
                     );
                 }
-            }
-        }
-        Ok(())
-    }
-
-    /// Restore the staged pre-effect bytes. Every path must still hold either
-    /// its original or its just-applied state before any byte is rewritten, so
-    /// a foreign edit made during the operation is never overwritten.
-    fn restore_registration(
-        staged: &StagedRegistration,
-    ) -> Result<(), crate::agents::host_bundle::HostBundleError> {
-        for (index, (path, original)) in staged.files.iter().enumerate() {
-            let observed = registration_observed_state(path)?;
-            if observed != original_observed_state(original.as_ref())
-                && staged.applied.as_ref().map(|applied| &applied[index]) != Some(&observed)
-            {
-                return Err(host_bundle_stale_preview!());
-            }
-        }
-        for (path, original) in &staged.files {
-            let observed = registration_observed_state(path)?;
-            match original {
-                Some((bytes, metadata)) => {
-                    if observed != original_observed_state(original.as_ref()) {
-                        crate::agents::safe_write_bytes_file_with_metadata(
-                            path,
-                            bytes,
-                            Some(metadata),
-                        )
-                        .map_err(|_| host_bundle_storage_failure!())?;
-                    }
-                    crate::agents::restore_host_file_metadata(path, metadata)
-                        .map_err(|_| host_bundle_storage_failure!())?;
-                    sync_registration_metadata(path)?;
-                }
-                None if observed.present => match fs::symlink_metadata(path) {
-                    Ok(metadata) if metadata.file_type().is_file() => {
-                        fs::remove_file(path).map_err(|_| host_bundle_storage_failure!())?;
-                    }
-                    Ok(_) => {
-                        return Err(crate::agents::host_bundle::HostBundleError::UnsafeInstallPath);
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => return Err(host_bundle_storage_failure!()),
-                },
-                None => {}
             }
         }
         Ok(())
@@ -830,14 +763,6 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
         if mode == CatalogRegistrationMode::ArtifactOnly {
             return Ok(());
         }
-        // `apply` runs *after* the transaction wrote its declared artifacts,
-        // so the drift check here is scoped to the registration paths this
-        // transaction did not claim. Comparing the full revision against the
-        // confirmed base at this point would make every host whose
-        // registration file is also a managed artifact (Kiro) invalidate its
-        // own write and roll back on every run. Foreign edits to a *declared*
-        // path are not lost: `verify_component_set_artifacts` re-digests
-        // exactly those files immediately after this step.
         match self.staged_foreign_registration_revision {
             Some(expected) => {
                 if self.registration_revision_excluding(
@@ -848,9 +773,6 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                     return Err(host_bundle_stale_preview!());
                 }
             }
-            // No staged observation (a caller driving the adapter directly
-            // rather than through the transaction): fall back to the confirmed
-            // base, which is the pre-write value.
             None => {
                 if let Some(expected) = self.confirmed_registration_revision
                     && self.current_registration_revision(component_set)? != expected
@@ -867,8 +789,6 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
         if !self.should_apply {
             return self.capture_applied_registration(request.operation_id);
         }
-        self.staged_registration(request.operation_id)?
-            .effect_started = true;
         let components = component_set
             .components
             .iter()
@@ -936,30 +856,6 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
         self.staged = None;
         Ok(())
     }
-
-    fn rollback(
-        &mut self,
-        component_set: &crate::agents::host_bundle::HostComponentSetV1,
-        request: &crate::agents::host_bundle::HostComponentSetExecutionRequestV1,
-    ) -> Result<(), crate::agents::host_bundle::HostBundleError> {
-        self.validate_catalog_host(component_set)?;
-        if self.registration_mode(component_set) == CatalogRegistrationMode::ArtifactOnly {
-            return Ok(());
-        }
-        // A rollback before `stage` ran finds nothing staged; there is no
-        // pre-effect copy outside this process by design.
-        let Some(staged) = self
-            .staged
-            .take()
-            .filter(|staged| staged.operation_id == request.operation_id)
-        else {
-            return Ok(());
-        };
-        if !staged.effect_started {
-            return Ok(());
-        }
-        Self::restore_registration(&staged)
-    }
 }
 
 fn registration_observed_state(
@@ -989,36 +885,6 @@ fn registration_observed_state(
         }
         Err(_) => Err(host_bundle_storage_failure!()),
     }
-}
-
-fn original_observed_state(
-    original: Option<&(Vec<u8>, crate::agents::HostFileMetadataIdentityV1)>,
-) -> RegistrationObservedStateV1 {
-    match original {
-        Some((bytes, metadata)) => RegistrationObservedStateV1 {
-            present: true,
-            digest: Sha256::digest(bytes).into(),
-            metadata: Some(metadata.clone()),
-        },
-        None => RegistrationObservedStateV1 {
-            present: false,
-            digest: [0; 32],
-            metadata: None,
-        },
-    }
-}
-
-fn sync_registration_metadata(
-    path: &Path,
-) -> Result<(), crate::agents::host_bundle::HostBundleError> {
-    tracedecay_private_fs::framed_log::sync_file_at(path)
-        .and_then(|()| {
-            tracedecay_private_fs::framed_log::sync_parent_directory(
-                path,
-                tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
-            )
-        })
-        .map_err(|_| host_bundle_storage_failure!())
 }
 
 #[cfg(test)]
@@ -1158,14 +1024,8 @@ mod tests {
                 .unwrap(),
             revision
         );
-        authority.rollback(&bundle.component_set, &request).unwrap();
-        assert_eq!(fs::read(&config).unwrap(), before);
-        assert_eq!(
-            authority
-                .current_revision(&bundle.component_set, &request)
-                .unwrap(),
-            revision
-        );
+        authority.commit(&bundle.component_set, &request).unwrap();
+        assert_ne!(fs::read(&config).unwrap(), before);
 
         writer
             .execute_component_set(&bundle.component_set, &request, &bundle, &mut authority)

@@ -95,11 +95,11 @@ describe('point field', () => {
     expect(picker.pick(camera, camera.scale, ax + 200, ay)).toBeNull();
   });
 
-  it('picks an unresolved cell as a whole, and its member once zoomed past the resolve zoom', () => {
+  it.each([1, 2.6])('keeps unresolved cell priority with body reach %s, then picks its member once resolved', (reach) => {
     const cell: SceneCluster = { id: 'cell:0:0', members: ['a', 'b'], x: 0, y: 1, width: 0.8, height: 0.25, resolveZoom: 4, mass: 20, spacing: 0.1 };
     const scene = registry([body('a', -0.05, 1, { cluster: cell.id }), body('b', 0.05, 1, { cluster: cell.id })], [cell]);
     const fit = fitCamera(scene.extent, 1000, 600, NO_PAD);
-    const picker = createPicker(scene);
+    const picker = createPicker(scene, reach);
     const [cx, cy] = toScreen(fit, -0.05, 1);
     expect(picker.pick(fit, fit.scale, cx, cy)).toEqual({ kind: 'cluster', cluster: cell });
     const close = zoomAt(fit, cx, cy, 5);

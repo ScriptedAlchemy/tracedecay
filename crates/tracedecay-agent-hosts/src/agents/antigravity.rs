@@ -35,8 +35,7 @@ use super::mcp_registration::{
 use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, TextFileMutation, report_mcp_registration,
-    update_two_config_files_transactionally,
+    McpDoctorLabels, TextFileMutation, report_mcp_registration, update_two_config_files_locked,
 };
 
 pub struct AntigravityIntegration;
@@ -269,7 +268,7 @@ fn install_mcp_if_selected(components: &[HostComponentV1], ctx: &InstallContext)
     }
     let ide = mcp_config_path(&ctx.home);
     let cli = cli_plugin_path(&ctx.home);
-    update_two_config_files_transactionally(&ide, &cli, |ide_existing, cli_existing| {
+    update_two_config_files_locked(&ide, &cli, |ide_existing, cli_existing| {
         Ok((
             (),
             add_registration(&ide, ide_existing, &ctx.tracedecay_bin, &ctx.serve_args)?,
@@ -293,7 +292,7 @@ fn uninstall_mcp_if_selected(components: &[HostComponentV1], home: &Path) -> Res
     }
     let ide = mcp_config_path(home);
     let cli = cli_plugin_path(home);
-    update_two_config_files_transactionally(&ide, &cli, |ide_existing, cli_existing| {
+    update_two_config_files_locked(&ide, &cli, |ide_existing, cli_existing| {
         Ok((
             (),
             remove_registration(&ide, ide_existing)?,
@@ -417,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_second_document_failure_rolls_first_back_exactly() {
+    fn antigravity_second_document_failure_leaves_first_published() {
         let home = tempfile::tempdir().unwrap();
         let ide = mcp_config_path(home.path());
         let cli = cli_plugin_path(home.path());
@@ -425,7 +424,7 @@ mod tests {
         let cli_original = br#"{"enabled":true}"#;
         write_parent(&ide, ide_original);
         write_parent(&cli, cli_original);
-        let pause = super::super::pause_next_host_config_write_after_validation(&cli);
+        let pause = super::super::pause_next_host_config_write_at_publication(&cli);
         let install = Arc::new(install_context(home.path(), "/tmp/tracedecay"));
         let worker_install = Arc::clone(&install);
         let worker = std::thread::spawn(move || {
@@ -441,7 +440,16 @@ mod tests {
         let error = worker.join().unwrap().unwrap_err();
 
         assert!(error.to_string().contains("failed to atomically replace"));
-        assert_eq!(std::fs::read(&ide).unwrap(), ide_original);
+        assert!(error.to_string().contains("earlier changes to"));
+        let published: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&ide).unwrap()).unwrap();
+        assert_eq!(published["theme"], "dark");
+        assert_eq!(
+            published["mcpServers"]["tracedecay"]["command"],
+            "/tmp/tracedecay"
+        );
         assert_eq!(std::fs::read(&cli).unwrap(), br#"{"foreign":"concurrent"}"#);
+        assert_eq!(std::fs::read_dir(ide.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(cli.parent().unwrap()).unwrap().count(), 1);
     }
 }

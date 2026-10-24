@@ -38,10 +38,10 @@ use tracedecay_sdk::operations::{TypedOperation, WorkflowListDefinitions};
 use tracedecay_sdk::remote_client::EnrolledRemoteClient;
 
 use super::production_daemon::{
-    Daemon, REMOTE_TLS_CERTIFICATE, REMOTE_TLS_PRIVATE_KEY, REMOTE_TLS_ROOT_CERTIFICATE,
-    enrollment_request, now_micros, query_policy, remote_admission, remote_grant, replay_policy,
-    spawn_remote_daemon, stop_daemon,
+    Daemon, enrollment_request, now_micros, query_policy, remote_admission, remote_grant,
+    replay_policy, spawn_remote_daemon, stop_daemon,
 };
+use super::tls_fixture::tls_identity;
 use crate::isolated_profile::apply_isolated_profile_env as isolated;
 use crate::{production_binary, run};
 
@@ -81,8 +81,13 @@ impl RemoteDaemonFixture {
             .current_dir(&project));
         let certificate = scratch.path().join("localhost.crt.pem");
         let private_key = scratch.path().join("localhost.key.pem");
-        fs::write(&certificate, REMOTE_TLS_CERTIFICATE).unwrap();
-        fs::write(&private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
+        let identity = tls_identity();
+        fs::write(
+            &certificate,
+            format!("{}{}", identity.certificate.pem(), identity.root_pem),
+        )
+        .unwrap();
+        fs::write(&private_key, identity.key.serialize_pem()).unwrap();
         fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600)).unwrap();
 
         let binary = production_binary();
@@ -243,7 +248,7 @@ impl RemoteDaemonFixture {
             )
             .json(&json!({
                 "endpoint": endpoint,
-                "trust_root_pem": std::str::from_utf8(REMOTE_TLS_ROOT_CERTIFICATE).unwrap(),
+                "trust_root_pem": tls_identity().root_pem,
                 "timeout_secs": 5,
                 "discovery": discovery,
             }))
@@ -297,7 +302,7 @@ impl RemoteDaemonFixture {
             format!("https://{}/remote/", self.remote),
             credential,
             Duration::from_secs(30),
-            REMOTE_TLS_ROOT_CERTIFICATE,
+            &tls_identity().root_pem,
         )
         .unwrap()
     }

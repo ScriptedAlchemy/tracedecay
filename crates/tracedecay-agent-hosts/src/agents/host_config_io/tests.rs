@@ -547,49 +547,6 @@ mod local_install_safety_tests {
 
     #[cfg(unix)]
     #[test]
-    fn shared_host_writer_retains_both_files_when_published_staging_is_mutated() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("AGENTS.md");
-        std::fs::write(&config, b"original").unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let publication = pause_next_host_config_write_at_publication(&config);
-        let published = pause_next_host_config_write_after_publication(&config);
-        let writer_path = config.clone();
-        let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&writer_path, b"tracedecay").map_err(|error| error.to_string())
-        });
-        publication.wait_until_reached();
-
-        std::fs::write(&config, b"foreign at boundary").unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
-        publication.resume();
-        published.wait_until_reached();
-
-        std::fs::write(&config, b"foreign after publication").unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
-        published.resume();
-        let error = writer.join().unwrap().unwrap_err();
-
-        assert!(error.contains("retained"), "{error}");
-        assert_eq!(std::fs::read(&config).unwrap(), b"foreign at boundary");
-        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o640);
-        let retained = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(std::result::Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| {
-                path != &config
-                    && std::fs::read(path)
-                        .is_ok_and(|contents| contents == b"foreign after publication")
-            })
-            .expect("the ambiguous published staging file must remain recoverable");
-        assert_eq!(std::fs::metadata(retained).unwrap().mode() & 0o777, 0o644);
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn shared_host_writer_refuses_a_symlink_swap_at_publication() {
         use std::os::unix::fs::symlink;
 

@@ -9,7 +9,7 @@ metadata:
 
 Follow these steps in order. Report a step you skip as `skip: <reason>`.
 [Operations](references/operations.md) lists each mutation's preview, apply,
-rollback, and reconcile rules.
+and reconcile rules.
 
 1. Resolve the exact symbol. Refuse an ambiguous name rather than choosing a
    same-named declaration.
@@ -23,8 +23,9 @@ rollback, and reconcile rules.
 4. Apply with the identity and expected state the preview or read returned.
    When the expected state no longer matches, stop and preserve the peer's
    change.
-5. If an operation was interrupted, reconcile its committed effects before
-   retrying. skip: every operation completed.
+5. If an edit was interrupted, inspect its receipt and current files before
+   retrying. Reconciliation records committed, unchanged, or partial effects.
+   It never restores source files.
 6. Verify the changed behavior with the native build or tests; use
    `assessing-impact` to select them.
 

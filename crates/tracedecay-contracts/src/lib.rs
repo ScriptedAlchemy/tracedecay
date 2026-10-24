@@ -64,7 +64,6 @@ pub mod session_sync;
 mod session_temporal_refresh;
 pub mod settings_preview;
 pub mod source_edit;
-mod source_edit_rollback;
 pub mod storage;
 pub mod work;
 pub mod work_artifact_hydration;
@@ -413,11 +412,10 @@ pub use source_edit::{
     SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditDiagnosticV1,
     SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditInvocationV1, SourceEditKind,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
-    SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditRollbackInvocationV1,
-    SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
-    source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
+    SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditVerificationStateV1,
+    SourceEditVerificationV1, source_edit_catalog_contribution, source_edit_handler_descriptors,
+    source_edit_operation, source_edit_reconciliation_operation,
 };
-pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback_operation};
 pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,

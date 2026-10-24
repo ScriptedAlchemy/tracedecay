@@ -44,6 +44,25 @@ describe('layoutLanes', () => {
     expect(ys[1]! - ys[0]!).toBe(44);
   });
 
+  it('draws one time tick for coincident observations while retaining every pull request', () => {
+    const inbox: DeliveryInboxV1 = {
+      ...INBOX,
+      pull_requests: [{ ...INBOX.pull_requests[0]!, attention: [] }, INBOX.pull_requests[2]!],
+    };
+    const layout = layoutLanes(inbox, inbox.pull_requests, buildUmbrellas(inbox), VIEWPORT, PORTFOLIO);
+    const observedAt = inbox.pull_requests[0]!.pull_request.operations[0]!.last_complete!.fetched_at_micros;
+    const center = (layout.x0 + layout.x1) / 2;
+
+    expect(layout.span).toEqual({ start: observedAt, end: observedAt });
+    expect(layout.ticks).toEqual([{ x: center, at: observedAt }]);
+    const bars = layout.lanes.flatMap((lane) => lane.bars);
+    expect(bars.map((bar) => bar.row.id)).toEqual(inbox.pull_requests.map((row) => row.id));
+    expect(bars.map((bar) => [bar.x0, bar.x1, bar.beads.map((bead) => bead.x)])).toEqual([
+      [center, center, [center]],
+      [center, center, [center]],
+    ]);
+  });
+
   it('ramps recency over the loaded page: the newest observation is 1, the oldest 0', () => {
     const layout = layoutLanes(INBOX, INBOX.pull_requests, buildUmbrellas(INBOX), VIEWPORT, PORTFOLIO);
     const bars = layout.lanes.flatMap((lane) => lane.bars);

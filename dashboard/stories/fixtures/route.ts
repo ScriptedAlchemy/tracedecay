@@ -6,7 +6,7 @@
  * the browser network layer (page.route), not via a service worker.
  */
 import type { Page, Route } from '@playwright/test';
-import { lookupFixture } from './data.ts';
+import { isFixtureEventStream, lookupFixture } from './data.ts';
 
 /** Requests no fixture modelled, as `METHOD /path?query`, in arrival order. */
 type UnmatchedRequests = readonly string[];
@@ -19,7 +19,7 @@ async function fulfillApi(route: Route, unmatched: string[]): Promise<void> {
   // app settles into its "offline" liveness state instead of hanging on a
   // pending EventSource. EventSource will retry; that is harmless for a
   // short-lived screenshot window.
-  if (url.pathname === '/api/events') {
+  if (request.method() === 'GET' && isFixtureEventStream(url.pathname)) {
     await route.fulfill({
       status: 200,
       contentType: 'text/event-stream',

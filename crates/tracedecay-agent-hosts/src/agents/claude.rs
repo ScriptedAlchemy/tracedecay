@@ -11,7 +11,7 @@
 //!    a stable marketplace dir (`~/.claude/plugins/marketplaces/tracedecay/`),
 //!    stamping the plugin version and substituting the resolved binary path.
 //! 2. Its activation step then drives Claude Code's native `claude plugin`
-//!    commands against that source, inside the same rollback boundary.
+//!    commands against that source.
 
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -103,8 +103,7 @@ impl AgentIntegration for ClaudeIntegration {
             let claude = require_claude_cli()?;
             claude_plugin_activate_with(&claude, &ctx.home)?;
         }
-        // Sibling version directories are not part of the registration
-        // snapshot. Claude leaves them in place across install and update.
+        // Claude leaves sibling version directories across install and update.
         remove_stale_claude_plugin_cache(&ctx.home)?;
         ensure_claude_plugin_permission(&ctx.home)
     }
@@ -499,8 +498,6 @@ fn prune_empty_dirs_up_to(file: &Path, root: &Path) -> Result<()> {
 }
 
 /// Delete every cache child that is not the version this binary ships.
-/// The current version directory is the registration snapshot; older
-/// siblings are not, and renaming them would leave a recoverable copy.
 fn remove_stale_claude_plugin_cache(home: &Path) -> Result<()> {
     let versions = home.join(".claude/plugins/cache/tracedecay/tracedecay");
     match std::fs::symlink_metadata(&versions) {
@@ -822,8 +819,7 @@ fn plugin_wildcard_perm() -> String {
 }
 
 /// Add the one documented plugin-namespace allow rule without replacing any
-/// other Claude setting. The receipt-backed lifecycle snapshots settings.json
-/// before this registration effect.
+/// other Claude setting.
 fn ensure_claude_plugin_permission(home: &Path) -> Result<()> {
     let settings_path = home.join(".claude/settings.json");
     ensure_claude_dir(

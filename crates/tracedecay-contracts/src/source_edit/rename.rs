@@ -229,10 +229,6 @@ pub struct RenameResult {
     pub impact: RenameImpactV1,
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub dry_run: bool,
-    /// True only when apply published the accepted edit and post-apply
-    /// verification then restored every exact preimage.
-    #[serde(default, skip_serializing_if = "super::is_false")]
-    pub rolled_back: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
     pub message: String,

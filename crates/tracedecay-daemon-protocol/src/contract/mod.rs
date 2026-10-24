@@ -36,7 +36,7 @@ use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblem, AuthorizedScopeSet, CancellationContext, Deadline,
     MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
     MultiRootScopeSetReadRequestV1, ObservatoryReadRequestV1, PageRequest, ResolvedScope,
-    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
+    SourceEditInvocationV1, SourceEditReconciliationInvocationV1,
 };
 use tracedecay_domain::{ManifestDigest, ScopeSetId, UtcMicros};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -433,7 +433,6 @@ pub enum DaemonInvocationOperation {
     LspDetach,
     SourceEdit,
     SourceEditReconcile,
-    SourceEditRollback,
     GraphTool,
 }
 
@@ -501,7 +500,6 @@ impl DaemonInvocationOperation {
             Self::LspDetach => "lsp_detach",
             Self::SourceEdit => "source_edit",
             Self::SourceEditReconcile => "source_edit_reconcile",
-            Self::SourceEditRollback => "source_edit_rollback",
             Self::GraphTool => "graph_tool",
         }
     }
@@ -797,12 +795,6 @@ pub enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
-    SourceEditRollback {
-        request: SourceEditRollbackInvocationV1,
-        observed_at: UtcMicros,
-        deadline: Deadline,
-        cancellation: CancellationContext,
-    },
     GraphTool {
         surface_operation: ApplicationSurfaceOperation,
         arguments: serde_json::Map<String, serde_json::Value>,
@@ -1030,8 +1022,7 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::InsertAtSymbol
             | ApplicationSurfaceOperation::MoveSymbol
             | ApplicationSurfaceOperation::RenameSymbol
-            | ApplicationSurfaceOperation::SourceEditReconcile
-            | ApplicationSurfaceOperation::SourceEditRollback => {
+            | ApplicationSurfaceOperation::SourceEditReconcile => {
                 unreachable!("source-edit operations use their typed constructors")
             }
             ApplicationSurfaceOperation::Context
@@ -1946,9 +1937,6 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::SourceEditReconcile { .. } => {
                 DaemonInvocationOperation::SourceEditReconcile
             }
-            DaemonInvocationPayload::SourceEditRollback { .. } => {
-                DaemonInvocationOperation::SourceEditRollback
-            }
             DaemonInvocationPayload::GraphTool { .. } => DaemonInvocationOperation::GraphTool,
         }
     }
@@ -2009,7 +1997,6 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::LspOpen
                 | DaemonInvocationOperation::SourceEdit
                 | DaemonInvocationOperation::SourceEditReconcile
-                | DaemonInvocationOperation::SourceEditRollback
                 | DaemonInvocationOperation::GraphTool
         )
     }
@@ -2223,12 +2210,6 @@ impl DaemonInvocationRequest {
                 ..
             }
             | DaemonInvocationPayload::SourceEditReconcile {
-                observed_at,
-                deadline,
-                cancellation,
-                ..
-            }
-            | DaemonInvocationPayload::SourceEditRollback {
                 observed_at,
                 deadline,
                 cancellation,

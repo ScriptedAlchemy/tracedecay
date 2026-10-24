@@ -113,7 +113,7 @@ fn application_surface_branch_sensitivity(
     };
     use ApplicationSurfaceOperation::{
         AstGrepRewrite, InsertAt, InsertAtSymbol, MoveSymbol, MultiStrReplace, RenameSymbol,
-        ReplaceSymbol, SourceEditReconcile, SourceEditRollback, StrReplace,
+        ReplaceSymbol, SourceEditReconcile, StrReplace,
     };
     match operation {
         // Mixed ApplicationSurface group: these operations read configuration,
@@ -306,8 +306,7 @@ fn application_surface_branch_sensitivity(
         | InsertAtSymbol
         | MoveSymbol
         | RenameSymbol
-        | SourceEditReconcile
-        | SourceEditRollback => BranchSensitivity::Sensitive,
+        | SourceEditReconcile => BranchSensitivity::Sensitive,
     }
 }
 

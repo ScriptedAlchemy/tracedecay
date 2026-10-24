@@ -25,12 +25,12 @@ const ABSENT_DIGEST: &str =
 const NO_JOURNAL: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: no source edit effect requires reconciliation";
 const IDENTITY_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit reconciliation identity does not match the retained effect";
 const COMMITTED_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit committed-state inspection does not match the exact preview";
-const ROLLED_BACK_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit rollback inspection does not match the admitted expected state";
+const UNCHANGED_MISMATCH: &str = "execution_failed source_edit.execution_failed [contact_administrator]: config error: source edit unchanged-state inspection does not match the admitted expected state";
 const CONFIRM_REQUIRED: &str = "project route error (application_surface_invalid_request): source edit reconciliation requires confirm=true from the caller after it inspects the file; do not pause for a human";
 const ATTEMPT_KEY_CONFLICT: &str = "project route error (application_surface_invalid_request): reconciliation attempt idempotency key must differ from the original edit key";
-const COMMITTED_STATE_UNEXPECTED: &str = "project route error (application_surface_invalid_request): committed_state is only valid when disposition is confirm_committed";
-const COMMITTED_STATE_REQUIRED: &str = "project route error (application_surface_invalid_request): missing required parameter: committed_state";
-const INVALID_DISPOSITION: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation disposition: guess";
+const COMMITTED_STATE_UNEXPECTED: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation request: unknown field `committed_state`, there are no fields";
+const COMMITTED_STATE_REQUIRED: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation request: missing field `committed_state`";
+const INVALID_DISPOSITION: &str = "project route error (application_surface_invalid_request): invalid source edit reconciliation request: unknown variant `guess`, expected one of `inspect`, `confirm_committed`, `confirm_unchanged`, `acknowledge_partial`";
 
 struct OpenedProject {
     _dir: TestTempDir,
@@ -101,7 +101,7 @@ fn reconcile_args(
     committed_state: Option<&str>,
 ) -> Value {
     let mut args = json!({
-        "kind": "str_replace",
+        "original_operation": "use-case.application.source-edit.str-replace",
         "effect_id": effect_id,
         "idempotency_key": original_key,
         "attempt_idempotency_key": attempt_key,
@@ -267,12 +267,12 @@ fn assert_reconcile_attempt(value: &Value, attempt_key: &str, replayed: bool) {
 async fn reconcile_refuses_uninspected_and_absent_effects() {
     let opened = open_project().await;
     let base = json!({
-        "kind": "str_replace",
+        "original_operation": "use-case.application.source-edit.str-replace",
         "effect_id": "effect.missing.reconcile",
         "idempotency_key": "mcp.source-edit-reconcile.missing.original",
         "attempt_idempotency_key": "mcp.source-edit-reconcile.missing.attempt",
         "input_digest": ABSENT_DIGEST,
-        "disposition": "confirm_rolled_back",
+        "disposition": "confirm_unchanged",
     });
 
     let mut missing_confirm = base.clone();
@@ -330,11 +330,11 @@ async fn reconcile_refuses_uninspected_and_absent_effects() {
 }
 
 #[tokio::test]
-async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
+async fn unpublished_effect_confirms_unchanged_and_releases_the_file() {
     let opened = open_project().await;
     let expected_state = admitted_expected_state(&opened.fixture).await;
-    let original_key = "mcp.source-edit-reconcile.rolled-back.original";
-    let attempt_key = "mcp.source-edit-reconcile.rolled-back.attempt";
+    let original_key = "mcp.source-edit-reconcile.unchanged.original";
+    let attempt_key = "mcp.source-edit-reconcile.unchanged.attempt";
     let unknown = retain_unpublished_effect(&opened, original_key, &expected_state).await;
     let effect_id = unknown["effect"]["effect_id"]
         .as_str()
@@ -352,9 +352,9 @@ async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
                 reconcile_args(
                     "effect.mcp.reconcile.wrong",
                     original_key,
-                    "mcp.source-edit-reconcile.rolled-back.wrong-identity",
+                    "mcp.source-edit-reconcile.unchanged.wrong-identity",
                     &input_digest,
-                    "confirm_rolled_back",
+                    "confirm_unchanged",
                     None,
                 ),
             )
@@ -372,12 +372,12 @@ async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
                 original_key,
                 attempt_key,
                 &input_digest,
-                "confirm_rolled_back",
+                "confirm_unchanged",
                 None,
             ),
         )
         .await
-        .expect("confirm rolled back"),
+        .expect("confirm unchanged"),
     );
     assert_reconcile_attempt(&concluded, attempt_key, false);
     assert_eq!(
@@ -394,12 +394,12 @@ async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
                 original_key,
                 attempt_key,
                 &input_digest,
-                "confirm_rolled_back",
+                "confirm_unchanged",
                 None,
             ),
         )
         .await
-        .expect("replay rolled back"),
+        .expect("replay unchanged"),
     );
     assert_reconcile_attempt(&replay, attempt_key, true);
     assert_eq!(
@@ -449,7 +449,7 @@ async fn unpublished_effect_confirms_rolled_back_and_releases_the_file() {
                 "path": RELATIVE_PATH,
                 "old_str": OLD,
                 "new_str": NEW,
-                "idempotency_key": "mcp.source-edit-reconcile.rolled-back.follow-up",
+                "idempotency_key": "mcp.source-edit-reconcile.unchanged.follow-up",
                 "expected_state": expected_state,
             }),
             None,
@@ -514,13 +514,13 @@ async fn mismatched_inspection_keeps_bytes_and_confirm_committed_keeps_the_posti
                     original_key,
                     "mcp.source-edit-reconcile.committed.wrong-disposition",
                     &input_digest,
-                    "confirm_rolled_back",
+                    "confirm_unchanged",
                     None,
                 ),
             )
             .await
         ),
-        ROLLED_BACK_MISMATCH
+        UNCHANGED_MISMATCH
     );
     assert_eq!(fs::read(&opened.file).unwrap(), POSTIMAGE);
 

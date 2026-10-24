@@ -412,15 +412,9 @@ async fn insert_at_symbol_places_literal_source_before_and_after_the_symbol() {
     let replay = success_body(&replay);
     assert_eq!(replay["effect"]["effect_id"], after_effect_id);
     assert_completed_effect(&replay, after_key, &after_state, 5, false, "src/after.rs");
-    let _replay_state = assert_stable(
-        replay,
-        json!({
-            "success": true,
-            "failed": false,
-            "message": REPLAY_MESSAGE,
-            "replayed": true,
-        }),
-    );
+    let mut expected_replay = durable_payload(5, false, "src/after.rs");
+    expected_replay["replayed"] = json!(true);
+    let _replay_state = assert_stable(replay, expected_replay);
     assert_eq!(read_file(&project, "src/after.rs"), AFTER_APPLIED);
 
     let before_preview = call_insert(

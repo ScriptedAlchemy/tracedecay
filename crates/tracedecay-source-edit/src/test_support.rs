@@ -121,8 +121,6 @@ pub(super) fn fixture_journal(
         expected_state: request.expected_state.clone(),
         predicted_state: Some(digest(SHA256_B)),
         candidate_files: vec!["src/lib.rs".to_owned()],
-        recovery_files: Vec::new(),
-        recovery_digest: None,
         request: SourceEditDurableRequestV1 {
             operation: operation.use_case_id().clone(),
             request_id: request.context.request_id().clone(),
@@ -148,7 +146,7 @@ pub(super) fn fixture_reconciliation(
     SourceEditReconciliationRequestV1 {
         context: request.context.clone(),
         authority: request.authority.clone(),
-        kind: request.edit.kind(),
+        original_operation: journal.request.operation.clone(),
         effect_id: journal.effect_id.clone(),
         idempotency_key: request.idempotency_key.clone(),
         attempt_idempotency_key: tracedecay_contracts::IdempotencyKey::new(

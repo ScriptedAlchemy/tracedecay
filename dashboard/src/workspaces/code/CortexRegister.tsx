@@ -15,13 +15,16 @@ import { envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn';
 import { cortexRegister, type RegisterCell } from './cortex.ts';
+import type { CortexRenderer } from './cortexRenderers.ts';
 
 export function CortexRegister({
   pending,
   result,
+  renderer,
 }: {
   pending: boolean;
   result: EnvelopeResult<GraphOverviewPayloadV1> | undefined;
+  renderer: CortexRenderer;
 }) {
   const state = envelopeReadState(pending, result, {
     loading: 'reading the code graph overview',
@@ -34,7 +37,7 @@ export function CortexRegister({
       data-graph-register={state.kind === 'ready' ? state.value.domain_state : state.state}
     >
       {state.kind === 'ready' ? (
-        cortexRegister(state.value.payload).map((cell) => (
+        cortexRegister(state.value.payload, renderer).map((cell) => (
           <Cell key={cell.label} cell={cell} />
         ))
       ) : (

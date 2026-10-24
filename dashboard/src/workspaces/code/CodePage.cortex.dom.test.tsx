@@ -83,7 +83,7 @@ describe('the register strip', () => {
       ['layout', 'measured'],
       ['rank', 'measured'],
     ]);
-    expect(within(register).getByText('module-packed')).toBeTruthy();
+    expect(within(register).getByText('force-directed')).toBeTruthy();
     expect(within(register).getByText('degree')).toBeTruthy();
     expect(within(register).queryByText(/eigenvector/i)).toBeNull();
   });

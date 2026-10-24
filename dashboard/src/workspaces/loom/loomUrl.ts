@@ -8,6 +8,7 @@
  */
 import { assertNever, type LoomSessionRowV1 } from '../../contracts/generated.ts';
 import { recordedProvider, sessionLaneId } from '../../viz/temporal/journey.ts';
+import type { TemporalSceneVariant } from '../../viz/temporal/TemporalScene.tsx';
 import { joinIndexRow, type SessionSelection } from '../sessions/model.ts';
 import {
   JOURNEY_EVENT_KINDS,
@@ -25,7 +26,12 @@ export const LOOM_PARAMS = {
   hidden: 'loomHide',
   zoom: 'loomZoom',
   encounter: 'loomEncounter',
+  renderer: 'loomRenderer',
 } as const;
+
+export function parseLoomRenderer(raw: string | null): TemporalSceneVariant {
+  return raw === 'strata' || raw === 'rail' ? raw : 'weave';
+}
 
 /** Earliest epoch second a Loom window may name. Anything smaller is not a
  * time this store could have recorded and is treated as malformed. */
