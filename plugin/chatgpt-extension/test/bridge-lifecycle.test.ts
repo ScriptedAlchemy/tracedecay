@@ -78,7 +78,7 @@ describe("bridge shutdown", () => {
     const fetch = vi.spyOn(globalThis, "fetch");
     await bridge.close();
     const reads = [
-      bridge.authority(), bridge.daemonState(), bridge.listProjects(), bridge.resolveProject(PROJECT_ID),
+      bridge.authority(), bridge.daemonState(), bridge.listProjects(), bridge.searchProjects("query"), bridge.resolveProject(PROJECT_ID),
       bridge.status(PROJECT_ID), bridge.search(PROJECT_ID, "query", 10), bridge.node(PROJECT_ID, "n1"),
       bridge.impact(PROJECT_ID, "n1", 1), bridge.callers(PROJECT_ID, "n1", 1),
       bridge.callees(PROJECT_ID, "n1", "generation", 1), bridge.symbolSearch(PROJECT_ID, "query"),
