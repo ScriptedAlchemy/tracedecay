@@ -22,9 +22,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use super::PROVIDER;
 use super::context::CodexContextState;
 use super::meta::{CodexMetaWithProvenance, session_meta_with_provenance};
+use super::{CODEX_SCOPE_MATCHERS, PROVIDER};
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::jsonl_observation_admission::{
@@ -33,7 +33,10 @@ use crate::runtime::jsonl_observation_admission::{
     shared_jsonl_background_cpu, shared_jsonl_file_identity, shared_jsonl_preparation_capacity,
 };
 use crate::runtime::shared::{ProjectRootMatcherCache, TranscriptScopeMatcher};
-use crate::runtime::source::{JsonlIoAccounting, TranscriptIngestError, TranscriptIngestResult};
+use crate::runtime::source::{
+    JsonlIoAccounting, TranscriptIngestError, TranscriptIngestResult,
+    run_blocking_transcript_section,
+};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, normalize_prepared_observation_record_v1};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
@@ -293,7 +296,7 @@ pub async fn try_admit_codex_jsonl_observations_for_project_with_admission_and_c
         max_new_bytes,
         None,
         cancellation,
-        &ProjectRootMatcherCache::default(),
+        &CODEX_SCOPE_MATCHERS,
     )
     .await
 }
@@ -319,7 +322,7 @@ pub(crate) async fn try_admit_codex_jsonl_observations_for_project_window(
         ),
         Some(crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW),
         cancellation,
-        &ProjectRootMatcherCache::default(),
+        &CODEX_SCOPE_MATCHERS,
     )
     .await
 }
@@ -360,7 +363,7 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission_and_c
         max_new_bytes,
         None,
         cancellation,
-        &ProjectRootMatcherCache::default(),
+        &CODEX_SCOPE_MATCHERS,
     )
     .await
 }
@@ -393,6 +396,25 @@ impl CodexObservationAdmission<'_> {
                 registered_roots, ..
             } => CodexScopeRoots::Profile(registered_roots.to_vec()),
         }
+    }
+
+    /// This rollout's scope boundary and its session cwd's verdict, resolved on
+    /// the blocking pool. A first resolution of a root or cwd runs git, and the
+    /// frame closures that consult the boundary run on the polling worker.
+    async fn resolve_scope(
+        &self,
+        matchers: &ProjectRootMatcherCache,
+        session_cwd: &Path,
+    ) -> TranscriptIngestResult<(TranscriptScopeMatcher, bool)> {
+        let roots = self.scope_roots();
+        let matchers = matchers.clone();
+        let session_cwd = session_cwd.to_path_buf();
+        run_blocking_transcript_section(PROVIDER, move || {
+            let matcher = roots.matcher(&matchers);
+            let in_scope = matcher.accepts(Some(&session_cwd));
+            (matcher, in_scope)
+        })
+        .await
     }
 
     pub(super) fn accepts_session(&self, session_id: &str) -> bool {
@@ -682,11 +704,8 @@ async fn admit_codex_jsonl_page(
         matchers,
     } = context;
     let scope = admission_scope.scope();
-    // Resolving the scope runs git for the root. An unchanged rollout admits
-    // no frame and must not pay it on every pass.
-    let resolved_scope = OnceLock::new();
-    let scope_matcher =
-        || resolved_scope.get_or_init(|| admission_scope.scope_roots().matcher(matchers));
+    let (scope_matcher, session_cwd_in_scope) =
+        admission_scope.resolve_scope(matchers, &meta.cwd).await?;
     let mut request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
@@ -720,9 +739,12 @@ async fn admit_codex_jsonl_page(
             } else {
                 CodexContextState::from_meta(meta)
             };
+            // Any other cwd, from the prior context or a later context record,
+            // resolves on first use through the same cache.
+            let scope_verdict = (context.cwd == meta.cwd).then_some(session_cwd_in_scope);
             CodexAdmissionState {
                 context,
-                scope_verdict: None,
+                scope_verdict,
             }
         },
         |state, _bytes, range, _, prepared, hints| {
@@ -734,7 +756,7 @@ async fn admit_codex_jsonl_page(
             // decode per frame to reach it.
             let in_scope = *state
                 .scope_verdict
-                .get_or_insert_with(|| scope_matcher().accepts(Some(state.context.cwd.as_path())));
+                .get_or_insert_with(|| scope_matcher.accepts(Some(state.context.cwd.as_path())));
             if !in_scope && !hints.may_change_codex_context {
                 return Ok(JsonlFrameAdmission::non_durable_before_decode(
                     ObservationCoverageReason::OutOfScope,
@@ -750,9 +772,10 @@ async fn admit_codex_jsonl_page(
                     // can no longer be trusted.
                     state.scope_verdict = None;
                 }
-                if !*state.scope_verdict.get_or_insert_with(|| {
-                    scope_matcher().accepts(Some(state.context.cwd.as_path()))
-                }) {
+                if !*state
+                    .scope_verdict
+                    .get_or_insert_with(|| scope_matcher.accepts(Some(state.context.cwd.as_path())))
+                {
                     non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                     return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                 }
