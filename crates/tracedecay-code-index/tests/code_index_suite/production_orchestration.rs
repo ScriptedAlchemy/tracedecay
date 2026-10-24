@@ -344,6 +344,12 @@ pub(super) fn add_present_typescript_file(
 fn cross_file_edges_require_path_binding_evidence() {
     let sources = [
         (
+            "file.binding.feedback-consumer",
+            "crates/consumer/src/lib.rs",
+            "rust",
+            "use tracedecay_contracts::feedback::{CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1};\npub fn project(tests: CanonicalAffectedTestsProjectionV1, impact: CanonicalFeedbackImpactProjectionV1) { let _ = (tests, impact); }\n",
+        ),
+        (
             "file.binding.other-read",
             "crates/other/src/read.rs",
             "rust",
@@ -360,6 +366,12 @@ fn cross_file_edges_require_path_binding_evidence() {
             "crates/tracedecay-contracts/src/feedback/read.rs",
             "rust",
             "pub struct CanonicalAffectedTestsProjectionV1;\npub struct CanonicalFeedbackImpactProjectionV1;\n",
+        ),
+        (
+            "file.binding.contracts-lib",
+            "crates/tracedecay-contracts/src/lib.rs",
+            "rust",
+            "pub mod feedback;\n",
         ),
         (
             "file.binding.model",
@@ -467,9 +479,16 @@ fn cross_file_edges_require_path_binding_evidence() {
     assert_eq!(
         incoming(&affected_tests),
         1,
-        "the grouped re-export makes mod.rs a dependent of read.rs",
+        "the grouped re-export binds the dependent crate to feedback/read.rs",
     );
     assert_eq!(incoming(&feedback_impact), 1);
+    assert_eq!(
+        incoming(&occurrence(
+            "crates/other/src/read.rs::CanonicalAffectedTestsProjectionV1"
+        )),
+        0,
+        "a same-named struct off the re-export path stays unbound",
+    );
     assert_eq!(
         incoming(&imported),
         1,
