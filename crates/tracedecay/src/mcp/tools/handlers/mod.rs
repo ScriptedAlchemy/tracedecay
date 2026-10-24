@@ -288,6 +288,11 @@ pub struct ToolCallRegistryOptions<'a> {
     >,
     pub(crate) dashboard_session_retrieval_identity:
         Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
+    /// The project session refresh worker's serving state, mounted with the
+    /// worker. Status reports it whether or not this checkout resolved a
+    /// session retrieval identity; `None` means no worker is mounted.
+    pub(crate) project_session_projection_status:
+        Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
     /// The canonical profile identity bound by the daemon handshake. A
     /// dashboard profile write resolves its configuration layer through this
     /// identity, so it must not be derived from the project-session store,
@@ -382,6 +387,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             registered_savings_db: None,
             dashboard_session_retrieval_service: None,
             dashboard_session_retrieval_identity: None,
+            project_session_projection_status: None,
             daemon_user_profile_id: None,
             profile: None,
             resolved_project_route: None,

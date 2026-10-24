@@ -235,6 +235,38 @@ pub enum PreparedBranchRollbackOutcome {
     NoMatch,
 }
 
+/// Records the repository default branch as the store's tracked branch when
+/// the store has no branch metadata.
+///
+/// Graph scopes, and the project session retrieval identity bound to one,
+/// are minted from this metadata. A checkout on a detached HEAD still belongs
+/// to a repository with a default branch, and serves that branch's
+/// provenance once the entry exists. Existing metadata, including a corrupt
+/// file, belongs to its owners. A contended lock means a branch writer that
+/// bootstraps missing metadata itself holds it.
+pub fn bootstrap_default_branch_meta(
+    project_root: &Path,
+    tracedecay_dir: &Path,
+) -> tracedecay_domain::errors::Result<()> {
+    let meta_path = tracedecay_dir.join(crate::storage::BRANCH_META_FILENAME);
+    if meta_path.exists() {
+        return Ok(());
+    }
+    let Some(default_branch) = detect_default_branch(project_root) else {
+        return Ok(());
+    };
+    let _branch_lock = match try_acquire_branch_add_lock(tracedecay_dir) {
+        Ok(lock) => lock,
+        Err(tracedecay_domain::errors::TraceDecayError::SyncLock { .. }) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if meta_path.exists() {
+        return Ok(());
+    }
+    crate::branch_meta::save_branch_meta(tracedecay_dir, &BranchMeta::new(&default_branch))?;
+    Ok(())
+}
+
 /// Publishes branch-tracking metadata for `branch_name` on the single project
 /// graph store.
 ///

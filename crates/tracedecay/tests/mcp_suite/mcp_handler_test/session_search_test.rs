@@ -886,6 +886,70 @@ async fn scheduled_session_import_makes_the_final_codex_source_searchable() {
     harness.shutdown().await;
 }
 
+/// A committed checkout on `main` whose HEAD is detached, with one Codex
+/// rollout recorded in it.
+#[cfg(feature = "test-transport")]
+fn detached_checkout_with_codex_rollout(isolation: &Path) -> PathBuf {
+    let transcripts = composed_transcript_home(isolation);
+    let project = isolation.join("project");
+    std::fs::create_dir_all(&project).expect("production composition project");
+    fixture::write_indexed_fixture_sources(&project);
+    common::fixture::git_run(&project, &["init", "-q", "-b", "main"]);
+    common::fixture::git_run(&project, &["add", "."]);
+    common::fixture::git_run(&project, &["commit", "-qm", "detached checkout fixture"]);
+    common::fixture::git_run(&project, &["checkout", "-q", "--detach"]);
+    write_production_codex_rollout(&transcripts, &project);
+    project
+}
+
+/// A checkout first enrolled while its HEAD is detached still belongs to a
+/// repository with a default branch, so project session recall mounts for it
+/// exactly as for a checkout enrolled on that branch.
+#[cfg(feature = "test-transport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detached_head_enrollment_serves_project_message_search() {
+    let root = test_temp_dir();
+    let isolation = root.path().join("composition");
+    let project = detached_checkout_with_codex_rollout(&isolation);
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        &isolation,
+        [project.clone()],
+    )
+    .await
+    .expect("first-touch production composition harness");
+    production_codex_message_search(&harness, &project).await;
+    harness.shutdown().await;
+}
+
+/// A store an earlier first touch enrolled at a detached HEAD has no branch
+/// metadata. Reopening it converges that metadata, so project session recall
+/// mounts instead of staying unavailable for the life of the daemon.
+#[cfg(feature = "test-transport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detached_enrolled_store_without_branch_metadata_serves_project_message_search() {
+    let root = test_temp_dir();
+    let isolation = root.path().join("composition");
+    let project = detached_checkout_with_codex_rollout(&isolation);
+    fixture::seed_production_composition_profile(&isolation, std::slice::from_ref(&project)).await;
+    let stores = std::fs::read_dir(isolation.join("profile").join("projects"))
+        .expect("seeded project stores")
+        .map(|entry| entry.expect("seeded project store").path())
+        .collect::<Vec<_>>();
+    assert_eq!(stores.len(), 1, "one seeded project store: {stores:?}");
+    std::fs::remove_file(stores[0].join(tracedecay_runtime_core::storage::BRANCH_META_FILENAME))
+        .expect("drop the branch metadata a detached enrollment never wrote");
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        &isolation,
+        [project.clone()],
+    )
+    .await
+    .expect("reopened production composition harness");
+    production_codex_message_search(&harness, &project).await;
+    harness.shutdown().await;
+}
+
 /// A Cursor assistant record holding text beside a `Task` dispatch is one
 /// searchable message. Its text, its dispatch prompt, and a word both carry
 /// each find that one row; none of the searches refuses.
