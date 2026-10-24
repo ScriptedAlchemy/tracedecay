@@ -198,12 +198,15 @@ fn sanitize_structured_text_with(
         .map_err(detection_error_from_structured_sanitization)?;
 
     let mut quarantine_findings = Vec::new();
-    let candidates = if parsed.fields.is_empty() {
+    let (candidates, keys) = if parsed.fields.is_empty() {
         tree_candidates(raw, &parsed, &policy, patterns, &mut quarantine_findings)
     } else {
-        line_candidates(raw, &parsed.fields, &policy, patterns)
+        (
+            line_candidates(raw, &parsed.fields, &policy, patterns),
+            RedactedKeys::default(),
+        )
     };
-    if candidates.is_empty() && quarantine_findings.is_empty() {
+    if candidates.is_empty() && keys.redactions.is_empty() && quarantine_findings.is_empty() {
         let mut scanned = raw_only(raw, patterns);
         scanned.format = Some(parsed.format);
         return Ok(scanned);
@@ -212,7 +215,7 @@ fn sanitize_structured_text_with(
     let ranks = ordinal_ranks(&candidates)?;
     let candidate_count =
         u32::try_from(candidates.len()).map_err(|_| DetectionError::ScanLimitExceeded)?;
-    let mut redactions: Vec<(Range<usize>, &'static str)> = candidates
+    let mut redactions: Vec<(Range<usize>, &str)> = candidates
         .iter()
         .flat_map(|candidate| {
             candidate
@@ -220,6 +223,11 @@ fn sanitize_structured_text_with(
                 .iter()
                 .map(|span| (span.clone(), candidate.marker))
         })
+        .chain(
+            keys.redactions
+                .iter()
+                .map(|key| (key.span.clone(), key.placeholder.as_str())),
+        )
         .collect();
     redactions.sort_by(|(left, _), (right, _)| {
         left.start
@@ -228,7 +236,7 @@ fn sanitize_structured_text_with(
     });
     redactions.dedup_by(|(later, _), (earlier, _)| later.start < earlier.end);
 
-    let mut findings = Vec::new();
+    let mut findings = keys.findings;
     let mut sanitized_text = String::with_capacity(raw.len());
     let mut cursor = 0usize;
     for (span, marker) in redactions {
@@ -281,19 +289,36 @@ fn sanitize_structured_text_with(
         );
     }
 
+    // Text-located spans (YAML only) can cover more than the value, so that
+    // redaction keeps its format label only if it still parses as the input's
+    // format. Parser spans replace exactly the value token.
+    let text_located = candidates.iter().any(|candidate| candidate.text_located);
+    let reparses = || {
+        matches!(
+            parse_structured_text(&sanitized_text),
+            Ok(Some(ref reparsed)) if reparsed.format == parsed.format
+        )
+    };
+    let reparsed = (text_located || !keys.redactions.is_empty()).then(reparses);
+    // A rewritten key leaves the document valid unless the key also occurs
+    // where the parser reported no span (a TOML table named in two headers),
+    // whose raw-scan redaction breaks the syntax. Such a document is withheld.
+    if !keys.redactions.is_empty() && reparsed == Some(false) {
+        for key in &keys.redactions {
+            redact_text(
+                &mut key.key.clone(),
+                "$",
+                patterns,
+                &mut quarantine_findings,
+                SanitizationActionV1::Quarantined,
+            );
+        }
+    }
+    let format = reparsed.unwrap_or(true).then_some(parsed.format);
     findings.sort();
     findings.dedup();
     quarantine_findings.sort();
     quarantine_findings.dedup();
-    // Text-located spans (YAML only) can cover more than the value, so that
-    // redaction keeps its format label only if it still parses as the input's
-    // format. Parser spans replace exactly the value token.
-    let format = (!candidates.iter().any(|candidate| candidate.text_located)
-        || matches!(
-            parse_structured_text(&sanitized_text),
-            Ok(Some(ref reparsed)) if reparsed.format == parsed.format
-        ))
-    .then_some(parsed.format);
     Ok(StructuredTextSanitizationV1 {
         format,
         sanitized_text,
@@ -423,19 +448,20 @@ fn tree_candidates(
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
     patterns: &CredentialPatternSet,
     quarantine_findings: &mut Vec<SanitizationFindingV1>,
-) -> Vec<SensitiveCandidate> {
+) -> (Vec<SensitiveCandidate>, RedactedKeys) {
     let Some(document) = document_node(raw, parsed) else {
         quarantine_findings.push(unlocatable_sensitive_field());
-        return Vec::new();
+        return (Vec::new(), RedactedKeys::default());
     };
-    let mut sensitive = Vec::new();
-    collect_tree_fields(
-        document,
+    let mut collector = TreeFieldCollector {
         policy,
         patterns,
-        &mut sensitive,
+        fields: TreeFields::default(),
         quarantine_findings,
-    );
+    };
+    collector.document(document);
+    let TreeFields { sensitive, keys } = collector.fields;
+    let quarantine_findings = collector.quarantine_findings;
 
     let mut candidates = Vec::new();
     for SensitiveScalar {
@@ -478,7 +504,7 @@ fn tree_candidates(
             text_located,
         });
     }
-    candidates
+    (candidates, keys)
 }
 
 fn unlocatable_sensitive_field() -> SanitizationFindingV1 {
@@ -493,11 +519,20 @@ fn unlocatable_sensitive_field() -> SanitizationFindingV1 {
 
 /// One node of a parsed tree document.
 enum DocumentNode<'a> {
-    Object(Vec<(Cow<'a, str>, DocumentNode<'a>)>),
+    Object(Vec<(DocumentKey<'a>, DocumentNode<'a>)>),
     Array(Vec<DocumentNode<'a>>),
     Scalar(ScalarValue),
     /// A boolean, null, or empty string: nothing to redact.
     Empty,
+}
+
+/// An object key and, when the format's parser reports it, the byte range a
+/// bare placeholder can replace while the document stays valid.
+struct DocumentKey<'a> {
+    name: Cow<'a, str>,
+    /// `None` for formats parsed without spans (YAML): such a key cannot be
+    /// rewritten in place.
+    span: Option<Range<usize>>,
 }
 
 /// Where a scalar's value sits in the raw text.
@@ -560,9 +595,17 @@ fn json_node(value: Json<'_>) -> DocumentNode<'_> {
                 .properties
                 .into_iter()
                 .map(|property| {
+                    // A string key's range includes both quotes; the
+                    // placeholder replaces the body only.
                     let key = match property.name {
-                        ObjectPropName::String(name) => name.value,
-                        ObjectPropName::Word(name) => Cow::Borrowed(name.value),
+                        ObjectPropName::String(name) => DocumentKey {
+                            span: Some(name.range.start + 1..name.range.end.saturating_sub(1)),
+                            name: name.value,
+                        },
+                        ObjectPropName::Word(name) => DocumentKey {
+                            span: Some(name.range.start..name.range.end),
+                            name: Cow::Borrowed(name.value),
+                        },
                     };
                     (key, json_node(property.value))
                 })
@@ -597,7 +640,15 @@ fn toml_table_node<'a>(raw: &str, table: DeTable<'a>) -> DocumentNode<'a> {
     DocumentNode::Object(
         table
             .into_iter()
-            .map(|(key, value)| (key.into_inner(), toml_node(raw, value)))
+            .map(|(key, value)| {
+                // The span covers the whole key token, quotes included, and
+                // the placeholder is a valid bare key.
+                let key = DocumentKey {
+                    span: Some(key.span()),
+                    name: key.into_inner(),
+                };
+                (key, toml_node(raw, value))
+            })
             .collect(),
     )
 }
@@ -642,7 +693,13 @@ fn decoded_node(value: &Value) -> DocumentNode<'_> {
         Value::Object(fields) => DocumentNode::Object(
             fields
                 .iter()
-                .map(|(key, child)| (Cow::Borrowed(key.as_str()), decoded_node(child)))
+                .map(|(key, child)| {
+                    let key = DocumentKey {
+                        name: Cow::Borrowed(key.as_str()),
+                        span: None,
+                    };
+                    (key, decoded_node(child))
+                })
                 .collect(),
         ),
         Value::Array(items) => DocumentNode::Array(items.iter().map(decoded_node).collect()),
@@ -662,130 +719,172 @@ struct SensitiveScalar {
     decoded_value_matched: bool,
 }
 
-fn collect_tree_fields(
-    node: DocumentNode<'_>,
-    policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &CredentialPatternSet,
-    sensitive: &mut Vec<SensitiveScalar>,
-    quarantine_findings: &mut Vec<SanitizationFindingV1>,
-) {
-    match node {
-        DocumentNode::Object(fields) => {
-            for (key, child) in fields {
-                let mut key_evidence = key.to_string();
-                redact_text(
-                    &mut key_evidence,
-                    "$",
-                    patterns,
-                    quarantine_findings,
-                    SanitizationActionV1::Quarantined,
-                );
-                match policy.classify(&NormalizedSensitiveKey::new(&key)) {
-                    Some(origin) => collect_scalars(child, &key, origin, patterns, sensitive),
-                    None => {
-                        collect_detected_scalars(
-                            child,
-                            &key,
-                            policy,
-                            patterns,
-                            sensitive,
-                            quarantine_findings,
-                        );
+/// An object key the detectors flagged, located byte-exactly in the raw text.
+struct KeyRedaction {
+    span: Range<usize>,
+    placeholder: String,
+    /// The decoded key, kept only so a rewrite that breaks the document can be
+    /// reported as the key quarantine it falls back to.
+    key: String,
+}
+
+/// Prefix of the placeholder that replaces a flagged object key. Like
+/// [`REDACTED_STRUCTURED_FIELD`] it is a valid bare TOML key and needs no JSON
+/// escaping, so the rewritten document still parses as its own format.
+const REDACTED_KEY_PREFIX: &str = "TraceDecay-redacted-key-";
+
+/// The flagged keys of one document and the detector findings that flagged
+/// them.
+#[derive(Default)]
+struct RedactedKeys {
+    redactions: Vec<KeyRedaction>,
+    findings: Vec<SanitizationFindingV1>,
+}
+
+/// Everything a walk over a parsed tree document collects.
+#[derive(Default)]
+struct TreeFields {
+    sensitive: Vec<SensitiveScalar>,
+    keys: RedactedKeys,
+}
+
+struct TreeFieldCollector<'a> {
+    policy: &'a ConfiguredSensitiveKeyPolicy<'a>,
+    patterns: &'a CredentialPatternSet,
+    fields: TreeFields,
+    quarantine_findings: &'a mut Vec<SanitizationFindingV1>,
+}
+
+impl TreeFieldCollector<'_> {
+    fn document(&mut self, node: DocumentNode<'_>) {
+        match node {
+            DocumentNode::Object(fields) => self.object(fields),
+            DocumentNode::Array(items) => {
+                for item in items {
+                    self.detected_scalars(item, "$");
+                }
+            }
+            DocumentNode::Scalar(_) | DocumentNode::Empty => {}
+        }
+    }
+
+    fn object(&mut self, fields: Vec<(DocumentKey<'_>, DocumentNode<'_>)>) {
+        let evidence: Vec<_> = fields
+            .iter()
+            .map(|(key, _)| self.key_evidence(key))
+            .collect();
+        // Placeholders are numbered in document order, which a TOML table's
+        // sorted map does not preserve, and skip any sibling's literal name.
+        let mut flagged: Vec<_> = (0..fields.len())
+            .filter(|&index| evidence[index].is_some())
+            .collect();
+        flagged.sort_by_key(|&index| fields[index].0.span.as_ref().map(|span| span.start));
+        let mut placeholders = vec![None; fields.len()];
+        let mut ordinal = 0usize;
+        for index in flagged {
+            placeholders[index] = Some(loop {
+                ordinal += 1;
+                let placeholder = format!("{REDACTED_KEY_PREFIX}{ordinal}");
+                if !fields.iter().any(|(key, _)| key.name == placeholder) {
+                    break placeholder;
+                }
+            });
+        }
+        for (((key, child), evidence), placeholder) in
+            fields.into_iter().zip(evidence).zip(placeholders)
+        {
+            let origin = self
+                .policy
+                .classify(&NormalizedSensitiveKey::new(&key.name));
+            match (key.span, evidence, placeholder) {
+                (Some(span), Some(evidence), Some(placeholder)) => {
+                    self.fields.keys.findings.extend(evidence);
+                    self.scalars(
+                        child,
+                        &placeholder,
+                        origin.unwrap_or(SanitizationDetectorOriginV1::BuiltInDetectorKernel),
+                    );
+                    self.fields.keys.redactions.push(KeyRedaction {
+                        span,
+                        placeholder,
+                        key: key.name.into_owned(),
+                    });
+                }
+                (_, evidence, _) => {
+                    self.quarantine_findings
+                        .extend(evidence.into_iter().flatten());
+                    match origin {
+                        Some(origin) => self.scalars(child, &key.name, origin),
+                        None => self.detected_scalars(child, &key.name),
                     }
                 }
             }
         }
-        DocumentNode::Array(items) => {
-            for item in items {
-                collect_detected_scalars(
-                    item,
-                    "$",
-                    policy,
-                    patterns,
-                    sensitive,
-                    quarantine_findings,
-                );
-            }
-        }
-        DocumentNode::Scalar(_) | DocumentNode::Empty => {}
     }
-}
 
-fn collect_scalars(
-    node: DocumentNode<'_>,
-    key: &str,
-    origin: SanitizationDetectorOriginV1,
-    patterns: &CredentialPatternSet,
-    sensitive: &mut Vec<SensitiveScalar>,
-) {
-    match node {
-        DocumentNode::Scalar(value) => {
-            let decoded_value_matched = value
-                .decoded_value()
-                .is_some_and(|decoded| trips_a_detector(decoded, patterns));
-            sensitive.push(SensitiveScalar {
-                key: key.to_owned(),
-                value,
-                origin,
-                decoded_value_matched,
-            });
-        }
-        DocumentNode::Object(fields) => {
-            for (_, child) in fields {
-                collect_scalars(child, key, origin, patterns, sensitive);
-            }
-        }
-        DocumentNode::Array(items) => {
-            for item in items {
-                collect_scalars(item, key, origin, patterns, sensitive);
-            }
-        }
-        DocumentNode::Empty => {}
+    /// Detector findings for a key that trips one, recorded as a redaction
+    /// when the key can be rewritten in place and as a quarantine otherwise.
+    fn key_evidence(&self, key: &DocumentKey<'_>) -> Option<Vec<SanitizationFindingV1>> {
+        let action = if key.span.is_some() {
+            SanitizationActionV1::Redacted
+        } else {
+            SanitizationActionV1::Quarantined
+        };
+        let mut probe = key.name.to_string();
+        let mut findings = Vec::new();
+        redact_text(&mut probe, "$", self.patterns, &mut findings, action).then_some(findings)
     }
-}
 
-fn collect_detected_scalars(
-    node: DocumentNode<'_>,
-    key: &str,
-    policy: &ConfiguredSensitiveKeyPolicy<'_>,
-    patterns: &CredentialPatternSet,
-    sensitive: &mut Vec<SensitiveScalar>,
-    quarantine_findings: &mut Vec<SanitizationFindingV1>,
-) {
-    match node {
-        DocumentNode::Scalar(value) => {
-            if value
-                .decoded_value()
-                .is_some_and(|decoded| trips_a_detector(decoded, patterns))
-            {
-                sensitive.push(SensitiveScalar {
+    fn scalars(&mut self, node: DocumentNode<'_>, key: &str, origin: SanitizationDetectorOriginV1) {
+        match node {
+            DocumentNode::Scalar(value) => {
+                let decoded_value_matched = value
+                    .decoded_value()
+                    .is_some_and(|decoded| trips_a_detector(decoded, self.patterns));
+                self.fields.sensitive.push(SensitiveScalar {
                     key: key.to_owned(),
                     value,
-                    origin: SanitizationDetectorOriginV1::BuiltInDetectorKernel,
-                    decoded_value_matched: true,
+                    origin,
+                    decoded_value_matched,
                 });
             }
-        }
-        DocumentNode::Object(fields) => collect_tree_fields(
-            DocumentNode::Object(fields),
-            policy,
-            patterns,
-            sensitive,
-            quarantine_findings,
-        ),
-        DocumentNode::Array(items) => {
-            for item in items {
-                collect_detected_scalars(
-                    item,
-                    key,
-                    policy,
-                    patterns,
-                    sensitive,
-                    quarantine_findings,
-                );
+            DocumentNode::Object(fields) => {
+                for (_, child) in fields {
+                    self.scalars(child, key, origin);
+                }
             }
+            DocumentNode::Array(items) => {
+                for item in items {
+                    self.scalars(item, key, origin);
+                }
+            }
+            DocumentNode::Empty => {}
         }
-        DocumentNode::Empty => {}
+    }
+
+    fn detected_scalars(&mut self, node: DocumentNode<'_>, key: &str) {
+        match node {
+            DocumentNode::Scalar(value) => {
+                if value
+                    .decoded_value()
+                    .is_some_and(|decoded| trips_a_detector(decoded, self.patterns))
+                {
+                    self.fields.sensitive.push(SensitiveScalar {
+                        key: key.to_owned(),
+                        value,
+                        origin: SanitizationDetectorOriginV1::BuiltInDetectorKernel,
+                        decoded_value_matched: true,
+                    });
+                }
+            }
+            DocumentNode::Object(fields) => self.object(fields),
+            DocumentNode::Array(items) => {
+                for item in items {
+                    self.detected_scalars(item, key);
+                }
+            }
+            DocumentNode::Empty => {}
+        }
     }
 }
 
