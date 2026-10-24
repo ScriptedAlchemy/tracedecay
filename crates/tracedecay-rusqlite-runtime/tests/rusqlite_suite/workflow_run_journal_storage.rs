@@ -471,10 +471,8 @@ fn command_replay_is_idempotent_and_divergent_reuse_is_a_typed_conflict() {
 fn artifact_payloads_survive_restart_and_hydration_verifies_content() {
     let store = RegisteredWorkflowStore::start("artifact-payload-durability");
     let authority = attach(&store);
-    let payload = content_artifact(
-        "artifact.workflow.journal.context",
-        b"durable context bytes",
-    );
+    let content = vec![b'x'; 5 * 1024 * 1024];
+    let payload = content_artifact("artifact.workflow.journal.context", &content);
 
     assert_eq!(
         authority.persist(&payload).unwrap(),
@@ -485,6 +483,19 @@ fn artifact_payloads_survive_restart_and_hydration_verifies_content() {
         WorkflowArtifactPersistOutcome::Replayed
     );
     assert_eq!(store.count("workflow_artifact_payloads"), 1);
+
+    store.inspect(|connection| {
+        let error = connection
+            .execute(
+                "UPDATE workflow_artifact_payloads SET byte_length = byte_length - 1",
+                [],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error().unwrap().extended_code,
+            rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
+        );
+    });
 
     let store = store.restart("artifact-payload-durability-restarted");
     let reopened = attach(&store);

@@ -26,8 +26,7 @@ use super::model::{
 use super::{
     HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleError, HostBundleInstallReceiptV1,
     HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
-    HostComponentV1, HostKindV1, MAX_ARTIFACT_CONTENT_BYTES, validate_identifier,
-    validate_relative_install_path,
+    HostComponentV1, HostKindV1, validate_identifier, validate_relative_install_path,
 };
 
 /// Verify first, then produce the full immutable lifecycle plan, including
@@ -807,9 +806,6 @@ pub(super) fn observe_artifact_at(
     let path = inspect_install_target(root, Path::new(relative_path))?;
     let (kind, artifact_digest) = match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => {
-            if metadata.len() > MAX_ARTIFACT_CONTENT_BYTES as u64 {
-                return Err(HostBundleError::ArtifactContentMismatch);
-            }
             let bytes = fs::read(&path).map_err(|_| host_bundle_storage_failure!())?;
             (
                 ObservedArtifactKindV1::RegularFile,
@@ -863,9 +859,7 @@ pub(super) fn validate_artifact_contents_for_operation(
     }
     let mut values = BTreeMap::new();
     for content in contents {
-        if content.bytes.len() > MAX_ARTIFACT_CONTENT_BYTES
-            || values.contains_key(&content.relative_path)
-        {
+        if values.contains_key(&content.relative_path) {
             return Err(HostBundleError::ArtifactContentMismatch);
         }
         let artifact = manifest
