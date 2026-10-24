@@ -4,15 +4,16 @@
 //! The decoded generation a worktree serves was held until the daemon exited:
 //! the first read that needed the whole generation set a latch that nothing
 //! cleared. Here that residency is a lease renewed by those reads. The worker
-//! also drops the seated decode, catalog, and engine when it parks after a
-//! publish: exact and lexical serve from the sealed text artifact,
+//! also drops the seated decode when it parks, and the catalog and engine an
+//! activation seated: exact and lexical serve from the sealed text artifact,
 //! `code_graph_serving` reports `warming` while catalog/engine are absent,
-//! and the next graph read reseats them (#3328). Once the lease lapses, or
-//! under pressure, the inventory
-//! releases the decode and the graph engine, and the worktree returns to the
-//! state a restart leaves it in: exact and lexical reads keep serving from
-//! the text artifact, graph reads reseat the engine from the durable graph,
-//! and the next read that needs the whole generation re-decodes it.
+//! and the next graph read reseats them (#3328). A graph that reads reseated
+//! stays across later parks. Once the lease lapses, or under pressure, the
+//! inventory releases the decode and the graph engine, and the worktree
+//! returns to the state a restart leaves it in: exact and lexical reads keep
+//! serving from the text artifact, graph reads reseat the engine from the
+//! durable graph, and the next read that needs the whole generation
+//! re-decodes it.
 //!
 //! Reads that only report on the seat (the status census, freshness) do not
 //! renew the lease, and a refresh of the worktree refused for memory takes
@@ -27,7 +28,7 @@ use std::time::Instant;
 use crate::code_index_task_support::spawn_detached;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1,
+    CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1, CodeGraphProjectionStore,
 };
 use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, DecodedGenerationContentV1,
@@ -68,6 +69,10 @@ pub(super) struct WorktreeResidencyV1 {
     refresh_waits_for_memory: AtomicBool,
     park_release_after_pass_armed: AtomicBool,
     park_release_after_reads_drain_retrying: AtomicBool,
+    /// The serving graph stores whose catalog, and whose engine, a release
+    /// already gave back. Whatever those hold now, graph reads reseated.
+    catalog_given_back: Mutex<Weak<CodeGraphProjectionStore>>,
+    engine_given_back: Mutex<Weak<CodeGraphProjectionStore>>,
     pub(super) park_headroom: ParkHeadroomV1,
 }
 
@@ -130,8 +135,28 @@ impl WorktreeResidencyV1 {
             refresh_waits_for_memory: AtomicBool::new(false),
             park_release_after_pass_armed: AtomicBool::new(false),
             park_release_after_reads_drain_retrying: AtomicBool::new(false),
+            catalog_given_back: Mutex::new(Weak::new()),
+            engine_given_back: Mutex::new(Weak::new()),
             park_headroom: ParkHeadroomV1::default(),
         }
+    }
+
+    /// Whether the serving graph's owner that `given_back` tracks is resident
+    /// because reads reseated it after a release gave it back. A park leaves
+    /// such an owner to the idle lease and pressure: only an activation seats
+    /// a graph nobody asked for, and taking a read-seated one back on every
+    /// park made each next graph read re-decode the whole catalog.
+    fn reseated_by_reads(&self, given_back: &Mutex<Weak<CodeGraphProjectionStore>>) -> bool {
+        let Some(store) = self
+            .serving_text()
+            .and_then(|text| text.interactive_graph_store().ok())
+        else {
+            return false;
+        };
+        Weak::ptr_eq(
+            &given_back.lock().unwrap_or_else(PoisonError::into_inner),
+            &Arc::downgrade(&store),
+        )
     }
 
     /// Record whether this worktree's last reconcile was refused for resident
@@ -195,7 +220,8 @@ impl WorktreeResidencyV1 {
     /// and taking it then turns serve-old into `GenerationUnavailable`.
     /// Catalog and engine still go back after a completed activation:
     /// `code_graph_serving` reports `warming` while they are absent and the
-    /// next graph read reseats them. Do not clear `complete_generation_requested`: a demand that
+    /// next graph read reseats them. A graph that reads reseated stays
+    /// resident. Do not clear `complete_generation_requested`: a demand that
     /// arrives during the take must still wake a successor pass to
     /// re-decode. The decode is announced as this worktree's own park
     /// release: a retry re-decodes it (issue #3588).
@@ -281,20 +307,24 @@ impl WorktreeResidencyV1 {
         }
         let mut graph_released = false;
         let mut graph_busy = false;
-        for (kind, release) in [
-            (
+        let mut releases = Vec::with_capacity(3);
+        if !self.reseated_by_reads(&self.catalog_given_back) {
+            releases.push((
                 ResidentOwnerKindV1::GraphCatalog,
                 GraphCatalogOwnerV1(Arc::clone(self)).release(),
-            ),
-            (
+            ));
+        }
+        if !self.reseated_by_reads(&self.engine_given_back) {
+            releases.push((
                 ResidentOwnerKindV1::GraphEngine,
                 GraphEngineOwnerV1(Arc::clone(self)).release(),
-            ),
-            (
-                ResidentOwnerKindV1::GraphEngine,
-                OutgoingGraphOwnerV1(Arc::clone(self)).release(),
-            ),
-        ] {
+            ));
+        }
+        releases.push((
+            ResidentOwnerKindV1::GraphEngine,
+            OutgoingGraphOwnerV1(Arc::clone(self)).release(),
+        ));
+        for (kind, release) in releases {
             match release {
                 ResidentOwnerReleaseV1::Released { bytes } => {
                     tracing::info!(
@@ -683,6 +713,13 @@ impl WorktreeResidencyV1 {
     }
 }
 
+fn note_given_back(
+    given_back: &Mutex<Weak<CodeGraphProjectionStore>>,
+    store: &Arc<CodeGraphProjectionStore>,
+) {
+    *given_back.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(store);
+}
+
 /// The interactive catalog built over the worktree's serving graph.
 struct GraphCatalogOwnerV1(Arc<WorktreeResidencyV1>);
 
@@ -713,9 +750,12 @@ impl ResidentOwnerV1 for GraphCatalogOwnerV1 {
             return ResidentOwnerReleaseV1::Empty;
         };
         match store.release_interactive_catalog() {
-            CodeGraphCatalogReleaseV1::Released { bytes } => ResidentOwnerReleaseV1::Released {
-                bytes: ResidentOwnerBytesV1::Measured(bytes),
-            },
+            CodeGraphCatalogReleaseV1::Released { bytes } => {
+                note_given_back(&self.0.catalog_given_back, &store);
+                ResidentOwnerReleaseV1::Released {
+                    bytes: ResidentOwnerBytesV1::Measured(bytes),
+                }
+            }
             CodeGraphCatalogReleaseV1::Busy => ResidentOwnerReleaseV1::Busy,
             CodeGraphCatalogReleaseV1::NotReady => ResidentOwnerReleaseV1::Empty,
         }
@@ -751,12 +791,15 @@ impl ResidentOwnerV1 for GraphEngineOwnerV1 {
             return ResidentOwnerReleaseV1::Empty;
         };
         match store.release_serving_engine() {
-            Ok(CodeGraphEngineReleaseV1::Released { bytes }) => ResidentOwnerReleaseV1::Released {
-                bytes: bytes.map_or(
-                    ResidentOwnerBytesV1::Unmeasured,
-                    ResidentOwnerBytesV1::Measured,
-                ),
-            },
+            Ok(CodeGraphEngineReleaseV1::Released { bytes }) => {
+                note_given_back(&self.0.engine_given_back, &store);
+                ResidentOwnerReleaseV1::Released {
+                    bytes: bytes.map_or(
+                        ResidentOwnerBytesV1::Unmeasured,
+                        ResidentOwnerBytesV1::Measured,
+                    ),
+                }
+            }
             Ok(CodeGraphEngineReleaseV1::Busy) => ResidentOwnerReleaseV1::Busy,
             Ok(CodeGraphEngineReleaseV1::NotPinned) => ResidentOwnerReleaseV1::Empty,
             Err(error) => {

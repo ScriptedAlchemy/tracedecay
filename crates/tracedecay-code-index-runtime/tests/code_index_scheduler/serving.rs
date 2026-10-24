@@ -24,7 +24,9 @@ use tracedecay_contracts::{
     PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResolvedScope, ResultProjection,
     RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
     SourceMetadataRequest, callable_code_operation,
-    code_index_freshness::{CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1},
+    code_index_freshness::{
+        CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
+    },
     retrieval::{
         CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
         CodeImplementationsRequest, CodeNavigationRequest, CodeTimelineRequest,
@@ -75,11 +77,12 @@ use super::{
     settle_text_projection, settled_owners_with_idle_admission, test_project_id,
     wait_for_dashboard_ready, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
-    wait_for_settled_owner, with_untouched_fillers, write,
+    wait_for_settled_owner, wait_for_worker_phase, with_untouched_fillers, write,
 };
 use crate::code_index_scheduler::{
-    CodeIndexBuildProgressStateV1, CodeIndexCommittedProgressSampleV1,
-    CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1, SharedCodeIndexBytePoolV1,
+    CodeIndexBuildProgressStateV1, CodeIndexCadenceOutcomeV1, CodeIndexCommittedProgressSampleV1,
+    CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
+    SharedCodeIndexBytePoolV1,
 };
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
@@ -5561,6 +5564,187 @@ async fn a_callers_request_after_park_waits_for_the_graph_to_rewarm() {
     assert!(
         !page.items.is_empty(),
         "callers still answers the hub's callers"
+    );
+
+    registry.shutdown().await;
+}
+
+/// Wake the worker for one pass over unchanged source and return once it has
+/// parked again, with the outcome of that pass.
+async fn park_after_one_pass(
+    registry: &CodeIndexSchedulerRegistryV1,
+    root: &Path,
+) -> CodeIndexCadenceOutcomeV1 {
+    let mut receipts = registry.subscribe_cadence_receipts();
+    let mark = receipts.borrow_and_update().receipts().len();
+    assert!(registry.note_worker_wake_for_test(root).await);
+    let outcome = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+        loop {
+            if let Some(receipt) = receipts.borrow_and_update().receipts().nth(mark) {
+                return receipt.outcome.clone();
+            }
+            receipts.changed().await.expect("cadence channel open");
+        }
+    })
+    .await
+    .expect("the woken pass records its receipt");
+    wait_for_settled_owner(registry, root).await;
+    wait_for_worker_phase(registry, root, CodeIndexWorkerPhaseV1::Parked).await;
+    outcome
+}
+
+async fn code_graph_serving(
+    registry: &CodeIndexSchedulerRegistryV1,
+    root: &Path,
+) -> Option<CodeGraphServingReadinessV1> {
+    registry
+        .dashboard_freshness(root)
+        .await
+        .expect("mounted worktree freshness")
+        .code_graph_serving
+}
+
+/// Issue #3328 gives an activated graph's catalog and engine back when the
+/// worker parks. A graph read then reseats them, and a later park after a
+/// pass that changed nothing must keep that graph: taking it back on every
+/// park made each next graph read re-decode the whole catalog and time out.
+#[tokio::test]
+async fn a_park_after_a_noop_pass_keeps_the_graph_a_read_reseated() {
+    let sources = caller_star_sources();
+    let files = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation = latest.generation.manifest().generation_id.clone();
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let hub = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("hub"))
+        .expect("hub symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    let activate = || {
+        install_verified_graph_store(&latest);
+        latest
+            .text_generation_handle()
+            .interactive_graph_store()
+            .expect("interactive graph store")
+            .warm_serving_engine()
+            .expect("activation pins the serving engine");
+    };
+    let callers = || async {
+        let outcome = registry
+            .callers(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &CodeRelationRequest {
+                    node_id: hub.clone(),
+                    maximum_depth: 1,
+                    resolve_trait_dispatch: false,
+                    scope: CodeQueryScope::new(generation.clone(), None).expect("query scope"),
+                    meta: callers_page_meta(CALLER_PAGE, None),
+                },
+            )
+            .await;
+        match outcome {
+            RetrievalPortOutcome::Completed(evidence) => {
+                assert!(
+                    !evidence.payload.expect("callers page").items.is_empty(),
+                    "callers answers the hub's callers"
+                );
+            }
+            other => panic!("callers must serve the graph: {other:?}"),
+        }
+    };
+
+    activate();
+    assert_eq!(
+        code_graph_serving(&registry, fixture.path()).await,
+        Some(CodeGraphServingReadinessV1::Ready)
+    );
+    park_after_one_pass(&registry, fixture.path()).await;
+    assert!(
+        matches!(
+            code_graph_serving(&registry, fixture.path()).await,
+            Some(CodeGraphServingReadinessV1::Warming { .. })
+        ),
+        "the first park after an activation gives its catalog and engine back"
+    );
+
+    callers().await;
+    latest
+        .text_generation_handle()
+        .interactive_graph_store()
+        .expect("interactive graph store")
+        .await_rewarm_for(
+            SERVING_SEAT_FAILURE_CEILING,
+            tracedecay_code_index::graph_projection::CodeGraphReadinessRequirement::Catalog,
+        )
+        .expect("the read reseats the released graph");
+    assert_eq!(
+        code_graph_serving(&registry, fixture.path()).await,
+        Some(CodeGraphServingReadinessV1::Ready)
+    );
+
+    for _ in 0..2 {
+        assert!(
+            matches!(
+                park_after_one_pass(&registry, fixture.path()).await,
+                CodeIndexCadenceOutcomeV1::Noop { .. }
+            ),
+            "unchanged source reconciles to a noop"
+        );
+        assert_eq!(
+            code_graph_serving(&registry, fixture.path()).await,
+            Some(CodeGraphServingReadinessV1::Ready),
+            "a park after a noop pass keeps the graph a read reseated"
+        );
+        callers().await;
+    }
+
+    activate();
+    park_after_one_pass(&registry, fixture.path()).await;
+    assert!(
+        matches!(
+            code_graph_serving(&registry, fixture.path()).await,
+            Some(CodeGraphServingReadinessV1::Warming { .. })
+        ),
+        "a newly activated graph still goes back on the next park"
     );
 
     registry.shutdown().await;
