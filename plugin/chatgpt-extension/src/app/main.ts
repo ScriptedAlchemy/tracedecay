@@ -1,3 +1,4 @@
+/// <reference types="@rsbuild/core/types" />
 import { App, type McpUiHostContext } from "@modelcontextprotocol/ext-apps";
 import type { CallToolResult } from "@modelcontextprotocol/client";
 import {
@@ -18,11 +19,11 @@ import "./styles.css";
 
 type Screen =
   | { readonly phase: "connecting" }
-  | { readonly phase: "loading"; readonly label: string; readonly previous: ViewState | null }
+  | { readonly phase: "loading"; readonly label: string; readonly previous: ViewState | null; readonly projectQuery?: string }
   | { readonly phase: "view"; readonly view: ViewState }
   | { readonly phase: "host_error"; readonly message: string };
 
-type ToolName = "tracedecay_workspace" | "tracedecay_list_projects" | "tracedecay_search_code" | "tracedecay_inspect_symbol";
+type ToolName = "tracedecay_workspace" | "tracedecay_list_projects" | "tracedecay_search_projects" | "tracedecay_search_code" | "tracedecay_inspect_symbol";
 
 const root = document.getElementById("root");
 if (root === null) throw new Error("app root element missing");
@@ -36,6 +37,14 @@ const app = new App(
 let screen: Screen = { phase: "connecting" };
 let knownProjects: readonly ProjectRef[] = [];
 let lastDeepLink: string | null = null;
+let pendingCall: AbortController | null = null;
+let projectQueryDraft: string | null = null;
+
+function cancelPendingCall(): void {
+  const previous = pendingCall;
+  pendingCall = null;
+  previous?.abort();
+}
 
 function setScreen(next: Screen): void {
   screen = next;
@@ -49,10 +58,12 @@ function currentView(): ViewState | null {
 }
 
 function rememberProjects(view: ViewState): void {
-  if (view.page === "projects" && view.projects.state === "ready") knownProjects = view.projects.data;
+  if (view.page === "projects") knownProjects = view.projects.state === "ready" ? view.projects.data.projects : [];
 }
 
 function adoptView(view: ViewState): void {
+  cancelPendingCall();
+  projectQueryDraft = view.page === "projects" ? view.query : null;
   rememberProjects(view);
   setScreen({ phase: "view", view });
   void publishModelContext(view);
@@ -62,10 +73,16 @@ function viewFromResult(result: CallToolResult): ViewState | null {
   return isViewState(result.structuredContent) ? result.structuredContent : null;
 }
 
-async function callTool(name: ToolName, args: Record<string, unknown>, label: string): Promise<void> {
-  setScreen({ phase: "loading", label, previous: currentView() });
+async function callTool(name: ToolName, args: Record<string, unknown>, label: string, projectQuery?: string): Promise<void> {
+  cancelPendingCall();
+  const controller = new AbortController();
+  pendingCall = controller;
+  if (projectQuery !== undefined) projectQueryDraft = projectQuery;
+  setScreen({ phase: "loading", label, previous: currentView(), projectQuery });
   try {
-    const result = await app.callServerTool({ name, arguments: args });
+    const result = await app.callServerTool({ name, arguments: args }, { signal: controller.signal });
+    if (pendingCall !== controller) return;
+    pendingCall = null;
     const view = viewFromResult(result);
     if (view === null) {
       setScreen({ phase: "host_error", message: `${name} returned no view payload` });
@@ -73,6 +90,8 @@ async function callTool(name: ToolName, args: Record<string, unknown>, label: st
     }
     adoptView(view);
   } catch (error) {
+    if (pendingCall !== controller) return;
+    pendingCall = null;
     setScreen({ phase: "host_error", message: error instanceof Error ? error.message : String(error) });
   }
 }
@@ -129,7 +148,12 @@ function describeSection<T>(section: Section<T>, ready: (data: T) => string): st
 // Navigation -----------------------------------------------------------------
 
 function openWorkspace(): void {
-  void callTool("tracedecay_workspace", {}, "Loading registered projects…");
+  void callTool("tracedecay_workspace", {}, "Loading registered projects…", "");
+}
+
+function findProjects(query: string): void {
+  const trimmed = query.trim();
+  void callTool("tracedecay_search_projects", { query: trimmed }, trimmed === "" ? "Loading recent projects…" : `Searching projects for "${trimmed}"…`, trimmed);
 }
 
 function openProject(project: ProjectRef): void {
@@ -273,25 +297,63 @@ function renderHeader(view: ViewState | null): HTMLElement {
   return bar;
 }
 
-function renderProjects(view: Extract<ViewState, { page: "projects" }>): Node[] {
+function renderProjects(view: Extract<ViewState, { page: "projects" }>, pendingQuery?: string): Node[] {
   const daemon =
     view.daemon.state === "connected"
       ? el("p", { class: "notice", "data-testid": "daemon-state" }, [badge("connected", "ok", "daemon-badge"), ` tracedecay ${view.daemon.version} (pid ${view.daemon.pid}) · profile `, el("code", {}, [view.daemon.profile_root])])
       : failureNotice(view.daemon.failure, "daemon-state");
-  const list = sectionBody(view.projects, "projects", (projects) =>
-    el(
+  const list = sectionBody(view.projects, "projects", (listing) => {
+    const rows = el(
       "ul",
       { class: "list" },
-      projects.map((project) =>
+      listing.projects.map((project) =>
         el("li", { "data-testid": "project-row" }, [
           button(project.label, () => openProject(project), { class: "primary", "data-testid": "project-open", "data-project-id": project.project_id }),
           el("span", { class: "loc" }, [project.project_root]),
           project.head_branch === null ? "" : badge(project.head_branch),
         ]),
       ),
-    ),
-  );
-  return [daemon, panel("Recent registered projects", "projects-panel", [list, el("p", { class: "notice" }, ["Showing up to 10 recently used projects. Only projects registered in this TraceDecay profile (via `tracedecay init`) can be explored. Nothing here writes to your code."])])];
+    );
+    const count = `${listing.projects.length} project(s) shown (up to ${listing.limit}).`;
+    const completeness = listing.truncated
+      ? `${count} More ${view.query === "" ? "registered projects are available; search to find projects outside this recent list" : "matches are available; refine your search to find a specific project"}.`
+      : `${count} ${view.query === "" ? "All registered projects are shown" : "All matching projects are shown"}.`;
+    return el("div", {}, [notice(completeness, listing.truncated ? "warn" : "neutral", "projects-completeness"), rows]);
+  });
+  const results = panel(view.query === "" ? "Recent registered projects" : `Projects matching "${view.query}"`, "projects-panel", [list]);
+  return [
+    daemon,
+    renderProjectSearchForm(projectQueryDraft ?? pendingQuery ?? view.query),
+    ...(pendingQuery === undefined ? [] : [el("p", { class: "loading", role: "status", "data-testid": "loading" }, [`${screen.phase === "loading" ? screen.label : "Loading projects…"} Previous results remain below.`])]),
+    results,
+    el("p", { class: "notice" }, ["Search registered project paths, aliases, IDs, or default branches. Only projects registered in this TraceDecay profile (via `tracedecay init`) can be explored."]),
+  ];
+}
+
+function renderProjectSearchForm(query: string): HTMLFormElement {
+  const input = el("input", { type: "search", name: "project-query", placeholder: "Find a registered project…", value: query, "data-testid": "project-search-input", "aria-label": "Find registered projects" });
+  const submit = (): void => findProjects(input.value);
+  const form = el("form", { class: "search project-search", "data-testid": "project-search-form", role: "search", "aria-label": "Registered projects" }, [
+    input,
+    button("Find projects", submit, { class: "primary", "data-testid": "project-search-submit" }),
+    button("Recent projects", () => findProjects(""), { "data-testid": "project-search-recent" }),
+  ]);
+  input.addEventListener("input", () => {
+    projectQueryDraft = input.value;
+    if (screen.phase === "loading" && screen.projectQuery !== undefined && screen.previous?.page === "projects") {
+      const previous = screen.previous;
+      cancelPendingCall();
+      setScreen({ phase: "view", view: previous });
+    }
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  });
+  form.addEventListener("submit", (event) => event.preventDefault());
+  return form;
 }
 
 function renderSearchForm(project: ProjectRef, query: string): HTMLFormElement {
@@ -491,6 +553,7 @@ function renderBody(): Node[] {
     case "connecting":
       return [el("p", { class: "loading", "data-testid": "connecting" }, ["Connecting to ChatGPT…"])];
     case "loading":
+      if (screen.previous?.page === "projects" && screen.projectQuery !== undefined) return renderProjects(screen.previous, screen.projectQuery);
       return [el("p", { class: "loading", "data-testid": "loading" }, [screen.label])];
     case "host_error":
       return [failureNotice({ kind: "protocol", code: "host_call_failed", message: screen.message }, "host-error"), el("div", { class: "actions" }, [button("Back to projects", openWorkspace, { class: "primary", "data-testid": "back-to-projects" })])];
@@ -509,17 +572,27 @@ function renderBody(): Node[] {
 }
 
 function render(): void {
+  const focused = document.activeElement;
+  const projectInput = focused instanceof HTMLInputElement && focused.dataset["testid"] === "project-search-input" ? focused : null;
+  const selection = projectInput === null ? null : [projectInput.selectionStart, projectInput.selectionEnd] as const;
   mount.replaceChildren(renderHeader(currentView()), ...renderBody());
   mount.dataset["phase"] = screen.phase;
   mount.dataset["page"] = currentView()?.page ?? "";
+  if (selection !== null) {
+    const replacement = mount.querySelector<HTMLInputElement>('[data-testid="project-search-input"]');
+    replacement?.focus({ preventScroll: true });
+    replacement?.setSelectionRange(...selection);
+  }
 }
 
 // Host wiring ----------------------------------------------------------------
 
 app.ontoolinput = (params) => {
+  cancelPendingCall();
   setScreen({ phase: "loading", label: `Loading ${params.arguments?.["query"] !== undefined ? `search for "${String(params.arguments["query"])}"` : "from TraceDecay"}…`, previous: currentView() });
 };
 app.ontoolresult = (result) => {
+  cancelPendingCall();
   const view = viewFromResult(result);
   if (view === null) setScreen({ phase: "host_error", message: "The tool result carried no TraceDecay view payload." });
   else adoptView(view);
@@ -528,6 +601,11 @@ app.onhostcontextchanged = (context) => {
   applyHostContext(context);
   render();
 };
+app.onteardown = async () => {
+  cancelPendingCall();
+  return {};
+};
+window.addEventListener("pagehide", cancelPendingCall);
 
 render();
 app
