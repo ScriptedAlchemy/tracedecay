@@ -23,6 +23,7 @@ struct MemorySealedStateV1 {
     active: BTreeMap<CodeIndexGenerationScopeV1, (CodeGenerationId, Arc<[u8]>)>,
     manifests: HashMap<CodeGenerationId, Arc<[u8]>>,
     publications: u64,
+    reads: HashMap<ManifestDigest, u64>,
 }
 
 /// Sealed generations held in memory, one active generation per scope.
@@ -41,7 +42,7 @@ impl MemorySealedPublicationStoreV1 {
         let state = Arc::clone(&self.state);
         Arc::new(
             move |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
-                let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
                 let (digest, range) = match request {
                     SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                         (digest, 0..size_bytes)
@@ -53,6 +54,7 @@ impl MemorySealedPublicationStoreV1 {
                         ..
                     } => (digest, offset..offset.saturating_add(length)),
                 };
+                *state.reads.entry(digest.clone()).or_default() += 1;
                 let bytes = state.segments.get(digest).ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
                         "in-memory sealed store has no such segment".to_owned(),
@@ -84,6 +86,11 @@ impl MemorySealedPublicationStoreV1 {
     /// Publications this store committed.
     pub fn publications(&self) -> u64 {
         self.state().publications
+    }
+
+    /// Reads this store served of the segment `digest` addresses.
+    pub fn segment_reads(&self, digest: &ManifestDigest) -> u64 {
+        self.state().reads.get(digest).copied().unwrap_or_default()
     }
 
     /// Bytes every stored segment holds.
