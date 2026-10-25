@@ -48,12 +48,26 @@ impl DiagnosticDocumentIdentity {
 pub(super) struct PendingDiagnosticRefresh {
     pub(super) identity: DiagnosticRefreshIdentity,
     pub(super) document: DiagnosticDocumentIdentity,
-    pub(super) validation_only: bool,
+    pub(super) state: DiagnosticRefreshState,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum DiagnosticRefreshState {
+    Refreshing,
+    ValidatingPull,
+    PublicationPending,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum DiagnosticSnapshotDelivery {
+    Admitted,
+    SettledValidation,
 }
 
 pub(super) struct RetainedDiagnosticSnapshot {
     document: DiagnosticDocumentIdentity,
     outcome: DiagnosticSnapshotOutcome,
+    delivery: DiagnosticSnapshotDelivery,
 }
 
 impl<P, S, D> DaemonLspProtocolSession<P, S, D>
@@ -97,83 +111,99 @@ where
             .diagnostics
             .provider
             .document_diagnostics(root, uri, overlay);
-        let outcome = match outcome {
-            DiagnosticSnapshotOutcome::Partial { ref coverage, .. }
-                if coverage == "refresh-required" =>
-            {
-                let Some(retained) = self.diagnostics.document_snapshots.get(uri) else {
-                    return outcome;
-                };
-                let DiagnosticSnapshotOutcome::Ready { diagnostics, .. } = &retained.outcome else {
-                    return retained.outcome.clone();
-                };
-                let source_generation = Some(diagnostics.generation);
-                let validation = self.diagnostics.provider.validate_document_snapshot(
-                    root,
-                    uri,
-                    overlay,
-                    diagnostics,
-                );
-                let outcome = match validation {
-                    DiagnosticSnapshotValidation::Current => return retained.outcome.clone(),
-                    DiagnosticSnapshotValidation::Changed => DiagnosticSnapshotOutcome::Partial {
-                        source_generation,
-                        coverage: "refresh-required".to_owned(),
-                    },
-                    DiagnosticSnapshotValidation::Pending(identity) => {
-                        if valid_refresh_identity(&identity, source_generation) {
-                            self.diagnostics.active_refreshes.insert(
-                                uri.to_owned(),
-                                PendingDiagnosticRefresh {
-                                    identity: identity.clone(),
-                                    document,
-                                    validation_only: for_pull,
+        if matches!(&outcome, DiagnosticSnapshotOutcome::Partial { coverage, .. }
+            if coverage == "refresh-required")
+        {
+            let Some(retained) = self.diagnostics.document_snapshots.get(uri) else {
+                return outcome;
+            };
+            let DiagnosticSnapshotOutcome::Ready { diagnostics, .. } = &retained.outcome else {
+                return retained.outcome.clone();
+            };
+            let source_generation = Some(diagnostics.generation);
+            let validation = self.diagnostics.provider.validate_document_snapshot(
+                root,
+                uri,
+                overlay,
+                diagnostics,
+            );
+            let outcome = match validation {
+                DiagnosticSnapshotValidation::Current => return retained.outcome.clone(),
+                DiagnosticSnapshotValidation::Changed => DiagnosticSnapshotOutcome::Partial {
+                    source_generation,
+                    coverage: "refresh-required".to_owned(),
+                },
+                DiagnosticSnapshotValidation::Pending(identity) => {
+                    if valid_refresh_identity(&identity, source_generation) {
+                        self.diagnostics.active_refreshes.insert(
+                            uri.to_owned(),
+                            PendingDiagnosticRefresh {
+                                identity: identity.clone(),
+                                document,
+                                state: if for_pull {
+                                    DiagnosticRefreshState::ValidatingPull
+                                } else {
+                                    DiagnosticRefreshState::Refreshing
                                 },
-                            );
-                            DiagnosticSnapshotOutcome::Refreshing(identity)
-                        } else {
-                            let _ = self.diagnostics.provider.retire_document_refresh(
-                                root,
-                                uri,
-                                &identity.operation_id,
-                            );
-                            DiagnosticSnapshotOutcome::Failed {
-                                source_generation,
-                                failure_class: "invalid-refresh-identity".to_owned(),
-                            }
-                        }
-                    }
-                    DiagnosticSnapshotValidation::Failed { failure_class } => {
+                            },
+                        );
+                        DiagnosticSnapshotOutcome::Refreshing(identity)
+                    } else {
+                        let _ = self.diagnostics.provider.retire_document_refresh(
+                            root,
+                            uri,
+                            &identity.operation_id,
+                        );
                         DiagnosticSnapshotOutcome::Failed {
                             source_generation,
-                            failure_class,
+                            failure_class: "invalid-refresh-identity".to_owned(),
                         }
                     }
-                };
-                self.diagnostics.document_snapshots.remove(uri);
-                self.discard_queued_document_publications(uri);
-                return outcome;
-            }
+                }
+                DiagnosticSnapshotValidation::Failed { failure_class } => {
+                    DiagnosticSnapshotOutcome::Failed {
+                        source_generation,
+                        failure_class,
+                    }
+                }
+            };
+            self.diagnostics.document_snapshots.remove(uri);
+            self.discard_queued_document_publications(uri);
+            return outcome;
+        }
+        self.admit_document_diagnostic_snapshot(
+            uri,
+            document,
+            outcome,
+            DiagnosticSnapshotDelivery::Admitted,
+        )
+    }
+
+    pub(super) fn admit_document_diagnostic_snapshot(
+        &mut self,
+        uri: &str,
+        document: DiagnosticDocumentIdentity,
+        outcome: DiagnosticSnapshotOutcome,
+        delivery: DiagnosticSnapshotDelivery,
+    ) -> DiagnosticSnapshotOutcome {
+        let outcome = match outcome {
             DiagnosticSnapshotOutcome::Ready {
                 mut diagnostics,
                 completed_operation_id,
             } => {
-                if let Some(operation_id) = completed_operation_id.as_deref() {
-                    let pending = self.diagnostics.active_refreshes.get(uri);
-                    if !pending.is_some_and(|pending| {
-                        pending.document == document
-                            && pending.identity.operation_id == operation_id
-                    }) {
-                        return pending.map_or_else(
-                            || DiagnosticSnapshotOutcome::Partial {
-                                source_generation: None,
-                                coverage: "refresh-required".to_owned(),
-                            },
-                            |pending| {
-                                DiagnosticSnapshotOutcome::Refreshing(pending.identity.clone())
-                            },
-                        );
+                let pending = self.diagnostics.active_refreshes.get(uri);
+                if let Some(pending) = pending {
+                    if pending.document != document
+                        || completed_operation_id.as_deref()
+                            != Some(pending.identity.operation_id.as_str())
+                    {
+                        return DiagnosticSnapshotOutcome::Refreshing(pending.identity.clone());
                     }
+                } else if completed_operation_id.is_some() {
+                    return DiagnosticSnapshotOutcome::Partial {
+                        source_generation: None,
+                        coverage: "refresh-required".to_owned(),
+                    };
                 }
                 let invalid_generation = self
                     .diagnostics
@@ -197,7 +227,7 @@ where
                     .is_some_and(|published| {
                         published.version == document.version
                             && published.generation > diagnostics.generation
-                            && published.scope_digest == root.scope_digest().cloned()
+                            && published.scope_digest == document.root.scope_digest().cloned()
                             && published.scope_set_digest == document.scope_set_digest
                     })
                     || self
@@ -256,7 +286,7 @@ where
                 PublishedDiagnostic {
                     version: document.version,
                     generation: diagnostics.generation,
-                    scope_digest: root.scope_digest().cloned(),
+                    scope_digest: document.root.scope_digest().cloned(),
                     scope_set_digest: document.scope_set_digest.clone(),
                 },
             );
@@ -266,9 +296,51 @@ where
             RetainedDiagnosticSnapshot {
                 document,
                 outcome: outcome.clone(),
+                delivery,
             },
         );
         outcome
+    }
+
+    pub(super) fn take_settled_diagnostic_validation(
+        &mut self,
+        uri: &str,
+        document: &DiagnosticDocumentIdentity,
+    ) -> Option<DiagnosticSnapshotOutcome> {
+        let retained = self.diagnostics.document_snapshots.get_mut(uri)?;
+        if retained.document != *document {
+            self.diagnostics.document_snapshots.remove(uri);
+            return None;
+        }
+        if retained.delivery != DiagnosticSnapshotDelivery::SettledValidation {
+            return None;
+        }
+        let outcome = retained.outcome.clone();
+        if matches!(&outcome, DiagnosticSnapshotOutcome::Ready { .. }) {
+            retained.delivery = DiagnosticSnapshotDelivery::Admitted;
+        } else {
+            self.diagnostics.document_snapshots.remove(uri);
+        }
+        Some(outcome)
+    }
+
+    pub(super) fn pending_diagnostic_publication(
+        &self,
+        uri: &str,
+        pending: &PendingDiagnosticRefresh,
+    ) -> DiagnosticSnapshotOutcome {
+        if let Some(retained) = self.diagnostics.document_snapshots.get(uri)
+            && retained.document == pending.document
+            && matches!(&retained.outcome, DiagnosticSnapshotOutcome::Ready {
+                completed_operation_id: Some(operation_id), ..
+            } if operation_id == &pending.identity.operation_id)
+        {
+            return retained.outcome.clone();
+        }
+        DiagnosticSnapshotOutcome::Failed {
+            source_generation: pending.identity.source_generation,
+            failure_class: "diagnostic-publication-unavailable".to_owned(),
+        }
     }
 
     pub(super) fn reserve_document_diagnostic_snapshot(&mut self, uri: &str) -> bool {

@@ -1,5 +1,6 @@
 use super::diagnostic_snapshots::{
-    DiagnosticDocumentIdentity, PendingDiagnosticRefresh, RetainedDiagnosticSnapshot,
+    DiagnosticDocumentIdentity, DiagnosticRefreshState, DiagnosticSnapshotDelivery,
+    PendingDiagnosticRefresh, RetainedDiagnosticSnapshot,
 };
 use super::outbound_controller::{PublicationRejection, PublicationTag};
 use super::workspace_diagnostics_controller::WorkspaceDiagnosticResultIdentity;
@@ -263,16 +264,39 @@ where
             self.lifecycle.gateway.request_document_diagnostics(uri),
             |()| Value::Null,
         )?;
-        let completed = self.poll_diagnostic_refresh(uri, true);
         let overlay = self.lifecycle.overlays.snapshot(uri);
         let root = self.document_root(uri)?;
-        let outcome = completed
-            .filter(|outcome| !matches!(outcome, DiagnosticSnapshotOutcome::Refreshing(_)))
-            .unwrap_or_else(|| {
-                self.document_diagnostic_snapshot(&root, uri, overlay.as_ref(), true)
+        let document = DiagnosticDocumentIdentity::new(
+            &root,
+            self.lifecycle.gateway.workspace().scope_set_digest(),
+            overlay.as_ref(),
+        );
+        let mut settled = self.take_settled_diagnostic_validation(uri, &document);
+        let validating = self
+            .diagnostics
+            .active_refreshes
+            .get(uri)
+            .is_some_and(|pending| {
+                pending.document == document
+                    && pending.state == DiagnosticRefreshState::ValidatingPull
             });
+        let completed = if settled.is_none() {
+            let completed = self.poll_diagnostic_refresh(uri);
+            settled = self.take_settled_diagnostic_validation(uri, &document);
+            completed
+        } else {
+            None
+        };
+        let consumed_validation = settled.is_some()
+            || (validating
+                && completed.as_ref().is_some_and(|outcome| {
+                    !matches!(outcome, DiagnosticSnapshotOutcome::Refreshing(_))
+                }));
+        let outcome = settled.or(completed).unwrap_or_else(|| {
+            self.document_diagnostic_snapshot(&root, uri, overlay.as_ref(), true)
+        });
         let version = overlay.as_ref().map_or(0, |overlay| overlay.version);
-        if !matches!(&outcome, DiagnosticSnapshotOutcome::Ready { .. }) {
+        if !consumed_validation && !matches!(&outcome, DiagnosticSnapshotOutcome::Ready { .. }) {
             let source_generation = diagnostic_source_generation(&outcome);
             if let Some(failure_class) =
                 self.request_diagnostic_refresh(uri, overlay.as_ref(), source_generation)
@@ -462,7 +486,7 @@ where
                     PendingDiagnosticRefresh {
                         identity,
                         document,
-                        validation_only: false,
+                        state: DiagnosticRefreshState::Refreshing,
                     },
                 );
                 None
@@ -472,20 +496,20 @@ where
     }
 
     pub(super) fn poll_diagnostic_refreshes(&mut self) {
-        // Pull validation belongs to the requesting reader. Background polling
-        // must not consume its one-shot completion before that reader retries.
-        let documents: Vec<_> = self
+        let (validations, publications): (Vec<_>, Vec<_>) = self
             .diagnostics
             .active_refreshes
             .iter()
-            .filter(|(_, pending)| !pending.validation_only)
-            .map(|(uri, _)| uri.clone())
-            .collect();
-        for document in documents {
+            .map(|(uri, pending)| (uri.clone(), pending.state))
+            .partition(|(_, state)| *state == DiagnosticRefreshState::ValidatingPull);
+        for (uri, _) in validations {
+            self.poll_diagnostic_refresh(&uri);
+        }
+        for (uri, _) in publications {
             if !self.has_outbound_capacity(MAX_PUBLICATION_BYTES) {
                 break;
             }
-            self.poll_diagnostic_refresh(&document, false);
+            self.poll_diagnostic_refresh(&uri);
         }
     }
 
@@ -493,7 +517,6 @@ where
     pub(super) fn poll_diagnostic_refresh(
         &mut self,
         uri: &str,
-        for_pull: bool,
     ) -> Option<DiagnosticSnapshotOutcome> {
         let pending = self.diagnostics.active_refreshes.get(uri).cloned()?;
         let overlay = self.lifecycle.overlays.snapshot(uri);
@@ -512,7 +535,30 @@ where
             self.invalidate_document_diagnostics(uri);
             return None;
         }
-        let outcome = self.document_diagnostic_snapshot(&root, uri, overlay.as_ref(), for_pull);
+        let outcome = if pending.state == DiagnosticRefreshState::PublicationPending {
+            self.pending_diagnostic_publication(uri, &pending)
+        } else {
+            let outcome =
+                self.diagnostics
+                    .provider
+                    .document_diagnostics(&root, uri, overlay.as_ref());
+            self.admit_document_diagnostic_snapshot(
+                uri,
+                pending.document.clone(),
+                outcome,
+                if pending.state == DiagnosticRefreshState::ValidatingPull {
+                    DiagnosticSnapshotDelivery::SettledValidation
+                } else {
+                    DiagnosticSnapshotDelivery::Admitted
+                },
+            )
+        };
+        if pending.state == DiagnosticRefreshState::ValidatingPull {
+            if !matches!(&outcome, DiagnosticSnapshotOutcome::Refreshing(_)) {
+                self.retire_diagnostic_refresh(uri);
+            }
+            return Some(outcome);
+        }
         match outcome.clone() {
             DiagnosticSnapshotOutcome::Ready {
                 diagnostics,
@@ -524,6 +570,8 @@ where
                     != Err(PublicationRejection::Backpressured)
                 {
                     self.retire_diagnostic_refresh(uri);
+                } else if let Some(pending) = self.diagnostics.active_refreshes.get_mut(uri) {
+                    pending.state = DiagnosticRefreshState::PublicationPending;
                 }
             }
             DiagnosticSnapshotOutcome::Partial { .. }

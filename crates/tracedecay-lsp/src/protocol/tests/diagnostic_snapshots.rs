@@ -78,6 +78,7 @@ struct DiagnosticAuthority {
     next_code: Mutex<Option<String>>,
     authority_digest: Arc<Mutex<Option<ManifestDigest>>>,
     validation_pending: Arc<AtomicBool>,
+    validation_failure: Arc<Mutex<Option<&'static str>>>,
 }
 
 impl CanonicalDiagnosticSnapshotAuthority for DiagnosticAuthority {
@@ -87,9 +88,12 @@ impl CanonicalDiagnosticSnapshotAuthority for DiagnosticAuthority {
     ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
         let digest = Arc::clone(&self.authority_digest);
         let pending = Arc::clone(&self.validation_pending);
+        let failure = Arc::clone(&self.validation_failure);
         Box::pin(std::future::poll_fn(move |_| {
             if pending.load(Ordering::SeqCst) {
                 Poll::Pending
+            } else if let Some(failure) = failure.lock().unwrap().take() {
+                Poll::Ready(Err(LspRuntimeFailure::new(failure)))
             } else {
                 Poll::Ready(Ok(digest
                     .lock()
@@ -1018,7 +1022,7 @@ fn publication_backpressure_does_not_discard_a_completed_snapshot() {
             .session
             .has_outbound_capacity(crate::MAX_PUBLICATION_BYTES)
     );
-    harness.session.poll_diagnostic_refresh(DOCUMENT, false);
+    harness.session.poll_diagnostic_refresh(DOCUMENT);
     harness.messages();
 
     assert_full(&harness.pull(None), 1, 1);
@@ -1196,4 +1200,267 @@ fn open_document_snapshots_refuse_new_results_when_the_bound_is_owned() {
         MAX_WORKSPACE_DIAGNOSTIC_RESULTS
     );
     assert_eq!(harness.runtime.started(), MAX_WORKSPACE_DIAGNOSTIC_RESULTS);
+}
+
+fn fill_outbound_queue(harness: &mut Harness) -> usize {
+    let mut queued = 0;
+    for _ in 0..MAX_QUEUED_OUTBOUND_MESSAGES {
+        if !harness.session.enqueue_value(json!({
+            "jsonrpc": "2.0", "method": "window/logMessage",
+            "params": { "type": 3, "message": "transport occupied" },
+        })) {
+            break;
+        }
+        queued += 1;
+    }
+    assert!(
+        !harness
+            .session
+            .has_outbound_capacity(crate::MAX_PUBLICATION_BYTES)
+    );
+    queued
+}
+
+fn validation_harness() -> (Harness, String) {
+    let mut harness = Harness::with_refresh_support(true, true);
+    harness.open(1);
+    harness.start_refresh();
+    harness.runtime.complete_next();
+    let messages = harness.send(json!({
+        "jsonrpc": "2.0", "id": "initial-report", "method": "textDocument/diagnostic",
+        "params": { "textDocument": { "uri": DOCUMENT } },
+    }));
+    let report = messages
+        .iter()
+        .find(|message| message["id"] == "initial-report")
+        .unwrap();
+    let result_id = assert_full(report, 1, 1);
+    let refresh = messages
+        .iter()
+        .find(|message| message["method"] == "workspace/diagnostic/refresh")
+        .unwrap();
+    assert!(
+        harness
+            .send(json!({
+                "jsonrpc": "2.0", "id": refresh["id"], "result": null,
+            }))
+            .is_empty()
+    );
+    (harness, result_id)
+}
+
+fn assert_settled_validation_failure(failure: Option<&'static str>, background: bool) {
+    let (mut harness, result_id) = validation_harness();
+    harness
+        .authority
+        .validation_pending
+        .store(true, Ordering::SeqCst);
+    assert_eq!(harness.pull(Some(&result_id))["error"]["code"], -32802);
+    assert_eq!(harness.runtime.started(), 2);
+
+    *harness.authority.validation_failure.lock().unwrap() = failure;
+    if failure.is_none() {
+        *harness.authority.authority_digest.lock().unwrap() = Some(digest('b'));
+    }
+    harness
+        .authority
+        .validation_pending
+        .store(false, Ordering::SeqCst);
+    harness.runtime.complete_next();
+    if background {
+        let queued = fill_outbound_queue(&mut harness);
+        harness.session.flush_due(harness.now_ms);
+        let messages = harness.messages();
+        assert_eq!(messages.len(), queued);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["method"] == "window/logMessage")
+        );
+        assert!(harness.session.diagnostics.active_refreshes.is_empty());
+    }
+
+    let messages = harness.send(json!({
+        "jsonrpc": "2.0", "id": "validation-result", "method": "textDocument/diagnostic",
+        "params": { "textDocument": { "uri": DOCUMENT }, "previousResultId": result_id },
+    }));
+    assert_eq!(
+        messages.len(),
+        1,
+        "validation consumption must emit only its response: {messages:?}"
+    );
+    let failed = &messages[0];
+    assert_eq!(failed["id"], "validation-result");
+    assert_eq!(failed["error"]["code"], -32802, "{failed}");
+    assert!(failed.get("result").is_none());
+    match failure {
+        Some(failure) => assert_eq!(failed["error"]["data"]["failureClass"], failure),
+        None => assert_eq!(failed["error"]["data"]["coverage"], "refresh-required"),
+    }
+    assert_eq!(
+        harness.runtime.started(),
+        2,
+        "consuming a terminal validation must not admit refresh work"
+    );
+    assert!(harness.session.diagnostics.active_refreshes.is_empty());
+    assert!(harness.session.diagnostics.document_snapshots.is_empty());
+    assert_eq!(harness.authority.generation.load(Ordering::SeqCst), 1);
+
+    let retry = harness.pull(Some(&result_id));
+    assert_eq!(
+        retry["error"]["data"]["coverage"], "refresh-required",
+        "{retry}"
+    );
+    assert_eq!(harness.runtime.started(), 3);
+    harness.runtime.complete_next();
+    assert_full(&harness.pull(Some(&result_id)), 2, 1);
+}
+
+#[test]
+fn partial_pull_validation_settles_under_backpressure_and_is_consumed_once() {
+    assert_settled_validation_failure(None, true);
+}
+
+#[test]
+fn failed_pull_validation_settles_under_backpressure_and_is_consumed_once() {
+    assert_settled_validation_failure(Some("provider-unavailable"), true);
+}
+
+#[test]
+fn directly_consumed_failed_validation_does_not_admit_a_refresh() {
+    assert_settled_validation_failure(Some("provider-unavailable"), false);
+}
+
+#[test]
+fn settled_ready_validation_is_consumed_once_and_preserves_the_generation_floor() {
+    let (mut harness, result_id) = validation_harness();
+    harness
+        .authority
+        .validation_pending
+        .store(true, Ordering::SeqCst);
+    assert_eq!(harness.pull(Some(&result_id))["error"]["code"], -32802);
+    harness
+        .authority
+        .validation_pending
+        .store(false, Ordering::SeqCst);
+    harness.runtime.complete_next();
+    let queued = fill_outbound_queue(&mut harness);
+    harness.session.flush_due(harness.now_ms);
+    let messages = harness.messages();
+    assert_eq!(messages.len(), queued);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message["method"] == "window/logMessage")
+    );
+    assert!(harness.session.diagnostics.active_refreshes.is_empty());
+
+    harness
+        .authority
+        .validation_pending
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness.pull(Some(&result_id))["result"]["kind"],
+        "unchanged"
+    );
+    assert_eq!(harness.runtime.started(), 2);
+    let validating = harness.pull(Some(&result_id));
+    assert_eq!(validating["error"]["code"], -32802, "{validating}");
+    assert!(
+        validating["error"]["data"]["operationId"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(harness.runtime.started(), 3);
+    harness
+        .authority
+        .validation_pending
+        .store(false, Ordering::SeqCst);
+    harness.runtime.complete_next();
+    harness.session.flush_due(harness.now_ms);
+    assert!(harness.messages().is_empty());
+
+    *harness.authority.next_generation.lock().unwrap() = Some(0);
+    harness.notify(
+        "textDocument/didSave",
+        json!({ "textDocument": { "uri": DOCUMENT } }),
+    );
+    harness.runtime.complete_next();
+    let stale = harness.pull(Some(&result_id));
+    assert_eq!(
+        stale["error"]["data"]["failureClass"], "superseded-generation",
+        "{stale}"
+    );
+    assert!(stale.get("result").is_none());
+}
+
+#[test]
+fn publication_retry_uses_the_admitted_snapshot_without_polling_or_revalidation() {
+    let mut harness = Harness::new(true);
+    harness.open(1);
+    harness.start_refresh();
+    harness.runtime.complete_next();
+    fill_outbound_queue(&mut harness);
+    harness.session.poll_diagnostic_refresh(DOCUMENT);
+    harness.messages();
+    let reads = harness
+        .session
+        .diagnostics
+        .provider
+        .reads
+        .load(Ordering::SeqCst);
+    harness
+        .authority
+        .validation_pending
+        .store(true, Ordering::SeqCst);
+    harness.session.flush_due(harness.now_ms);
+    let messages = harness.messages();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
+    assert_eq!(messages[0]["params"]["diagnostics"], expected_items(1, 1));
+    assert_eq!(
+        harness
+            .session
+            .diagnostics
+            .provider
+            .reads
+            .load(Ordering::SeqCst),
+        reads
+    );
+    assert_eq!(harness.runtime.started(), 1);
+    assert_completed_refresh_is_not_polled_again(&mut harness);
+}
+
+#[test]
+fn late_validation_cannot_answer_a_reopened_document_or_retire_its_refresh() {
+    let mut harness = Harness::new(false);
+    harness.open(1);
+    harness.start_refresh();
+    harness.runtime.complete_next();
+    let result_id = assert_full(&harness.pull(None), 1, 1);
+    harness
+        .authority
+        .validation_pending
+        .store(true, Ordering::SeqCst);
+    assert_eq!(harness.pull(Some(&result_id))["error"]["code"], -32802);
+    harness.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": DOCUMENT } }),
+    );
+    harness.open(1);
+    assert_eq!(harness.pull(Some(&result_id))["error"]["code"], -32802);
+    assert_eq!(harness.runtime.started(), 3);
+    harness
+        .authority
+        .validation_pending
+        .store(false, Ordering::SeqCst);
+    harness.runtime.complete_next();
+    harness.session.flush_due(harness.now_ms);
+    assert!(harness.messages().is_empty());
+    let pending = harness.pull(Some(&result_id));
+    assert_eq!(pending["error"]["code"], -32802, "{pending}");
+    assert!(pending["error"]["data"]["operationId"].as_str().is_some());
+    assert_eq!(harness.runtime.started(), 3);
+    harness.runtime.complete_next();
+    assert_full(&harness.pull(Some(&result_id)), 2, 1);
 }
