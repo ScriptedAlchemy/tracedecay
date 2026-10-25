@@ -68,6 +68,36 @@ impl ProductionFixture {
     fn home(&self) -> &Path {
         self._environment.home()
     }
+
+    fn wait_for_query_readiness(&self) {
+        // Symbol reads can use a retained decode while the text owner warms.
+        // Continuations also exercise exact and phrase search, so both owners
+        // must serve before their pagination behavior is tested.
+        let arguments = serde_json::json!({
+            "format": "json",
+            "wait_for": {
+                "state": "ready",
+                "timeout_ms": u64::try_from(READINESS_RETRY_DEADLINE.as_millis())
+                    .expect("readiness budget fits u64"),
+            },
+        });
+        let output = common::tracedecay_command_with_home(self.home())
+            .current_dir(&self.project)
+            .args(["tool", "--project"])
+            .arg(&self.project)
+            .args(["status", "--args"])
+            .arg(arguments.to_string())
+            .stdin(Stdio::null())
+            .output()
+            .expect("wait for code query readiness");
+        assert_command_success("code query readiness", &output);
+        let status: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+        assert_eq!(
+            status["wait"],
+            serde_json::json!({ "outcome": "reached" }),
+            "text and graph queries must be ready before pagination: {status}"
+        );
+    }
 }
 
 /// Opens the shipped daemon over an indexed project whose symbol graph is large
@@ -1399,6 +1429,7 @@ async fn continuation_result(
 async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() {
     let fixture = production_fixture().await;
     let anchors = ProbeAnchors::resolve(&fixture).await;
+    fixture.wait_for_query_readiness();
     let cases = continuation_cases();
 
     let declared = cases
