@@ -18,11 +18,10 @@ common --repo_env=CARGO_NET_GIT_FETCH_WITH_CLI=true
 # host cargo would download another 418 MB toolchain on every CI job.
 common --repo_env=CARGO_UNSTABLE_GIT=shallow-deps
 common --repo_env=RUSTC_BOOTSTRAP=1
-# MODULE.bazel registers only nightly/2026-10-25. Without this, rules_rust
-# resolves the stable channel and the build fails closed.
+# MODULE.bazel registers the pinned stable compiler.
 # Hosts can extend this repository profile with their private fleet settings.
 build --config=tracedecay
-build:tracedecay --@rules_rust//rust/toolchain/channel=nightly
+build:tracedecay --@rules_rust//rust/toolchain/channel=stable
 build --incompatible_enable_cc_toolchain_resolution
 build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 build --workspace_status_command=scripts/bazel/workspace_status.sh

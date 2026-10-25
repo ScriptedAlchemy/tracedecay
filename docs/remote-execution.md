@@ -1,7 +1,7 @@
 # Private Bazel execution
 
 The repository always expands its `tracedecay` Bazel configuration, which
-selects the pinned nightly toolchain. Add the following to the host's
+selects the pinned Rust toolchain. Add the following to the host's
 `~/.bazelrc` to extend that profile with private execution settings:
 
 ```bazelrc
@@ -15,7 +15,8 @@ build:fleet --remote_local_fallback
 
 Every new TraceDecay worktree inherits this host profile automatically. Other
 repositories do not select it. Without a host extension, including under
-`--nohome_rc` in CI, the repository still selects nightly and builds locally.
+`--nohome_rc` in CI, the repository still selects the pinned toolchain and
+builds locally.
 The ignored `.bazelrc.local` remains available for later per-checkout overrides;
 command-line options take precedence over rc settings.
 

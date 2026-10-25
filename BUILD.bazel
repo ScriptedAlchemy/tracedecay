@@ -11,6 +11,7 @@ npm_link_all_packages(name = "node_modules")
 
 exports_files(
     [
+        ".github/actions/setup-bazel/configure_fleet.py",
         ".github/release-targets.json",
         ".npmrc",
         "MODULE.bazel",

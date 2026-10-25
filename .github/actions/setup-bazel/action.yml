@@ -27,8 +27,8 @@ inputs:
 
 outputs:
   fleet-enabled:
-    description: Whether this job uses private workers and dynamic execution.
-    value: ${{ inputs.tailscale-client-id != '' }}
+    description: Whether Tailscale enrollment and executor connectivity enabled the fleet.
+    value: ${{ steps.fleet.outputs.enabled }}
   disk-cache-path:
     description: Action-cache directory to save after the caller's build.
     value: ${{ steps.disk-cache-config.outputs.path }}
@@ -88,17 +88,6 @@ runs:
         # D:/_bazel) keeps MSVC's header paths under MAX_PATH.
         output-base: ${{ runner.os == 'Windows' && 'D:/b' || '' }}
 
-    # Bazel validates action contents itself. A fresh save key retains new
-    # source-build outputs even when MODULE.bazel and BUILD files are unchanged.
-    - name: Restore master action cache
-      id: disk-cache
-      if: inputs.tailscale-client-id == ''
-      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ${{ steps.disk-cache-config.outputs.path }}
-        key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-        restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}
-
     - name: Preserve the runner network environment for Tailscale
       if: runner.os == 'Linux' && inputs.tailscale-client-id != ''
       shell: bash
@@ -118,7 +107,10 @@ runs:
         sudo visudo -cf /etc/sudoers.d/tailscale-ci-network
 
     - name: Connect to the private Bazel fleet
+      id: tailscale
       if: inputs.tailscale-client-id != ''
+      # Private infrastructure is optional; compilation and test failures are not.
+      continue-on-error: true
       uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4
       with:
         oauth-client-id: ${{ inputs.tailscale-client-id }}
@@ -126,47 +118,28 @@ runs:
         tags: tag:bazel-ci
         ping: ubuntu-main
 
-    - name: Share compilation and tests with private workers
-      if: inputs.tailscale-client-id != ''
+    - name: Select private executor or hosted execution
+      id: fleet
       shell: bash
+      env:
+        TAILSCALE_OUTCOME: ${{ steps.tailscale.outcome }}
       run: |
-        case "$RUNNER_OS/$RUNNER_ARCH" in
-          Linux/X64)
-            profile=rbe-linux
-            mkdir -p /tmp/zig-cache
-            ;;
-          macOS/ARM64) profile=rbe-macos ;;
-          *)
-            echo "No compatible fleet worker for $RUNNER_OS/$RUNNER_ARCH" >&2
-            exit 1
-            ;;
-        esac
-        # Use the checkout's existing local rc import for fleet settings.
-        # Tests carry their tools in runfiles, so both branches use identical inputs.
-        printf 'build --config=%s\n' "$profile" > .bazelrc.local
-        cat >> .bazelrc.local <<'RC'
-        build --remote_executor=grpc://ubuntu-main:50051
-        build --remote_cache=grpc://ubuntu-main:50051
-        build --remote_instance_name=main
-        build --remote_timeout=600
-        # Fleet compilation must not fall back onto the smaller hosted VM.
-        # Dynamic tests still have their explicitly scheduled local branch.
-        build --noremote_local_fallback
-        build --remote_download_outputs=toplevel
-        build --jobs=40
-        build --local_resources=cpu=HOST_CPUS
-        build --local_resources=memory=HOST_RAM*.5
-        build --internal_spawn_scheduler
-        build --dynamic_local_strategy=sandboxed
-        build --dynamic_remote_strategy=remote
-        # Large Rust links raced on the hosted VM while the same actions ran
-        # remotely. local_resources only schedules estimates; it does not cap
-        # rustc memory. Keep compilation on the fleet and tests hybrid.
-        build --strategy=Rustc=remote
-        build --strategy=TestRunner=dynamic
-        build --bes_backend=grpc://ubuntu-main:1985
-        build --bes_results_url=https://ubuntu-main.tail039078.ts.net/invocation/
-        build --bes_timeout=30s
-        build --bes_upload_mode=fully_async
-        RC
+        python3 "$GITHUB_ACTION_PATH/configure_fleet.py"
 
+    - name: Prepare the Linux fleet toolchain cache
+      if: steps.fleet.outputs.enabled == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: mkdir -p /tmp/zig-cache
+
+    # Bazel validates action contents itself. A fresh save key retains new
+    # source-build outputs even when MODULE.bazel and BUILD files are unchanged.
+    # Restore after enrollment so an offline private executor gets the same
+    # hosted cache as a job without a fleet identity.
+    - name: Restore master action cache
+      id: disk-cache
+      if: steps.fleet.outputs.enabled != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.disk-cache-config.outputs.path }}
+        key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+        restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}

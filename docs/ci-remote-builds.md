@@ -11,18 +11,40 @@ and macOS CI retain their existing hosted execution. The Mac currently has a
 newer Xcode/SDK than the macos-26 image; matching OS and CPU alone does not make
 native compilation compatible.
 
-Rustc and TestRunner actions use Bazel dynamic execution with sandboxed local
-execution and remote execution. Both may start the same action; Bazel keeps the
-first result and cancels the other. Local work respects the runner CPU count
-and half its RAM. The shared action cache remains enabled. Tests carry Node, Rust Analyzer,
-and their compiler tools as declared runfiles.
+Rustc actions, including asupersync, prefer remote execution. Large Rust
+compilations do not race a second copy on the smaller hosted runner.
+TestRunner actions use Bazel dynamic execution with sandboxed local execution
+and remote execution: both may start the same test, and Bazel keeps the first
+result and cancels the other. Local work is admitted against the runner CPU
+count and half its RAM; these scheduler estimates do not cap a compiler's
+actual memory use. The shared action cache remains enabled. Tests carry Node,
+Rust Analyzer, and their compiler tools as declared runfiles.
 Each remote test reserves four worker CPU units and the Rust harness uses four
 threads. The local branch reserves the hosted runner CPU budget so suites do not
 compete with one another for local cores. Remote infrastructure failures allow
-local fallback; an actual test failure still fails the test. BuildBuddy events
+sandboxed local fallback. Bazel's fallback flag applies to the CI command,
+including asupersync and other remote actions. Actual compiler errors, failed
+tests, and remote action execution timeouts still fail the build. BuildBuddy events
 upload asynchronously, so a reporting outage does not fail a successful build.
-A terminated runner can leave an incomplete report. Fleet jobs skip restoring
-and saving the multi-GB Actions disk cache; other jobs retain it.
+A terminated runner can leave an incomplete report.
+
+CI checks Tailscale enrollment and TCP connectivity to the executor before
+selecting the private fleet. If either fails, it uses the hosted runner and
+restores the usual master Actions disk cache. `fleet-enabled` reports that
+observed selection; passing a client ID alone does not enable it. Jobs with a
+reachable executor skip the multi-GB Actions disk-cache restore. The existing
+Linux matrix is chosen before this check, so a fleet job that falls back still
+builds and tests `//...` in that job rather than expanding into hosted shards.
+
+The connectivity check proves that the coordinator accepts connections, not
+that compatible workers are online. A reachable coordinator can queue an
+action while its worker pool is offline. Local fallback follows infrastructure
+errors from Bazel; it does not guarantee immediate recovery from a queue with
+no workers. The checked-in execution platforms select OS and CPU architecture,
+with CPU admission requirements. They do not define a high-memory worker
+class for asupersync. Worker memory capacity and scheduling belong to the
+private fleet configuration and must be verified from executed-action worker
+identities and metrics.
 
 ## Trust configuration
 
@@ -53,8 +75,10 @@ The action registers ephemeral nodes and logs them out during job cleanup.
 
 ## Verification
 
-An authenticated hosted run must show Tailscale OIDC enrollment, remote cache
-or execution activity in Bazel's action summary, and the BuildBuddy invocation
-URL. A cache hit alone does not prove remote execution. Cold dynamic builds may
-show both sandboxed and remote actions; warm builds may use the cache entirely.
+An authenticated hosted run must show Tailscale OIDC enrollment, successful
+executor connectivity, remote cache or execution activity in Bazel's action
+summary, and the BuildBuddy invocation URL. A cache hit alone does not prove
+remote execution. Cold builds may show both sandboxed and remote test actions;
+warm builds may use the cache entirely. An offline setup must report
+`fleet-enabled=false` and restore the hosted action cache.
 Actionlint checks workflow syntax but does not establish network or OIDC access.

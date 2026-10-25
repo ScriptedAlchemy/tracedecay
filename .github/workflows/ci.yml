@@ -173,6 +173,7 @@ jobs:
           //scripts:ambient_tokio_check_test
           //scripts:rusqlite_storage_boundary_test
           //scripts:packaged_lsp_bridge_test
+          //scripts:configure_ci_fleet_test
 
       - name: Test the ranked-tail trim replay against the Rust rule cases
         run: bazel run //scripts:test-measure-ranked-tail-trim.py
@@ -543,8 +544,13 @@ jobs:
       # Matrix shards share github.job, so they would race the same save key.
       # One writer keeps the 10 GiB Actions cache from holding several copies
       # that would evict this prefix (observed: 6.9 GiB workspace-only save).
+      # An offline fleet matrix has one job, which becomes that writer.
       - name: Save compiled Bazel actions
-        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.shard == 'root-b' && steps.bazel.outputs.disk-cache-key != ''
+        if: >-
+          always() && !cancelled() && github.ref == 'refs/heads/master'
+          && (matrix.shard == 'root-b'
+            || (matrix.shard == 'fleet' && steps.bazel.outputs.fleet-enabled != 'true'))
+          && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
