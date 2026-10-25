@@ -409,9 +409,9 @@ pub enum DetectionError {
     #[error("privacy sanitizer quarantined an ambiguous structured document")]
     StructuredQuarantine,
     /// The document parsed, but key-anchored material cannot be redacted in
-    /// place: an object key carries credential material, or a key-proven
-    /// sensitive field cannot be located byte-exactly. Fail-closed quarantine,
-    /// not a receipt fault.
+    /// place: an object key carries credential material and the parser gave
+    /// no span to rewrite it at (YAML, the JSON value route), or the rewritten
+    /// document no longer parses. Fail-closed quarantine, not a receipt fault.
     #[error("privacy sanitizer quarantined credential-bearing keys")]
     CredentialKeyQuarantine,
     /// A parsed sensitive field could not be mapped back to one exact byte

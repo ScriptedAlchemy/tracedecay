@@ -15,7 +15,7 @@ use tracedecay_domain::configuration::{LcmSummarizerExecutableV1, LcmSummarizerE
 use tracedecay_global_db::tests::harness::{
     RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime,
 };
-use tracedecay_lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
+use tracedecay_lcm::{LcmError, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
 use super::{
@@ -310,4 +310,91 @@ async fn configured_model_reaches_the_summarizer_in_a_private_workspace() {
         !workspace.exists(),
         "the per-run summary workspace must be removed after the run"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_provider_timeouts_are_execution_failures() {
+    let root = tempfile::tempdir().unwrap();
+    let project_root = root.path().join("project");
+    let runtime = RegisteredGlobalDbTestRuntime::project(
+        root.path().join("profile"),
+        &project_root,
+        ProjectId::new("project.lcm-provider-timeout".to_owned()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let database = runtime.project_database_arc().unwrap();
+    let executable = root.path().join("unresponsive-summarizer");
+    // Exec keeps the blocking fixture in the exact child the adapter reaps.
+    // A zero caller budget forces the deadline branch without a timing race.
+    write_executable_script(&executable, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
+    let configured = LcmSummarizerExecutableV1::configured(executable).unwrap();
+    tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+        &database,
+        &project_root,
+        LcmSummarizerExecutablesV1 {
+            cursor_agent: configured.clone(),
+            codex: configured,
+        },
+    )
+    .unwrap();
+
+    for provider in ["cursor", "codex"] {
+        let error = generate_provider_summary(
+            &database,
+            provider,
+            &summary_request(provider),
+            Duration::ZERO,
+        )
+        .await
+        .err()
+        .expect("the configured process cannot finish before its expired deadline");
+        assert!(
+            matches!(
+                error,
+                SummaryResolutionError::Storage(LcmError::DeadlineExceeded)
+            ),
+            "{provider} must preserve a timeout as retryable execution failure"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_configured_executables_remain_typed_unavailable() {
+    let root = tempfile::tempdir().unwrap();
+    let project_root = root.path().join("project");
+    let runtime = RegisteredGlobalDbTestRuntime::project(
+        root.path().join("profile"),
+        &project_root,
+        ProjectId::new("project.lcm-provider-missing".to_owned()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let database = runtime.project_database_arc().unwrap();
+    let missing = LcmSummarizerExecutableV1::configured(root.path().join("missing-host")).unwrap();
+    tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+        &database,
+        &project_root,
+        LcmSummarizerExecutablesV1 {
+            cursor_agent: missing.clone(),
+            codex: missing,
+        },
+    )
+    .unwrap();
+
+    for (provider, reason) in [
+        ("cursor", "cursor_agent_unavailable"),
+        ("codex", "codex_app_server_unavailable"),
+    ] {
+        let error = generate_provider_summary(
+            &database,
+            provider,
+            &summary_request(provider),
+            Duration::from_secs(5),
+        )
+        .await
+        .err()
+        .expect("a missing executable cannot summarize");
+        assert_eq!(unavailable_reason(error), reason);
+    }
 }

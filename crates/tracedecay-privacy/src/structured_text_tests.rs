@@ -26,6 +26,7 @@ use super::structured_text::{
 };
 
 mod code_shape;
+mod key_redaction;
 
 /// Ordinary words: no credential prefix, no digits, shorter than the entropy
 /// floor, and containing no substring the credential patterns know.
@@ -506,25 +507,6 @@ fn lcm_json_credential_bearing_keys_quarantine_instead_of_faulting_the_receipt()
 }
 
 #[test]
-fn lcm_non_json_credential_bearing_keys_are_key_quarantine_not_parse_ambiguity() {
-    // Same key-quarantine contract as the JSON container path, reached through
-    // the non-JSON structured-text route: a parsed TOML table whose *key* is
-    // itself credential material. (TOML rather than `key: value`, which the
-    // format probe reads as an HTTP header block whose line path never scans
-    // keys.) The refusal must name the key quarantine, not claim the document
-    // was ambiguous. It parsed fine.
-    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
-    let raw = format!("{credential_key} = \"ordinary-value\"\nregion = \"us-east\"\n");
-
-    let error = sanitize_lcm_payload_text(&raw).expect_err("key quarantine");
-    assert_eq!(error, DetectionError::CredentialKeyQuarantine);
-    assert_eq!(
-        error.to_string(),
-        "privacy sanitizer quarantined credential-bearing keys"
-    );
-}
-
-#[test]
 fn prose_opening_with_a_bracketed_annotation_line_is_not_toml_quarantine() {
     // LCM compaction emits scaffold messages such as
     // `[Current user objective preserved from compacted history]` followed by
@@ -592,21 +574,6 @@ fn sanitizer_verdicts_stay_distinguishable_from_sanitizer_faults() {
             "a sanitizer fault decides nothing about the content: {fault}"
         );
     }
-}
-
-#[test]
-fn code_source_credential_bearing_keys_are_key_quarantine_not_parse_ambiguity() {
-    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
-    let raw = format!("{credential_key} = \"ordinary-value\"\nregion = \"us-east\"\n");
-
-    let error = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
-        .map(|_| ())
-        .expect_err("key quarantine");
-    assert_eq!(error, DetectionError::CredentialKeyQuarantine);
-    assert_eq!(
-        error.to_string(),
-        "privacy sanitizer quarantined credential-bearing keys"
-    );
 }
 
 #[test]
