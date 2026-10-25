@@ -8,6 +8,8 @@ load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
 
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
 rust_library(
     name = "tracedecay-sdk",
     srcs = glob(["src/**/*.rs"]),
@@ -87,6 +89,12 @@ rust_test(
 )
 
 exports_files(["src/bin/generate.rs", "src/codegen.rs", "src/operations.rs"],
+    visibility = ["//visibility:public"],
+)
+
+js_library(
+    name = "sse_framing_fixture",
+    srcs = ["tests/fixtures/sse-framing.json"],
     visibility = ["//visibility:public"],
 )
 
