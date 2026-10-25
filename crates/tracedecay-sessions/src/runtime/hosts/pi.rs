@@ -934,8 +934,13 @@ fn warn_discovery_failures(sessions_root: &Path, discovery: &PiDiscoveryReport) 
         );
     }
     let summary_key = sessions_root.to_path_buf();
-    if discovery.failure_count <= discovery.failures.len() as u64 {
-        PI_DISCOVERY_SUMMARY_GATE.clear(&summary_key);
+    let fully_reported = discovery.failure_count <= discovery.failures.len() as u64;
+    if fully_reported {
+        // An interrupted empty sweep has not established recovery; keep the
+        // last admitted summary so the next complete pass does not re-log it.
+        if discovery.scan_complete || discovery.failure_count > 0 {
+            PI_DISCOVERY_SUMMARY_GATE.clear(&summary_key);
+        }
     } else if PI_DISCOVERY_SUMMARY_GATE.admit(
         summary_key,
         (discovery.failure_count, discovery.failures.len()),

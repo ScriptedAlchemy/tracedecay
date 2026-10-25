@@ -15,7 +15,7 @@ use super::{
 use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
-use crate::runtime::source::TranscriptDiscoveryBounds;
+use crate::runtime::source::{FileDiscoveryReport, TranscriptDiscoveryBounds};
 
 const FIXTURE_NAME: &str = "2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl";
 const FIXTURE: &str = include_str!(
@@ -147,6 +147,25 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
         summary_count(&first, &first_report),
         0,
         "an unchanged refusal summary is not repeated"
+    );
+    let interrupted = PiDiscoveryReport {
+        files: FileDiscoveryReport {
+            paths: Vec::new(),
+            truncated: None,
+            skipped_oversized_entries: 0,
+            bytes_charged: 0,
+            files_considered: 0,
+        },
+        failures: Vec::new(),
+        failure_count: 0,
+        scan_complete: false,
+        reached_end: false,
+    };
+    assert_eq!(summary_count(&first, &interrupted), 0);
+    assert_eq!(
+        summary_count(&first, &first_report),
+        0,
+        "an interrupted empty scan must not clear the admitted summary"
     );
     first.write_malformed_files(25);
     let changed = report(&first);
