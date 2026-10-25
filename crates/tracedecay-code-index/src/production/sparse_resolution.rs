@@ -201,6 +201,12 @@ impl ChangedNamesV1 {
                         .push(resolution_key(symbol));
                 }
             }
+            // Symbols are stored in occurrence order, and an edit re-keys
+            // every occurrence of the file, so same-named symbols can trade
+            // places without any of them changing.
+            for keys in sides.values_mut().flatten() {
+                keys.sort_unstable();
+            }
             for symbol in before
                 .artifacts
                 .symbols
