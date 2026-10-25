@@ -42,6 +42,9 @@ def main():
         policy = workspace / ".cargo" / "acquisition.toml"
         if not policy.is_file():
             raise ValueError(f"Cargo acquisition policy is unavailable: {policy}")
+        # Match Bazel's repository environment: stable Cargo otherwise ignores
+        # the shared policy's unstable shallow-dependency acquisition setting.
+        env["RUSTC_BOOTSTRAP"] = "1"
         options = args[1:args.index("--")] if "--" in args else args[1:]
         if "--locked" not in options and "--frozen" not in options:
             args.insert(1, "--locked")

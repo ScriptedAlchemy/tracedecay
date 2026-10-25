@@ -18,6 +18,8 @@ pass through unchanged except that `build`, `test`, `run` and `check` default to
 parses this flag into its native build selection and forwards it to workspace
 metadata and loading; it does not force the Cargo-only path. Native diagnostics,
 fallback explanations and exit status pass through.
+These commands also use Bazel's `RUSTC_BOOTSTRAP=1` environment so pinned stable
+Cargo honors that policy's unstable shallow-dependency setting.
 Use Cargo's package/target/feature flags for focused runs. Required integration-test
 features still apply; `--workspace` alone does not enable them.
 
