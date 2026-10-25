@@ -39,6 +39,8 @@ bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
 zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
 use_repo(zig, "zig_sdk")
 
+RUST_VERSION = "1.99.0"
+
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
@@ -50,23 +52,29 @@ rust.toolchain(
         "fastbuild": "1",
         "opt": "3",
     },
-    versions = ["1.99.0"],
-    rustfmt_version = "1.99.0",
-    rust_analyzer_version = "1.99.0",
+    versions = [RUST_VERSION],
+    rustfmt_version = RUST_VERSION,
+    rust_analyzer_version = RUST_VERSION,
 )
 use_repo(
     rust,
     "rust_toolchains",
-    rust_analyzer_tools = "rust_analyzer_1.99.0_tools",
+    rust_analyzer_tools = "rust_analyzer_" + RUST_VERSION + "_tools",
 )
 register_toolchains("@rust_toolchains//:all")
+
+host = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
+host.host_tools(name = "cargo_host_tools", version = RUST_VERSION)
+use_repo(host, "cargo_host_tools")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     # One letter: Windows build-script paths repeat the hub's repository
     # name, and MSVC cannot open headers past MAX_PATH (gen_builds.py).
     name = "c",
+    cargo_config = "//:.cargo/acquisition.toml",
     cargo_lockfile = "//:Cargo.lock",
+    host_tools = "@cargo_host_tools",
     manifests = ["//:Cargo.toml"],
 )
 

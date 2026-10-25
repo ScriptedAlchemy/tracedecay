@@ -4,12 +4,17 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
+
+from python.runfiles import runfiles
 
 
 SCRIPT = Path(__file__).resolve().parent / "bazel" / "gen_builds.py"
@@ -34,8 +39,9 @@ class ProductionFeatureResolutionTests(unittest.TestCase):
         self.gen = load_gen_builds()
 
     def resolve(self, output, package="tracedecay", edges="normal,build", features=()):
-        with mock.patch.object(self.gen, "run", return_value=output):
-            return self.gen.feature_map(package, edges, features)
+        query = mock.Mock(spec=self.gen.CargoQuery)
+        query.run.return_value = output
+        return self.gen.feature_map(query, package, edges, features)
 
     def test_clean_graph_projects_members_and_unions_repeated_rows(self) -> None:
         output = "\n".join([
@@ -111,11 +117,12 @@ class ProductionFeatureResolutionTests(unittest.TestCase):
 
     def test_lean_context_preserves_empty_features_and_locked_request(self) -> None:
         output = "tracedecay v0.1.0 (/workspace/crates/tracedecay)|\n"
-        with mock.patch.object(self.gen, "run", return_value=output) as cargo:
-            self.assertEqual(self.gen.feature_map(
-                "tracedecay", "normal,build", (self.gen.NO_DEFAULT_FEATURES,),
-            ), {"tracedecay": set()})
-        command = cargo.call_args.args[0]
+        query = mock.Mock(spec=self.gen.CargoQuery)
+        query.run.return_value = output
+        self.assertEqual(self.gen.feature_map(
+            query, "tracedecay", "normal,build", (self.gen.NO_DEFAULT_FEATURES,),
+        ), {"tracedecay": set()})
+        command = query.run.call_args.args[0]
         self.assertIn("--locked", command)
         self.assertIn("--no-default-features", command)
         self.assertNotIn("--features", command)
@@ -191,14 +198,17 @@ class ProductionDeclarationTests(unittest.TestCase):
         for arguments in ([], ["--check"]):
             for declaration in packages:
                 with self.subTest(arguments=arguments, packages=declaration):
-                    with mock.patch.object(self.gen, "run", return_value=json.dumps({
+                    query = mock.Mock(spec=self.gen.CargoQuery, workspace=Path("/unused"))
+                    query.run.return_value = json.dumps({
                         "packages": declaration,
-                    })) as cargo, mock.patch.object(sys, "argv", [str(SCRIPT), *arguments]):
+                    })
+                    with mock.patch.object(self.gen.CargoQuery, "from_bazel", return_value=query), \
+                            mock.patch.object(sys, "argv", [str(SCRIPT), *arguments]):
                         with self.assertRaises(ValueError):
                             self.gen.main()
-                    self.assertEqual(cargo.call_count, 1)
-                    command = cargo.call_args.args[0]
-                    self.assertEqual(command[:2], ["cargo", "metadata"])
+                    self.assertEqual(query.run.call_count, 1)
+                    command = query.run.call_args.args[0]
+                    self.assertEqual(command[0], "metadata")
                     self.assertIn("--locked", command)
 
     def test_valid_declaration_reaches_graph_policy_before_any_output_write(self) -> None:
@@ -220,22 +230,114 @@ class ProductionDeclarationTests(unittest.TestCase):
 
                 def cargo_output(command, **kwargs):
                     self.assertIn("--locked", command)
-                    if command[:2] == ["cargo", "metadata"]:
+                    if command[0] == "metadata":
                         return metadata
-                    self.assertEqual(command[:2], ["cargo", "tree"])
+                    self.assertEqual(command[0], "tree")
                     return (
                         f"tracedecay v0.1.0 ({product})|production\n"
                         "external v1.0.0 (proc-macro)|test-transport (*)\n"
                     )
 
-                with mock.patch.object(self.gen, "REPO", root), \
-                        mock.patch.object(self.gen, "run", side_effect=cargo_output), \
+                query = mock.Mock(spec=self.gen.CargoQuery, workspace=root)
+                query.run.side_effect = cargo_output
+                with mock.patch.object(self.gen.CargoQuery, "from_bazel", return_value=query), \
                         mock.patch.object(sys, "argv", [str(SCRIPT), *arguments]):
                     with self.assertRaises(ValueError) as raised:
                         self.gen.main()
                 self.assertIn("test-transport", str(raised.exception))
                 self.assertEqual(build.read_text(encoding="utf-8"), "existing output\n")
                 self.assertEqual(set(root.rglob("BUILD.bazel")), {build})
+
+
+class CargoAcquisitionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gen = load_gen_builds()
+        scratch = tempfile.TemporaryDirectory(prefix="cargo query ", dir=os.environ["TEST_TMPDIR"])
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name).resolve()
+        self.workspace = root / "workspace with spaces"
+        self.workspace.mkdir()
+        (self.workspace / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+        files = runfiles.Create()
+        self.assertIsNotNone(files)
+        toolchain = files.Rlocation(os.environ["GEN_BUILDS_TOOLCHAIN"], source_repo="")
+        self.assertIsNotNone(toolchain)
+        (self.workspace / "rust-toolchain.toml").write_bytes(Path(toolchain).read_bytes())
+        env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("CARGO", "RUSTC", "RUSTUP", "__CARGO_TEST"))
+        }
+        for variable, directory in (
+            ("CARGO_HOME", "cargo home"),
+            ("RUSTUP_HOME", "rustup home"),
+            ("HOME", "home"),
+        ):
+            path = root / directory
+            path.mkdir()
+            env[variable] = str(path)
+        env.update(
+            BUILD_WORKSPACE_DIRECTORY=str(self.workspace),
+            USERPROFILE=env["HOME"],
+            PATH="",
+        )
+        environment = mock.patch.dict(os.environ, env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_declared_tools_load_acquisition_policy_with_origin(self) -> None:
+        query = self.gen.CargoQuery.from_bazel()
+        for key, value in (
+            ("unstable.git", '"shallow-deps"'),
+            ("net.git-fetch-with-cli", "true"),
+        ):
+            with self.subTest(key=key):
+                output = query.run(["-Zunstable-options", "config", "get", key, "--show-origin"])
+                setting, origin = output.strip().split(" # ", 1)
+                self.assertEqual(setting, f"{key} = {value}")
+                self.assertIn(str(query.policy), origin)
+        self.assertNotIn("RUSTC_BOOTSTRAP", os.environ)
+        self.assertNotIn("RUSTC", os.environ)
+
+    def test_cargo_rejects_array_policy_and_unactivated_inspection(self) -> None:
+        query = self.gen.CargoQuery.from_bazel()
+        args = ["-Zunstable-options", "config", "get", "unstable.git", "--show-origin"]
+        query.run(args)
+        malformed = self.workspace / "invalid-acquisition.toml"
+        malformed.write_text('[unstable]\ngit = ["shallow-deps"]\n', encoding="utf-8")
+        with self.assertRaises(SystemExit) as raised:
+            replace(query, policy=malformed).run(args)
+        self.assertNotEqual(raised.exception.code, 0)
+        unactivated = subprocess.run(
+            [str(query.cargo), "--config", str(query.policy), *args],
+            cwd=query.workspace,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertNotEqual(unactivated.returncode, 0)
+        self.assertIn("nightly", unactivated.stderr.lower())
+
+    def test_missing_declared_tool_and_version_mismatch_fail(self) -> None:
+        with mock.patch.dict(os.environ, {"GEN_BUILDS_CARGO": ""}):
+            with self.assertRaisesRegex(ValueError, "GEN_BUILDS_CARGO"):
+                self.gen.CargoQuery.from_bazel()
+        (self.workspace / "rust-toolchain.toml").write_text(
+            '[toolchain]\nchannel = "0.0.0"\n', encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "must match rust-toolchain.toml"):
+            self.gen.CargoQuery.from_bazel()
+
+    def test_cli_requires_workspace_and_rejects_unknown_arguments(self) -> None:
+        with mock.patch.dict(os.environ, {"BUILD_WORKSPACE_DIRECTORY": ""}):
+            for args in ([], ["--check"]):
+                with self.subTest(args=args), mock.patch.object(sys, "argv", [str(SCRIPT), *args]):
+                    with self.assertRaisesRegex(ValueError, "bazel run //scripts:gen_builds"):
+                        self.gen.main()
+            with mock.patch.object(sys, "argv", [str(SCRIPT), "--unknown"]):
+                with self.assertRaises(SystemExit) as raised:
+                    self.gen.main()
+                self.assertIn("usage:", raised.exception.code)
 
 
 class ResolverProcessTests(unittest.TestCase):

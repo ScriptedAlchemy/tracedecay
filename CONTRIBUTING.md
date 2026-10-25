@@ -26,11 +26,24 @@ lockfile and generated Bazel targets:
 
 ```bash
 CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c
-bazel run //scripts:bazel/gen_builds.py
+bazel run //scripts:gen_builds
 ```
 
 For a targeted dependency update, use `CARGO_BAZEL_REPIN=<crate>` instead.
 Review and commit `Cargo.lock` and any generated target changes together.
+Use `bazel run //scripts:gen_builds -- --check` to compare generated targets
+without writing. The generator uses Bazel-declared Cargo and rustc matching
+`rust-toolchain.toml`. Git and network credentials remain host prerequisites.
+
+`.cargo/acquisition.toml` configures Git acquisition for the generator
+and crate_universe. The generator passes it through Cargo's `--config`, which
+takes precedence over environment configuration. crate_universe copies it
+into its isolated splice, where environment configuration can override it.
+The splice receives only this acquisition file. The generator also discovers
+the checkout's `.cargo/config.toml` normally. Ordinary validation leaves
+`CARGO_BAZEL_REPIN` and `REPIN` unset. Investigate unexpected lockfile changes
+before repinning.
+
 Dashboard `contracts:generate` and `contracts:check` run the
 `//sdks/codegen:generate` and `//sdks/codegen:dashboard_schema` Bazel targets.
 

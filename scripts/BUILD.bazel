@@ -61,6 +61,28 @@ py_test(
     main = "test-bazel-dependency-patches.py",
 )
 
+_CARGO_QUERY_DATA = [
+    "//:.cargo/acquisition.toml",
+    "@cargo_host_tools//:cargo",
+    "@cargo_host_tools//:rustc",
+    "@cargo_host_tools//:rustc_lib",
+]
+
+_CARGO_QUERY_ENV = {
+    "GEN_BUILDS_CARGO": "$(rlocationpath @cargo_host_tools//:cargo)",
+    "GEN_BUILDS_RUSTC": "$(rlocationpath @cargo_host_tools//:rustc)",
+    "GEN_BUILDS_POLICY": "$(rlocationpath //:.cargo/acquisition.toml)",
+}
+
+py_binary(
+    name = "gen_builds",
+    srcs = ["bazel/gen_builds.py"],
+    data = _CARGO_QUERY_DATA,
+    env = _CARGO_QUERY_ENV,
+    main = "bazel/gen_builds.py",
+    deps = ["@rules_python//python/runfiles"],
+)
+
 py_test(
     name = "gen_builds_test",
     size = "small",
@@ -68,7 +90,12 @@ py_test(
         "bazel/gen_builds.py",
         "test-gen-builds-default-alias.py",
     ],
+    data = _CARGO_QUERY_DATA + ["//:rust-toolchain.toml"],
+    env = _CARGO_QUERY_ENV | {
+        "GEN_BUILDS_TOOLCHAIN": "$(rlocationpath //:rust-toolchain.toml)",
+    },
     main = "test-gen-builds-default-alias.py",
+    deps = ["@rules_python//python/runfiles"],
 )
 
 py_test(
@@ -77,6 +104,21 @@ py_test(
     srcs = ["test-configure-ci-fleet.py"],
     data = ["//:.github/actions/setup-bazel/configure_fleet.py"],
     main = "test-configure-ci-fleet.py",
+)
+
+py_test(
+    name = "release_pr_refresh_test",
+    size = "small",
+    srcs = [
+        "neutralize-release-pr-closing-keywords.py",
+        "test-neutralize-release-pr-closing-keywords.py",
+    ],
+    data = [
+        "neutralize-release-pr-closing-keywords.sh",
+        "update-release-pr-lockfile.sh",
+    ],
+    main = "test-neutralize-release-pr-closing-keywords.py",
+    tags = ["local"],
 )
 
 py_test(
@@ -131,7 +173,6 @@ exports_files(
         "generate-release-inventory.py",
         "test-generate-release-inventory.py",
         "test-update-release-checksums.py",
-        "bazel/gen_builds.py",
         "bazel/rust_test_environment_probe.txt",
         "check-dashboard-bundle.py",
         "check-github-hosted-runners.py",

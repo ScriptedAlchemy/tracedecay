@@ -193,7 +193,7 @@ jobs:
           python3 scripts/test-check-release-artifacts.py
           python3 scripts/test-generate-release-inventory.py
           python3 scripts/test-update-release-checksums.py
-          python3 scripts/test-neutralize-release-pr-closing-keywords.py
+          bazel test --config=ci --test_output=errors //scripts:release_pr_refresh_test
           bash tests/macos_stable_codesign_test.sh
 
       # Exercise the release guard scripts when admitting proposed changes.
@@ -213,7 +213,7 @@ jobs:
       # Manifest edits that skip a gen_builds.py rerun leave stale BUILD
       # files; compare the committed files against a fresh generation.
       - name: Check generated Bazel BUILD files and production feature isolation
-        run: bazel run //scripts:bazel/gen_builds.py -- --check
+        run: bazel run //scripts:gen_builds -- --check
 
       - name: Test and check dev skill host copies
         run: |
