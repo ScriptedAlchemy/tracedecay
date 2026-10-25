@@ -26,6 +26,8 @@ use tracedecay_store::{
 };
 
 mod compression_ownership;
+#[cfg(unix)]
+mod summarizer_retries;
 
 fn session(provider: &str, session_id: &str) -> SessionRecord {
     SessionRecord {
@@ -1568,7 +1570,7 @@ fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restar
             &db,
             &project_root,
             LcmSummarizerExecutablesV1 {
-                cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, Some(5))
+                cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, None)
                     .unwrap(),
                 codex: LcmSummarizerExecutableV1::Unconfigured,
             },
@@ -1712,7 +1714,7 @@ fn refresh_begins_at_the_committed_frontier_after_background_summaries_publish()
         )
         .unwrap();
         fixture.pin(LcmSummarizerExecutablesV1 {
-            cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, Some(5))
+            cursor_agent: LcmSummarizerExecutableV1::configured_with(cursor_bin, None, None)
                 .unwrap(),
             codex: LcmSummarizerExecutableV1::Unconfigured,
         });

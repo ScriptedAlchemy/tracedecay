@@ -1042,14 +1042,25 @@ fn activation_retires_released_skill_files_and_converges() {
         !retired_dir.exists(),
         "activation must delete the retired skill and its emptied directory"
     );
-    copy_rendered_bundle_to_native_cache(home.path(), TEST_BIN);
+    // The cache was current before adding the retired source-only skill.
+    // Observe activation's result directly instead of repairing the fixture.
+    assert!(
+        codex_source_manifest_matches_catalog_version(home.path()).unwrap(),
+        "activation must preserve the current source manifest"
+    );
+    assert!(
+        codex_plugin_enabled(home.path()).unwrap(),
+        "activation must preserve the enabled plugin key: {:?}",
+        load_toml_file(&codex_config_path(home.path())).unwrap()
+    );
     assert!(
         codex_plugin_is_natively_active(
             profile,
             home.path(),
             Some((TEST_BIN, &ServeArgs::default()))
         )
-        .unwrap()
+        .unwrap(),
+        "activation must leave the source and native cache current"
     );
 }
 
