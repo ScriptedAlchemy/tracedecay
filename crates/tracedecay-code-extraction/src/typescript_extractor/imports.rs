@@ -11,6 +11,8 @@ use crate::types::{
 };
 
 use super::ExtractionState;
+use super::module_references::{TypeScriptModuleReferenceKind, module_call, module_source_node};
+use super::string_literals::string_literal_value;
 
 /// Preserve the statement-level graph row while collecting binding evidence
 /// from the same parser node. Binding rows never become graph nodes.
@@ -88,6 +90,22 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
             ImportNamespaceV1::Value
         };
 
+    if let Some(clause) = find_direct_child_by_kind(node, "import_require_clause") {
+        if let Some(local) = find_direct_child_by_kind(clause, "identifier") {
+            let local_name = state.node_text(local).to_owned();
+            push_evidence(
+                state,
+                &module_specifier,
+                (Some("default".to_owned()), Some(local_name)),
+                BindingShape::IMPORT,
+                statement_namespace,
+                module_kind,
+                local,
+            );
+        }
+        return;
+    }
+
     let Some(clause) = find_direct_child_by_kind(node, "import_clause") else {
         push_evidence(
             state,
@@ -154,16 +172,21 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
 /// (`./util.ts`): the seal resolves that specifier back to this file and
 /// looks `a` up among its declarations and local imports.
 pub(super) fn visit_reexport(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-    let module_specifier = match extract_module_specifier(state, node) {
-        Some(module_specifier) => module_specifier,
-        None if find_direct_child_by_kind(node, "export_clause").is_some() => {
-            let file_name = state.file_path.rsplit('/').next().unwrap_or_default();
-            if file_name.is_empty() {
-                return;
-            }
-            format!("./{file_name}")
+    let module_specifier = if module_source_node(node).is_some() {
+        // A source clause that cannot be decoded is not a local export. Keep
+        // its error and never manufacture a same-file binding in its place.
+        let Some(module_specifier) = extract_module_specifier(state, node) else {
+            return;
+        };
+        module_specifier
+    } else if find_direct_child_by_kind(node, "export_clause").is_some() {
+        let file_name = state.file_path.rsplit('/').next().unwrap_or_default();
+        if file_name.is_empty() {
+            return;
         }
-        None => return,
+        format!("./{file_name}")
+    } else {
+        return;
     };
     let Some(module_kind) = import_module_kind("typescript", &module_specifier) else {
         return;
@@ -200,15 +223,19 @@ pub(super) fn visit_reexport(state: &mut ExtractionState<'_>, node: TsNode<'_>) 
                             } else {
                                 ImportNamespaceV1::Value
                             };
-                            push_evidence(
-                                state,
-                                &module_specifier,
-                                (Some(imported_name), Some(exported_name)),
-                                BindingShape::REEXPORT,
-                                namespace,
-                                module_kind,
-                                specifier,
-                            );
+                            if let (Some(imported_name), Some(exported_name)) =
+                                (imported_name, exported_name)
+                            {
+                                push_evidence(
+                                    state,
+                                    &module_specifier,
+                                    (Some(imported_name), Some(exported_name)),
+                                    BindingShape::REEXPORT,
+                                    namespace,
+                                    module_kind,
+                                    specifier,
+                                );
+                            }
                         }
                         if !specifiers.goto_next_sibling() {
                             break;
@@ -325,15 +352,17 @@ fn visit_named_imports(
             } else {
                 ImportNamespaceV1::Value
             };
-            push_evidence(
-                state,
-                module_specifier,
-                (Some(imported_name), Some(local_name)),
-                BindingShape::IMPORT,
-                namespace,
-                module_kind,
-                specifier,
-            );
+            if let (Some(imported_name), Some(local_name)) = (imported_name, local_name) {
+                push_evidence(
+                    state,
+                    module_specifier,
+                    (Some(imported_name), Some(local_name)),
+                    BindingShape::IMPORT,
+                    namespace,
+                    module_kind,
+                    specifier,
+                );
+            }
         }
         if !cursor.goto_next_sibling() {
             break;
@@ -464,28 +493,30 @@ fn evidence_location(
     ))
 }
 
-fn extract_module_specifier(state: &ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
-    node.child_by_field_name("source")
-        .and_then(|source| unquote(state.node_text(source)))
+fn extract_module_specifier(state: &mut ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
+    module_source_node(node).and_then(|source| import_literal_value(state, source))
 }
 
-fn binding_name(state: &ExtractionState<'_>, node: TsNode<'_>) -> String {
-    let text = state.node_text(node);
-    match unquote(text) {
-        Some(unquoted) => unquoted,
-        None => text.to_string(),
+fn import_literal_value(state: &mut ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
+    match string_literal_value(state.source, node) {
+        Ok(value) => value,
+        Err(error) => {
+            state.errors.push(format!(
+                "TypeScript import literal at {}:{}: {error}",
+                node.start_position().row + 1,
+                node.start_position().column + 1,
+            ));
+            None
+        }
     }
 }
 
-fn unquote(text: &str) -> Option<String> {
-    text.strip_prefix('"')
-        .and_then(|inner| inner.strip_suffix('"'))
-        .or_else(|| {
-            text.strip_prefix('\'')
-                .and_then(|inner| inner.strip_suffix('\''))
-        })
-        .filter(|inner| !inner.is_empty())
-        .map(str::to_owned)
+fn binding_name(state: &mut ExtractionState<'_>, node: TsNode<'_>) -> Option<String> {
+    if matches!(node.kind(), "string" | "template_string") {
+        import_literal_value(state, node)
+    } else {
+        Some(state.node_text(node).to_owned())
+    }
 }
 
 /// Only a declarator at module top level introduces a file-scope binding:
@@ -519,24 +550,12 @@ pub(super) fn visit_require_declarator(state: &mut ExtractionState<'_>, declarat
     let Some(value) = declarator.child_by_field_name("value") else {
         return;
     };
-    if value.kind() != "call_expression" {
-        return;
-    }
-    let Some(callee) = value
-        .child_by_field_name("function")
-        .or_else(|| value.named_child(0))
+    let Some((TypeScriptModuleReferenceKind::Require, Some(argument))) =
+        module_call(state.source, value)
     else {
         return;
     };
-    if state.node_text(callee) != "require" {
-        return;
-    }
-    let Some(module_specifier) = value
-        .child_by_field_name("arguments")
-        .or_else(|| find_direct_child_by_kind(value, "arguments"))
-        .and_then(|arguments| arguments.named_child(0))
-        .and_then(|argument| unquote(state.node_text(argument)))
-    else {
+    let Some(module_specifier) = import_literal_value(state, argument) else {
         return;
     };
     let Some(module_kind) = import_module_kind("typescript", &module_specifier) else {
@@ -600,15 +619,17 @@ fn visit_require_object_pattern(
                         .child_by_field_name("value")
                         .or_else(|| child.named_child(1))
                         .map_or_else(|| imported_name.clone(), |value| binding_name(state, value));
-                    push_evidence(
-                        state,
-                        module_specifier,
-                        (Some(imported_name), Some(local_name)),
-                        BindingShape::IMPORT,
-                        ImportNamespaceV1::Value,
-                        module_kind,
-                        child,
-                    );
+                    if let (Some(imported_name), Some(local_name)) = (imported_name, local_name) {
+                        push_evidence(
+                            state,
+                            module_specifier,
+                            (Some(imported_name), Some(local_name)),
+                            BindingShape::IMPORT,
+                            ImportNamespaceV1::Value,
+                            module_kind,
+                            child,
+                        );
+                    }
                 }
             }
             _ => {}

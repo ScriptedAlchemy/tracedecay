@@ -740,6 +740,59 @@ fn confirmed_component_set_rejects_changed_artifact_state_without_overwrite() {
 }
 
 #[test]
+fn large_artifacts_complete_the_host_bundle_lifecycle() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("plugins/tracedecay.json");
+    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+    let mut bytes = vec![0; 3 * 1024 * 1024];
+
+    for (operation, operation_id) in [
+        (HostBundleLifecycleOpV1::Install, 1),
+        (HostBundleLifecycleOpV1::Update, 2),
+        (HostBundleLifecycleOpV1::Repair, 3),
+    ] {
+        bytes.fill(operation_id);
+        let bundle = manifest(HostKindV1::OpenCode, &bytes);
+        let request = execution(HostKindV1::OpenCode, operation, operation_id, true);
+        let catalog = verifier(&bundle);
+
+        dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+            root.path(),
+            root.path(),
+            &bundle,
+            &request,
+            &catalog,
+            &[],
+        )
+        .unwrap();
+        let receipt = writer
+            .execute(&bundle, &request, &content(&bytes), &catalog)
+            .unwrap();
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        assert_eq!(receipt.operation, operation);
+        assert_eq!(receipt.artifacts[0].artifact_digest, digest);
+        assert!(fs::read(&path).unwrap() == bytes);
+    }
+
+    let bundle = manifest(HostKindV1::OpenCode, &bytes);
+    let receipt = writer
+        .execute(
+            &bundle,
+            &execution(
+                HostKindV1::OpenCode,
+                HostBundleLifecycleOpV1::Uninstall,
+                4,
+                true,
+            ),
+            &[],
+            &verifier(&bundle),
+        )
+        .unwrap();
+    assert!(receipt.artifacts.is_empty());
+    assert!(!path.exists());
+}
+
+#[test]
 fn corruption_and_external_bundle_paths_are_rejected() {
     let root = tempfile::tempdir().unwrap();
     let bundle = manifest(HostKindV1::OpenCode, b"expected");
@@ -2209,57 +2262,4 @@ fn doctor_reports_dual_claim_as_one_owner_with_canonical_repair() {
             component.label()
         );
     }
-}
-
-#[test]
-fn large_artifacts_complete_the_host_bundle_lifecycle() {
-    let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("plugins/tracedecay.json");
-    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
-    let mut bytes = vec![0; 3 * 1024 * 1024];
-
-    for (operation, operation_id) in [
-        (HostBundleLifecycleOpV1::Install, 1),
-        (HostBundleLifecycleOpV1::Update, 2),
-        (HostBundleLifecycleOpV1::Repair, 3),
-    ] {
-        bytes.fill(operation_id);
-        let bundle = manifest(HostKindV1::OpenCode, &bytes);
-        let request = execution(HostKindV1::OpenCode, operation, operation_id, true);
-        let catalog = verifier(&bundle);
-
-        dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
-            root.path(),
-            root.path(),
-            &bundle,
-            &request,
-            &catalog,
-            &[],
-        )
-        .unwrap();
-        let receipt = writer
-            .execute(&bundle, &request, &content(&bytes), &catalog)
-            .unwrap();
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        assert_eq!(receipt.operation, operation);
-        assert_eq!(receipt.artifacts[0].artifact_digest, digest);
-        assert!(fs::read(&path).unwrap() == bytes);
-    }
-
-    let bundle = manifest(HostKindV1::OpenCode, &bytes);
-    let receipt = writer
-        .execute(
-            &bundle,
-            &execution(
-                HostKindV1::OpenCode,
-                HostBundleLifecycleOpV1::Uninstall,
-                4,
-                true,
-            ),
-            &[],
-            &verifier(&bundle),
-        )
-        .unwrap();
-    assert!(receipt.artifacts.is_empty());
-    assert!(!path.exists());
 }
