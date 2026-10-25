@@ -282,6 +282,8 @@ fn run_pnpm(dir: &Path, args: &[&str], envs: &[(&str, &OsStr)]) -> io::Result<()
             .args(args)
             .envs(envs.iter().copied())
             .current_dir(dir)
+            // Build-script stdout is Cargo's directive stream; frontend logs belong on stderr.
+            .stdout(io::stderr())
             .status()
     };
     // Standalone pnpm installs `pnpm.exe`; npm and Corepack install a

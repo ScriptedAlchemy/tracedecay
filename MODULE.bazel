@@ -67,6 +67,13 @@ host = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
 host.host_tools(name = "cargo_host_tools", version = RUST_VERSION)
 use_repo(host, "cargo_host_tools")
 
+# Provision the native Cargo driver and its sibling wrappers from one upstream pin.
+blaze_repository = use_repo_rule("//scripts/bazel/blaze:repositories.bzl", "blaze_repository")
+blaze_repository(
+    name = "blaze",
+    host_tools = "@cargo_host_tools//:BUILD.bazel",
+)
+
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     # One letter: Windows build-script paths repeat the hub's repository
