@@ -17,6 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use tracedecay_runtime_core::resident_memory::ResidentMemoryOperationV1;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
@@ -79,172 +80,6 @@ impl CodeIndexColdBuildReasonV1 {
 /// this many, the same share a layered graph refresh carries.
 const SPARSE_MAX_CHANGED_FILE_SHARE_DENOMINATOR: usize = 8;
 
-/// One segment a sparse successor seals, in publication order.
-enum SparseSegmentV1 {
-    File(ManifestDigest, Vec<u8>),
-    FileEvidence(ManifestDigest, Vec<u8>),
-    ResolutionIndex(ManifestDigest, Vec<u8>),
-    CodeGraphPage(u32, ManifestDigest, Vec<u8>),
-    EvidencePage(u32, ManifestDigest, Vec<u8>),
-    EvidenceCommit(ManifestDigest, u64, u32),
-}
-
-impl SparseSegmentV1 {
-    fn of(publication: SealedGenerationSegmentPublicationV1<'_>) -> Self {
-        match publication {
-            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                Self::File(digest.clone(), bytes.to_vec())
-            }
-            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
-                Self::FileEvidence(digest.clone(), bytes.to_vec())
-            }
-            SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                Self::ResolutionIndex(digest.clone(), bytes.to_vec())
-            }
-            SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                file_key,
-                page_digest,
-                bytes,
-            } => Self::CodeGraphPage(file_key, page_digest.clone(), bytes.to_vec()),
-            SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
-                page_ordinal,
-                page_digest,
-                bytes,
-            } => Self::EvidencePage(page_ordinal, page_digest.clone(), bytes.to_vec()),
-            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                segment_digest,
-                segment_size_bytes,
-                page_count,
-            } => Self::EvidenceCommit(segment_digest.clone(), segment_size_bytes, page_count),
-        }
-    }
-
-    fn publication(&self) -> SealedGenerationSegmentPublicationV1<'_> {
-        match self {
-            Self::File(digest, bytes) => {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes }
-            }
-            Self::FileEvidence(digest, bytes) => {
-                SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-            }
-            Self::ResolutionIndex(digest, bytes) => {
-                SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes }
-            }
-            Self::CodeGraphPage(file_key, page_digest, bytes) => {
-                SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    file_key: *file_key,
-                    page_digest,
-                    bytes,
-                }
-            }
-            Self::EvidencePage(page_ordinal, page_digest, bytes) => {
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
-                    page_ordinal: *page_ordinal,
-                    page_digest,
-                    bytes,
-                }
-            }
-            Self::EvidenceCommit(segment_digest, segment_size_bytes, page_count) => {
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    segment_size_bytes: *segment_size_bytes,
-                    page_count: *page_count,
-                }
-            }
-        }
-    }
-}
-
-/// A successor generation sealed over its parent: its metadata, its
-/// projection handoff, and the new segments and manifest a publication
-/// store writes.
-pub struct CodeIndexSparseGenerationV1 {
-    manifest: CodeGenerationManifestV1,
-    snapshot: SanitizedCodeSnapshotV1,
-    statistics: CodeIndexGenerationStatisticsV1,
-    chunk_count: u64,
-    projection: ProjectionPublicationHandoffV1,
-    segments: Vec<SparseSegmentV1>,
-    manifest_bytes: Vec<u8>,
-    clone_payloads_reused: u64,
-    clone_payloads_computed: u64,
-    clone_stale_invalidations: u64,
-}
-
-impl std::fmt::Debug for CodeIndexSparseGenerationV1 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CodeIndexSparseGenerationV1")
-            .field("generation_id", &self.manifest.generation_id)
-            .field("segments", &self.segments.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl CodeIndexSparseGenerationV1 {
-    pub fn manifest(&self) -> &CodeGenerationManifestV1 {
-        &self.manifest
-    }
-
-    pub fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
-        &self.snapshot
-    }
-
-    pub fn statistics(&self) -> &CodeIndexGenerationStatisticsV1 {
-        &self.statistics
-    }
-
-    pub fn chunk_count(&self) -> u64 {
-        self.chunk_count
-    }
-
-    pub fn projection(&self) -> &ProjectionPublicationHandoffV1 {
-        &self.projection
-    }
-
-    pub fn clone_update_statistics(&self) -> (u64, u64, bool) {
-        (
-            self.clone_payloads_reused,
-            self.clone_stale_invalidations,
-            self.clone_payloads_computed > 0 || self.clone_stale_invalidations > 0,
-        )
-    }
-
-    /// Every segment this successor wrote: its kind, content address, and
-    /// stored size.
-    #[cfg(test)]
-    pub(super) fn written_segments(
-        &self,
-    ) -> impl Iterator<Item = (&'static str, &ManifestDigest, usize)> {
-        self.segments.iter().filter_map(|segment| match segment {
-            SparseSegmentV1::File(digest, bytes) => Some(("file", digest, bytes.len())),
-            SparseSegmentV1::FileEvidence(digest, bytes) => {
-                Some(("file_evidence", digest, bytes.len()))
-            }
-            SparseSegmentV1::ResolutionIndex(digest, bytes) => {
-                Some(("resolution_index", digest, bytes.len()))
-            }
-            SparseSegmentV1::CodeGraphPage(_, digest, bytes) => {
-                Some(("code_graph_page", digest, bytes.len()))
-            }
-            SparseSegmentV1::EvidencePage(..) | SparseSegmentV1::EvidenceCommit(..) => None,
-        })
-    }
-
-    /// Publish every new segment in order and return the manifest.
-    pub(super) fn replay(
-        &self,
-        mut publish_segment: impl FnMut(
-            SealedGenerationSegmentPublicationV1<'_>,
-        ) -> Result<(), CodeIndexProductionErrorV1>,
-    ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
-        for segment in &self.segments {
-            publish_segment(segment.publication())?;
-        }
-        Ok(self.manifest_bytes.clone())
-    }
-}
-
 /// Everything a sparse build reads besides its parent.
 pub(super) struct SparseBuildV1<'a> {
     pub(super) config: &'a CodeIndexProductionConfigV1,
@@ -259,6 +94,7 @@ pub(super) struct SparseBuildV1<'a> {
     pub(super) captured_files: &'a BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
     pub(super) target_projection_key: &'a ProjectionKeyV1,
     pub(super) control: &'a dyn CodeIndexExecutionControlV1,
+    pub(super) construction_operation: &'a ResidentMemoryOperationV1,
 }
 
 fn present_paths(files: &[SanitizedCodeFileV1]) -> BTreeSet<&str> {
@@ -287,6 +123,33 @@ pub(super) fn count(value: usize) -> Result<u64, CodeIndexProductionErrorV1> {
     u64::try_from(value).map_err(|_| contract("sparse generation count exceeds u64"))
 }
 
+/// Charge the same shared chunk and symbol allocations once across both
+/// sides of the edited set, using the canonical owned-row accounting.
+fn edited_artifact_bytes(edited: &[EditedFileV1<'_>]) -> usize {
+    let mut files = HashSet::new();
+    let mut chunks = HashSet::new();
+    let mut symbols = HashSet::new();
+    let mut bytes = edited
+        .len()
+        .saturating_mul(std::mem::size_of::<EditedFileV1<'_>>());
+    for file in edited.iter().flat_map(|file| [&file.before, &file.after]) {
+        if files.insert(Arc::as_ptr(file)) {
+            bytes = bytes.saturating_add(super::resident_bytes::file_bytes(file));
+        }
+        for chunk in &file.artifacts.chunks.chunks {
+            if chunks.insert(Arc::as_ptr(chunk)) {
+                bytes = bytes.saturating_add(super::resident_bytes::chunk_bytes(chunk));
+            }
+        }
+        for symbol in &file.artifacts.symbols {
+            if symbols.insert(Arc::as_ptr(symbol)) {
+                bytes = bytes.saturating_add(super::resident_bytes::symbol_bytes(symbol));
+            }
+        }
+    }
+    bytes
+}
+
 impl SparseBuildV1<'_> {
     /// The successor of `parent` for `snapshot`, or why it must build cold.
     #[tracing::instrument(name = "code_index.build.sparse", level = "trace", skip_all)]
@@ -296,11 +159,13 @@ impl SparseBuildV1<'_> {
         plan: &GenerationIncrementPlanV1,
         mut manifest: CodeGenerationManifestV1,
         snapshot: &SanitizedCodeSnapshotV1,
+        preparation: &mut impl CodeIndexPreparationPort,
     ) -> Result<
-        Result<CodeIndexSparseGenerationV1, CodeIndexColdBuildReasonV1>,
+        Result<CodeIndexSealedPublicationV1, CodeIndexColdBuildReasonV1>,
         CodeIndexProductionErrorV1,
     > {
         let control = self.control;
+        let mut memory = ConstructionMemoryV1::new(self.construction_operation.clone())?;
         if plan.is_full_rebuild() {
             return Ok(Err(CodeIndexColdBuildReasonV1::FullRebuild));
         }
@@ -341,6 +206,8 @@ impl SparseBuildV1<'_> {
         }
         lexical_page_source::checkpoint(control)?;
         let edited = self.extract_edited(parent, &edited_rows, &manifest)?;
+        let artifact_bytes = edited_artifact_bytes(&edited);
+        memory.resize(count(artifact_bytes)?)?;
         if edited
             .iter()
             .any(|file| moves_name_lookups(&file.before, &file.after))
@@ -357,7 +224,19 @@ impl SparseBuildV1<'_> {
 
         let generation_id = manifest.generation_id.clone();
         let parent_id = parent.manifest().generation_id.clone();
-        let changes = edited_chunk_changes(parent, &edited, &generation_id, present_count)?;
+        let changes = edited_chunk_changes(
+            parent,
+            &edited,
+            &generation_id,
+            present_count,
+            &mut |change_bytes| {
+                memory.resize(
+                    count(artifact_bytes)?
+                        .checked_add(change_bytes)
+                        .ok_or_else(|| contract("sparse construction charge exceeds u64"))?,
+                )
+            },
+        )?;
         let parent_full_replay = parent
             .manifest()
             .source_commitments
@@ -388,16 +267,8 @@ impl SparseBuildV1<'_> {
         )
         .emit(&manifest)
         .map_err(CodeIndexProductionErrorV1::Capability)?;
-        let projection = project_for_publication(projection_request(
-            Some(self.target_projection_key.clone()),
-            self.target_projection_key.clone(),
-            changes.set,
-        )?)
-        .map_err(CodeIndexProductionErrorV1::Projection)?;
-        lexical_page_source::checkpoint(control)?;
-
         let sealed = SealedSuccessorV1::new(parent, &manifest, snapshot, &edited)?;
-        let resolution = sealed.resolve(parent, &edited)?;
+        let resolution = sealed.resolve(parent, &edited, self.construction_operation)?;
         lexical_page_source::checkpoint(control)?;
         let lineage = edited_lineage(&parent_id, &generation_id, &edited)?;
         let carried_symbols = parent
@@ -412,10 +283,10 @@ impl SparseBuildV1<'_> {
             .ok_or_else(|| contract("sealed parent counts fewer symbols than it carries"))?;
         let lineage_prior = (carried_symbols > 0 || !lineage.is_empty()).then_some(&parent_id);
 
-        let mut segments = Vec::new();
         let mut publish = |publication: SealedGenerationSegmentPublicationV1<'_>| {
-            segments.push(SparseSegmentV1::of(publication));
-            Ok(())
+            preparation
+                .write_segment(publication)
+                .map_err(CodeIndexProductionErrorV1::Publication)
         };
         let file_segments = sealed.file_segments(parent, &edited, &mut publish)?;
         let (file_evidence, cross_file_edges) = sealed.file_evidence(
@@ -427,6 +298,8 @@ impl SparseBuildV1<'_> {
             &mut publish,
         )?;
         let code_graph_pages = sealed.graph_pages(parent, &edited, &resolution, &mut publish)?;
+        let statistics = successor_statistics(parent, &edited, &cross_file_edges, &resolution)?;
+        drop(resolution);
         let resolution_index = reseal_resolution_index(
             &parent.resolution_index()?,
             &edited
@@ -439,6 +312,17 @@ impl SparseBuildV1<'_> {
                 .collect::<Vec<_>>(),
             &mut publish,
         )?;
+        let projection = project_for_publication(projection_request(
+            Some(self.target_projection_key.clone()),
+            self.target_projection_key.clone(),
+            changes.set,
+        )?)
+        .map_err(CodeIndexProductionErrorV1::Projection)?;
+        memory.resize(count(artifact_bytes.saturating_add(
+            super::resident_bytes::projection_heap_bytes(&projection),
+        ))?)?;
+        lexical_page_source::checkpoint(control)?;
+
         let rosters = FileChunkRostersV1::new(
             edited
                 .iter()
@@ -456,7 +340,6 @@ impl SparseBuildV1<'_> {
             &mut publish,
         )?;
         drop(rosters);
-        let statistics = successor_statistics(parent, &edited, &cross_file_edges, &resolution)?;
         let chunk_policy = edited
             .iter()
             .flat_map(|file| file.after.artifacts.chunks.chunks.iter())
@@ -492,18 +375,19 @@ impl SparseBuildV1<'_> {
             computed = computed.saturating_add(file.clone_stats.computed);
             stale = stale.saturating_add(file.stale_invalidations);
         }
-        Ok(Ok(CodeIndexSparseGenerationV1 {
-            manifest,
-            snapshot: snapshot.clone(),
-            statistics,
-            chunk_count: changes.chunk_count,
+        let mut publication = CodeIndexSealedPublicationV1::from_prepared(
+            Arc::from(manifest_bytes),
             projection,
-            segments,
-            manifest_bytes,
-            clone_payloads_reused: reused,
-            clone_payloads_computed: computed,
-            clone_stale_invalidations: stale,
-        }))
+            None,
+            (reused, computed, stale),
+        )?;
+        drop(edited);
+        memory.resize(count(super::resident_bytes::sealed_publication_bytes(
+            &publication,
+            super::resident_bytes::chunk_policy_heap_bytes(&chunk_policy),
+        ))?)?;
+        publication.construction_memory = Some(Arc::new(memory));
+        Ok(Ok(publication))
     }
 
     /// Decode each edited file as the parent sealed it and extract it anew.
@@ -570,6 +454,7 @@ fn edited_chunk_changes(
     edited: &[EditedFileV1<'_>],
     generation_id: &CodeGenerationId,
     present_files: usize,
+    retain_changes: &mut impl FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<EditedChunkChangesV1, CodeIndexProductionErrorV1> {
     let before = edited
         .iter()
@@ -636,6 +521,17 @@ fn edited_chunk_changes(
         reused_count,
         reused_digest,
     };
+    let changed_bytes = super::resident_bytes::vec_bytes(
+        &set.added_or_changed,
+        set.added_or_changed.capacity(),
+        super::resident_bytes::changed_chunk_heap_bytes,
+    )
+    .saturating_add(super::resident_bytes::vec_bytes(
+        &set.deleted,
+        set.deleted.capacity(),
+        super::resident_bytes::changed_chunk_heap_bytes,
+    ));
+    retain_changes(count(changed_bytes)?)?;
     set.seal().map_err(|error| contract(&error.to_string()))?;
     Ok(EditedChunkChangesV1 {
         set,
@@ -766,4 +662,106 @@ pub(super) fn lane_digest(
     }
     ManifestDigest::from_sha256_bytes(&hasher.finalize())
         .map_err(|error| contract(&error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::EditedFileV1;
+    use crate::clones::ClonePayloadBuildStatsV1;
+    use crate::production::sealed_parent::SealedParentGenerationV1;
+    use crate::production::sparse_increment_tests::{owner, request, scope};
+    use crate::production::sparse_successor::SealedSuccessorV1;
+    use crate::production::{MemorySealedPublicationStoreV1, UninterruptibleCodeIndexControlV1};
+
+    #[test]
+    fn sparse_resolved_rows_keep_their_operation_reservation_through_sealing() {
+        let store = MemorySealedPublicationStoreV1::default();
+        let mut owner = owner(&store);
+        let seed_request = request(
+            &[
+                ("src/a.rs", "rust", "pub fn run() { crate::b::helper(); }\n"),
+                ("src/b.rs", "rust", "pub fn helper() {}\n"),
+                ("src/lib.rs", "rust", "pub mod a; pub mod b;\n"),
+            ],
+            1_000_000,
+        );
+        let memory = Arc::clone(&seed_request.resident_memory);
+        let published = owner
+            .build_and_publish(seed_request, &UninterruptibleCodeIndexControlV1)
+            .unwrap();
+        let prior = store.decode_active(&scope()).unwrap().unwrap();
+        let parent = SealedParentGenerationV1::open(published.sealed_generation().clone()).unwrap();
+        let mut successor_request = request(
+            &[
+                (
+                    "src/a.rs",
+                    "rust",
+                    "pub fn run_again() { crate::b::helper(); }\n",
+                ),
+                ("src/b.rs", "rust", "pub fn helper() {}\n"),
+                ("src/lib.rs", "rust", "pub mod a; pub mod b;\n"),
+            ],
+            2_000_000,
+        );
+        successor_request.resident_memory = Arc::clone(&memory);
+        let successor_publication = owner
+            .build_and_publish(successor_request, &UninterruptibleCodeIndexControlV1)
+            .unwrap();
+        let decoded = store.decode_active(&scope()).unwrap().unwrap();
+        assert_eq!(
+            decoded.manifest.generation_id,
+            successor_publication.publication().manifest().generation_id,
+        );
+        let file = decoded
+            .snapshot
+            .files
+            .iter()
+            .find(|file| file.logical_path == "src/a.rs")
+            .unwrap();
+        let artifact = decoded
+            .files
+            .iter()
+            .find(|file| file.authority.logical_path == "src/a.rs")
+            .unwrap();
+        let edited = vec![EditedFileV1 {
+            file,
+            before: Arc::clone(
+                prior
+                    .files
+                    .iter()
+                    .find(|file| file.authority.logical_path == "src/a.rs")
+                    .unwrap(),
+            ),
+            after: Arc::clone(artifact),
+            clone_stats: ClonePayloadBuildStatsV1::default(),
+            stale_invalidations: 0,
+        }];
+        let successor =
+            SealedSuccessorV1::new(&parent, &decoded.manifest, &decoded.snapshot, &edited).unwrap();
+        let operation = memory.begin_operation();
+        let before = memory.snapshot().used_bytes;
+        let resolution = successor.resolve(&parent, &edited, &operation).unwrap();
+        assert!(resolution.files.values().any(|file| !file.edges.is_empty()));
+        let held = resolution._output_memory.as_ref().unwrap().charged_bytes;
+        assert!(held > 0);
+        assert_eq!(memory.snapshot().used_bytes, before + held);
+        let mut staged = 0;
+        successor
+            .graph_pages(&parent, &edited, &resolution, &mut |_| {
+                assert_eq!(memory.snapshot().used_bytes, before + held);
+                staged += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert!(staged > 0);
+        assert_eq!(
+            memory.snapshot().used_bytes,
+            before + held,
+            "sealing must retain the resolution reservation"
+        );
+        drop(resolution);
+        assert_eq!(memory.snapshot().used_bytes, before);
+    }
 }

@@ -33,6 +33,10 @@ use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 
+/// Temporary publication directories are protected by the shared project
+/// segment lease. Only the exclusive segment sweep may reclaim abandoned ones.
+pub const CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1: &str = ".code-index-preparation-";
+
 mod file_quarantine;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod fixture;
@@ -1487,6 +1491,55 @@ fn sweep_unreferenced_generation_segments(
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        if file_name.starts_with(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1) {
+            let metadata = path.symlink_metadata().map_err(deferred_if_absent)?;
+            if !metadata.file_type().is_dir() {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "generation preparation '{}' is not a regular directory",
+                    path.display()
+                )));
+            }
+            found = true;
+            if !apply {
+                return Ok((true, false));
+            }
+            // The caller holds the exclusive project segment lock, which
+            // excludes every live preparation's shared lease. Runtime staging
+            // is flat; refusing other entry types avoids following any links.
+            let mut complete = true;
+            for staged in std::fs::read_dir(&path).map_err(storage)? {
+                if is_cancelled() {
+                    return Err(CodeGenerationRetentionErrorV1::Cancelled);
+                }
+                charge_entry_budget(&mut remaining_entries)?;
+                let staged = staged.map_err(storage)?;
+                let staged_path = staged.path();
+                let metadata = staged_path.symlink_metadata().map_err(deferred_if_absent)?;
+                if !metadata.file_type().is_file() {
+                    return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                        "generation preparation entry '{}' is not a regular file",
+                        staged_path.display()
+                    )));
+                }
+                std::fs::remove_file(&staged_path).map_err(storage)?;
+                reclaimed = reclaimed.saturating_add(metadata.len());
+                reclaimed_segments += 1;
+                if reclaimed_segments == MAX_CODE_GENERATION_RETENTION_BATCH_V1 {
+                    complete = false;
+                    break;
+                }
+            }
+            if complete {
+                std::fs::remove_dir(&path).map_err(storage)?;
+                reclaimed_segments += 1;
+            } else {
+                sync_directory(&path)?;
+            }
+            if reclaimed_segments >= MAX_CODE_GENERATION_RETENTION_BATCH_V1 {
+                break;
+            }
+            continue;
+        }
         let Some(digest) = file_name
             .strip_prefix("segment-")
             .and_then(|name| name.strip_suffix(".json"))
@@ -1517,12 +1570,12 @@ fn sweep_unreferenced_generation_segments(
             break;
         }
     }
-    if reclaimed > 0 {
+    if reclaimed > 0 || reclaimed_segments > 0 {
         sync_directory(&segments_root)?;
     }
     Ok((
         found,
-        reclaimed_segments == MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+        reclaimed_segments >= MAX_CODE_GENERATION_RETENTION_BATCH_V1,
     ))
 }
 

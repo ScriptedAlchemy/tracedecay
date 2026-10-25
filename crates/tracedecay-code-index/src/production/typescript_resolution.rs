@@ -32,8 +32,9 @@ use serde_json::Value;
 use tracedecay_code_extraction::ImportNamespaceV1;
 use tracedecay_domain::{RelationEdgeKindV1, blank_json_comments};
 
-use super::FileGenerationArtifactsV1;
-use super::resolution_view::{ResolutionFileV1, SymbolsByNameV1};
+use super::CodeIndexProductionErrorV1;
+use super::resolution_view::ResolutionMemoryChangeV1;
+use super::resolution_view::{ResolutionFileFactsV1, ResolutionFileV1, SymbolsByNameV1};
 use crate::chunks::{
     CodeIndexImportEvidenceV1, is_typescript_family, relation_target_kind_is_compatible,
 };
@@ -54,9 +55,9 @@ const MAX_REEXPORT_DEPTH: usize = 16;
 
 /// One resolved import binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ImportBindingOutcomeV1<'a> {
+pub(super) enum ImportBindingOutcomeV1 {
     /// The exact defining symbol.
-    Bound(usize, &'a LineageSymbolRecordV1),
+    Bound(usize, Arc<LineageSymbolRecordV1>),
     /// The specifier names a dependency outside the indexed project.
     External,
     /// The specifier names project code the seal cannot reach or that does
@@ -164,6 +165,50 @@ struct NodePackageV1 {
     subpath_exports: Vec<(String, Vec<String>)>,
 }
 
+impl AliasRuleV1 {
+    fn retained_heap_bytes(&self) -> usize {
+        self.prefix
+            .capacity()
+            .saturating_add(self.suffix.capacity())
+            .saturating_add(super::resident_bytes::vec_bytes(
+                &self.targets,
+                self.targets.capacity(),
+                String::capacity,
+            ))
+    }
+}
+impl BuildMappingV1 {
+    fn retained_heap_bytes(&self) -> usize {
+        self.dir
+            .capacity()
+            .saturating_add(self.source_root.capacity())
+            .saturating_add(self.output_root.capacity())
+    }
+}
+impl NodePackageV1 {
+    fn retained_heap_bytes(&self) -> usize {
+        self.dir
+            .capacity()
+            .saturating_add(super::resident_bytes::vec_bytes(
+                &self.entries,
+                self.entries.capacity(),
+                String::capacity,
+            ))
+            .saturating_add(super::resident_bytes::vec_bytes(
+                &self.subpath_exports,
+                self.subpath_exports.capacity(),
+                |(path, rows)| {
+                    path.capacity()
+                        .saturating_add(super::resident_bytes::vec_bytes(
+                            rows,
+                            rows.capacity(),
+                            String::capacity,
+                        ))
+                },
+            ))
+    }
+}
+
 /// Module facts for one sealed file set.
 pub(super) struct TypeScriptModuleIndexV1 {
     /// Indexed TypeScript-family source paths.
@@ -180,10 +225,17 @@ pub(super) struct TypeScriptModuleIndexV1 {
 }
 
 impl TypeScriptModuleIndexV1 {
-    pub(super) fn new<T>(files: &[T]) -> Self
+    pub(super) fn new<T>(files: &[T]) -> Result<Self, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
+        Self::new_charged(files, &mut |_| Ok(()))
+    }
+
+    pub(super) fn new_charged<T: ResolutionFileV1>(
+        files: &[T],
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
         let mut sources = HashMap::new();
         let mut packages = Vec::new();
         let mut by_package_name: HashMap<String, Option<usize>> = HashMap::new();
@@ -193,6 +245,8 @@ impl TypeScriptModuleIndexV1 {
             let path = file.logical_path();
             let language = file.language();
             if is_typescript_family(language) {
+                super::resolution_view::reserve_resolution_map(&mut sources, charge)?;
+                charge(ResolutionMemoryChangeV1::Retain(path.len()))?;
                 sources.insert(path.to_owned(), index);
                 continue;
             }
@@ -201,42 +255,106 @@ impl TypeScriptModuleIndexV1 {
             }
             let (dir, name) = split_parent(path);
             if name == "package.json" {
-                let (package_name, package) = node_package(dir, &file.as_ref().artifacts.symbols);
+                let (package_name, package) = node_package(dir, file.binding()?.symbols());
                 if let Some(package_name) = package_name {
+                    if !by_package_name.contains_key(&package_name) {
+                        super::resolution_view::reserve_resolution_map(
+                            &mut by_package_name,
+                            charge,
+                        )?;
+                        charge(ResolutionMemoryChangeV1::Retain(package_name.capacity()))?;
+                    }
                     by_package_name
                         .entry(package_name)
                         .and_modify(|slot| *slot = None)
                         .or_insert(Some(packages.len()));
                 }
+                super::resolution_view::reserve_resolution_vec(&mut packages, 1, charge)?;
+                charge(ResolutionMemoryChangeV1::Retain(
+                    package.retained_heap_bytes(),
+                ))?;
                 packages.push(package);
-                build_mappings.extend(package_script_mappings(
-                    dir,
-                    &file.as_ref().artifacts.symbols,
-                ));
+                let mappings = package_script_mappings(dir, file.binding()?.symbols());
+                super::resolution_view::reserve_resolution_vec(
+                    &mut build_mappings,
+                    mappings.len(),
+                    charge,
+                )?;
+                charge(ResolutionMemoryChangeV1::Retain(
+                    mappings
+                        .iter()
+                        .map(BuildMappingV1::retained_heap_bytes)
+                        .sum(),
+                ))?;
+                build_mappings.extend(mappings);
             } else if (name.starts_with("tsconfig") && name.ends_with(".json"))
                 || name == "jsconfig.json"
             {
-                let config = tsconfig(dir, &file.as_ref().artifacts.symbols);
-                if let Some(mapping) = tsconfig_build_mapping(dir, &file.as_ref().artifacts.symbols)
-                {
+                let config = tsconfig(dir, file.binding()?.symbols());
+                if let Some(mapping) = tsconfig_build_mapping(dir, file.binding()?.symbols()) {
+                    super::resolution_view::reserve_resolution_vec(&mut build_mappings, 1, charge)?;
+                    charge(ResolutionMemoryChangeV1::Retain(
+                        mapping.retained_heap_bytes(),
+                    ))?;
                     build_mappings.push(mapping);
                 }
-                let merged = tsconfigs.entry(dir.to_owned()).or_default();
+                if !tsconfigs.contains_key(dir) {
+                    let before = super::resident_bytes::btree_bytes(
+                        tsconfigs.len(),
+                        std::mem::size_of::<(String, TsConfigV1)>(),
+                    );
+                    let after = super::resident_bytes::btree_bytes(
+                        tsconfigs.len().saturating_add(1),
+                        std::mem::size_of::<(String, TsConfigV1)>(),
+                    );
+                    charge(ResolutionMemoryChangeV1::Retain(
+                        after.saturating_sub(before).saturating_add(dir.len()),
+                    ))?;
+                    tsconfigs.insert(dir.to_owned(), TsConfigV1::default());
+                }
+                let merged = tsconfigs.get_mut(dir).ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "TypeScript config insertion lost its rows".to_owned(),
+                    )
+                })?;
+                super::resolution_view::reserve_resolution_vec(
+                    &mut merged.extends,
+                    config.extends.len(),
+                    charge,
+                )?;
+                charge(ResolutionMemoryChangeV1::Retain(
+                    config.extends.iter().map(String::capacity).sum(),
+                ))?;
+                super::resolution_view::reserve_resolution_vec(
+                    &mut merged.aliases,
+                    config.aliases.len(),
+                    charge,
+                )?;
+                charge(ResolutionMemoryChangeV1::Retain(
+                    config
+                        .aliases
+                        .iter()
+                        .map(AliasRuleV1::retained_heap_bytes)
+                        .sum(),
+                ))?;
                 merged.extends.extend(config.extends);
                 merged.aliases.extend(config.aliases);
                 if merged.base_url.is_none() {
+                    charge(ResolutionMemoryChangeV1::Retain(
+                        config.base_url.as_ref().map_or(0, String::capacity),
+                    ))?;
                     merged.base_url = config.base_url;
                 }
             }
         }
         build_mappings.sort_by_key(|left| std::cmp::Reverse(left.output_root.len()));
-        Self {
+        Ok(Self {
             sources,
             packages,
             by_package_name,
             tsconfigs,
             build_mappings,
-        }
+        })
     }
 
     /// The file `specifier` names from `from_path`, or why it names none.
@@ -292,18 +410,18 @@ impl TypeScriptModuleIndexV1 {
         by_simple_name: &'a dyn SymbolsByNameV1,
         binding: &CodeIndexImportEvidenceV1,
         kind: RelationEdgeKindV1,
-    ) -> ImportBindingOutcomeV1<'a>
+    ) -> Result<ImportBindingOutcomeV1, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
         let Some(imported_name) = binding.imported_name.as_deref() else {
-            return ImportBindingOutcomeV1::Unresolved;
+            return Ok(ImportBindingOutcomeV1::Unresolved);
         };
         let target = match self.resolve_specifier(&binding.logical_path, &binding.module_specifier)
         {
             ModuleTargetV1::File(index) => index,
-            ModuleTargetV1::External => return ImportBindingOutcomeV1::External,
-            ModuleTargetV1::Unresolved => return ImportBindingOutcomeV1::Unresolved,
+            ModuleTargetV1::External => return Ok(ImportBindingOutcomeV1::External),
+            ModuleTargetV1::Unresolved => return Ok(ImportBindingOutcomeV1::Unresolved),
         };
         self.exported_symbol(files, by_simple_name, target, imported_name, kind)
     }
@@ -319,18 +437,18 @@ impl TypeScriptModuleIndexV1 {
         binding: &CodeIndexImportEvidenceV1,
         members: &str,
         kind: RelationEdgeKindV1,
-    ) -> ImportBindingOutcomeV1<'a>
+    ) -> Result<ImportBindingOutcomeV1, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
         let Some(imported_name) = binding.imported_name.as_deref() else {
-            return ImportBindingOutcomeV1::Unresolved;
+            return Ok(ImportBindingOutcomeV1::Unresolved);
         };
         let mut module =
             match self.resolve_specifier(&binding.logical_path, &binding.module_specifier) {
                 ModuleTargetV1::File(index) => index,
-                ModuleTargetV1::External => return ImportBindingOutcomeV1::External,
-                ModuleTargetV1::Unresolved => return ImportBindingOutcomeV1::Unresolved,
+                ModuleTargetV1::External => return Ok(ImportBindingOutcomeV1::External),
+                ModuleTargetV1::Unresolved => return Ok(ImportBindingOutcomeV1::Unresolved),
             };
         let (namespaces, member) = members.rsplit_once('.').unwrap_or(("", members));
         let namespaces = (imported_name != "*")
@@ -346,22 +464,26 @@ impl TypeScriptModuleIndexV1 {
                 namespace,
                 &mut visited,
                 0,
-            ) {
+            )? {
                 NamespaceTargetV1::Module(next) => next,
-                NamespaceTargetV1::External => return ImportBindingOutcomeV1::External,
+                NamespaceTargetV1::External => return Ok(ImportBindingOutcomeV1::External),
                 // `Uses` admits every symbol kind: any binding by that name is
                 // a value whose members module resolution cannot see.
                 NamespaceTargetV1::Missing => {
-                    return match self.exported_symbol(
-                        files,
-                        by_simple_name,
-                        module,
-                        namespace,
-                        RelationEdgeKindV1::Uses,
-                    ) {
-                        ImportBindingOutcomeV1::Bound(..) => ImportBindingOutcomeV1::ValueMember,
-                        _ => ImportBindingOutcomeV1::Unresolved,
-                    };
+                    return Ok(
+                        match self.exported_symbol(
+                            files,
+                            by_simple_name,
+                            module,
+                            namespace,
+                            RelationEdgeKindV1::Uses,
+                        )? {
+                            ImportBindingOutcomeV1::Bound(..) => {
+                                ImportBindingOutcomeV1::ValueMember
+                            }
+                            _ => ImportBindingOutcomeV1::Unresolved,
+                        },
+                    );
                 }
             };
         }
@@ -375,7 +497,7 @@ impl TypeScriptModuleIndexV1 {
         module: usize,
         name: &str,
         kind: RelationEdgeKindV1,
-    ) -> ImportBindingOutcomeV1<'a>
+    ) -> Result<ImportBindingOutcomeV1, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
@@ -389,13 +511,13 @@ impl TypeScriptModuleIndexV1 {
             &mut HashSet::new(),
             0,
             &mut found,
-        );
+        )?;
         found.sort_by_key(|(index, symbol)| (*index, symbol.occurrence.clone()));
         found.dedup_by(|left, right| left.1.occurrence == right.1.occurrence);
-        match found.as_slice() {
-            [(index, symbol)] => ImportBindingOutcomeV1::Bound(*index, symbol),
+        Ok(match found.as_slice() {
+            [(index, symbol)] => ImportBindingOutcomeV1::Bound(*index, Arc::clone(symbol)),
             _ => ImportBindingOutcomeV1::Unresolved,
-        }
+        })
     }
 
     /// The module namespace `name` denotes as an export of `file_index`, with
@@ -409,23 +531,23 @@ impl TypeScriptModuleIndexV1 {
         name: &str,
         visited: &mut HashSet<(usize, String)>,
         depth: usize,
-    ) -> NamespaceTargetV1
+    ) -> Result<NamespaceTargetV1, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
         if depth > MAX_REEXPORT_DEPTH || !visited.insert((file_index, name.to_owned())) {
-            return NamespaceTargetV1::Missing;
+            return Ok(NamespaceTargetV1::Missing);
         }
-        let file = files[file_index].as_ref();
-        let public = || file.artifacts.imports.iter().filter(|row| row.is_public);
+        let file = files[file_index].binding()?;
+        let public = || file.imports().iter().filter(|row| row.is_public);
         let mut forwarding = public()
             .filter(|row| !row.is_glob && row.local_name.as_deref() == Some(name))
             .collect::<Vec<_>>();
         if forwarding.is_empty() {
-            if !defined_symbols(by_simple_name, file_index, name, RelationEdgeKindV1::Uses)
+            if !defined_symbols(by_simple_name, file_index, name, RelationEdgeKindV1::Uses)?
                 .is_empty()
             {
-                return NamespaceTargetV1::Missing;
+                return Ok(NamespaceTargetV1::Missing);
             }
             if name != "default" {
                 forwarding.extend(public().filter(|row| row.is_glob));
@@ -455,7 +577,7 @@ impl TypeScriptModuleIndexV1 {
                         forwarded,
                         visited,
                         depth + 1,
-                    ),
+                    )?,
                     ModuleTargetV1::File(next) => self.namespace_export(
                         files,
                         by_simple_name,
@@ -463,21 +585,21 @@ impl TypeScriptModuleIndexV1 {
                         forwarded,
                         visited,
                         depth + 1,
-                    ),
+                    )?,
                     ModuleTargetV1::External => NamespaceTargetV1::External,
                     ModuleTargetV1::Unresolved => NamespaceTargetV1::Missing,
                 };
             match resolved {
-                NamespaceTargetV1::Module(_) => return resolved,
+                NamespaceTargetV1::Module(_) => return Ok(resolved),
                 NamespaceTargetV1::External => external = true,
                 NamespaceTargetV1::Missing => {}
             }
         }
-        if external {
+        Ok(if external {
             NamespaceTargetV1::External
         } else {
             NamespaceTargetV1::Missing
-        }
+        })
     }
 
     /// The module namespace a same-module export clause forwards: the module
@@ -491,26 +613,28 @@ impl TypeScriptModuleIndexV1 {
         name: &str,
         visited: &mut HashSet<(usize, String)>,
         depth: usize,
-    ) -> NamespaceTargetV1
+    ) -> Result<NamespaceTargetV1, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
         let Some(binding) =
-            unique_local_import(files[file_index].as_ref(), name, RelationEdgeKindV1::Uses)
+            unique_local_import(files[file_index].binding()?, name, RelationEdgeKindV1::Uses)
         else {
-            return NamespaceTargetV1::Missing;
+            return Ok(NamespaceTargetV1::Missing);
         };
         let Some(imported) = binding.imported_name.as_deref() else {
-            return NamespaceTargetV1::Missing;
+            return Ok(NamespaceTargetV1::Missing);
         };
-        match self.resolve_specifier(&binding.logical_path, &binding.module_specifier) {
-            ModuleTargetV1::File(next) if imported == "*" => NamespaceTargetV1::Module(next),
-            ModuleTargetV1::File(next) => {
-                self.namespace_export(files, by_simple_name, next, imported, visited, depth)
-            }
-            ModuleTargetV1::External => NamespaceTargetV1::External,
-            ModuleTargetV1::Unresolved => NamespaceTargetV1::Missing,
-        }
+        Ok(
+            match self.resolve_specifier(&binding.logical_path, &binding.module_specifier) {
+                ModuleTargetV1::File(next) if imported == "*" => NamespaceTargetV1::Module(next),
+                ModuleTargetV1::File(next) => {
+                    self.namespace_export(files, by_simple_name, next, imported, visited, depth)?
+                }
+                ModuleTargetV1::External => NamespaceTargetV1::External,
+                ModuleTargetV1::Unresolved => NamespaceTargetV1::Missing,
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -523,15 +647,16 @@ impl TypeScriptModuleIndexV1 {
         kind: RelationEdgeKindV1,
         visited: &mut HashSet<(usize, String)>,
         depth: usize,
-        found: &mut Vec<(usize, &'a LineageSymbolRecordV1)>,
-    ) where
+        found: &mut Vec<(usize, Arc<LineageSymbolRecordV1>)>,
+    ) -> Result<(), CodeIndexProductionErrorV1>
+    where
         T: ResolutionFileV1,
     {
         if depth > MAX_REEXPORT_DEPTH || !visited.insert((file_index, name.to_owned())) {
-            return;
+            return Ok(());
         }
-        let file = files[file_index].as_ref();
-        let public = || file.artifacts.imports.iter().filter(|row| row.is_public);
+        let file = files[file_index].binding()?;
+        let public = || file.imports().iter().filter(|row| row.is_public);
         // An export clause naming `name` is the export itself; a same-named
         // declaration beside `export { a as name }` is a different binding.
         // Either one shadows whatever `export *` forwards, and `export *`
@@ -540,10 +665,10 @@ impl TypeScriptModuleIndexV1 {
             .filter(|row| !row.is_glob && row.local_name.as_deref() == Some(name))
             .collect::<Vec<_>>();
         if forwarding.is_empty() {
-            let defined = defined_symbols(by_simple_name, file_index, name, kind);
+            let defined = defined_symbols(by_simple_name, file_index, name, kind)?;
             if !defined.is_empty() {
                 found.extend(defined);
-                return;
+                return Ok(());
             }
             if name != "default" {
                 forwarding.extend(public().filter(|row| row.is_glob));
@@ -576,7 +701,7 @@ impl TypeScriptModuleIndexV1 {
                     visited,
                     depth + 1,
                     found,
-                );
+                )?;
             } else {
                 self.collect_exported_symbols(
                     files,
@@ -587,9 +712,10 @@ impl TypeScriptModuleIndexV1 {
                     visited,
                     depth + 1,
                     found,
-                );
+                )?;
             }
         }
+        Ok(())
     }
 
     /// The module-scope binding `name` a same-module export clause forwards:
@@ -604,24 +730,25 @@ impl TypeScriptModuleIndexV1 {
         kind: RelationEdgeKindV1,
         visited: &mut HashSet<(usize, String)>,
         depth: usize,
-        found: &mut Vec<(usize, &'a LineageSymbolRecordV1)>,
-    ) where
+        found: &mut Vec<(usize, Arc<LineageSymbolRecordV1>)>,
+    ) -> Result<(), CodeIndexProductionErrorV1>
+    where
         T: ResolutionFileV1,
     {
-        let defined = defined_symbols(by_simple_name, file_index, name, kind);
+        let defined = defined_symbols(by_simple_name, file_index, name, kind)?;
         if !defined.is_empty() {
             found.extend(defined);
-            return;
+            return Ok(());
         }
-        let Some(binding) = unique_local_import(files[file_index].as_ref(), name, kind) else {
-            return;
+        let Some(binding) = unique_local_import(files[file_index].binding()?, name, kind) else {
+            return Ok(());
         };
         let Some(imported) = binding
             .imported_name
             .as_deref()
             .filter(|imported| *imported != "*")
         else {
-            return;
+            return Ok(());
         };
         if let ModuleTargetV1::File(next) =
             self.resolve_specifier(&binding.logical_path, &binding.module_specifier)
@@ -635,8 +762,9 @@ impl TypeScriptModuleIndexV1 {
                 visited,
                 depth,
                 found,
-            );
+            )?;
         }
+        Ok(())
     }
 
     /// Rewrite a missing published path through a declared compiler mapping.
@@ -1233,31 +1361,30 @@ fn tsconfig(dir: &str, symbols: &[Arc<LineageSymbolRecordV1>]) -> TsConfigV1 {
     config
 }
 
-fn defined_symbols<'a>(
-    by_simple_name: &'a dyn SymbolsByNameV1,
+fn defined_symbols(
+    by_simple_name: &dyn SymbolsByNameV1,
     file_index: usize,
     name: &str,
     kind: RelationEdgeKindV1,
-) -> Vec<(usize, &'a LineageSymbolRecordV1)> {
-    by_simple_name
-        .get(name)
+) -> Result<Vec<(usize, Arc<LineageSymbolRecordV1>)>, CodeIndexProductionErrorV1> {
+    Ok(by_simple_name
+        .get(name)?
         .into_iter()
         .flatten()
         .filter(|(index, symbol)| {
             *index == file_index && relation_target_kind_is_compatible(kind, &symbol.kind)
         })
-        .map(|(index, symbol)| (*index, symbol.as_ref()))
-        .collect()
+        .collect())
 }
 
 /// The one local (non-forwarding) import binding of `local_name` usable for
 /// `relation`, or `None` when the file binds it zero or several times.
 pub(super) fn unique_local_import<'a>(
-    file: &'a FileGenerationArtifactsV1,
+    file: &'a dyn ResolutionFileFactsV1,
     local_name: &str,
     relation: RelationEdgeKindV1,
 ) -> Option<&'a CodeIndexImportEvidenceV1> {
-    let mut matches = file.artifacts.imports.iter().filter(|binding| {
+    let mut matches = file.imports().iter().filter(|binding| {
         !binding.is_public
             && binding.local_name.as_deref() == Some(local_name)
             && match relation {

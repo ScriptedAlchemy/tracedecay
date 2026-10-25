@@ -1,4 +1,7 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
@@ -25,6 +28,9 @@ pub struct CodeIndexIgnoredSourceAdmissionV1 {
 /// Inputs for one complete immutable code-index generation.
 #[derive(Clone, Debug)]
 pub struct CodeIndexBuildRequestV1 {
+    /// The invoking process's canonical ledger and pressure authority. Source,
+    /// bounded extraction scratch, and retained construction facts share it.
+    pub resident_memory: Arc<ProcessResidentMemoryV1>,
     pub snapshot: SanitizedCodeSnapshotV1,
     pub captured_files: Vec<CodeIndexCapturedFileV1>,
     /// Capture-reported paths are evidence only; digest equality remains the

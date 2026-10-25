@@ -117,6 +117,20 @@ fn clone_scheduler_error(error: &CodeIndexSchedulerErrorV1) -> CodeIndexSchedule
         CodeIndexSchedulerErrorV1::IgnoredDependency(error) => {
             CodeIndexSchedulerErrorV1::IgnoredDependency(error.clone())
         }
+        CodeIndexSchedulerErrorV1::ReconstructionMemoryRefused {
+            detail,
+            source_epoch,
+            demand,
+        } => CodeIndexSchedulerErrorV1::ReconstructionMemoryRefused {
+            detail: detail.clone(),
+            source_epoch: *source_epoch,
+            demand: demand.clone(),
+        },
+        CodeIndexSchedulerErrorV1::PreparedPublicationRefused { error } => {
+            CodeIndexSchedulerErrorV1::PreparedPublicationRefused {
+                error: error.clone(),
+            }
+        }
         CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(error) => {
             CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(*error)
         }

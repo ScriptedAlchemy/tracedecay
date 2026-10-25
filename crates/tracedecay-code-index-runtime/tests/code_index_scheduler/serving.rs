@@ -619,11 +619,15 @@ fn same_process_text_restore_releases_the_decoded_generation_before_projection()
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
     published(scheduler.reconcile_now().expect("seed generation"));
-    assert!(
-        scheduler.latest_complete_already_decoded().is_some(),
-        "seal installs the built generation so reconcile does not encode then decode"
-    );
+    assert!(scheduler.latest_complete_already_decoded().is_none());
     assert_eq!(scheduler.sealed_decode_count(), 0);
+    drop(
+        scheduler
+            .latest_complete()
+            .expect("explicit complete-generation consumer"),
+    );
+    assert!(scheduler.latest_complete_already_decoded().is_some());
+    assert_eq!(scheduler.sealed_decode_count(), 1);
     assert!(
         scheduler
             .active_generation_encoded_bytes()
@@ -649,7 +653,7 @@ fn same_process_text_restore_releases_the_decoded_generation_before_projection()
     );
     assert_eq!(
         scheduler.sealed_decode_count(),
-        0,
+        1,
         "text restore must not replace the released pin with a sealed-byte decode"
     );
     while !text
@@ -661,7 +665,7 @@ fn same_process_text_restore_releases_the_decoded_generation_before_projection()
         scheduler.latest_complete_already_decoded().is_none(),
         "ready exact and lexical owners must not re-pin the decoded generation"
     );
-    assert_eq!(scheduler.sealed_decode_count(), 0);
+    assert_eq!(scheduler.sealed_decode_count(), 1);
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     published(
@@ -675,7 +679,7 @@ fn same_process_text_restore_releases_the_decoded_generation_before_projection()
     );
     assert_eq!(
         scheduler.sealed_decode_count(),
-        0,
+        1,
         "the next increment seals over its released parent without decoding it"
     );
     let incremental_text = scheduler

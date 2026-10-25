@@ -6,10 +6,10 @@
 
 use std::collections::HashSet;
 
-use crate::edits::{
-    LeadingKind, MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff,
-    classify_leading_line, splice_lines,
-};
+use tracedecay_code_extraction::ts_provider::parse_extractor_source;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+
+use crate::edits::{MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff};
 
 /// Removes `lines[start..=end]` and collapses the blank-line separator the
 /// removed item left behind so the source stays tidy.
@@ -35,51 +35,115 @@ pub(super) fn remove_span_with_cleanup(lines: &[&str], start: usize, end: usize)
 /// import region or at the top of a fresh file), then the moved block after a
 /// blank-line separator.
 pub(super) fn build_dest_content(
+    dest_file: &str,
     dest_original: &str,
     imports: &[String],
     moved_text: &str,
-) -> String {
+) -> Result<String> {
     let moved_block = moved_text.trim_end_matches('\n');
-    if dest_original.trim().is_empty() {
-        let mut parts: Vec<String> = Vec::new();
-        if !imports.is_empty() {
-            parts.push(imports.join("\n"));
-        }
-        parts.push(moved_block.to_string());
-        let mut content = parts.join("\n\n");
-        content.push('\n');
-        content
+    let mut content = if dest_file.ends_with(".rs") {
+        // Even a dependency-free move must not append inside malformed syntax
+        // or adopt dangling outer attributes from the destination.
+        insert_imports(dest_original, imports)?
+    } else if imports.is_empty() {
+        dest_original.to_owned()
     } else {
-        let with_imports = insert_imports(dest_original, imports);
-        format!("{}\n\n{}\n", with_imports.trim_end(), moved_block)
+        return Err(destination_syntax_error(
+            "automatic dependency imports require a Rust destination",
+        ));
+    };
+    let newline = line_ending(dest_original);
+    if !content.is_empty() {
+        if !content.ends_with('\n') {
+            content.push_str(newline);
+        }
+        if !content.ends_with(&format!("{newline}{newline}")) {
+            content.push_str(newline);
+        }
+    }
+    content.push_str(moved_block);
+    content.push('\n');
+    Ok(content)
+}
+
+/// Inserts imports between complete top-level Rust items, preserving all
+/// existing bytes and the attachments of outer docs and attributes.
+pub(super) fn insert_imports(dest_source: &str, imports: &[String]) -> Result<String> {
+    let offset = rust_import_offset(dest_source)?;
+    if imports.is_empty() {
+        return Ok(dest_source.to_string());
+    }
+    let newline = line_ending(dest_source);
+    let (before, after) = dest_source.split_at(offset);
+    let mut content = before.to_owned();
+    if !before.is_empty() && !before.ends_with('\n') {
+        content.push_str(newline);
+    }
+    content.push_str(&imports.join(newline));
+    content.push_str(newline);
+    content.push_str(after);
+    Ok(content)
+}
+
+fn line_ending(source: &str) -> &'static str {
+    if source
+        .find('\n')
+        .is_some_and(|offset| offset > 0 && source.as_bytes()[offset - 1] == b'\r')
+    {
+        "\r\n"
+    } else {
+        "\n"
     }
 }
 
-/// Inserts `imports` into an existing Rust file after its leading module-doc /
-/// comment / existing-`use` region.
-pub(super) fn insert_imports(dest_source: &str, imports: &[String]) -> String {
-    if imports.is_empty() {
-        return dest_source.to_string();
+fn destination_syntax_error(message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("source-edit-destination-syntax-unsupported", false, message)
+}
+
+fn rust_import_offset(source: &str) -> Result<usize> {
+    let tree = parse_extractor_source("rust", "Rust", source).map_err(|error| {
+        destination_syntax_error(format!("cannot parse Rust destination: {error}"))
+    })?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err(destination_syntax_error(
+            "Rust destination contains incomplete or unsupported syntax",
+        ));
     }
-    let lines: Vec<&str> = dest_source.lines().collect();
-    let mut idx = 0;
-    while idx < lines.len() {
-        // Stop before an OUTER doc-comment block (`///` or `/**`): it documents
-        // the first item, and inserting a `use` between the doc and its item
-        // detaches the doc. Inner docs (`//!`), plain comments (`//`), blank
-        // lines, and existing imports stay in the header region.
-        match classify_leading_line(lines[idx]) {
-            LeadingKind::OuterDoc => break,
-            LeadingKind::Blank | LeadingKind::InnerDoc | LeadingKind::LineComment => idx += 1,
-            LeadingKind::UseImport => idx += 1,
-            LeadingKind::BlockComment | LeadingKind::Attribute | LeadingKind::Code => break,
+    let mut offset = None;
+    let mut seen_item = false;
+    let mut pending_outer = false;
+    for node in root.named_children(&mut root.walk()) {
+        let comment = matches!(node.kind(), "line_comment" | "block_comment");
+        if node.kind() == "inner_attribute_item"
+            || (comment && node.child_by_field_name("inner").is_some())
+        {
+            if seen_item || pending_outer {
+                return Err(destination_syntax_error(
+                    "Rust destination has an inner attribute or doc after an item or outer attribute",
+                ));
+            }
+        } else if node.kind() == "attribute_item"
+            || (comment && node.child_by_field_name("outer").is_some())
+        {
+            // Outer attachments belong to the following item, including when
+            // that item is itself an import. Never split this group.
+            offset.get_or_insert(node.start_byte());
+            pending_outer = true;
+        } else if !comment && node.kind() != "shebang" {
+            if !matches!(node.kind(), "use_declaration" | "extern_crate_declaration") {
+                offset.get_or_insert(node.start_byte());
+            }
+            seen_item = true;
+            pending_outer = false;
         }
     }
-    let mut rebuilt: Vec<&str> = Vec::with_capacity(lines.len() + imports.len());
-    rebuilt.extend_from_slice(&lines[..idx]);
-    rebuilt.extend(imports.iter().map(String::as_str));
-    rebuilt.extend_from_slice(&lines[idx..]);
-    splice_lines(&rebuilt, dest_source.ends_with('\n'))
+    if pending_outer {
+        return Err(destination_syntax_error(
+            "Rust destination ends with an outer attribute or doc without its item",
+        ));
+    }
+    Ok(offset.unwrap_or(source.len()))
 }
 
 /// Drops imports already present verbatim in the destination and de-duplicates
@@ -193,10 +257,12 @@ mod tests {
     #[test]
     fn build_dest_content_new_file_prepends_imports() {
         let content = build_dest_content(
+            "src/relocated.rs",
             "",
             &["use crate::pricing::LineItem;".to_string()],
             "/// doc\nfn f() {}\n",
-        );
+        )
+        .unwrap();
         assert_eq!(
             content,
             "use crate::pricing::LineItem;\n\n/// doc\nfn f() {}\n"
@@ -205,7 +271,13 @@ mod tests {
 
     #[test]
     fn build_dest_content_existing_file_appends_after_blank() {
-        let content = build_dest_content("//! mod\n\nfn existing() {}\n", &[], "fn f() {}");
+        let content = build_dest_content(
+            "src/relocated.rs",
+            "//! mod\n\nfn existing() {}\n",
+            &[],
+            "fn f() {}",
+        )
+        .unwrap();
         assert_eq!(content, "//! mod\n\nfn existing() {}\n\nfn f() {}\n");
     }
 
@@ -214,7 +286,8 @@ mod tests {
         let out = insert_imports(
             "//! module doc\n\nfn a() {}\n",
             &["use crate::X;".to_string()],
-        );
+        )
+        .unwrap();
         assert_eq!(out, "//! module doc\n\nuse crate::X;\nfn a() {}\n");
     }
 
@@ -225,7 +298,8 @@ mod tests {
         let out = insert_imports(
             "/// Docs for other.\npub fn other() {}\n",
             &["use crate::X;".to_string()],
-        );
+        )
+        .unwrap();
         assert_eq!(
             out,
             "use crate::X;\n/// Docs for other.\npub fn other() {}\n"
@@ -237,6 +311,63 @@ mod tests {
             .position(|l| l.trim() == "/// Docs for other.")
             .unwrap();
         assert_eq!(lines[doc + 1].trim(), "pub fn other() {}");
+    }
+
+    #[test]
+    fn insert_imports_preserves_comments_and_complete_same_line_items() {
+        for (original, expected) in [
+            (
+                "/* License. */\nuse a::{B, C}; /* Import note. */\nfn marker() {}",
+                "/* License. */\nuse a::{B, C}; /* Import note. */\nuse crate::X;\nfn marker() {}",
+            ),
+            (
+                "use a::B; fn marker() {}",
+                "use a::B; \nuse crate::X;\nfn marker() {}",
+            ),
+            ("// License.", "// License.\nuse crate::X;\n"),
+            ("/* License. */", "/* License. */\nuse crate::X;\n"),
+            ("//! Module.", "//! Module.\nuse crate::X;\n"),
+        ] {
+            assert_eq!(
+                insert_imports(original, &["use crate::X;".to_owned()]).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn destination_validation_rejects_incomplete_or_misplaced_attachments() {
+        for original in [
+            "use a::{B, C",
+            "/// Detached.\n",
+            "#[allow(unused)]\n// Detached.\n",
+            "use a::B;\n#![allow(unused)]\n",
+            "fn keep() {}\n//! Misplaced module doc.\n",
+        ] {
+            assert!(
+                build_dest_content("src/relocated.rs", original, &[], "fn moved() {}").is_err(),
+                "must refuse without needing new imports: {original}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_rust_destination_without_imports_keeps_generic_append_support() {
+        let original = "export const keep = 1;\n \t";
+        assert_eq!(
+            build_dest_content("src/relocated.ts", original, &[], "export const moved = 2;")
+                .unwrap(),
+            "export const keep = 1;\n \t\n\nexport const moved = 2;\n"
+        );
+        assert!(
+            build_dest_content(
+                "src/relocated.ts",
+                original,
+                &["use crate::X;".to_owned()],
+                "export const moved = 2;"
+            )
+            .is_err()
+        );
     }
 
     #[test]
