@@ -33,10 +33,12 @@ import json
 import re
 import subprocess
 import sys
+import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import NamedTuple
 
 REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -209,6 +211,7 @@ RUNTIME_BINARIES = (
 
 # Marks a resolution context that Cargo builds with `--no-default-features`.
 NO_DEFAULT_FEATURES = "!no-default-features"
+PRODUCTION_CONTEXT = ("tracedecay", "normal,build", frozenset())
 
 
 def normalize_default_alias(feats, feature_table):
@@ -235,13 +238,21 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def run(cmd, cwd=REPO):
-    # Cargo emits UTF-8; the Windows console default (cp1252) cannot decode it.
-    out = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True,
-        encoding="utf-8",
-    )
+    command = " ".join(cmd)
+    started = time.monotonic()
+    print(f"gen_builds: start {command}", file=sys.stderr, flush=True)
+    try:
+        out = subprocess.run(
+            cmd, cwd=cwd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
+        )
+    finally:
+        print(
+            f"gen_builds: end {command} ({time.monotonic() - started:.2f}s)",
+            file=sys.stderr, flush=True,
+        )
     if out.returncode != 0:
-        sys.exit(f"{' '.join(cmd)} failed:\n{out.stderr}")
+        print(f"{command} failed (exit {out.returncode})", file=sys.stderr, flush=True)
+        sys.exit(out.returncode)
     # CARGO_TERM_COLOR=always CI shells would otherwise bake color escapes
     # into parsed feature names; --color never covers Cargo, this covers the
     # rest.
@@ -269,45 +280,106 @@ def perf_opt_levels():
 
 def cargo_metadata():
     return json.loads(
-        run(["cargo", "metadata", "--format-version", "1", "--no-deps", "-q",
+        run(["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps", "-q",
              "--color", "never"])
     )
 
 
+def validate_production_features(members):
+    product = members.get("tracedecay")
+    if product is None:
+        raise ValueError("missing tracedecay product package declaration")
+    features = product.get("features") or {}
+    if features.get("default") != ["production"]:
+        raise ValueError("tracedecay default feature must delegate only to production")
+    production = set(features.get("production", []))
+    if not {"token-counting", "lite", "full"}.issubset(production):
+        raise ValueError("tracedecay production feature set lost a required member")
+    if "test-transport" in production:
+        raise ValueError("tracedecay production feature directly enables test-transport")
+
+
 _TREE_LINE = re.compile(
-    r"^(?P<name>\S+) v(?P<ver>\S+)(?: \((?P<path>[^)]+)\))?\|(?P<feats>.*)$"
+    r"(?P<name>[\w-]+) v(?P<ver>[0-9]+\.[0-9]+\.[0-9]+"
+    r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)"
+    r"(?: \(proc-macro\))?(?: \((?P<source>[^\r\n]+)\))?"
+    r"\|(?P<feats>[^|\r\n]*)"
 )
+_TREE_EXTERNAL_SOURCE = re.compile(
+    r"(?:[A-Za-z][A-Za-z0-9+.-]*://\S+|registry `[^`]+`|dir .+|builtin .+)"
+)
+
+
+class _TreeRow(NamedTuple):
+    package_id: str
+    name: str
+    version: str
+    path: str | None
+    features: frozenset[str]
+
+
+def _parse_tree_row(line):
+    # Cargo appends the duplicate marker after the entire formatted row.
+    row = line.removesuffix(" (*)")
+    match = _TREE_LINE.fullmatch(row)
+    if match is None:
+        raise ValueError(f"cargo tree emitted an invalid package row: {line!r}")
+    source = match.group("source")
+    path = None
+    if source is not None:
+        if PurePosixPath(source).is_absolute() or PureWindowsPath(source).is_absolute():
+            path = source
+        elif _TREE_EXTERNAL_SOURCE.fullmatch(source) is None:
+            raise ValueError(f"cargo tree emitted an invalid package source: {line!r}")
+    raw = match.group("feats")
+    features = frozenset(raw.split(",")) if raw else frozenset()
+    if any(not feature or re.search(r"[\s|()*]", feature) for feature in features):
+        raise ValueError(f"cargo tree emitted an invalid feature list: {line!r}")
+    return _TreeRow(
+        row.rsplit("|", 1)[0], match.group("name"), match.group("ver"), path, features,
+    )
+
+
+def _parse_feature_map(output, context):
+    production = context == PRODUCTION_CONTEXT
+    fmap = {}
+    for line in output.splitlines():
+        # Cargo separates workspace roots with an empty line.
+        if not line:
+            continue
+        try:
+            row = _parse_tree_row(line)
+        except ValueError as error:
+            raise ValueError(f"{context}: {error}") from error
+        if production and "test-transport" in row.features:
+            raise ValueError(
+                f"{context}: production graph enables test-transport for {row.package_id}"
+            )
+        # Cargo renders host-native paths; source URLs are not member paths.
+        if row.path is not None and "/crates/" in row.path.replace("\\", "/"):
+            fmap.setdefault(row.name, set()).update(row.features)
+    if production and "tracedecay" not in fmap:
+        raise ValueError(f"{context}: cargo tree omitted the tracedecay root package")
+    return fmap
 
 
 def feature_map(pkg_name, edges, features=()):
     """cargo tree resolution for one root context, or for the whole workspace
     when `pkg_name` is None (features then carry their `pkg/` prefix). Maps
     member -> feature set."""
+    context = (pkg_name, edges, frozenset(features))
     root = ["--workspace"] if pkg_name is None else ["-p", pkg_name]
     cmd = [
-        "cargo", "tree", *root, "-e", edges,
+        "cargo", "tree", "--locked", *root, "-e", edges,
         "-f", "{p}|{f}", "--prefix", "none", "--color", "never",
     ]
-    features = set(features)
+    features = set(context[2])
     if NO_DEFAULT_FEATURES in features:
         features.discard(NO_DEFAULT_FEATURES)
         cmd.append("--no-default-features")
     if features:
         cmd += ["--features", ",".join(sorted(features))]
-    fmap = {}
-    for line in run(cmd).splitlines():
-        m = _TREE_LINE.match(line.strip())
-        if not m or not m.group("path"):
-            continue
-        # cargo tree renders host-native separators; labels below assume /
-        if "/crates/" not in m.group("path").replace("\\", "/"):
-            continue
-        # cargo tree marks repeated subtrees by appending ' (*)' inside the
-        # feature field; strip the marker before splitting.
-        raw = m.group("feats").replace("(*)", "")
-        feats = {f.strip() for f in raw.split(",") if f.strip()}
-        fmap.setdefault(m.group("name"), set()).update(feats)
-    return fmap
+    return _parse_feature_map(run(cmd), context)
 
 
 def target_feature_annotations(locked):
@@ -315,7 +387,7 @@ def target_feature_annotations(locked):
     its own repository from Cargo's target resolution. The override keeps the
     generated deps and build script; only the feature set narrows."""
     full = json.loads(
-        run(["cargo", "metadata", "--format-version", "1", "-q", "--color", "never",
+        run(["cargo", "metadata", "--locked", "--format-version", "1", "-q", "--color", "never",
              "--filter-platform", TARGET_TRIPLE])
     )
     blocks = []
@@ -325,15 +397,17 @@ def target_feature_annotations(locked):
             sys.exit(f"{name}: expected one locked version, found {versions}")
         version = versions[0]
         tree = [
-            m for line in run([
-                "cargo", "tree", "-p", f"{name}@{version}", "-e", "normal",
+            _parse_tree_row(line) for line in run([
+                "cargo", "tree", "--locked", "-p", f"{name}@{version}", "-e", "normal",
                 "--depth", "1", "--target", TARGET_TRIPLE, "-f", "{p}|{f}",
                 "--prefix", "none", "--color", "never",
             ]).splitlines()
-            if (m := _TREE_LINE.match(line.strip()))
+            if line
         ]
+        if not tree or tree[0].name != name or tree[0].version != version:
+            raise ValueError(f"cargo tree omitted the {name}@{version} annotation root")
         root, deps = tree[0], tree[1:]
-        features = sorted(f for f in root.group("feats").split(",") if f)
+        features = sorted(root.features)
         package = next(
             p for p in full["packages"] if p["name"] == name and p["version"] == version
         )
@@ -349,7 +423,7 @@ def target_feature_annotations(locked):
             dep_lib = next(t for t in dep["targets"] if "lib" in t["kind"])
             return f"@{CRATE_HUB}__{dep_name}-{dep_version}//:{dep_lib['name'].replace('-', '_')}"
 
-        dep_labels = sorted(lib_label(m.group("name"), m.group("ver")) for m in deps)
+        dep_labels = sorted(lib_label(row.name, row.version) for row in deps)
         if has_build:
             dep_labels.append(f"@{repo}//:build_script_build")
         crate_root = Path(lib["src_path"]).relative_to(Path(package["manifest_path"]).parent).as_posix()
@@ -588,8 +662,9 @@ def main():
         sys.exit("usage: gen_builds.py [--check]")
     check_only = sys.argv[1:] == ["--check"]
     meta = cargo_metadata()
-    opt_default, opt_levels = perf_opt_levels()
     members = {p["name"]: p for p in meta["packages"]}
+    validate_production_features(members)
+    opt_default, opt_levels = perf_opt_levels()
     dir_of = {
         p["name"]: Path(p["manifest_path"]).parent.relative_to(REPO).as_posix()
         for p in meta["packages"]
@@ -1627,4 +1702,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ValueError as error:
+        sys.exit(str(error))

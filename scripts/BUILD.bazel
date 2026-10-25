@@ -62,6 +62,16 @@ py_test(
 )
 
 py_test(
+    name = "gen_builds_test",
+    size = "small",
+    srcs = [
+        "bazel/gen_builds.py",
+        "test-gen-builds-default-alias.py",
+    ],
+    main = "test-gen-builds-default-alias.py",
+)
+
+py_test(
     name = "configure_ci_fleet_test",
     size = "small",
     srcs = ["test-configure-ci-fleet.py"],

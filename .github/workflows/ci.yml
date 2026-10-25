@@ -149,9 +149,6 @@ jobs:
       - name: Test Bazel workspace provenance
         run: python3 scripts/test-bazel-workspace-status.py
 
-      - name: Test Bazel default-feature alias collapse
-        run: python3 scripts/test-gen-builds-default-alias.py
-
       - name: Test the real-repository hot-path benchmark harness
         run: python3 scripts/test-bench-hot-paths.py
 
@@ -215,7 +212,7 @@ jobs:
 
       # Manifest edits that skip a gen_builds.py rerun leave stale BUILD
       # files; compare the committed files against a fresh generation.
-      - name: Check generated Bazel BUILD files are current
+      - name: Check generated Bazel BUILD files and production feature isolation
         run: bazel run //scripts:bazel/gen_builds.py -- --check
 
       - name: Test and check dev skill host copies
@@ -721,23 +718,21 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  # The production feature graph must exclude test-only surfaces. The
-  # feature-gated variants themselves (every `test-transport` library and the
-  # lean `--no-default-features` root, emitted by scripts/bazel/gen_builds.py)
-  # are ordinary `//...` targets that the Clippy job compiles.
+  # Feature gates remains a required check and exercises the parser and policy.
   feature-gates:
     name: Feature gates
     needs: gates
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # One graph walk per push. The release resolver repeats it on the tag it
-      # builds, since a release is dispatched without waiting on this run.
-      - name: Check the production feature graph
-        run: python3 scripts/check-production-feature-profile.py
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: ci-feature-gates
+
+      - name: Test generator feature policy and Cargo tree parsing
+        run: bazel test --config=ci --test_output=errors //scripts:gen_builds_test
 
   # The configuration users actually receive: the release build of
   # `tracedecay-cli`, whose default features are `production`. Nothing else on
