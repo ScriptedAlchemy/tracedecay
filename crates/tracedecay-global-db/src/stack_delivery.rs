@@ -2,19 +2,20 @@
 //!
 //! This is deliberately separate from the observability outbox.  A signal is
 //! an immutable provider/coordinator commitment; recipient rows are the
-//! delivery state machine that lets a daemon hand work to a host without
-//! mistaking the coordinator's acknowledgement for the host's receipt.
+//! delivery state machine.  A row stays `pending` until the authenticated host
+//! read that expands it records the receipt, so listing never settles.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params, params_from_iter};
 
 use crate::{RegisteredGlobalDb, registered::JobExit};
 
-/// Maximum number of rows in the `pending` state for one project.
+/// Maximum number of rows in the `pending` state for one recipient of one
+/// project.  A recipient that never reads cannot exhaust another's capacity.
 pub const MAX_GITHUB_STACK_ACTIVE_PENDING_V1: usize = 256;
-/// A single coordinator/host operation is bounded so a malformed caller
+/// A single read page or signal fanout is bounded so a malformed caller
 /// cannot turn one transaction into an unbounded fanout.
 pub const MAX_GITHUB_STACK_DELIVERY_BATCH_V1: usize = 256;
 /// Recipient identity and serialized signal fields are intentionally bounded
@@ -47,29 +48,12 @@ pub struct GitHubStackDeliveryRecordV1 {
     pub recipient: String,
 }
 
-/// Stable key used by coordinator acknowledgement and host receipt actions.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct GitHubStackDeliveryKeyV1 {
-    pub signal_id: String,
-    pub recipient: String,
-}
-
-impl From<&GitHubStackDeliveryRecordV1> for GitHubStackDeliveryKeyV1 {
-    fn from(value: &GitHubStackDeliveryRecordV1) -> Self {
-        Self {
-            signal_id: value.signal.signal_id.clone(),
-            recipient: value.recipient.clone(),
-        }
-    }
-}
-
 /// Durable per-recipient delivery state.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GitHubStackDeliveryStateV1 {
     Pending,
     Deferred,
-    HostPending,
     Settled,
     AuthorizationLost,
 }
@@ -79,7 +63,6 @@ impl GitHubStackDeliveryStateV1 {
         match self {
             Self::Pending => "pending",
             Self::Deferred => "deferred",
-            Self::HostPending => "host_pending",
             Self::Settled => "settled",
             Self::AuthorizationLost => "authorization_lost",
         }
@@ -89,7 +72,6 @@ impl GitHubStackDeliveryStateV1 {
         match value.as_str() {
             "pending" => Ok(Self::Pending),
             "deferred" => Ok(Self::Deferred),
-            "host_pending" => Ok(Self::HostPending),
             "settled" => Ok(Self::Settled),
             "authorization_lost" => Ok(Self::AuthorizationLost),
             _ => Err(format!("unknown GitHub stack delivery state '{value}'")),
@@ -134,14 +116,16 @@ impl GitHubStackSignalAppendOutcomeV1 {
     }
 }
 
-/// Additive schema owned by this module.  It is installed for existing stores
-/// as well as fresh stores; no previous registered schema is rewritten.
+/// Schema owned by this module, installed for existing stores as well as fresh
+/// ones.  Rows left in the retired `host_pending` staging state by an older
+/// daemon are returned to `pending` through the settlement guard, and the
+/// overflow they were holding back is promoted under the per-recipient bound.
+/// Every statement is a no-op once applied.
 pub(crate) async fn ensure_github_stack_delivery_schema(
     connection: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS github_stack_delivery_signals (
+    let schema = format!(
+        "CREATE TABLE IF NOT EXISTS github_stack_delivery_signals (
                 project_id TEXT NOT NULL,
                 signal_id TEXT NOT NULL,
                 scope_digest TEXT NOT NULL,
@@ -165,18 +149,16 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
                     REFERENCES github_stack_delivery_signals(project_id, signal_id)
                     ON DELETE RESTRICT
             ) STRICT;
-            CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_pending
+            DROP INDEX IF EXISTS idx_github_stack_delivery_pending;
+            DROP INDEX IF EXISTS idx_github_stack_delivery_host_pending;
+            CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_pending_recipient
                 ON github_stack_delivery_recipients(
-                    project_id, state, signal_id, recipient
+                    project_id, recipient, signal_id
                 ) WHERE state = 'pending';
             CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_deferred
                 ON github_stack_delivery_recipients(
-                    project_id, state, signal_id, recipient
+                    project_id, recipient, signal_id
                 ) WHERE state = 'deferred';
-            CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_host_pending
-                ON github_stack_delivery_recipients(
-                    project_id, state, signal_id, recipient
-                ) WHERE state = 'host_pending';
             CREATE TRIGGER IF NOT EXISTS github_stack_delivery_signals_immutable_update
             BEFORE UPDATE ON github_stack_delivery_signals
             BEGIN
@@ -195,13 +177,14 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
             BEGIN
                 SELECT RAISE(ABORT, 'GitHub stack delivery recipient identity is immutable');
             END;
-            CREATE TRIGGER IF NOT EXISTS github_stack_delivery_recipients_transition_guard
+            DROP TRIGGER IF EXISTS github_stack_delivery_recipients_transition_guard;
+            CREATE TRIGGER IF NOT EXISTS github_stack_delivery_recipients_settlement_guard
             BEFORE UPDATE ON github_stack_delivery_recipients
             WHEN NOT (
                 (OLD.state = NEW.state)
-                OR (OLD.state = 'pending' AND NEW.state IN ('host_pending', 'authorization_lost'))
+                OR (OLD.state = 'pending' AND NEW.state IN ('settled', 'authorization_lost'))
                 OR (OLD.state = 'deferred' AND NEW.state IN ('pending', 'authorization_lost'))
-                OR (OLD.state = 'host_pending' AND NEW.state = 'settled')
+                OR (OLD.state = 'host_pending' AND NEW.state = 'pending')
             )
             BEGIN
                 SELECT RAISE(ABORT, 'invalid GitHub stack delivery state transition');
@@ -210,12 +193,15 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
             BEFORE DELETE ON github_stack_delivery_recipients
             BEGIN
                 SELECT RAISE(ABORT, 'GitHub stack delivery recipient rows are retained');
-            END;",
-        )
-        .await
-        .map_err(|error| {
-            crate::global_db_operation_error("initialize GitHub stack delivery schema", error)
-        })
+            END;
+            UPDATE github_stack_delivery_recipients
+            SET state = 'pending' WHERE state = 'host_pending';
+            {promote}",
+        promote = promote_deferred_sql("")
+    );
+    connection.execute_batch(&schema).await.map_err(|error| {
+        crate::global_db_operation_error("initialize GitHub stack delivery schema", error)
+    })
 }
 
 fn validate_text(value: &str, field: &str) -> Result<(), String> {
@@ -319,43 +305,53 @@ async fn counts(executor: &impl QueryExecutor, project_id: &str) -> Result<(usiz
     ))
 }
 
-/// Promotes the oldest deferred rows whenever pending capacity becomes
-/// available.  The ordering is explicit so a restart cannot reorder a queue.
+/// Promotes each recipient's oldest deferred rows into whatever per-recipient
+/// pending capacity is free.  `scope_filter` narrows the candidates (`""`
+/// covers every project, as the schema migration needs).  The ordering is
+/// explicit so a restart cannot reorder a queue.
+fn promote_deferred_sql(scope_filter: &str) -> String {
+    format!(
+        "UPDATE github_stack_delivery_recipients
+         SET state = 'pending'
+         WHERE state = 'deferred' AND rowid IN (
+             SELECT ranked.rowid FROM (
+                 SELECT d.rowid AS rowid,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY d.project_id, d.recipient
+                            ORDER BY s.observed_at_micros ASC, d.signal_id ASC
+                        ) AS queue_rank,
+                        (SELECT COUNT(*) FROM github_stack_delivery_recipients AS p
+                         WHERE p.project_id = d.project_id
+                           AND p.recipient = d.recipient
+                           AND p.state = 'pending') AS pending_count
+                 FROM github_stack_delivery_recipients AS d
+                 JOIN github_stack_delivery_signals AS s
+                   ON s.project_id = d.project_id AND s.signal_id = d.signal_id
+                 WHERE d.state = 'deferred'{scope_filter}
+             ) AS ranked
+             WHERE ranked.queue_rank <= {MAX_GITHUB_STACK_ACTIVE_PENDING_V1} - ranked.pending_count
+         );"
+    )
+}
+
 #[tracing::instrument(
     name = "global_db.stack_delivery.queue.promote",
     level = "trace",
     skip_all
 )]
-async fn promote_deferred(executor: &impl Executor, project_id: &str) -> Result<usize, String> {
-    let pending = state_count(executor, project_id, GitHubStackDeliveryStateV1::Pending).await?;
-    let capacity = MAX_GITHUB_STACK_ACTIVE_PENDING_V1.saturating_sub(pending);
-    if capacity == 0 {
-        return Ok(0);
-    }
-    let limit = i64::try_from(capacity)
-        .map_err(|_| "GitHub stack capacity exceeds SQLite range".to_owned())?;
-    let promoted = executor
+async fn promote_deferred(
+    executor: &impl Executor,
+    project_id: &str,
+    recipient: &str,
+) -> Result<(), String> {
+    executor
         .execute(
-            "UPDATE github_stack_delivery_recipients
-             SET state = 'pending'
-             WHERE rowid IN (
-                 SELECT r.rowid
-                 FROM github_stack_delivery_recipients AS r
-                 JOIN github_stack_delivery_signals AS s
-                   ON s.project_id = r.project_id AND s.signal_id = r.signal_id
-                 WHERE r.project_id = ?1 AND r.state = 'deferred'
-                 ORDER BY s.observed_at_micros ASC, r.signal_id ASC, r.recipient ASC
-                 LIMIT ?2
-             )
-               AND state = 'deferred'",
-            params![project_id, limit],
+            &promote_deferred_sql(" AND d.project_id = ?1 AND d.recipient = ?2"),
+            params![project_id, recipient],
         )
         .await
         .map_err(|error| format!("promote deferred GitHub stack deliveries: {error}"))?;
-    let promoted = usize::try_from(promoted)
-        .map_err(|_| "promoted GitHub stack delivery count exceeds usize".to_owned())?;
-
-    Ok(promoted)
+    Ok(())
 }
 
 async fn lookup_signal(
@@ -380,144 +376,53 @@ async fn lookup_signal(
         .transpose()
 }
 
-#[derive(Clone, Debug)]
-struct DeliveryBatchRow {
-    watermark_id: Option<String>,
-    state: Option<GitHubStackDeliveryStateV1>,
-}
-
-#[tracing::instrument(
-    name = "global_db.stack_delivery.query.transition_batch",
-    level = "trace",
-    skip_all
-)]
-async fn read_delivery_batch(
+/// Recipients among `recipients` whose pending rows already fill their bound.
+async fn saturated_recipients(
     executor: &impl QueryExecutor,
     project_id: &str,
-    keys: &[GitHubStackDeliveryKeyV1],
-) -> Result<BTreeMap<GitHubStackDeliveryKeyV1, DeliveryBatchRow>, String> {
-    if keys.is_empty() {
-        return Ok(BTreeMap::new());
+    recipients: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, String> {
+    if recipients.is_empty() {
+        return Ok(BTreeSet::new());
     }
-    let values = (0..keys.len())
-        .map(|index| format!("(?{}, ?{})", index * 2 + 1, index * 2 + 2))
+    let placeholders = (0..recipients.len())
+        .map(|index| format!("?{}", index + 2))
         .collect::<Vec<_>>()
         .join(", ");
-    let project_parameter = keys.len() * 2 + 1;
-    let mut parameters = Vec::with_capacity(project_parameter);
-    for key in keys {
-        parameters.push(key.signal_id.as_str());
-        parameters.push(key.recipient.as_str());
-    }
+    let mut parameters = Vec::with_capacity(recipients.len() + 1);
     parameters.push(project_id);
+    parameters.extend(recipients.iter().map(String::as_str));
     let mut rows = executor
         .query(
             &format!(
-                "WITH requested(signal_id, recipient) AS (VALUES {values})
-                 SELECT requested.signal_id, requested.recipient, signal.watermark_id,
-                        binding.state
-                 FROM requested
-                 LEFT JOIN github_stack_delivery_signals AS signal
-                   ON signal.project_id = ?{project_parameter}
-                  AND signal.signal_id = requested.signal_id
-                 LEFT JOIN github_stack_delivery_recipients AS binding
-                   ON binding.project_id = ?{project_parameter}
-                  AND binding.signal_id = requested.signal_id
-                  AND binding.recipient = requested.recipient
-                 ORDER BY requested.signal_id, requested.recipient"
+                "SELECT recipient FROM github_stack_delivery_recipients
+                 WHERE project_id = ?1 AND state = 'pending'
+                   AND recipient IN ({placeholders})
+                 GROUP BY recipient
+                 HAVING COUNT(*) >= {MAX_GITHUB_STACK_ACTIVE_PENDING_V1}"
             ),
             params_from_iter(parameters),
         )
         .await
-        .map_err(|error| format!("query GitHub stack delivery batch: {error}"))?;
-    let mut batch = BTreeMap::new();
+        .map_err(|error| format!("query saturated GitHub stack recipients: {error}"))?;
+    let mut saturated = BTreeSet::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| format!("read GitHub stack delivery batch: {error}"))?
+        .map_err(|error| format!("read saturated GitHub stack recipient: {error}"))?
     {
-        let key = GitHubStackDeliveryKeyV1 {
-            signal_id: row
-                .get::<String>(0)
-                .map_err(|error| format!("decode GitHub stack batch signal id: {error}"))?,
-            recipient: row
-                .get::<String>(1)
-                .map_err(|error| format!("decode GitHub stack batch recipient: {error}"))?,
-        };
-        let state = row
-            .get::<Option<String>>(3)
-            .map_err(|error| format!("decode GitHub stack batch state: {error}"))?
-            .map(GitHubStackDeliveryStateV1::parse)
-            .transpose()?;
-        let value = DeliveryBatchRow {
-            watermark_id: row
-                .get::<Option<String>>(2)
-                .map_err(|error| format!("decode GitHub stack batch watermark: {error}"))?,
-            state,
-        };
-        if batch.insert(key, value).is_some() {
-            return Err("GitHub stack delivery batch repeated a requested key".to_owned());
-        }
+        saturated.insert(
+            row.get::<String>(0)
+                .map_err(|error| format!("decode saturated GitHub stack recipient: {error}"))?,
+        );
     }
-    Ok(batch)
-}
-
-#[tracing::instrument(
-    name = "global_db.stack_delivery.persist.transition_batch",
-    level = "trace",
-    skip_all
-)]
-async fn transition_pending_batch(
-    executor: &impl Executor,
-    project_id: &str,
-    keys: &[GitHubStackDeliveryKeyV1],
-) -> Result<(), String> {
-    if keys.is_empty() {
-        return Ok(());
-    }
-    let values = (0..keys.len())
-        .map(|index| format!("(?{}, ?{})", index * 2 + 1, index * 2 + 2))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let project_parameter = keys.len() * 2 + 1;
-    let mut parameters = Vec::with_capacity(project_parameter);
-    for key in keys {
-        parameters.push(key.signal_id.as_str());
-        parameters.push(key.recipient.as_str());
-    }
-    parameters.push(project_id);
-    let changed = executor
-        .execute(
-            &format!(
-                "WITH requested(signal_id, recipient) AS (VALUES {values})
-                 UPDATE github_stack_delivery_recipients
-                 SET state = 'host_pending'
-                 WHERE project_id = ?{project_parameter}
-                   AND state = 'pending'
-                   AND EXISTS (
-                       SELECT 1 FROM requested
-                       WHERE requested.signal_id =
-                                 github_stack_delivery_recipients.signal_id
-                         AND requested.recipient =
-                                 github_stack_delivery_recipients.recipient
-                   )"
-            ),
-            params_from_iter(parameters),
-        )
-        .await
-        .map_err(|error| format!("publish GitHub stack host delivery batch: {error}"))?;
-    if changed
-        != u64::try_from(keys.len())
-            .map_err(|_| "GitHub stack delivery batch exceeds SQLite range".to_owned())?
-    {
-        return Err("GitHub stack delivery batch changed unexpectedly".to_owned());
-    }
-    Ok(())
+    Ok(saturated)
 }
 
 impl RegisteredGlobalDb {
-    /// Appends one immutable signal and its recipient bindings.  Overflow
-    /// bindings are durably deferred and reported as typed saturation.
+    /// Appends one immutable signal and its recipient bindings.  A recipient
+    /// whose pending bound is full has its binding durably deferred, reported
+    /// as typed saturation.
     #[tracing::instrument(
         name = "global_db.stack_delivery.persist.append",
         level = "trace",
@@ -577,17 +482,14 @@ impl RegisteredGlobalDb {
                     )
                     .await
                     .map_err(|error| format!("append GitHub stack signal: {error}"))?;
-                // Repair a deferred queue left by an interrupted older writer before
-                // assigning this append's capacity.  The write job is serialized, so
-                // the quota decision is too.
-                promote_deferred(&transaction, &record.project_id).await?;
-                let (pending_before, _) = counts(&transaction, &record.project_id).await?;
-                let capacity = MAX_GITHUB_STACK_ACTIVE_PENDING_V1.saturating_sub(pending_before);
-                for (index, recipient) in recipient_set.iter().enumerate() {
-                    let state = if index < capacity {
-                        GitHubStackDeliveryStateV1::Pending
-                    } else {
+                // The write job is serialized, so the quota decision is too.
+                let saturated =
+                    saturated_recipients(&transaction, &record.project_id, &recipient_set).await?;
+                for recipient in &recipient_set {
+                    let state = if saturated.contains(recipient) {
                         GitHubStackDeliveryStateV1::Deferred
+                    } else {
+                        GitHubStackDeliveryStateV1::Pending
                     };
                     transaction
                         .execute(
@@ -624,7 +526,11 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    /// Returns a deterministic page of coordinator-pending deliveries.
+    /// Returns a deterministic page of one scope's `pending` deliveries,
+    /// oldest first, for one recipient or for every recipient.  Reading does
+    /// not change delivery state; only [`Self::acknowledge_github_stack_host_delivery`]
+    /// settles.  The page is the per-recipient pending bound, so one
+    /// recipient's whole backlog fits in it.
     #[tracing::instrument(
         name = "global_db.stack_delivery.query.pending_page",
         level = "trace",
@@ -633,33 +539,49 @@ impl RegisteredGlobalDb {
     pub async fn pending_github_stack_deliveries(
         &self,
         project_id: &str,
-        limit: usize,
+        scope_digest: &str,
+        recipient: Option<&str>,
     ) -> Result<Vec<GitHubStackDeliveryRecordV1>, String> {
         validate_text(project_id, "project id")?;
-        let limit = limit.min(MAX_GITHUB_STACK_ACTIVE_PENDING_V1);
-        if limit == 0 {
-            return Ok(Vec::new());
+        validate_text(scope_digest, "scope digest")?;
+        if let Some(recipient) = recipient {
+            validate_recipient(recipient)?;
         }
-        let limit = i64::try_from(limit)
+        let limit = i64::try_from(MAX_GITHUB_STACK_ACTIVE_PENDING_V1)
             .map_err(|_| "GitHub stack page exceeds SQLite range".to_owned())?;
         let snapshot = self
             .read_snapshot()
             .await
             .map_err(|error| format!("begin GitHub stack pending snapshot: {error}"))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT s.project_id, s.signal_id, s.scope_digest, s.repository_id,
-                        s.watermark_id, s.observed_at_micros, s.signal_json, r.recipient
-                 FROM github_stack_delivery_recipients AS r
-                 JOIN github_stack_delivery_signals AS s
-                   ON s.project_id = r.project_id AND s.signal_id = r.signal_id
-                 WHERE r.project_id = ?1 AND r.state = 'pending'
-                 ORDER BY s.observed_at_micros ASC, r.signal_id ASC, r.recipient ASC
-                 LIMIT ?2",
-                params![project_id, limit],
-            )
-            .await
-            .map_err(|error| format!("query GitHub stack pending deliveries: {error}"))?;
+        let select = "SELECT s.project_id, s.signal_id, s.scope_digest, s.repository_id,
+                            s.watermark_id, s.observed_at_micros, s.signal_json, r.recipient
+                     FROM github_stack_delivery_recipients AS r
+                     JOIN github_stack_delivery_signals AS s
+                       ON s.project_id = r.project_id AND s.signal_id = r.signal_id
+                     WHERE r.project_id = ?1 AND s.scope_digest = ?2
+                       AND r.state = 'pending'";
+        let order = format!(
+            "ORDER BY s.observed_at_micros ASC, r.signal_id ASC, r.recipient ASC LIMIT {limit}"
+        );
+        let mut rows = match recipient {
+            Some(recipient) => {
+                snapshot
+                    .query(
+                        &format!("{select} AND r.recipient = ?3 {order}"),
+                        params![project_id, scope_digest, recipient],
+                    )
+                    .await
+            }
+            None => {
+                snapshot
+                    .query(
+                        &format!("{select} {order}"),
+                        params![project_id, scope_digest],
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| format!("query GitHub stack pending deliveries: {error}"))?;
         let mut deliveries = Vec::new();
         while let Some(row) = rows
             .next()
@@ -675,113 +597,9 @@ impl RegisteredGlobalDb {
         Ok(deliveries)
     }
 
-    /// Publishes a host batch.  This is the durable handoff boundary: rows
-    /// become `host_pending`, never `settled`, before a host receipt arrives.
-    #[tracing::instrument(
-        name = "global_db.stack_delivery.persist.publish",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn publish_github_stack_deliveries(
-        &self,
-        project_id: &str,
-        watermark_id: &str,
-        deliveries: &[GitHubStackDeliveryKeyV1],
-    ) -> Result<(), String> {
-        self.transition_github_stack_deliveries_to_host_pending(
-            project_id,
-            watermark_id,
-            deliveries,
-        )
-        .await
-    }
-
-    /// Coordinator acknowledgement is intentionally not final host
-    /// settlement.  It is idempotent for both `pending` and `host_pending`.
-    #[tracing::instrument(
-        name = "global_db.stack_delivery.persist.acknowledge",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn acknowledge_github_stack_deliveries(
-        &self,
-        project_id: &str,
-        watermark_id: &str,
-        deliveries: &[GitHubStackDeliveryKeyV1],
-    ) -> Result<(), String> {
-        self.transition_github_stack_deliveries_to_host_pending(
-            project_id,
-            watermark_id,
-            deliveries,
-        )
-        .await
-    }
-
-    async fn transition_github_stack_deliveries_to_host_pending(
-        &self,
-        project_id: &str,
-        watermark_id: &str,
-        deliveries: &[GitHubStackDeliveryKeyV1],
-    ) -> Result<(), String> {
-        validate_text(project_id, "project id")?;
-        validate_text(watermark_id, "watermark id")?;
-        if deliveries.len() > MAX_GITHUB_STACK_DELIVERY_BATCH_V1 {
-            return Err(format!(
-                "GitHub stack delivery batch exceeds {} rows",
-                MAX_GITHUB_STACK_DELIVERY_BATCH_V1
-            ));
-        }
-        let keys = deliveries.iter().collect::<BTreeSet<_>>();
-        let keys = keys.into_iter().cloned().collect::<Vec<_>>();
-        for key in &keys {
-            validate_text(&key.signal_id, "signal id")?;
-            validate_recipient(&key.recipient)?;
-        }
-        let project_id = project_id.to_owned();
-        let watermark_id = watermark_id.to_owned();
-        self.transact_or(
-            |error| format!("GitHub stack host publication: {error}"),
-            async move |transaction| {
-                let batch = read_delivery_batch(&transaction, &project_id, &keys).await?;
-                let mut pending = Vec::with_capacity(keys.len());
-                for key in &keys {
-                    let row = batch
-                        .get(key)
-                        .ok_or_else(|| "GitHub stack delivery batch is incomplete".to_owned())?;
-                    let signal_watermark = row
-                        .watermark_id
-                        .as_deref()
-                        .ok_or_else(|| "GitHub stack delivery signal is unavailable".to_owned())?;
-                    if signal_watermark != watermark_id {
-                        return Err("GitHub stack delivery watermark mismatch".to_owned());
-                    }
-                    let state = row.state.ok_or_else(|| {
-                        "GitHub stack recipient binding is unavailable".to_owned()
-                    })?;
-                    match state {
-                        GitHubStackDeliveryStateV1::Pending => {
-                            pending.push(key.clone());
-                        }
-                        GitHubStackDeliveryStateV1::HostPending => {}
-                        GitHubStackDeliveryStateV1::Deferred => {
-                            return Err("GitHub stack delivery is deferred".to_owned());
-                        }
-                        GitHubStackDeliveryStateV1::Settled => {}
-                        GitHubStackDeliveryStateV1::AuthorizationLost => {
-                            return Err("GitHub stack delivery authorization was lost".to_owned());
-                        }
-                    }
-                }
-                transition_pending_batch(&transaction, &project_id, &pending).await?;
-                promote_deferred(&transaction, &project_id).await?;
-                Ok(())
-            },
-        )
-        .await
-    }
-
-    /// Final host receipt.  Replaying a receipt after settlement is harmless;
-    /// settling a row that never reached the host is rejected.
+    /// Host receipt, recorded by the authenticated read that expanded the
+    /// signal.  Replaying it after settlement is harmless; settling a row that
+    /// is deferred or lost its authorization is rejected.
     #[tracing::instrument(
         name = "global_db.stack_delivery.persist.settle",
         level = "trace",
@@ -824,13 +642,13 @@ impl RegisteredGlobalDb {
                         .map_err(|error| format!("decode GitHub stack host state: {error}"))?,
                 )?;
                 match state {
-                    GitHubStackDeliveryStateV1::HostPending => {
+                    GitHubStackDeliveryStateV1::Pending => {
                         transaction
                             .execute(
                                 "UPDATE github_stack_delivery_recipients
                                  SET state = 'settled'
                                  WHERE project_id = ?1 AND signal_id = ?2 AND recipient = ?3
-                                   AND state = 'host_pending'",
+                                   AND state = 'pending'",
                                 params![
                                     project_id.as_str(),
                                     signal_id.as_str(),
@@ -843,11 +661,6 @@ impl RegisteredGlobalDb {
                             })?;
                     }
                     GitHubStackDeliveryStateV1::Settled => {}
-                    GitHubStackDeliveryStateV1::Pending => {
-                        return Err(
-                            "GitHub stack delivery is still pending host publication".to_owned()
-                        );
-                    }
                     GitHubStackDeliveryStateV1::Deferred => {
                         return Err("GitHub stack delivery is deferred".to_owned());
                     }
@@ -855,7 +668,7 @@ impl RegisteredGlobalDb {
                         return Err("GitHub stack delivery authorization was lost".to_owned());
                     }
                 }
-                promote_deferred(&transaction, &project_id).await?;
+                promote_deferred(&transaction, &project_id, &recipient).await?;
                 Ok(())
             },
         )
@@ -916,7 +729,7 @@ impl RegisteredGlobalDb {
                         return Err("GitHub stack delivery is no longer authorizable".to_owned());
                     }
                 }
-                promote_deferred(&transaction, &project_id).await?;
+                promote_deferred(&transaction, &project_id, &recipient).await?;
                 Ok(())
             },
         )
@@ -937,106 +750,6 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| format!("begin GitHub stack signal lookup: {error}"))?;
         lookup_signal(&snapshot, project_id, signal_id).await
-    }
-
-    /// Reads the host-pending handoff page without exposing settled or
-    /// authorization-lost bindings.
-    #[tracing::instrument(
-        name = "global_db.stack_delivery.query.host_pending_page",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn pending_host_github_stack_deliveries(
-        &self,
-        project_id: &str,
-        scope_digest: &str,
-        limit: usize,
-    ) -> Result<Vec<GitHubStackDeliveryRecordV1>, String> {
-        validate_text(project_id, "project id")?;
-        validate_text(scope_digest, "scope digest")?;
-        let limit = limit.min(MAX_GITHUB_STACK_DELIVERY_BATCH_V1);
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let limit = i64::try_from(limit)
-            .map_err(|_| "GitHub stack page exceeds SQLite range".to_owned())?;
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("begin GitHub stack host-pending snapshot: {error}"))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT s.project_id, s.signal_id, s.scope_digest, s.repository_id,
-                        s.watermark_id, s.observed_at_micros, s.signal_json, r.recipient
-                 FROM github_stack_delivery_recipients AS r
-                 JOIN github_stack_delivery_signals AS s
-                   ON s.project_id = r.project_id AND s.signal_id = r.signal_id
-                 WHERE r.project_id = ?1 AND s.scope_digest = ?2
-                   AND r.state = 'host_pending'
-                 ORDER BY s.observed_at_micros ASC, r.signal_id ASC, r.recipient ASC
-                 LIMIT ?3",
-                params![project_id, scope_digest, limit],
-            )
-            .await
-            .map_err(|error| format!("query GitHub stack host-pending deliveries: {error}"))?;
-        let mut deliveries = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| format!("read GitHub stack host-pending delivery: {error}"))?
-        {
-            let signal = decode_signal_row(&row)?;
-            let recipient = row
-                .get::<String>(7)
-                .map_err(|error| format!("decode GitHub stack host-pending recipient: {error}"))?;
-            deliveries.push(GitHubStackDeliveryRecordV1 { signal, recipient });
-        }
-        Ok(deliveries)
-    }
-
-    /// Selects the oldest host-pending signal for one exact recipient and
-    /// scope. Authorization predicates are applied before the deterministic
-    /// limit so another recipient's backlog cannot hide an eligible signal.
-    pub async fn oldest_host_pending_github_stack_delivery(
-        &self,
-        project_id: &str,
-        scope_digest: &str,
-        recipient: &str,
-    ) -> Result<Option<GitHubStackDeliveryRecordV1>, String> {
-        validate_text(project_id, "project id")?;
-        validate_text(scope_digest, "scope digest")?;
-        validate_recipient(recipient)?;
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("begin GitHub stack recipient-pending snapshot: {error}"))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT s.project_id, s.signal_id, s.scope_digest, s.repository_id,
-                        s.watermark_id, s.observed_at_micros, s.signal_json, r.recipient
-                 FROM github_stack_delivery_recipients AS r
-                 JOIN github_stack_delivery_signals AS s
-                   ON s.project_id = r.project_id AND s.signal_id = r.signal_id
-                 WHERE r.project_id = ?1 AND s.scope_digest = ?2
-                   AND r.recipient = ?3 AND r.state = 'host_pending'
-                 ORDER BY s.observed_at_micros ASC, r.signal_id ASC
-                 LIMIT 1",
-                params![project_id, scope_digest, recipient],
-            )
-            .await
-            .map_err(|error| format!("query GitHub stack recipient-pending delivery: {error}"))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| format!("read GitHub stack recipient-pending delivery: {error}"))?
-        else {
-            return Ok(None);
-        };
-        let signal = decode_signal_row(&row)?;
-        let recipient = row
-            .get::<String>(7)
-            .map_err(|error| format!("decode GitHub stack recipient-pending recipient: {error}"))?;
-        Ok(Some(GitHubStackDeliveryRecordV1 { signal, recipient }))
     }
 
     /// Returns one recipient's durable binding state.
@@ -1074,35 +787,9 @@ impl RegisteredGlobalDb {
 }
 
 #[cfg(test)]
-mod batch_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, Rows};
-
-    use super::{
-        GitHubStackDeliveryKeyV1, GitHubStackDeliveryStateV1, GitHubStackSignalRecordV1,
-        read_delivery_batch, state_count_sql,
-    };
+mod plan_tests {
+    use super::{GitHubStackDeliveryStateV1, state_count_sql};
     use crate::tests::harness::RegisteredGlobalDbHarness;
-
-    struct CountingQueryExecutor<'a, T> {
-        inner: &'a T,
-        queries: AtomicUsize,
-    }
-
-    impl<T: QueryExecutor> QueryExecutor for CountingQueryExecutor<'_, T> {
-        async fn query<P>(
-            &self,
-            sql: &str,
-            params: P,
-        ) -> tracedecay_runtime_core::db::engine::Result<Rows>
-        where
-            P: IntoParams,
-        {
-            self.queries.fetch_add(1, Ordering::Relaxed);
-            self.inner.query(sql, params).await
-        }
-    }
 
     #[asupersync::test]
     async fn state_counts_search_their_partial_indexes() {
@@ -1111,7 +798,7 @@ mod batch_tests {
         for (state, index) in [
             (
                 GitHubStackDeliveryStateV1::Pending,
-                "idx_github_stack_delivery_pending",
+                "idx_github_stack_delivery_pending_recipient",
             ),
             (
                 GitHubStackDeliveryStateV1::Deferred,
@@ -1135,49 +822,5 @@ mod batch_tests {
                 "{sql}\nmust search {index}: {plan:?}"
             );
         }
-    }
-
-    #[asupersync::test]
-    async fn delivery_batch_reads_all_keys_in_one_query() {
-        let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-batch-read").await;
-        let record = GitHubStackSignalRecordV1 {
-            project_id: "project.github-stack-batch".to_owned(),
-            signal_id: "signal.github-stack-batch".to_owned(),
-            scope_digest: "sha256:github-stack-batch-scope".to_owned(),
-            repository_id: "repository.github-stack-batch".to_owned(),
-            watermark_id: "watermark.github-stack-batch".to_owned(),
-            observed_at_micros: 10,
-            signal_json: "{}".to_owned(),
-        };
-        let recipients = vec!["actor.cursor".to_owned(), "actor.claude".to_owned()];
-        harness
-            .registered
-            .append_github_stack_signal(record.clone(), recipients.clone())
-            .await
-            .unwrap();
-        let keys = recipients
-            .into_iter()
-            .map(|recipient| GitHubStackDeliveryKeyV1 {
-                signal_id: record.signal_id.clone(),
-                recipient,
-            })
-            .collect::<Vec<_>>();
-        let snapshot = harness.registered.read_snapshot().await.unwrap();
-        let counted = CountingQueryExecutor {
-            inner: &snapshot,
-            queries: AtomicUsize::new(0),
-        };
-
-        let states = read_delivery_batch(&counted, &record.project_id, &keys)
-            .await
-            .unwrap();
-
-        assert_eq!(states.len(), keys.len());
-        assert!(
-            states
-                .values()
-                .all(|row| row.state == Some(GitHubStackDeliveryStateV1::Pending))
-        );
-        assert_eq!(counted.queries.load(Ordering::Relaxed), 1);
     }
 }

@@ -29,6 +29,11 @@ use super::verified_sealed_segments::{SealedSegmentFingerprintV1, VerifiedSealed
 
 const SEAL_READ_CHECK_BYTES: usize = 64 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static SEGMENT_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn classify_sealed_generation_decode_error(
     error: CodeIndexProductionErrorV1,
     sealed_state_digest: &ManifestDigest,
@@ -436,6 +441,7 @@ fn with_verified_segments<T>(
     ) -> Result<T, SealedCodeGraphRowsError>,
 ) -> Result<T, GraphDbError> {
     let mut interruption = None;
+    let mut segments = GraphSegmentReadPassV1::new(&routes.segment_roots);
     let mut read_segment = |request: SealedGenerationSegmentReadV1<'_>,
                             buffer: &mut Vec<u8>|
      -> Result<(), CodeIndexProductionErrorV1> {
@@ -448,13 +454,16 @@ fn with_verified_segments<T>(
             }
             return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
         }
-        read_partitioned_segment(
-            select_partitioned_segment_root(&routes.segment_roots, request)?,
-            request,
-            buffer,
-        )
+        segments.read(request, buffer)
     };
     let built = build(&mut read_segment);
+    tracing::info!(
+        event = "code_graph_segment_read_pass",
+        segment_open_attempts = segments.open_attempts,
+        segment_reads = segments.reads,
+        "finished the pass-scoped sealed graph segment reader"
+    );
+    drop(segments);
     if let Some(interruption) = interruption {
         return Err(interruption);
     }
@@ -775,12 +784,53 @@ struct PinnedPartitionedSegmentV1 {
     file: File,
 }
 
+struct GraphSegmentReadPassV1<'a> {
+    roots: &'a [PathBuf],
+    pinned: Option<PinnedPartitionedSegmentV1>,
+    open_attempts: usize,
+    reads: usize,
+}
+
+impl<'a> GraphSegmentReadPassV1<'a> {
+    fn new(roots: &'a [PathBuf]) -> Self {
+        Self {
+            roots,
+            pinned: None,
+            open_attempts: 0,
+            reads: 0,
+        }
+    }
+
+    fn read(
+        &mut self,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let (digest, _, _, _) = partitioned_segment_request(request)?;
+        if !self
+            .pinned
+            .as_ref()
+            .is_some_and(|pinned| pinned.digest == digest)
+        {
+            self.pinned = None;
+            let root = select_partitioned_segment_root(self.roots, request)?;
+            self.open_attempts += 1;
+            self.pinned = Some(open_partitioned_segment(root, request)?);
+        }
+        let pinned = self.pinned.as_mut().ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "sealed graph segment handle was not pinned".to_owned(),
+            )
+        })?;
+        self.reads += 1;
+        read_pinned_partitioned_segment(pinned, request, buffer)
+    }
+}
+
 fn partitioned_segment_request(
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
 ) -> Result<(&str, u64, u64, u64), tracedecay_code_index::production::CodeIndexProductionErrorV1> {
-    use tracedecay_code_index::production::{
-        CodeIndexProductionErrorV1, SealedGenerationSegmentReadV1,
-    };
+    use tracedecay_code_index::production::SealedGenerationSegmentReadV1;
     let (digest, expected_size, offset, length) = match request {
         SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
             (digest.as_str(), size_bytes, 0, size_bytes)
@@ -830,6 +880,7 @@ fn select_partitioned_segment_root<'a>(
     ))
 }
 
+#[tracing::instrument(name = "code_index.graph.segment.open", level = "trace", skip_all)]
 fn open_partitioned_segment(
     segments_root: &std::path::Path,
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
@@ -852,6 +903,8 @@ fn open_partitioned_segment(
             "sealed generation segment identity does not match its manifest".to_owned(),
         ));
     }
+    #[cfg(test)]
+    SEGMENT_OPENS.with(|opens| opens.set(opens.get() + 1));
     let file = File::open(&path).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation segment cannot be opened: {error}"
@@ -892,7 +945,17 @@ fn read_pinned_partitioned_segment(
     let (digest, expected_size, offset, length) = partitioned_segment_request(request)?;
     if digest != pinned.digest || expected_size != pinned.size_bytes {
         return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation evidence pages do not share one segment identity".to_owned(),
+            "sealed generation page does not match its pinned segment identity".to_owned(),
+        ));
+    }
+    let metadata = pinned.file.metadata().map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment metadata cannot be read: {error}"
+        ))
+    })?;
+    if !metadata.is_file() || metadata.len() != expected_size {
+        return Err(CodeIndexProductionErrorV1::Contract(
+            "sealed generation segment identity does not match its manifest".to_owned(),
         ));
     }
     let length = usize::try_from(length).map_err(|_| {
@@ -906,46 +969,6 @@ fn read_pinned_partitioned_segment(
         .file
         .seek(SeekFrom::Start(offset))
         .and_then(|_| pinned.file.read_exact(buffer))
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment read failed: {error}"
-            ))
-        })
-}
-
-fn read_partitioned_segment(
-    segments_root: &std::path::Path,
-    request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
-    buffer: &mut Vec<u8>,
-) -> Result<(), tracedecay_code_index::production::CodeIndexProductionErrorV1> {
-    use tracedecay_code_index::production::CodeIndexProductionErrorV1;
-    let (digest, expected_size, offset, length) = partitioned_segment_request(request)?;
-    let digest_hex = sha256_hex_suffix(digest).ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
-    })?;
-    let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
-    let metadata = segment_path.symlink_metadata().map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation segment is unavailable: {error}"
-        ))
-    })?;
-    if !metadata.file_type().is_file() || metadata.len() != expected_size {
-        return Err(CodeIndexProductionErrorV1::Contract(
-            "sealed generation segment identity does not match its manifest".to_owned(),
-        ));
-    }
-    let length = usize::try_from(length).map_err(|_| {
-        CodeIndexProductionErrorV1::Contract(
-            "sealed generation segment range exceeds addressable memory".to_owned(),
-        )
-    })?;
-    buffer.clear();
-    buffer.resize(length, 0);
-    File::open(segment_path)
-        .and_then(|mut file| {
-            file.seek(SeekFrom::Start(offset))?;
-            file.read_exact(buffer)
-        })
         .map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation segment read failed: {error}"
@@ -1501,11 +1524,15 @@ mod tests {
 
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
+    use tracedecay_code_index::graph_projection::build_sealed_code_graph_rows;
+    use tracedecay_code_index::production::SealedGenerationSegmentReadV1;
     use tracedecay_code_index_retention::code_index_generations::{
         DurablePublicationPointerV1, acquire_code_generation_store_lock,
         code_generation_segments_root,
     };
-    use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId, sha256_hex_suffix};
+    use tracedecay_domain::{
+        CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, sha256_hex_suffix,
+    };
     use tracedecay_graph_db::{
         GraphDbError, GraphGenerationManifestProvider, GraphGenerationRowSpill, GraphNamespace,
         GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
@@ -1517,11 +1544,11 @@ mod tests {
     };
 
     use super::{
-        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, VerifiedSealedSegmentsV1,
-        read_verified_seal_manifest, spill_sealed_generation_graph_from_roots,
-        validate_sealed_generation_metadata, verify_checked_seal,
-        verify_checked_seal_bundle_with_evidence_barrier,
-        verify_sealed_generation_source_from_roots,
+        DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, SEGMENT_OPENS, SealRoutes,
+        VerifiedSealedSegmentsV1, open_seal_from_roots, read_verified_seal_manifest,
+        spill_sealed_generation_graph_from_roots, validate_sealed_generation_metadata,
+        verify_checked_seal, verify_checked_seal_bundle_with_evidence_barrier,
+        verify_sealed_generation_source_from_roots, with_verified_segments,
     };
     use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
@@ -2084,6 +2111,307 @@ mod tests {
     }
 
     const PARTITIONED_FIXTURE_FILES: [&str; 3] = ["lib", "alpha", "beta"];
+
+    #[test]
+    fn sealed_graph_build_preserves_rows_and_opens_each_distinct_page_segment_once() {
+        let fixture = partitioned_seal_fixture("graph-page-opens");
+        let seal = open_seal_from_roots(
+            &fixture.scope_root.join("code-generations-v1"),
+            fixture.pool_manifest.parent().unwrap(),
+            &SealedGraphStateDigest::try_from(format!("sha256:{}", fixture.digest)).unwrap(),
+            &fixture.generation,
+            &|| Ok(()),
+            "test.graph-pages",
+        )
+        .unwrap();
+        let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+            GraphNamespace::new("namespace.page-opens").unwrap(),
+        )
+        .unwrap();
+        let revision = GraphProjectorRevision::try_from(
+            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+        )
+        .unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fixture.pool_manifest).unwrap()).unwrap();
+        let pages = manifest["generation"]["code_graph_pages"]
+            .as_array()
+            .unwrap();
+        let distinct = pages
+            .iter()
+            .map(|page| page["page_digest"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert_eq!(pages.len(), PARTITIONED_FIXTURE_FILES.len());
+        let build =
+            |read: &mut tracedecay_code_index::production::SealedGenerationSegmentReaderV1<'_>,
+             name| {
+                build_sealed_code_graph_rows(
+                    projection.clone(),
+                    &seal.source,
+                    read,
+                    &revision,
+                    GraphGenerationRowSpill::create(
+                        fixture._temporary.path().join(name),
+                        projection.clone(),
+                    )
+                    .unwrap(),
+                    &mut |_| Ok(()),
+                    &|| Ok(()),
+                )
+            };
+        let reference = build(
+            &mut |request, buffer| {
+                let SealedGenerationSegmentReadV1::Whole { digest, .. } = request else {
+                    panic!("current graph pages are whole segments");
+                };
+                *buffer = std::fs::read(fixture.segments_root.join(format!(
+                    "segment-{}.json",
+                    sha256_hex_suffix(digest.as_str()).unwrap()
+                )))
+                .unwrap();
+                Ok(())
+            },
+            "reference",
+        )
+        .unwrap();
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let rows = with_verified_segments(
+            &seal.sealed_state_digest,
+            &seal.routes,
+            &|| Ok(()),
+            |read| build(read, "pinned"),
+        )
+        .unwrap();
+        assert_eq!(rows.row_counts(), (10, 9));
+        assert_eq!(
+            rows.expected_recovered_digest(),
+            reference.expected_recovered_digest()
+        );
+        assert_eq!(
+            serde_json::to_vec(&rows.materialize(&|| Ok(())).unwrap()).unwrap(),
+            serde_json::to_vec(&reference.materialize(&|| Ok(())).unwrap()).unwrap(),
+        );
+        let opens = SEGMENT_OPENS.with(|opens| opens.get());
+        println!(
+            "sealed graph build: pages={}, distinct_segments={distinct}, opens={opens}, rows={:?}",
+            pages.len(),
+            rows.row_counts()
+        );
+        assert_eq!(opens, distinct);
+        let page_path = fixture.segments_root.join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(pages[0]["page_digest"].as_str().unwrap()).unwrap()
+        ));
+        let mut corrupt = std::fs::read(&page_path).unwrap();
+        corrupt[0] ^= 1;
+        std::fs::write(&page_path, corrupt).unwrap();
+        assert!(matches!(
+            with_verified_segments(
+                &seal.sealed_state_digest,
+                &seal.routes,
+                &|| Ok(()),
+                |read| build(read, "tampered"),
+            ),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn graph_segment_pass_pins_bytes_and_preserves_interruption_precedence() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated segment bytes";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let size_bytes = bytes.len() as u64;
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let seal_path = temporary.path().join("seal");
+        std::fs::write(&seal_path, b"live").unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![seal_path.clone()],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes,
+        };
+        let read_after_unlink = |check: &dyn Fn() -> Result<(), GraphDbError>| {
+            with_verified_segments(&digest, &routes, check, |read| {
+                let mut first = Vec::new();
+                read(request, &mut first)?;
+                std::fs::remove_file(&path).unwrap();
+                std::fs::write(&path, vec![b'x'; bytes.len()]).unwrap();
+                let mut second = Vec::new();
+                read(request, &mut second)?;
+                assert_eq!(first, bytes);
+                assert_eq!(second, bytes);
+                Ok(())
+            })
+        };
+        read_after_unlink(&|| Ok(())).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            with_verified_segments(&digest, &routes, &|| Ok(()), |read| {
+                read(request, &mut Vec::new())?;
+                Ok(())
+            }),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            std::fs::write(&path, bytes).unwrap();
+            let checks = AtomicUsize::new(0);
+            assert_eq!(
+                read_after_unlink(&|| {
+                    if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok(())
+                    } else {
+                        Err(interruption.clone())
+                    }
+                })
+                .unwrap_err(),
+                interruption
+            );
+        }
+        assert!(matches!(
+            with_verified_segments(&digest, &routes, &|| Ok(()), |read| {
+                read(request, &mut Vec::new())?;
+                read(
+                    SealedGenerationSegmentReadV1::Whole {
+                        digest: &digest,
+                        size_bytes: size_bytes + 1,
+                    },
+                    &mut Vec::new(),
+                )?;
+                Ok(())
+            }),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let changed = with_verified_segments(&digest, &routes, &|| Ok(()), |read| {
+            read(request, &mut Vec::new())?;
+            std::fs::write(&path, vec![b'x'; bytes.len()]).unwrap();
+            let mut changed = Vec::new();
+            read(request, &mut changed)?;
+            Ok(changed)
+        })
+        .unwrap();
+        let observed = ManifestDigest::from_sha256_bytes(&Sha256::digest(&changed)).unwrap();
+        assert_ne!(
+            observed, digest,
+            "a pinned handle must not cache verified content"
+        );
+        assert_eq!(changed, vec![b'x'; bytes.len()]);
+        for length in [size_bytes - 1, size_bytes + 1] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(matches!(
+                with_verified_segments(&digest, &routes, &|| Ok(()), |read| {
+                    read(request, &mut Vec::new())?;
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_len(length)
+                        .unwrap();
+                    read(request, &mut Vec::new())?;
+                    Ok(())
+                }),
+                Err(GraphDbError::Corrupt { .. })
+            ));
+        }
+        std::fs::remove_file(&seal_path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            with_verified_segments(&digest, &routes, &|| Ok(()), |read| {
+                read(request, &mut Vec::new())?;
+                Ok(())
+            })
+            .unwrap_err(),
+            GraphDbError::SealSuperseded
+        );
+    }
+
+    #[test]
+    fn graph_build_segment_ranges_open_once_per_pass() {
+        let fixture = partitioned_seal_fixture("range-opens");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fixture.pool_manifest).unwrap()).unwrap();
+        let evidence = &manifest["generation"]["generation_evidence"];
+        let digest = ManifestDigest::new(evidence["segment_digest"].as_str().unwrap()).unwrap();
+        let size_bytes = evidence["segment_size_bytes"].as_u64().unwrap();
+        let path = fixture.segments_root.join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        let expected = std::fs::read(&path).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![fixture.pool_manifest.clone()],
+            segment_roots: vec![fixture.segments_root.clone()],
+        };
+        let sealed_digest = ManifestDigest::new(format!("sha256:{}", fixture.digest)).unwrap();
+        let page_bytes = size_bytes.div_ceil(16);
+        let read_pass = || {
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let started = std::time::Instant::now();
+            let mut reads = 0;
+            let restored =
+                with_verified_segments(&sealed_digest, &routes, &|| Ok(()), |read_segment| {
+                    let mut restored = Vec::new();
+                    let mut buffer = Vec::new();
+                    let mut offset = 0;
+                    while offset < size_bytes {
+                        let length = page_bytes.min(size_bytes - offset);
+                        read_segment(
+                            SealedGenerationSegmentReadV1::Range {
+                                digest: &digest,
+                                size_bytes,
+                                offset,
+                                length,
+                            },
+                            &mut buffer,
+                        )?;
+                        restored.extend_from_slice(&buffer);
+                        offset += length;
+                        reads += 1;
+                    }
+                    Ok(restored)
+                })
+                .unwrap();
+            assert_eq!(restored, expected);
+            assert_eq!(
+                ManifestDigest::from_sha256_bytes(&Sha256::digest(&restored)).unwrap(),
+                digest
+            );
+            let opens = SEGMENT_OPENS.with(|opens| opens.get());
+            println!(
+                "segment range pass: reads={reads}, segments=1, opens={opens}, bytes={}, elapsed={:?}",
+                restored.len(),
+                started.elapsed()
+            );
+            assert!(reads > 1);
+            assert_eq!(opens, 1, "range reads must reuse the segment's open handle");
+        };
+        read_pass();
+        read_pass();
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            with_verified_segments(&sealed_digest, &routes, &|| Ok(()), |read_segment| {
+                read_segment(
+                    SealedGenerationSegmentReadV1::Range {
+                        digest: &digest,
+                        size_bytes,
+                        offset: 0,
+                        length: page_bytes,
+                    },
+                    &mut Vec::new(),
+                )?;
+                Ok(())
+            }),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+    }
 
     fn partitioned_seal_fixture(label: &str) -> PartitionedSealFixture {
         let temporary = TempDir::new().unwrap();
