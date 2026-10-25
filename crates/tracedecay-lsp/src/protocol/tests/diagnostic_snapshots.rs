@@ -17,7 +17,7 @@ use crate::gateway::{
 };
 use crate::overlay::{
     CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
-    DiagnosticSnapshotAdapter, OverlaySnapshot,
+    DiagnosticSnapshotAdapter, MAX_DIAGNOSTIC_OPERATIONS, OverlaySnapshot,
 };
 use crate::protocol::{DaemonLspProtocolSession, MAX_QUEUED_OUTBOUND_MESSAGES};
 use crate::provider::{
@@ -233,6 +233,10 @@ struct Harness {
 
 impl Harness {
     fn new(push: bool) -> Self {
+        Self::with_refresh_support(push, false)
+    }
+
+    fn with_refresh_support(push: bool, refresh_support: bool) -> Self {
         let runtime = Arc::new(ControlledRuntime::default());
         let authority = Arc::new(DiagnosticAuthority::default());
         let provider = ControlledDiagnosticPort {
@@ -279,6 +283,9 @@ impl Harness {
         if push {
             capabilities["textDocument"]["publishDiagnostics"] = json!({ "versionSupport": true });
         }
+        if refresh_support {
+            capabilities["workspace"]["diagnostic"] = json!({ "refreshSupport": true });
+        }
         let initialized = harness.request(
             "initialize",
             json!({ "rootUri": "file:///root", "capabilities": capabilities }),
@@ -293,6 +300,15 @@ impl Harness {
                 .capabilities()
                 .supports_publish_diagnostics,
             push,
+        );
+        assert_eq!(
+            harness
+                .session
+                .lifecycle
+                .gateway
+                .capabilities()
+                .supports_workspace_diagnostic_refresh,
+            refresh_support,
         );
         harness
     }
@@ -597,6 +613,92 @@ fn pending_authority_validation_is_not_consumed_by_background_publication() {
         harness.authority.generation.load(Ordering::SeqCst),
         1,
         "validation must not execute a new analyzer refresh"
+    );
+}
+
+#[test]
+fn settled_pull_validations_release_capacity_without_client_retries() {
+    let mut harness = Harness::with_refresh_support(true, true);
+    let mut reports = Vec::new();
+    for index in 0..MAX_DIAGNOSTIC_OPERATIONS {
+        let uri = format!("file:///root/retained-{index:03}.rs");
+        assert_eq!(harness.pull_document(&uri, None)["error"]["code"], -32802);
+        harness.runtime.complete_next();
+        let result_id = assert_full(&harness.pull_document(&uri, None), index as u64 + 1, 0);
+        reports.push((uri, result_id));
+    }
+    assert_eq!(harness.runtime.started(), reports.len());
+    harness
+        .authority
+        .validation_pending
+        .store(true, Ordering::SeqCst);
+    for (uri, result_id) in &reports {
+        let pending = harness.pull_document(uri, Some(result_id));
+        assert_eq!(pending["error"]["code"], -32802, "{pending}");
+        assert!(pending["error"]["data"]["operationId"].as_str().is_some());
+        assert!(pending.get("result").is_none());
+    }
+    assert_eq!(harness.runtime.started(), reports.len() * 2);
+
+    let fresh_uri = "file:///root/fresh.rs";
+    let saturated = harness.pull_document(fresh_uri, None);
+    assert_eq!(saturated["error"]["code"], -32802, "{saturated}");
+    assert_eq!(
+        saturated["error"]["data"]["failureClass"],
+        "diagnostic-capacity"
+    );
+    assert_eq!(harness.runtime.started(), reports.len() * 2);
+
+    harness
+        .authority
+        .validation_pending
+        .store(false, Ordering::SeqCst);
+    for _ in &reports {
+        harness.runtime.complete_next();
+    }
+    harness.session.flush_due(harness.now_ms);
+    assert!(
+        harness.messages().is_empty(),
+        "validation settlement must emit neither diagnostics nor a workspace refresh"
+    );
+
+    let admitted = harness.pull_document(fresh_uri, None);
+    assert_eq!(admitted["error"]["code"], -32802, "{admitted}");
+    assert_eq!(
+        admitted["error"]["data"]["coverage"], "refresh-required",
+        "{admitted}"
+    );
+    let started = harness.runtime.started();
+    assert_eq!(
+        started,
+        reports.len() * 2 + 1,
+        "settled validations must release capacity without another pull: {admitted}"
+    );
+    harness
+        .authority
+        .validation_pending
+        .store(true, Ordering::SeqCst);
+    let (uri, result_id) = reports.last().unwrap();
+    assert_eq!(
+        harness.pull_document(uri, Some(result_id))["result"],
+        json!({ "kind": "unchanged", "resultId": result_id }),
+        "a surviving report must consume its settled validation"
+    );
+    assert_eq!(harness.runtime.started(), started);
+    assert_eq!(
+        harness.authority.generation.load(Ordering::SeqCst),
+        reports.len() as u64
+    );
+
+    harness
+        .authority
+        .validation_pending
+        .store(false, Ordering::SeqCst);
+    harness.runtime.complete_next();
+    assert_full(
+        &harness.pull_document(fresh_uri, None),
+        reports.len() as u64 + 1,
+        0,
     );
 }
 
