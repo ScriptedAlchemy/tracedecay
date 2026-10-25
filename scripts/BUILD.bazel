@@ -118,7 +118,7 @@ py_test(
         "update-release-pr-lockfile.sh",
     ],
     main = "test-neutralize-release-pr-closing-keywords.py",
-    tags = ["local"],
+    tags = ["local", "manual"],
 )
 
 py_test(
