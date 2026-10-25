@@ -97,9 +97,7 @@ use tracedecay_domain::feedback::{
     FeedbackCycleRuntimeSnapshotV1, FeedbackDiagnosticBaselineIdentityV1,
     FeedbackDiagnosticBaselineV1, FeedbackDiagnosticProducerV1, FeedbackDiagnosticV1,
     FeedbackEvaluationInputV1, FeedbackFindingLifecycleV1, FeedbackImpactStateV1, FeedbackImpactV1,
-    FeedbackTargetV1, FeedbackTriggerV1, ProximityBranchWorktreeIncompatibilityV1,
-    ProximityCoverageV1, ProximityRelationStrengthV1, ProximityRiskInputsV1,
-    ProximityWarningClassV1,
+    FeedbackTargetV1, FeedbackTriggerV1, ProximityCoverageV1, ProximityWarningClassV1,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
@@ -1941,18 +1939,9 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
                 symbol: Some(ci_symbol.symbol.clone()),
             },
             relation_paths: Vec::new(),
-            risk_inputs: ProximityRiskInputsV1 {
-                overlap_size: 1,
-                blast_radius_size: 2,
-                relation_strength: ProximityRelationStrengthV1::Direct,
-                branch_worktree_incompatibility:
-                    ProximityBranchWorktreeIncompatibilityV1::Compatible,
-                freshness_decay_basis_points: 0,
-            },
             // Same file as the saved edit: the shipped owner classifies that as
-            // the immediate tier, so inclusion never depends on the threshold.
+            // an exact overlap, so inclusion never depends on the threshold.
             warning_class: ProximityWarningClassV1::SameFile,
-            raw_risk_basis_points: 9_000,
             observed_at: UtcMicros(now.0.saturating_sub(1_000_000)),
             expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
             coverage: ProximityCoverageV1::Complete,
