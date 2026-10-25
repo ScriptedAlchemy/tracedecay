@@ -7760,3 +7760,40 @@ async fn retained_attribution_demand_wakes_same_generation_without_foreground_de
     );
     registry.shutdown().await;
 }
+
+/// A first pass captures, parses, links, and seals before any generation
+/// owns the progress slot. Status must see that work advance, or a waiter
+/// cannot tell a slow first build from a hung one (#4508).
+#[test]
+fn first_pass_publishes_advancing_progress_before_its_generation_exists() {
+    let files = [
+        ("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n"),
+        ("src/beta.rs", "pub fn beta() -> u32 { alpha() }\n"),
+        ("src/gamma.rs", "pub fn gamma() -> u32 { beta() }\n"),
+    ];
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    let pass_started_micros = tracedecay_contracts::now_micros().0;
+
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("seal the first generation"),
+    );
+
+    let progress = scheduler
+        .build_progress_slot()
+        .read()
+        .expect("build progress slot")
+        .snapshot()
+        .expect("the first pass must publish progress before its generation exists");
+    let file_count = files.len() as u64;
+    assert!(
+        progress.progress_epoch >= 2 * file_count + 2,
+        "each captured file, parsed file, and sealing step advances the epoch: {}",
+        progress.progress_epoch
+    );
+    assert!(progress.last_progress_micros >= pass_started_micros);
+}
