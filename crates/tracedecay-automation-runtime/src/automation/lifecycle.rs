@@ -26,8 +26,7 @@ use super::run_ledger::{
     AutomationTrigger, append_run_record, load_run_ledger_task_summary,
 };
 use super::scheduler::{
-    AutomationTaskLock, load_session_activity, schedule_decision, stale_lock_secs,
-    task_disabled_skip,
+    AutomationTaskLock, load_session_activity, schedule_decision, task_disabled_skip,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -529,16 +528,7 @@ fn scheduler_gate_with_lock_retention<'a>(
                 trigger,
                 AutomationTrigger::Scheduler | AutomationTrigger::HostReceipt
             );
-
-            let lock_now_secs = current_timestamp();
-            let Some(lock) = AutomationTaskLock::try_acquire(
-                dashboard_root,
-                task,
-                stale_lock_secs(config, task),
-                lock_now_secs,
-            )
-            .await?
-            else {
+            let Some(lock) = AutomationTaskLock::try_acquire(dashboard_root, task).await? else {
                 super::scheduler_trace::observe_skip_reason(
                     AutomationSkipReasonV1::SchedulerLockActive,
                 );
@@ -1434,15 +1424,11 @@ mod recorded_failure_tests {
         let root = tempfile::tempdir().expect("temporary dashboard root");
         let settlement_guard = AutomationRunSettlementGuard::new();
         let retention = settlement_guard.retention();
-        let task_lock = AutomationTaskLock::try_acquire(
-            root.path(),
-            AgentTaskKind::SessionReflector,
-            Some(3_600),
-            current_timestamp(),
-        )
-        .await
-        .expect("first lock acquisition")
-        .expect("first lock");
+        let task_lock =
+            AutomationTaskLock::try_acquire(root.path(), AgentTaskKind::SessionReflector)
+                .await
+                .expect("first lock acquisition")
+                .expect("first lock");
         assert!(
             retain_task_lock(task_lock, Some(&retention))
                 .expect("retain lock")
@@ -1459,28 +1445,18 @@ mod recorded_failure_tests {
         assert!(matches!(result, Err(AutomationRunError::Runtime(_))));
 
         assert!(
-            AutomationTaskLock::try_acquire(
-                root.path(),
-                AgentTaskKind::SessionReflector,
-                Some(3_600),
-                current_timestamp(),
-            )
-            .await
-            .expect("competing lock acquisition")
-            .is_none()
+            AutomationTaskLock::try_acquire(root.path(), AgentTaskKind::SessionReflector,)
+                .await
+                .expect("competing lock acquisition")
+                .is_none()
         );
 
         drop(settlement_guard);
         assert!(
-            AutomationTaskLock::try_acquire(
-                root.path(),
-                AgentTaskKind::SessionReflector,
-                Some(3_600),
-                current_timestamp(),
-            )
-            .await
-            .expect("post-settlement lock acquisition")
-            .is_some()
+            AutomationTaskLock::try_acquire(root.path(), AgentTaskKind::SessionReflector,)
+                .await
+                .expect("post-settlement lock acquisition")
+                .is_some()
         );
     }
 }

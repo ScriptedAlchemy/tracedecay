@@ -365,13 +365,6 @@ async fn retained_disabled_user_job_run(
     .await
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("wall clock")
-        .as_secs() as i64
-}
-
 async fn retained_recovery_project(
     temp: &tempfile::TempDir,
     name: &str,
@@ -399,8 +392,6 @@ async fn fixed_task_lock_is_denied(
     tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
         dashboard_root,
         task,
-        None,
-        now_secs(),
     )
     .await
     .expect("competing fixed-task lock")
@@ -1292,8 +1283,6 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
             dashboard_root,
             AgentTaskKind::MemoryCurator,
-            None,
-            now_secs(),
         )
         .await
         .expect("post-abandonment task lock")

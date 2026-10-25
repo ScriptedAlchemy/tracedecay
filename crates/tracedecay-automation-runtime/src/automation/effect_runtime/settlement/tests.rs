@@ -389,19 +389,10 @@ async fn retained_disabled_user_job_run(
     .await
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("wall clock")
-        .as_secs() as i64
-}
-
 async fn task_lock_is_denied(dashboard_root: &std::path::Path, job_id: &str) -> bool {
     crate::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
         dashboard_root,
         &format!("user_job_{job_id}"),
-        None,
-        now_secs(),
     )
     .await
     .expect("competing task lock")
@@ -2237,8 +2228,6 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
         if crate::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
             dashboard_root,
             &format!("user_job_{job_id}"),
-            None,
-            now_secs(),
         )
         .await
         .expect("post-projector-panic task lock")
@@ -2581,8 +2570,6 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         let reacquired = crate::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
             dashboard_root,
             &format!("user_job_{job_id}"),
-            None,
-            now_secs(),
         )
         .await
         .expect("post-pair lock probe");
@@ -3010,8 +2997,6 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         crate::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
             dashboard_root,
             &format!("user_job_{job_id}"),
-            None,
-            now_secs(),
         )
         .await
         .expect("post-terminal lock")
