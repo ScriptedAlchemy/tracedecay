@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, OptionalStackPreflightPort, StackCircuitPolicyV1,
-    StackCoordinatorErrorV1, StackCoordinatorStore, StackDeliveryAuthorizationPort,
-    StackDeliveryAuthorizationV1, StackSignalV1,
+    DaemonGitHubStackCoordinatorV1, OptionalPreflightV1, OptionalStackPreflightPort,
+    StackCircuitPolicyV1, StackCoordinatorErrorV1, StackCoordinatorStore,
+    StackDeliveryAuthorizationPort, StackDeliveryAuthorizationV1, StackSignalV1,
 };
 use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
@@ -30,7 +30,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{
     ActorId, ManifestDigest, NativeIntegrationApprovalV1, NativeIntegrationSelectionV1,
     NativeIntegrationTerminalOutcomeV1, NativeIntegrationUnavailabilityV1, ProjectId,
-    StackSignalId, StackSignalKindV1, UtcMicros, canonical_sha256,
+    StackSignalId, StackSignalKindV1, UtcMicros,
 };
 
 use tracedecay_global_db::{
@@ -140,7 +140,6 @@ struct StackRuntimePortsV1 {
     native_service: Arc<DaemonProjectNativeIntegrationService>,
     native_store: DaemonNativeIntegrationStore,
     authorizations: Arc<Mutex<BTreeMap<StackSignalId, DeliveryAuthorizationEvidenceV1>>>,
-    preflight_outcomes: Arc<Mutex<BTreeMap<ManifestDigest, NativeIntegrationPreflightOutcomeV1>>>,
 }
 
 impl StackRuntimePortsV1 {
@@ -501,18 +500,10 @@ impl OptionalStackPreflightPort for StackRuntimePortsV1 {
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
-        let request_digest = canonical_sha256(request)
-            .map_err(|error| StackCoordinatorErrorV1::Invalid(error.to_string()))?;
-        let outcome = self
-            .native_service
+        self.native_service
             .preflight(request.clone(), cancellation)
             .await
-            .map_err(map_native_preflight_error)?;
-        self.preflight_outcomes
-            .lock()
-            .map_err(|_| StackCoordinatorErrorV1::Unavailable)?
-            .insert(request_digest, outcome.clone());
-        Ok(outcome)
+            .map_err(map_native_preflight_error)
     }
 }
 
@@ -580,7 +571,6 @@ impl DaemonGitHubStackRuntimeV1 {
             native_service,
             native_store,
             authorizations: Arc::new(Mutex::new(BTreeMap::new())),
-            preflight_outcomes: Arc::new(Mutex::new(BTreeMap::new())),
         };
         Ok(Arc::new(Self {
             scope,
@@ -621,17 +611,9 @@ impl DaemonGitHubStackRuntimeV1 {
     }
 
     /// Executes preflight through the coordinator's circuit and bounded
-    /// admission path. The port stores the exact outcome produced by that
-    /// invocation so callers do not bypass the circuit with a second Git run.
+    /// admission path, so callers do not bypass the circuit with a second Git
+    /// run. Identical concurrent requests share the one native result.
     pub async fn preflight(
-        &self,
-        request: &NativeIntegrationPreflightRequestV1,
-        cancellation: &CancellationSignal,
-    ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
-        self.preflight_via_circuit(request, cancellation).await
-    }
-
-    async fn preflight_via_circuit(
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
@@ -647,9 +629,7 @@ impl DaemonGitHubStackRuntimeV1 {
                 .await
                 .map_err(map_native_preflight_error);
         }
-        let request_digest = canonical_sha256(request)
-            .map_err(|error| StackCoordinatorErrorV1::Invalid(error.to_string()))?;
-        let disposition = self
+        match self
             .coordinator
             .optional_preflight(
                 &self.ports,
@@ -657,31 +637,11 @@ impl DaemonGitHubStackRuntimeV1 {
                 cancellation,
                 StackRuntimePortsV1::now()?,
             )
-            .await?;
-        let outcome = self
-            .ports
-            .preflight_outcomes
-            .lock()
-            .map_err(|_| StackCoordinatorErrorV1::Unavailable)?
-            .remove(&request_digest);
-        match disposition {
-            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Complete
-            | tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Partial => {
-                outcome.ok_or(StackCoordinatorErrorV1::Unavailable)
-            }
-            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::SuppressedOpenCircuit
-            | tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Unavailable
-            | tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Saturated => {
+            .await?
+        {
+            OptionalPreflightV1::Completed(outcome) => Ok(outcome),
+            OptionalPreflightV1::SuppressedOpenCircuit | OptionalPreflightV1::Saturated => {
                 Ok(NativeIntegrationPreflightOutcomeV1::Unavailable)
-            }
-            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Cancelled => {
-                Ok(NativeIntegrationPreflightOutcomeV1::Cancelled)
-            }
-            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Stale => {
-                Ok(NativeIntegrationPreflightOutcomeV1::Stale)
-            }
-            tracedecay_application::stack_coordinator::OptionalPreflightDispositionV1::Denied => {
-                Ok(NativeIntegrationPreflightOutcomeV1::Denied)
             }
         }
     }

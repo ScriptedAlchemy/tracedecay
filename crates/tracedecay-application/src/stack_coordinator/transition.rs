@@ -258,16 +258,13 @@ fn invalid(error: impl std::fmt::Display) -> StackCoordinatorErrorV1 {
     StackCoordinatorErrorV1::Invalid(error.to_string())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OptionalPreflightDispositionV1 {
-    Complete,
-    Partial,
+/// How an optional preflight request ended. `Completed` carries the one full
+/// native result; the other two are admission refusals that ran nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OptionalPreflightV1 {
+    Completed(NativeIntegrationPreflightOutcomeV1),
     SuppressedOpenCircuit,
     Saturated,
-    Cancelled,
-    Stale,
-    Denied,
-    Unavailable,
 }
 
 pub(super) fn stack_drift(
