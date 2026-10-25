@@ -164,7 +164,11 @@ fn assert_diagnostic_delivery(
             .collect::<Vec<_>>();
         assert!(messages.windows(2).all(|pair| pair[0] < pair[1]));
     };
-    assert!(session.publish_complete_snapshot("file:///root/a.rs", 1, snapshot.clone()));
+    assert!(
+        session
+            .publish_complete_snapshot("file:///root/a.rs", 1, snapshot.clone())
+            .is_ok()
+    );
     let publication: Value = session
         .drain_outbound()
         .iter()

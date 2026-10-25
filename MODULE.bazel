@@ -50,14 +50,14 @@ rust.toolchain(
         "fastbuild": "1",
         "opt": "3",
     },
-    versions = ["nightly/2026-10-19"],
-    rustfmt_version = "nightly/2026-10-19",
-    rust_analyzer_version = "nightly/2026-10-19",
+    versions = ["nightly/2026-10-25"],
+    rustfmt_version = "nightly/2026-10-25",
+    rust_analyzer_version = "nightly/2026-10-25",
 )
 use_repo(
     rust,
     "rust_toolchains",
-    rust_analyzer_tools = "rust_analyzer_nightly-2026-10-19_tools",
+    rust_analyzer_tools = "rust_analyzer_nightly-2026-10-25_tools",
 )
 register_toolchains("@rust_toolchains//:all")
 

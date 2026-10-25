@@ -729,6 +729,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_pending_wake = Arc::clone(&pending_wake);
         let memory_retry = Arc::new(super::MemoryRefusalRetryV1::default());
         let worker_memory_retry = Arc::clone(&memory_retry);
+        let refused_reconcile_start = Arc::new(super::RefusedReconcileStartV1::default());
+        let worker_refused_reconcile_start = Arc::clone(&refused_reconcile_start);
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_build_publication_lock = Arc::clone(&build_publication_lock);
@@ -804,6 +806,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .park_headroom
             .released_by_others(&mut worker_owner_headroom);
         let mut worker_admission_headroom = self.resident_memory.pressure().subscribe_headroom();
+        let worker_resident_memory = Arc::clone(&self.resident_memory);
         // Boxed at definition on purpose: this worker's state machine is the
         // largest future in the daemon (reconcile + text advance + decode +
         // activation + swap inline), and an unboxed `let` materializes the
@@ -909,7 +912,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     .park_headroom
                     .released_by_others(&mut worker_owner_headroom)
                     > worker_owner_headroom_seen
-                    || worker_admission_headroom.has_changed();
+                    || (worker_admission_headroom.has_changed()
+                        && worker_refused_reconcile_start.admits_retry(&worker_resident_memory));
                 if headroom_moved
                     && worktree_waits_for_memory(
                         &worker_text_generation,
@@ -1446,6 +1450,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready);
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
+                let started_pressure = worker_resident_memory.pressure().state();
                 // A sealed successor answers the arrival it claimed; a later
                 // arrival stays pending for its own pass.
                 let (arrival, trigger) = match sealed_successor.as_ref() {
@@ -3365,6 +3370,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 );
                 let waited_for_memory = worker_residency.refresh_waits_for_memory();
                 worker_residency.set_refresh_waits_for_memory(refused_for_memory);
+                if refused_for_memory {
+                    worker_refused_reconcile_start
+                        .refused(started_pressure, &worker_resident_memory);
+                } else {
+                    worker_refused_reconcile_start.clear();
+                }
                 if let Ok((Err(error), _, _)) = &result
                     && refused_for_memory
                 {
@@ -3924,6 +3935,8 @@ impl CodeIndexSchedulerRegistryV1 {
             .park_headroom
             .released_by_others(&mut owner_headroom);
         let mut admission_headroom = self.resident_memory.pressure().subscribe_headroom();
+        let headroom_resident_memory = Arc::downgrade(&self.resident_memory);
+        let headroom_refused_reconcile_start = Arc::downgrade(&refused_reconcile_start);
         let headroom_pending_wake = Arc::downgrade(&pending_wake);
         let headroom_wake = Arc::downgrade(&wake);
         let headroom_text = Arc::downgrade(&text_generation);
@@ -3967,6 +3980,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         continue;
                     }
                     owner_headroom_seen = by_others;
+                } else if let (Some(resident_memory), Some(refused_start)) = (
+                    headroom_resident_memory.upgrade(),
+                    headroom_refused_reconcile_start.upgrade(),
+                ) && !refused_start.admits_retry(&resident_memory)
+                {
+                    continue;
                 }
                 if worktree_waits_for_memory(&text, &park, &residency) {
                     Self::note_wake(

@@ -235,6 +235,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
 ) {
     let mut retry_attempt = 0u32;
     let mut summary_retry_attempt = 0u32;
+    let mut summary_recheck = false;
     let mut history_priority_passes = 0u32;
     let mut history_release = None;
     let mut granted_history_admission = None;
@@ -265,11 +266,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 history_requested = false;
                 projection_requested = true;
             }
-            if !projection_requested && !history_requested {
+            if !projection_requested && !history_requested && !summary_recheck {
                 break;
             }
+            summary_recheck = false;
             state.begin_pass();
-            state.pass_count.fetch_add(1, Ordering::AcqRel);
+            if projection_requested || history_requested {
+                state.pass_count.fetch_add(1, Ordering::AcqRel);
+            }
             // A granted turn this iteration does not spend on history is
             // returned before the summary page queues for a permit of its own.
             let granted = granted_history_admission
@@ -426,7 +430,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                         // registered to receive one.
                         state.mark_worker_idle();
                         state.idle.notify_waiters();
-                        let Some(permit) = live_projection
+                        let Some((permit, _)) = live_projection
                             .wait_for(&mut admission, &mut projection_joins, &mut report, true)
                             .await
                         else {
@@ -466,13 +470,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                             ),
                         };
                         tokio::pin!(page);
-                        let Some(result) = live_projection
+                        let Some((result, recheck)) = live_projection
                             .wait_for(&mut page, &mut projection_joins, &mut report, false)
                             .await
                         else {
                             return;
                         };
                         drop(permit);
+                        summary_recheck = recheck;
                         result
                     };
                     match summary_result {
@@ -920,8 +925,8 @@ impl LiveProjectionDuringSummary<'_> {
         stage: F,
         joins: &mut Vec<SessionProjectionJoin>,
         report: &mut SessionTemporalRefreshPassReport,
-        idle_between_projections: bool,
-    ) -> Option<F::Output>
+        waiting_for_admission: bool,
+    ) -> Option<(F::Output, bool)>
     where
         F: Future + Send,
         F::Output: Send,
@@ -929,7 +934,8 @@ impl LiveProjectionDuringSummary<'_> {
         tokio::pin!(stage);
         let mut retry_attempt = 0u32;
         let mut retry_at = None;
-        loop {
+        let mut summary_pass_owed = false;
+        let result = loop {
             let projection_wake = async {
                 let wake = self.state.wake.notified();
                 if let Some(deadline) = retry_at {
@@ -947,7 +953,7 @@ impl LiveProjectionDuringSummary<'_> {
             let woke = tokio::select! {
                 biased;
                 () = self.state.wait_for_cancellation() => return None,
-                result = &mut stage => return Some(result),
+                result = &mut stage => break result,
                 woke = projection_wake => woke,
             };
             if !woke {
@@ -956,6 +962,7 @@ impl LiveProjectionDuringSummary<'_> {
             if !self.state.take_dirty() {
                 continue;
             }
+            summary_pass_owed |= !waiting_for_admission;
             self.state.mark_worker_busy();
             self.state.begin_pass();
             self.state.pass_count.fetch_add(1, Ordering::AcqRel);
@@ -1013,13 +1020,17 @@ impl LiveProjectionDuringSummary<'_> {
                 }
             }
             if let Some(result) = completed_stage {
-                return Some(result);
+                break result;
             }
-            if idle_between_projections {
+            if waiting_for_admission {
                 self.state.mark_worker_idle();
                 self.state.idle.notify_waiters();
             }
-        }
+        };
+        // A running page may have read its inputs before the consumed wake.
+        // Its follow-up needs summary convergence, not another projection of
+        // the frontier this wake already served. Admission has no page yet.
+        Some((result, summary_pass_owed))
     }
 }
 
@@ -2210,6 +2221,80 @@ mod tests {
     use tracedecay_store::{SessionRefreshReceiptRequestV1, SessionRefreshTerminalStateV1};
 
     #[tokio::test]
+    async fn a_live_wake_during_summary_retains_one_convergence_pass() {
+        for (name, waiting_for_admission, cancel, owes_convergence) in [
+            ("completed-page", false, false, true),
+            ("completed-admission", true, false, false),
+            ("cancelled-page", false, true, false),
+        ] {
+            let harness = RegisteredGlobalDbHarness::open(name).await;
+            let state = Arc::new(SessionTemporalRefreshWakeState::default());
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let finish = Arc::new(tokio::sync::Notify::new());
+            let worker = tokio::spawn({
+                let database = harness.registered.clone();
+                let state = Arc::clone(&state);
+                let entered = Arc::clone(&entered);
+                let finish = Arc::clone(&finish);
+                async move {
+                    let stage = async {
+                        entered.notify_one();
+                        finish.notified().await;
+                    };
+                    let live_projection = LiveProjectionDuringSummary {
+                        database: &database,
+                        state: &state,
+                        projector: &CanonicalSessionTemporalProjector,
+                        policy: SessionTemporalRefreshPolicy::default(),
+                    };
+                    let mut joins = Vec::new();
+                    let mut report = SessionTemporalRefreshPassReport::default();
+                    live_projection
+                        .wait_for(stage, &mut joins, &mut report, waiting_for_admission)
+                        .await
+                }
+            });
+            entered.notified().await;
+
+            // A running page may already have checked the old summarizer
+            // binding. Publishing this empty temporal frontier cannot cover
+            // the convergence work requested by a later configuration wake.
+            assert!(
+                state
+                    .handle()
+                    .wake_and_wait_for_projection(Duration::from_secs(5))
+                    .await,
+                "{name}: live projection must join before the held stage finishes"
+            );
+            assert!(!worker.is_finished(), "{name}: stage must remain in flight");
+            assert!(
+                !state.dirty.load(Ordering::Acquire),
+                "{name}: do not spin on the consumed wake while the stage is in flight"
+            );
+
+            if cancel {
+                state.cancel();
+            } else {
+                finish.notify_one();
+            }
+            let completed = tokio::time::timeout(Duration::from_secs(5), worker)
+                .await
+                .expect("held stage must settle")
+                .expect("worker must join");
+            assert_eq!(
+                completed,
+                (!cancel).then_some(((), owes_convergence)),
+                "{name}: a consumed wake still owes convergence after a running page"
+            );
+            assert_eq!(state.pass_count.load(Ordering::Acquire), 1, "{name}");
+            assert!(
+                !state.take_dirty(),
+                "{name}: summary convergence must not replay the consumed projection"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn an_in_flight_summary_stage_keeps_polling_while_a_live_wake_projects() {
         let harness = RegisteredGlobalDbHarness::open("refresh-during-summary-writer").await;
         let store = SessionTemporalStore::new(harness.registered.as_ref());
@@ -2285,7 +2370,10 @@ mod tests {
         assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
         assert!(!worker.is_finished(), "the summary stage remains in flight");
         finish.notify_one();
-        assert_eq!(worker.await.expect("summary stage completes"), Some(17));
+        assert_eq!(
+            worker.await.expect("summary stage completes"),
+            Some((17, true))
+        );
     }
 
     /// A lease the store has fenced resubmits the identical request on every

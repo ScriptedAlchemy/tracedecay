@@ -394,6 +394,7 @@ pub const MAX_DIAGNOSTIC_OPERATIONS: usize = 128;
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DiagnosticOperationKey {
     root_uri: String,
+    scope_digest: Option<ManifestDigest>,
     document_uri: String,
     overlay_version: i64,
     overlay_language_id: Option<String>,
@@ -435,6 +436,7 @@ impl DiagnosticSnapshotAdapter {
     ) -> DiagnosticOperationKey {
         DiagnosticOperationKey {
             root_uri: root.uri().to_owned(),
+            scope_digest: root.scope_digest().cloned(),
             document_uri: document_uri.to_owned(),
             overlay_version: overlay.map_or(0, |overlay| overlay.version),
             overlay_language_id: overlay.map(|overlay| overlay.language_id.clone()),
@@ -532,6 +534,20 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
                 failure_class: "diagnostic-identity-exhausted".to_owned(),
             },
         }
+    }
+
+    fn retire_document_refresh(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        operation_id: &str,
+    ) -> bool {
+        self.operations.cancel_matching(|key, identity| {
+            key.root_uri == root.uri()
+                && key.scope_digest.as_ref() == root.scope_digest()
+                && key.document_uri == document_uri
+                && identity.operation_id == operation_id
+        })
     }
 
     fn supports_workspace_diagnostics(&self) -> bool {
