@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
 use serde_json::Value;
@@ -256,7 +257,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         previous_roster: Vec<CodeIndexIgnoredSourceAdmissionV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
-        let began_under = self.epoch.load(std::sync::atomic::Ordering::Acquire);
+        let source_control = self.reconcile_control();
+        let began_under = source_control.expected_epoch();
         let _workers = self.ensure_worker_plan()?;
         let _worker_memory = match self.reserve_worker_memory() {
             Ok(reservation) => reservation,
@@ -305,8 +307,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                 return Err(error);
             }
         };
+        drop(retained_bytes);
+        *self.owner.publication_mut() = self
+            .publication
+            .clone()
+            .with_reconcile_publication_fence(Arc::clone(&self.hints), source_control.clone());
         let generation = match self.owner.build_and_publish(
             CodeIndexBuildRequestV1 {
+                resident_memory: Arc::clone(&self.resident_memory),
                 snapshot: snapshot.clone(),
                 captured_files,
                 changed_files: changed_paths,
@@ -320,12 +328,24 @@ impl CodeIndexWorktreeSchedulerV1 {
         ) {
             Ok(generation) => generation,
             Err(error) => {
+                let requirement = self.owner.take_reconstruction_requirement();
+                // Refused entrypoint admission restores its prior roster;
+                // no unpublished generation may later resurrect that entry.
+                drop(self.owner.take_unpublished());
+                let error = super::reconcile::discarded_construction_refusal(
+                    error,
+                    &source_control,
+                    requirement,
+                    false,
+                    std::iter::once(&_worker_memory).chain(&retained_reservations),
+                    self.resident_memory.admission_watermark_bytes(),
+                );
                 self.ignored_source_admissions = previous_roster;
-                return Err(error.into());
+                return Err(error);
             }
         };
         let generation_id = generation.manifest().generation_id.clone();
-        drop((retained_bytes, retained_reservations));
+        drop(retained_reservations);
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         self.mark_reconciled(
             SourceContentManifestV1::for_snapshot(generation.snapshot()),

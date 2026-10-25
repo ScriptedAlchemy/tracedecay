@@ -6,6 +6,9 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::incremental::ParseLimits;
@@ -20,15 +23,16 @@ use tracedecay_code_index::{
     production::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
-        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
-        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedBuildV1,
+        CodeIndexPreparationPort, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
+        CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedBuildV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-        CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, MemorySealedPublicationStoreV1,
-        SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentPublicationV1,
-        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
-        SharedPhysicalCodeArtifactPoolV1, VerifiedSealedLexicalPageReadV1,
-        VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-        advance_import_dictionary_digest, initial_import_dictionary_digest,
+        CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, MemoryCodeIndexPreparationV1,
+        MemorySealedPublicationStoreV1, SEALED_GENERATION_FORMAT_REVISION_V1,
+        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
+        SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
+        VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+        VerifiedSealedLexicalPageV1, advance_import_dictionary_digest,
+        initial_import_dictionary_digest,
     },
     provider::GenerationTestAttributionJoinReadPort,
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
@@ -68,20 +72,13 @@ impl SharedPublicationStore {
         &self,
         published: &CodeIndexPublishedBuildV1,
     ) -> Arc<CodeIndexPublishedGenerationV1> {
-        published.decoded().map_or_else(
-            || {
-                Arc::new(
-                    self.sealed
-                        .decode(published.manifest_bytes())
-                        .expect("published generation decodes"),
-                )
-            },
-            Arc::clone,
-        )
+        cold_generation(published)
     }
 }
 
 impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
+    type Preparation = MemoryCodeIndexPreparationV1;
+
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
@@ -89,14 +86,20 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
         self.sealed.load_active(scope)
     }
 
-    fn publish_atomically(
+    fn commit(
+        &mut self,
+        preparation: &mut Self::Preparation,
+        publication: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+        self.sealed.commit(preparation, publication)
+    }
+
+    fn prepare(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
-        self.sealed
-            .publish_atomically(scope, expected_active_generation, generation)
+    ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
+        self.sealed.prepare(scope, expected_active_generation)
     }
 }
 
@@ -109,7 +112,52 @@ struct PartialKeyPublicationStore {
     pointer: Arc<Mutex<Option<CodeIndexGenerationScopeV1>>>,
 }
 
+impl PartialKeyPublicationStore {
+    fn incumbent(
+        &self,
+        pointer: Option<&CodeIndexGenerationScopeV1>,
+    ) -> Result<Option<CodeGenerationId>, CodeIndexPublicationStoreErrorV1> {
+        let Some(scope) = pointer else {
+            return Ok(None);
+        };
+        let active = self.sealed.load_active(scope)?.ok_or_else(|| {
+            CodeIndexPublicationStoreErrorV1::Unavailable(
+                "fixture slot names an absent canonical generation".to_owned(),
+            )
+        })?;
+        let metadata = active
+            .metadata()
+            .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))?;
+        Ok(Some(metadata.manifest().generation_id.clone()))
+    }
+}
+
+struct PartialKeyPreparation {
+    inner: MemoryCodeIndexPreparationV1,
+    scope: CodeIndexGenerationScopeV1,
+    expected: Option<CodeGenerationId>,
+}
+
+impl CodeIndexPreparationPort for PartialKeyPreparation {
+    fn write_segment(
+        &mut self,
+        publication: SealedGenerationSegmentPublicationV1<'_>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.write_segment(publication)
+    }
+
+    fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.segment_reader()
+    }
+
+    fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.abort()
+    }
+}
+
 impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
+    type Preparation = PartialKeyPreparation;
+
     fn load_active(
         &self,
         _scope: &CodeIndexGenerationScopeV1,
@@ -121,20 +169,48 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
         }
     }
 
-    fn publish_atomically(
+    fn commit(
+        &mut self,
+        preparation: &mut Self::Preparation,
+        publication: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+        let mut pointer = self.pointer.lock().expect("publication lock");
+        if self.incumbent(pointer.as_ref())?.as_ref() != preparation.expected.as_ref() {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
+        let manifest = self.sealed.commit(&mut preparation.inner, publication)?;
+        *pointer = Some(preparation.scope.clone());
+        Ok(manifest)
+    }
+
+    fn prepare(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
-        let pointer = self
-            .pointer
-            .lock()
-            .expect("publication lock")
-            .get_or_insert_with(|| scope.clone())
-            .clone();
-        self.sealed
-            .publish_atomically(&pointer, expected_active_generation, generation)
+    ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
+        let pointer = self.pointer.lock().expect("publication lock");
+        if self.incumbent(pointer.as_ref())?.as_ref() != expected_active_generation {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
+        // The faulty selector has one slot, but its storage still binds every
+        // preparation to the exact requested full scope. A label move fences
+        // the old slot above and the destination's canonical incumbent here.
+        let destination = self
+            .sealed
+            .load_active(scope)?
+            .map(|active| {
+                active
+                    .metadata()
+                    .map(|metadata| metadata.manifest().generation_id.clone())
+            })
+            .transpose()
+            .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))?;
+        let inner = self.sealed.prepare(scope, destination.as_ref())?;
+        Ok(PartialKeyPreparation {
+            inner,
+            scope: scope.clone(),
+            expected: expected_active_generation.cloned(),
+        })
     }
 }
 
@@ -276,6 +352,9 @@ fn request_at_path(
     };
 
     CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot,
         captured_files: vec![CodeIndexCapturedFileV1 {
             file_occurrence_id: file.file_occurrence_id,
@@ -704,97 +783,115 @@ fn unchanged_increment_does_not_reextract_carried_files() {
     assert_eq!(clone_after_restored.clone_payloads_reused, 0);
 }
 
-/// The physical reuse pool is an index over immutable generation-owned
-/// artifacts, not a second owner of every parsed and chunked payload. Keeping
-/// the registry-scoped pool alive after its publication owner shuts down must
-/// therefore release the complete file corpus with the generation.
+/// A completed build retains sealed segments, while the weak extraction index
+/// releases its full artifacts after staging. Explicitly decoding the seal
+/// does not transfer those new allocations into that extraction index.
 #[test]
-fn physical_artifact_pool_does_not_retain_a_dropped_generation() {
+fn published_build_and_decode_do_not_pin_physical_extraction_artifacts() {
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
-    {
-        let store = SharedPublicationStore::default();
-        let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
-            .expect("production owner")
-            .with_physical_artifact_pool(pool.clone());
-        let generation = owner
-            .build_and_publish(request("file.physical.1", 1_100_000), &ActiveControl)
-            .expect("generation publishes");
-        let generation = store.generation(&generation);
-
-        assert_eq!(pool.stats().resident, 1);
-        drop(generation);
-    }
-
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone())
+        .expect("production owner")
+        .with_physical_artifact_pool(pool.clone());
+    let published = owner
+        .build_and_publish(request("file.physical.1", 1_100_000), &ActiveControl)
+        .expect("generation publishes");
+    assert_eq!(pool.stats().inserted, 1);
     assert_eq!(
         pool.stats().resident,
         0,
-        "the reuse index must not pin a second copy of a dropped generation"
+        "staging releases the extracted corpus"
     );
+    let generation = store.generation(&published);
+    assert!(!generation.chunks().chunks().is_empty());
+    assert_eq!(
+        pool.stats().resident,
+        0,
+        "a decode owns separate serving content"
+    );
+    drop(generation);
+    drop(published);
+    drop(owner);
+    pool.release_dead_entries();
+    assert_eq!(pool.stats().resident, 0);
 }
 
-/// Physical reuse is keyed by logical path and content digest, not
-/// worktree-local `file_occurrence_id`. Linked worktrees therefore share
-/// parse/chunk artifacts for identical bytes; rematerialize rebinds the
-/// requesting occurrence. Same-occurrence reuse must still seal every
-/// durable byte as a cold rebuild. Distinct bytes must miss.
+/// A restarted owner reuses the canonical sealed parent's file segments
+/// without retaining or extracting the decoded corpus. An independently
+/// cold-seeded history produces the same complete successor bytes.
 #[test]
-fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
-    let pool = SharedPhysicalCodeArtifactPoolV1::default();
+fn sealed_parent_reuse_preserves_byte_exact_generation_and_foreign_identity() {
+    let store = SharedPublicationStore::default();
     let mut source_owner =
-        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
-            .expect("source owner")
-            .with_physical_artifact_pool(pool.clone());
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("source owner");
     let source = source_owner
         .build_and_publish(request("file.physical.target", 1_100_000), &ActiveControl)
         .expect("source generation publishes");
-    let source = cold_generation(&source);
-    assert_eq!(pool.stats().reused, 0);
-    assert_eq!(pool.stats().inserted, 1);
+    let source_manifest: serde_json::Value =
+        serde_json::from_slice(source.manifest_bytes()).expect("source partitioned manifest");
+    drop(source_owner);
 
     let mut reused_owner =
-        CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
-            .expect("reuse owner")
-            .with_physical_artifact_pool(pool.clone());
+        CodeIndexProductionOwnerV1::new(config(), store).expect("restarted reuse owner");
     let reused = reused_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
-        .expect("physically reused generation publishes");
-    let reused = cold_generation(&reused);
+        .expect("sealed parent successor publishes");
+    assert_eq!(reused.cold_reason(), None);
+    assert_eq!(reused_owner.retained_parse_stats().full_extractions, 0);
+    assert_eq!(reused_owner.retained_parse_stats().initial_parses, 0);
+    assert_eq!(reused.lane_digest(), source.lane_digest());
+    let reused_manifest: serde_json::Value =
+        serde_json::from_slice(reused.manifest_bytes()).expect("successor partitioned manifest");
     assert_eq!(
-        pool.stats().reused,
-        1,
-        "identical path and content must reuse the source physical artifact"
+        reused_manifest["generation"]["file_segments"],
+        source_manifest["generation"]["file_segments"],
+        "the restarted owner must carry the exact parent file segment descriptors"
+    );
+    assert_eq!(
+        reused.projection().request().changes.reused_count,
+        source.projection().request().changes.added_or_changed.len() as u64,
+        "every source chunk is reused through the sealed parent"
+    );
+    let reused_bytes = Arc::clone(reused.manifest_bytes());
+    let reused = cold_generation(&reused);
+    assert!(
+        reused.is_validated(),
+        "the explicit decode verifies the restored successor"
+    );
+    assert!(
+        !reused
+            .admitted_chunks()
+            .expect("restored exact authority")
+            .is_empty()
     );
 
     let mut cold_owner =
         CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
-            .expect("cold owner");
+            .expect("independent comparison owner");
+    cold_owner
+        .build_and_publish(request("file.physical.target", 1_100_000), &ActiveControl)
+        .expect("independent cold seed publishes");
     let cold = cold_owner
         .build_and_publish(request("file.physical.target", 1_200_000), &ActiveControl)
-        .expect("cold comparison generation publishes");
+        .expect("independent comparison successor publishes");
+    assert_eq!(
+        reused_bytes.as_ref(),
+        cold.manifest_bytes().as_ref(),
+        "published manifest bytes mismatch"
+    );
     let cold = cold_generation(&cold);
 
     let foreign_occurrence = id::<FileOccurrenceId>("file.physical.foreign");
     let mut foreign_owner =
         CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
-            .expect("foreign occurrence owner")
-            .with_physical_artifact_pool(pool.clone());
+            .expect("foreign occurrence owner");
     let foreign = foreign_owner
         .build_and_publish(request("file.physical.foreign", 1_200_000), &ActiveControl)
-        .expect("foreign occurrence rematerializes from the shared artifact");
+        .expect("foreign occurrence publishes with its own identity");
     let foreign = cold_generation(&foreign);
-    assert_eq!(
-        pool.stats().reused,
-        2,
-        "same path and content must share artifacts across worktree-local occurrence ids"
-    );
-    assert_eq!(
-        pool.stats().inserted,
-        1,
-        "occurrence-id-free reuse must not insert a second artifact for the same bytes"
-    );
     assert!(
         !foreign.chunks().chunks().is_empty(),
-        "foreign rematerialize must produce chunks"
+        "a foreign occurrence must produce chunks"
     );
     assert!(
         foreign
@@ -802,7 +899,7 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
             .chunks()
             .iter()
             .all(|chunk| chunk.anchor.file_occurrence_id == foreign_occurrence),
-        "rematerialize must rebind shared chunks onto the requesting occurrence"
+        "published chunks must bind the requesting foreign occurrence"
     );
     assert_ne!(
         PartitionedSealV1::of(&foreign).manifest,
@@ -817,20 +914,24 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     changed.captured_files[0].sanitized_bytes = Arc::from(changed_source.as_slice());
     let mut changed_owner =
         CodeIndexProductionOwnerV1::new(config(), SharedPublicationStore::default())
-            .expect("changed-content owner")
-            .with_physical_artifact_pool(pool.clone());
-    changed_owner
+            .expect("changed-content owner");
+    let changed = changed_owner
         .build_and_publish(changed, &ActiveControl)
-        .expect("different content publishes without borrowing the prior artifact");
-    assert_eq!(
-        pool.stats().reused,
-        2,
-        "different content digest must not reuse the prior physical artifact"
-    );
-    assert_eq!(
-        pool.stats().inserted,
-        2,
-        "a content miss must insert its own physical artifact"
+        .expect("different content publishes without borrowing prior identities");
+    let changed = cold_generation(&changed);
+    let prior_ids = reused
+        .chunks()
+        .chunks()
+        .iter()
+        .map(|chunk| &chunk.id)
+        .collect::<BTreeSet<_>>();
+    assert!(!changed.chunks().chunks().is_empty());
+    assert!(
+        changed
+            .chunks()
+            .chunks()
+            .iter()
+            .all(|chunk| !prior_ids.contains(&chunk.id))
     );
 
     assert_eq!(reused.manifest(), cold.manifest(), "manifest mismatch");
@@ -859,7 +960,7 @@ fn physical_artifact_reuse_preserves_byte_exact_sealed_generation() {
     assert_eq!(
         PartitionedSealV1::of(&reused),
         PartitionedSealV1::of(&cold),
-        "sharing the physical allocation must preserve every durable byte and digest"
+        "sealed parent reuse must preserve every durable byte and digest"
     );
     drop(source);
 }
@@ -901,6 +1002,9 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
         disposition: SnapshotFileDispositionV1::Present,
     };
     let request = CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot: SanitizedCodeSnapshotV1 {
             repository: id::<RepositoryId>("repository.production"),
             worktree: None,
@@ -1249,8 +1353,8 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
             .is_empty()
     );
     assert_eq!(
-        first.projection().receipt().source_generation,
-        first.manifest().generation_id
+        first.projection().source_generation(),
+        &first.manifest().generation_id
     );
     let first_commitments = first
         .manifest()
@@ -2647,6 +2751,18 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
         hawk.manifest()
     );
 
+    let mut competing = store.clone();
+    assert!(
+        matches!(
+            competing.prepare(&moved_label_scope, None),
+            Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
+        ),
+        "a label move must name the occupied physical slot's incumbent"
+    );
+    let mut stale_preparation = competing
+        .prepare(&moved_label_scope, Some(&hawk.manifest().generation_id))
+        .expect("competing label move prepares against the same incumbent");
+
     let moved = owner
         .build_and_publish(
             request_in_scope(
@@ -2659,11 +2775,35 @@ fn config_dispatch_refuses_a_generation_sealed_for_another_full_scope() {
             &ActiveControl,
         )
         .expect("label-move publish must CAS against the prior-label incumbent");
+    assert!(
+        matches!(
+            competing.commit(&mut stale_preparation, moved.publication()),
+            Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
+        ),
+        "the losing label move must not commit against its superseded incumbent"
+    );
+    stale_preparation.abort().expect("abort losing label move");
     let moved = cold_generation(&moved);
     assert_ne!(
         moved.manifest().generation_id,
         hawk.manifest().generation_id,
         "the rebuilt generation is a new publication, not the reused hawk seal"
+    );
+    let selected = store
+        .load_active(&moved_label_scope)
+        .expect("physical slot reads")
+        .expect("moved generation remains selected")
+        .metadata()
+        .expect("selected manifest verifies");
+    assert_eq!(selected.manifest(), moved.manifest());
+    assert!(
+        matches!(
+            owner.active_generation(&pr_worktree_scope),
+            Err(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_)
+            ))
+        ),
+        "the label move must preserve foreign-checkout corruption detection"
     );
 }
 
@@ -2854,6 +2994,9 @@ fn partitioned_request(
         )));
     }
     CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot: SanitizedCodeSnapshotV1 {
             repository: id::<RepositoryId>("repository.production"),
             worktree: None,

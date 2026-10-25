@@ -1422,7 +1422,13 @@ impl ResidentMemorySnapshotV1 {
 struct ResidentMemoryStateV1 {
     used_bytes: u64,
     charges: BTreeMap<ResidentMemoryKeyV1, u64>,
-    process_shared_charges: BTreeMap<ResidentMemoryComponentIdV1, u64>,
+    process_shared_charges: BTreeMap<
+        (
+            ResidentMemoryComponentIdV1,
+            Option<ResidentMemoryOperationIdentityV1>,
+        ),
+        u64,
+    >,
     /// The smallest refused request per ceiling is the first that can fit.
     /// Shared headroom must be evaluated against each distinct ceiling.
     waiting_requests: BTreeMap<u64, u64>,
@@ -1462,7 +1468,12 @@ pub fn process_admission_reservations_v1() -> ProcessAdmissionReservationsV1 {
             .charges
             .iter()
             .map(|(key, bytes)| (key.component, *bytes))
-            .chain(state.process_shared_charges.iter().map(|(c, b)| (*c, *b)));
+            .chain(
+                state
+                    .process_shared_charges
+                    .iter()
+                    .map(|((c, _), b)| (*c, *b)),
+            );
         for (component, bytes) in charges {
             let total = reservations.components.entry(component).or_default();
             *total = total.saturating_add(bytes);
@@ -1477,6 +1488,246 @@ fn register_process_admission_ledger_v1(state: &Arc<Mutex<ResidentMemoryStateV1>
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     ledgers.retain(|ledger| ledger.strong_count() > 0);
     ledgers.push(Arc::downgrade(state));
+}
+
+struct ResidentMemoryOperationAllocationV1 {
+    /// Historical requirement only; live balances belong exclusively to the
+    /// canonical charge map. Accessed while the authority state lock is held.
+    witnessed: Mutex<ResidentMemoryOperationWitnessV1>,
+}
+
+#[derive(Default)]
+struct ResidentMemoryOperationWitnessV1 {
+    required_bytes: u128,
+    pressure_refusal: Option<ResidentMemoryOperationPressureWitnessV1>,
+}
+
+#[derive(Clone, Copy)]
+struct ResidentMemoryOperationPressureWitnessV1 {
+    required_bytes: u128,
+    ceiling: u64,
+}
+
+#[derive(Clone)]
+struct ResidentMemoryOperationIdentityV1(Arc<ResidentMemoryOperationAllocationV1>);
+
+impl PartialEq for ResidentMemoryOperationIdentityV1 {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ResidentMemoryOperationIdentityV1 {}
+
+impl PartialOrd for ResidentMemoryOperationIdentityV1 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ResidentMemoryOperationIdentityV1 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        Arc::as_ptr(&self.0).cmp(&Arc::as_ptr(&other.0))
+    }
+}
+
+/// Related construction regions sharing one exact allocation identity.
+/// The identity is process-local and never part of a persisted owner or wire DTO.
+#[derive(Clone)]
+pub struct ResidentMemoryOperationV1 {
+    authority: Arc<ProcessResidentMemoryV1>,
+    identity: ResidentMemoryOperationIdentityV1,
+}
+
+impl fmt::Debug for ResidentMemoryOperationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResidentMemoryOperationV1")
+            .field("authority", &self.authority)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResidentMemoryOperationV1 {
+    pub fn authority(&self) -> &Arc<ProcessResidentMemoryV1> {
+        &self.authority
+    }
+
+    /// Reserve another region, witnessing the live operation plus this request
+    /// under the same lock that admits or refuses it. Refusals register the
+    /// full reconstruction request rather than just its last increment.
+    pub fn reserve_process_shared(
+        &self,
+        component: ResidentMemoryComponentIdV1,
+        requested_bytes: NonZeroU64,
+    ) -> Result<ProcessSharedMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
+        self.authority.pressure.measure_admission_bytes();
+        self.authority.reserve_process_shared_attribution(
+            component,
+            requested_bytes,
+            Some(&self.identity),
+        )
+    }
+
+    /// The largest witnessed live-plus-next requirement, retained even after
+    /// every construction guard has unwound. It predicts no unvisited work.
+    /// Pressure growth refusals retain their typed watermark independently of
+    /// whether the caller's execution control reached a checkpoint. Callers
+    /// use the admission watermark for a checkpoint-only refusal and the hard
+    /// limit for a ledger growth refusal.
+    pub fn witnessed_reconstruction_requirement(
+        &self,
+        ceiling: u64,
+    ) -> Result<
+        Option<ResidentMemoryReconstructionDemandV1>,
+        ResidentMemoryReconstructionDemandFailureV1,
+    > {
+        let _state = self.authority.lock_state();
+        let witnessed = self
+            .identity
+            .0
+            .witnessed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if witnessed.required_bytes == 0 {
+            return Ok(None);
+        }
+        let demand = ResidentMemoryReconstructionDemandV1 {
+            authority: Arc::clone(&self.authority),
+            required_bytes: witnessed.required_bytes,
+            ceiling: ceiling.min(self.authority.limit_bytes()),
+        };
+        let demand = match witnessed.pressure_refusal {
+            Some(pressure) => demand.merge(ResidentMemoryReconstructionDemandV1 {
+                authority: Arc::clone(&self.authority),
+                required_bytes: pressure.required_bytes,
+                ceiling: pressure.ceiling,
+            })?,
+            None => demand,
+        };
+        Ok(Some(demand))
+    }
+}
+
+/// An immutable witnessed requirement for construction that was discarded.
+/// This owns no live charge and makes no claim about the cause of RSS changes.
+#[derive(Clone, Debug)]
+pub struct ResidentMemoryReconstructionDemandV1 {
+    authority: Arc<ProcessResidentMemoryV1>,
+    // A live total plus a refused increment can exceed u64 even though the
+    // ledger itself cannot. Preserve that impossible requirement losslessly.
+    required_bytes: u128,
+    ceiling: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ResidentMemoryReconstructionDemandFailureV1 {
+    #[error("discarded reservation belongs to another resident-memory authority")]
+    AuthorityMismatch,
+    #[error("discarded reservation was included more than once")]
+    DuplicateReservation,
+    #[error("witnessed reconstruction requirement overflowed")]
+    RequirementOverflow,
+}
+
+impl ResidentMemoryReconstructionDemandV1 {
+    pub const fn required_bytes(&self) -> u128 {
+        self.required_bytes
+    }
+
+    /// Narrow this requirement to the checkpoint's actual admission ceiling.
+    #[must_use]
+    pub fn below_ceiling(mut self, ceiling: u64) -> Self {
+        self.ceiling = self.ceiling.min(ceiling);
+        self
+    }
+
+    /// Preserve both witnessed constraints across retries of unchanged input.
+    /// A larger request and a tighter ceiling are not independently combined:
+    /// retain the tightest permissible standing charge and the largest cgroup
+    /// headroom request, which is exactly their conjunction.
+    pub fn merge(self, other: Self) -> Result<Self, ResidentMemoryReconstructionDemandFailureV1> {
+        if !Arc::ptr_eq(&self.authority, &other.authority) {
+            return Err(ResidentMemoryReconstructionDemandFailureV1::AuthorityMismatch);
+        }
+        let Some(left_slack) = u128::from(self.ceiling).checked_sub(self.required_bytes) else {
+            return Ok(self);
+        };
+        let Some(right_slack) = u128::from(other.ceiling).checked_sub(other.required_bytes) else {
+            return Ok(other);
+        };
+        let required_bytes = self.required_bytes.max(other.required_bytes);
+        // min(slack) + max(required) cannot exceed the original ceiling of
+        // whichever requirement supplied max(required).
+        let ceiling = u64::try_from(required_bytes + left_slack.min(right_slack))
+            .map_err(|_| ResidentMemoryReconstructionDemandFailureV1::RequirementOverflow)?;
+        Ok(Self {
+            authority: self.authority,
+            required_bytes,
+            ceiling,
+        })
+    }
+
+    /// Include exact still-owned guards before they unwind. The iterator must
+    /// contain each discarded reservation once, from this same authority.
+    pub fn including_discarded_reservations<'a>(
+        mut self,
+        reservations: impl IntoIterator<Item = &'a ResidentMemoryReservationV1>,
+    ) -> Result<Self, ResidentMemoryReconstructionDemandFailureV1> {
+        let mut included = Vec::<&ResidentMemoryReservationV1>::new();
+        for reservation in reservations {
+            if !Arc::ptr_eq(&self.authority, &reservation.authority) {
+                return Err(ResidentMemoryReconstructionDemandFailureV1::AuthorityMismatch);
+            }
+            if included.iter().any(|held| std::ptr::eq(*held, reservation)) {
+                return Err(ResidentMemoryReconstructionDemandFailureV1::DuplicateReservation);
+            }
+            self.required_bytes = self
+                .required_bytes
+                .checked_add(u128::from(reservation.reserved_bytes()))
+                .ok_or(ResidentMemoryReconstructionDemandFailureV1::RequirementOverflow)?;
+            included.push(reservation);
+        }
+        Ok(self)
+    }
+
+    /// Re-measure and atomically either admit this witnessed requirement or
+    /// re-arm the existing canonical waiter. A ready request adds no waiter,
+    /// so repeatedly checking it cannot generate its own wake loop.
+    pub fn can_retry(&self) -> bool {
+        self.authority.pressure.measure_admission_bytes();
+        // Match the pressure settler's lock order. Holding both locks closes
+        // ledger-release and sample-settlement races during registration.
+        let mut waiting = self
+            .authority
+            .pressure
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.authority.lock_state();
+        let headroom = self.authority.headroom_from_state(&state, self.ceiling);
+        if u128::from(headroom.available_bytes) >= self.required_bytes {
+            return true;
+        }
+        if let Ok(required_bytes) = u64::try_from(self.required_bytes)
+            && required_bytes <= self.ceiling
+        {
+            state
+                .waiting_requests
+                .entry(self.ceiling)
+                .and_modify(|held| *held = (*held).min(required_bytes))
+                .or_insert(required_bytes);
+            let authority = Arc::downgrade(&self.authority);
+            if !waiting.iter().any(|held| held.ptr_eq(&authority)) {
+                waiting.push(authority);
+            }
+            self.authority
+                .pressure
+                .any_waiting
+                .store(true, Ordering::Release);
+        }
+        false
+    }
 }
 
 /// The single process ceiling. Callers share one pointer-identical `Arc`.
@@ -1499,6 +1750,20 @@ impl fmt::Debug for ProcessResidentMemoryV1 {
 }
 
 impl ProcessResidentMemoryV1 {
+    /// Attribute related construction regions to one allocation, independently
+    /// of any project or generation label. Clones retain this exact identity.
+    #[must_use]
+    pub fn begin_operation(self: &Arc<Self>) -> ResidentMemoryOperationV1 {
+        ResidentMemoryOperationV1 {
+            authority: Arc::clone(self),
+            identity: ResidentMemoryOperationIdentityV1(Arc::new(
+                ResidentMemoryOperationAllocationV1 {
+                    witnessed: Mutex::new(ResidentMemoryOperationWitnessV1::default()),
+                },
+            )),
+        }
+    }
+
     /// Production constructor: binds the one process-wide measured-RSS cell.
     pub fn new(limit_bytes: NonZeroU64) -> Self {
         let ledger = Self::with_pressure(
@@ -1526,6 +1791,11 @@ impl ProcessResidentMemoryV1 {
     #[must_use]
     pub fn pressure(&self) -> &Arc<ResidentMemoryPressureV1> {
         &self.pressure
+    }
+
+    #[must_use]
+    pub const fn limit_bytes(&self) -> u64 {
+        self.limit_bytes.get()
     }
 
     /// Wait for `bytes` to fit below `ceiling` beside both the ledger and the
@@ -1587,7 +1857,7 @@ impl ProcessResidentMemoryV1 {
         key: ResidentMemoryKeyV1,
         requested_bytes: NonZeroU64,
     ) -> Result<ResidentMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
-        if let Some(failure) = self.observed_over_budget_refusal(requested_bytes) {
+        if let Some(failure) = self.observed_over_budget_refusal(requested_bytes, requested_bytes) {
             return Err(self.refused(failure));
         }
         if let Some(reservation) = self.try_reserve(&key, requested_bytes) {
@@ -1666,30 +1936,131 @@ impl ProcessResidentMemoryV1 {
         component: ResidentMemoryComponentIdV1,
         requested_bytes: NonZeroU64,
     ) -> Result<ProcessSharedMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
-        if let Some(failure) = self.observed_over_budget_refusal(requested_bytes) {
-            return Err(self.refused(failure));
-        }
+        self.reserve_process_shared_attribution(component, requested_bytes, None)
+    }
+
+    fn reserve_process_shared_attribution(
+        self: &Arc<Self>,
+        component: ResidentMemoryComponentIdV1,
+        requested_bytes: NonZeroU64,
+        operation: Option<&ResidentMemoryOperationIdentityV1>,
+    ) -> Result<ProcessSharedMemoryReservationV1, ResidentMemoryAdmissionFailureV1> {
         let mut state = self.lock_state();
+        // The canonical live total cannot exceed used_bytes. Widen before
+        // adding the next request so an impossible reconstruction stays
+        // impossible even when its witnessed requirement exceeds u64.
+        let required_bytes = operation.map(|operation| {
+            let live_bytes = state
+                .process_shared_charges
+                .iter()
+                .filter(|((_, identity), _)| identity.as_ref() == Some(operation))
+                .map(|(_, bytes)| u128::from(*bytes))
+                .sum::<u128>();
+            let required_bytes = live_bytes + u128::from(requested_bytes.get());
+            let mut witnessed = operation
+                .0
+                .witnessed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            witnessed.required_bytes = witnessed.required_bytes.max(required_bytes);
+            required_bytes
+        });
         let next_used = state
             .used_bytes
             .checked_add(requested_bytes.get())
             .filter(|next_used| *next_used <= self.limit_bytes.get());
-        let Some(next_used) = next_used else {
-            let failure = self.admission_failure_from_used(state.used_bytes, requested_bytes);
-            drop(state);
-            return Err(self.refused(failure));
+        // An attributed operation is one admission unit even when its regions
+        // grow a byte at a time. Legacy callers retain their delta-sized floor.
+        // An unrepresentable operation requirement necessarily exceeds the
+        // u64 ledger ceiling; refuse it without truncating its stored witness.
+        let pressure_request = match required_bytes {
+            Some(required_bytes) => u64::try_from(required_bytes).ok().and_then(NonZeroU64::new),
+            None => Some(requested_bytes),
         };
-        state.used_bytes = next_used;
-        *state.process_shared_charges.entry(component).or_default() += requested_bytes.get();
+        let failure = match pressure_request {
+            Some(pressure_request) => {
+                self.observed_over_budget_refusal(pressure_request, requested_bytes)
+            }
+            None => Some(self.admission_failure_from_used(state.used_bytes, requested_bytes)),
+        }
+        .or_else(|| {
+            next_used
+                .is_none()
+                .then(|| self.admission_failure_from_used(state.used_bytes, requested_bytes))
+        });
+        if let Some(failure) = failure {
+            let waiting_bytes = required_bytes.unwrap_or(u128::from(requested_bytes.get()));
+            let ceiling = match (operation, required_bytes, failure) {
+                (
+                    Some(operation),
+                    Some(required_bytes),
+                    ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
+                        high_watermark_bytes,
+                        ..
+                    },
+                ) => {
+                    let mut witnessed = operation
+                        .0
+                        .witnessed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // This exact operation always uses the same authority and
+                    // immutable pressure watermark. Keep the largest actual
+                    // refusal at that bound, separately from its historical
+                    // peak at the hard limit.
+                    if witnessed
+                        .pressure_refusal
+                        .is_none_or(|held| required_bytes > held.required_bytes)
+                    {
+                        witnessed.pressure_refusal =
+                            Some(ResidentMemoryOperationPressureWitnessV1 {
+                                required_bytes,
+                                ceiling: high_watermark_bytes,
+                            });
+                    }
+                    high_watermark_bytes
+                }
+                _ => failure.limit_bytes(),
+            };
+            let register = if let Ok(waiting_bytes) = u64::try_from(waiting_bytes)
+                && waiting_bytes <= ceiling
+            {
+                state
+                    .waiting_requests
+                    .entry(ceiling)
+                    .and_modify(|held| *held = (*held).min(waiting_bytes))
+                    .or_insert(waiting_bytes);
+                true
+            } else {
+                false
+            };
+            drop(state);
+            if register {
+                self.pressure.register_waiting(self);
+            }
+            return Err(failure);
+        }
+        // No failure means the checked addition above fits the authority.
+        // Use the same proven bound rather than a second fallible admission.
+        state.used_bytes += requested_bytes.get();
+        *state
+            .process_shared_charges
+            .entry((component, operation.cloned()))
+            .or_default() += requested_bytes.get();
         Ok(ProcessSharedMemoryReservationV1 {
             authority: Arc::clone(self),
             component,
+            operation: operation.cloned(),
             reserved_bytes: requested_bytes.get(),
         })
     }
 
     pub fn snapshot(&self) -> ResidentMemorySnapshotV1 {
         let state = self.lock_state();
+        let mut shared = BTreeMap::<ResidentMemoryComponentIdV1, u64>::new();
+        for ((component, _), bytes) in &state.process_shared_charges {
+            *shared.entry(*component).or_default() += *bytes;
+        }
         ResidentMemorySnapshotV1 {
             used_bytes: state.used_bytes,
             limit_bytes: self.limit_bytes.get(),
@@ -1701,13 +2072,9 @@ impl ProcessResidentMemoryV1 {
                     bytes: *bytes,
                 })
                 .collect(),
-            process_shared_charges: state
-                .process_shared_charges
-                .iter()
-                .map(|(component, bytes)| ProcessSharedMemoryChargeV1 {
-                    component: *component,
-                    bytes: *bytes,
-                })
+            process_shared_charges: shared
+                .into_iter()
+                .map(|(component, bytes)| ProcessSharedMemoryChargeV1 { component, bytes })
                 .collect(),
         }
     }
@@ -1787,18 +2154,21 @@ impl ProcessResidentMemoryV1 {
     /// Only *new* admissions are refused. Nothing already reserved is revoked,
     /// shrunk, or released by this path: the reservation guards outlive
     /// pressure exactly as before. Nominal RSS must leave room under the hard
-    /// limit for the allocation; an existing pressure latch still clears when a
+    /// limit for the additional allocation: live operation bytes are already
+    /// represented by RSS. The full request controls floor eligibility and
+    /// names the refused work; an existing pressure latch still clears when a
     /// later sample falls to the low watermark.
     fn observed_over_budget_refusal(
         &self,
         requested_bytes: NonZeroU64,
+        additional_bytes: NonZeroU64,
     ) -> Option<ResidentMemoryAdmissionFailureV1> {
         let pressure = self.pressure.state();
         let observed_bytes = pressure.observed_bytes()?;
         let high_watermark_bytes = self.pressure.high_watermark_bytes();
         if requested_bytes.get() <= RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1
             || (!pressure.is_over_budget()
-                && requested_bytes.get()
+                && additional_bytes.get()
                     <= self.pressure.limit_bytes().saturating_sub(observed_bytes))
         {
             return None;
@@ -1925,6 +2295,7 @@ impl ProcessResidentMemoryV1 {
     fn shrink_process_shared(
         &self,
         component: ResidentMemoryComponentIdV1,
+        operation: Option<&ResidentMemoryOperationIdentityV1>,
         reserved_bytes: u64,
         measured_bytes: u64,
     ) -> Result<(), ResidentMemoryAdjustmentFailureV1> {
@@ -1940,26 +2311,33 @@ impl ProcessResidentMemoryV1 {
         }
         let mut state = self.lock_state();
         state.used_bytes -= released_bytes;
-        if let Some(charge) = state.process_shared_charges.get_mut(&component) {
+        let key = (component, operation.cloned());
+        if let Some(charge) = state.process_shared_charges.get_mut(&key) {
             *charge -= released_bytes;
             if *charge == 0 {
-                state.process_shared_charges.remove(&component);
+                state.process_shared_charges.remove(&key);
             }
         }
         self.ledger_released(state);
         Ok(())
     }
 
-    fn release_process_shared(&self, component: ResidentMemoryComponentIdV1, reserved_bytes: u64) {
+    fn release_process_shared(
+        &self,
+        component: ResidentMemoryComponentIdV1,
+        operation: Option<&ResidentMemoryOperationIdentityV1>,
+        reserved_bytes: u64,
+    ) {
         if reserved_bytes == 0 {
             return;
         }
         let mut state = self.lock_state();
         state.used_bytes -= reserved_bytes;
-        if let Some(charge) = state.process_shared_charges.get_mut(&component) {
+        let key = (component, operation.cloned());
+        if let Some(charge) = state.process_shared_charges.get_mut(&key) {
             *charge -= reserved_bytes;
             if *charge == 0 {
-                state.process_shared_charges.remove(&component);
+                state.process_shared_charges.remove(&key);
             }
         }
         self.ledger_released(state);
@@ -2044,6 +2422,7 @@ impl Drop for ResidentMemoryReservationV1 {
 pub struct ProcessSharedMemoryReservationV1 {
     authority: Arc<ProcessResidentMemoryV1>,
     component: ResidentMemoryComponentIdV1,
+    operation: Option<ResidentMemoryOperationIdentityV1>,
     reserved_bytes: u64,
 }
 
@@ -2052,12 +2431,37 @@ impl ProcessSharedMemoryReservationV1 {
         self.reserved_bytes
     }
 
+    /// Admit growth on this exact component and operation, retaining one guard
+    /// for the whole region. Coalescing ownership never releases ledger bytes
+    /// or emits headroom; a refusal leaves the existing reservation intact.
+    pub fn try_grow(
+        &mut self,
+        additional: NonZeroU64,
+    ) -> Result<(), ResidentMemoryAdmissionFailureV1> {
+        self.authority.pressure().measure_admission_bytes();
+        let mut growth = self.authority.reserve_process_shared_attribution(
+            self.component,
+            additional,
+            self.operation.as_ref(),
+        )?;
+        // Successful canonical admission bounds both guards by used_bytes,
+        // so their total fits u64. Keep overflow typed if that invariant fails.
+        let reserved_bytes = self
+            .reserved_bytes
+            .checked_add(growth.reserved_bytes)
+            .ok_or_else(|| self.authority.admission_failure(additional))?;
+        self.reserved_bytes = reserved_bytes;
+        growth.reserved_bytes = 0;
+        Ok(())
+    }
+
     pub fn shrink_to(
         &mut self,
         measured_bytes: u64,
     ) -> Result<(), ResidentMemoryAdjustmentFailureV1> {
         self.authority.shrink_process_shared(
             self.component,
+            self.operation.as_ref(),
             self.reserved_bytes,
             measured_bytes,
         )?;
@@ -2078,8 +2482,11 @@ impl fmt::Debug for ProcessSharedMemoryReservationV1 {
 
 impl Drop for ProcessSharedMemoryReservationV1 {
     fn drop(&mut self) {
-        self.authority
-            .release_process_shared(self.component, self.reserved_bytes);
+        self.authority.release_process_shared(
+            self.component,
+            self.operation.as_ref(),
+            self.reserved_bytes,
+        );
     }
 }
 

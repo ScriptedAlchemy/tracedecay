@@ -5,6 +5,7 @@ use std::path::Path;
 
 use tracedecay_domain::{EdgeAuthorityV1, LanguageId, SanitizationReceiptId, SensitivityLevelV1};
 
+use super::helpers::{edge_evidence, resolve_cross_file_references_charged};
 use super::worker_tests::{
     WorkerPublicationStore, worker_config, worker_id, worker_request_with_source,
 };
@@ -255,9 +256,12 @@ fn differential_counts(language: &str) -> DifferentialCounts {
     let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
     let store = WorkerPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(worker_config(), store).expect("production owner");
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
     let base = publish(&mut owner, &tree, None, false, 1_000_000);
-    let base = base.decoded().expect("a cold seal holds its generation");
+    let base = store
+        .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(base.snapshot()))
+        .expect("decode cold fixture")
+        .expect("cold fixture active");
     let mut counts = DifferentialCounts::default();
     for index in 0..tree.len() {
         let (path, source) = &tree[index];
@@ -378,7 +382,10 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
         let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store.clone())
             .expect("production owner");
         let parent = publish(&mut owner, &tree, None, false, 1_000_000);
-        let parent = parent.decoded().expect("a cold seal holds its generation");
+        let parent = store
+            .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(parent.snapshot()))
+            .expect("decode cold fixture")
+            .expect("cold fixture active");
         assert!(
             parent
                 .edges
@@ -426,11 +433,12 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
             .decode_active(&scope)
             .expect("the edit restores")
             .expect("an active edit");
+        let full_resolution = resolve_cross_file_references_charged(&edited.files, &mut |_| Ok(()))
+            .expect("whole reference resolution");
+        let (full_edges, _) =
+            edge_evidence(&edited.files, full_resolution.edges).expect("whole edge evidence");
         assert_eq!(
-            edited.edges,
-            collect_edge_evidence(&edited.files)
-                .expect("whole edge evidence")
-                .0,
+            edited.edges, full_edges,
             "{language}: edges of the first build after the restart"
         );
     }

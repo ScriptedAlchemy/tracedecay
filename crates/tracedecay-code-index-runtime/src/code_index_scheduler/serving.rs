@@ -1703,6 +1703,12 @@ impl LatestCompleteCodeIndexV1 {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn prewarm_serving_derivations(&self) {
         let _ = self.production_query_owners();
+        self.prewarm_graph_derivations();
+    }
+
+    /// Graph activation must not advance the independently owned text build.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(super) fn prewarm_graph_derivations(&self) {
         let _ = self.record_index();
         let generation_id = self.generation.manifest().generation_id.clone();
         let Ok(freshness) = self.source_freshness() else {

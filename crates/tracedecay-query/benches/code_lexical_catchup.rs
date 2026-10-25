@@ -2,19 +2,21 @@
 //! transaction shapes. This target intentionally owns its fixture because
 //! query's production fixture helpers are test-private.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
-    CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
-    CodeIndexRepositoryParseIdentityV1, MemorySealedPublicationStoreV1,
-    SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageReadV1,
+    CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexRepositoryParseIdentityV1,
+    MemorySealedPublicationStoreV1, SealedGenerationSegmentReadV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };
@@ -163,6 +165,9 @@ fn build_fixture() -> Fixture {
         omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot,
         captured_files: sources
             .iter()
@@ -206,38 +211,8 @@ fn build_fixture() -> Fixture {
     let generation = owner
         .build_and_publish(request, &control)
         .expect("build deterministic sealed generation");
-    let mut segments = BTreeMap::new();
-    let mut evidence_pack = Vec::new();
-    let manifest = generation
-        .publication()
-        .encode(None, |publication| {
-            match publication {
-                SealedGenerationSegmentPublicationV1::File { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
-                | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::CodeGraphPage {
-                    page_digest, bytes, ..
-                } => {
-                    segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                    evidence_pack.extend_from_slice(bytes);
-                }
-                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-                    segment_digest,
-                    ..
-                } => {
-                    segments.insert(
-                        segment_digest.as_str().to_owned(),
-                        std::mem::take(&mut evidence_pack),
-                    );
-                }
-            }
-            Ok(())
-        })
-        .expect("encode deterministic sealed generation");
+    let manifest = generation.manifest_bytes();
+    let reader = generation.sealed_generation().segment_reader();
     let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
         .expect("sealed manifest digest");
     let metadata = CodeLexicalProjectionMetadataV1 {
@@ -264,13 +239,11 @@ fn build_fixture() -> Fixture {
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &manifest,
         state_digest,
-        move |digest, _, buffer, _control| {
-            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
-            })?;
-            buffer.clear();
-            buffer.extend_from_slice(bytes);
-            Ok(())
+        move |digest, size_bytes, buffer, _control| {
+            reader(
+                SealedGenerationSegmentReadV1::Whole { digest, size_bytes },
+                buffer,
+            )
         },
         1,
         1024 * 1024,

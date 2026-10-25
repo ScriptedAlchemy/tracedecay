@@ -3,9 +3,22 @@
 //! statistics, coverage, and resolution index, and the same restored edges
 //! and call limitations.
 
+use std::num::NonZeroU64;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use sha2::Digest as _;
 use tracedecay_domain::{LanguageId, ProjectionKeyV1, ProjectionKindV1, SanitizationReceiptId};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, ProcessResidentSampleV1, ResidentMemoryPressureV1,
+    detected_process_resident_memory_limit_v1,
+};
 
+use super::module_resolution::ModuleImportIndexV1;
+use super::resolution_view::SymbolsByNameV1;
+use super::sealed_parent::SealedParentGenerationV1;
+use super::sparse_resolution::{SparseDefinitionWindowV1, SparseSymbolsByNameV1};
+use super::typescript_resolution::ImportBindingOutcomeV1;
 use super::worker_tests::{worker_config, worker_id};
 use super::*;
 
@@ -39,7 +52,7 @@ fn request_capturing(
     request
 }
 
-fn request(files: &[(&str, &str, &str)], sealed_at: i64) -> CodeIndexBuildRequestV1 {
+pub(super) fn request(files: &[(&str, &str, &str)], sealed_at: i64) -> CodeIndexBuildRequestV1 {
     let mut rows = files
         .iter()
         .map(|(path, language, source)| SanitizedCodeFileV1 {
@@ -60,6 +73,9 @@ fn request(files: &[(&str, &str, &str)], sealed_at: i64) -> CodeIndexBuildReques
         .collect::<Vec<_>>()
         .concat();
     CodeIndexBuildRequestV1 {
+        resident_memory: Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot: SanitizedCodeSnapshotV1 {
             repository: worker_id("repository.worker"),
             worktree: None,
@@ -98,7 +114,7 @@ fn request(files: &[(&str, &str, &str)], sealed_at: i64) -> CodeIndexBuildReques
 
 type Owner = CodeIndexProductionOwnerV1<MemorySealedPublicationStoreV1>;
 
-fn owner(store: &MemorySealedPublicationStoreV1) -> Owner {
+pub(super) fn owner(store: &MemorySealedPublicationStoreV1) -> Owner {
     CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner")
 }
 
@@ -115,7 +131,7 @@ fn publish(
         .expect("published generation")
 }
 
-fn scope() -> CodeIndexGenerationScopeV1 {
+pub(super) fn scope() -> CodeIndexGenerationScopeV1 {
     CodeIndexGenerationScopeV1::for_snapshot(&request(&[], 0).snapshot)
 }
 
@@ -194,9 +210,16 @@ fn assert_sparse_matches_cold(
         None,
         "an in-place edit seals over its parent"
     );
-    assert!(
-        sparse.decoded().is_none(),
-        "a sparse successor holds no decoded generation"
+    assert_eq!(
+        store
+            .load_active(&scope())
+            .expect("active publication")
+            .expect("active successor")
+            .metadata()
+            .expect("verified metadata")
+            .manifest()
+            .generation_id,
+        sparse.manifest().generation_id
     );
 
     let cold_store = MemorySealedPublicationStoreV1::default();
@@ -249,6 +272,103 @@ fn a_comment_on_a_called_module_reseals_over_the_parent() {
     assert!(
         sparse.projection().request().changes.reused_count > 0,
         "carried chunks are reused"
+    );
+}
+
+/// Symbols are kept in occurrence order, and a comment re-keys every
+/// occurrence of its file, so the edit reorders same-named symbols without
+/// changing any of them. Files that only spell those names, and whose calls
+/// bind elsewhere, keep their decisions without being decoded.
+#[test]
+fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
+    let util = (0..8)
+        .map(|n| {
+            format!("pub struct Kind{n};\nimpl Kind{n} {{ pub fn new() -> Self {{ Kind{n} }} }}\n")
+        })
+        .collect::<String>()
+        + UTIL;
+    let edited = format!("{util}// probe line\n");
+    let other = "pub struct Other;\nimpl Other { pub fn new() -> Self { Other } }\n";
+    let callers = (0..4)
+        .map(|n| {
+            (
+                format!("src/caller{n}.rs"),
+                format!("pub fn caller{n}() {{ let _ = crate::other::Other::new(); }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    fn caller_tree<'a>(
+        util: &'a str,
+        other: &'a str,
+        callers: &'a [(String, String)],
+    ) -> Vec<(&'a str, &'a str, &'a str)> {
+        let mut tree = rust_tree(util, MAIN);
+        tree.push(("src/other.rs", RUST, other));
+        tree.extend(
+            callers
+                .iter()
+                .map(|(path, source)| (path.as_str(), RUST, source.as_str())),
+        );
+        tree
+    }
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    let parent = publish(
+        &mut incremental,
+        &caller_tree(&util, other, &callers),
+        1_100_000,
+    );
+    let manifest = store
+        .manifest_bytes(&parent.manifest().generation_id)
+        .expect("parent manifest");
+    let manifest =
+        super::partitioned_codec::parse_partitioned_manifest(&manifest).expect("manifest parses");
+    let snapshot = request(&caller_tree(&util, other, &callers), 0)
+        .snapshot
+        .files;
+    let segment_of = |path: &str| {
+        let key = snapshot
+            .iter()
+            .position(|file| file.logical_path == path)
+            .expect("parent file");
+        manifest
+            .file_segments
+            .iter()
+            .find(|segment| segment.file_key as usize == key)
+            .map(|segment| segment.segment_digest.clone())
+            .expect("parent file segment")
+    };
+    let untouched = callers
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .chain(["src/other.rs"])
+        .map(|path| (path, segment_of(path)))
+        .collect::<Vec<_>>();
+    let reads_before = untouched
+        .iter()
+        .map(|(_, digest)| store.segment_reads(digest))
+        .collect::<Vec<_>>();
+
+    let sparse = publish(
+        &mut incremental,
+        &caller_tree(&edited, other, &callers),
+        1_200_000,
+    );
+    assert_eq!(
+        sparse.cold_reason(),
+        None,
+        "a comment seals over its parent"
+    );
+    for ((path, digest), before) in untouched.iter().zip(reads_before) {
+        assert_eq!(
+            store.segment_reads(digest),
+            before,
+            "{path} names `new` but binds nowhere in the edited file, so its segment stays sealed"
+        );
+    }
+    assert_sparse_matches_cold(
+        &caller_tree(&util, other, &callers),
+        &caller_tree(&edited, other, &callers),
     );
 }
 
@@ -405,9 +525,13 @@ fn import_and_file_set_changes_build_cold() {
         added.cold_reason(),
         Some(CodeIndexColdBuildReasonV1::FilesAddedOrRemoved)
     );
-    assert!(
-        added.decoded().is_some(),
-        "a cold build holds its decoded generation"
+    assert_eq!(
+        store
+            .decode_active(&scope())
+            .expect("decode cold publication")
+            .expect("cold publication active")
+            .statistics,
+        *added.metadata().generation_statistics()
     );
 }
 
@@ -549,15 +673,25 @@ fn ambiguity_census_preserves_unknown_parent_count() {
         .expect("statistics object")
         .remove("ambiguous_name_drops");
     legacy.statistics = serde_json::from_value(statistics).expect("legacy statistics decode");
+    let mut preparation = store
+        .prepare(&scope(), Some(&initial.manifest().generation_id))
+        .expect("prepare legacy publication");
+    let manifest_bytes = legacy
+        .encode_partitioned_sealed(|segment| {
+            preparation
+                .write_segment(segment)
+                .map_err(CodeIndexProductionErrorV1::Publication)
+        })
+        .expect("seal legacy publication");
+    let publication = CodeIndexSealedPublicationV1::from_prepared(
+        Arc::from(manifest_bytes),
+        legacy.projection().clone(),
+        Some(CodeIndexColdBuildReasonV1::NoParent),
+        (0, 0, 0),
+    )
+    .expect("verified legacy publication");
     store
-        .publish_atomically(
-            &scope(),
-            Some(&initial.manifest().generation_id),
-            &CodeIndexSealedPublicationV1::Cold(
-                Arc::new(legacy),
-                CodeIndexColdBuildReasonV1::NoParent,
-            ),
-        )
+        .commit(&mut preparation, &publication)
         .expect("legacy publication");
     let after = ambiguous_rust_tree(NO_AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
     let sparse = publish(&mut owner(&store), &after, 1_200_000);
@@ -716,4 +850,257 @@ fn a_language_changed_file_without_captured_bytes_is_refused() {
         error,
         CodeIndexProductionErrorV1::Input(CodeIndexInputErrorV1::MissingCapturedFile)
     ));
+}
+
+#[test]
+fn sparse_lookup_window_shares_canonical_page_and_releases_it() {
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = owner(&store);
+    let request = request(
+        &[(
+            "src/lib.rs",
+            "rust",
+            "pub fn alpha() {}\npub fn beta() {}\n",
+        )],
+        1_000_000,
+    );
+    let memory = Arc::clone(&request.resident_memory);
+    let published = owner
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
+        .expect("publish canonical lookup fixture");
+    let sealed = published.sealed_generation();
+    let canonical = sealed.segment_reader();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let fail = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&reads);
+    let failure = Arc::clone(&fail);
+    let reader: Arc<SealedSegmentReaderV1> = Arc::new(move |segment, bytes| {
+        observed.fetch_add(1, Ordering::Relaxed);
+        if failure.load(Ordering::Relaxed) {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "reader failure".to_owned(),
+            ));
+        }
+        canonical(segment, bytes)
+    });
+    let parent = SealedParentGenerationV1::open(CodeIndexSealedGenerationV1::new(
+        Arc::from(sealed.manifest_bytes()),
+        reader,
+    ))
+    .expect("open canonical parent");
+    let mut present = parent
+        .snapshot()
+        .files
+        .iter()
+        .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+        .collect::<Vec<_>>();
+    present.sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
+    let paths = present
+        .iter()
+        .enumerate()
+        .map(|(index, file)| (file.logical_path.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let index = parent
+        .resolution_index()
+        .expect("canonical resolution index");
+    let operation = memory.begin_operation();
+    let window = SparseDefinitionWindowV1::new(&index, &operation).expect("lookup window");
+    let before =
+        SparseSymbolsByNameV1::new(&index, &paths, &window, std::iter::empty(), &operation)
+            .expect("before overlay");
+    let after = SparseSymbolsByNameV1::new(&index, &paths, &window, std::iter::empty(), &operation)
+        .expect("after overlay");
+    assert!(before.get("alpha").expect("first name").is_some());
+    assert!(after.get("beta").expect("second name").is_some());
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        1,
+        "before and after share one canonical page"
+    );
+    window.release().expect("release first window");
+    assert!(after.get("alpha").expect("next window").is_some());
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        2,
+        "next window reads the canonical page again"
+    );
+    window.release().expect("release second window");
+    fail.store(true, Ordering::Relaxed);
+    assert!(
+        matches!(after.get("beta"), Err(CodeIndexProductionErrorV1::Contract(message)) if message == "reader failure")
+    );
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        3,
+        "reader failure reaches the canonical loader"
+    );
+}
+
+#[test]
+fn ruby_require_memo_releases_its_charged_workspace_and_retries_errors() {
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = owner(&store);
+    publish(
+        &mut owner,
+        &[
+            (
+                "lib/a.rb",
+                "ruby",
+                "require_relative 'b'\ndef run\n  Inner.bar\nend\n",
+            ),
+            (
+                "lib/b.rb",
+                "ruby",
+                "require_relative 'c'\nmodule Inner\n  def self.bar\n    3\n  end\nend\n",
+            ),
+            ("lib/c.rb", "ruby", "require_relative 'a'\nC = 1\n"),
+        ],
+        1_000_000,
+    );
+    let decoded = store.decode_active(&scope()).unwrap().unwrap();
+    let files = &decoded.files;
+    let index = files
+        .iter()
+        .position(|file| file.authority.logical_path == "lib/a.rb")
+        .unwrap();
+    let reference = files[index]
+        .artifacts
+        .unresolved_references
+        .iter()
+        .find(|reference| reference.reference_name == "Inner.bar")
+        .unwrap();
+    let mut modules = ModuleImportIndexV1::new(files).unwrap();
+    let refuse = || CodeIndexProductionErrorV1::Contract("closure admission refused".to_owned());
+    assert!(
+        matches!(modules.call_outcome(index, reference, &mut |_| Err(refuse())),
+        Err(CodeIndexProductionErrorV1::Contract(message)) if message == "closure admission refused")
+    );
+    let mut charged = 0;
+    let first = modules
+        .call_outcome(index, reference, &mut |bytes| {
+            charged = bytes.apply_to(charged)?;
+            Ok(())
+        })
+        .unwrap();
+    let Some(ImportBindingOutcomeV1::Bound(target, symbol)) = first else {
+        panic!("the canonical require cycle binds Inner.bar");
+    };
+    assert!(
+        charged > 0,
+        "the closure must be admitted before allocation"
+    );
+    assert!(
+        matches!(modules.call_outcome(index, reference, &mut |_| Err(refuse())).unwrap(),
+        Some(ImportBindingOutcomeV1::Bound(index, ref row)) if index == target && row.occurrence == symbol.occurrence)
+    );
+    modules.release_file_memo(index);
+    assert!(
+        matches!(modules.call_outcome(index, reference, &mut |_| Err(refuse())),
+        Err(CodeIndexProductionErrorV1::Contract(message)) if message == "closure admission refused")
+    );
+    assert!(
+        matches!(modules.call_outcome(index, reference, &mut |_| Ok(())).unwrap(),
+        Some(ImportBindingOutcomeV1::Bound(index, ref row)) if index == target && row.occurrence == symbol.occurrence)
+    );
+}
+
+#[test]
+fn carried_evidence_visitors_release_each_files_scratch_before_the_next_file() {
+    let mut sources = (0..24).map(|index| (
+        format!("lib/caller_{index}.rb"),
+        "ruby",
+        format!("require_relative 'target'\nrequire_relative 'missing'\ndef run_{index}\n  Target.helper\n  Missing.call\nend\n"),
+    )).collect::<Vec<_>>();
+    sources.push((
+        "lib/target.rb".to_owned(),
+        "ruby",
+        "module Target\n  def self.helper\n    1\n  end\nend\n".to_owned(),
+    ));
+    let rows = sources
+        .iter()
+        .map(|(path, language, source)| (path.as_str(), *language, source.as_str()))
+        .collect::<Vec<_>>();
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = owner(&store);
+    let request = request(&rows, 1_000_000);
+    let fixture_memory = Arc::clone(&request.resident_memory);
+    let published = owner
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
+        .unwrap();
+    let parent = SealedParentGenerationV1::open(published.sealed_generation().clone()).unwrap();
+    let decoded = store.decode_active(&scope()).unwrap().unwrap();
+    let fixture_operation = fixture_memory.begin_operation();
+    let baseline = fixture_memory.snapshot().used_bytes;
+    let mut one_file_peak = 0;
+    for descriptor in &parent.generation().file_segments {
+        let file = &parent.snapshot().files[descriptor.file_key as usize];
+        let facts = decoded
+            .files
+            .iter()
+            .find(|facts| facts.authority.logical_path == file.logical_path)
+            .unwrap();
+        let Some(evidence) = parent.file_evidence(descriptor.file_key).unwrap() else {
+            continue;
+        };
+        evidence
+            .for_each_sealed_edge(facts.as_ref(), &fixture_operation, &mut |_, _, _, _, _| {
+                one_file_peak = one_file_peak.max(fixture_memory.snapshot().used_bytes - baseline);
+                Ok(())
+            })
+            .unwrap();
+        evidence
+            .for_each_unresolved_call(facts.as_ref(), &fixture_operation, &mut |_| {
+                one_file_peak = one_file_peak.max(fixture_memory.snapshot().used_bytes - baseline);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fixture_memory.snapshot().used_bytes, baseline);
+    }
+    let limit = NonZeroU64::new(one_file_peak).expect("real fixture has evidence scratch");
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| {
+                Some(ProcessResidentSampleV1 {
+                    resident_bytes: 0,
+                    unreclaimable_bytes: 0,
+                    swapped_bytes: 0,
+                    cgroup_headroom_bytes: None,
+                })
+            }),
+        )),
+    ));
+    let operation = memory.begin_operation();
+    let mut visited_edges = 0;
+    let mut visited_calls = 0;
+    for descriptor in &parent.generation().file_segments {
+        let file = &parent.snapshot().files[descriptor.file_key as usize];
+        let facts = decoded
+            .files
+            .iter()
+            .find(|facts| facts.authority.logical_path == file.logical_path)
+            .unwrap();
+        let Some(evidence) = parent.file_evidence(descriptor.file_key).unwrap() else {
+            continue;
+        };
+        evidence
+            .for_each_sealed_edge(facts.as_ref(), &operation, &mut |_, _, _, _, _| {
+                visited_edges += 1;
+                assert!(memory.snapshot().used_bytes <= one_file_peak);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(memory.snapshot().used_bytes, 0);
+        evidence
+            .for_each_unresolved_call(facts.as_ref(), &operation, &mut |_| {
+                visited_calls += 1;
+                assert!(memory.snapshot().used_bytes <= one_file_peak);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(memory.snapshot().used_bytes, 0);
+    }
+    assert!(visited_edges >= 24);
+    assert!(visited_calls >= 24);
 }
