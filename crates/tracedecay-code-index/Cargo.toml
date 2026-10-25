@@ -93,6 +93,7 @@ tempfile.workspace = true
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 
