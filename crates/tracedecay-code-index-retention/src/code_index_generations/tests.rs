@@ -3790,3 +3790,212 @@ fn store_release_wait_outlasts_a_reader() {
             .is_some()
     );
 }
+
+#[test]
+fn abandoned_preparations_are_collected_only_after_shared_project_publication_leases_end() {
+    let project = tempfile::TempDir::new().expect("project store");
+    let scope = project
+        .path()
+        .join(code_index_scope_hash(Path::new("/fixture/main")));
+    let peer = project
+        .path()
+        .join(code_index_scope_hash(Path::new("/fixture/peer")));
+    std::fs::create_dir_all(scope.join(GENERATIONS_DIRECTORY)).expect("main scope");
+    std::fs::create_dir_all(peer.join(GENERATIONS_DIRECTORY)).expect("peer scope");
+    let segments = code_generation_segments_root(&scope);
+    std::fs::create_dir_all(&segments).expect("segments root");
+    // A process crash leaves the directory after its TempDir owner and shared
+    // lease disappear. Keep the fixture directory to exercise that filesystem
+    // state through the real planner and executor.
+    let abandoned = tempfile::Builder::new()
+        .prefix(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1)
+        .tempdir_in(&segments)
+        .expect("publication staging")
+        .keep();
+    std::fs::write(
+        abandoned.join("generation-evidence.tmp"),
+        b"interrupted publication",
+    )
+    .expect("abandoned pack");
+    let unrelated = segments.join("unrelated-directory");
+    std::fs::create_dir(&unrelated).expect("unrelated directory");
+    std::fs::write(unrelated.join("payload"), b"preserve").expect("unrelated payload");
+    let lease = acquire_generation_segments_publication_lock(&peer, &|| false)
+        .expect("live peer publication lease");
+    let plan =
+        plan_code_generation_retention(&scope, &BTreeSet::new()).expect("orphan-only census");
+    assert!(plan.has_collectable_work());
+    assert!(plan.collectable_generations.is_empty());
+    let result = execute_code_generation_retention_cancellable(
+        &scope,
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(1),
+        None,
+        &|| false,
+    );
+    assert!(matches!(
+        result,
+        Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)
+    ));
+    assert!(abandoned.join("generation-evidence.tmp").is_file());
+
+    let plan =
+        plan_code_generation_retention(&scope, &BTreeSet::new()).expect("protected orphan census");
+    let prior_parks = locking::store_lock_park_count();
+    let result = execute_code_generation_retention_cancellable(
+        &scope,
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(1),
+        None,
+        &|| locking::store_lock_park_count() > prior_parks,
+    );
+    assert!(matches!(
+        result,
+        Err(CodeGenerationRetentionErrorV1::Cancelled)
+    ));
+    assert!(
+        locking::store_lock_park_count() > prior_parks,
+        "the canonical cancellation callback observes a contended lock wait"
+    );
+    assert!(abandoned.join("generation-evidence.tmp").is_file());
+    drop(lease);
+
+    let plan = prepare_next_code_generation_retention_cancellable(
+        &scope,
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("ordinary maintenance finds stranded staging");
+    assert!(plan.has_collectable_work());
+    let report = execute_code_generation_retention(
+        &scope,
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(2),
+        None,
+    )
+    .expect("reclaim abandoned staging");
+    assert!(report.deleted_generations.is_empty());
+    assert!(!abandoned.exists());
+    assert_eq!(
+        std::fs::read(unrelated.join("payload")).expect("unrelated bytes"),
+        b"preserve"
+    );
+}
+
+#[test]
+fn preparation_directory_collection_observes_cancellation_entry_and_batch_bounds() {
+    let store = tempfile::TempDir::new().expect("store");
+    let segments = code_generation_segments_root(store.path());
+    std::fs::create_dir_all(&segments).expect("segments root");
+    let abandoned = tempfile::Builder::new()
+        .prefix(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1)
+        .tempdir_in(&segments)
+        .expect("staging")
+        .keep();
+    for index in 0..MAX_CODE_GENERATION_RETENTION_BATCH_V1 + 2 {
+        std::fs::write(abandoned.join(format!("segment-{index}.json")), b"").expect("staged file");
+    }
+    let mut budget = 0;
+    assert!(matches!(
+        has_unreferenced_generation_segments_budgeted(store.path(), None, &|| false, &mut budget),
+        Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded)
+    ));
+    assert!(matches!(
+        has_unreferenced_generation_segments(store.path(), None, &|| true),
+        Err(CodeGenerationRetentionErrorV1::Cancelled)
+    ));
+    assert_eq!(
+        std::fs::read_dir(&abandoned).expect("staged files").count(),
+        MAX_CODE_GENERATION_RETENTION_BATCH_V1 + 2
+    );
+    let first = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(1),
+        None,
+    )
+    .expect("first bounded collection");
+    assert!(first.generation_segment_batch_exhausted);
+    assert_eq!(
+        std::fs::read_dir(&abandoned)
+            .expect("remaining staging")
+            .count(),
+        2
+    );
+    run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(2),
+        None,
+    )
+    .expect("finish bounded collection");
+    assert!(!abandoned.exists());
+    let empty = tempfile::Builder::new()
+        .prefix(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1)
+        .tempdir_in(&segments)
+        .expect("empty abandoned staging")
+        .keep();
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("empty directory is collectable work");
+    assert!(plan.has_collectable_work());
+    execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(3),
+        None,
+    )
+    .expect("collect empty staging");
+    assert!(!empty.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn preparation_collection_refuses_symbolic_links_without_following_them() {
+    let store = tempfile::TempDir::new().expect("store");
+    let segments = code_generation_segments_root(store.path());
+    std::fs::create_dir_all(&segments).expect("segments root");
+    let outside = tempfile::TempDir::new().expect("outside staging authority");
+    let payload = outside.path().join("payload");
+    std::fs::write(&payload, b"preserve").expect("outside bytes");
+    let link = segments.join(format!("{CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1}link"));
+    std::os::unix::fs::symlink(outside.path(), &link).expect("directory symlink");
+    assert!(matches!(
+        plan_code_generation_retention(store.path(), &BTreeSet::new()),
+        Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+    ));
+    std::fs::remove_file(&link).expect("remove symbolic directory entry");
+    let staging = tempfile::Builder::new()
+        .prefix(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1)
+        .tempdir_in(&segments)
+        .expect("staging directory");
+    std::os::unix::fs::symlink(&payload, staging.path().join("segment.json"))
+        .expect("file symlink");
+    let plan =
+        plan_code_generation_retention(store.path(), &BTreeSet::new()).expect("stage census");
+    assert!(matches!(
+        execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(1),
+            None
+        ),
+        Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+    ));
+    assert_eq!(
+        std::fs::read(&payload).expect("outside payload survives"),
+        b"preserve"
+    );
+}

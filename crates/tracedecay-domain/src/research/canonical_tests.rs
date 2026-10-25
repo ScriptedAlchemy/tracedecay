@@ -544,3 +544,61 @@ fn zero_digest_matches_the_historical_placeholder_spelling() {
         format!("sha256:{}", "0".repeat(64))
     );
 }
+
+#[test]
+fn ordered_struct_fields_stream_and_keep_canonical_identity() {
+    #[derive(Serialize)]
+    #[serde(rename = "$tracedecay::canonical::ordered_object")]
+    struct Ordered<T> {
+        a: T,
+        z: u64,
+    }
+    let value = Ordered {
+        a: vec![json!({"z": 1, "a": "escaped\nvalue"})],
+        z: 2,
+    };
+    assert_canonical_identity(&value, "ordered root with ordinary nested objects");
+
+    struct ObservedSink<'a>(&'a std::cell::Cell<usize>);
+    impl CanonicalSink for ObservedSink<'_> {
+        fn write(&mut self, chunk: &str) {
+            self.0.set(self.0.get() + chunk.len());
+        }
+    }
+    struct ObservedRows<'a>(&'a std::cell::Cell<usize>);
+    impl Serialize for ObservedRows<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut rows = serializer.serialize_seq(Some(32))?;
+            for row in 0..32 {
+                let before = self.0.get();
+                rows.serialize_element(&row)?;
+                assert!(
+                    self.0.get() > before,
+                    "each row reaches the sink before the next row"
+                );
+            }
+            rows.end()
+        }
+    }
+    let written = std::cell::Cell::new(0);
+    super::super::canonical_serializer::serialize_canonical(
+        &Ordered {
+            a: ObservedRows(&written),
+            z: 2,
+        },
+        &mut ObservedSink(&written),
+    )
+    .unwrap();
+}
+
+#[test]
+fn ordered_struct_rejects_out_of_order_fields() {
+    #[derive(Serialize)]
+    #[serde(rename = "$tracedecay::canonical::ordered_object")]
+    struct Unordered {
+        z: u64,
+        a: u64,
+    }
+    assert!(canonical_sha256(&Unordered { z: 1, a: 2 }).is_err());
+}

@@ -26,6 +26,10 @@
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
+
 #[path = "../bench_support.rs"]
 mod artifact_bench;
 
@@ -710,6 +714,9 @@ fn build_request(
         omitted_sources: Vec::new(),
     };
     CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot,
         captured_files,
         changed_files: files

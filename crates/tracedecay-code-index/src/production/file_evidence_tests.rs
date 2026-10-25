@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracedecay_domain::EdgeAuthorityV1;
 
 use super::sparse_differential_tests::{FIXTURE_ROOT, fixture_files, language_for, publish};
-use super::worker_tests::{WorkerPublicationStore, worker_config};
+use super::worker_tests::{WorkerPublicationStore, decoded_generation, worker_config};
 use super::*;
 use crate::lineage::LineageKindV1;
 
@@ -19,9 +19,44 @@ struct CountingStoreV1 {
     inner: WorkerPublicationStore,
     reads: Arc<AtomicUsize>,
     read_digests: Arc<Mutex<Vec<ManifestDigest>>>,
+    writes: Arc<Mutex<BTreeMap<ManifestDigest, usize>>>,
+}
+
+struct CountingPreparationV1 {
+    inner: MemoryCodeIndexPreparationV1,
+    writes: Arc<Mutex<BTreeMap<ManifestDigest, usize>>>,
+}
+
+impl CodeIndexPreparationPort for CountingPreparationV1 {
+    fn write_segment(
+        &mut self,
+        publication: SealedGenerationSegmentPublicationV1<'_>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let evidence = match &publication {
+            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
+                Some(((*digest).clone(), bytes.len()))
+            }
+            _ => None,
+        };
+        self.inner.write_segment(publication)?;
+        if let Some((digest, bytes)) = evidence {
+            self.writes.lock().expect("write log").insert(digest, bytes);
+        }
+        Ok(())
+    }
+
+    fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.segment_reader()
+    }
+
+    fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.abort()
+    }
 }
 
 impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
+    type Preparation = CountingPreparationV1;
+
     fn load_active(
         &self,
         scope: &CodeIndexGenerationScopeV1,
@@ -48,14 +83,25 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         )))
     }
 
-    fn publish_atomically(
+    fn prepare(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
-        generation: &CodeIndexSealedPublicationV1,
+    ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
+        let inner = self.inner.prepare(scope, expected_active_generation)?;
+        self.writes.lock().expect("write log").clear();
+        Ok(CountingPreparationV1 {
+            inner,
+            writes: Arc::clone(&self.writes),
+        })
+    }
+
+    fn commit(
+        &mut self,
+        preparation: &mut Self::Preparation,
+        publication: &CodeIndexSealedPublicationV1,
     ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
-        self.inner
-            .publish_atomically(scope, expected_active_generation, generation)
+        self.inner.commit(&mut preparation.inner, publication)
     }
 }
 
@@ -63,18 +109,19 @@ type OwnerV1 = CodeIndexProductionOwnerV1<WorkerPublicationStore>;
 
 /// The file evidence segments a sparse successor wrote, by the logical
 /// path each names.
-fn written_evidence(published: &CodeIndexPublishedBuildV1) -> Vec<(String, usize)> {
-    let CodeIndexSealedPublicationV1::Sparse(sparse) = published.publication() else {
-        panic!("the edit seals over its parent");
-    };
+fn written_evidence(
+    store: &CountingStoreV1,
+    published: &CodeIndexPublishedBuildV1,
+) -> Vec<(String, usize)> {
+    assert_eq!(
+        published.cold_reason(),
+        None,
+        "the edit seals over its parent"
+    );
     let generation =
         super::partitioned_codec::parse_partitioned_manifest(published.manifest_bytes())
             .expect("sealed manifest");
-    let written = sparse
-        .written_segments()
-        .filter(|(kind, _, _)| *kind == "file_evidence")
-        .map(|(_, digest, bytes)| (digest.clone(), bytes))
-        .collect::<std::collections::BTreeMap<_, _>>();
+    let written = store.writes.lock().expect("write log");
     generation
         .file_evidence
         .iter()
@@ -100,7 +147,7 @@ fn sealed_file_evidence_restores_the_built_edges_calls_and_lineage() {
         let store = WorkerPublicationStore::default();
         let mut owner = OwnerV1::new(worker_config(), store.clone()).expect("production owner");
         let cold = publish(&mut owner, &tree, None, false, 1_000_000);
-        let built = cold.decoded().expect("a cold seal holds its generation");
+        let built = decoded_generation(&cold);
         assert!(
             built
                 .edges
@@ -216,8 +263,7 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
         .expect("the edited leaf");
     let base = publish(&mut owner, &base_tree, None, false, 2_000_000);
     assert_eq!(
-        base.decoded()
-            .expect("cold seal")
+        decoded_generation(&base)
             .edges
             .iter()
             .filter(|edge| edge.authority == EdgeAuthorityV1::NameResolved)
@@ -239,7 +285,7 @@ fn an_edit_reads_and_writes_only_what_it_changes() {
             reads < 24,
             "an edit to one of {LEAVES} files read {reads} parent segments"
         );
-        let written = written_evidence(&edited);
+        let written = written_evidence(&store, &edited);
         assert_eq!(
             written
                 .iter()

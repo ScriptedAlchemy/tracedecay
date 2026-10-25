@@ -1,3 +1,4 @@
+use super::resolution_view::ResolutionMemoryChangeV1;
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -15,66 +16,16 @@ use crate::chunks::{
     rust_ufcs_impl_type_name, typescript_member_call_path,
 };
 use crate::lineage::LineageSymbolRecordV1;
-use crate::production::go_satisfaction::go_satisfaction;
 use crate::production::module_resolution::{
     ModuleImportIndexV1, caller_scope, is_module_import_language,
 };
-use crate::production::resolution_view::{FileSymbolsByNameV1, ResolutionFileV1, SymbolsByNameV1};
+use crate::production::resolution_view::{
+    FileSymbolsByNameV1, ResolutionFileFactsV1, ResolutionFileV1, SymbolsByNameV1,
+    reserve_resolution_map, reserve_resolution_vec,
+};
 use crate::production::typescript_resolution::{
     ImportBindingOutcomeV1, TypeScriptModuleIndexV1, unique_local_import,
 };
-
-pub(crate) struct StagedGenerationV1 {
-    pub(crate) files: Vec<Arc<FileGenerationArtifactsV1>>,
-    pub(crate) chunks: GenerationChunkManifestV1,
-    pub(crate) symbols: GenerationSymbolIndexV1,
-    pub(crate) clone_payloads_reused: u64,
-    pub(crate) clone_payloads_computed: u64,
-    pub(crate) clone_stale_invalidations: u64,
-}
-
-pub(crate) fn staged_generation(
-    generation_id: CodeGenerationId,
-    mut files: Vec<Arc<FileGenerationArtifactsV1>>,
-) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
-    files.sort_by(|left, right| {
-        left.artifacts
-            .chunks
-            .document
-            .file_occurrence_id
-            .cmp(&right.artifacts.chunks.document.file_occurrence_id)
-    });
-    let chunks = {
-        let _span = tracing::trace_span!("code_index.generation.aggregate_chunks").entered();
-        GenerationChunkManifestV1::from_validated_files(
-            generation_id.clone(),
-            files
-                .iter()
-                .map(|file| file.artifacts.chunks.clone())
-                .collect(),
-        )
-    }
-    .map_err(CodeIndexProductionErrorV1::Increment)?;
-    let symbols = {
-        let _span = tracing::trace_span!("code_index.generation.aggregate_symbols").entered();
-        GenerationSymbolIndexV1::new(
-            generation_id,
-            files
-                .iter()
-                .flat_map(|file| file.artifacts.symbols.clone())
-                .collect(),
-        )
-    }
-    .map_err(CodeIndexProductionErrorV1::Lineage)?;
-    Ok(StagedGenerationV1 {
-        files,
-        chunks,
-        symbols,
-        clone_payloads_reused: 0,
-        clone_payloads_computed: 0,
-        clone_stale_invalidations: 0,
-    })
-}
 
 /// Pin one descriptor registry to the languages this generation can actually
 /// index. The same registry instance shape is used by intake, generation
@@ -177,7 +128,7 @@ pub(crate) fn file_coverage(file: &FileGenerationArtifactsV1) -> CoverageSummary
     coverage
 }
 
-fn add_coverage(left: CoverageSummaryV1, right: CoverageSummaryV1) -> CoverageSummaryV1 {
+pub(super) fn add_coverage(left: CoverageSummaryV1, right: CoverageSummaryV1) -> CoverageSummaryV1 {
     CoverageSummaryV1 {
         files_eligible: left.files_eligible.saturating_add(right.files_eligible),
         files_excluded: left.files_excluded.saturating_add(right.files_excluded),
@@ -310,109 +261,256 @@ pub(crate) fn edge_order(
         ))
 }
 
-type EdgeEvidenceV1 = (
-    Vec<CanonicalRelationEdgeV1>,
-    Vec<CodeIndexEdgeAbstentionV1>,
-    Vec<CodeIndexUnresolvedReferenceV1>,
-    u64,
-);
-
-/// `files`' edge evidence resolved whole, with the references the seal
-/// cannot decide.
-pub(crate) fn collect_edge_evidence<T>(
-    files: &[T],
-) -> Result<EdgeEvidenceV1, CodeIndexProductionErrorV1>
-where
-    T: ResolutionFileV1,
-{
-    // Resolution's whole-set indexes are gone before the per-file copies are
-    // made, and the one exact-capacity vector never regrows, so the peak is
-    // the edges this returns plus one sort buffer.
-    let CrossFileResolutionV1 {
-        edges,
-        gaps,
-        ambiguous_name_drops,
-    } = resolve_cross_file_references(files)?;
-    let (edges, abstentions) = edge_evidence(files, edges);
-    Ok((edges, abstentions, gaps, ambiguous_name_drops))
-}
-
 /// `files`' edge evidence: each file's own edges and `cross_file`, the
 /// edges resolution derives between them.
 pub(crate) fn edge_evidence<T>(
     files: &[T],
     cross_file: Vec<CanonicalRelationEdgeV1>,
-) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>)
+) -> Result<
+    (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>),
+    CodeIndexProductionErrorV1,
+>
 where
     T: ResolutionFileV1,
 {
-    let per_file = files
+    let facts = files
         .iter()
-        .map(|file| file.as_ref().artifacts.edges.len())
-        .sum::<usize>();
+        .map(ResolutionFileV1::binding)
+        .collect::<Result<Vec<_>, _>>()?;
+    let per_file = facts.iter().map(|file| file.edges().len()).sum::<usize>();
     let mut edges = Vec::with_capacity(per_file.saturating_add(cross_file.len()));
-    for file in files {
-        edges.extend(file.as_ref().artifacts.edges.iter().cloned());
+    for file in &facts {
+        edges.extend(file.edges().iter().cloned());
     }
     edges.extend(cross_file);
     edges.sort_by(edge_order);
-    let mut abstentions = files
+    let mut abstentions = facts
         .iter()
-        .flat_map(|file| file.as_ref().artifacts.edge_abstentions.clone())
+        .flat_map(|file| file.edge_abstentions().iter().cloned())
         .collect::<Vec<_>>();
     abstentions.sort();
-    (edges, abstentions)
+    Ok((edges, abstentions))
 }
 
-/// Resolve the retained per-file unresolved references against the whole
-/// staged file set. Sealing is the first moment every file's symbols exist
-/// together, so this is where cross-file call/use/implements edges are
-/// derived; incremental generations re-run it over their full carried +
-/// re-extracted file set, so an edge disappears with either endpoint.
-///
-/// Binding requires a qualified reference or parser-attested import path,
-/// including Rust parent globs and workspace-crate public re-exports, plus
-/// exactly one kind-compatible symbol; Python, Go, Java, and Ruby calls bind
-/// through [`ModuleImportIndexV1`]. Other bare names have no cross-file
-/// authority and stay unresolved. Bound edges carry the `NameResolved`
-/// authority class, not `SyntaxExact`.
-///
-/// Go types implement interfaces implicitly, so the whole-set pass also
-/// decides Go interface satisfaction from every Go method set.
-#[tracing::instrument(name = "code_index.seal.resolve", level = "trace", skip_all)]
-pub(crate) fn resolve_cross_file_references<T>(
+pub(super) fn resolution_hash_capacity(entries: usize) -> usize {
+    if entries == 0 {
+        0
+    } else if entries < 4 {
+        3
+    } else {
+        let buckets = entries
+            .saturating_mul(8)
+            .div_ceil(7)
+            .checked_next_power_of_two()
+            .unwrap_or(usize::MAX);
+        buckets.saturating_sub(buckets / 8)
+    }
+}
+
+/// The cold staged route keeps one file's binder memo at a time and admits
+/// every retained output before growing or cloning it. The callback receives
+/// cumulative live bytes in addition to the caller's retained compact facts.
+pub(super) fn resolve_cross_file_references_charged<T: ResolutionFileV1>(
     files: &[T],
-) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
-where
-    T: ResolutionFileV1,
-{
+    retain_output: &mut dyn FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1> {
     #[cfg(test)]
     SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.set(resolutions.get() + 1));
-    let by_simple_name = {
-        let _span = tracing::trace_span!("code_index.seal.reference_index").entered();
-        FileSymbolsByNameV1::new(files)
+    let mut retained = 0_usize;
+    let mut charge = |bytes: ResolutionMemoryChangeV1| {
+        bytes.apply_with(&mut retained, |retained| {
+            retain_output(u64::try_from(retained).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "resolution output charge exceeds u64".to_owned(),
+                )
+            })?)
+        })
     };
-    resolve_references(files, &by_simple_name, None)
+    let by_name = FileSymbolsByNameV1::new_charged(files, &mut charge)?;
+    let mut modules = ResolutionModulesV1::new_charged(files, &mut charge)?;
+    let index_bytes = retained;
+    let mut edges = Vec::new();
+    let mut gaps = Vec::new();
+    let mut ambiguous_name_drops = 0_u64;
+    for index in 0..files.len() {
+        let output_bytes = super::resident_bytes::vec_bytes(
+            &edges,
+            edges.capacity(),
+            super::resident_bytes::edge_heap_bytes,
+        )
+        .saturating_add(super::resident_bytes::vec_bytes(
+            &gaps,
+            gaps.capacity(),
+            super::resident_bytes::unresolved_heap_bytes,
+        ));
+        let mut file_bytes = 0_usize;
+        let (file_edges, file_gaps, drops) = resolve_one_file_cross_file_references(
+            files,
+            &by_name,
+            &modules,
+            index,
+            None,
+            &mut |bytes: ResolutionMemoryChangeV1| {
+                bytes.apply_with(&mut file_bytes, |file_bytes| {
+                    retain_output(
+                        u64::try_from(
+                            index_bytes
+                                .saturating_add(output_bytes)
+                                .saturating_add(file_bytes),
+                        )
+                        .map_err(|_| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "resolution output charge exceeds u64".to_owned(),
+                            )
+                        })?,
+                    )
+                })
+            },
+        )?;
+        modules.release_file_memo(index);
+        ambiguous_name_drops = ambiguous_name_drops.saturating_add(drops);
+        let mut cumulative = index_bytes
+            .saturating_add(output_bytes)
+            .saturating_add(file_bytes);
+        let mut reserve = |bytes: ResolutionMemoryChangeV1| {
+            bytes.apply_with(&mut cumulative, |cumulative| {
+                retain_output(u64::try_from(cumulative).map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "resolution output charge exceeds u64".to_owned(),
+                    )
+                })?)
+            })
+        };
+        reserve_resolution_vec(&mut edges, file_edges.len(), &mut reserve)?;
+        reserve_resolution_vec(&mut gaps, file_gaps.len(), &mut reserve)?;
+        edges.extend(file_edges);
+        gaps.extend(file_gaps);
+    }
+    let mut has_go = false;
+    for file in files {
+        if !file.binding()?.go_method_sets().is_empty() {
+            has_go = true;
+            break;
+        }
+    }
+    if has_go {
+        let mut cumulative = index_bytes
+            .saturating_add(super::resident_bytes::vec_bytes(
+                &edges,
+                edges.capacity(),
+                super::resident_bytes::edge_heap_bytes,
+            ))
+            .saturating_add(super::resident_bytes::vec_bytes(
+                &gaps,
+                gaps.capacity(),
+                super::resident_bytes::unresolved_heap_bytes,
+            ));
+        let mut charge = |bytes: ResolutionMemoryChangeV1| {
+            bytes.apply_with(&mut cumulative, |cumulative| {
+                retain_output(u64::try_from(cumulative).map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "resolution output charge exceeds u64".to_owned(),
+                    )
+                })?)
+            })
+        };
+        let satisfaction = super::go_satisfaction::go_satisfaction_charged(
+            files,
+            modules.modules()?,
+            &mut charge,
+        )?;
+        reserve_resolution_vec(&mut edges, satisfaction.edges.len(), &mut charge)?;
+        reserve_resolution_vec(&mut gaps, satisfaction.gaps.len(), &mut charge)?;
+        edges.extend(satisfaction.edges);
+        gaps.extend(satisfaction.gaps);
+    }
+    let sort_bytes = index_bytes
+        .saturating_add(super::resident_bytes::vec_bytes(
+            &edges,
+            edges.capacity(),
+            super::resident_bytes::edge_heap_bytes,
+        ))
+        .saturating_add(super::resident_bytes::vec_bytes(
+            &gaps,
+            gaps.capacity(),
+            super::resident_bytes::unresolved_heap_bytes,
+        ))
+        .saturating_add(
+            edges
+                .len()
+                .div_ceil(2)
+                .saturating_mul(std::mem::size_of::<CanonicalRelationEdgeV1>()),
+        );
+    retain_output(u64::try_from(sort_bytes).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract("resolution sort charge exceeds u64".to_owned())
+    })?)?;
+    edges.sort_by(edge_order);
+    edges.dedup();
+    drop(modules);
+    drop(by_name);
+    retain_output(
+        u64::try_from(
+            super::resident_bytes::vec_bytes(
+                &edges,
+                edges.capacity(),
+                super::resident_bytes::edge_heap_bytes,
+            )
+            .saturating_add(super::resident_bytes::vec_bytes(
+                &gaps,
+                gaps.capacity(),
+                super::resident_bytes::unresolved_heap_bytes,
+            )),
+        )
+        .map_err(|_| {
+            CodeIndexProductionErrorV1::Contract("resolution output charge exceeds u64".to_owned())
+        })?,
+    )?;
+    Ok(CrossFileResolutionV1 {
+        edges,
+        gaps,
+        ambiguous_name_drops,
+    })
 }
 
 /// The retained references a resolution pass decides: per file index, the
 /// indices of its references to decide, ascending.
 pub(crate) type ReferenceSelectionV1 = [(usize, Vec<usize>)];
 
-/// Resolves only `selection`'s references against the whole file set whose
-/// symbols `by_simple_name` indexes. Each reference binds exactly as
-/// [`resolve_cross_file_references`] binds it; the result is the edges those
-/// references contribute and the ambiguous calls among them.
-#[tracing::instrument(name = "code_index.seal.resolve_selected", level = "trace", skip_all)]
-pub(crate) fn resolve_selected_cross_file_references<T>(
+/// Resolve one bounded selected-file window against a reusable module
+/// context. The immutable binder and its rule helpers are the same as the
+/// ordinary whole-set pass; only scheduling and ownership differ.
+pub(super) fn resolve_selected_with_modules<T: ResolutionFileV1>(
     files: &[T],
-    by_simple_name: &dyn SymbolsByNameV1,
+    by_name: &dyn SymbolsByNameV1,
+    modules: &ResolutionModulesV1<'_, T>,
     selection: &ReferenceSelectionV1,
-) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
-where
-    T: ResolutionFileV1,
-{
-    resolve_references(files, by_simple_name, Some(selection))
+    charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1> {
+    let mut edges = Vec::new();
+    let mut gaps = Vec::new();
+    let mut ambiguous_name_drops = 0_u64;
+    for (index, picks) in selection {
+        let (file_edges, file_gaps, drops) = resolve_one_file_cross_file_references(
+            files,
+            by_name,
+            modules,
+            *index,
+            Some(picks),
+            charge,
+        )?;
+        reserve_resolution_vec(&mut edges, file_edges.len(), charge)?;
+        reserve_resolution_vec(&mut gaps, file_gaps.len(), charge)?;
+        edges.extend(file_edges);
+        gaps.extend(file_gaps);
+        ambiguous_name_drops = ambiguous_name_drops.saturating_add(drops);
+    }
+    edges.sort_by(edge_order);
+    edges.dedup();
+    Ok(CrossFileResolutionV1 {
+        edges,
+        gaps,
+        ambiguous_name_drops,
+    })
 }
 
 /// A resolution: the cross-file edges, and the references the seal cannot
@@ -430,24 +528,30 @@ pub(crate) struct CrossFileResolutionV1 {
 pub(crate) fn selected_references<'f, T>(
     files: &'f [T],
     selection: Option<&ReferenceSelectionV1>,
-) -> impl Iterator<Item = (usize, &'f CodeIndexUnresolvedReferenceV1)>
+) -> Result<Vec<(usize, &'f CodeIndexUnresolvedReferenceV1)>, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
-    let every = selection.is_none().then(|| {
-        files.iter().enumerate().flat_map(|(index, file)| {
-            file.as_ref()
-                .artifacts
-                .unresolved_references
-                .iter()
-                .map(move |reference| (index, reference))
-        })
-    });
-    let selected = selection.into_iter().flatten().flat_map(|(index, picks)| {
-        let references = &files[*index].as_ref().artifacts.unresolved_references;
-        picks.iter().map(move |&pick| (*index, &references[pick]))
-    });
-    every.into_iter().flatten().chain(selected)
+    let mut selected = Vec::new();
+    match selection {
+        None => {
+            for (index, file) in files.iter().enumerate() {
+                selected.extend(
+                    file.binding()?
+                        .unresolved_references()
+                        .iter()
+                        .map(|reference| (index, reference)),
+                );
+            }
+        }
+        Some(selection) => {
+            for (index, picks) in selection {
+                let references = files[*index].binding()?.unresolved_references();
+                selected.extend(picks.iter().map(|&pick| (*index, &references[pick])));
+            }
+        }
+    }
+    Ok(selected)
 }
 
 /// The module facts resolution consults beside symbols by name, each built
@@ -459,96 +563,89 @@ pub(crate) struct ResolutionModulesV1<'f, T> {
     rust: RustFileIndexV1,
     typescript: OnceLock<TypeScriptModuleIndexV1>,
     modules: OnceLock<ModuleImportIndexV1<'f, T>>,
+    module_initialization: Mutex<()>,
 }
 
 impl<'f, T: ResolutionFileV1> ResolutionModulesV1<'f, T> {
-    pub(crate) fn new(files: &'f [T]) -> Self {
-        Self {
+    pub(crate) fn new(files: &'f [T]) -> Result<Self, CodeIndexProductionErrorV1> {
+        Ok(Self {
             files,
-            rust: RustFileIndexV1::new(files),
+            rust: RustFileIndexV1::new(files)?,
             typescript: OnceLock::new(),
             modules: OnceLock::new(),
-        }
+            module_initialization: Mutex::new(()),
+        })
     }
 
-    fn typescript(&self) -> &TypeScriptModuleIndexV1 {
-        self.typescript
-            .get_or_init(|| TypeScriptModuleIndexV1::new(self.files))
-    }
-
-    fn modules(&self) -> &ModuleImportIndexV1<'f, T> {
-        self.modules
-            .get_or_init(|| ModuleImportIndexV1::new(self.files))
-    }
-}
-
-fn resolve_references<T>(
-    files: &[T],
-    by_simple_name: &dyn SymbolsByNameV1,
-    selection: Option<&ReferenceSelectionV1>,
-) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
-where
-    T: ResolutionFileV1,
-{
-    let workers = crate::parallelism::indexing_workers().max(1);
-
-    let modules = {
-        let _span = tracing::trace_span!("code_index.seal.module_index").entered();
-        ResolutionModulesV1::new(files)
-    };
-    // Every file resolves against the same immutable whole-set index, so this
-    // is one ordered fan-out over the indexing pool. Concatenating each file's
-    // edges in file-index order reproduces the exact sequence the serial loop
-    // pushed, so the stable sort and dedup below, and therefore every edge
-    // digest downstream, do not depend on the width.
-    let units = selection.map_or(files.len(), <[_]>::len);
-    let per_file = collect_by_file_index_ordered(units, workers, &|unit| {
-        let (index, picks) = match selection {
-            Some(selection) => (selection[unit].0, Some(selection[unit].1.as_slice())),
-            None => (unit, None),
+    pub(super) fn new_charged(
+        files: &'f [T],
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        let modules = Self {
+            files,
+            rust: RustFileIndexV1::new_charged(files, charge)?,
+            typescript: OnceLock::new(),
+            modules: OnceLock::new(),
+            module_initialization: Mutex::new(()),
         };
-        resolve_one_file_cross_file_references(files, by_simple_name, &modules, index, picks)
-    })?;
-    let ambiguous_name_drops = per_file
-        .iter()
-        .fold(0_u64, |total, (_, _, drops)| total.saturating_add(*drops));
-    // Satisfaction needs every Go method set, so only a whole-set pass
-    // decides it, and only a file set with Go types builds the module index.
-    let satisfaction = if selection.is_none()
-        && files
-            .iter()
-            .any(|file| !file.as_ref().artifacts.go_method_sets.is_empty())
-    {
-        go_satisfaction(files, modules.modules())
-    } else {
-        Default::default()
-    };
-    drop(modules);
-    let mut edges = Vec::with_capacity(
-        per_file
-            .iter()
-            .map(|(edges, _, _)| edges.len())
-            .sum::<usize>()
-            .saturating_add(satisfaction.edges.len()),
-    );
-    let mut gaps = satisfaction.gaps;
-    for (file_edges, file_gaps, _) in per_file {
-        edges.extend(file_edges);
-        gaps.extend(file_gaps);
-    }
-    edges.extend(satisfaction.edges);
-    {
-        let _span = tracing::trace_span!("code_index.seal.edge_materialization").entered();
-        {
-            edges.sort_by(edge_order);
-            edges.dedup();
+        let mut needs_typescript = false;
+        let mut needs_modules = false;
+        for file in files {
+            let facts = file.binding()?;
+            needs_typescript |=
+                is_typescript_family(file.language()) && !facts.unresolved_references().is_empty();
+            needs_modules |= (is_module_import_language(file.language())
+                && !facts.unresolved_references().is_empty())
+                || !facts.go_method_sets().is_empty();
         }
-    };
-    Ok(CrossFileResolutionV1 {
-        edges,
-        gaps,
-        ambiguous_name_drops,
-    })
+        if needs_typescript {
+            let index = TypeScriptModuleIndexV1::new_charged(files, charge)?;
+            let _ = modules.typescript.set(index);
+        }
+        if needs_modules {
+            let index = ModuleImportIndexV1::new_charged(files, charge)?;
+            let _ = modules.modules.set(index);
+        }
+        Ok(modules)
+    }
+
+    pub(super) fn release_file_memo(&mut self, index: usize) {
+        if let Some(modules) = self.modules.get_mut() {
+            modules.release_file_memo(index);
+        }
+    }
+
+    fn typescript(&self) -> Result<&TypeScriptModuleIndexV1, CodeIndexProductionErrorV1> {
+        if let Some(index) = self.typescript.get() {
+            return Ok(index);
+        }
+        let _guard = self.module_initialization.lock().map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "resolution module initialization lock poisoned".to_owned(),
+            )
+        })?;
+        if let Some(index) = self.typescript.get() {
+            return Ok(index);
+        }
+        let index = TypeScriptModuleIndexV1::new(self.files)?;
+        Ok(self.typescript.get_or_init(|| index))
+    }
+
+    fn modules(&self) -> Result<&ModuleImportIndexV1<'f, T>, CodeIndexProductionErrorV1> {
+        if let Some(index) = self.modules.get() {
+            return Ok(index);
+        }
+        let _guard = self.module_initialization.lock().map_err(|_| {
+            CodeIndexProductionErrorV1::Contract(
+                "resolution module initialization lock poisoned".to_owned(),
+            )
+        })?;
+        if let Some(index) = self.modules.get() {
+            return Ok(index);
+        }
+        let index = ModuleImportIndexV1::new(self.files)?;
+        Ok(self.modules.get_or_init(|| index))
+    }
 }
 
 /// Retained call sites whose import binding names project code the seal
@@ -556,7 +653,7 @@ where
 /// workspace-package specifier that reaches no indexed file, or a module that
 /// does not define the imported name (a default import, an `export { x }` of
 /// a name the module neither declares nor imports from project code).
-/// Python, Go, Java, and Ruby: see [`ModuleImportIndexV1::call_gaps`].
+/// Python, Go, Java, and Ruby: see [`ModuleImportIndexV1::call_gaps_charged`].
 /// These are the sites `callers` and `file_dependents` must disclose as gaps;
 /// an import of an external dependency is not one of them.
 /// `selection`, when given, limits the sites decided to its references.
@@ -564,124 +661,115 @@ pub(crate) fn unresolved_import_calls<T>(
     files: &[T],
     by_simple_name: &dyn SymbolsByNameV1,
     selection: Option<&ReferenceSelectionV1>,
-) -> Vec<CodeIndexUnresolvedReferenceV1>
+) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
-    let modules = ResolutionModulesV1::new(files);
-    let selected = || selected_references(files, selection);
-    let mut unresolved =
-        if selected().any(|(index, _)| is_module_import_language(files[index].language())) {
-            modules.modules().call_gaps(selected())
-        } else {
-            Vec::new()
-        };
+    let modules = ResolutionModulesV1::new(files)?;
+    unresolved_import_calls_with_modules(
+        files,
+        by_simple_name,
+        &modules,
+        selection,
+        &mut |_| Ok(()),
+    )
+}
+
+pub(super) fn unresolved_import_calls_with_modules<T: ResolutionFileV1>(
+    files: &[T],
+    by_simple_name: &dyn SymbolsByNameV1,
+    modules: &ResolutionModulesV1<'_, T>,
+    selection: Option<&ReferenceSelectionV1>,
+    charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, CodeIndexProductionErrorV1> {
+    let selected = selected_references(files, selection)?;
+    let mut unresolved = if selected
+        .iter()
+        .any(|(index, _)| is_module_import_language(files[*index].language()))
+    {
+        modules
+            .modules()?
+            .call_gaps_charged(selected.iter().copied(), charge)?
+    } else {
+        Vec::new()
+    };
     let mut receiver_gaps = HashSet::new();
-    for (index, reference) in selected() {
+    for (index, reference) in selected {
         if !is_typescript_family(files[index].language())
             || reference.kind != RelationEdgeKindV1::Calls
             || reference.reference_name.contains("::")
         {
             continue;
         }
-        let file = files[index].as_ref();
+        let file = files[index].binding()?;
         match typescript_import_call_outcome(
             files,
             by_simple_name,
-            modules.typescript(),
+            modules.typescript()?,
             file,
             reference,
-        ) {
-            Some(ImportBindingOutcomeV1::Unresolved) => unresolved.push(reference.clone()),
+        )? {
+            Some(ImportBindingOutcomeV1::Unresolved) => {
+                reserve_resolution_vec(&mut unresolved, 1, charge)?;
+                charge(ResolutionMemoryChangeV1::Retain(
+                    super::resident_bytes::unresolved_heap_bytes(reference),
+                ))?;
+                unresolved.push(reference.clone());
+            }
             // A member call no import names is a receiver call nothing binds.
             // It can only be a missing edge to a project symbol of that name,
             // and one site per caller and name is the whole disclosure.
             None => {
                 if let Some((_, member)) = reference.reference_name.rsplit_once('.')
-                    && by_simple_name.get(member).is_some()
+                    && by_simple_name.get(member)?.is_some()
                     && receiver_gaps.insert((&reference.from_occurrence, member))
                 {
+                    reserve_resolution_vec(&mut unresolved, 1, charge)?;
+                    charge(ResolutionMemoryChangeV1::Retain(
+                        super::resident_bytes::unresolved_heap_bytes(reference),
+                    ))?;
                     unresolved.push(reference.clone());
                 }
             }
             Some(_) => {}
         }
     }
-    unresolved
+    Ok(unresolved)
 }
 
 /// How a TypeScript-family call binds through the file's import of its
 /// callee: a bare imported name, or a member path read from an imported
 /// module namespace. `None` when no unique local import names the callee.
-fn typescript_import_call_outcome<'a, T>(
-    files: &'a [T],
-    by_simple_name: &'a dyn SymbolsByNameV1,
+fn typescript_import_call_outcome<T>(
+    files: &[T],
+    by_simple_name: &dyn SymbolsByNameV1,
     typescript_modules: &TypeScriptModuleIndexV1,
-    file: &FileGenerationArtifactsV1,
+    file: &dyn ResolutionFileFactsV1,
     reference: &CodeIndexUnresolvedReferenceV1,
-) -> Option<ImportBindingOutcomeV1<'a>>
+) -> Result<Option<ImportBindingOutcomeV1>, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
     if !reference.reference_name.contains('.') {
-        let binding = unique_import(file, &reference.reference_name, reference.kind)?;
-        return Some(typescript_modules.resolve_import_binding(
-            files,
-            by_simple_name,
-            binding,
-            reference.kind,
-        ));
+        let Some(binding) = unique_import(file, &reference.reference_name, reference.kind) else {
+            return Ok(None);
+        };
+        return typescript_modules
+            .resolve_import_binding(files, by_simple_name, binding, reference.kind)
+            .map(Some);
     }
     if reference.kind != RelationEdgeKindV1::Calls {
-        return None;
+        return Ok(None);
     }
-    let (head, members) = typescript_member_call_path(&reference.reference_name)?;
-    let binding = unique_import(file, head, reference.kind)?;
-    Some(typescript_modules.resolve_member_call(
-        files,
-        by_simple_name,
-        binding,
-        members,
-        reference.kind,
-    ))
-}
-
-/// One ordered, panic-contained fan-out over file indices on the indexing pool.
-///
-/// Results come back in index order whatever the completion order was, so a
-/// caller may concatenate them and keep the sequence a serial loop produced.
-fn collect_by_file_index_ordered<R>(
-    count: usize,
-    workers: usize,
-    operation: &(dyn Fn(usize) -> R + Send + Sync),
-) -> Result<Vec<R>, CodeIndexProductionErrorV1>
-where
-    R: Send,
-{
-    if count < 2 || workers < 2 {
-        return Ok((0..count).map(operation).collect());
-    }
-    crate::parallelism::install(|| {
-        (0..count)
-            .into_par_iter()
-            .map(|index| {
-                crate::parallelism::with_background_cpu_permit(|| {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(index)))
-                        .map_err(|payload| {
-                            crate::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
-                                index, &*payload,
-                            )
-                        })
-                })
-            })
-            // Collecting every unit before short-circuiting keeps the reported
-            // failure the lowest-index one, as the serial loop's would be.
-            .collect::<Vec<_>>()
-    })
-    .map_err(CodeIndexProductionErrorV1::from)?
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(CodeIndexProductionErrorV1::from)
+    let Some((head, members)) = typescript_member_call_path(&reference.reference_name) else {
+        return Ok(None);
+    };
+    let Some(binding) = unique_import(file, head, reference.kind) else {
+        return Ok(None);
+    };
+    typescript_modules
+        .resolve_member_call(files, by_simple_name, binding, members, reference.kind)
+        .map(Some)
 }
 
 /// Resolve one file's retained unresolved references against the whole staged
@@ -697,11 +785,15 @@ fn resolve_one_file_cross_file_references<T>(
     modules: &ResolutionModulesV1<'_, T>,
     index: usize,
     picks: Option<&[usize]>,
-) -> (
-    Vec<CanonicalRelationEdgeV1>,
-    Vec<CodeIndexUnresolvedReferenceV1>,
-    u64,
-)
+    charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<
+    (
+        Vec<CanonicalRelationEdgeV1>,
+        Vec<CodeIndexUnresolvedReferenceV1>,
+        u64,
+    ),
+    CodeIndexProductionErrorV1,
+>
 where
     T: ResolutionFileV1,
 {
@@ -712,7 +804,7 @@ where
     let mut edges = Vec::new();
     let mut gaps = Vec::new();
     let mut ambiguous_name_drops = 0_u64;
-    let references = &files[index].as_ref().artifacts.unresolved_references;
+    let references = files[index].binding()?.unresolved_references();
     let every = picks.is_none().then(|| references.iter());
     let picked = picks.into_iter().flatten().map(|&pick| &references[pick]);
     for reference in every.into_iter().flatten().chain(picked) {
@@ -738,9 +830,20 @@ where
                     index,
                     reference,
                     &mut ambiguous,
-                );
+                    charge,
+                )?;
                 (resolved, ambiguous)
             };
+            if !resolved_references.contains_key(&cache_key) {
+                reserve_resolution_map(&mut resolved_references, charge)?;
+            }
+            if let Some(ReferenceResolutionV1::Bound(_, targets)) = &resolved.0 {
+                charge(ResolutionMemoryChangeV1::Retain(
+                    super::resident_bytes::vec_bytes(targets, targets.len(), |target| {
+                        target.as_str().len()
+                    }),
+                ))?;
+            }
             resolved_references.insert(cache_key, resolved.clone());
             resolved
         };
@@ -751,6 +854,10 @@ where
             Some(ReferenceResolutionV1::Bound(target_index, targets)) => (target_index, targets),
             Some(ReferenceResolutionV1::Ambiguous) => {
                 if reference.kind == RelationEdgeKindV1::Calls {
+                    reserve_resolution_vec(&mut gaps, 1, charge)?;
+                    charge(ResolutionMemoryChangeV1::Retain(
+                        super::resident_bytes::unresolved_heap_bytes(reference),
+                    ))?;
                     gaps.push(reference.clone());
                 }
                 continue;
@@ -760,15 +867,24 @@ where
         if target_index == index && !same_file_binds {
             continue;
         }
-        edges.extend(targets.into_iter().map(|target| CanonicalRelationEdgeV1 {
-            from_occurrence: reference.from_occurrence.clone(),
-            to_occurrence: target,
-            kind: reference.kind,
-            authority: EdgeAuthorityV1::NameResolved,
-            evidence_span: reference.evidence_span,
-        }));
+        for target in targets {
+            reserve_resolution_vec(&mut edges, 1, charge)?;
+            charge(ResolutionMemoryChangeV1::Retain(
+                super::resident_bytes::edge_endpoint_heap_bytes(
+                    &reference.from_occurrence,
+                    &target,
+                ),
+            ))?;
+            edges.push(CanonicalRelationEdgeV1 {
+                from_occurrence: reference.from_occurrence.clone(),
+                to_occurrence: target,
+                kind: reference.kind,
+                authority: EdgeAuthorityV1::NameResolved,
+                evidence_span: reference.evidence_span,
+            });
+        }
     }
-    (edges, gaps, ambiguous_name_drops)
+    Ok((edges, gaps, ambiguous_name_drops))
 }
 
 #[cfg(test)]
@@ -808,19 +924,17 @@ fn cross_file_target_kind_is_compatible<T: ResolutionFileV1>(
     index: usize,
     kind: RelationEdgeKindV1,
     symbol: &LineageSymbolRecordV1,
-) -> bool {
-    relation_target_kind_is_compatible(kind, &symbol.kind)
+) -> Result<bool, CodeIndexProductionErrorV1> {
+    Ok(relation_target_kind_is_compatible(kind, &symbol.kind)
         && (files[index].language() != "rust"
             || kind != RelationEdgeKindV1::Calls
             || symbol.kind != "struct"
             // Canonical artifacts sort arities by occurrence. Only tuple
             // structs have a parser-observed callable parameter list.
-            || files[index]
-                .as_ref()
-                .artifacts
-                .callable_arities
+            || files[index].binding()?
+                .callable_arities()
                 .binary_search_by(|row| row.occurrence.cmp(&symbol.occurrence))
-                .is_ok())
+                .is_ok()))
 }
 
 fn resolve_cross_file_reference<T>(
@@ -830,48 +944,55 @@ fn resolve_cross_file_reference<T>(
     index: usize,
     reference: &CodeIndexUnresolvedReferenceV1,
     ambiguous: &mut bool,
-) -> Option<ReferenceResolutionV1>
+    charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<Option<ReferenceResolutionV1>, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
     if reference.ambiguous_local {
-        return Some(ReferenceResolutionV1::Ambiguous);
+        return Ok(Some(ReferenceResolutionV1::Ambiguous));
     }
     let rust = &modules.rust;
-    let file = files[index].as_ref();
+    let source = &files[index];
     // These languages bind one exact module member through their own import
     // and package rules, never by name matching.
-    if is_module_import_language(file.extraction.language.as_str()) {
-        return match modules.modules().call_outcome(index, reference)? {
-            ImportBindingOutcomeV1::Bound(target_index, symbol) => Some(
-                ReferenceResolutionV1::Bound(target_index, vec![symbol.occurrence.clone()]),
-            ),
-            ImportBindingOutcomeV1::External
-            | ImportBindingOutcomeV1::Unresolved
-            | ImportBindingOutcomeV1::ValueMember => None,
-        };
+    if is_module_import_language(source.language()) {
+        return Ok(
+            match modules.modules()?.call_outcome(index, reference, charge)? {
+                Some(ImportBindingOutcomeV1::Bound(target_index, symbol)) => Some(
+                    ReferenceResolutionV1::Bound(target_index, vec![symbol.occurrence.clone()]),
+                ),
+                Some(
+                    ImportBindingOutcomeV1::External
+                    | ImportBindingOutcomeV1::Unresolved
+                    | ImportBindingOutcomeV1::ValueMember,
+                )
+                | None => None,
+            },
+        );
     }
-    if file.extraction.language.as_str() == "rust"
+    if source.language() == "rust"
         && reference.kind == RelationEdgeKindV1::Calls
         && reference.reference_name.contains('.')
     {
-        return None;
+        return Ok(None);
     }
+    let file = source.binding()?;
     let qualified = reference.reference_name.contains("::");
     // A TypeScript-family import binds one exact module and one exact name,
     // so it resolves through module resolution rather than name matching;
     // the ubiquity blocklist guards only name-only binding.
     if !qualified
-        && is_typescript_family(file.extraction.language.as_str())
+        && is_typescript_family(file.language())
         && let Some(outcome) = typescript_import_call_outcome(
             files,
             by_simple_name,
-            modules.typescript(),
+            modules.typescript()?,
             file,
             reference,
-        )
+        )?
     {
-        return match outcome {
+        return Ok(match outcome {
             ImportBindingOutcomeV1::Bound(target_index, symbol) if target_index != index => Some(
                 ReferenceResolutionV1::Bound(target_index, vec![symbol.occurrence.clone()]),
             ),
@@ -879,21 +1000,21 @@ where
             | ImportBindingOutcomeV1::External
             | ImportBindingOutcomeV1::Unresolved
             | ImportBindingOutcomeV1::ValueMember => None,
-        };
+        });
     }
     let import = (!qualified)
         .then(|| unique_import(file, &reference.reference_name, reference.kind))
         .flatten();
-    let has_rust_glob = file.extraction.language.as_str() == "rust"
-        && file.artifacts.imports.iter().any(|binding| binding.is_glob);
+    let has_rust_glob =
+        file.language() == "rust" && file.imports().iter().any(|binding| binding.is_glob);
     if !qualified && import.is_none() && !has_rust_glob {
-        return None;
+        return Ok(None);
     }
     let simple_name = import
         .and_then(|binding| binding.imported_name.as_deref())
         .or_else(|| reference.reference_name.rsplit("::").next())
         .unwrap_or(reference.reference_name.as_str());
-    let is_rust = file.extraction.language.as_str() == "rust";
+    let is_rust = file.language() == "rust";
     let owner_attested = qualified
         && is_rust
         && (CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name)
@@ -905,25 +1026,26 @@ where
         || (import.is_some() && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name))
         || cross_file_reference_name_is_blocklisted(&reference.reference_name, owner_attested)
     {
-        return None;
+        return Ok(None);
     }
-    let candidates = by_simple_name.get(simple_name)?;
-    if !qualified
-        && import.is_none()
-        && has_rust_glob
-        && candidates.iter().any(|(candidate_index, symbol)| {
-            *candidate_index == index
+    let Some(candidates) = by_simple_name.get(simple_name)? else {
+        return Ok(None);
+    };
+    if !qualified && import.is_none() && has_rust_glob {
+        for (candidate_index, symbol) in &candidates {
+            if *candidate_index == index
                 && cross_file_target_kind_is_compatible(
                     files,
                     *candidate_index,
                     reference.kind,
                     symbol,
-                )
-        })
-    {
-        return None;
+                )?
+            {
+                return Ok(None);
+            }
+        }
     }
-    let source_path = &file.authority.logical_path;
+    let source_path = file.logical_path();
     let crate_qualified = reference.reference_name.strip_prefix("crate::");
     // A blocklisted member (`new`, `read`, `spawn`) is exempt from the
     // blocklist only behind an owner this file attests as project code;
@@ -933,86 +1055,89 @@ where
         && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name)
         && !owner_attested
     {
-        return None;
+        return Ok(None);
     }
     // The walk's target-independent half is computed once per reference, not
     // once per candidate: `new` alone has thousands of candidates.
-    let walk = (qualified && is_rust)
-        .then(|| RustQualifiedWalkV1::new(files, rust, index, &reference.reference_name))
-        .flatten();
-    let compatible = candidates
-        .iter()
-        .filter(|(candidate_index, symbol)| {
-            let target = RustSymbolTargetV1 {
-                index: *candidate_index,
+    let walk = if qualified && is_rust {
+        RustQualifiedWalkV1::new(files, rust, index, &reference.reference_name)?
+    } else {
+        None
+    };
+    let mut compatible = Vec::new();
+    for (candidate_index, symbol) in &candidates {
+        if files[*candidate_index].language() != file.language()
+            || !cross_file_target_kind_is_compatible(
+                files,
+                *candidate_index,
+                reference.kind,
                 symbol,
-            };
-            files[*candidate_index].language() == file.extraction.language.as_str()
-                && cross_file_target_kind_is_compatible(
-                    files,
-                    *candidate_index,
-                    reference.kind,
-                    symbol,
-                )
-                && match import {
+            )?
+        {
+            continue;
+        }
+        let target = RustSymbolTargetV1 {
+            index: *candidate_index,
+            symbol,
+        };
+        let matches = match import {
+            None => {
+                let direct = match crate_qualified {
                     None => {
-                        let direct = match crate_qualified {
-                            None => {
-                                (has_rust_glob
-                                    && rust_parent_glob_import_matches(
-                                        files,
-                                        rust,
-                                        index,
-                                        &reference.reference_name,
-                                        reference.kind,
-                                        target,
-                                    ))
-                                    // Rust `::` paths bind only through the
-                                    // hop-by-hop walk below; a bare file-stem
-                                    // match would bind `fs::read` to any crate's
-                                    // `fs.rs`.
-                                    || (!is_rust
-                                        && file_qualified_name_matches(
-                                            &reference.reference_name,
-                                            files[*candidate_index].logical_path(),
-                                            &symbol.qualified_name,
-                                        ))
-                            }
-                            Some(crate_path) => rust_crate_qualified_name_matches(
-                                crate_path,
-                                source_path,
-                                files[*candidate_index].logical_path(),
-                                &symbol.qualified_name,
-                            ),
-                        };
-                        direct
-                            || walk
-                                .as_ref()
-                                .is_some_and(|walk| walk.matches(files, rust, target))
+                        (has_rust_glob
+                            && rust_parent_glob_import_matches(
+                                files,
+                                rust,
+                                index,
+                                &reference.reference_name,
+                                reference.kind,
+                                target,
+                            )?)
+                            // Rust `::` paths bind only through the hop-by-hop
+                            // walk; a file-stem match could cross crate roots.
+                            || (!is_rust
+                                && file_qualified_name_matches(
+                                    &reference.reference_name,
+                                    files[*candidate_index].logical_path(),
+                                    &symbol.qualified_name,
+                                ))
                     }
-                    Some(binding) => match binding.module_kind {
-                        ImportModuleKindV1::ProjectRelative => project_import_matches(
-                            binding,
-                            &binding.logical_path,
-                            files[*candidate_index].logical_path(),
-                            &symbol.qualified_name,
-                        ),
-                        ImportModuleKindV1::BareModule
-                            if file.extraction.language.as_str() == "rust" =>
-                        {
-                            rust_bare_import_matches(files, rust, index, binding, target, "")
-                        }
-                        ImportModuleKindV1::BareModule => false,
-                    },
+                    Some(crate_path) => rust_crate_qualified_name_matches(
+                        crate_path,
+                        source_path,
+                        files[*candidate_index].logical_path(),
+                        &symbol.qualified_name,
+                    ),
+                };
+                direct
+                    || match &walk {
+                        Some(walk) => walk.matches(files, rust, target)?,
+                        None => false,
+                    }
+            }
+            Some(binding) => match binding.module_kind {
+                ImportModuleKindV1::ProjectRelative => project_import_matches(
+                    binding,
+                    &binding.logical_path,
+                    files[*candidate_index].logical_path(),
+                    &symbol.qualified_name,
+                ),
+                ImportModuleKindV1::BareModule if file.language() == "rust" => {
+                    rust_bare_import_matches(files, rust, index, binding, target, "")?
                 }
-        })
-        .collect::<Vec<_>>();
+                ImportModuleKindV1::BareModule => false,
+            },
+        };
+        if matches {
+            compatible.push((candidate_index, symbol));
+        }
+    }
     // A type-path call may match both an inherent `Type::method` and one or
     // more `<Type as Trait>::method` aliases; Rust prefers the inherent, so
     // keep a unique non-UFCS hit when aliases also matched. Any other choice
     // between candidates is ambiguous.
     let compatible = match compatible.as_slice() {
-        [] => return None,
+        [] => return Ok(None),
         [_] => compatible,
         // `#[cfg]` variants of one Rust definition: one file, one qualified
         // name, one kind. The call binds that identity at every site.
@@ -1038,43 +1163,44 @@ where
                 [_] => inherent,
                 _ => {
                     *ambiguous = true;
-                    return Some(ReferenceResolutionV1::Ambiguous);
+                    return Ok(Some(ReferenceResolutionV1::Ambiguous));
                 }
             }
         }
     };
-    let (target_index, _) = compatible.first()?;
-    if *target_index == index {
-        return None;
+    let Some((target_index, _)) = compatible.first() else {
+        return Ok(None);
+    };
+    if **target_index == index {
+        return Ok(None);
     }
-    Some(ReferenceResolutionV1::Bound(
-        *target_index,
+    Ok(Some(ReferenceResolutionV1::Bound(
+        **target_index,
         compatible
             .iter()
             .map(|(_, symbol)| symbol.occurrence.clone())
             .collect(),
-    ))
+    )))
 }
 
 fn unique_import<'a>(
-    file: &'a FileGenerationArtifactsV1,
+    file: &'a dyn ResolutionFileFactsV1,
     local_name: &str,
     relation: RelationEdgeKindV1,
 ) -> Option<&'a CodeIndexImportEvidenceV1> {
-    if is_typescript_family(file.extraction.language.as_str()) {
+    if is_typescript_family(file.language()) {
         // `export { x } from` forwards without binding `x` locally; Rust's
         // `pub use` does both, so only TypeScript filters forwarding rows.
         return unique_local_import(file, local_name, relation);
     }
-    let mut matches = file.artifacts.imports.iter().filter(|binding| {
+    let mut matches = file.imports().iter().filter(|binding| {
         binding.local_name.as_deref() == Some(local_name)
             && match relation {
                 RelationEdgeKindV1::Calls => binding.namespace == ImportNamespaceV1::Value,
                 RelationEdgeKindV1::Implements
                 | RelationEdgeKindV1::Extends
                 | RelationEdgeKindV1::TypeOf => {
-                    file.extraction.language.as_str() == "rust"
-                        || binding.namespace == ImportNamespaceV1::Type
+                    file.language() == "rust" || binding.namespace == ImportNamespaceV1::Type
                 }
                 _ => true,
             }
@@ -1095,19 +1221,26 @@ struct RustFileIndexV1 {
 }
 
 impl RustFileIndexV1 {
-    fn new<T>(files: &[T]) -> Self
+    fn new<T>(files: &[T]) -> Result<Self, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
+        Self::new_charged(files, &mut |_| Ok(()))
+    }
+
+    fn new_charged<T: ResolutionFileV1>(
+        files: &[T],
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
         let mut modules = BTreeMap::new();
         let mut crate_roots = BTreeMap::new();
         // Cargo manifests are found by path without scanning the set per
         // crate root.
-        let by_path = files
-            .iter()
-            .enumerate()
-            .map(|(index, file)| (file.logical_path(), index))
-            .collect::<HashMap<_, _>>();
+        let mut by_path = HashMap::new();
+        for (index, file) in files.iter().enumerate() {
+            reserve_resolution_map(&mut by_path, charge)?;
+            by_path.insert(file.logical_path(), index);
+        }
         for (index, file) in files.iter().enumerate() {
             if file.language() != "rust" {
                 continue;
@@ -1123,6 +1256,20 @@ impl RustFileIndexV1 {
                 continue;
             };
             if let Some(module) = rust_file_module(relative) {
+                let before = super::resident_bytes::btree_bytes(
+                    modules.len(),
+                    std::mem::size_of::<((String, String), Option<usize>)>(),
+                );
+                let after = super::resident_bytes::btree_bytes(
+                    modules.len().saturating_add(1),
+                    std::mem::size_of::<((String, String), Option<usize>)>(),
+                );
+                charge(ResolutionMemoryChangeV1::Retain(
+                    after
+                        .saturating_sub(before)
+                        .saturating_add(source_root.len())
+                        .saturating_add(module.len()),
+                ))?;
                 insert_unique_index(
                     &mut modules,
                     (source_root.to_owned(), module.to_owned()),
@@ -1130,15 +1277,28 @@ impl RustFileIndexV1 {
                 );
             }
             if relative == "lib.rs"
-                && let Some(crate_name) = rust_crate_name(files, &by_path, source_root)
+                && let Some(crate_name) = rust_crate_name(files, &by_path, source_root)?
             {
+                let before = super::resident_bytes::btree_bytes(
+                    crate_roots.len(),
+                    std::mem::size_of::<(String, Option<usize>)>(),
+                );
+                let after = super::resident_bytes::btree_bytes(
+                    crate_roots.len().saturating_add(1),
+                    std::mem::size_of::<(String, Option<usize>)>(),
+                );
+                charge(ResolutionMemoryChangeV1::Retain(
+                    after
+                        .saturating_sub(before)
+                        .saturating_add(crate_name.capacity()),
+                ))?;
                 insert_unique_index(&mut crate_roots, crate_name, index);
             }
         }
-        Self {
+        Ok(Self {
             modules,
             crate_roots,
-        }
+        })
     }
 
     fn module(&self, source_path: &str, module: &str) -> Option<usize> {
@@ -1158,7 +1318,7 @@ fn rust_crate_name<T>(
     files: &[T],
     by_path: &HashMap<&str, usize>,
     source_root: &str,
-) -> Option<String>
+) -> Result<Option<String>, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
@@ -1168,15 +1328,18 @@ where
         Some((dir, _)) => format!("{dir}/Cargo.toml"),
         None => "Cargo.toml".to_owned(),
     };
-    by_path
-        .get(manifest.as_str())
-        .map(|index| &files[*index])
-        .and_then(|file| {
-            file.as_ref().artifacts.symbols.iter().find(|symbol| {
+    let package_name = match by_path.get(manifest.as_str()) {
+        Some(index) => files[*index]
+            .binding()?
+            .symbols()
+            .iter()
+            .find(|symbol| {
                 symbol.simple_name == "name" && symbol.qualified_name.ends_with("::package::name")
             })
-        })
-        .and_then(|symbol| symbol.signature.as_deref())
+            .and_then(|symbol| symbol.signature.as_deref()),
+        None => None,
+    };
+    Ok(package_name
         // A CRLF checkout leaves the pair's trailing `\r` in its signature,
         // and bare CR is invalid TOML, so parse the trimmed fragment.
         .and_then(|signature| toml::from_str::<toml::Value>(signature.trim_end()).ok())
@@ -1192,7 +1355,7 @@ where
                 .and_then(|name| name.to_str())
                 .map(str::to_owned)
         })
-        .map(|name| name.replace('-', "_"))
+        .map(|name| name.replace('-', "_")))
 }
 
 fn insert_unique_index<K: Ord>(index: &mut BTreeMap<K, Option<usize>>, key: K, value: usize) {
@@ -1209,26 +1372,28 @@ fn rust_parent_glob_import_matches<T>(
     local_name: &str,
     relation: RelationEdgeKindV1,
     target: RustSymbolTargetV1<'_>,
-) -> bool
+) -> Result<bool, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
-    let source = files[source_index].as_ref();
-    source
-        .artifacts
-        .imports
-        .iter()
-        .filter(|binding| {
-            binding.is_glob
-                && (binding.module_specifier == "super"
-                    || binding.module_specifier.starts_with("super::"))
-        })
-        .filter_map(|binding| {
-            rust_relative_module(&binding.module_specifier, &source.authority.logical_path)
-        })
-        .filter_map(|module| rust.module(&source.authority.logical_path, &module))
-        .filter_map(|scope_index| unique_import(files[scope_index].as_ref(), local_name, relation))
-        .any(|binding| match binding.module_kind {
+    let source = files[source_index].binding()?;
+    for binding in source.imports().iter().filter(|binding| {
+        binding.is_glob
+            && (binding.module_specifier == "super"
+                || binding.module_specifier.starts_with("super::"))
+    }) {
+        let Some(module) = rust_relative_module(&binding.module_specifier, source.logical_path())
+        else {
+            continue;
+        };
+        let Some(scope_index) = rust.module(source.logical_path(), &module) else {
+            continue;
+        };
+        let Some(binding) = unique_import(files[scope_index].binding()?, local_name, relation)
+        else {
+            continue;
+        };
+        let matches = match binding.module_kind {
             ImportModuleKindV1::ProjectRelative => project_import_matches(
                 binding,
                 &binding.logical_path,
@@ -1236,9 +1401,14 @@ where
                 &target.symbol.qualified_name,
             ),
             ImportModuleKindV1::BareModule => {
-                rust_bare_import_matches(files, rust, source_index, binding, target, "")
+                rust_bare_import_matches(files, rust, source_index, binding, target, "")?
             }
-        })
+        };
+        if matches {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn rust_bare_import_matches<T>(
@@ -1248,12 +1418,12 @@ fn rust_bare_import_matches<T>(
     binding: &CodeIndexImportEvidenceV1,
     target: RustSymbolTargetV1<'_>,
     member: &str,
-) -> bool
+) -> Result<bool, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
     let mut chain = Vec::new();
-    rust_bare_import_chain(files, rust, access_index, binding, member, &mut chain);
+    rust_bare_import_chain(files, rust, access_index, binding, member, &mut chain)?;
     rust_export_chain_matches(files, rust, &chain, target)
 }
 
@@ -1280,12 +1450,14 @@ fn rust_qualified_path_matches<T>(
     index: usize,
     reference_name: &str,
     target: RustSymbolTargetV1<'_>,
-) -> bool
+) -> Result<bool, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
-    RustQualifiedWalkV1::new(files, rust, index, reference_name)
-        .is_some_and(|walk| walk.matches(files, rust, target))
+    match RustQualifiedWalkV1::new(files, rust, index, reference_name)? {
+        Some(walk) => walk.matches(files, rust, target),
+        None => Ok(false),
+    }
 }
 
 /// The target-independent half of [`rust_qualified_path_matches`]: the head
@@ -1306,50 +1478,53 @@ impl RustQualifiedWalkV1 {
         rust: &RustFileIndexV1,
         index: usize,
         reference_name: &str,
-    ) -> Option<Self>
+    ) -> Result<Option<Self>, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
-        let file = files[index].as_ref();
+        let file = files[index].binding()?;
         let segments = reference_name.split("::").collect::<Vec<_>>();
         if segments.len() < 2
             || segments
                 .iter()
                 .any(|segment| segment.is_empty() || segment.contains('<'))
         {
-            return None;
+            return Ok(None);
         }
-        let (origin, path) = rust_expand_path_head(rust, file, &segments)?;
+        let Some((origin, path)) = rust_expand_path_head(rust, file, &segments) else {
+            return Ok(None);
+        };
         // A path into another workspace crate binds only public targets.
         let (origin_index, requires_public) = match origin {
             RustPathOriginV1::InCrate => (index, false),
             RustPathOriginV1::Crate { root_index } => (root_index, true),
         };
         let root_path = files[origin_index].logical_path();
-        let chains = (0..path.len())
-            .filter_map(|k| {
-                let scope_index = rust.module(root_path, &path[..k].join("/"))?;
-                let member = path[k + 1..]
-                    .iter()
-                    .map(|segment| format!("::{segment}"))
-                    .collect::<String>();
-                let mut chain = Vec::new();
-                rust_export_chain(
-                    files,
-                    rust,
-                    origin_index,
-                    scope_index,
-                    index,
-                    &path[k],
-                    &member,
-                    requires_public,
-                    &mut BTreeSet::new(),
-                    &mut chain,
-                );
-                Some(chain)
-            })
-            .collect();
-        Some(Self { chains })
+        let mut chains = Vec::new();
+        for k in 0..path.len() {
+            let Some(scope_index) = rust.module(root_path, &path[..k].join("/")) else {
+                continue;
+            };
+            let member = path[k + 1..]
+                .iter()
+                .map(|segment| format!("::{segment}"))
+                .collect::<String>();
+            let mut chain = Vec::new();
+            rust_export_chain(
+                files,
+                rust,
+                origin_index,
+                scope_index,
+                index,
+                &path[k],
+                &member,
+                requires_public,
+                &mut BTreeSet::new(),
+                &mut chain,
+            )?;
+            chains.push(chain);
+        }
+        Ok(Some(Self { chains }))
     }
 
     fn matches<T>(
@@ -1357,13 +1532,16 @@ impl RustQualifiedWalkV1 {
         files: &[T],
         rust: &RustFileIndexV1,
         target: RustSymbolTargetV1<'_>,
-    ) -> bool
+    ) -> Result<bool, CodeIndexProductionErrorV1>
     where
         T: ResolutionFileV1,
     {
-        self.chains
-            .iter()
-            .any(|chain| rust_export_chain_matches(files, rust, chain, target))
+        for chain in &self.chains {
+            if rust_export_chain_matches(files, rust, chain, target)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -1375,10 +1553,10 @@ impl RustQualifiedWalkV1 {
 /// any of those is `None`.
 fn rust_expand_path_head(
     rust: &RustFileIndexV1,
-    file: &FileGenerationArtifactsV1,
+    file: &dyn ResolutionFileFactsV1,
     segments: &[&str],
 ) -> Option<(RustPathOriginV1, Vec<String>)> {
-    let source_path = file.authority.logical_path.as_str();
+    let source_path = file.logical_path();
     let head = segments[0];
     if matches!(head, "crate" | "self" | "super") {
         return rust_relative_path(source_path, segments)
@@ -1428,7 +1606,7 @@ fn rust_expand_path_head(
 /// behind a workspace crate is not.
 fn rust_qualified_owner_is_project_attested(
     rust: &RustFileIndexV1,
-    file: &FileGenerationArtifactsV1,
+    file: &dyn ResolutionFileFactsV1,
     reference_name: &str,
 ) -> bool {
     let Some((head, _)) = reference_name.split_once("::") else {
@@ -1449,10 +1627,10 @@ fn rust_qualified_owner_is_project_attested(
     if rust.crate_root(head).is_some() {
         return true;
     }
-    let source_path = file.authority.logical_path.as_str();
+    let source_path = file.logical_path();
     rust_relative_module(&format!("self::{head}"), source_path)
         .is_some_and(|module| rust.module(source_path, &module).is_some())
-        || file.artifacts.symbols.iter().any(|symbol| {
+        || file.symbols().iter().any(|symbol| {
             symbol.simple_name == head
                 && relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
         })
@@ -1482,13 +1660,13 @@ fn rust_relative_path(source_path: &str, segments: &[&str]) -> Option<Vec<String
 /// The single non-glob import binding `local_name` in `file`, whatever its
 /// namespace: a path head may be a type, a module, or a value.
 fn unique_named_import<'a>(
-    file: &'a FileGenerationArtifactsV1,
+    file: &'a dyn ResolutionFileFactsV1,
     local_name: &str,
 ) -> Option<&'a CodeIndexImportEvidenceV1> {
-    let mut matches =
-        file.artifacts.imports.iter().filter(|binding| {
-            !binding.is_glob && binding.local_name.as_deref() == Some(local_name)
-        });
+    let mut matches = file
+        .imports()
+        .iter()
+        .filter(|binding| !binding.is_glob && binding.local_name.as_deref() == Some(local_name));
     let binding = matches.next()?;
     matches.next().is_none().then_some(binding)
 }
@@ -1590,7 +1768,7 @@ fn rust_export_resolves_to_target<T>(
     exported_name: &str,
     target: RustSymbolTargetV1<'_>,
     member: &str,
-) -> bool
+) -> Result<bool, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
@@ -1606,7 +1784,7 @@ where
         false,
         &mut BTreeSet::new(),
         &mut chain,
-    );
+    )?;
     rust_export_chain_matches(files, rust, &chain, target)
 }
 
@@ -1628,24 +1806,25 @@ fn rust_export_chain<T>(
     requires_public: bool,
     visited: &mut BTreeSet<(usize, String)>,
     chain: &mut Vec<RustExportHopV1>,
-) where
+) -> Result<(), CodeIndexProductionErrorV1>
+where
     T: ResolutionFileV1,
 {
     if !visited.insert((scope_index, format!("{exported_name}{member}"))) {
-        return;
+        return Ok(());
     }
     let scope_path = files[scope_index].logical_path();
     let Some(source_root) = rust_source_root(scope_path) else {
-        return;
+        return Ok(());
     };
     let Some(relative_scope) = scope_path
         .strip_prefix(source_root)
         .and_then(|path| path.strip_prefix('/'))
     else {
-        return;
+        return Ok(());
     };
     let Some(scope_module) = rust_file_module(relative_scope) else {
-        return;
+        return Ok(());
     };
     let mut hop = RustExportHopV1 {
         origin_index,
@@ -1660,43 +1839,39 @@ fn rust_export_chain<T>(
         import_qualified: None,
         requires_public,
     };
-    let mut bindings = files[scope_index]
-        .as_ref()
-        .artifacts
-        .imports
-        .iter()
-        .filter(|binding| {
-            binding.local_name.as_deref() == Some(exported_name)
-                && rust_reexport_visible(files, binding, access_index, scope_index)
-        });
+    let scope = files[scope_index].binding()?;
+    let mut bindings = scope.imports().iter().filter(|binding| {
+        binding.local_name.as_deref() == Some(exported_name)
+            && rust_reexport_visible(files, binding, access_index, scope_index)
+    });
     let binding = match (bindings.next(), bindings.next()) {
         (Some(binding), None) => binding,
         _ => {
             chain.push(hop);
-            return;
+            return Ok(());
         }
     };
     match binding.module_kind {
         ImportModuleKindV1::BareModule => {
             chain.push(hop);
-            rust_bare_import_chain(files, rust, access_index, binding, member, chain);
+            rust_bare_import_chain(files, rust, access_index, binding, member, chain)?;
         }
         ImportModuleKindV1::ProjectRelative => {
             let Some(imported_name) = binding.imported_name.as_deref() else {
                 chain.push(hop);
-                return;
+                return Ok(());
             };
             let Some(qualified) =
                 rust_import_qualified_name(&binding.module_specifier, imported_name, scope_path)
             else {
                 chain.push(hop);
-                return;
+                return Ok(());
             };
             hop.import_qualified = Some(format!("{qualified}{member}"));
             chain.push(hop);
             let (module, imported_name) = qualified.rsplit_once("::").unwrap_or(("", &qualified));
             let Some(next_scope) = rust.module(scope_path, &module.replace("::", "/")) else {
-                return;
+                return Ok(());
             };
             rust_export_chain(
                 files,
@@ -1709,9 +1884,10 @@ fn rust_export_chain<T>(
                 requires_public,
                 visited,
                 chain,
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 /// The hops a workspace-crate import (`use krate::module::Name`) walks from
@@ -1725,26 +1901,27 @@ fn rust_bare_import_chain<T>(
     binding: &CodeIndexImportEvidenceV1,
     member: &str,
     chain: &mut Vec<RustExportHopV1>,
-) where
+) -> Result<(), CodeIndexProductionErrorV1>
+where
     T: ResolutionFileV1,
 {
     let Some(imported_name) = binding.imported_name.as_deref() else {
-        return;
+        return Ok(());
     };
     let mut module = binding.module_specifier.split("::");
     let Some(crate_name) = module.next() else {
-        return;
+        return Ok(());
     };
     let module = module.collect::<Vec<_>>().join("/");
     let Some(root_index) = rust.crate_root(crate_name) else {
-        return;
+        return Ok(());
     };
     let scope_index = if module.is_empty() {
         root_index
     } else {
         let root_path = files[root_index].logical_path();
         let Some(index) = rust.module(root_path, &module) else {
-            return;
+            return Ok(());
         };
         index
     };
@@ -1759,7 +1936,7 @@ fn rust_bare_import_chain<T>(
         true,
         &mut BTreeSet::new(),
         chain,
-    );
+    )
 }
 
 /// Whether any hop of `chain` names `target`. A hop that requires a public
@@ -1769,14 +1946,14 @@ fn rust_export_chain_matches<T>(
     rust: &RustFileIndexV1,
     chain: &[RustExportHopV1],
     target: RustSymbolTargetV1<'_>,
-) -> bool
+) -> Result<bool, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
     let target_path = files[target.index].logical_path();
     for hop in chain {
         if hop.requires_public && target.symbol.visibility != "public" {
-            return false;
+            return Ok(false);
         }
         let root_path = files[hop.origin_index].logical_path();
         if (target.index == hop.scope_index
@@ -1795,7 +1972,7 @@ where
                 &hop.exported_name,
                 &hop.member,
                 target,
-            )
+            )?
             || hop.import_qualified.as_deref().is_some_and(|qualified| {
                 rust_crate_qualified_name_matches(
                     qualified,
@@ -1805,10 +1982,10 @@ where
                 )
             })
         {
-            return true;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 /// The crate-relative path of `exported_name` defined in the module file
@@ -1835,17 +2012,17 @@ fn rust_project_import_resolves_to_target<T>(
     binding: &CodeIndexImportEvidenceV1,
     target: RustSymbolTargetV1<'_>,
     member: &str,
-) -> bool
+) -> Result<bool, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
     let Some(imported_name) = binding.imported_name.as_deref() else {
-        return false;
+        return Ok(false);
     };
     let Some(qualified) =
         rust_import_qualified_name(&binding.module_specifier, imported_name, scope_path)
     else {
-        return false;
+        return Ok(false);
     };
     let root_path = files[origin_index].logical_path();
     if rust_crate_qualified_name_matches(
@@ -1854,11 +2031,11 @@ where
         files[target.index].logical_path(),
         &target.symbol.qualified_name,
     ) {
-        return true;
+        return Ok(true);
     }
     let (module, imported_name) = qualified.rsplit_once("::").unwrap_or(("", &qualified));
     let Some(next_scope) = rust.module(scope_path, &module.replace("::", "/")) else {
-        return false;
+        return Ok(false);
     };
     rust_export_resolves_to_target(
         files,
@@ -2037,12 +2214,12 @@ fn rust_inherent_method_owned_by_scope_type<T>(
     exported_name: &str,
     member: &str,
     target: RustSymbolTargetV1<'_>,
-) -> bool
+) -> Result<bool, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
 {
     if member.is_empty() {
-        return false;
+        return Ok(false);
     }
     let root_path = files[origin_index].logical_path();
     // The member's own identity settles nearly every candidate (another
@@ -2054,34 +2231,34 @@ where
         files[target.index].logical_path(),
         &target.symbol.qualified_name,
     ) else {
-        return false;
+        return Ok(false);
     };
     if impl_owner.rsplit("::").next() != Some(exported_name) {
-        return false;
+        return Ok(false);
     }
-    let impl_file = files[target.index].as_ref();
+    let impl_file = files[target.index].binding()?;
     if !rust_method_belongs_to_type_impl(impl_file, target.symbol) {
-        return false;
+        return Ok(false);
     }
-    let scope = files[scope_index].as_ref();
+    let scope = files[scope_index].binding()?;
     let scope_qualified_type = rust_scope_qualified_name(scope_module, exported_name);
-    let Some(scope_type) = scope.artifacts.symbols.iter().find(|symbol| {
+    let Some(scope_type) = scope.symbols().iter().find(|symbol| {
         relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
             && rust_crate_qualified_name_matches(
                 &scope_qualified_type,
                 root_path,
-                &scope.authority.logical_path,
+                scope.logical_path(),
                 &symbol.qualified_name,
             )
     }) else {
-        return false;
+        return Ok(false);
     };
-    let shadowed = impl_file.artifacts.symbols.iter().any(|symbol| {
+    let shadowed = impl_file.symbols().iter().any(|symbol| {
         symbol.simple_name == exported_name
             && relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
     });
     if shadowed {
-        return false;
+        return Ok(false);
     }
     let type_target = RustSymbolTargetV1 {
         index: scope_index,
@@ -2091,11 +2268,11 @@ where
         return rust_qualified_path_matches(files, rust, target.index, impl_owner, type_target);
     }
     if target.index == scope_index {
-        return true;
+        return Ok(true);
     }
-    let impl_path = impl_file.authority.logical_path.as_str();
+    let impl_path = impl_file.logical_path();
     if let Some(binding) = unique_named_import(impl_file, exported_name) {
-        return binding.module_kind == ImportModuleKindV1::ProjectRelative
+        return Ok(binding.module_kind == ImportModuleKindV1::ProjectRelative
             && rust_project_import_resolves_to_target(
                 files,
                 rust,
@@ -2105,20 +2282,19 @@ where
                 binding,
                 type_target,
                 "",
-            );
+            )?);
     }
     let glob_modules = impl_file
-        .artifacts
-        .imports
+        .imports()
         .iter()
         .filter(|binding| {
             binding.is_glob && binding.module_kind == ImportModuleKindV1::ProjectRelative
         })
         .filter_map(|binding| rust_relative_module(&binding.module_specifier, impl_path))
         .collect::<Vec<_>>();
-    glob_modules.iter().any(|module| {
-        rust.module(impl_path, module).is_some_and(|glob_scope| {
-            rust_export_resolves_to_target(
+    for module in &glob_modules {
+        if let Some(glob_scope) = rust.module(impl_path, module)
+            && rust_export_resolves_to_target(
                 files,
                 rust,
                 origin_index,
@@ -2127,24 +2303,25 @@ where
                 exported_name,
                 type_target,
                 "",
-            )
-        })
-    })
+            )?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn rust_method_belongs_to_type_impl(
-    file: &FileGenerationArtifactsV1,
+    file: &dyn ResolutionFileFactsV1,
     method: &LineageSymbolRecordV1,
 ) -> bool {
-    file.artifacts
-        .edges
+    file.edges()
         .iter()
         .filter(|edge| {
             edge.kind == RelationEdgeKindV1::Contains && edge.to_occurrence == method.occurrence
         })
         .filter_map(|edge| {
-            file.artifacts
-                .symbols
+            file.symbols()
                 .iter()
                 .find(|symbol| symbol.occurrence == edge.from_occurrence)
         })

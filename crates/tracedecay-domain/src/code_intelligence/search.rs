@@ -808,28 +808,33 @@ pub struct ChangedCodeChunkV1 {
 /// generation emits empty `added_or_changed` and `deleted` sets with a
 /// non-zero `reused_count`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(
+    deny_unknown_fields,
+    rename(serialize = "$tracedecay::canonical::ordered_object")
+)]
 pub struct ChangedCodeChunkSetV1 {
-    pub from_generation: Option<CodeGenerationId>,
-    pub to_generation: CodeGenerationId,
-    pub manifest_digest: ManifestDigest,
+    // Keep fields lexicographic so canonical hashing streams the row sequences.
     pub added_or_changed: Vec<ChangedCodeChunkV1>,
     pub deleted: Vec<ChangedCodeChunkV1>,
+    pub from_generation: Option<CodeGenerationId>,
+    pub manifest_digest: ManifestDigest,
     /// Request-authenticated unchanged chunks that required no projector work.
     pub reused_count: u64,
     /// Canonical digest over the ordered reused `(chunk_id, content_digest)` pairs.
     pub reused_digest: ManifestDigest,
+    pub to_generation: CodeGenerationId,
 }
 
 #[derive(Serialize)]
+#[serde(rename = "$tracedecay::canonical::ordered_object")]
 struct ChangedCodeChunkSetDigestInput<'a> {
-    domain: &'static str,
-    from_generation: &'a Option<CodeGenerationId>,
-    to_generation: &'a CodeGenerationId,
     added_or_changed: &'a [ChangedCodeChunkV1],
     deleted: &'a [ChangedCodeChunkV1],
+    domain: &'static str,
+    from_generation: &'a Option<CodeGenerationId>,
     reused_count: u64,
     reused_digest: &'a ManifestDigest,
+    to_generation: &'a CodeGenerationId,
 }
 
 #[derive(Serialize)]
@@ -915,11 +920,12 @@ pub struct CodeGenerationSourceCommitmentsV1 {
 }
 
 #[derive(Serialize)]
+#[serde(rename = "$tracedecay::canonical::ordered_object")]
 struct CodeSourceParentDeltaDigestInput<'a> {
-    domain: &'static str,
-    parent_full_replay_digest: Option<&'a ManifestDigest>,
     added_or_changed: &'a [ChangedCodeChunkV1],
     deleted: &'a [ChangedCodeChunkV1],
+    domain: &'static str,
+    parent_full_replay_digest: Option<&'a ManifestDigest>,
     reused_count: u64,
     reused_digest: &'a ManifestDigest,
 }
@@ -1423,14 +1429,34 @@ pub struct ProjectionBatchReceiptV1 {
 pub fn projection_batch_publication_digest(
     batch: &ProjectionBatchReceiptV1,
 ) -> Result<ManifestDigest, DomainError> {
-    canonical_sha256(&(
-        PROJECTION_PUBLICATION_SEPARATOR,
+    projection_publication_digest_for_receipts(
         &batch.target_projection_key,
         &batch.request_digest,
         &batch.source_generation,
         &batch.source_manifest_digest,
         &batch.receipts,
         batch.reused_count,
+    )
+}
+
+/// Seal the published receipt identity over either stored rows or a replayed
+/// sequence. Both representations serialize the same canonical tuple.
+pub fn projection_publication_digest_for_receipts(
+    target_projection_key: &ProjectionKeyV1,
+    request_digest: &ManifestDigest,
+    source_generation: &CodeGenerationId,
+    source_manifest_digest: &ManifestDigest,
+    receipts: &impl Serialize,
+    reused_count: u64,
+) -> Result<ManifestDigest, DomainError> {
+    canonical_sha256(&(
+        PROJECTION_PUBLICATION_SEPARATOR,
+        target_projection_key,
+        request_digest,
+        source_generation,
+        source_manifest_digest,
+        receipts,
+        reused_count,
     ))
 }
 
@@ -2074,6 +2100,41 @@ mod tests {
         mixed_generation.from_generation = Some(mixed_generation.to_generation.clone());
         mixed_generation.manifest_digest = mixed_generation.compute_digest().unwrap();
         assert!(mixed_generation.validate().is_err());
+    }
+
+    #[test]
+    fn streamed_change_and_parent_digests_match_canonical_json_objects() {
+        let changes = changed_set();
+        let change_input = serde_json::json!({
+            "domain": CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN,
+            "from_generation": changes.from_generation,
+            "to_generation": changes.to_generation,
+            "added_or_changed": changes.added_or_changed,
+            "deleted": changes.deleted,
+            "reused_count": changes.reused_count,
+            "reused_digest": changes.reused_digest,
+        });
+        assert_eq!(
+            changes.compute_digest().unwrap(),
+            canonical_sha256(&change_input).unwrap()
+        );
+        let parent = id::<ManifestDigest>(&digest('e'));
+        let parent_input = serde_json::json!({
+            "domain": CODE_SOURCE_PARENT_DELTA_DIGEST_DOMAIN,
+            "parent_full_replay_digest": parent,
+            "added_or_changed": changes.added_or_changed,
+            "deleted": changes.deleted,
+            "reused_count": changes.reused_count,
+            "reused_digest": changes.reused_digest,
+        });
+        assert_eq!(
+            code_source_parent_delta_digest(Some(&parent), &changes).unwrap(),
+            canonical_sha256(&parent_input).unwrap()
+        );
+        assert_eq!(
+            canonical_sha256(&changes).unwrap(),
+            canonical_sha256(&serde_json::to_value(&changes).unwrap()).unwrap()
+        );
     }
 
     #[test]

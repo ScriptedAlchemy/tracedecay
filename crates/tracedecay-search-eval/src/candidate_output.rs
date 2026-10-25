@@ -17,6 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -30,7 +33,7 @@ use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
     MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
-    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
     VerifiedSealedLexicalSymbolDisplayV1,
 };
 use tracedecay_contracts::ResolvedScope;
@@ -1312,6 +1315,9 @@ fn publish_scope_generation(
         profile_digest: lexical_projection_profile_digest()?,
     };
     let request = CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot,
         captured_files: captured,
         changed_files: BTreeSet::new(),
@@ -1345,9 +1351,17 @@ fn publish_scope_generation(
             .map_err(|error| {
                 CandidateOutputError::Contract(format!("publish generation: {error}"))
             })?;
-    let generation = published.decoded().map(Arc::clone).ok_or_else(|| {
-        CandidateOutputError::Contract("a generation without a parent builds cold".to_owned())
-    })?;
+    let reader = published.sealed_generation().segment_reader();
+    let generation = Arc::new(
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            published.manifest_bytes(),
+            &SharedDecodedContentPoolV1::default(),
+            |request, buffer| reader(request, buffer),
+        )
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!("decode published generation: {error}"))
+        })?,
+    );
     Ok(Some((generation, file_to_document)))
 }
 
