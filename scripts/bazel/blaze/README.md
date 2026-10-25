@@ -14,9 +14,10 @@ The target launches upstream's native Cargo driver from the checkout root. Cargo
 owns workspace membership, features, build scripts, test selection and generated
 artifacts; this integration has no second package list or compiler graph. Arguments
 pass through unchanged except that `build`, `test`, `run` and `check` default to
-`--locked` and load the existing `.cargo/acquisition.toml` with `--config`. Upstream
-parses this flag into its native build selection and forwards it to workspace
-metadata and loading; it does not force the Cargo-only path. Native diagnostics,
+`--locked` and load the existing `.cargo/acquisition.toml` with `--config`. The
+launcher also exports that file's acquisition settings for the pinned engine's
+metadata subprocesses, which do not forward `--config`. This does not force the
+Cargo-only path. Native diagnostics,
 fallback explanations and exit status pass through.
 These commands also use Bazel's `RUSTC_BOOTSTRAP=1` environment so pinned stable
 Cargo honors that policy's unstable shallow-dependency setting.

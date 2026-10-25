@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import sys
+import tomllib
 
 from python.runfiles import runfiles
 
@@ -45,6 +46,14 @@ def main():
         # Match Bazel's repository environment: stable Cargo otherwise ignores
         # the shared policy's unstable shallow-dependency acquisition setting.
         env["RUSTC_BOOTSTRAP"] = "1"
+        # The pinned engine's workspace loader launches additional Cargo
+        # metadata commands without forwarding --config. Keep acquisition
+        # consistent for those children using values from the same policy.
+        acquisition = tomllib.loads(policy.read_text())
+        env["CARGO_NET_GIT_FETCH_WITH_CLI"] = str(
+            acquisition["net"]["git-fetch-with-cli"]
+        ).lower()
+        env["CARGO_UNSTABLE_GIT"] = acquisition["unstable"]["git"]
         options = args[1:args.index("--")] if "--" in args else args[1:]
         if "--locked" not in options and "--frozen" not in options:
             args.insert(1, "--locked")
