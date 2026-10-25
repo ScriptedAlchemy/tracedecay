@@ -1,7 +1,7 @@
 use std::fs;
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tempfile::TempDir;
 use tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1;
@@ -11,9 +11,7 @@ use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryComponentIdV1, ResidentMemoryPressureV1,
 };
 
-use tracedecay_code_index::production::{
-    CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-};
+use tracedecay_code_index::production::CodeIndexPublicationStoreErrorV1;
 
 use super::publication_store::ActiveGenerationDecodeChargeV1;
 use super::tests::OwnerSignals;
@@ -63,14 +61,6 @@ fn worker_reservation_bytes(runtime: &CodeIndexWorkerRuntimeV1) -> u64 {
     tracedecay_code_index::parallelism::worker_reservation_bytes(usize::from(
         runtime.status().effective_workers,
     ))
-}
-
-fn expected_worker_reservation_on(runtime: &CodeIndexWorkerRuntimeV1, remaining_bytes: u64) -> u64 {
-    let planned_workers = usize::from(runtime.status().effective_workers);
-    let affordable = tracedecay_code_index::parallelism::memory_safe_worker_count(remaining_bytes);
-    tracedecay_code_index::parallelism::worker_reservation_bytes(
-        planned_workers.min(affordable).max(1),
-    )
 }
 
 /// Ledger scenarios own their measured input independently of sibling tests.
@@ -283,6 +273,7 @@ fn fixture_scheduler_builds_on_the_fixture_width_not_the_host() {
 
 #[test]
 fn worker_memory_reservation_is_charged_and_released_by_raii() {
+    const MIB: u64 = 1024 * 1024;
     let project = fixture();
     let project_id = ProjectId::new("project.code-index-worker-memory").expect("valid project");
     let store = TempDir::new().expect("store root");
@@ -298,23 +289,37 @@ fn worker_memory_reservation_is_charged_and_released_by_raii() {
         2,
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
     );
-    let authority = ledger_memory(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1);
+    assert_eq!(runtime.status().effective_workers, 2);
+    let authority = ledger_memory(NonZeroU64::new(400 * MIB).expect("limit"));
+    let standing = authority
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-standing-memory").unwrap(),
+            NonZeroU64::new(100 * MIB).unwrap(),
+        )
+        .expect("standing charge fits");
     scheduler.bind_resident_memory(Arc::clone(&authority));
+    assert!(
+        tracedecay_code_index::parallelism::memory_safe_worker_count(300 * MIB).max(1) == 1,
+        "the old admission arithmetic would charge only one worker"
+    );
+    let _entered = runtime.enter();
+    assert_eq!(
+        tracedecay_code_index::parallelism::install(rayon::current_num_threads)
+            .expect("installed executor width"),
+        2
+    );
     let reservation = scheduler
         .reserve_worker_memory()
-        .expect("reserve worker memory");
-    assert_eq!(
-        authority.snapshot().used_bytes,
-        expected_worker_reservation_on(&runtime, DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get())
-    );
+        .expect("both installed workers fit beside the standing charge");
+    assert_eq!(reservation.reserved_bytes(), 2 * 128 * MIB);
+    assert_eq!(authority.snapshot().used_bytes, 100 * MIB + 2 * 128 * MIB);
+    assert_eq!(runtime.status().effective_workers, 2);
     drop(reservation);
-    assert_eq!(authority.snapshot().used_bytes, 0);
+    assert_eq!(authority.snapshot().used_bytes, standing.reserved_bytes());
 }
 
-/// A host-sized process-global plan must not spend the 6 GiB default
-/// authority's typed snapshot headroom. The live failure was remount seating
-/// gen 00000001, then refusing a 31-byte successor snapshot because
-/// `reserve_worker_memory` had reserved `remaining / 128MiB` and used==limit.
+/// Planning against the default authority leaves snapshot headroom while
+/// admission charges the complete installed executor width.
 #[test]
 fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
     let project = fixture();
@@ -327,9 +332,13 @@ fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    let runtime = bind_automatic_worker_runtime(&scheduler, 128, 128 * 1024 * 1024 * 1024);
-    // This case isolates the ledger's worker/snapshot split. Live process
-    // pressure can narrow the slab and is exercised with explicit samples below.
+    let runtime = bind_automatic_worker_runtime(
+        &scheduler,
+        128,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
+    // This case isolates the installed worker/snapshot split. Measured process
+    // pressure is exercised with explicit samples below.
     let authority = ledger_memory(DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1);
     scheduler.bind_resident_memory(Arc::clone(&authority));
 
@@ -338,7 +347,7 @@ fn default_authority_worker_reserve_leaves_typed_snapshot_headroom() {
         .expect("6 GiB authority admits a memory-safe worker slab");
     let used = authority.snapshot().used_bytes;
     let limit = DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get();
-    assert_eq!(used, expected_worker_reservation_on(&runtime, limit));
+    assert_eq!(used, worker_reservation_bytes(&runtime));
     assert!(
         used < limit,
         "worker reserve must leave the typed non-worker headroom: used={used} limit={limit}"
@@ -533,13 +542,11 @@ fn measured_rss_pressure_refuses_worker_admission_and_readmits_as_it_falls() {
     );
 }
 
-/// Live heap no resident owner charges still fills the process, so the ledger
-/// claims room for the whole worker plan while measured RSS does not. A
-/// refresh after the cold index sizes its worker slab to the measured headroom
-/// and publishes, instead of asking for the full plan and being refused on
-/// every retry.
+/// Measured process headroom must fit the complete installed executor.
+/// External memory release admits the same width without changing its pool.
 #[test]
-fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
+fn a_refresh_with_installed_workers_waits_for_enough_measured_headroom() {
+    const GIB: u64 = 1024 * 1024 * 1024;
     let project = fixture();
     let store = TempDir::new().expect("store root");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -554,17 +561,10 @@ fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
         8,
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
     );
-    let planned = u64::from(runtime.status().effective_workers);
-    assert!(
-        planned >= 2,
-        "the default plan must span more than one worker for the slab to narrow"
-    );
-    // Measured headroom fits half the planned slab. The limit keeps the
-    // observed bytes under the high watermark and leaves the ledger room for
-    // the whole plan.
-    let headroom =
-        (planned / 2) * tracedecay_code_index::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1;
-    let limit = NonZeroU64::new(8 * headroom).expect("limit");
+    assert_eq!(runtime.status().effective_workers, 8);
+    let worker_bytes = worker_reservation_bytes(&runtime);
+    assert_eq!(worker_bytes, GIB);
+    let limit = NonZeroU64::new(4 * GIB).expect("limit");
     let observed = Arc::new(AtomicU64::new(0));
     let sampled = Arc::clone(&observed);
     let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
@@ -588,8 +588,13 @@ fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
         scheduler.reconcile_now().expect("cold index publishes"),
         CodeIndexReconcileOutcomeV1::Published(_)
     ));
+    let predecessor = scheduler.active_publication_generation_id_for_test();
+    assert!(predecessor.is_some());
+    let decodes_before = scheduler.sealed_decode_count();
+    let used_before = authority.snapshot().used_bytes;
 
-    observed.store(limit.get() - headroom, Ordering::Release);
+    let refused_observed = 3 * GIB + GIB / 2;
+    observed.store(refused_observed, Ordering::Release);
     pressure.sample_and_publish();
     fs::write(
         project.path().join("src/lib.rs"),
@@ -597,16 +602,40 @@ fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
     )
     .expect("write source");
     git(project.path(), &["commit", "-q", "-am", "refresh"]);
-    let refreshed = scheduler
+    let failure = scheduler
         .reconcile_now()
-        .expect("the refresh is admitted within measured headroom");
+        .expect_err("the installed executor does not fit");
+    assert_observed_worker_memory_refusal(&failure, refused_observed, limit.get());
+    let CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(admission) = &failure else {
+        panic!("expected installed-worker admission refusal");
+    };
+    assert_eq!(admission.requested_bytes(), worker_bytes);
+    assert_eq!(
+        scheduler.active_publication_generation_id_for_test(),
+        predecessor
+    );
+    assert_eq!(scheduler.sealed_decode_count(), decodes_before);
+    assert_eq!(authority.snapshot().used_bytes, used_before);
+
+    observed.store(2 * GIB + GIB / 2, Ordering::Release);
+    pressure.sample_and_publish();
     assert!(matches!(
-        refreshed,
+        scheduler
+            .reconcile_now()
+            .expect("external release admits the installed executor"),
         CodeIndexReconcileOutcomeV1::Published(_)
     ));
-    let latest = scheduler.latest_complete().expect("refreshed generation");
+    assert_eq!(runtime.status().effective_workers, 8);
+    assert_ne!(
+        scheduler.active_publication_generation_id_for_test(),
+        predecessor
+    );
+    let latest = scheduler
+        .publication
+        .load_active_shared()
+        .expect("explicit decode admission")
+        .expect("refreshed generation");
     let mut symbols = latest
-        .generation
         .symbols()
         .symbols
         .iter()
@@ -617,18 +646,15 @@ fn a_refresh_after_cold_index_sizes_its_worker_slab_to_measured_headroom() {
         symbols,
         [
             "src/lib.rs::refreshed_generation",
-            "src/lib.rs::retained_generation"
+            "src/lib.rs::retained_generation",
         ]
     );
 }
 
-/// A refresh decodes its active parent generation and builds under one worker
-/// slab. Here another holder leaves the parent's measured decode plus 64 MiB
-/// below the admission watermark: room for the parent, not for the parent
-/// beside a 128 MiB worker. The refresh still publishes, with its slab
-/// planned against what the resident parent leaves.
+/// A graph-disabled retained-text refresh builds from sealed metadata without
+/// materializing its parent or reserving the full executor's scratch again.
 #[test]
-fn a_refresh_decodes_its_parent_before_planning_its_worker_slab() {
+fn a_retained_text_refresh_does_not_decode_its_parent_under_memory_pressure() {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
     let project = fixture();
@@ -640,51 +666,45 @@ fn a_refresh_decodes_its_parent_before_planning_its_worker_slab() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
-    bind_automatic_worker_runtime(
+    let runtime = bind_automatic_worker_runtime(
         &scheduler,
         8,
         DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
     );
     let limit = NonZeroU64::new(4 * GIB).expect("limit");
-    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
-        limit,
-        Arc::new(|| {
-            Some(ProcessResidentSampleV1 {
-                resident_bytes: 0,
-                unreclaimable_bytes: 0,
-                swapped_bytes: 0,
-                cgroup_headroom_bytes: None,
-            })
-        }),
-    ));
-    let high_watermark = pressure.high_watermark_bytes();
-    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let authority = ledger_memory(limit);
     scheduler.bind_resident_memory(Arc::clone(&authority));
     assert!(matches!(
         scheduler.reconcile_now().expect("cold index publishes"),
         CodeIndexReconcileOutcomeV1::Published(_)
     ));
-    scheduler
+    let metadata = scheduler
         .publication
-        .release_decoded_active_after_seal()
-        .expect("release the sealed decode");
-    let ActiveGenerationDecodeChargeV1::Measured {
-        bytes: decode_bytes,
-        ..
-    } = scheduler
-        .publication
-        .active_generation_charge()
-        .expect("decode charge")
-    else {
-        panic!("the cold index measured the generation it published");
-    };
-    let holder_bytes = high_watermark - authority.snapshot().used_bytes - decode_bytes - 64 * MIB;
-    let _holder = authority
+        .load_active_manifest()
+        .expect("read active sealed metadata")
+        .expect("sealed predecessor")
+        .metadata;
+    let predecessor = scheduler.active_publication_generation_id_for_test();
+    let decodes_before = scheduler.sealed_decode_count();
+    assert_eq!(
+        decodes_before, 0,
+        "publishing sealed text does not decode its parent"
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .active_generation_charge()
+            .expect("decode state"),
+        ActiveGenerationDecodeChargeV1::Unmeasured
+    );
+    let holder = authority
         .reserve_process_shared(
-            ResidentMemoryComponentIdV1::new("test-text-build").expect("component"),
-            NonZeroU64::new(holder_bytes).expect("holder bytes"),
+            ResidentMemoryComponentIdV1::new("test-standing-memory").expect("component"),
+            NonZeroU64::new(limit.get() - authority.snapshot().used_bytes - 64 * MIB)
+                .expect("standing bytes"),
         )
-        .expect("the holder fits the ledger");
+        .expect("standing memory leaves the retained refresh room");
+    assert!(worker_reservation_bytes(&runtime) > 64 * MIB);
 
     fs::write(
         project.path().join("src/lib.rs"),
@@ -692,16 +712,29 @@ fn a_refresh_decodes_its_parent_before_planning_its_worker_slab() {
     )
     .expect("write source");
     git(project.path(), &["commit", "-q", "-am", "refresh"]);
-    let refreshed = scheduler
-        .reconcile_now()
-        .expect("the refresh decodes its parent and builds");
     assert!(matches!(
-        refreshed,
-        CodeIndexReconcileOutcomeV1::Published(_)
+        scheduler
+            .reconcile_retained_text_generation_with(&metadata, true)
+            .expect("retained-text refresh builds within its real charge"),
+        Some(CodeIndexReconcileOutcomeV1::Published(_))
     ));
-    let latest = scheduler.latest_complete().expect("refreshed generation");
+    assert_ne!(
+        scheduler.active_publication_generation_id_for_test(),
+        predecessor
+    );
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        decodes_before,
+        "the retained-text successor must not decode the predecessor"
+    );
+    drop(holder);
+    let latest = scheduler
+        .publication
+        .load_active_shared()
+        .expect("explicit decode admission")
+        .expect("refreshed generation");
+    assert_eq!(scheduler.sealed_decode_count(), decodes_before + 1);
     let mut symbols = latest
-        .generation
         .symbols()
         .symbols
         .iter()
@@ -712,16 +745,13 @@ fn a_refresh_decodes_its_parent_before_planning_its_worker_slab() {
         symbols,
         [
             "src/lib.rs::refreshed_generation",
-            "src/lib.rs::retained_generation"
+            "src/lib.rs::retained_generation",
         ]
     );
 }
 
-/// The seal hands the decoded generation back so the text build has the
-/// memory; decoding it again must fit the process budget. Here another holder
-/// keeps all but a sliver below the admission watermark, so the decode waits
-/// (typed refusal, no decode, the ledger untouched) instead of materializing
-/// the generation into the kill line, and runs once that holder lets go.
+/// A consumer explicitly decodes and releases a generation. Its next decode
+/// uses that measured cost and must wait until the full cost fits again.
 #[test]
 fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -735,43 +765,44 @@ fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
     )
     .expect("open scheduler");
     let limit = NonZeroU64::new(16 * GIB).expect("limit");
-    // This tests ledger admission independently of unrelated process allocations.
-    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
-        limit,
-        Arc::new(|| {
-            Some(ProcessResidentSampleV1 {
-                resident_bytes: 0,
-                unreclaimable_bytes: 0,
-                swapped_bytes: 0,
-                cgroup_headroom_bytes: None,
-            })
-        }),
-    ));
-    let high_watermark = pressure.high_watermark_bytes();
-    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    let authority = ledger_memory(limit);
+    let high_watermark = authority.admission_watermark_bytes();
     scheduler.bind_resident_memory(Arc::clone(&authority));
     assert!(matches!(
         scheduler.reconcile_now().expect("publish generation"),
         CodeIndexReconcileOutcomeV1::Published(_)
     ));
+    let measured = scheduler
+        .publication
+        .load_active_shared()
+        .expect("first explicit decode admission")
+        .expect("published generation");
+    drop(measured);
     scheduler
         .publication
         .release_decoded_active_after_seal()
-        .expect("release the sealed decode");
+        .expect("release the explicitly decoded generation");
+    let ActiveGenerationDecodeChargeV1::Measured {
+        bytes: decode_bytes,
+        ..
+    } = scheduler
+        .publication
+        .active_generation_charge()
+        .expect("measured decode charge")
+    else {
+        panic!("an explicit decode must measure the next decode's charge");
+    };
+    assert!(decode_bytes > 0);
     let decodes_before = scheduler.sealed_decode_count();
-
+    let used_before = authority.snapshot().used_bytes;
     let holder = authority
         .reserve_process_shared(
-            ResidentMemoryComponentIdV1::new("test-text-build").expect("component"),
-            NonZeroU64::new(high_watermark - 1024).expect("holder bytes"),
+            ResidentMemoryComponentIdV1::new("test-standing-memory").expect("component"),
+            NonZeroU64::new(high_watermark - used_before - (decode_bytes - 1))
+                .expect("holder bytes"),
         )
-        .expect("the holder fits the ledger");
+        .expect("standing memory leaves one byte less than the measured decode needs");
     let used_while_held = authority.snapshot().used_bytes;
-
-    assert!(
-        scheduler.latest_complete().is_none(),
-        "a decode that does not fit must not materialize the generation"
-    );
     assert!(matches!(
         scheduler.publication.load_active_shared(),
         Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_))
@@ -785,12 +816,13 @@ fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
 
     drop(holder);
     let decoded = scheduler
-        .latest_complete()
-        .expect("the decode runs once the memory is given back");
+        .publication
+        .load_active_shared()
+        .expect("decode admission after external release")
+        .expect("published generation");
     assert_eq!(scheduler.sealed_decode_count(), decodes_before + 1);
     assert_eq!(
         decoded
-            .generation
             .symbols()
             .symbols
             .iter()
@@ -798,10 +830,17 @@ fn a_released_generation_decodes_again_only_once_its_bytes_fit_the_budget() {
             .collect::<Vec<_>>(),
         ["src/lib.rs::retained_generation"]
     );
+    let repeated = scheduler
+        .publication
+        .load_active_shared()
+        .expect("repeat explicit decode admission")
+        .expect("published generation");
+    assert!(Arc::ptr_eq(&decoded, &repeated));
+    assert_eq!(scheduler.sealed_decode_count(), decodes_before + 1);
     assert_eq!(
         authority.snapshot().used_bytes,
-        0,
-        "the decode's charge is released once it completes"
+        used_before,
+        "the transient decode reservation releases after the decode completes"
     );
 }
 
@@ -890,11 +929,8 @@ fn a_decode_is_admitted_against_unreclaimable_bytes_not_clean_file_pages() {
     );
 }
 
-/// A linked-worktree reconcile is admitted while RSS is still under the
-/// watermark and then keeps allocating. The next checkpoint has to read the
-/// process again: once the sample crosses the watermark the pass stops as a
-/// capacity refusal and the worktree stays unpublished. Treating that stop as
-/// a superseded epoch would start another capture immediately.
+/// Live pressure crosses the watermark after real construction starts. The
+/// refusal retains the full witnessed reconstruction demand through unwind.
 #[test]
 fn reconcile_stops_when_resident_memory_crosses_the_watermark() {
     let project = fixture();
@@ -906,44 +942,64 @@ fn reconcile_stops_when_resident_memory_crosses_the_watermark() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     )
     .expect("open scheduler");
+    let runtime = bind_automatic_worker_runtime(
+        &scheduler,
+        2,
+        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1.get(),
+    );
     let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).expect("limit");
-    let sampled = Arc::new(AtomicU64::new(0));
-    let ceiling = limit.get();
-    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
-        limit,
+    let ledger = Arc::new(OnceLock::<Weak<ProcessResidentMemoryV1>>::new());
+    let external_burst = Arc::new(AtomicBool::new(false));
+    let construction_peak = Arc::new(AtomicU64::new(0));
+    let construction = ResidentMemoryComponentIdV1::new("code_index.construction.v1").unwrap();
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(limit, {
+        let ledger = Arc::clone(&ledger);
+        let external_burst = Arc::clone(&external_burst);
+        let construction_peak = Arc::clone(&construction_peak);
         Arc::new(move || {
-            let read = sampled.fetch_add(1, Ordering::AcqRel);
-            let unreclaimable_bytes = if read == 0 { 1 } else { ceiling };
+            if let Some(memory) = ledger.get().and_then(Weak::upgrade) {
+                let bytes = memory.snapshot().process_shared_charge_for(construction);
+                construction_peak.fetch_max(bytes, Ordering::AcqRel);
+                if bytes > 0 {
+                    external_burst.store(true, Ordering::Release);
+                }
+            }
+            // The external occupancy persists after the build releases itself.
+            let bytes = if external_burst.load(Ordering::Acquire) {
+                limit.get()
+            } else {
+                1
+            };
             Some(ProcessResidentSampleV1 {
-                resident_bytes: unreclaimable_bytes,
-                unreclaimable_bytes,
+                resident_bytes: bytes,
+                unreclaimable_bytes: bytes,
                 swapped_bytes: 0,
                 cgroup_headroom_bytes: None,
             })
-        }),
-    ));
-    scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::with_pressure(
-        limit, pressure,
-    )));
-
+        })
+    }));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    ledger.set(Arc::downgrade(&authority)).unwrap();
+    scheduler.bind_resident_memory(Arc::clone(&authority));
     let error = scheduler
         .reconcile_now()
-        .expect_err("a reconcile whose live RSS crosses the watermark must not publish");
-    assert!(
-        error.is_transient_capacity_failure(),
-        "the watermark stop must stay retryable after RSS falls: {error}"
-    );
-    assert!(
-        matches!(
-            error,
-            CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
-                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_)
-            ))
-        ),
-        "the stop must be a resident-memory refusal, not a superseded retry: {error}"
+        .expect_err("a reconcile whose live pressure crosses the watermark must not publish");
+    assert!(external_burst.load(Ordering::Acquire));
+    assert!(construction_peak.load(Ordering::Acquire) > 0);
+    assert!(error.is_transient_capacity_failure());
+    assert!(error.is_resident_memory_refusal());
+    let CodeIndexSchedulerErrorV1::ReconstructionMemoryRefused { demand, .. } = &error else {
+        panic!("expected a witnessed reconstruction refusal, got {error:?}");
+    };
+    assert!(demand.required_bytes() >= u128::from(worker_reservation_bytes(&runtime)));
+    assert!(!demand.can_retry());
+    assert_eq!(
+        authority.snapshot().used_bytes,
+        0,
+        "discarded build charges unwind"
     );
     assert!(
         matches!(scheduler.publication.load_active_shared(), Ok(None)),
-        "the refused reconcile must leave the worktree unpublished"
+        "the refused reconcile leaves the worktree unpublished"
     );
 }

@@ -1169,7 +1169,7 @@ pub(super) fn assemble_published_generation(
         .iter()
         .any(|file| !file.artifacts.go_method_sets.is_empty())
     {
-        unresolved_calls.extend(go_satisfaction(&files, &ModuleImportIndexV1::new(&files)).gaps);
+        unresolved_calls.extend(go_satisfaction(&files, &ModuleImportIndexV1::new(&files)?)?.gaps);
         unresolved_calls.sort();
         unresolved_calls.dedup();
     }
@@ -1228,7 +1228,7 @@ pub(super) fn assemble_published_generation(
             let (edges, edge_abstentions) = {
                 let _span =
                     tracing::trace_span!("code_index.sealed_decode.edge_evidence").entered();
-                edge_evidence(&files, cross_file_edges)
+                edge_evidence(&files, cross_file_edges)?
             };
             probe.sample();
             let projection = {

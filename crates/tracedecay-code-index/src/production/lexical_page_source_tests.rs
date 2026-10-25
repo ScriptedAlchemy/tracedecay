@@ -5,6 +5,9 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use tracedecay_domain::{
     ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
@@ -592,6 +595,9 @@ fn fixture_for_source_files(
         omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot,
         captured_files: files
             .into_iter()
@@ -638,10 +644,14 @@ fn fixture_for_source_files(
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .expect("fixture generation publishes");
-    let generation = Arc::clone(
-        generation
-            .decoded()
-            .expect("a cold seal holds its generation"),
+    let reader = generation.sealed_generation().segment_reader();
+    let generation = Arc::new(
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            generation.manifest_bytes(),
+            &SharedDecodedContentPoolV1::default(),
+            |request, buffer| reader(request, buffer),
+        )
+        .expect("fixture generation decodes"),
     );
     let mut segments = BTreeMap::new();
     let manifest = generation

@@ -27,8 +27,11 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Instant,
+};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
 };
 
 use serde::Serialize;
@@ -38,21 +41,23 @@ use tracedecay_code_index::{
     languages::{LanguageRegistry, StaticLanguageRegistry},
     lineage::LineageKindV1,
     production::{
-        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
+        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
+        CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexPreparationPort,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
-        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-        CodeIndexSealedPublicationV1, MemorySealedPublicationStoreV1,
-        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+        CodeIndexRepositoryParseIdentityV1, CodeIndexSealedGenerationV1,
+        CodeIndexSealedPublicationV1, MemoryCodeIndexPreparationV1, MemorySealedPublicationStoreV1,
+        SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
         SharedDecodedContentPoolV1, VerifiedSealedLexicalPageReadV1,
         VerifiedSealedLexicalPageSourceV1,
     },
 };
 use tracedecay_domain::{
-    ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1, RepositoryDirtyStateV1,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, TreeId, UtcMicros,
-    WorktreeId,
+    ChunkerRevision, CodeGenerationId, FileOccurrenceId, LanguageId, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
+    TreeId, UtcMicros, WorktreeId,
 };
 
 const REPO_ENV: &str = "SEALED_STORAGE_REPO";
@@ -83,6 +88,7 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
     }
 }
 
+#[derive(Default)]
 struct Sealed {
     manifest: Vec<u8>,
     file_segments: BTreeMap<String, Vec<u8>>,
@@ -92,6 +98,7 @@ struct Sealed {
 
 #[derive(Serialize)]
 struct GenerationReport {
+    /// Canonical preparation through commit, including bounded construction.
     seal_ms: u128,
     /// Restore through `decode_partitioned_sealed` alone.
     restore_ms: u128,
@@ -149,7 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let sources = git_sources(&repository, &revision)?;
     let corpus_bytes = sources.iter().map(|source| source.bytes.len()).sum();
 
-    let store = MemorySealedPublicationStoreV1::default();
+    let store = ObservedStoreV1::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config()?, store.clone())?;
     let all_paths = sources
         .iter()
@@ -165,19 +172,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?,
         &ActiveControl,
     )?;
+    let (clean_sealed, clean_seal_ms) = store.take_sealed()?;
     // The same tree sealed again as a linked worktree of the project.
-    let linked =
-        CodeIndexProductionOwnerV1::new(config()?, MemorySealedPublicationStoreV1::default())?
-            .build_and_publish(
-                request(
-                    &sources,
-                    all_paths,
-                    "tree.sealed-storage.clean",
-                    2_000_000,
-                    Some(id::<WorktreeId>("worktree.sealed-storage.linked")?),
-                )?,
-                &ActiveControl,
-            )?;
+    let linked_store = ObservedStoreV1::default();
+    let _linked = CodeIndexProductionOwnerV1::new(config()?, linked_store.clone())?
+        .build_and_publish(
+            request(
+                &sources,
+                all_paths,
+                "tree.sealed-storage.clean",
+                2_000_000,
+                Some(id::<WorktreeId>("worktree.sealed-storage.linked")?),
+            )?,
+            &ActiveControl,
+        )?;
     let (edited, edited_paths) = edit(&sources);
     let edited_files = edited_paths.len();
     let successor = owner.build_and_publish(
@@ -191,13 +199,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         &ActiveControl,
     )?;
 
-    let started = Instant::now();
-    let clean_sealed = seal(clean.publication(), None)?;
-    let clean_seal_ms = started.elapsed().as_millis();
-    let started = Instant::now();
-    let successor_sealed = seal(successor.publication(), Some(&clean_sealed.manifest))?;
-    let successor_seal_ms = started.elapsed().as_millis();
-    let linked_sealed = seal(linked.publication(), None)?;
+    let (successor_sealed, successor_seal_ms) = store.take_sealed()?;
+    let (linked_sealed, _) = linked_store.take_sealed()?;
     let file_segment_bytes =
         |segments: &BTreeMap<String, Vec<u8>>| segments.values().map(Vec::len).sum::<usize>();
     let scope_bytes = |sealed: &Sealed| sealed.manifest.len() + sealed.evidence.1.len();
@@ -258,13 +261,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         corpus_bytes,
         edited_files,
         clean: generation_report(
-            &store.decode(clean.manifest_bytes())?,
+            &store.inner.decode(clean.manifest_bytes())?,
             &clean_sealed,
             clean_seal_ms,
             clean_restore_ms,
         ),
         successor: generation_report(
-            &store.decode(successor.manifest_bytes())?,
+            &store.inner.decode(successor.manifest_bytes())?,
             &successor_sealed,
             successor_seal_ms,
             successor_restore_ms,
@@ -445,6 +448,9 @@ fn request(
         });
     }
     Ok(CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot: SanitizedCodeSnapshotV1 {
             repository: id("repository.sealed-storage")?,
             worktree,
@@ -487,57 +493,132 @@ fn config() -> Result<CodeIndexProductionConfigV1, Box<dyn Error>> {
     })
 }
 
-fn seal(
-    publication: &CodeIndexSealedPublicationV1,
-    parent: Option<&[u8]>,
-) -> Result<Sealed, CodeIndexProductionErrorV1> {
-    let mut file_segments = BTreeMap::new();
-    let mut segment_kinds = BTreeMap::new();
-    let mut pack = Vec::new();
-    let mut evidence = None;
-    let manifest = publication.encode(parent, |publication| {
-        match publication {
-            SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
-                file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                segment_kinds.insert(digest.as_str().to_owned(), "file");
-            }
-            SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes } => {
-                file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                segment_kinds.insert(digest.as_str().to_owned(), "file_evidence");
-            }
-            SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
-                file_segments.insert(digest.as_str().to_owned(), bytes.to_vec());
-                segment_kinds.insert(digest.as_str().to_owned(), "resolution_index");
+/// Observe the actual preparation writes so reuse and storage accounting use
+/// exactly the segments the production constructor staged.
+#[derive(Clone, Default)]
+struct ObservedStoreV1 {
+    inner: MemorySealedPublicationStoreV1,
+    sealed: Arc<Mutex<Option<(Sealed, u128)>>>,
+}
+
+impl ObservedStoreV1 {
+    fn take_sealed(&self) -> Result<(Sealed, u128), Box<dyn Error>> {
+        self.sealed
+            .lock()
+            .map_err(|_| "sealed observation lock poisoned")?
+            .take()
+            .ok_or_else(|| "publication observation is missing".into())
+    }
+}
+
+struct ObservedPreparationV1 {
+    inner: MemoryCodeIndexPreparationV1,
+    sealed: Sealed,
+    evidence_pack: Vec<u8>,
+    started: Instant,
+}
+
+impl CodeIndexPreparationPort for ObservedPreparationV1 {
+    fn write_segment(
+        &mut self,
+        publication: SealedGenerationSegmentPublicationV1<'_>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        // The observer retains bytes only for this benchmark's storage report.
+        match &publication {
+            SealedGenerationSegmentPublicationV1::File { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::FileEvidence { digest, bytes }
+            | SealedGenerationSegmentPublicationV1::ResolutionIndex { digest, bytes } => {
+                let kind = match &publication {
+                    SealedGenerationSegmentPublicationV1::File { .. } => "file",
+                    SealedGenerationSegmentPublicationV1::FileEvidence { .. } => "file_evidence",
+                    _ => "resolution_index",
+                };
+                self.sealed
+                    .file_segments
+                    .insert(digest.as_str().to_owned(), bytes.to_vec());
+                self.sealed
+                    .segment_kinds
+                    .insert(digest.as_str().to_owned(), kind);
             }
             SealedGenerationSegmentPublicationV1::CodeGraphPage {
                 page_digest, bytes, ..
             } => {
-                file_segments.insert(page_digest.as_str().to_owned(), bytes.to_vec());
-                segment_kinds.insert(page_digest.as_str().to_owned(), "code_graph");
+                self.sealed
+                    .file_segments
+                    .insert(page_digest.as_str().to_owned(), bytes.to_vec());
+                self.sealed
+                    .segment_kinds
+                    .insert(page_digest.as_str().to_owned(), "code_graph");
             }
             SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
-                pack.extend_from_slice(bytes);
+                self.evidence_pack.extend_from_slice(bytes);
             }
             SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
                 segment_digest,
                 ..
             } => {
-                evidence = Some((
+                self.sealed.evidence = (
                     segment_digest.as_str().to_owned(),
-                    std::mem::take(&mut pack),
-                ));
+                    std::mem::take(&mut self.evidence_pack),
+                );
             }
         }
-        Ok(())
-    })?;
-    Ok(Sealed {
-        manifest,
-        file_segments,
-        segment_kinds,
-        evidence: evidence.ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract("sealed generation has no evidence".to_owned())
-        })?,
-    })
+        self.inner.write_segment(publication)
+    }
+
+    fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        self.inner.segment_reader()
+    }
+
+    fn abort(self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.inner.abort()
+    }
+}
+
+impl CodeIndexAtomicPublicationPort for ObservedStoreV1 {
+    type Preparation = ObservedPreparationV1;
+
+    fn load_active(
+        &self,
+        scope: &CodeIndexGenerationScopeV1,
+    ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        self.inner.load_active(scope)
+    }
+
+    fn prepare(
+        &mut self,
+        scope: &CodeIndexGenerationScopeV1,
+        expected: Option<&CodeGenerationId>,
+    ) -> Result<Self::Preparation, CodeIndexPublicationStoreErrorV1> {
+        let started = Instant::now();
+        Ok(ObservedPreparationV1 {
+            inner: self.inner.prepare(scope, expected)?,
+            sealed: Sealed::default(),
+            evidence_pack: Vec::new(),
+            started,
+        })
+    }
+
+    fn commit(
+        &mut self,
+        preparation: &mut Self::Preparation,
+        publication: &CodeIndexSealedPublicationV1,
+    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+        if preparation.sealed.evidence.0.is_empty() || !preparation.evidence_pack.is_empty() {
+            return Err(CodeIndexPublicationStoreErrorV1::Unavailable(
+                "sealed generation has no complete evidence pack".to_owned(),
+            ));
+        }
+        let manifest = self.inner.commit(&mut preparation.inner, publication)?;
+        preparation.sealed.manifest = manifest.to_vec();
+        let seal_ms = preparation.started.elapsed().as_millis();
+        *self.sealed.lock().map_err(|_| {
+            CodeIndexPublicationStoreErrorV1::Unavailable(
+                "sealed observation lock poisoned".to_owned(),
+            )
+        })? = Some((std::mem::take(&mut preparation.sealed), seal_ms));
+        Ok(manifest)
+    }
 }
 
 /// Restore `sealed` from `segments` (its own plus any it reuses from a

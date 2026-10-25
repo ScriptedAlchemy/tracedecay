@@ -1,9 +1,9 @@
 name: Set up Bazel
 description: >
   Installs Bazel through the pinned bazelisk with its repository cache, and a
-  disk cache named by `cache-key` that only master saves: other refs restore
-  master's entry, and their own saves would be multi-GB copies that ordinary
-  master and PR runs cannot reuse. Jobs with the same configuration and
+  disk cache named by `cache-key` that only master saves automatically: PRs
+  restore master's entry; explicit native Windows dispatches may also prime
+  their branch's cache. Jobs with the same configuration and
   runner image share a restore prefix; master callers save fresh
   action outputs after the build, including failed tests. Test runtimes are
   declared Bazel inputs.
@@ -169,3 +169,4 @@ runs:
         build --bes_timeout=30s
         build --bes_upload_mode=fully_async
         RC
+

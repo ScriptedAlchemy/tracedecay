@@ -18,9 +18,10 @@ use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry}
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, CodeIndexProductionErrorV1, CodeIndexPublishedBuildV1,
     CodeIndexPublishedGenerationV1, MemorySealedPublicationStoreV1,
-    SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageBatchBoundsV1,
-    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
-    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
+    SealedGenerationSegmentPublicationV1, SharedDecodedContentPoolV1,
+    VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
+    VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{LanguageId, ManifestDigest};
 
@@ -158,19 +159,19 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
     }
 }
 
-/// The generation `published` sealed, decoded whole from `store`. A cold
-/// build already holds it.
+/// Decode the published generation through its canonical sealed reader.
 pub(crate) fn decoded_generation(
-    store: &MemorySealedPublicationStoreV1,
+    _store: &MemorySealedPublicationStoreV1,
     published: &CodeIndexPublishedBuildV1,
 ) -> Result<Arc<CodeIndexPublishedGenerationV1>, String> {
-    if let Some(generation) = published.decoded() {
-        return Ok(Arc::clone(generation));
-    }
-    store
-        .decode(published.manifest_bytes())
-        .map(Arc::new)
-        .map_err(|error| format!("decode published generation: {error}"))
+    let reader = published.sealed_generation().segment_reader();
+    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        published.manifest_bytes(),
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| reader(request, buffer),
+    )
+    .map(Arc::new)
+    .map_err(|error| format!("decode published generation: {error}"))
 }
 
 /// A partitioned sealed generation held in memory: the manifest, its content

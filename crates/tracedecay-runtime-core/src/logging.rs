@@ -243,11 +243,14 @@ pub struct FormattedTracingCapture {
 
 #[cfg(feature = "test-helpers")]
 #[derive(Clone)]
-struct CaptureBuffer(std::sync::Arc<Mutex<Vec<u8>>>);
+struct CaptureBuffer(std::sync::Arc<Mutex<Vec<u8>>>, bool);
 
 #[cfg(feature = "test-helpers")]
 impl std::io::Write for CaptureBuffer {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self.1 {
+            std::io::stderr().write_all(buffer)?;
+        }
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -276,16 +279,34 @@ impl FormattedTracingCapture {
     /// before the first captured event.
     #[must_use]
     pub fn start() -> Self {
+        Self::start_with_output(false)
+    }
+
+    /// Also writes each line to stderr so a terminated measurement retains
+    /// the events emitted before its deadline.
+    #[must_use]
+    pub fn start_with_stderr() -> Self {
+        Self::start_with_output(true)
+    }
+
+    fn start_with_output(stderr: bool) -> Self {
         let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
-            .without_time()
             .with_ansi(false)
-            .with_writer(CaptureBuffer(std::sync::Arc::clone(&bytes)))
-            .finish();
+            .with_writer(CaptureBuffer(std::sync::Arc::clone(&bytes), stderr));
+        let guard = if stderr {
+            set_tracing_capture(
+                subscriber
+                    .with_timer(tracing_subscriber::fmt::time::uptime())
+                    .finish(),
+            )
+        } else {
+            set_tracing_capture(subscriber.without_time().finish())
+        };
         Self {
             bytes,
-            _guard: set_tracing_capture(subscriber),
+            _guard: guard,
         }
     }
 

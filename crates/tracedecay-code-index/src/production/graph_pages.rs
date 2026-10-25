@@ -7,8 +7,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, FileOccurrenceId, ManifestDigest, SanitizedCodeFileV1,
-    SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, ManifestDigest,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{GraphDbError, GraphEntityId, GraphNamespace, GraphSpillRowFootprint};
 
@@ -20,6 +20,7 @@ use crate::graph_projection::{
 use crate::lineage::LineageSymbolRecordV1;
 
 use super::graph_page_store::CodeGraphPageBuildFootprintV1;
+use super::resolution_view::ResolutionMemoryChangeV1;
 use super::{
     CodeIndexProductionErrorV1, CodeIndexPublishedGenerationV1, FileGenerationArtifactsV1,
 };
@@ -139,17 +140,13 @@ impl CodeIndexPublishedGenerationV1 {
                     })
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let files_by_occurrence = snapshot_files
-            .iter()
-            .map(|(occurrence, (_, file))| (occurrence, *file))
-            .collect::<BTreeMap<_, _>>();
         let artifacts_by_occurrence = self
             .files
             .iter()
             .map(|file| (&file.extraction.file_occurrence_id, file))
             .collect::<BTreeMap<_, _>>();
 
-        let mut owners = BTreeMap::<SymbolOccurrenceId, FileOccurrenceId>::new();
+        let mut owners = BTreeMap::<&SymbolOccurrenceId, &FileOccurrenceId>::new();
         for file in &self.files {
             let occurrence = &file.extraction.file_occurrence_id;
             snapshot_files.get(occurrence).ok_or_else(|| {
@@ -170,9 +167,9 @@ impl CodeIndexPublishedGenerationV1 {
                         .map(|symbol| &symbol.occurrence),
                 )
             {
-                match owners.insert(owned.clone(), occurrence.clone()) {
+                match owners.insert(owned, occurrence) {
                     None => {}
-                    Some(existing) if existing == *occurrence => {}
+                    Some(existing) if existing == occurrence => {}
                     Some(_) => {
                         return Err(CodeIndexProductionErrorV1::Contract(
                             "one graph symbol occurrence belongs to multiple files".to_owned(),
@@ -182,87 +179,20 @@ impl CodeIndexPublishedGenerationV1 {
             }
         }
 
-        let mut edges = BTreeMap::<FileOccurrenceId, Vec<&CanonicalRelationEdgeV1>>::new();
-        for edge in &self.edges {
-            if let Some(owner) = owners.get(&edge.from_occurrence) {
-                edges.entry(owner.clone()).or_default().push(edge);
-            }
-        }
-
-        let mut unresolved =
-            BTreeMap::<FileOccurrenceId, Vec<&CodeIndexUnresolvedReferenceV1>>::new();
-        for reference in &self.unresolved_calls {
-            if let Some(owner) = owners.get(&reference.from_occurrence) {
-                unresolved.entry(owner.clone()).or_default().push(reference);
-            }
-        }
-
-        let mut placeholder_owners = BTreeMap::<SymbolOccurrenceId, FileOccurrenceId>::new();
-        for (file_occurrence_id, page_edges) in &edges {
-            for edge in page_edges {
-                if !owners.contains_key(&edge.to_occurrence) {
-                    placeholder_owners
-                        .entry(edge.to_occurrence.clone())
-                        .and_modify(|owner| {
-                            if file_occurrence_id < owner {
-                                *owner = file_occurrence_id.clone();
-                            }
-                        })
-                        .or_insert_with(|| file_occurrence_id.clone());
-                }
-            }
-        }
-
-        for (position, snapshot_file) in self.snapshot.files.iter().enumerate() {
-            let file_key = u32::try_from(position).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "code graph page file key exceeds u32".to_owned(),
-                )
-            })?;
-            let occurrence = &snapshot_file.file_occurrence_id;
-            let page_edges = edges.remove(occurrence).unwrap_or_default();
-            let target_files = page_edges
-                .iter()
-                .filter_map(|edge| {
-                    owners
-                        .get(&edge.to_occurrence)
-                        .or_else(|| placeholder_owners.get(&edge.to_occurrence))
-                        .filter(|target| *target != occurrence)
-                        .map(|target| (edge.to_occurrence.clone(), target.clone()))
-                })
-                .collect();
-            let owned_placeholders = placeholder_owners
-                .iter()
-                .filter(|(_, owner)| *owner == occurrence)
-                .map(|(occurrence, _)| occurrence.clone())
-                .collect();
-            let placeholder_targets = page_edges
-                .iter()
-                .filter(|edge| !owners.contains_key(&edge.to_occurrence))
-                .map(|edge| edge.to_occurrence.clone())
-                .collect();
-            visit(seal_code_graph_page(
-                CodeGraphPageInputsV1 {
-                    file_key,
-                    snapshot_file,
-                    artifacts: artifacts_by_occurrence
-                        .get(occurrence)
-                        .map(|file| file.as_ref()),
-                    edges: page_edges.into_iter().cloned().collect(),
-                    unresolved_calls: unresolved
-                        .remove(occurrence)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .cloned()
-                        .collect(),
-                    target_files,
-                    placeholder_targets,
-                    owned_placeholders,
-                },
-                &files_by_occurrence,
-                &self.manifest.generation_id,
-            )?)?;
-        }
+        for_each_code_graph_page(
+            &self.snapshot,
+            &self.manifest.generation_id,
+            &owners,
+            &self.edges,
+            &self.unresolved_calls,
+            &mut |_| Ok(()),
+            &mut |file| {
+                Ok(artifacts_by_occurrence
+                    .get(&file.file_occurrence_id)
+                    .map(|artifacts| Arc::clone(artifacts)))
+            },
+            &mut visit,
+        )?;
         Ok(())
     }
 }
@@ -270,7 +200,8 @@ impl CodeIndexPublishedGenerationV1 {
 /// The symbol occurrences a file's graph page owns: its chunks' symbols and
 /// its symbols.
 pub(super) fn owned_occurrences(file: &FileGenerationArtifactsV1) -> BTreeSet<&SymbolOccurrenceId> {
-    file.artifacts
+    let occurrences = file
+        .artifacts
         .chunks
         .chunks
         .iter()
@@ -280,8 +211,12 @@ pub(super) fn owned_occurrences(file: &FileGenerationArtifactsV1) -> BTreeSet<&S
                 .symbols
                 .iter()
                 .map(|symbol| &symbol.occurrence),
-        )
-        .collect()
+        );
+    let mut owners = BTreeSet::new();
+    for occurrence in occurrences {
+        owners.insert(occurrence);
+    }
+    owners
 }
 
 /// Everything one file's graph page holds besides what its file says.
@@ -303,6 +238,16 @@ pub(super) fn seal_code_graph_page(
     inputs: CodeGraphPageInputsV1<'_>,
     files_by_occurrence: &BTreeMap<&FileOccurrenceId, &SanitizedCodeFileV1>,
     generation: &tracedecay_domain::CodeGenerationId,
+) -> Result<SealedCodeGraphPageV1, CodeIndexProductionErrorV1> {
+    seal_code_graph_page_charged(inputs, files_by_occurrence, generation, 0, &mut |_| Ok(()))
+}
+
+fn seal_code_graph_page_charged(
+    inputs: CodeGraphPageInputsV1<'_>,
+    files_by_occurrence: &BTreeMap<&FileOccurrenceId, &SanitizedCodeFileV1>,
+    generation: &CodeGenerationId,
+    base: usize,
+    retain: &mut dyn FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<SealedCodeGraphPageV1, CodeIndexProductionErrorV1> {
     let check = || Ok::<(), GraphDbError>(());
     let CodeGraphPageInputsV1 {
@@ -338,9 +283,7 @@ pub(super) fn seal_code_graph_page(
         placeholder_targets,
         owned_placeholders,
     };
-    let encoded = serde_json::to_vec(&page).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("code graph page encoding failed: {error}"))
-    })?;
+    let encoded = super::partitioned_codec::encode_json_rows_charged(&page, base, retain)?;
     let page_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&encoded))
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
     let build_footprint = page_build_footprint(&page, generation, encoded.len())?;
@@ -352,4 +295,285 @@ pub(super) fn seal_code_graph_page(
         encoded,
         build_footprint,
     })
+}
+
+/// Emit the same canonical graph pages from either decoded files or a staged
+/// source. The loader's one file stays alive only until its page is sealed.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn for_each_code_graph_page(
+    snapshot: &SanitizedCodeSnapshotV1,
+    generation: &CodeGenerationId,
+    owners: &BTreeMap<&SymbolOccurrenceId, &FileOccurrenceId>,
+    all_edges: &[CanonicalRelationEdgeV1],
+    unresolved_calls: &[CodeIndexUnresolvedReferenceV1],
+    retain: &mut dyn FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
+    load: &mut impl FnMut(
+        &SanitizedCodeFileV1,
+    )
+        -> Result<Option<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1>,
+    visit: &mut impl FnMut(SealedCodeGraphPageV1) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<(), CodeIndexProductionErrorV1> {
+    let mut routing = super::resident_bytes::btree_bytes(
+        snapshot.files.len(),
+        size_of::<(&FileOccurrenceId, &SanitizedCodeFileV1)>(),
+    );
+    retain(u64::try_from(routing).map_err(|_| {
+        CodeIndexProductionErrorV1::Contract("graph routing charge exceeds u64".to_owned())
+    })?)?;
+    let mut charge = |bytes: ResolutionMemoryChangeV1| {
+        bytes.apply_with(&mut routing, |routing| {
+            retain(u64::try_from(routing).map_err(|_| {
+                CodeIndexProductionErrorV1::Contract("graph routing charge exceeds u64".to_owned())
+            })?)
+        })
+    };
+    let files_by_occurrence = snapshot
+        .files
+        .iter()
+        .map(|file| (&file.file_occurrence_id, file))
+        .collect::<BTreeMap<_, _>>();
+    let mut edges = BTreeMap::<&FileOccurrenceId, Vec<&CanonicalRelationEdgeV1>>::new();
+    for edge in all_edges {
+        if let Some(owner) = owners.get(&edge.from_occurrence) {
+            if !edges.contains_key(*owner) {
+                let before = super::resident_bytes::btree_bytes(
+                    edges.len(),
+                    size_of::<(&FileOccurrenceId, Vec<&CanonicalRelationEdgeV1>)>(),
+                );
+                let after = super::resident_bytes::btree_bytes(
+                    edges.len().saturating_add(1),
+                    size_of::<(&FileOccurrenceId, Vec<&CanonicalRelationEdgeV1>)>(),
+                );
+                charge(ResolutionMemoryChangeV1::Retain(
+                    after.saturating_sub(before),
+                ))?;
+            }
+            let rows = edges.entry(*owner).or_default();
+            super::resolution_view::reserve_resolution_vec(rows, 1, &mut charge)?;
+            rows.push(edge);
+        }
+    }
+
+    let mut unresolved = BTreeMap::<&FileOccurrenceId, Vec<&CodeIndexUnresolvedReferenceV1>>::new();
+    for reference in unresolved_calls {
+        if let Some(owner) = owners.get(&reference.from_occurrence) {
+            if !unresolved.contains_key(*owner) {
+                let before = super::resident_bytes::btree_bytes(
+                    unresolved.len(),
+                    size_of::<(&FileOccurrenceId, Vec<&CodeIndexUnresolvedReferenceV1>)>(),
+                );
+                let after = super::resident_bytes::btree_bytes(
+                    unresolved.len().saturating_add(1),
+                    size_of::<(&FileOccurrenceId, Vec<&CodeIndexUnresolvedReferenceV1>)>(),
+                );
+                charge(ResolutionMemoryChangeV1::Retain(
+                    after.saturating_sub(before),
+                ))?;
+            }
+            let rows = unresolved.entry(*owner).or_default();
+            super::resolution_view::reserve_resolution_vec(rows, 1, &mut charge)?;
+            rows.push(reference);
+        }
+    }
+
+    let mut placeholder_owners = BTreeMap::<&SymbolOccurrenceId, &FileOccurrenceId>::new();
+    for (file_occurrence_id, page_edges) in &edges {
+        for edge in page_edges {
+            if !owners.contains_key(&edge.to_occurrence) {
+                if !placeholder_owners.contains_key(&edge.to_occurrence) {
+                    let before = super::resident_bytes::btree_bytes(
+                        placeholder_owners.len(),
+                        size_of::<(&SymbolOccurrenceId, &FileOccurrenceId)>(),
+                    );
+                    let after = super::resident_bytes::btree_bytes(
+                        placeholder_owners.len().saturating_add(1),
+                        size_of::<(&SymbolOccurrenceId, &FileOccurrenceId)>(),
+                    );
+                    charge(ResolutionMemoryChangeV1::Retain(
+                        after.saturating_sub(before),
+                    ))?;
+                }
+                placeholder_owners
+                    .entry(&edge.to_occurrence)
+                    .and_modify(|owner| {
+                        if *file_occurrence_id < *owner {
+                            *owner = *file_occurrence_id;
+                        }
+                    })
+                    .or_insert(*file_occurrence_id);
+            }
+        }
+    }
+
+    for (position, snapshot_file) in snapshot.files.iter().enumerate() {
+        let file_key = u32::try_from(position).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract("code graph page file key exceeds u32".to_owned())
+        })?;
+        let occurrence = &snapshot_file.file_occurrence_id;
+        let page_edges = edges.remove(occurrence).unwrap_or_default();
+        let page_calls = unresolved.remove(occurrence).unwrap_or_default();
+        let mut page_bytes = routing
+            .saturating_add(super::resident_bytes::vec_bytes(
+                &page_edges,
+                page_edges.len(),
+                |edge| super::resident_bytes::edge_heap_bytes(edge),
+            ))
+            .saturating_add(page_edges.len().saturating_mul(
+                size_of::<CanonicalRelationEdgeV1>() - size_of::<&CanonicalRelationEdgeV1>(),
+            ))
+            .saturating_add(super::resident_bytes::vec_bytes(
+                &page_calls,
+                page_calls.len(),
+                |call| super::resident_bytes::unresolved_heap_bytes(call),
+            ))
+            .saturating_add(page_calls.len().saturating_mul(
+                size_of::<CodeIndexUnresolvedReferenceV1>()
+                    - size_of::<&CodeIndexUnresolvedReferenceV1>(),
+            ));
+        let mut charge = |bytes: ResolutionMemoryChangeV1| {
+            bytes.apply_with(&mut page_bytes, |page_bytes| {
+                retain(u64::try_from(page_bytes).map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract("graph page charge exceeds u64".to_owned())
+                })?)
+            })
+        };
+        let mut target_files = BTreeMap::new();
+        let mut placeholder_targets = BTreeSet::new();
+        for edge in &page_edges {
+            if let Some(target) = owners
+                .get(&edge.to_occurrence)
+                .or_else(|| placeholder_owners.get(&edge.to_occurrence))
+                && *target != occurrence
+                && !target_files.contains_key(&edge.to_occurrence)
+            {
+                let before = super::resident_bytes::btree_bytes(
+                    target_files.len(),
+                    size_of::<(SymbolOccurrenceId, FileOccurrenceId)>(),
+                );
+                let after = super::resident_bytes::btree_bytes(
+                    target_files.len().saturating_add(1),
+                    size_of::<(SymbolOccurrenceId, FileOccurrenceId)>(),
+                );
+                charge(ResolutionMemoryChangeV1::Retain(
+                    after
+                        .saturating_sub(before)
+                        .saturating_add(edge.to_occurrence.as_str().len())
+                        .saturating_add(target.as_str().len()),
+                ))?;
+                target_files.insert(edge.to_occurrence.clone(), (*target).clone());
+            }
+            if !owners.contains_key(&edge.to_occurrence)
+                && !placeholder_targets.contains(&edge.to_occurrence)
+            {
+                let before = super::resident_bytes::btree_bytes(
+                    placeholder_targets.len(),
+                    size_of::<SymbolOccurrenceId>(),
+                );
+                let after = super::resident_bytes::btree_bytes(
+                    placeholder_targets.len().saturating_add(1),
+                    size_of::<SymbolOccurrenceId>(),
+                );
+                charge(ResolutionMemoryChangeV1::Retain(
+                    after
+                        .saturating_sub(before)
+                        .saturating_add(edge.to_occurrence.as_str().len()),
+                ))?;
+                placeholder_targets.insert(edge.to_occurrence.clone());
+            }
+        }
+        let mut owned_placeholders = BTreeSet::new();
+        for (placeholder, owner) in &placeholder_owners {
+            if *owner != occurrence {
+                continue;
+            }
+            let before = super::resident_bytes::btree_bytes(
+                owned_placeholders.len(),
+                size_of::<SymbolOccurrenceId>(),
+            );
+            let after = super::resident_bytes::btree_bytes(
+                owned_placeholders.len().saturating_add(1),
+                size_of::<SymbolOccurrenceId>(),
+            );
+            charge(ResolutionMemoryChangeV1::Retain(
+                after
+                    .saturating_sub(before)
+                    .saturating_add(placeholder.as_str().len()),
+            ))?;
+            owned_placeholders.insert((*placeholder).clone());
+        }
+        let artifacts = load(snapshot_file)?;
+        if let Some(file) = &artifacts {
+            page_bytes = page_bytes
+                .saturating_add(super::resident_bytes::file_bytes(file))
+                .saturating_add(
+                    file.artifacts
+                        .chunks
+                        .chunks
+                        .iter()
+                        .map(|chunk| super::resident_bytes::chunk_bytes(chunk))
+                        .sum::<usize>(),
+                )
+                .saturating_add(
+                    file.artifacts
+                        .symbols
+                        .iter()
+                        .map(|symbol| super::resident_bytes::symbol_bytes(symbol))
+                        .sum::<usize>(),
+                )
+                .saturating_add(super::resident_bytes::vec_bytes(
+                    &file.artifacts.imports,
+                    file.artifacts.imports.len(),
+                    super::resident_bytes::import_heap_bytes,
+                ))
+                .saturating_add(
+                    file.artifacts
+                        .symbols
+                        .len()
+                        .saturating_mul(size_of::<Arc<LineageSymbolRecordV1>>()),
+                );
+            page_bytes = page_bytes.saturating_add(super::resident_bytes::btree_bytes(
+                file.artifacts.chunks.chunks.len(),
+                size_of::<(SymbolOccurrenceId, CodeGraphSymbolBindingV1)>(),
+            ));
+            for chunk in &file.artifacts.chunks.chunks {
+                page_bytes = page_bytes
+                    .saturating_add(
+                        chunk
+                            .anchor
+                            .symbol_occurrence_id
+                            .as_ref()
+                            .map_or(0, |id| id.as_str().len()),
+                    )
+                    .saturating_add(chunk.anchor.file_occurrence_id.as_str().len())
+                    .saturating_add(chunk.id.as_str().len())
+                    .saturating_add(chunk.language_descriptor_revision.as_str().len())
+                    .saturating_add(snapshot_file.logical_path.len());
+            }
+        }
+        page_bytes = page_bytes
+            .saturating_add(size_of::<SanitizedCodeFileV1>())
+            .saturating_add(super::resident_bytes::snapshot_file_heap_bytes(
+                snapshot_file,
+            ));
+        retain(u64::try_from(page_bytes).map_err(|_| {
+            CodeIndexProductionErrorV1::Contract("graph page charge exceeds u64".to_owned())
+        })?)?;
+        visit(seal_code_graph_page_charged(
+            CodeGraphPageInputsV1 {
+                file_key,
+                snapshot_file,
+                artifacts: artifacts.as_deref(),
+                edges: page_edges.into_iter().cloned().collect(),
+                unresolved_calls: page_calls.into_iter().cloned().collect(),
+                target_files,
+                placeholder_targets,
+                owned_placeholders,
+            },
+            &files_by_occurrence,
+            generation,
+            page_bytes,
+            retain,
+        )?)?;
+    }
+    Ok(())
 }

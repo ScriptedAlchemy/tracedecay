@@ -87,14 +87,18 @@ pub fn validated_rust_file(source: &[u8]) -> ReceiptBoundCodeFileV1 {
         .expect("receipt-bound rust source")
 }
 
-/// The generation a first build holds: with no sealed parent it ran cold.
+/// Decode the published generation explicitly through its canonical sealed reader.
 pub fn cold_generation(
     published: &CodeIndexPublishedBuildV1,
 ) -> Arc<CodeIndexPublishedGenerationV1> {
-    Arc::clone(
-        published
-            .decoded()
-            .expect("a build without a parent runs cold"),
+    let reader = published.sealed_generation().segment_reader();
+    Arc::new(
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            published.manifest_bytes(),
+            &SharedDecodedContentPoolV1::default(),
+            |request, buffer| reader(request, buffer),
+        )
+        .expect("published generation decodes"),
     )
 }
 
