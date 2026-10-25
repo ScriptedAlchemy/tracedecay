@@ -74,10 +74,5 @@ name = "lcm_expansion"
 harness = false
 required-features = ["test-helpers"]
 
-[[bench]]
-name = "stack_delivery_batch"
-harness = false
-required-features = ["test-helpers"]
-
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

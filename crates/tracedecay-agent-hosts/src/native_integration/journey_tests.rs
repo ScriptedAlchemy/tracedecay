@@ -6,9 +6,10 @@
 //! transaction port or a test-only Git implementation.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::analysis::DaemonNativeIntegrationAnalysisV1;
@@ -22,7 +23,7 @@ use tracedecay_application::native_integration::{
 };
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, StackSignalDraftV1, StackSignalV1,
+    DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalV1,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::IndexingIdentityV1;
@@ -41,6 +42,7 @@ use tracedecay_contracts::{
     RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
     native_integration_surface_operation,
 };
+use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::{
     ActorId, AuthorityRef, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1,
     BranchStackRevisionId, BranchStackRevisionV1, BranchStackSourceV1, CapabilityId, CommitId,
@@ -61,6 +63,7 @@ use tracedecay_runtime_core::git::try_git_program;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::NativeIntegrationStore;
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
 const EXPIRES_AT: UtcMicros = UtcMicros(10_000);
@@ -488,9 +491,97 @@ impl Drop for JourneyCodeIndex {
     }
 }
 
+#[derive(Default)]
+struct AnalysisGate {
+    state: Mutex<(usize, bool)>,
+    changed: Condvar,
+    entered: tokio::sync::Notify,
+}
+
+impl AnalysisGate {
+    fn release(&self) {
+        self.state.lock().expect("analysis gate").1 = true;
+        self.changed.notify_all();
+    }
+}
+
+struct ReleaseAnalysis(Arc<AnalysisGate>);
+
+impl Drop for ReleaseAnalysis {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+struct GatedAnalysis {
+    analysis: Arc<DaemonNativeIntegrationAnalysisV1>,
+    gate: Arc<AnalysisGate>,
+    fail: bool,
+}
+
+impl NativeIntegrationAnalysisPort for GatedAnalysis {
+    fn analyze(
+        &self,
+        selection: &NativeIntegrationSelectionV1,
+        native: &tracedecay_runtime_core::git_repository::GitNativePreflight,
+        candidate: &tracedecay_runtime_core::git_repository::GitNativeCandidateTreeV1<'_>,
+        deadline: &Deadline,
+        cancellation_signal: &CancellationSignal,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        tracedecay_domain::NativeIntegrationAnalysisReportV1,
+        tracedecay_contracts::NativeIntegrationPortError,
+    > {
+        {
+            let mut state = self.gate.state.lock().expect("analysis gate");
+            state.0 += 1;
+            self.gate.entered.notify_one();
+            while !state.1 {
+                state = self.gate.changed.wait(state).expect("analysis gate");
+            }
+        }
+        if self.fail {
+            return Err(tracedecay_contracts::NativeIntegrationPortError::Unavailable);
+        }
+        self.analysis.analyze(
+            selection,
+            native,
+            candidate,
+            deadline,
+            cancellation_signal,
+            cancellation,
+        )
+    }
+
+    fn revalidate(
+        &self,
+        report: &tracedecay_domain::NativeIntegrationAnalysisReportV1,
+        deadline: &Deadline,
+        cancellation: &CancellationSignal,
+    ) -> Result<
+        NativeIntegrationAnalysisRevalidationV1,
+        tracedecay_contracts::NativeIntegrationPortError,
+    > {
+        self.analysis.revalidate(report, deadline, cancellation)
+    }
+}
+
 async fn mount(
     database: RegisteredGlobalDbLeaseV1,
     repository_root: std::path::PathBuf,
+) -> (
+    DaemonNativeIntegrationServiceRegistry,
+    super::registry::DaemonNativeIntegrationOwner,
+    Arc<DaemonNativeIntegrationAnalysisV1>,
+    JourneyCodeIndex,
+) {
+    mount_with_analysis_gate(database, repository_root, None).await
+}
+
+async fn mount_with_analysis_gate(
+    database: RegisteredGlobalDbLeaseV1,
+    repository_root: std::path::PathBuf,
+    gate: Option<(Arc<AnalysisGate>, bool)>,
 ) -> (
     DaemonNativeIntegrationServiceRegistry,
     super::registry::DaemonNativeIntegrationOwner,
@@ -569,6 +660,14 @@ async fn mount(
         schedulers.clone(),
         analysis_scope,
     ));
+    let native_analysis: Arc<dyn NativeIntegrationAnalysisPort> = match gate {
+        Some((gate, fail)) => Arc::new(GatedAnalysis {
+            analysis: Arc::clone(&analysis),
+            gate,
+            fail,
+        }),
+        None => analysis.clone(),
+    };
     let registry = DaemonNativeIntegrationServiceRegistry::default();
     let owner = registry
         .ensure(
@@ -580,7 +679,7 @@ async fn mount(
                 policy_digest: digest('d'),
             },
             OBSERVED_AT,
-            analysis.clone(),
+            native_analysis,
         )
         .await
         .expect("mount native integration owner");
@@ -604,8 +703,7 @@ async fn preflight(
     preview.as_ref().clone()
 }
 
-/// Mounts from a thread with no Tokio runtime entered, so the stack runtime's
-/// drain loop cannot borrow the test's Tokio runtime.
+/// Mounts from a native blocking thread, as the daemon's project-open does.
 async fn mount_stack_runtime_off_tokio(
     owner: super::registry::DaemonNativeIntegrationOwner,
     database: RegisteredGlobalDbLeaseV1,
@@ -638,6 +736,174 @@ async fn stack_snapshot(
         panic!("fixture must freeze the exact independent pair: {outcome:?}");
     };
     selection.as_ref().clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declared_stack_runtime_shares_native_preview_and_failure_without_consuming_result() {
+    for fail in [false, true] {
+        let directory = tempfile::tempdir().expect("temporary project directory");
+        let repository_root = directory.path().join("repo");
+        std::fs::create_dir_all(&repository_root).expect("repository root");
+        prepare_pair(&repository_root, MechanicalIntegrationModeV1::FastForward);
+        let project = ProjectId::new("project.native.journey").expect("project id");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &repository_root,
+            project.as_str(),
+        )
+        .expect("project enrollment");
+        let profile_root = directory.path().join("profile");
+        let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "shared native stack preflight",
+        )
+        .expect("fixture database scope");
+        let stores = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("canonical store registry");
+        let roots = vec![repository_root.canonicalize().expect("canonical root")];
+        let graph_database = stores
+            .project_memory(project.clone(), roots.clone())
+            .await
+            .expect("project graph owner");
+        let database = stores
+            .project_sessions(project.clone(), roots)
+            .await
+            .expect("project sessions owner");
+        stores
+            .settle_project_memory_graph(&project)
+            .await
+            .expect("settle graph owner");
+        assert!(
+            database
+                .bind_project_graph_runtime(
+                    graph_database
+                        .memory_graph_runtime()
+                        .expect("graph authority")
+                )
+                .is_ok(),
+            "bind exact graph owner"
+        );
+        let gate = Arc::new(AnalysisGate::default());
+        let (registry, owner, _analysis, code_index) = mount_with_analysis_gate(
+            database.clone(),
+            repository_root.clone(),
+            Some((Arc::clone(&gate), fail)),
+        )
+        .await;
+        let request = declared_preflight_request(
+            &repository_root,
+            &database,
+            MechanicalIntegrationModeV1::FastForward,
+            "request.native.shared-preflight",
+        );
+        request.validate().expect("declared request");
+        assert!(matches!(
+            database
+                .authorized_scope_set_storage()
+                .expect("scope storage")
+                .compare_and_swap(None, &request.topology.authorized_scope_set),
+            Ok(tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_))
+        ));
+        let scope = request.topology.destination.clone();
+        let (capability, _) =
+            operation_authority(tracedecay_contracts::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
+        let access = ProjectSourceAccessSnapshot {
+            scope: scope.clone(),
+            requester: request.context.actor().clone(),
+            binding: ScopeSourceBinding::new(
+                SourceBindingId::new("binding.native.shared-preflight").expect("binding id"),
+                SourceKindV1::GitHub,
+                LocatorDigest::new(format!("sha256:{}", "3".repeat(64))).expect("locator"),
+                AuthorityRef::Project(scope.project_id.clone()),
+            )
+            .expect("source binding"),
+            configuration_revision: ConfigurationRevisionId::new(
+                "configuration.native.shared-preflight",
+            )
+            .expect("configuration revision"),
+            configuration_digest: digest('4'),
+            configuration_provenance_digest: digest('5'),
+            effective_capabilities: BTreeSet::from([capability]),
+            grant_expires_at: EXPIRES_AT,
+        };
+        let stack = mount_stack_runtime_off_tokio(owner.clone(), database, scope, access).await;
+        for joiner_first in [false, true] {
+            let mut request = request.clone();
+            request.preview_id = NativeIntegrationPreviewId::new(format!(
+                "preview.native.shared-preflight.{joiner_first}"
+            ))
+            .expect("preview identity");
+            *gate.state.lock().expect("analysis gate") = (0, false);
+            let _release_on_failure = ReleaseAnalysis(Arc::clone(&gate));
+            let executing_stack = Arc::clone(&stack);
+            let executing_request = request.clone();
+            let mut executing = tokio::spawn(async move {
+                native_runtime::on_blocking_pool(async move {
+                    executing_stack
+                        .preflight(
+                            &executing_request,
+                            &CancellationSignal::active("cancel.native.shared.owner")
+                                .expect("owner cancellation"),
+                        )
+                        .await
+                })
+                .await
+                .expect("native preflight join")
+            });
+            tokio::select! {
+                () = gate.entered.notified() => {}
+                result = &mut executing => panic!("preflight ended before native barrier: {result:?}"),
+            }
+            let cancellation =
+                CancellationSignal::active("cancel.native.shared.joiner").expect("cancellation");
+            let mut joined = Box::pin(stack.preflight(&request, &cancellation));
+            std::future::poll_fn(|cx| {
+                assert!(joined.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            gate.release();
+            let (executed, joined) = if joiner_first {
+                let joined = joined.await;
+                (executing.await.expect("owner task"), joined)
+            } else {
+                (executing.await.expect("owner task"), joined.await)
+            };
+            assert_eq!(
+                executed, joined,
+                "both readers retain the full native result"
+            );
+            assert_eq!(gate.state.lock().expect("analysis gate").0, 1);
+            if fail {
+                assert_eq!(executed, Err(StackCoordinatorErrorV1::Unavailable));
+            } else {
+                let NativeIntegrationPreflightOutcomeV1::Preview(preview) =
+                    executed.expect("native preview")
+                else {
+                    panic!("expected native preview");
+                };
+                preview.validate().expect("exact preview evidence");
+                assert_eq!(
+                    owner
+                        .store()
+                        .read_preview(&preview.preview_id)
+                        .await
+                        .expect("stored preview"),
+                    Some(*preview)
+                );
+            }
+        }
+        assert_eq!(
+            git(&repository_root, &["rev-parse", "refs/heads/destination"]),
+            git(&repository_root, &["rev-parse", "refs/heads/main"]),
+            "preflight does not move the destination"
+        );
+        drop(stack);
+        registry.shutdown().await.expect("shutdown owner registry");
+        code_index.shutdown().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -928,20 +1194,20 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         .enqueue_from_preflight(occupied_signal.clone(), &live_context)
         .await
         .expect("enqueue destination-occupied dependency-ready signal");
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if stack_runtime
-                .pending_host_deliveries()
-                .await
-                .is_ok_and(|pending| pending.len() == 3)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("publish stack signals to host");
+    assert_eq!(
+        database
+            .pending_github_stack_deliveries(
+                project_id.as_str(),
+                destination_scope.scope_digest.as_str(),
+                None,
+            )
+            .await
+            .expect("pending page")
+            .len(),
+        3,
+        "enqueued signals are readable by the host without a promotion step"
+    );
+    assert_eq!(stack_runtime.has_due_pending_delivery().await, Ok(true));
 
     let cancellation = CancellationSignal::active("cancel.native.journey.declared-conflict.expand")
         .expect("expand cancellation");
@@ -992,6 +1258,48 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         expanded_preview.disposition,
         NativeIntegrationPreviewDispositionV1::NativeConflict { .. }
     ));
+    let debounced = StackSignalV1::seal(
+        &destination_scope,
+        StackSignalDraftV1 {
+            stack_revision_id: signal.stack_revision_id.clone(),
+            stack_revision_digest: signal.stack_revision_digest.clone(),
+            kind: StackSignalKindV1::StackTipDrift,
+            state_digest: digest('7'),
+            github_stack_digest: None,
+            observed_at: now,
+        },
+    )
+    .expect("debounced signal");
+    stack_runtime
+        .enqueue_from_preflight(debounced.clone(), &live_context)
+        .await
+        .expect("enqueue debounced signal");
+    assert_eq!(
+        stack_runtime
+            .expand(
+                GitHubStackSignalExpandSurfaceRequest {
+                    signal_id: Some(debounced.signal_id.clone()),
+                    expected_watermark_id: None,
+                }
+                .into_application_request(live_context.clone()),
+                &cancellation,
+            )
+            .await,
+        Err(GitHubStackSignalExpandPortError::Unavailable),
+        "a debounced signal is not readable before its window ends"
+    );
+    assert_eq!(
+        database
+            .github_stack_recipient_state(
+                project_id.as_str(),
+                debounced.signal_id.as_str(),
+                requester.as_str(),
+            )
+            .await
+            .expect("debounced recipient state"),
+        Some(GitHubStackDeliveryStateV1::Pending),
+        "an early read settles nothing"
+    );
     let occupied = stack_runtime
         .expand(
             GitHubStackSignalExpandSurfaceRequest {
@@ -1038,7 +1346,7 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
             )
             .await
             .expect("other recipient state"),
-        Some(GitHubStackDeliveryStateV1::HostPending)
+        Some(GitHubStackDeliveryStateV1::Pending)
     );
     let stored = database
         .github_stack_signal(project_id.as_str(), signal.signal_id.as_str())
@@ -1373,20 +1681,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
                 .enqueue_from_preflight(stack_signal.clone(), &live_context)
                 .await
                 .expect("enqueue terminal signal");
-            tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    if stack_runtime
-                        .pending_host_deliveries()
-                        .await
-                        .is_ok_and(|pending| pending.len() == 1)
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .expect("publish terminal signal");
+            assert_eq!(stack_runtime.has_due_pending_delivery().await, Ok(true));
             let expanded = stack_runtime
                 .expand(
                     GitHubStackSignalExpandSurfaceRequest {

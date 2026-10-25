@@ -18,8 +18,6 @@ use super::{
 
 pub const MAX_REPOSITORY_PREFLIGHTS: usize = 4;
 pub const MAX_DAEMON_PREFLIGHTS: usize = 16;
-pub const MAX_BATCH_RECIPIENTS: usize = 64;
-pub const MAX_BATCH_SIGNALS: usize = 128;
 pub const DEDUPE_TTL_MICROS: i64 = 300_000_000;
 
 #[derive(Clone, Debug)]
@@ -94,6 +92,17 @@ impl StackSignalV1 {
         Ok(())
     }
 
+    /// A material signal is readable at once; a debounced one only after its
+    /// class window, so early reads cannot see a transition still settling.
+    pub fn is_due(&self, now: UtcMicros) -> bool {
+        self.kind.is_material()
+            || self
+                .observed_at
+                .0
+                .saturating_add(self.kind.debounce_micros())
+                <= now.0
+    }
+
     fn validate_fields(&self, scope: &ResolvedScope) -> Result<(), StackCoordinatorErrorV1> {
         scope.validate().map_err(invalid)?;
         self.signal_id.validate().map_err(invalid)?;
@@ -157,21 +166,6 @@ impl StackSignalV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StackPendingDeliveryV1 {
-    pub recipient: ActorId,
-    pub signal_id: StackSignalId,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StackDeliveryBatchV1 {
-    pub watermark_id: StackDeliveryWatermarkId,
-    pub recipients: Vec<ActorId>,
-    pub signals: Vec<StackSignalV1>,
-    pub deliveries: Vec<StackPendingDeliveryV1>,
-    pub partial: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StackDeliveryAuthorizationV1 {
     Authorized,
@@ -185,16 +179,6 @@ pub trait StackCoordinatorStore: Send + Sync {
         &self,
         signal: StackSignalV1,
         recipients: Vec<ActorId>,
-    ) -> impl Future<Output = Result<(), StackCoordinatorErrorV1>> + Send;
-    fn pending_deliveries(
-        &self,
-    ) -> impl Future<
-        Output = Result<Vec<(StackPendingDeliveryV1, StackSignalV1)>, StackCoordinatorErrorV1>,
-    > + Send;
-    fn acknowledge(
-        &self,
-        watermark_id: &StackDeliveryWatermarkId,
-        deliveries: &[StackPendingDeliveryV1],
     ) -> impl Future<Output = Result<(), StackCoordinatorErrorV1>> + Send;
     fn signal(
         &self,
@@ -220,13 +204,6 @@ pub trait StackDeliveryAuthorizationPort: Send + Sync {
         recipient: &ActorId,
         signal: &StackSignalV1,
     ) -> impl Future<Output = StackDeliveryAuthorizationV1> + Send;
-}
-
-pub trait StackDeliveryPort: Send + Sync {
-    fn deliver(
-        &self,
-        batch: &StackDeliveryBatchV1,
-    ) -> impl Future<Output = Result<(), StackCoordinatorErrorV1>> + Send;
 }
 
 pub trait OptionalStackPreflightPort: Send + Sync {
@@ -281,16 +258,13 @@ fn invalid(error: impl std::fmt::Display) -> StackCoordinatorErrorV1 {
     StackCoordinatorErrorV1::Invalid(error.to_string())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OptionalPreflightDispositionV1 {
-    Complete,
-    Partial,
+/// How an optional preflight request ended. `Completed` carries the one full
+/// native result; the other two are admission refusals that ran nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OptionalPreflightV1 {
+    Completed(NativeIntegrationPreflightOutcomeV1),
     SuppressedOpenCircuit,
     Saturated,
-    Cancelled,
-    Stale,
-    Denied,
-    Unavailable,
 }
 
 pub(super) fn stack_drift(
