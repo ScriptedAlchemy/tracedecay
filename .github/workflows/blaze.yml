@@ -25,10 +25,6 @@ jobs:
       BLAZE_TESTS: all
       BLAZE_CACHE: ${{ github.workspace }}/target/blaze/store
       NATIVE_BLAZE_BIN_DIR: ${{ github.workspace }}/target/blaze/tool/bin
-      # BLAZE_HOME aliases RA_JIT_HOME before the daemon reads it. Neither
-      # this runtime directory nor the Cargo home itself is a cache input.
-      BLAZE_HOME: ${{ runner.temp }}/blaze-runtime
-      CARGO_HOME: ${{ runner.temp }}/blaze-cargo
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/blaze
       CARGO_TERM_COLOR: always
       WORKSPACE_FEATURES: tracedecay/test-helpers,tracedecay/test-transport,tracedecay/search-eval,tracedecay-cli/test-transport,tracedecay-query/production
@@ -61,6 +57,11 @@ jobs:
           BOOTSTRAP_HASH: ${{ hashFiles('scripts/bazel/blaze/repositories.bzl', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelversion', '.bazelrc', 'rust-toolchain.toml', '.github/workflows/blaze.yml') }}
         run: |
           set -euo pipefail
+          # runner.temp is unavailable in job-level env. Resolve it on the runner
+          # and persist these paths for subsequent build and cache steps.
+          export BLAZE_HOME="$RUNNER_TEMP/blaze-runtime"
+          export CARGO_HOME="$RUNNER_TEMP/blaze-cargo"
+          printf 'BLAZE_HOME=%s\nCARGO_HOME=%s\n' "$BLAZE_HOME" "$CARGO_HOME" >> "$GITHUB_ENV"
           mkdir -p "$BLAZE_HOME" "$BLAZE_CACHE" "$CARGO_HOME"
           chmod 700 "$BLAZE_HOME"
           {
