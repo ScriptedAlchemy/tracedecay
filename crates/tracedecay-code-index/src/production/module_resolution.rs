@@ -1,9 +1,9 @@
 //! Python, Go, Java, and Ruby call binding over the sealed file set.
 //!
 //! Each language binds a call through its own import form and one module
-//! rule, reading only the per-file artifacts the seal already holds: the
-//! indexed source paths, each file's parser-attested import rows, and the
-//! package, module, and class symbols its extractor published.
+//! rule, using source-path metadata and fallibly loaded compact binding
+//! facts: each file's parser-attested import rows and the package, module,
+//! and class symbols its extractor published.
 //!
 //! - Python: `from m import f`, `import m as a` / `import a.b` with dotted
 //!   member paths, relative imports, globs, and names a package's
@@ -21,14 +21,18 @@
 //! gap, disclosed so `callers` and `file_dependents` report partial
 //! coverage; a binding of an external module binds nothing and is no gap.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::OnceLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use tracedecay_code_extraction::{CallableArityV1, ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_domain::{NodeKind, RelationEdgeKindV1, SymbolOccurrenceId};
 
-use super::FileGenerationArtifactsV1;
-use super::resolution_view::ResolutionFileV1;
+use super::CodeIndexProductionErrorV1;
+use super::resolution_view::ResolutionMemoryChangeV1;
+use super::resolution_view::{
+    ResolutionFileFactsV1, ResolutionFileV1, reserve_resolution_map, reserve_resolution_set,
+    reserve_resolution_vec,
+};
 use super::typescript_resolution::{ImportBindingOutcomeV1, join_normalized, split_parent};
 use crate::chunks::relation_target_kind_is_compatible;
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
@@ -50,15 +54,15 @@ pub(super) fn caller_scope<'r>(
     (language == "ruby").then_some(&reference.from_occurrence)
 }
 
-type SymbolRef<'a> = (usize, &'a LineageSymbolRecordV1);
+type SymbolRef = (usize, Arc<LineageSymbolRecordV1>);
 
 /// A module path under a source root to its `(root, target)` candidates.
 type PythonModulesV1 = HashMap<String, Vec<(String, PythonModuleV1)>>;
 
 /// What one step of module resolution reached.
 #[derive(Clone, Debug)]
-enum TargetV1<'a> {
-    Symbol(SymbolRef<'a>),
+enum TargetV1 {
+    Symbol(SymbolRef),
     /// A Python module file (`m.py` or a package `__init__.py`).
     ModuleFile(usize),
     /// A Python namespace package directory without `__init__.py`.
@@ -74,12 +78,12 @@ enum TargetV1<'a> {
 pub(super) struct ModuleImportIndexV1<'a, T> {
     /// Import-module source paths to their file index.
     sources: HashMap<&'a str, usize>,
-    /// Every sealed file, by index; only import-module sources are read.
+    /// Every source, by index; only import-module binding facts are read.
     files: &'a [T],
     /// `(language, directory)` to the source files directly inside it.
     dirs: HashMap<(&'a str, &'a str), Vec<usize>>,
     /// Every symbol by exact qualified name.
-    by_qualified: HashMap<&'a str, Vec<SymbolRef<'a>>>,
+    by_qualified: HashMap<&'a str, Vec<(usize, &'a Arc<LineageSymbolRecordV1>)>>,
     /// Directories holding an `__init__.py`: regular Python packages.
     python_packages: HashSet<&'a str>,
     python_modules: PythonModulesV1,
@@ -114,7 +118,23 @@ enum PythonModuleV1 {
 }
 
 impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
-    pub(super) fn new(files: &'a [T]) -> Self {
+    pub(super) fn release_file_memo(&mut self, index: usize) {
+        self.ruby_loaded[index].take();
+    }
+
+    pub(super) fn new(files: &'a [T]) -> Result<Self, CodeIndexProductionErrorV1> {
+        Self::new_charged(files, &mut |_| Ok(()))
+    }
+
+    pub(super) fn new_charged(
+        files: &'a [T],
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        charge(ResolutionMemoryChangeV1::Retain(
+            files
+                .len()
+                .saturating_mul(std::mem::size_of::<OnceLock<(Vec<usize>, bool)>>()),
+        ))?;
         let mut index = Self {
             sources: HashMap::new(),
             files,
@@ -136,58 +156,96 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
         };
         for (file_index, file) in files.iter().enumerate() {
             if is_module_import_language(file.language()) {
-                index.register(file_index, file.as_ref());
+                index.register(file_index, file.binding()?, charge)?;
             }
         }
         index
             .go_modules
             .sort_by(|left, right| right.0.len().cmp(&left.0.len()).then(left.cmp(right)));
-        (index.python_modules, index.python_namespace_dirs) = index.python_module_candidates();
-        index
+        (index.python_modules, index.python_namespace_dirs) =
+            index.python_module_candidates(charge)?;
+        Ok(index)
     }
 
     /// Index one Python, Go, Java, or Ruby file: its path, directory, and
     /// symbols, and the package, module, and load-path facts its language
     /// resolves through.
-    fn register(&mut self, file_index: usize, file: &'a FileGenerationArtifactsV1) {
-        let language = file.extraction.language.as_str();
-        let path = file.authority.logical_path.as_str();
+    fn register(
+        &mut self,
+        file_index: usize,
+        file: &'a dyn ResolutionFileFactsV1,
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let language = file.language();
+        let path = file.logical_path();
         let (dir, name) = split_parent(path);
         if language == "go" && name == "go.mod" {
             if let Some(module) = file
-                .artifacts
-                .symbols
+                .symbols()
                 .iter()
                 .find(|symbol| symbol.kind == NodeKind::Module.as_str())
             {
+                reserve_resolution_vec(&mut self.go_modules, 1, charge)?;
                 self.go_modules.push((module.simple_name.as_str(), dir));
             }
-            return;
+            return Ok(());
+        }
+        if !self.sources.contains_key(path) {
+            reserve_resolution_map(&mut self.sources, charge)?;
         }
         self.sources.insert(path, file_index);
+        if !self.dirs.contains_key(&(language, dir)) {
+            reserve_resolution_map(&mut self.dirs, charge)?;
+        }
+        reserve_resolution_vec(self.dirs.entry((language, dir)).or_default(), 1, charge)?;
         self.dirs
             .entry((language, dir))
             .or_default()
             .push(file_index);
-        for symbol in &file.artifacts.symbols {
+        for symbol in file.symbols() {
+            if !self
+                .by_qualified
+                .contains_key(symbol.qualified_name.as_str())
+            {
+                reserve_resolution_map(&mut self.by_qualified, charge)?;
+            }
+            reserve_resolution_vec(
+                self.by_qualified
+                    .entry(symbol.qualified_name.as_str())
+                    .or_default(),
+                1,
+                charge,
+            )?;
             self.by_qualified
                 .entry(symbol.qualified_name.as_str())
                 .or_default()
                 .push((file_index, symbol));
-            self.register_declaration(language, file_index, symbol);
+            self.register_declaration(language, file_index, symbol, charge)?;
         }
-        for row in &file.artifacts.callable_arities {
+        for row in file.callable_arities() {
+            if !self.arities.contains_key(&row.occurrence) {
+                reserve_resolution_map(&mut self.arities, charge)?;
+            }
             self.arities.insert(&row.occurrence, row.arity);
         }
         match language {
             "python" if name == "__init__.py" => {
+                if !self.python_packages.contains(dir) {
+                    reserve_resolution_set(&mut self.python_packages, charge)?;
+                }
                 self.python_packages.insert(dir);
             }
             "go" => {
                 let mut suffix = dir;
+                if !self.go_dir_suffixes.contains(suffix) {
+                    reserve_resolution_set(&mut self.go_dir_suffixes, charge)?;
+                }
                 self.go_dir_suffixes.insert(suffix);
                 while let Some((_, rest)) = suffix.split_once('/') {
                     suffix = rest;
+                    if !self.go_dir_suffixes.contains(suffix) {
+                        reserve_resolution_set(&mut self.go_dir_suffixes, charge)?;
+                    }
                     self.go_dir_suffixes.insert(suffix);
                 }
             }
@@ -196,6 +254,14 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                     .strip_prefix("lib/")
                     .or_else(|| path.rfind("/lib/").map(|at| &path[at + "/lib/".len()..]));
                 if let Some(under_lib) = under_lib {
+                    if !self.ruby_load_path.contains_key(under_lib) {
+                        reserve_resolution_map(&mut self.ruby_load_path, charge)?;
+                    }
+                    reserve_resolution_vec(
+                        self.ruby_load_path.entry(under_lib).or_default(),
+                        1,
+                        charge,
+                    )?;
                     self.ruby_load_path
                         .entry(under_lib)
                         .or_default()
@@ -203,10 +269,15 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                 }
             }
             "java" if !self.java_file_packages.contains_key(&file_index) => {
+                if !self.java_packages.contains_key("") {
+                    reserve_resolution_map(&mut self.java_packages, charge)?;
+                }
+                reserve_resolution_vec(self.java_packages.entry("").or_default(), 1, charge)?;
                 self.java_packages.entry("").or_default().push(file_index);
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Record a Go package clause, a Java package, or a Ruby constant.
@@ -215,26 +286,44 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
         language: &str,
         file_index: usize,
         symbol: &'a LineageSymbolRecordV1,
-    ) {
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
         let name = symbol.simple_name.as_str();
         match language {
             "go" if symbol.kind == NodeKind::GoPackage.as_str() => {
+                if !self.go_packages.contains_key(&file_index) {
+                    reserve_resolution_map(&mut self.go_packages, charge)?;
+                }
                 self.go_packages.insert(file_index, name);
             }
             "java" if symbol.kind == NodeKind::Package.as_str() => {
+                if !self.java_packages.contains_key(name) {
+                    reserve_resolution_map(&mut self.java_packages, charge)?;
+                }
+                reserve_resolution_vec(self.java_packages.entry(name).or_default(), 1, charge)?;
                 self.java_packages.entry(name).or_default().push(file_index);
+                if !self.java_file_packages.contains_key(&file_index) {
+                    reserve_resolution_map(&mut self.java_file_packages, charge)?;
+                }
                 self.java_file_packages.insert(file_index, name);
             }
             "ruby" => {
+                if !self.ruby_symbols.contains_key(&symbol.occurrence) {
+                    reserve_resolution_map(&mut self.ruby_symbols, charge)?;
+                }
                 self.ruby_symbols.insert(&symbol.occurrence, symbol);
                 if symbol.kind == NodeKind::Module.as_str()
                     || symbol.kind == NodeKind::Class.as_str()
                 {
+                    if !self.ruby_constants.contains(name) {
+                        reserve_resolution_set(&mut self.ruby_constants, charge)?;
+                    }
                     self.ruby_constants.insert(name);
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Every module path under a source root a Python source can be
@@ -242,7 +331,10 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     /// and each directory of sources that is not a regular package as a
     /// namespace package. A root is any ancestor that is not itself a
     /// regular package.
-    fn python_module_candidates(&self) -> (PythonModulesV1, HashSet<String>) {
+    fn python_module_candidates(
+        &self,
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<(PythonModulesV1, HashSet<String>), CodeIndexProductionErrorV1> {
         let mut modules = PythonModulesV1::new();
         let mut namespace_dirs = HashSet::new();
         for (path, file_index) in &self.sources {
@@ -254,20 +346,33 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                 None if stem == "__init__" => continue,
                 None => stem,
             };
-            insert_python_roots(&mut modules, &self.python_packages, module, || {
-                PythonModuleV1::File(*file_index)
-            });
+            insert_python_roots(
+                &mut modules,
+                &self.python_packages,
+                module,
+                0,
+                || PythonModuleV1::File(*file_index),
+                charge,
+            )?;
             let mut dir = split_parent(path).0;
             while !dir.is_empty() {
-                if !self.python_packages.contains(dir) && namespace_dirs.insert(dir.to_owned()) {
-                    insert_python_roots(&mut modules, &self.python_packages, dir, || {
-                        PythonModuleV1::Dir(dir.to_owned())
-                    });
+                if !self.python_packages.contains(dir) && !namespace_dirs.contains(dir) {
+                    reserve_resolution_set(&mut namespace_dirs, charge)?;
+                    charge(ResolutionMemoryChangeV1::Retain(dir.len()))?;
+                    namespace_dirs.insert(dir.to_owned());
+                    insert_python_roots(
+                        &mut modules,
+                        &self.python_packages,
+                        dir,
+                        dir.len(),
+                        || PythonModuleV1::Dir(dir.to_owned()),
+                        charge,
+                    )?;
                 }
                 dir = split_parent(dir).0;
             }
         }
-        (modules, namespace_dirs)
+        Ok((modules, namespace_dirs))
     }
 
     /// How the retained call `reference` in file `index` binds, or `None`
@@ -277,38 +382,46 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
         &self,
         index: usize,
         reference: &CodeIndexUnresolvedReferenceV1,
-    ) -> Option<ImportBindingOutcomeV1<'a>> {
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Option<ImportBindingOutcomeV1>, CodeIndexProductionErrorV1> {
         if reference.kind != RelationEdgeKindV1::Calls {
-            return None;
+            return Ok(None);
         }
-        let file = self.files[index].as_ref();
+        let source = &self.files[index];
         let name = reference.reference_name.as_str();
-        let language = file.extraction.language.as_str();
+        let language = source.language();
         let target = match language {
-            "python" => self.python_call(file, &identifier_path(name, &["."])?),
-            "go" => self.go_call(index, file, &identifier_path(name, &["."])?),
-            "java" => self.java_call(
-                index,
-                file,
-                &identifier_path(name, &["."])?,
-                reference.argument_count,
-            ),
+            "python" | "go" | "java" => {
+                let Some(segments) = identifier_path(name, &["."]) else {
+                    return Ok(None);
+                };
+                let file = source.binding()?;
+                match language {
+                    "python" => self.python_call(file, &segments)?,
+                    "go" => self.go_call(index, file, &segments),
+                    "java" => self.java_call(index, file, &segments, reference.argument_count),
+                    _ => None,
+                }
+            }
             "ruby" => {
                 let (absolute, name) = match name.strip_prefix("::") {
                     Some(rest) => (true, rest),
                     None => (false, name),
                 };
-                let segments = identifier_path(name, &[".", "::"])?;
-                self.ruby_call(
-                    index,
-                    caller_scope(language, reference)?,
-                    absolute,
-                    &segments,
-                )
+                let Some(segments) = identifier_path(name, &[".", "::"]) else {
+                    return Ok(None);
+                };
+                let Some(scope) = caller_scope(language, reference) else {
+                    return Ok(None);
+                };
+                self.ruby_call(index, scope, absolute, &segments, charge)?
             }
             _ => None,
-        }?;
-        Some(match target {
+        };
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        Ok(Some(match target {
             TargetV1::Symbol((target_index, symbol))
                 if relation_target_kind_is_compatible(RelationEdgeKindV1::Calls, &symbol.kind) =>
             {
@@ -322,21 +435,28 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
             | TargetV1::Opaque => ImportBindingOutcomeV1::ValueMember,
             TargetV1::External => ImportBindingOutcomeV1::External,
             TargetV1::Unresolved => ImportBindingOutcomeV1::Unresolved,
-        })
+        }))
     }
 
     /// Every retained Python, Go, Java, and Ruby call that is a caller gap.
-    pub(super) fn call_gaps<'r>(
+    pub(super) fn call_gaps_charged<'r>(
         &self,
         references: impl Iterator<Item = (usize, &'r CodeIndexUnresolvedReferenceV1)>,
-    ) -> Vec<CodeIndexUnresolvedReferenceV1> {
-        references
-            .filter(|&(index, reference)| {
-                is_module_import_language(self.files[index].language())
-                    && self.is_call_gap(index, reference)
-            })
-            .map(|(_, reference)| reference.clone())
-            .collect()
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Vec<CodeIndexUnresolvedReferenceV1>, CodeIndexProductionErrorV1> {
+        let mut gaps = Vec::new();
+        for (index, reference) in references {
+            if is_module_import_language(self.files[index].language())
+                && self.is_call_gap(index, reference, charge)?
+            {
+                super::resolution_view::reserve_resolution_vec(&mut gaps, 1, charge)?;
+                charge(ResolutionMemoryChangeV1::Retain(
+                    super::resident_bytes::unresolved_heap_bytes(reference),
+                ))?;
+                gaps.push(reference.clone());
+            }
+        }
+        Ok(gaps)
     }
 
     /// Whether the retained call `reference` in file `index` is a caller gap:
@@ -344,11 +464,16 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     /// call on a runtime value (dynamic dispatch). A bare call no import
     /// names is a builtin or a local in Python and Go, and a call on `self`
     /// that may be inherited in Java and Ruby.
-    fn is_call_gap(&self, index: usize, reference: &CodeIndexUnresolvedReferenceV1) -> bool {
+    fn is_call_gap(
+        &self,
+        index: usize,
+        reference: &CodeIndexUnresolvedReferenceV1,
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<bool, CodeIndexProductionErrorV1> {
         if reference.kind != RelationEdgeKindV1::Calls {
-            return false;
+            return Ok(false);
         }
-        match self.call_outcome(index, reference) {
+        Ok(match self.call_outcome(index, reference, charge)? {
             Some(ImportBindingOutcomeV1::Unresolved) => true,
             Some(
                 ImportBindingOutcomeV1::Bound(..)
@@ -360,13 +485,13 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                     || (matches!(self.files[index].language(), "java" | "ruby")
                         && identifier_path(&reference.reference_name, &["::"]).is_some())
             }
-        }
+        })
     }
 
     /// The unique symbol `container::name` in `file_index`. A package
     /// clause is no member: `package main` shares `main.go::main` with
     /// `func main`.
-    fn member(&self, file_index: usize, container: &str, name: &str) -> Option<TargetV1<'a>> {
+    fn member(&self, file_index: usize, container: &str, name: &str) -> Option<TargetV1> {
         self.member_accepting(file_index, container, name, None)
     }
 
@@ -379,7 +504,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
         container: &str,
         name: &str,
         arguments: Option<u32>,
-    ) -> Option<TargetV1<'a>> {
+    ) -> Option<TargetV1> {
         let found = self
             .by_qualified
             .get(format!("{container}::{name}").as_str())
@@ -404,7 +529,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
             })
             .collect::<Vec<_>>();
         Some(match accepting.as_slice() {
-            [symbol] => TargetV1::Symbol(*symbol),
+            [symbol] => TargetV1::Symbol((symbol.0, Arc::clone(symbol.1))),
             _ => TargetV1::Unresolved,
         })
     }
@@ -413,10 +538,10 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
 
     fn python_call(
         &self,
-        file: &FileGenerationArtifactsV1,
+        file: &dyn ResolutionFileFactsV1,
         segments: &[&str],
-    ) -> Option<TargetV1<'a>> {
-        let path = file.authority.logical_path.as_str();
+    ) -> Result<Option<TargetV1>, CodeIndexProductionErrorV1> {
+        let path = file.logical_path();
         // The longest dotted prefix the file binds: `import a.b` binds the
         // path `a.b`, every other form one name.
         for split in (1..=segments.len()).rev() {
@@ -425,15 +550,15 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
             let row = match rows.as_slice() {
                 [] => continue,
                 [row] => *row,
-                _ => return Some(TargetV1::Unresolved),
+                _ => return Ok(Some(TargetV1::Unresolved)),
             };
-            let start = self.python_row_target(path, row, 0);
-            return Some(self.python_walk(start, &segments[split..], 0));
+            let start = self.python_row_target(path, row, 0)?;
+            return self.python_walk(start, &segments[split..], 0).map(Some);
         }
         if let [name] = segments {
             return self.python_glob_member(file, name, 0);
         }
-        None
+        Ok(None)
     }
 
     fn python_row_target(
@@ -441,19 +566,24 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
         path: &str,
         row: &CodeIndexImportEvidenceV1,
         depth: usize,
-    ) -> TargetV1<'a> {
+    ) -> Result<TargetV1, CodeIndexProductionErrorV1> {
         let module = self.python_module(path, &row.module_specifier);
         match row.imported_name.as_deref() {
-            Some("*") | None => module,
+            Some("*") | None => Ok(module),
             Some(imported) => self.python_member(module, imported, depth + 1),
         }
     }
 
-    fn python_walk(&self, mut target: TargetV1<'a>, rest: &[&str], depth: usize) -> TargetV1<'a> {
+    fn python_walk(
+        &self,
+        mut target: TargetV1,
+        rest: &[&str],
+        depth: usize,
+    ) -> Result<TargetV1, CodeIndexProductionErrorV1> {
         for segment in rest {
             target = match target {
                 TargetV1::ModuleFile(_) | TargetV1::ModuleDir(_) => {
-                    self.python_member(target, segment, depth)
+                    self.python_member(target, segment, depth)?
                 }
                 TargetV1::Symbol((file_index, symbol))
                     if symbol.kind == NodeKind::Class.as_str() =>
@@ -461,18 +591,23 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                     self.member(file_index, &symbol.qualified_name, segment)
                         .unwrap_or(TargetV1::Unresolved)
                 }
-                TargetV1::Symbol(_) | TargetV1::Opaque => return TargetV1::Opaque,
-                TargetV1::External | TargetV1::Unresolved => return target,
+                TargetV1::Symbol(_) | TargetV1::Opaque => return Ok(TargetV1::Opaque),
+                TargetV1::External | TargetV1::Unresolved => return Ok(target),
             };
         }
-        target
+        Ok(target)
     }
 
     /// `name` read from a module: its own definition, a name it imports, a
     /// submodule of a package, or a name one of its globs provides.
-    fn python_member(&self, module: TargetV1<'a>, name: &str, depth: usize) -> TargetV1<'a> {
+    fn python_member(
+        &self,
+        module: TargetV1,
+        name: &str,
+        depth: usize,
+    ) -> Result<TargetV1, CodeIndexProductionErrorV1> {
         if depth > MAX_FORWARDING_DEPTH {
-            return TargetV1::Unresolved;
+            return Ok(TargetV1::Unresolved);
         }
         let (module_file, dir) = match &module {
             TargetV1::ModuleFile(file_index) => {
@@ -485,67 +620,67 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
             }
             TargetV1::ModuleDir(dir) => (None, Some(dir.as_str())),
             TargetV1::Symbol(_) | TargetV1::Opaque | TargetV1::External | TargetV1::Unresolved => {
-                return module.clone();
+                return Ok(module.clone());
             }
         };
         if let Some(file_index) = module_file {
-            let file = self.files[file_index].as_ref();
-            let path = file.authority.logical_path.as_str();
+            let source = &self.files[file_index];
+            let path = source.logical_path();
             if let Some(found) = self.member(file_index, path, name) {
-                return found;
+                return Ok(found);
             }
-            match named_rows(file, name).as_slice() {
+            match named_rows(source.binding()?, name).as_slice() {
                 [] => {}
                 [row] => return self.python_row_target(path, row, depth),
-                _ => return TargetV1::Unresolved,
+                _ => return Ok(TargetV1::Unresolved),
             }
         }
         if let Some(dir) = dir {
             let submodule = join_normalized(dir, name);
             if let Some(found) = self.python_exact_module(&submodule) {
-                return found;
+                return Ok(found);
             }
         }
         if let Some(file_index) = module_file
             && let Some(found) =
-                self.python_glob_member(self.files[file_index].as_ref(), name, depth + 1)
+                self.python_glob_member(self.files[file_index].binding()?, name, depth + 1)?
         {
-            return found;
+            return Ok(found);
         }
-        TargetV1::Unresolved
+        Ok(TargetV1::Unresolved)
     }
 
     /// `name` through the file's `from m import *` rows: the unique module
     /// that provides it, a gap when a project glob cannot be followed.
     fn python_glob_member(
         &self,
-        file: &FileGenerationArtifactsV1,
+        file: &dyn ResolutionFileFactsV1,
         name: &str,
         depth: usize,
-    ) -> Option<TargetV1<'a>> {
-        let path = file.authority.logical_path.as_str();
+    ) -> Result<Option<TargetV1>, CodeIndexProductionErrorV1> {
+        let path = file.logical_path();
         let mut found = Vec::new();
         let mut unresolved = false;
-        for row in file.artifacts.imports.iter().filter(|row| row.is_glob) {
+        for row in file.imports().iter().filter(|row| row.is_glob) {
             match self.python_module(path, &row.module_specifier) {
                 TargetV1::External => {}
                 TargetV1::Unresolved => unresolved = true,
-                module => match self.python_member(module, name, depth) {
+                module => match self.python_member(module, name, depth)? {
                     TargetV1::Unresolved => {}
                     target => found.push(target),
                 },
             }
         }
-        match found.as_slice() {
+        Ok(match found.as_slice() {
             [target] => Some(target.clone()),
             [] if unresolved => Some(TargetV1::Unresolved),
             [] => None,
             _ => Some(TargetV1::Unresolved),
-        }
+        })
     }
 
     /// The module a specifier names from the file at `from_path`.
-    fn python_module(&self, from_path: &str, specifier: &str) -> TargetV1<'a> {
+    fn python_module(&self, from_path: &str, specifier: &str) -> TargetV1 {
         let dots = specifier.bytes().take_while(|byte| *byte == b'.').count();
         let dotted = &specifier[dots..];
         if dots > 0 {
@@ -597,7 +732,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
 
     /// The module at exactly this project path: `path.py`,
     /// `path/__init__.py`, or a directory of sources.
-    fn python_exact_module(&self, module: &str) -> Option<TargetV1<'a>> {
+    fn python_exact_module(&self, module: &str) -> Option<TargetV1> {
         if let Some(file_index) = self.sources.get(format!("{module}.py").as_str()) {
             return Some(TargetV1::ModuleFile(*file_index));
         }
@@ -619,22 +754,22 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     fn go_call(
         &self,
         index: usize,
-        file: &FileGenerationArtifactsV1,
+        file: &dyn ResolutionFileFactsV1,
         segments: &[&str],
-    ) -> Option<TargetV1<'a>> {
+    ) -> Option<TargetV1> {
         match segments {
             [name] => {
-                let dir = split_parent(file.authority.logical_path.as_str()).0;
+                let dir = split_parent(file.logical_path()).0;
                 let package = self.go_packages.get(&index).copied();
                 let mut found = self.go_package_functions(dir, package, name);
-                for row in file.artifacts.imports.iter().filter(|row| row.is_glob) {
+                for row in file.imports().iter().filter(|row| row.is_glob) {
                     if let TargetV1::ModuleDir(dir) = self.go_package_dir(&row.module_specifier) {
                         found.extend(self.go_package_functions(&dir, None, name));
                     }
                 }
                 match found.as_slice() {
                     [] => None,
-                    [symbol] => Some(TargetV1::Symbol(*symbol)),
+                    [symbol] => Some(TargetV1::Symbol(symbol.clone())),
                     _ => Some(TargetV1::Unresolved),
                 }
             }
@@ -647,7 +782,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                 Some(match self.go_package_dir(&row.module_specifier) {
                     TargetV1::ModuleDir(dir) => {
                         match self.go_package_functions(&dir, None, name).as_slice() {
-                            [symbol] => TargetV1::Symbol(*symbol),
+                            [symbol] => TargetV1::Symbol(symbol.clone()),
                             _ => TargetV1::Unresolved,
                         }
                     }
@@ -660,12 +795,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
 
     /// Package-level functions named `name` in the Go sources of `dir`,
     /// restricted to one package clause when `package` is given.
-    fn go_package_functions(
-        &self,
-        dir: &str,
-        package: Option<&str>,
-        name: &str,
-    ) -> Vec<SymbolRef<'a>> {
+    fn go_package_functions(&self, dir: &str, package: Option<&str>, name: &str) -> Vec<SymbolRef> {
         self.dirs
             .get(&("go", dir))
             .into_iter()
@@ -696,7 +826,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     /// The project directory an import path names through the longest
     /// `go.mod` module path it starts with. Without a `go.mod`, a path whose
     /// tail names a source directory is project code the seal cannot place.
-    fn go_package_dir(&self, import_path: &str) -> TargetV1<'a> {
+    fn go_package_dir(&self, import_path: &str) -> TargetV1 {
         let module = self.go_modules.iter().find_map(|(module, root)| {
             let rest = import_path.strip_prefix(module)?;
             match rest.strip_prefix('/') {
@@ -731,10 +861,10 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     fn java_call(
         &self,
         index: usize,
-        file: &FileGenerationArtifactsV1,
+        file: &dyn ResolutionFileFactsV1,
         segments: &[&str],
         arguments: Option<u32>,
-    ) -> Option<TargetV1<'a>> {
+    ) -> Option<TargetV1> {
         let (method, qualifier) = segments.split_last()?;
         if qualifier.is_empty() {
             return self.java_static_import(file, method, arguments);
@@ -756,13 +886,12 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     /// the method, and a gap when a project glob class does not.
     fn java_static_import(
         &self,
-        file: &FileGenerationArtifactsV1,
+        file: &dyn ResolutionFileFactsV1,
         method: &str,
         arguments: Option<u32>,
-    ) -> Option<TargetV1<'a>> {
+    ) -> Option<TargetV1> {
         let statics = file
-            .artifacts
-            .imports
+            .imports()
             .iter()
             .filter(|row| row.namespace == ImportNamespaceV1::Value);
         if let Some(row) = statics
@@ -781,7 +910,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
             }
         }
         match found.as_slice() {
-            [symbol] => Some(TargetV1::Symbol(*symbol)),
+            [symbol] => Some(TargetV1::Symbol(symbol.clone())),
             [] if !project_glob => None,
             _ => Some(TargetV1::Unresolved),
         }
@@ -792,12 +921,11 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     fn java_class_name(
         &self,
         index: usize,
-        file: &FileGenerationArtifactsV1,
+        file: &dyn ResolutionFileFactsV1,
         simple: &str,
     ) -> Option<String> {
         let type_rows = file
-            .artifacts
-            .imports
+            .imports()
             .iter()
             .filter(|row| row.namespace == ImportNamespaceV1::Type);
         if let Some(row) = type_rows
@@ -824,7 +952,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     }
 
     /// The project file and symbol of the top-level class `qualified`.
-    fn java_class(&self, qualified: &str) -> Option<SymbolRef<'a>> {
+    fn java_class(&self, qualified: &str) -> Option<SymbolRef> {
         let (package, simple) = qualified.rsplit_once('.').unwrap_or(("", qualified));
         self.java_packages
             .get(package)
@@ -842,7 +970,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
     /// call's `arguments`; a project class without that method (inherited)
     /// or without one such overload is a gap, a class outside the project
     /// binds nothing.
-    fn java_class_member(&self, class: &str, method: &str, arguments: Option<u32>) -> TargetV1<'a> {
+    fn java_class_member(&self, class: &str, method: &str, arguments: Option<u32>) -> TargetV1 {
         let Some((file_index, symbol)) = self.java_class(class) else {
             let package = class.rsplit_once('.').map_or("", |(package, _)| package);
             return if self.java_packages.contains_key(package) {
@@ -867,14 +995,17 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
         from: &SymbolOccurrenceId,
         absolute: bool,
         segments: &[&str],
-    ) -> Option<TargetV1<'a>> {
-        let (method, constant) = segments.split_last()?;
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Option<TargetV1>, CodeIndexProductionErrorV1> {
+        let Some((method, constant)) = segments.split_last() else {
+            return Ok(None);
+        };
         if constant.is_empty()
             || !constant
                 .iter()
                 .all(|segment| segment.starts_with(|c: char| c.is_ascii_uppercase()))
         {
-            return None;
+            return Ok(None);
         }
         let constant = constant.join("::");
         let path = self.files[index].logical_path();
@@ -888,13 +1019,19 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                 .and_then(|symbol| symbol.qualified_name.strip_prefix(path)?.strip_prefix("::"))
                 .map(|scope| scope.split("::").collect::<Vec<_>>())
             else {
-                return Some(TargetV1::Unresolved);
+                return Ok(Some(TargetV1::Unresolved));
             };
             scope.pop();
             scope
         };
-        let (loaded, unresolved_require) =
-            self.ruby_loaded[index].get_or_init(|| self.ruby_require_closure(index));
+        let closure = &self.ruby_loaded[index];
+        let (loaded, unresolved_require) = match closure.get() {
+            Some(loaded) => loaded,
+            None => {
+                let loaded = self.ruby_require_closure(index, charge)?;
+                closure.get_or_init(|| loaded)
+            }
+        };
         for depth in (0..=nesting.len()).rev() {
             let qualified = match nesting[..depth].join("::") {
                 prefix if prefix.is_empty() => constant.clone(),
@@ -909,37 +1046,50 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                 .collect::<Vec<_>>();
             match found.as_slice() {
                 [] => {}
-                [target] => return Some(target.clone()),
-                _ => return Some(TargetV1::Unresolved),
+                [target] => return Ok(Some(target.clone())),
+                _ => return Ok(Some(TargetV1::Unresolved)),
             }
         }
-        Some(
+        Ok(Some(
             if !*unresolved_require && !self.ruby_constants.contains(segments[0]) {
                 TargetV1::External
             } else {
                 TargetV1::Unresolved
             },
-        )
+        ))
     }
 
     /// The files `index` loads through `require_relative` and project
     /// `require` chains, itself first, and whether a project-relative
     /// require named no indexed file.
-    fn ruby_require_closure(&self, index: usize) -> (Vec<usize>, bool) {
-        let mut loaded = vec![index];
-        let mut seen = HashSet::from([index]);
-        let mut queue = VecDeque::from([index]);
+    fn ruby_require_closure(
+        &self,
+        index: usize,
+        charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<(Vec<usize>, bool), CodeIndexProductionErrorV1> {
+        let mut loaded = Vec::new();
+        let mut seen = HashSet::new();
+        reserve_resolution_vec(&mut loaded, 1, charge)?;
+        reserve_resolution_set(&mut seen, charge)?;
+        loaded.push(index);
+        seen.insert(index);
+        let mut cursor = 0;
         let mut unresolved = false;
-        while let Some(current) = queue.pop_front() {
-            let file = self.files[current].as_ref();
-            let (dir, _) = split_parent(file.authority.logical_path.as_str());
-            for row in &file.artifacts.imports {
+        // The retained discovery order is also the breadth-first queue.
+        while cursor < loaded.len() {
+            let current = loaded[cursor];
+            cursor += 1;
+            let file = self.files[current].binding()?;
+            let (dir, _) = split_parent(file.logical_path());
+            for row in file.imports() {
                 let target = self.ruby_require_target(dir, row);
                 match target {
                     Some(target) => {
-                        if seen.insert(target) {
+                        if !seen.contains(&target) {
+                            reserve_resolution_vec(&mut loaded, 1, charge)?;
+                            reserve_resolution_set(&mut seen, charge)?;
+                            seen.insert(target);
                             loaded.push(target);
-                            queue.push_back(target);
                         }
                     }
                     None if row.module_kind == ImportModuleKindV1::ProjectRelative => {
@@ -949,7 +1099,7 @@ impl<'a, T: ResolutionFileV1> ModuleImportIndexV1<'a, T> {
                 }
             }
         }
-        (loaded, unresolved)
+        Ok((loaded, unresolved))
     }
 
     /// The indexed file one require names: relative to the requiring file,
@@ -980,31 +1130,45 @@ fn insert_python_roots(
     modules: &mut PythonModulesV1,
     packages: &HashSet<&str>,
     module: &str,
+    target_heap_bytes: usize,
     target: impl Fn() -> PythonModuleV1,
-) {
+    charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<(), CodeIndexProductionErrorV1> {
     let mut root_end = 0;
     loop {
         let root = &module[..root_end];
         if !packages.contains(root.strip_suffix('/').unwrap_or(root)) {
-            modules
-                .entry(module[root_end..].to_owned())
-                .or_default()
-                .push((root.to_owned(), target()));
+            let key = &module[root_end..];
+            if !modules.contains_key(key) {
+                reserve_resolution_map(modules, charge)?;
+                charge(ResolutionMemoryChangeV1::Retain(key.len()))?;
+                modules.insert(key.to_owned(), Vec::new());
+            }
+            let rows = modules.get_mut(key).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "Python module insertion lost its rows".to_owned(),
+                )
+            })?;
+            reserve_resolution_vec(rows, 1, charge)?;
+            charge(ResolutionMemoryChangeV1::Retain(
+                root.len().saturating_add(target_heap_bytes),
+            ))?;
+            rows.push((root.to_owned(), target()));
         }
         match module[root_end..].find('/') {
             Some(offset) => root_end += offset + 1,
             None => break,
         }
     }
+    Ok(())
 }
 
 /// The file's private import rows binding `local`.
 fn named_rows<'f>(
-    file: &'f FileGenerationArtifactsV1,
+    file: &'f dyn ResolutionFileFactsV1,
     local: &str,
 ) -> Vec<&'f CodeIndexImportEvidenceV1> {
-    file.artifacts
-        .imports
+    file.imports()
         .iter()
         .filter(|row| !row.is_public && !row.is_glob && row.local_name.as_deref() == Some(local))
         .collect()

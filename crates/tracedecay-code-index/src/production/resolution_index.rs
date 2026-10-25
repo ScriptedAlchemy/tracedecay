@@ -15,11 +15,9 @@
 //! write identical bytes for identical files.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
+use std::mem::size_of;
 use std::sync::Arc;
 
-use flate2::Compression;
-use flate2::write::DeflateEncoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::ManifestDigest;
@@ -28,7 +26,10 @@ use super::partitioned_codec::{
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, inflate_index_segment,
     verify_index_segment,
 };
-use super::{CodeIndexProductionErrorV1, FileGenerationArtifactsV1, collect_bounded_ordered};
+use super::resident_bytes::btree_bytes;
+use super::resolution_view::ResolutionMemoryChangeV1;
+use super::resolution_view::{ResolutionFileFactsV1, ResolutionFileV1};
+use super::{CodeIndexProductionErrorV1, FileGenerationArtifactsV1};
 use crate::lineage::LineageSymbolRecordV1;
 
 /// Symbols a cold seal plans per definition page.
@@ -95,7 +96,8 @@ fn page_of(key: &str, pages: usize) -> usize {
 }
 
 /// Simple name to defining file to the file's symbols of that name.
-type DefinitionPageV1 = BTreeMap<String, BTreeMap<String, Vec<LineageSymbolRecordV1>>>;
+pub(super) type DefinitionPageV1 =
+    BTreeMap<String, BTreeMap<String, Vec<Arc<LineageSymbolRecordV1>>>>;
 /// Name segment to the files with a reference spelling it.
 type ReferencePageV1 = BTreeMap<String, BTreeSet<String>>;
 /// Every `(local, imported)` pair an import renames.
@@ -118,26 +120,23 @@ struct FileRowsV1<'a> {
 }
 
 impl<'a> FileRowsV1<'a> {
-    fn of(file: &'a FileGenerationArtifactsV1) -> Self {
+    fn of(file: &'a dyn ResolutionFileFactsV1) -> Self {
         let mut symbols = file
-            .artifacts
-            .symbols
+            .symbols()
             .iter()
             .map(|symbol| (symbol.simple_name.as_str(), symbol.as_ref()))
             .collect::<Vec<_>>();
         symbols.sort_by(|left, right| left.1.occurrence.cmp(&right.1.occurrence));
         Self {
-            path: file.authority.logical_path.as_str(),
+            path: file.logical_path(),
             symbols,
             segments: file
-                .artifacts
-                .unresolved_references
+                .unresolved_references()
                 .iter()
                 .flat_map(|reference| name_segments(&reference.reference_name))
                 .collect(),
             aliases: file
-                .artifacts
-                .imports
+                .imports()
                 .iter()
                 .filter_map(|binding| {
                     let local = binding.local_name.as_deref()?;
@@ -161,47 +160,28 @@ fn planned_pages(symbols: usize) -> usize {
 fn encode_segment<T: Serialize>(
     value: &T,
 ) -> Result<(PartitionedIndexSegmentDescriptorV1, Vec<u8>), CodeIndexProductionErrorV1> {
-    let failed = |error: &dyn std::fmt::Display| {
-        contract(format!("sealed resolution index encoding failed: {error}"))
-    };
-    let canonical = serde_json::to_vec(value).map_err(|error| failed(&error))?;
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(PAGE_COMPRESSION_LEVEL_V1));
-    encoder
-        .write_all(&canonical)
-        .map_err(|error| failed(&error))?;
-    let bytes = encoder.finish().map_err(|error| failed(&error))?;
-    let length = |bytes: &[u8]| {
-        u64::try_from(bytes.len())
-            .map_err(|_| failed(&"sealed resolution index length exceeds u64"))
-    };
-    Ok((
-        PartitionedIndexSegmentDescriptorV1 {
-            segment_digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes))
-                .map_err(|error| contract(error.to_string()))?,
-            segment_size_bytes: length(&bytes)?,
-            decoded_size_bytes: length(&canonical)?,
-        },
-        bytes,
-    ))
+    encode_segment_charged(value, 0, &mut |_| Ok(()))
 }
 
-/// Encode `pages` on the indexing pool and publish them in page order.
-fn publish_pages<T: Serialize + Sync>(
-    pages: &[T],
-    publish: &mut impl FnMut(
-        SealedGenerationSegmentPublicationV1<'_>,
-    ) -> Result<(), CodeIndexProductionErrorV1>,
-) -> Result<Vec<PartitionedIndexSegmentDescriptorV1>, CodeIndexProductionErrorV1> {
-    let encoded = collect_bounded_ordered(pages, |page| encode_segment(page))?;
-    let mut descriptors = Vec::with_capacity(encoded.len());
-    for (descriptor, bytes) in encoded {
-        publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {
-            digest: &descriptor.segment_digest,
-            bytes: &bytes,
-        })?;
-        descriptors.push(descriptor);
-    }
-    Ok(descriptors)
+fn encode_segment_charged<T: Serialize>(
+    value: &T,
+    base: usize,
+    retain: &mut dyn FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<(PartitionedIndexSegmentDescriptorV1, Vec<u8>), CodeIndexProductionErrorV1> {
+    let (bytes, decoded_size_bytes) = super::partitioned_codec::encode_compressed_rows_charged(
+        value,
+        PAGE_COMPRESSION_LEVEL_V1,
+        base,
+        retain,
+    )?;
+    let descriptor = PartitionedIndexSegmentDescriptorV1 {
+        segment_digest: ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes))
+            .map_err(|error| contract(error.to_string()))?,
+        segment_size_bytes: u64::try_from(bytes.len())
+            .map_err(|_| contract("resolution index length exceeds u64"))?,
+        decoded_size_bytes,
+    };
+    Ok((descriptor, bytes))
 }
 
 type BorrowedDefinitionPageV1<'a> =
@@ -214,44 +194,216 @@ type BorrowedReferencePageV1<'a> = BTreeMap<&'a str, BTreeSet<&'a str>>;
     level = "trace",
     skip_all
 )]
-pub(super) fn seal_resolution_index(
-    files: &[Arc<FileGenerationArtifactsV1>],
+pub(super) fn seal_resolution_index<T: ResolutionFileV1>(
+    files: &[T],
+    publish: impl FnMut(
+        SealedGenerationSegmentPublicationV1<'_>,
+    ) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<PartitionedResolutionIndexDescriptorV1, CodeIndexProductionErrorV1> {
+    seal_resolution_index_charged(files, &mut |_| Ok(()), publish)
+}
+
+/// Each canonical partition is planned, charged, encoded and released before
+/// the next one. Only the final descriptors span partitions.
+pub(super) fn seal_resolution_index_charged<T: ResolutionFileV1>(
+    files: &[T],
+    retain: &mut dyn FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
     mut publish: impl FnMut(
         SealedGenerationSegmentPublicationV1<'_>,
     ) -> Result<(), CodeIndexProductionErrorV1>,
 ) -> Result<PartitionedResolutionIndexDescriptorV1, CodeIndexProductionErrorV1> {
-    let rows = files
-        .iter()
-        .map(|file| FileRowsV1::of(file))
-        .collect::<Vec<_>>();
-    let pages = planned_pages(rows.iter().map(|rows| rows.symbols.len()).sum());
-    let mut definitions = vec![BorrowedDefinitionPageV1::new(); pages];
-    let mut references = vec![BorrowedReferencePageV1::new(); pages];
-    let mut aliases = BTreeSet::new();
-    for file in &rows {
-        for (name, symbol) in &file.symbols {
-            definitions[page_of(name, pages)]
-                .entry(name)
-                .or_default()
-                .entry(file.path)
-                .or_default()
-                .push(symbol);
-        }
-        for segment in &file.segments {
-            references[page_of(segment, pages)]
-                .entry(segment)
-                .or_default()
-                .insert(file.path);
-        }
-        aliases.extend(file.aliases.iter().copied());
+    let mut symbols = 0_usize;
+    for file in files {
+        symbols = symbols.saturating_add(file.binding()?.symbols().len());
     }
-    let definitions = publish_pages(&definitions, &mut publish)?;
-    let references = publish_pages(&references, &mut publish)?;
-    let (import_aliases, bytes) = encode_segment(&aliases)?;
+    let pages = planned_pages(symbols);
+    let descriptor_bytes = pages
+        .saturating_mul(2)
+        .saturating_add(1)
+        .saturating_mul(size_of::<PartitionedIndexSegmentDescriptorV1>() + "sha256:".len() + 64);
+    let mut routing = descriptor_bytes.saturating_add(pages.saturating_mul(
+        size_of::<Vec<(&str, &LineageSymbolRecordV1)>>() + size_of::<Vec<(&str, &str)>>(),
+    ));
+    retain(u64::try_from(routing).map_err(|_| contract("resolution index charge exceeds u64"))?)?;
+    let mut definition_rows = (0..pages)
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<(&str, &LineageSymbolRecordV1)>>>();
+    let mut reference_rows = (0..pages)
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<(&str, &str)>>>();
+    let mut aliases = BTreeSet::new();
+    for file in files {
+        let file = file.binding()?;
+        let file_workspace = file
+            .symbols()
+            .len()
+            .saturating_mul(size_of::<&LineageSymbolRecordV1>());
+        retain(
+            u64::try_from(routing.saturating_add(file_workspace))
+                .map_err(|_| contract("resolution index charge exceeds u64"))?,
+        )?;
+        let mut selected = file
+            .symbols()
+            .iter()
+            .map(|symbol| symbol.as_ref())
+            .collect::<Vec<_>>();
+        selected.sort_unstable_by(|left, right| left.occurrence.cmp(&right.occurrence));
+        for symbol in selected {
+            let page = page_of(&symbol.simple_name, pages);
+            super::resolution_view::reserve_resolution_vec(
+                &mut definition_rows[page],
+                1,
+                &mut |bytes: ResolutionMemoryChangeV1| {
+                    bytes.apply_with(&mut routing, |routing| {
+                        retain(
+                            u64::try_from(routing.saturating_add(file_workspace))
+                                .map_err(|_| contract("resolution index charge exceeds u64"))?,
+                        )
+                    })
+                },
+            )?;
+            definition_rows[page].push((file.logical_path(), symbol));
+        }
+        for segment in file
+            .unresolved_references()
+            .iter()
+            .flat_map(|reference| name_segments(&reference.reference_name))
+        {
+            let page = page_of(segment, pages);
+            super::resolution_view::reserve_resolution_vec(
+                &mut reference_rows[page],
+                1,
+                &mut |bytes: ResolutionMemoryChangeV1| {
+                    bytes.apply_with(&mut routing, |routing| {
+                        retain(
+                            u64::try_from(routing)
+                                .map_err(|_| contract("resolution index charge exceeds u64"))?,
+                        )
+                    })
+                },
+            )?;
+            reference_rows[page].push((segment, file.logical_path()));
+        }
+        for binding in file.imports() {
+            if let (Some(local), Some(imported)) = (
+                binding.local_name.as_deref(),
+                binding.imported_name.as_deref(),
+            ) && local != imported
+                && !aliases.contains(&(local, imported))
+            {
+                let before = btree_bytes(aliases.len(), size_of::<(&str, &str)>());
+                let after = btree_bytes(aliases.len().saturating_add(1), size_of::<(&str, &str)>());
+                routing = routing.saturating_add(after.saturating_sub(before));
+                retain(
+                    u64::try_from(routing)
+                        .map_err(|_| contract("resolution index charge exceeds u64"))?,
+                )?;
+                aliases.insert((local, imported));
+            }
+        }
+    }
+    let mut definitions = Vec::with_capacity(pages);
+    let mut references = Vec::with_capacity(pages);
+    for mut inputs in definition_rows {
+        // Group the borrowed rows before allocating the canonical page. Stable
+        // sorting preserves the existing per-file occurrence order.
+        let sort_bytes = inputs
+            .len()
+            .saturating_mul(size_of::<(&str, &LineageSymbolRecordV1)>());
+        retain(
+            u64::try_from(routing.saturating_add(sort_bytes))
+                .map_err(|_| contract("resolution index charge exceeds u64"))?,
+        )?;
+        inputs.sort_by(|left, right| {
+            left.1
+                .simple_name
+                .cmp(&right.1.simple_name)
+                .then_with(|| left.0.cmp(right.0))
+        });
+        let names = inputs.chunk_by(|left, right| left.1.simple_name == right.1.simple_name);
+        let mut current = routing.saturating_add(btree_bytes(
+            names.clone().count(),
+            size_of::<(&str, BTreeMap<&str, Vec<&LineageSymbolRecordV1>>)>(),
+        ));
+        for name in names {
+            current = current.saturating_add(btree_bytes(
+                name.chunk_by(|left, right| left.0 == right.0).count(),
+                size_of::<(&str, Vec<&LineageSymbolRecordV1>)>(),
+            ));
+            current = current.saturating_add(
+                name.len()
+                    .saturating_mul(size_of::<&LineageSymbolRecordV1>()),
+            );
+        }
+        // All tree bodies and exact symbol vectors coexist under one admission.
+        retain(
+            u64::try_from(current).map_err(|_| contract("resolution index charge exceeds u64"))?,
+        )?;
+        let mut rows = BorrowedDefinitionPageV1::new();
+        for name in inputs.chunk_by(|left, right| left.1.simple_name == right.1.simple_name) {
+            let mut files = BTreeMap::new();
+            for file in name.chunk_by(|left, right| left.0 == right.0) {
+                let mut symbols = Vec::with_capacity(file.len());
+                for (_, symbol) in file {
+                    symbols.push(*symbol);
+                }
+                files.insert(file[0].0, symbols);
+            }
+            rows.insert(name[0].1.simple_name.as_str(), files);
+        }
+        let (descriptor, bytes) = encode_segment_charged(&rows, current, retain)?;
+        publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {
+            digest: &descriptor.segment_digest,
+            bytes: &bytes,
+        })?;
+        definitions.push(descriptor);
+        routing = routing.saturating_sub(
+            inputs
+                .capacity()
+                .saturating_mul(size_of::<(&str, &LineageSymbolRecordV1)>()),
+        );
+    }
+    for mut inputs in reference_rows {
+        inputs.sort_unstable();
+        inputs.dedup();
+        let segments = inputs.chunk_by(|left, right| left.0 == right.0);
+        let mut current = routing.saturating_add(btree_bytes(
+            segments.clone().count(),
+            size_of::<(&str, BTreeSet<&str>)>(),
+        ));
+        for segment in segments {
+            current = current.saturating_add(btree_bytes(segment.len(), size_of::<&str>()));
+        }
+        retain(
+            u64::try_from(current).map_err(|_| contract("resolution index charge exceeds u64"))?,
+        )?;
+        let mut rows = BorrowedReferencePageV1::new();
+        for segment in inputs.chunk_by(|left, right| left.0 == right.0) {
+            let mut paths = BTreeSet::new();
+            for (_, path) in segment {
+                paths.insert(*path);
+            }
+            rows.insert(segment[0].0, paths);
+        }
+        let (descriptor, bytes) = encode_segment_charged(&rows, current, retain)?;
+        publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {
+            digest: &descriptor.segment_digest,
+            bytes: &bytes,
+        })?;
+        references.push(descriptor);
+        routing =
+            routing.saturating_sub(inputs.capacity().saturating_mul(size_of::<(&str, &str)>()));
+    }
+    let base = routing;
+    let (import_aliases, bytes) = encode_segment_charged(&aliases, base, retain)?;
     publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {
         digest: &import_aliases.segment_digest,
         bytes: &bytes,
     })?;
+    retain(
+        u64::try_from(descriptor_bytes)
+            .map_err(|_| contract("resolution index charge exceeds u64"))?,
+    )?;
     Ok(PartitionedResolutionIndexDescriptorV1 {
         definitions,
         references,
@@ -309,6 +461,21 @@ impl<'r> ResolutionIndexReaderV1<'r> {
             .map_err(|error| contract(format!("sealed resolution index decoding failed: {error}")))
     }
 
+    pub(super) fn definition_page_read_bytes(
+        &self,
+        page: usize,
+    ) -> Result<u64, CodeIndexProductionErrorV1> {
+        let descriptor = self
+            .descriptor
+            .definitions
+            .get(page)
+            .ok_or_else(|| contract("sealed resolution index page is out of range"))?;
+        descriptor
+            .segment_size_bytes
+            .checked_add(descriptor.decoded_size_bytes)
+            .ok_or_else(|| contract("resolution page read size exceeds u64"))
+    }
+
     pub(super) fn definition_page(
         &self,
         page: usize,
@@ -358,11 +525,11 @@ pub(super) fn reseal_resolution_index(
 ) -> Result<PartitionedResolutionIndexDescriptorV1, CodeIndexProductionErrorV1> {
     let before = before
         .iter()
-        .map(|file| FileRowsV1::of(file))
+        .map(|file| FileRowsV1::of(*file))
         .collect::<Vec<_>>();
     let after = after
         .iter()
-        .map(|file| FileRowsV1::of(file))
+        .map(|file| FileRowsV1::of(*file))
         .collect::<Vec<_>>();
     fn aliases<'a>(rows: &[FileRowsV1<'a>]) -> BTreeSet<(&'a str, &'a str)> {
         rows.iter()
@@ -387,7 +554,6 @@ pub(super) fn reseal_resolution_index(
         reference_pages.extend(file.segments.iter().map(|segment| page_of(segment, pages)));
     }
     let mut descriptor = parent.descriptor.clone();
-    let mut rewritten = BTreeMap::new();
     for page in definition_pages {
         let mut rows = parent.definition_page(page)?;
         rows.retain(|_, files| {
@@ -401,20 +567,17 @@ pub(super) fn reseal_resolution_index(
                         .or_default()
                         .entry(file.path.to_owned())
                         .or_default()
-                        .push((*symbol).clone());
+                        .push(Arc::new((*symbol).clone()));
                 }
             }
         }
-        rewritten.insert(page, encode_segment(&rows)?);
-    }
-    for (page, (segment, bytes)) in rewritten {
+        let (segment, bytes) = encode_segment(&rows)?;
         publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {
             digest: &segment.segment_digest,
             bytes: &bytes,
         })?;
         descriptor.definitions[page] = segment;
     }
-    let mut rewritten = BTreeMap::new();
     for page in reference_pages {
         let mut rows = parent.reference_page(page)?;
         rows.retain(|_, files| {
@@ -430,9 +593,7 @@ pub(super) fn reseal_resolution_index(
                 }
             }
         }
-        rewritten.insert(page, encode_segment(&rows)?);
-    }
-    for (page, (segment, bytes)) in rewritten {
+        let (segment, bytes) = encode_segment(&rows)?;
         publish(SealedGenerationSegmentPublicationV1::ResolutionIndex {
             digest: &segment.segment_digest,
             bytes: &bytes,

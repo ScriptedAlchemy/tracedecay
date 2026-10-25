@@ -68,7 +68,7 @@ impl CodeIndexGenerationStatisticsV1 {
     }
 }
 
-fn checked_source_total<'a>(
+pub(super) fn checked_source_total<'a>(
     mut coverages: impl Iterator<Item = &'a ExtractionCoverageV1>,
 ) -> Result<u64, CodeIndexProductionErrorV1> {
     coverages.try_fold(0_u64, |total, coverage| {

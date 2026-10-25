@@ -1,13 +1,12 @@
 //! Dry-run preview rendering shared by every edit primitive: a bounded
 //! single-hunk diff of the changed region, the success-message wrapper that
-//! marks dry runs, and the line classifier shared by `move_symbol`'s header
-//! scanner and inner-doc skip loop.
+//! marks dry runs, and the line classifier used by `move_symbol`'s source
+//! inner-doc skip loop.
 
 /// What a single source line looks like when scanning a file's leading
-/// region. One classifier shared by every place that used to hand-roll its
-/// own prefix checks in `move_symbol`'s import-insertion header scanner (which
-/// leading lines belong to the header vs. the first item) and its `//!` skip
-/// loop (never let a moved span start on an inner module doc).
+/// region. MoveSymbol's source-span `//!` skip loop uses this classifier to
+/// keep an inner module doc out of the moved item. Destination insertion uses
+/// Rust syntax and byte ranges instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeadingKind {
     /// Empty (after trimming leading whitespace).
