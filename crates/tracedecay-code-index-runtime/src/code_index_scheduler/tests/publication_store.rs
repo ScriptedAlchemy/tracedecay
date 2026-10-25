@@ -11,14 +11,15 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay_application::code_index::DaemonCodeIndexControlV1;
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
-    DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DurableGenerationIndexEntryV1,
-    DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
-    acquire_code_generation_store_lock, code_generation_segments_root,
-    code_text_artifact_staging_root, code_text_artifacts_root, durable_generation_index_digest,
-    execute_code_generation_retention_cancellable, execute_scope_root_retention,
-    plan_scope_root_retention_with_liveness_proof,
+    CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationRetentionErrorV1,
+    CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+    DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
+    MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
+    code_generation_segments_root, code_text_artifact_staging_root, code_text_artifacts_root,
+    durable_generation_index_digest, execute_code_generation_retention_cancellable,
+    execute_scope_root_retention, plan_scope_root_retention_with_liveness_proof,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
     scope_root_liveness_proof, try_acquire_code_generation_store_read_lock,
     withdraw_verified_text_artifact_under_lock,
@@ -33,11 +34,15 @@ use tracedecay_domain::{
 use tracedecay_query::retrieval::lexical::LexicalLaneRequest;
 use tracedecay_query::retrieval::ports::RetrievalPortError;
 use tracedecay_runtime_core::resident_memory::{
-    ProcessResidentMemoryV1, ProcessResidentSampleV1, ResidentMemoryComponentIdV1,
+    ProcessResidentMemoryV1, ProcessResidentSampleV1,
+    RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryComponentIdV1,
     ResidentMemoryPressureV1,
 };
 
-use super::super::publication_store::ActiveGenerationDecodeChargeV1;
+use super::super::PendingHintsV1;
+use super::super::publication_store::{
+    ActiveGenerationDecodeChargeV1, UnpublishedCodeIndexPublicationV1,
+};
 use super::{
     EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, downgrade_pointer_to_pre_segment_bytes_shape,
     execute_proof_bound_scope_retention, published, remove_historical_pointer_entries,
@@ -49,15 +54,105 @@ use crate::code_index_scheduler::{
     SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
 use tracedecay_code_index::production::{
-    CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexColdBuildReasonV1,
-    CodeIndexExecutionControlV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
-    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1, CodeIndexSealedPublicationV1,
+    CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
+    CodeIndexInterruptionV1, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
+    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentReadV1,
     SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
 
-fn cold(generation: &Arc<CodeIndexPublishedGenerationV1>) -> CodeIndexSealedPublicationV1 {
-    CodeIndexSealedPublicationV1::Cold(Arc::clone(generation), CodeIndexColdBuildReasonV1::NoParent)
+/// Re-publication stages an already validated decoded generation through the
+/// same target writer; failures retain the port's exact typed refusal.
+fn publish_generation(
+    target: &mut super::super::DaemonCodeIndexPublicationStoreV1,
+    generation: &Arc<CodeIndexPublishedGenerationV1>,
+    expected: Option<&CodeGenerationId>,
+) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
+    let mut preparation = target.prepare(&generation.sealed_scope(), expected)?;
+    let publication = match generation.stage_publication(&mut preparation) {
+        Ok(publication) => publication,
+        Err(error) => {
+            preparation.abort()?;
+            return Err(match error {
+                CodeIndexProductionErrorV1::Publication(error) => error,
+                error => CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()),
+            });
+        }
+    };
+    let result = target.commit(&mut preparation, &publication);
+    if result.is_err() {
+        preparation.abort()?;
+    }
+    result
+}
+
+#[test]
+fn a_prepared_publication_retries_without_a_construction_worker_reservation() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_store = TempDir::new().expect("source store");
+    let mut source = scheduler(
+        &fixture,
+        source_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(source.reconcile_now().expect("source publication"));
+    let generation = source.latest_complete().expect("decode source").generation;
+    let target_store = TempDir::new().expect("target store");
+    let mut target = scheduler(
+        &fixture,
+        target_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let mut preparation = target
+        .publication
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage target");
+    let exact_manifest = Arc::clone(publication.manifest_bytes());
+    target
+        .publication
+        .restore_unpublished(UnpublishedCodeIndexPublicationV1 {
+            preparation,
+            publication,
+        });
+
+    let limit = NonZeroU64::new(64 * 1024 * 1024).expect("limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(|| None),
+    ));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(limit, pressure));
+    target.bind_resident_memory(Arc::clone(&memory));
+    let standing_bytes = limit.get() - RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1 + 1;
+    let standing = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("other-build").expect("component"),
+            NonZeroU64::new(standing_bytes).expect("standing charge"),
+        )
+        .expect("standing charge fits");
+    assert!(
+        limit.get() - memory.snapshot().used_bytes
+            < RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+        "available admission is smaller than a construction worker request",
+    );
+    let retried = target
+        .republish_unpublished_retained_generation()
+        .expect("prepared retry needs only source verification and commit admission")
+        .expect("prepared publication remains current");
+    published(retried);
+    assert_eq!(
+        target
+            .publication
+            .load_active_manifest()
+            .expect("active manifest")
+            .expect("prepared generation is durable")
+            .manifest_bytes
+            .as_ref(),
+        exact_manifest.as_ref(),
+    );
+    assert_eq!(memory.snapshot().used_bytes, standing.reserved_bytes());
 }
 
 #[test]
@@ -596,9 +691,7 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
     published(scheduler.reconcile_now().expect("publish first generation"));
-    let latest = scheduler
-        .latest_complete_already_decoded()
-        .expect("first generation");
+    let latest = scheduler.latest_complete().expect("first generation");
     let generation_id = latest.generation.manifest().generation_id.clone();
     let text_store = &latest.text.text_artifact_store;
     let identity = text_store
@@ -672,9 +765,7 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     );
     assert_eq!(source.cursor(), &initial_cursor);
 
-    let latest = scheduler
-        .latest_complete_already_decoded()
-        .expect("successor generation");
+    let latest = scheduler.latest_complete().expect("successor generation");
     let text_store = &latest.text.text_artifact_store;
     let identity = text_store
         .sealed_identity(&latest.generation.manifest().generation_id)
@@ -1010,6 +1101,36 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
 }
 
 #[test]
+fn source_supersession_during_sealing_retries_the_reconcile() {
+    let fixture = GitFixture::new(&[
+        ("src/first.rs", "pub fn first() {}\n"),
+        ("src/second.rs", "pub fn second() {}\n"),
+    ]);
+    let store = TempDir::new().expect("publication store");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let epoch = Arc::clone(&scheduler.epoch);
+    let superseded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = Arc::clone(&superseded);
+    scheduler.publication = scheduler
+        .publication
+        .clone()
+        .with_segments_dir_sync_observer_for_test(Arc::new(move || {
+            if !observed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                DaemonCodeIndexControlV1::advance(&epoch);
+            }
+        }));
+
+    published(scheduler.reconcile_now().expect("superseded seal retries"));
+    assert!(superseded.load(std::sync::atomic::Ordering::Acquire));
+    let active = scheduler.latest_complete().expect("successor is readable");
+    assert_eq!(active.generation.snapshot().files.len(), 2);
+}
+
+#[test]
 fn retired_fence_cancels_a_generation_seal_between_segments() {
     // One segment per file: shutdown is signalled after the first durable
     // segment, exactly where a TERM lands on a large worktree's first build.
@@ -1041,8 +1162,8 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
         );
         Arc::clone(
             &scheduler
-                .latest_complete_already_decoded()
-                .expect("multi-file generation remains decoded")
+                .latest_complete()
+                .expect("multi-file generation decodes")
                 .generation,
         )
     };
@@ -1069,8 +1190,7 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
         observer_shutting_down.store(true, std::sync::atomic::Ordering::Release);
     }));
 
-    let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+    let error = publish_generation(&mut publication, &generation, None)
         .expect_err("shutdown signalled mid-seal must stop the publication");
     assert!(
         matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
@@ -1146,8 +1266,8 @@ fn publishing_many_new_segments_syncs_the_segments_directory_once() {
         );
         Arc::clone(
             &scheduler
-                .latest_complete_already_decoded()
-                .expect("multi-file generation remains decoded")
+                .latest_complete()
+                .expect("multi-file generation decodes")
                 .generation,
         )
     };
@@ -1175,8 +1295,7 @@ fn publishing_many_new_segments_syncs_the_segments_directory_once() {
         sync_observer.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }));
 
-    publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+    publish_generation(&mut publication, &generation, None)
         .expect("publish a fresh multi-segment generation");
 
     let segment_count = published_segments.load(std::sync::atomic::Ordering::Acquire);
@@ -1266,8 +1385,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     std::fs::write(&colliding_pack, b"wrong immutable evidence pack")
         .expect("seed corrupt immutable evidence target");
 
-    let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+    let error = publish_generation(&mut publication, &generation, None)
         .expect_err("a conflicting aggregate pack must fail publication");
     assert!(
         error
@@ -1323,8 +1441,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         .join(&source_generation_file);
     std::fs::write(&colliding_manifest, b"wrong immutable generation manifest")
         .expect("seed corrupt immutable generation target");
-    let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+    let error = publish_generation(&mut publication, &generation, None)
         .expect_err("a post-pack manifest collision must fail publication");
     assert!(
         error
@@ -1340,8 +1457,8 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         "the failure must occur after the final evidence-pack durability transaction"
     );
     assert!(
-        !colliding_pack.exists(),
-        "a pre-manifest publication failure must immediately roll back its final pack"
+        colliding_pack.exists(),
+        "canonical packs remain available to peer preparations until ordinary retention"
     );
     assert!(
         !failed_store
@@ -1352,8 +1469,11 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     );
     std::fs::remove_file(colliding_manifest).expect("remove injected manifest collision");
 
-    std::fs::copy(&source_pack, &colliding_pack)
-        .expect("simulate a crash after the final evidence-pack rename");
+    assert_eq!(
+        std::fs::read(&colliding_pack).expect("retained canonical pack"),
+        std::fs::read(&source_pack).expect("source canonical pack"),
+        "failed manifest publication retains the exact canonical pack"
+    );
     drop(publication);
     let _reopened = super::super::DaemonCodeIndexPublicationStoreV1::new(
         failed_store.path(),
@@ -2356,8 +2476,8 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
     );
     published(scheduler.reconcile_now().expect("initial publish"));
     let latest = scheduler
-        .latest_complete_already_decoded()
-        .expect("published generation remains decoded");
+        .latest_complete()
+        .expect("published generation decodes");
     let pointer_path = store.path().join("active-code-generation-v1.json");
     let pointer: DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
@@ -2392,12 +2512,7 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
             .expect("sanitizer revision"),
     )
     .expect("reopen publication store");
-    reopened
-        .publish_atomically(
-            &latest.generation.sealed_scope(),
-            Some(&active_generation),
-            &cold(&latest.generation),
-        )
+    publish_generation(&mut reopened, &latest.generation, Some(&active_generation))
         .expect("identical immutable generation republishes");
     assert_eq!(
         reopened
@@ -2557,8 +2672,8 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
             );
             published(scheduler.reconcile_now().expect("initial publish"));
             scheduler
-                .latest_complete_already_decoded()
-                .expect("published generation remains decoded")
+                .latest_complete()
+                .expect("published generation decodes")
                 .generation
                 .manifest()
                 .generation_id
@@ -2584,7 +2699,7 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
         );
 
         let rebuilt = reopened
-            .latest_complete_already_decoded()
+            .latest_complete()
             .expect("the rebuilt generation serves");
         assert_ne!(
             rebuilt.generation.manifest().generation_id,
@@ -2633,10 +2748,9 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     );
     published(scheduler.reconcile_now().expect("initial publish"));
     let seeded = scheduler
-        .latest_complete_already_decoded()
-        .expect("published generation remains decoded")
+        .latest_complete()
+        .expect("published generation decodes")
         .generation;
-    let scope = seeded.sealed_scope();
     drop(scheduler);
     let observed = rewrite_active_generation_as_previous_revision(store.path(), true);
 
@@ -2686,8 +2800,7 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
         write_repaired_pointer(&pointer_path, &mut moved);
 
         let mut refusing = publication.for_undecoded_active_rebuild(&observed);
-        let error = refusing
-            .publish_atomically(&scope, None, &cold(&seeded))
+        let error = publish_generation(&mut refusing, &seeded, None)
             .expect_err("a pointer that moved under the writer must refuse the publication");
         assert!(
             matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
@@ -2706,8 +2819,7 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     let mut restored = observed.clone();
     write_repaired_pointer(&pointer_path, &mut restored);
     let mut admitting = publication.for_undecoded_active_rebuild(&observed);
-    admitting
-        .publish_atomically(&scope, None, &cold(&seeded))
+    publish_generation(&mut admitting, &seeded, None)
         .expect("the observed identity still admits the rebuild");
 }
 
@@ -3570,8 +3682,8 @@ fn a_sweep_never_collects_segments_a_publication_has_not_yet_named() {
         published(scheduler.reconcile_now().expect("build generation"));
         Arc::clone(
             &scheduler
-                .latest_complete_already_decoded()
-                .expect("generation remains decoded")
+                .latest_complete()
+                .expect("generation decodes")
                 .generation,
         )
     };
@@ -3608,8 +3720,7 @@ fn a_sweep_never_collects_segments_a_publication_has_not_yet_named() {
             .push(outcome);
     }));
 
-    publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+    publish_generation(&mut publication, &generation, None)
         .expect("publish while sibling sweeps run");
 
     let sweeps = sweeps.lock().expect("sweep observations");
@@ -3728,4 +3839,479 @@ fn a_pointer_sealed_before_segment_bytes_is_corrupt_until_the_store_is_reset() {
         .expect("the rebuilt pointer exists");
     assert_eq!(rebuilt.generation_index.len(), 1);
     assert!(rebuilt.generation_index[0].segment_bytes > 0);
+}
+
+#[test]
+fn a_manifest_cannot_activate_another_preparations_private_segments() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_store = TempDir::new().expect("source store");
+    let mut source = scheduler(
+        &fixture,
+        source_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(source.reconcile_now().expect("source publication"));
+    let generation = source
+        .latest_complete()
+        .expect("decode canonical source")
+        .generation;
+    let target_store = TempDir::new().expect("target store");
+    let mut target = scheduler(
+        &fixture,
+        target_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let scope = generation.sealed_scope();
+    let mut staged = target.publication.prepare(&scope, None).expect("prepare A");
+    let publication = generation.stage_publication(&mut staged).expect("stage A");
+    let reader = staged.segment_reader();
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
+        publication.manifest_bytes(),
+    )
+    .expect("canonical segment identities");
+    assert_ne!(identities, Vec::new());
+    let identity = &identities[0];
+    let mut before = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &identity.digest,
+            size_bytes: identity.size_bytes,
+        },
+        &mut before,
+    )
+    .expect("A reads its staged bytes");
+    let incumbent = target
+        .publication
+        .read_publication_pointer()
+        .expect("incumbent");
+    assert!(incumbent.is_none());
+    let mut empty = target.publication.prepare(&scope, None).expect("prepare B");
+    assert!(
+        target.publication.commit(&mut empty, &publication).is_err(),
+        "B owns none of A's private files"
+    );
+    empty.abort().expect("abort B");
+    assert_eq!(
+        target
+            .publication
+            .read_publication_pointer()
+            .expect("unchanged incumbent"),
+        incumbent
+    );
+    target
+        .publication
+        .commit(&mut staged, &publication)
+        .expect("A commits its exact segments");
+    drop(staged);
+    let mut after = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &identity.digest,
+            size_bytes: identity.size_bytes,
+        },
+        &mut after,
+    )
+    .expect("committed reader survives preparation drop");
+    assert_eq!(after, before);
+    let decoded = target
+        .publication
+        .load_active_shared()
+        .expect("verify durable generation")
+        .expect("published generation");
+    assert_eq!(
+        decoded.manifest().generation_id,
+        generation.manifest().generation_id
+    );
+}
+
+#[test]
+fn escaped_staged_readers_refuse_after_abort_or_uncommitted_drop() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_store = TempDir::new().expect("source store");
+    let mut source = scheduler(
+        &fixture,
+        source_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(source.reconcile_now().expect("source publication"));
+    let generation = source
+        .latest_complete()
+        .expect("decode canonical source")
+        .generation;
+    let target_store = TempDir::new().expect("target store");
+    let mut target = scheduler(
+        &fixture,
+        target_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    for explicit_abort in [true, false] {
+        let mut preparation = target
+            .publication
+            .prepare(&generation.sealed_scope(), None)
+            .expect("prepare");
+        let publication = generation
+            .stage_publication(&mut preparation)
+            .expect("stage");
+        let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
+            publication.manifest_bytes(),
+        )
+        .expect("segment identities");
+        let identity = &identities[0];
+        let reader = preparation.segment_reader();
+        let mut whole = Vec::new();
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+            },
+            &mut whole,
+        )
+        .expect("whole staged segment");
+        assert!(whole.len() > 2);
+        let mut range = Vec::new();
+        reader(
+            SealedGenerationSegmentReadV1::Range {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+                offset: 1,
+                length: 2,
+            },
+            &mut range,
+        )
+        .expect("staged range");
+        assert_eq!(range, whole[1..3]);
+        if explicit_abort {
+            preparation.abort().expect("abort");
+        } else {
+            drop(preparation);
+        }
+        assert!(
+            reader(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &identity.digest,
+                    size_bytes: identity.size_bytes
+                },
+                &mut whole
+            )
+            .is_err()
+        );
+        assert!(
+            std::fs::read_dir(code_generation_segments_root(target_store.path()))
+                .expect("segments root")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1))
+        );
+    }
+}
+
+#[test]
+fn staged_segment_content_and_extent_are_authenticated_at_commit() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_store = TempDir::new().expect("source store");
+    let mut source = scheduler(
+        &fixture,
+        source_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(source.reconcile_now().expect("source publication"));
+    let generation = source
+        .latest_complete()
+        .expect("decode canonical source")
+        .generation;
+    let target_store = TempDir::new().expect("target store");
+    let mut target = scheduler(
+        &fixture,
+        target_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    for truncate in [false, true] {
+        let mut preparation = target
+            .publication
+            .prepare(&generation.sealed_scope(), None)
+            .expect("prepare");
+        let publication = generation
+            .stage_publication(&mut preparation)
+            .expect("stage");
+        let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
+            publication.manifest_bytes(),
+        )
+        .expect("segment identities");
+        let identity = &identities[0];
+        let directory = std::fs::read_dir(code_generation_segments_root(target_store.path()))
+            .expect("segments root")
+            .map(|entry| entry.expect("entry").path())
+            .find(|path| {
+                path.file_name()
+                    .expect("name")
+                    .to_string_lossy()
+                    .starts_with(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1)
+            })
+            .expect("owned staging directory");
+        let path = directory.join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(identity.digest.as_str()).expect("digest")
+        ));
+        let mut bytes = std::fs::read(&path).expect("staged bytes");
+        if truncate {
+            bytes.pop();
+        } else {
+            bytes[0] ^= 1;
+        }
+        std::fs::write(&path, bytes).expect("corrupt staging");
+        assert!(matches!(
+            target.publication.commit(&mut preparation, &publication),
+            Err(CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(_))
+        ));
+        preparation.abort().expect("remove corrupt staging");
+        assert!(
+            target
+                .publication
+                .read_publication_pointer()
+                .expect("unchanged pointer")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn resident_refusal_at_final_commit_retains_the_exact_publication_for_a_fresh_control() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_store = TempDir::new().expect("source store");
+    let mut source = scheduler(
+        &fixture,
+        source_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(source.reconcile_now().expect("source publication"));
+    let generation = source.latest_complete().expect("decode source").generation;
+    let target_store = TempDir::new().expect("target store");
+    let target = scheduler(
+        &fixture,
+        target_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let observed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let sampled = Arc::clone(&observed);
+    let limit = NonZeroU64::new(1024 * 1024).expect("resident limit");
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        limit,
+        Arc::new(move || {
+            let bytes = sampled.load(std::sync::atomic::Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: bytes,
+                unreclaimable_bytes: bytes,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        }),
+    ));
+    let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let control = DaemonCodeIndexControlV1::new(Arc::clone(&epoch), Arc::clone(&shutdown))
+        .with_resident_memory(Arc::clone(&pressure));
+    let hints = Arc::new(std::sync::Mutex::new(PendingHintsV1::default()));
+    let (paused_tx, paused) = std::sync::mpsc::sync_channel(1);
+    let (resume, resume_rx) = std::sync::mpsc::sync_channel(1);
+    let resume_rx = std::sync::Mutex::new(resume_rx);
+    let mut attempt = target
+        .publication
+        .clone()
+        .with_reconcile_publication_fence(Arc::clone(&hints), control.clone())
+        .with_segments_dir_sync_observer_for_test(Arc::new(move || {
+            paused_tx.send(()).expect("report final commit pause");
+            resume_rx
+                .lock()
+                .expect("resume receiver")
+                .recv()
+                .expect("resume commit");
+        }));
+    let mut preparation = attempt
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage publication");
+    let exact_manifest = Arc::clone(publication.manifest_bytes());
+    let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities(&exact_manifest)
+        .expect("segment identities")
+        .into_iter()
+        .next()
+        .expect("segment");
+    let reader = preparation.segment_reader();
+    let encoded_bytes = attempt
+        .seal_encoded_segment_bytes
+        .load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        encoded_bytes > 0,
+        "the retry owns already encoded segment files"
+    );
+    let worker = std::thread::spawn(move || {
+        let result = attempt.commit(&mut preparation, &publication);
+        (
+            result,
+            UnpublishedCodeIndexPublicationV1 {
+                preparation,
+                publication,
+            },
+        )
+    });
+    paused
+        .recv_timeout(Duration::from_secs(10))
+        .expect("commit paused after segment durability");
+    observed.store(limit.get(), std::sync::atomic::Ordering::Release);
+    pressure.publish_observed_resident_bytes(limit.get());
+    resume.send(()).expect("release final commit");
+    let (result, pending) = worker.join().expect("commit worker");
+    assert!(matches!(
+        result,
+        Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_))
+    ));
+    assert!(control.refused_by_resident_memory());
+    assert!(
+        target
+            .publication
+            .read_publication_pointer()
+            .expect("incumbent")
+            .is_none()
+    );
+    let mut bytes = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &identity.digest,
+            size_bytes: identity.size_bytes,
+        },
+        &mut bytes,
+    )
+    .expect("memory refusal keeps preparation readable");
+    target.publication.restore_unpublished(pending);
+    let mut pending = target
+        .publication
+        .take_unpublished()
+        .expect("owned retry pair retained");
+    assert!(Arc::ptr_eq(
+        pending.publication.manifest_bytes(),
+        &exact_manifest
+    ));
+    observed.store(0, std::sync::atomic::Ordering::Release);
+    pressure.publish_observed_resident_bytes(0);
+    assert!(
+        control.is_cancelled(),
+        "the refused control remains latched"
+    );
+    let fresh_control =
+        DaemonCodeIndexControlV1::new(epoch, shutdown).with_resident_memory(pressure);
+    let mut refreshed = target
+        .publication
+        .clone()
+        .with_reconcile_publication_fence(hints, fresh_control);
+    let committed = refreshed
+        .commit(&mut pending.preparation, &pending.publication)
+        .expect("fresh feasible control resumes the exact prepared publication");
+    assert!(Arc::ptr_eq(&committed, &exact_manifest));
+    assert_eq!(
+        refreshed
+            .seal_encoded_segment_bytes
+            .load(std::sync::atomic::Ordering::Acquire),
+        encoded_bytes
+    );
+    drop(pending);
+    let mut committed_bytes = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &identity.digest,
+            size_bytes: identity.size_bytes,
+        },
+        &mut committed_bytes,
+    )
+    .expect("committed reader survives preparation drop");
+    assert_eq!(committed_bytes, bytes);
+    assert_eq!(
+        refreshed
+            .load_active_shared()
+            .expect("decode committed generation")
+            .expect("active generation")
+            .manifest()
+            .generation_id,
+        generation.manifest().generation_id
+    );
+}
+
+#[test]
+fn source_supersession_at_final_commit_aborts_the_preparation() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_store = TempDir::new().expect("source store");
+    let mut source = scheduler(
+        &fixture,
+        source_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(source.reconcile_now().expect("source publication"));
+    let generation = source.latest_complete().expect("decode source").generation;
+    let target_store = TempDir::new().expect("target store");
+    let target = scheduler(
+        &fixture,
+        target_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let control = DaemonCodeIndexControlV1::new(
+        Arc::clone(&epoch),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let mut attempt = target
+        .publication
+        .clone()
+        .with_reconcile_publication_fence(
+            Arc::new(std::sync::Mutex::new(PendingHintsV1::default())),
+            control,
+        )
+        .with_segments_dir_sync_observer_for_test(Arc::new(move || {
+            DaemonCodeIndexControlV1::advance(&epoch);
+        }));
+    let mut preparation = attempt
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage publication");
+    let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities(
+        publication.manifest_bytes(),
+    )
+    .expect("segment identities")
+    .into_iter()
+    .next()
+    .expect("segment");
+    let reader = preparation.segment_reader();
+    assert!(matches!(
+        attempt.commit(&mut preparation, &publication),
+        Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
+    ));
+    assert!(
+        attempt
+            .read_publication_pointer()
+            .expect("incumbent")
+            .is_none()
+    );
+    assert!(
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+            },
+            &mut Vec::new()
+        )
+        .is_err()
+    );
+    assert!(
+        std::fs::read_dir(code_generation_segments_root(target_store.path()))
+            .expect("segments root")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1))
+    );
 }

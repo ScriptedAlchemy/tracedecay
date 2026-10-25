@@ -10,6 +10,8 @@ mod symbols;
 #[cfg(test)]
 mod execute_tests;
 #[cfg(test)]
+mod move_destination_tests;
+#[cfg(test)]
 mod reconcile_tests;
 #[cfg(test)]
 mod test_support;

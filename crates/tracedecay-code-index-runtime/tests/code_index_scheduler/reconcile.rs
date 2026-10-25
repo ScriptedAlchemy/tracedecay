@@ -5,7 +5,10 @@ use std::{
     fmt::Write as _,
     num::NonZeroU64,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -23,25 +26,35 @@ use tracedecay_contracts::{
     callable_code_operation,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CodeSourceOmissionReasonV1, CommitId, OmittedCodeSourceV1, ProjectId,
-    PublicRetrieverStatus, RefId, RetrieverKind, SensitivityLevelV1, SnapshotFileDispositionV1,
-    UtcMicros, WorktreeId,
+    AuthorizationRevision, CodeGenerationId, CodeSourceOmissionReasonV1, CommitId,
+    ComponentRevision, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
+    FreshnessVectorDigest, OmittedCodeSourceV1, PrincipalId, ProjectId, PublicRetrieverStatus,
+    QueryNormalizationRevision, RefId, RetrievalBudget, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId,
+    SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros,
+    VectorWatermark, WorktreeId,
 };
+use tracedecay_query::retrieval::{
+    exact::{CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest},
+    lexical::LexicalLaneRequest,
+};
+use tracedecay_runtime_core::logging::FormattedTracingCapture;
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentHoldingV1,
-    ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1,
-    ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
+    ResidentMemoryPressureV1, ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerReleaseV1,
+    ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersV1,
     detected_process_resident_memory_limit_v1, sampled_process_resident_bytes_v1,
+    sampled_process_resident_v1,
 };
 
 use super::super::memory_tests::ledger_memory;
 #[cfg(unix)]
 use super::stage_raw_git_path;
 use super::{
-    ALPHA_LIB_V1, GitFixture, OwnerSignals, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
-    active_text_artifact_path, advance_pointer_to_unseated_successor, application_context,
-    clear_pending_wake_until_quiet, committed_capture_corpus_files, core_search_request, git,
-    git_stdout, hold_scheduler_for_root, mounted_core_query_worktree,
+    ALPHA_LIB_V1, GitFixture, OwnerSignals, RETAINED_REVISION_0, ReadyRetrievalControlV1,
+    SERVING_SEAT_FAILURE_CEILING, active_text_artifact_path, advance_pointer_to_unseated_successor,
+    application_context, clear_pending_wake_until_quiet, committed_capture_corpus_files,
+    core_search_request, git, git_stdout, hold_scheduler_for_root, mounted_core_query_worktree,
     mounted_core_query_worktree_with_one_permit, move_git_metadata, published, query_authority,
     query_meta, quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
     replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
@@ -58,8 +71,8 @@ use crate::code_index_scheduler::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
     CodeIndexHintPolicyV1, CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
-    CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
-    RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
+    CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCodeTextGenerationV1,
+    LatestCompleteCodeIndexV1, RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
     classification::{
         NonUtf8ClassifiedChangeV1, WorktreeChangeClassV1, WorktreeChangeClassificationV1,
     },
@@ -1394,14 +1407,126 @@ async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     registry.shutdown().await;
 }
 
-/// Full pre-seat memory journey: a fresh scheduler decodes the retained active
-/// generation, publishes a one-file increment through the partitioned sealer,
-/// and drains that successor into the durable text artifact. The default is
-/// intentionally substantial and can be raised to the preserved operator
-/// shape without changing the exercised production path.
+pub(super) fn assert_exact_and_lexical_retrieval(
+    latest: &LatestCodeTextGenerationV1,
+    needle: &str,
+) {
+    let owners = latest
+        .production_query_owners()
+        .expect("published text query owners");
+    let metadata = latest.metadata();
+    let base = RetrievalRequest {
+        principal: PrincipalId::new("principal.scale-text").expect("principal"),
+        scope: RetrievalScope {
+            privacy_domain: metadata.manifest().privacy_domain.clone(),
+            root: SingleRootScopeV1 {
+                repository: metadata.snapshot().repository.clone(),
+                worktree: metadata.snapshot().worktree.clone(),
+                reference: metadata.snapshot().reference.clone(),
+            },
+        },
+        temporal_mode: TemporalModeV1::Current,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "f".repeat(64)))
+                .expect("freshness"),
+            authorization_revision: AuthorizationRevision::new("authorization.scale-text.v1")
+                .expect("authorization"),
+            captured_at: UtcMicros(1),
+        },
+        profile_id: "profile.scale-text.v1"
+            .to_owned()
+            .try_into()
+            .expect("profile"),
+        budget: RetrievalBudget {
+            max_candidates_per_lane: 8,
+            max_fused_candidates: 8,
+            max_hydrated_results: 8,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        },
+    };
+    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+        needle,
+        SanitizerRevision::new("sanitizer.scale-text.v1").expect("sanitizer"),
+        QueryNormalizationRevision::new("normalization.scale-text.v1").expect("normalization"),
+    )
+    .expect("query view");
+    let authority = CentralExactAdmissionAuthorityV1::new(
+        ExactAdmissionRuleRevision::new(tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1)
+            .expect("exact rule"),
+    );
+    let exact = owners
+        .retrieve_exact(&ExactLaneRequest {
+            control: &ReadyRetrievalControlV1,
+            literals: authority.parse_literals(&query_view, &base),
+            path_prefix: None,
+            generation: metadata.manifest().generation_id.clone(),
+            budget: base.budget,
+            base: base.clone(),
+            query_view: &query_view,
+        })
+        .expect("exact retrieval from the bounded publication");
+    let RetrieverOutcome::Complete(exact) = exact else {
+        panic!("scale exact retrieval must complete");
+    };
+    assert!(
+        !exact.candidates.is_empty(),
+        "exact retrieval must find {needle}"
+    );
+    let lexical = owners
+        .retrieve_lexical(&LexicalLaneRequest {
+            query_view: &query_view,
+            generation: metadata.manifest().generation_id.clone(),
+            whole_terms: std::borrow::Cow::Owned(vec![needle.to_owned()]),
+            subtokens: std::borrow::Cow::Owned(vec![needle.to_owned()]),
+            phrases: std::borrow::Cow::Owned(Vec::new()),
+            proximities: std::borrow::Cow::Owned(Vec::new()),
+            field_filters: std::borrow::Cow::Owned(Vec::new()),
+            path_prefix: None,
+            fuzzy_budget: 0,
+            lexical_profile_revision: ComponentRevision::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+            )
+            .expect("lexical profile"),
+            score_domain: ScoreDomainId::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            )
+            .expect("score domain"),
+            budget: base.budget,
+            base,
+            control: &ReadyRetrievalControlV1,
+        })
+        .expect("lexical retrieval from the bounded publication");
+    let RetrieverOutcome::Complete(lexical) = lexical else {
+        panic!("scale lexical retrieval must complete");
+    };
+    assert!(
+        !lexical.candidates.is_empty(),
+        "lexical retrieval must find {needle}"
+    );
+}
+
+/// Cold construction, retained activation, a one-file increment, and durable
+/// exact/lexical publication under the same real process-memory authority.
+/// Full graph decoding is a separate, admitted consumer: ordinary text serving
+/// must not materialize the decoded corpus to make this journey ready.
 #[test]
 #[ignore = "scale memory regression; run explicitly with one exact test process"]
 fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_watermark() {
+    measure_scale_publication(true);
+}
+
+/// Measure cold construction independently of the text builder's established
+/// minimum budget. This journey authenticates the durable sealed publication;
+/// the retained journey above additionally requires exact and lexical serving.
+#[test]
+#[ignore = "scale memory regression; run explicitly with one exact test process"]
+fn cold_materialization_publishes_below_the_process_high_watermark() {
+    measure_scale_publication(false);
+}
+
+fn measure_scale_publication(include_retained_text: bool) {
     let file_count = std::env::var("TRACEDECAY_PRESEAT_SCALE_FILES").map_or(2_600, |value| {
         value.parse::<usize>().expect("positive scale file count")
     });
@@ -1437,86 +1562,167 @@ fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_waterma
         .map(|(path, source)| (path.as_str(), source.as_str()))
         .collect::<Vec<_>>();
     let fixture = GitFixture::new(&sources);
+    drop(sources);
+    drop(owned_sources);
     let store = TempDir::new().expect("store root");
 
     // This scale journey measures real process pressure through admission
     // as well as its RSS assertions, so retain the production pressure cell.
     let memory_limit = detected_process_resident_memory_limit_v1();
+    let peak_admission = Arc::new(AtomicU64::new(0));
+    let peak_process = Arc::new(AtomicU64::new(0));
+    let peak_sample = Arc::new(std::sync::Mutex::new(
+        None::<tracedecay_runtime_core::resident_memory::ProcessResidentSampleV1>,
+    ));
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(memory_limit, {
+        let admission = Arc::clone(&peak_admission);
+        let process = Arc::clone(&peak_process);
+        let peak_sample = Arc::clone(&peak_sample);
+        Arc::new(move || {
+            let sample = sampled_process_resident_v1()?;
+            let mut peak = peak_sample.lock().unwrap();
+            if peak.is_none_or(|prior| {
+                sample.admission_bytes(memory_limit.get())
+                    >= prior.admission_bytes(memory_limit.get())
+            }) {
+                *peak = Some(sample);
+            }
+            drop(peak);
+            admission.fetch_max(
+                sample.admission_bytes(memory_limit.get()),
+                Ordering::Relaxed,
+            );
+            process.fetch_max(sample.resident_bytes, Ordering::Relaxed);
+            Some(sample)
+        })
+    }));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        memory_limit,
+        pressure,
+    ));
+    let high_watermark = memory.admission_watermark_bytes();
+    #[cfg(target_os = "linux")]
+    std::fs::write("/proc/self/clear_refs", b"5\n")
+        .expect("reset process peak RSS before cold construction");
+    let baseline_rss_bytes = sampled_process_resident_bytes_v1();
 
+    let mut active_decode_count;
     {
         let mut seed = scheduler(
             &fixture,
             store.path().to_path_buf(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
-        seed.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::new(memory_limit)));
-        published(seed.reconcile_now().expect("seed retained generation"));
+        seed.bind_resident_memory(Arc::clone(&memory));
+        let capture = FormattedTracingCapture::start_with_stderr();
+        let result = seed.reconcile_now();
+        let captured_trace = capture.text();
+        let captured_trace_bytes = captured_trace.len();
+        drop(capture);
+        drop(captured_trace);
+        let peak = *peak_sample.lock().unwrap();
+        println!(
+            "{}",
+            serde_json::json!({
+                "phase": "cold_construction",
+                "peak_sample_rss_bytes": peak.map(|sample| sample.resident_bytes),
+                "peak_sample_unreclaimable_bytes": peak.map(|sample| sample.unreclaimable_bytes),
+                "peak_sample_swap_bytes": peak.map(|sample| sample.swapped_bytes),
+                "peak_sample_cgroup_headroom_bytes": peak.and_then(|sample| sample.cgroup_headroom_bytes),
+                "captured_trace_bytes": captured_trace_bytes,
+                "files": file_count,
+                "functions_per_file": functions_per_file,
+                "source_bytes": source_bytes,
+                "completed": result.is_ok(),
+                "error": result.as_ref().err().map(ToString::to_string),
+                "peak_admission_bytes": peak_admission.load(Ordering::Relaxed),
+                "high_watermark_bytes": high_watermark,
+            })
+        );
+        let evidence =
+            published(result.expect("cold construction publishes within the configured authority"));
+        let retained = seed
+            .publication
+            .load_active_manifest()
+            .expect("reopen authenticated cold publication")
+            .expect("cold publication remains durably active");
+        assert_eq!(
+            retained.metadata.manifest().generation_id,
+            evidence.generation_id
+        );
+        assert_eq!(retained.metadata.snapshot().files.len(), file_count);
+        active_decode_count = seed.publication.sealed_decode_count();
+        assert_eq!(active_decode_count, 0);
     }
 
-    #[cfg(target_os = "linux")]
-    std::fs::write("/proc/self/clear_refs", b"5\n").expect("reset process peak RSS");
-    let baseline_rss_bytes = sampled_process_resident_bytes_v1();
+    if include_retained_text {
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        scheduler.bind_resident_memory(Arc::clone(&memory));
+        assert_eq!(scheduler.publication.sealed_decode_count(), 0);
+        assert!(matches!(
+            scheduler
+                .reconcile_now()
+                .expect("restore retained generation"),
+            CodeIndexReconcileOutcomeV1::Noop(_)
+        ));
+        assert_eq!(
+            scheduler.publication.sealed_decode_count(),
+            0,
+            "retained activation must preserve the sealed source without decoding the full corpus"
+        );
 
-    let mut scheduler = scheduler(
-        &fixture,
-        store.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    );
-    scheduler.bind_resident_memory(Arc::new(ProcessResidentMemoryV1::new(memory_limit)));
-    assert_eq!(scheduler.publication.sealed_decode_count(), 0);
-    assert!(matches!(
-        scheduler
-            .reconcile_now()
-            .expect("restore retained generation"),
-        CodeIndexReconcileOutcomeV1::Noop(_)
-    ));
-    assert_eq!(
-        scheduler.publication.sealed_decode_count(),
-        1,
-        "fresh activation must decode the retained generation exactly once"
-    );
+        let mut edited = String::new();
+        for function in 0..functions_per_file {
+            writeln!(
+                edited,
+                "pub fn scale_{:04}_{function:04}() -> usize {{ {} }}",
+                file_count - 1,
+                file_count + function
+            )
+            .expect("write edited scale source");
+        }
+        let edited_path = format!("src/scale_{:04}.rs", file_count - 1);
+        fixture.edit(&edited_path, &edited);
+        scheduler.notify_path(fixture.path().join(&edited_path));
+        let increment = published(
+            scheduler
+                .reconcile_now()
+                .expect("publish one-file incremental generation"),
+        );
+        assert_eq!(increment.reextracted_files, 1);
+        assert!(
+            scheduler
+                .publication
+                .seal_encoded_segment_bytes
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        );
+        assert_eq!(
+            scheduler
+                .publication
+                .seal_existing_segment_bytes_read
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "unchanged parent file segments must stay content-address reused"
+        );
 
-    let mut edited = String::new();
-    for function in 0..functions_per_file {
-        writeln!(
-            edited,
-            "pub fn scale_{:04}_{function:04}() -> usize {{ {} }}",
-            file_count - 1,
-            file_count + function
-        )
-        .expect("write edited scale source");
+        let latest = scheduler
+            .servable_retained_text_generation()
+            .expect("bounded retained text authority")
+            .expect("incremental generation binds exact and lexical serving");
+        while !latest
+            .advance_text_serving(super::super::TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)
+            .expect("drain successor through durable text publication")
+        {}
+        assert!(latest.query_owners_are_ready());
+        assert_exact_and_lexical_retrieval(&latest, &format!("scale_{:04}_0000", file_count - 1));
+        active_decode_count = scheduler.publication.sealed_decode_count();
+        assert_eq!(active_decode_count, 0);
     }
-    let edited_path = format!("src/scale_{:04}.rs", file_count - 1);
-    fixture.edit(&edited_path, &edited);
-    scheduler.notify_path(fixture.path().join(&edited_path));
-    let increment = published(
-        scheduler
-            .reconcile_now()
-            .expect("publish one-file incremental generation"),
-    );
-    assert_eq!(increment.reextracted_files, 1);
-    assert!(
-        scheduler
-            .publication
-            .seal_encoded_segment_bytes
-            .load(std::sync::atomic::Ordering::Relaxed)
-            > 0
-    );
-    assert_eq!(
-        scheduler
-            .publication
-            .seal_existing_segment_bytes_read
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "unchanged parent file segments must stay content-address reused"
-    );
-
-    let latest = scheduler.latest_complete().expect("incremental generation");
-    while !latest
-        .advance_text_serving(super::super::TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1)
-        .expect("drain successor through durable text publication")
-    {}
-    assert!(latest.query_owners_are_ready());
     let settled_rss_bytes = sampled_process_resident_bytes_v1();
     #[cfg(target_os = "linux")]
     let peak_rss_bytes = {
@@ -1531,25 +1737,32 @@ fn retained_decode_incremental_seal_and_text_publish_stay_below_the_high_waterma
     };
     #[cfg(not(target_os = "linux"))]
     let peak_rss_bytes = settled_rss_bytes.unwrap_or(0);
-    let existing_high_watermark_bytes = 18_u64
-        .saturating_mul(1024 * 1024 * 1024)
-        .saturating_add(84_u64.saturating_mul(1024 * 1024 * 1024) / 100);
+    assert_eq!(active_decode_count, 0);
+    let measured_admission = peak_admission.load(Ordering::Relaxed);
+    assert!(
+        measured_admission > 0,
+        "real pressure samples must be observed"
+    );
     println!(
         "{}",
         serde_json::json!({
             "files": file_count,
             "functions_per_file": functions_per_file,
             "source_bytes": source_bytes,
-            "active_decode_count": scheduler.publication.sealed_decode_count(),
+            "active_decode_count": active_decode_count,
+            "retained_text_exercised": include_retained_text,
             "baseline_rss_bytes": baseline_rss_bytes,
             "peak_rss_bytes": peak_rss_bytes,
             "settled_rss_bytes": settled_rss_bytes,
-            "existing_high_watermark_bytes": existing_high_watermark_bytes,
+            "configured_limit_bytes": memory_limit.get(),
+            "high_watermark_bytes": high_watermark,
+            "peak_admission_bytes": measured_admission,
+            "peak_sampled_rss_bytes": peak_process.load(Ordering::Relaxed),
         })
     );
     assert!(
-        peak_rss_bytes < existing_high_watermark_bytes,
-        "pre-seat pipeline peak {peak_rss_bytes} exceeded the existing {existing_high_watermark_bytes}-byte high watermark"
+        measured_admission < high_watermark,
+        "the selected publication journey exceeded the canonical admission high watermark: {measured_admission} >= {high_watermark}"
     );
 }
 
@@ -1890,7 +2103,7 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
 }
 
 /// Linked worktrees sealing identical content share its occurrence identity
-/// and physical parse artifacts; each worktree still seals its own snapshot and
+/// and decoded content; each worktree still seals its own snapshot and
 /// generation, and a worktree's generation never names content only its
 /// sibling holds.
 #[test]
@@ -1926,12 +2139,32 @@ fn linked_worktrees_share_identity_for_identical_content_and_never_serve_diverge
         .latest_complete()
         .expect("second generation")
         .generation;
-    let reuse = registry.byte_pool_stats();
-
-    assert!(
-        reuse.parse_chunk_reused >= 1,
-        "matching parse/chunk artifacts must be physically shared"
+    assert_eq!(
+        first_generation.chunks().chunks().len(),
+        second_generation.chunks().chunks().len()
     );
+    for (first, second) in first_generation
+        .chunks()
+        .chunks()
+        .iter()
+        .zip(second_generation.chunks().chunks())
+    {
+        assert!(
+            Arc::ptr_eq(first, second),
+            "identical sealed content must share decoded chunks"
+        );
+    }
+    for (first, second) in first_generation
+        .symbols()
+        .symbols
+        .iter()
+        .zip(&second_generation.symbols().symbols)
+    {
+        assert!(
+            Arc::ptr_eq(first, second),
+            "identical sealed content must share decoded symbols"
+        );
+    }
     assert_eq!(first_publish.repository_id, second_publish.repository_id);
     assert_eq!(
         first_publish.file_occurrence_ids, second_publish.file_occurrence_ids,
@@ -4370,7 +4603,7 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
     release_projection
         .send(())
         .expect("release publication projection");
-    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+    let convergence = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             let pointer = active_pointer();
             let projected = |generation_id: &str| {
@@ -4378,18 +4611,49 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
                     entry.generation_id == generation_id && entry.text_artifact().is_some()
                 })
             };
-            if projected(&projecting)
-                && projected(&successor)
-                && pointer.generation_id != successor
-                && projected(&pointer.generation_id)
-            {
+            // Superseded text owners cancel at their publication fence;
+            // only the final source generation must finish projecting.
+            if pointer.generation_id != successor && projected(&pointer.generation_id) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("both projections finish and the later edit seals and projects its own generation");
+    .await;
+    let final_pointer = active_pointer();
+    assert!(
+        convergence.is_ok(),
+        "the later edit seals and projects its own generation: projecting={projecting}, successor={successor}, active={}, text_states={:?}",
+        final_pointer.generation_id,
+        final_pointer
+            .generation_index
+            .iter()
+            .map(|entry| (&entry.generation_id, entry.text_artifact().is_some()))
+            .collect::<Vec<_>>()
+    );
+    let latest = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_complete()
+        .expect("explicitly load the final published generation");
+    assert_eq!(
+        latest.generation.manifest().generation_id.as_str(),
+        final_pointer.generation_id
+    );
+    assert_eq!(
+        latest
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.simple_name.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "alpha".to_owned(),
+            "edited_during_projection".to_owned(),
+            "edited_after_seal".to_owned(),
+        ])
+    );
     registry.shutdown().await;
 }
 
@@ -6434,7 +6698,13 @@ fn exact_source_readiness_abstains_when_a_file_is_added_inside_freshness_window(
     assert!(
         scheduler
             .latest_complete_with(GenerationDecodeAdmissionV1::AlreadyDecoded)
-            .is_some()
+            .is_none()
+    );
+
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        0,
+        "source readiness does not require a full decode"
     );
 
     fixture.edit("src/added.rs", "pub fn added() {}\n");
@@ -11676,6 +11946,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .expect("generation B remains available for a publication-only retry")
+            .publication
             .manifest()
             .generation_id
             .clone()

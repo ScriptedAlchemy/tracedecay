@@ -11,6 +11,10 @@ use super::error::DomainError;
 
 type ObjectEntries = Vec<(Cow<'static, str>, Range<usize>)>;
 
+// Serde's struct name is not part of JSON. Opted-in structs emit their fields
+// in canonical order, checked below, so large sequence fields can stream.
+const ORDERED_OBJECT: &str = "$tracedecay::canonical::ordered_object";
+
 /// One object's entry buffer may keep this much rendered-value capacity when
 /// it returns to the pool. Canonical chunk/manifest objects render well below
 /// this; a corpus-scale object (a legacy whole-generation digest renders the
@@ -334,6 +338,14 @@ impl<'sink, S: CanonicalSink> serde::Serializer for CanonicalSerializer<'sink, S
         name: &'static str,
         len: usize,
     ) -> CanonicalResult<Self::SerializeStruct> {
+        if name == ORDERED_OBJECT {
+            self.sink.write("{");
+            return Ok(StructWriter::Ordered {
+                sink: self.sink,
+                pool: self.pool,
+                previous: None,
+            });
+        }
         if name.starts_with(SERDE_JSON_PRIVATE_TOKEN_PREFIX) {
             return Ok(StructWriter::Delegated {
                 sink: self.sink,
@@ -608,6 +620,11 @@ impl<S: CanonicalSink> serde::ser::SerializeStructVariant for ObjectWriter<'_, S
 /// Structs stream like maps, except for `serde_json`'s private tokens.
 enum StructWriter<'sink, S: CanonicalSink> {
     Object(ObjectWriter<'sink, S>),
+    Ordered {
+        sink: &'sink mut S,
+        pool: &'sink mut ObjectBufferPool,
+        previous: Option<&'static str>,
+    },
     Delegated {
         sink: &'sink mut S,
         inner: <serde_json::value::Serializer as serde::Serializer>::SerializeStruct,
@@ -624,6 +641,25 @@ impl<S: CanonicalSink> serde::ser::SerializeStruct for StructWriter<'_, S> {
     {
         match self {
             Self::Object(object) => object.push_entry(Cow::Borrowed(key), value),
+            Self::Ordered {
+                sink,
+                pool,
+                previous,
+            } => {
+                if let Some(prior) = previous {
+                    if *prior >= key {
+                        return Err(serde::ser::Error::custom(
+                            "canonical ordered object fields must be strictly increasing",
+                        ));
+                    }
+                    sink.write(",");
+                }
+                write_json_string(key, *sink);
+                sink.write(":");
+                value.serialize(CanonicalSerializer { sink: *sink, pool })?;
+                *previous = Some(key);
+                Ok(())
+            }
             Self::Delegated { inner, .. } => {
                 serde::ser::SerializeStruct::serialize_field(inner, key, value)
             }
@@ -633,6 +669,10 @@ impl<S: CanonicalSink> serde::ser::SerializeStruct for StructWriter<'_, S> {
     fn end(self) -> CanonicalResult {
         match self {
             Self::Object(object) => object.finish(),
+            Self::Ordered { sink, .. } => {
+                sink.write("}");
+                Ok(())
+            }
             Self::Delegated { sink, inner } => {
                 let value = serde::ser::SerializeStruct::end(inner)?;
                 write_canonical(&value, sink);

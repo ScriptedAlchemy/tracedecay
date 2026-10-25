@@ -633,7 +633,7 @@ impl CodeGraphActivationAuthorityV1 {
                         ),
                     ));
                 }
-                native_runtime::spawn_blocking(move || latest.prewarm_serving_derivations())
+                native_runtime::spawn_blocking(move || latest.prewarm_graph_derivations())
                     .await
                     .map_err(|error| {
                         CodeIndexSchedulerErrorV1::GraphActivation(format!(

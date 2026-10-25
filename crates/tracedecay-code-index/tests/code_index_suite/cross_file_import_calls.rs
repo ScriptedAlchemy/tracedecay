@@ -689,6 +689,7 @@ fn disclosed_gaps(generation: &CodeIndexPublishedGenerationV1, file: &str) -> BT
         .collect::<BTreeSet<_>>();
     generation
         .unresolved_import_calls()
+        .expect("sealed import-call evidence resolves")
         .into_iter()
         .filter(|gap| in_file.contains(&gap.from_occurrence))
         .map(|gap| gap.reference_name)

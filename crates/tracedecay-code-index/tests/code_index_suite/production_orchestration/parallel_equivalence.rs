@@ -1,4 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use tracedecay_code_index::{
     chunks::content_digest,
@@ -69,6 +72,9 @@ fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildReques
     );
 
     CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot: SanitizedCodeSnapshotV1 {
             repository: id::<RepositoryId>("repository.production"),
             worktree: None,

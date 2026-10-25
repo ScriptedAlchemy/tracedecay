@@ -1,25 +1,31 @@
+use std::fmt::Write as _;
 use std::num::NonZeroU64;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use tracedecay_code_index::parallelism::CodeIndexWorkerRuntimeV1;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexStalenessStateV1,
 };
+use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessResidentSampleV1, ProcessSharedMemoryReservationV1,
-    ResidentHoldingV1, ResidentMemoryComponentIdV1, ResidentMemoryPressureV1, ResidentOwnerBytesV1,
-    ResidentOwnerKindV1, ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1,
-    ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1,
-    ResidentOwnersV1,
+    ResidentHoldingV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureV1,
+    ResidentMemoryReservationV1, ResidentOwnerBytesV1, ResidentOwnerKindV1,
+    ResidentOwnerReleaseCauseV1, ResidentOwnerReleaseV1, ResidentOwnerSampleV1,
+    ResidentOwnerScopeV1, ResidentOwnerV1, ResidentOwnersReportV1, ResidentOwnersV1,
 };
 
 use super::super::{
     CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1, CodeIndexWorkerPhaseV1,
 };
+
+use super::reconcile::assert_exact_and_lexical_retrieval;
 
 use super::{
     ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING,
@@ -1424,6 +1430,679 @@ async fn a_refused_text_build_retries_when_a_reservation_it_waited_on_drops() {
         "the dropped reservation, not an owner release, woke the refused build"
     );
 
+    registry.shutdown().await;
+}
+
+async fn owner_passes_started(registry: &CodeIndexSchedulerRegistryV1, root: &Path) -> u64 {
+    registry
+        .subscribe_owner_activity(root)
+        .await
+        .expect("mounted worktree activity")
+        .passes()
+        .started
+}
+
+/// Mount with an already planned executor while admission is held, so the
+/// standing charges exercise build admission rather than runtime planning.
+async fn mount_cold_build_with_workers(
+    registry: &CodeIndexSchedulerRegistryV1,
+    fixture: &GitFixture,
+    store: &TempDir,
+    workers: u16,
+) {
+    let admission = registry.background_reconcile_admission();
+    let permits = u32::try_from(admission.available_permits()).expect("admission permit count");
+    assert!(permits > 0, "the fresh registry has background admission");
+    let _held = admission
+        .acquire_many(permits)
+        .await
+        .expect("hold all background admission");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount scheduler");
+    let runtime = CodeIndexWorkerRuntimeV1::build(
+        CodeIndexWorkerSelectionV1::Exact { workers },
+        usize::from(workers),
+        registry.resident_memory.snapshot().limit_bytes,
+    )
+    .expect("plan the owned executor before admitting the build");
+    let mounted = registry.mounted.lock().await;
+    mounted
+        .get(fixture.path())
+        .expect("mounted worktree")
+        .scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .bind_worker_runtime(runtime);
+}
+
+async fn wait_for_cold_build_memory_park(registry: &CodeIndexSchedulerRegistryV1, root: &Path) {
+    super::wait_for_owner(
+        registry,
+        root,
+        SERVING_SEAT_FAILURE_CEILING,
+        "a cold build parked for resident memory",
+        || async {
+            registry
+                .dashboard_freshness(root)
+                .await
+                .and_then(|freshness| freshness.parked)
+                .and_then(|parked| parked.blocked_reason)
+                .filter(|reason| *reason == CodeIndexBuildBlockedReasonV1::ResidentMemory)
+        },
+    )
+    .await;
+    wait_for_worker_phase(registry, root, CodeIndexWorkerPhaseV1::Parked).await;
+    // The source arrival stays pending while memory gates reconstruction.
+    // Quiescence means the pass finished, not that its unpaid arrival vanished.
+    super::wait_for_quiescent_owner_pass(registry, root).await;
+}
+
+async fn assert_cold_build_stays_parked(registry: &CodeIndexSchedulerRegistryV1, root: &Path) {
+    let refused = owner_passes_started(registry, root).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        owner_passes_started(registry, root).await,
+        refused,
+        "a memory-parked build must stay quiescent until its full requirement fits"
+    );
+    assert_eq!(
+        registry
+            .dashboard_freshness(root)
+            .await
+            .and_then(|freshness| freshness.parked)
+            .and_then(|parked| parked.blocked_reason),
+        Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+    );
+    assert!(
+        registry.latest_text_serving_for_root(root).await.is_none(),
+        "a refused cold build must not publish a serving text owner"
+    );
+    assert!(
+        registry.latest_generation_id(root).await.is_none(),
+        "a refused cold build must not publish a durable generation"
+    );
+}
+
+fn cold_build_worker_bytes(memory: &ProcessResidentMemoryV1) -> u64 {
+    let component = ResidentMemoryComponentIdV1::new(
+        super::super::reconcile::CODE_INDEX_WORKER_RESIDENT_COMPONENT_V1,
+    )
+    .unwrap();
+    memory
+        .snapshot()
+        .charges
+        .iter()
+        .filter(|charge| charge.key.component == component)
+        .map(|charge| charge.bytes)
+        .sum()
+}
+
+/// Real retained construction outgrows the room beside one installed worker.
+/// Its release cannot admit reconstruction, even through an unrelated wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cold_build_refused_during_construction_stays_parked_until_reconstruction_fits() {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let files = (0..160)
+        .map(|file| {
+            let mut source = String::new();
+            for function in 0..80 {
+                writeln!(
+                    source,
+                    "pub fn charged_{file:03}_{function:03}() -> u32 {{ {function} }}"
+                )
+                .expect("write fixture source");
+            }
+            (format!("src/charged_{file:03}.rs"), source)
+        })
+        .collect::<Vec<_>>();
+    let borrowed = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&borrowed);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(16 * GIB).unwrap();
+    let ledger = Arc::new(OnceLock::<Weak<ProcessResidentMemoryV1>>::new());
+    let construction_peak = Arc::new(AtomicU64::new(0));
+    let worker_peak = Arc::new(AtomicU64::new(0));
+    let construction = ResidentMemoryComponentIdV1::new("code_index.construction.v1").unwrap();
+    let sampler = {
+        let ledger = Arc::clone(&ledger);
+        let construction_peak = Arc::clone(&construction_peak);
+        let worker_peak = Arc::clone(&worker_peak);
+        Arc::new(move || {
+            if let Some(memory) = ledger.get().and_then(Weak::upgrade) {
+                construction_peak.fetch_max(
+                    memory.snapshot().process_shared_charge_for(construction),
+                    Ordering::AcqRel,
+                );
+                worker_peak.fetch_max(cold_build_worker_bytes(&memory), Ordering::AcqRel);
+            }
+            // Observe real ledger charges without supplying an RSS estimate.
+            None
+        })
+    };
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(limit, sampler));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    ledger.set(Arc::downgrade(&memory)).unwrap();
+    let mut standing = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-standing-memory").unwrap(),
+            NonZeroU64::new(limit.get() - 130 * MIB).unwrap(),
+        )
+        .expect("standing charge leaves 130 MiB");
+    let foreign = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-unrelated-byte").unwrap(),
+            NonZeroU64::MIN,
+        )
+        .expect("unrelated byte fits");
+    let registry = CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&memory))
+        .with_resident_owners(Arc::new(ResidentOwnersV1::new(IDLE_WINDOW)));
+    mount_cold_build_with_workers(&registry, &fixture, &store, 1).await;
+    wait_for_cold_build_memory_park(&registry, fixture.path()).await;
+    assert_eq!(worker_peak.load(Ordering::Acquire), 128 * MIB);
+    assert!(
+        construction_peak.load(Ordering::Acquire) > 0,
+        "the actual builder must acquire construction bytes before refusing growth"
+    );
+    assert_eq!(memory.snapshot().process_shared_charge_for(construction), 0);
+    assert_eq!(cold_build_worker_bytes(&memory), 0);
+    assert_eq!(memory.snapshot().used_bytes, standing.reserved_bytes() + 1);
+    assert_cold_build_stays_parked(&registry, fixture.path()).await;
+
+    let mut headroom = pressure.subscribe_headroom();
+    drop(headroom.borrow_and_update());
+    memory.wait_for_headroom(1, limit.get());
+    drop(foreign);
+    assert!(headroom.has_changed());
+    assert_cold_build_stays_parked(&registry, fixture.path()).await;
+
+    // Leave room for the 1.5 GiB text build below the 14.4 GiB watermark.
+    standing
+        .shrink_to(12 * GIB)
+        .expect("release external standing memory");
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert_exact_and_lexical_retrieval(&text, "charged_159_079");
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_cold_build_recovers_from_a_stale_starting_measurement() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn stale_sample_target() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(16 * GIB).unwrap();
+    let outside = Arc::new(AtomicU64::new(8 * GIB));
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(limit, {
+        let outside = Arc::clone(&outside);
+        Arc::new(move || {
+            let bytes = outside.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: bytes,
+                unreclaimable_bytes: bytes,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        })
+    }));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    pressure.sample_and_publish();
+    outside.store(15 * GIB, Ordering::Release);
+    let registry = CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&memory))
+        .with_resident_owners(Arc::new(ResidentOwnersV1::new(IDLE_WINDOW)));
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount scheduler");
+    wait_for_cold_build_memory_park(&registry, fixture.path()).await;
+    assert!(
+        pressure.state().is_over_budget(),
+        "fresh admission must read 15 GiB"
+    );
+    assert_eq!(memory.snapshot().used_bytes, 0);
+    assert_cold_build_stays_parked(&registry, fixture.path()).await;
+
+    outside.store(11 * GIB, Ordering::Release);
+    pressure.sample_and_publish();
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert_exact_and_lexical_retrieval(&text, "stale_sample_target");
+    registry.shutdown().await;
+}
+
+/// External occupancy starts only after A's worker reservation exists, and
+/// persists after A unwinds. Tracked occupancy belongs to another worktree;
+/// untracked occupancy has its own atomic lifetime outside the ledger.
+async fn cold_build_recovers_after_external_burst(tracked: bool) {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    const BURST: u64 = 4 * GIB + GIB / 2;
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn external_burst_target() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(16 * GIB).unwrap();
+    let ledger = Arc::new(OnceLock::<Weak<ProcessResidentMemoryV1>>::new());
+    let triggered = Arc::new(AtomicBool::new(false));
+    let burst = Arc::new(AtomicU64::new(0));
+    let foreign = Arc::new(Mutex::new(None::<ResidentMemoryReservationV1>));
+    let worker_peak = Arc::new(AtomicU64::new(0));
+    let foreign_key = ResidentMemoryKeyV1 {
+        project_id: test_project_id(),
+        worktree_id: WorktreeId::new("worktree.other").unwrap(),
+        generation_id: CodeGenerationId::new("generation.v1.other").unwrap(),
+        component: ResidentMemoryComponentIdV1::new("test-overlapping-build").unwrap(),
+    };
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(limit, {
+        let ledger = Arc::clone(&ledger);
+        let triggered = Arc::clone(&triggered);
+        let burst = Arc::clone(&burst);
+        let foreign = Arc::clone(&foreign);
+        let worker_peak = Arc::clone(&worker_peak);
+        let foreign_key = foreign_key.clone();
+        Arc::new(move || {
+            let workers = ledger.get().and_then(Weak::upgrade).map_or(0, |memory| {
+                let workers = cold_build_worker_bytes(&memory);
+                worker_peak.fetch_max(workers, Ordering::AcqRel);
+                if workers > 0 && !triggered.swap(true, Ordering::AcqRel) {
+                    if tracked {
+                        *foreign.lock().expect("foreign reservation") = Some(
+                            memory
+                                .reserve(foreign_key.clone(), NonZeroU64::new(BURST).unwrap())
+                                .expect("foreign worktree reserves its own burst"),
+                        );
+                    }
+                    burst.store(BURST, Ordering::Release);
+                }
+                workers
+            });
+            let bytes = 10 * GIB + burst.load(Ordering::Acquire) + workers;
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: bytes,
+                unreclaimable_bytes: bytes,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        })
+    }));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    ledger.set(Arc::downgrade(&memory)).unwrap();
+    pressure.sample_and_publish();
+    let registry = CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&memory))
+        .with_resident_owners(Arc::new(ResidentOwnersV1::new(IDLE_WINDOW)));
+    mount_cold_build_with_workers(&registry, &fixture, &store, 2).await;
+    wait_for_cold_build_memory_park(&registry, fixture.path()).await;
+    assert!(triggered.load(Ordering::Acquire));
+    assert_eq!(worker_peak.load(Ordering::Acquire), 256 * MIB);
+    assert_eq!(cold_build_worker_bytes(&memory), 0);
+    assert_eq!(burst.load(Ordering::Acquire), BURST);
+    assert_eq!(
+        memory.snapshot().charge_for(&foreign_key),
+        if tracked { BURST } else { 0 }
+    );
+    assert!(pressure.sample_and_publish().unwrap().1.is_over_budget());
+    assert_cold_build_stays_parked(&registry, fixture.path()).await;
+
+    burst.store(0, Ordering::Release);
+    drop(foreign.lock().expect("foreign reservation").take());
+    assert!(!pressure.sample_and_publish().unwrap().1.is_over_budget());
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    assert_exact_and_lexical_retrieval(&text, "external_burst_target");
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_cold_build_recovers_when_an_overlapping_worktree_releases() {
+    cold_build_recovers_after_external_burst(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_cold_build_recovers_when_untracked_external_memory_releases() {
+    cold_build_recovers_after_external_burst(false).await;
+}
+
+/// A successor refused inside its predecessor's projection keeps its complete
+/// reconstruction requirement after that already-admitted projection finishes.
+/// The sealed predecessor stays authoritative until external memory releases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_nested_successor_memory_refusal_survives_predecessor_projection_completion() {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(16 * GIB).unwrap();
+    let ledger = Arc::new(OnceLock::<Weak<ProcessResidentMemoryV1>>::new());
+    let pool = Arc::new(OnceLock::<Weak<super::SharedCodeIndexBytePoolV1>>::new());
+    let clone_baseline = Arc::new(AtomicU64::new(0));
+    let external_bytes = Arc::new(AtomicU64::new(1));
+    let observing = Arc::new(AtomicBool::new(false));
+    let construction_baseline = Arc::new(AtomicU64::new(0));
+    let construction_peak = Arc::new(AtomicU64::new(0));
+    let worker_peak = Arc::new(AtomicU64::new(0));
+    let construction_seen = Arc::new(tokio::sync::Notify::new());
+    let construction = ResidentMemoryComponentIdV1::new("code_index.construction.v1").unwrap();
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(limit, {
+        let ledger = Arc::clone(&ledger);
+        let pool = Arc::clone(&pool);
+        let clone_baseline = Arc::clone(&clone_baseline);
+        let external_bytes = Arc::clone(&external_bytes);
+        let observing = Arc::clone(&observing);
+        let construction_baseline = Arc::clone(&construction_baseline);
+        let construction_peak = Arc::clone(&construction_peak);
+        let worker_peak = Arc::clone(&worker_peak);
+        let construction_seen = Arc::clone(&construction_seen);
+        Arc::new(move || {
+            if observing.load(Ordering::Acquire)
+                && let Some(memory) = ledger.get().and_then(Weak::upgrade)
+            {
+                let bytes = memory.snapshot().process_shared_charge_for(construction);
+                let baseline = construction_baseline.load(Ordering::Acquire);
+                if bytes > baseline {
+                    construction_peak.fetch_max(bytes - baseline, Ordering::AcqRel);
+                    if let Some(pool) = pool.get().and_then(Weak::upgrade) {
+                        let stats = pool.physical_artifacts.stats();
+                        if stats.clone_payloads_computed + stats.clone_payloads_reused
+                            > clone_baseline.load(Ordering::Acquire)
+                        {
+                            external_bytes.store(limit.get(), Ordering::Release);
+                            construction_seen.notify_one();
+                        }
+                    }
+                }
+                worker_peak.fetch_max(cold_build_worker_bytes(&memory), Ordering::AcqRel);
+            }
+            let bytes = external_bytes.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: bytes,
+                unreclaimable_bytes: bytes,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        })
+    }));
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::clone(&pressure),
+    ));
+    ledger.set(Arc::downgrade(&memory)).unwrap();
+    let registry = CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&memory))
+        .with_resident_owners(Arc::new(ResidentOwnersV1::new(IDLE_WINDOW)));
+    pool.set(Arc::downgrade(&registry.byte_pool)).unwrap();
+    let root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    let (projection_started, release_projection) =
+        registry.pause_next_opened_published_text_projection(root);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount predecessor");
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, projection_started)
+        .await
+        .expect("predecessor reaches its text projection")
+        .expect("predecessor projection gate stays armed");
+    let predecessor = registry
+        .sealed_publication_identity(fixture.path(), None)
+        .await
+        .expect("predecessor sealed identity")
+        .expect("predecessor is sealed before projection")
+        .generation_id()
+        .clone();
+    let clone_work = || {
+        let stats = registry.byte_pool.physical_artifacts.stats();
+        stats.clone_payloads_computed + stats.clone_payloads_reused
+    };
+    let before_successor = clone_work();
+    clone_baseline.store(before_successor, Ordering::Release);
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler");
+    let worker_bytes = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _workers = scheduler
+            .ensure_worker_plan()
+            .expect("installed worker plan");
+        tracedecay_code_index::parallelism::worker_reservation_bytes(
+            tracedecay_code_index::parallelism::indexing_workers(),
+        )
+    };
+    let baseline = memory.snapshot().process_shared_charge_for(construction);
+    construction_baseline.store(baseline, Ordering::Release);
+    let mut standing = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-standing-memory").unwrap(),
+            NonZeroU64::new(limit.get() - memory.snapshot().used_bytes - worker_bytes - 2 * MIB)
+                .unwrap(),
+        )
+        .expect("standing charge fits beside the small sealed predecessor");
+    let foreign = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-unrelated-byte").unwrap(),
+            NonZeroU64::MIN,
+        )
+        .expect("unrelated byte fits");
+    observing.store(true, Ordering::Release);
+    for file in 0..160 {
+        let mut source = String::new();
+        for function in 0..80 {
+            writeln!(
+                source,
+                "pub fn nested_{file:03}_{function:03}() -> u32 {{ {function} }}"
+            )
+            .expect("write fixture source");
+        }
+        fixture.edit(&format!("src/nested_{file:03}.rs"), &source);
+    }
+    fixture.commit_all("add successor sources while predecessor projection is held");
+    assert!(matches!(
+        registry.notify_hook_overflow(fixture.path()).await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, construction_seen.notified())
+        .await
+        .expect("the nested successor acquires real construction bytes");
+    // This lock follows the actual nested build, whose fresh production owner
+    // shares the physical pool but does not share the scheduler's parse pool.
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler");
+    let observed_scheduler = Arc::clone(&scheduler);
+    let observed_memory = Arc::clone(&memory);
+    let observed_predecessor = predecessor.clone();
+    let worker_wake = tokio::time::timeout(
+        SERVING_SEAT_FAILURE_CEILING,
+        tokio::task::spawn_blocking(move || {
+            let scheduler = observed_scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(cold_build_worker_bytes(&observed_memory), 0);
+            assert_eq!(
+                observed_memory
+                    .snapshot()
+                    .process_shared_charge_for(construction),
+                baseline,
+                "the refused successor releases its construction"
+            );
+            assert_eq!(
+                scheduler
+                    .publication
+                    .read_publication_pointer()
+                    .expect("durable pointer")
+                    .expect("sealed predecessor")
+                    .generation_id,
+                observed_predecessor.as_str(),
+                "nested refusal must leave the predecessor published"
+            );
+            Arc::clone(&scheduler.wake)
+        }),
+    )
+    .await
+    .expect("nested build unwinds")
+    .expect("observe nested build completion");
+    assert_eq!(worker_peak.load(Ordering::Acquire), worker_bytes);
+    assert!(construction_peak.load(Ordering::Acquire) > 0);
+    let refused_work = clone_work();
+    assert!(
+        refused_work > before_successor,
+        "the nested successor performs real artifact work"
+    );
+
+    let assert_incumbent = || {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            scheduler
+                .publication
+                .read_publication_pointer()
+                .expect("durable pointer")
+                .expect("sealed predecessor remains published")
+                .generation_id,
+            predecessor.as_str(),
+            "the refused successor cannot replace the sealed incumbent"
+        );
+    };
+    let mut headroom = pressure.subscribe_headroom();
+    drop(headroom.borrow_and_update());
+    memory.wait_for_headroom(1, limit.get());
+    drop(foreign);
+    assert!(
+        !headroom.has_changed(),
+        "an unrelated byte release cannot clear the external pressure refusal"
+    );
+    // Deliver and bank plain worker wakes without advancing the source epoch.
+    worker_wake.notify_one();
+    worker_wake.notify_one();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        clone_work(),
+        refused_work,
+        "banked wakes must not reconstruct inside projection"
+    );
+    assert!(
+        registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .is_none()
+    );
+    assert_incumbent();
+
+    release_projection
+        .send(())
+        .expect("finish predecessor projection attempt");
+    wait_for_cold_build_memory_park(&registry, fixture.path()).await;
+    assert_incumbent();
+    let retained = registry
+        .retained_text_owner_for_root(fixture.path())
+        .await
+        .expect("the sealed predecessor retains its text owner");
+    assert_eq!(retained.metadata().manifest().generation_id, predecessor);
+    assert_eq!(
+        retained
+            .metadata()
+            .snapshot()
+            .files
+            .iter()
+            .map(|file| file.logical_path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs"],
+        "the retained owner still describes the exact predecessor"
+    );
+    assert!(retained.query_owners_are_ready());
+    retained
+        .production_query_owners()
+        .expect("the admitted predecessor completes");
+    assert_eq!(
+        registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .expect("predecessor remains ready")
+            .metadata()
+            .manifest()
+            .generation_id,
+        predecessor,
+    );
+    assert_eq!(
+        registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .and_then(|freshness| freshness.parked)
+            .and_then(|parked| parked.blocked_reason),
+        Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+        "predecessor completion preserves the successor memory refusal"
+    );
+    assert_eq!(
+        clone_work(),
+        refused_work,
+        "finishing the predecessor must preserve the successor gate"
+    );
+    let foreign = memory
+        .reserve_process_shared(
+            ResidentMemoryComponentIdV1::new("test-unrelated-byte").unwrap(),
+            NonZeroU64::MIN,
+        )
+        .expect("another unrelated byte fits");
+    memory.wait_for_headroom(1, limit.get());
+    drop(foreign);
+    worker_wake.notify_one();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        clone_work(),
+        refused_work,
+        "a parked successor still requires its complete demand"
+    );
+    assert_incumbent();
+    assert!(retained.query_owners_are_ready());
+    assert_eq!(
+        registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .expect("predecessor remains ready")
+            .metadata()
+            .manifest()
+            .generation_id,
+        predecessor,
+    );
+
+    observing.store(false, Ordering::Release);
+    external_bytes.store(12 * GIB, Ordering::Release);
+    pressure.sample_and_publish();
+    // Leave room for the 1.5 GiB text build below the 14.4 GiB watermark.
+    standing
+        .shrink_to(12 * GIB)
+        .expect("release external standing memory");
+    let successor =
+        super::wait_for_queryable_text_generation_change(&registry, fixture.path(), &predecessor)
+            .await;
+    assert!(
+        clone_work() > refused_work,
+        "external release admits actual successor work"
+    );
+    assert_exact_and_lexical_retrieval(&successor, "nested_159_079");
     registry.shutdown().await;
 }
 

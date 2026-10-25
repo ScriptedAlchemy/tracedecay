@@ -24,6 +24,707 @@ fn bytes(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("test byte count is non-zero")
 }
 
+fn operation_authority(limit: u64) -> Arc<ProcessResidentMemoryV1> {
+    Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(limit),
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(limit),
+            Arc::new(|| None),
+        )),
+    ))
+}
+
+#[test]
+fn shared_guard_growth_coalesces_ownership_without_releasing_headroom() {
+    let authority = operation_authority(100);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let mut outside = authority
+        .reserve_process_shared(component, bytes(20))
+        .unwrap();
+    let operation = authority.begin_operation();
+    let mut owned = operation
+        .reserve_process_shared(component, bytes(40))
+        .unwrap();
+    let related = operation
+        .clone()
+        .reserve_process_shared(component, bytes(10))
+        .unwrap();
+    let foreign_operation = authority.begin_operation();
+    let foreign = foreign_operation
+        .reserve_process_shared(component, bytes(5))
+        .unwrap();
+
+    // Releasing a temporary growth guard would satisfy this waiter. Correct
+    // coalescing keeps those admitted bytes charged continuously.
+    authority.wait_for_headroom(20, 99);
+    let epoch = authority.pressure.subscribe_headroom();
+    let before = *epoch.borrow();
+    owned.try_grow(bytes(10)).unwrap();
+    assert_eq!(*epoch.borrow(), before, "coalescing emits no headroom wake");
+    assert_eq!(owned.reserved_bytes(), 50);
+    let grown = authority.snapshot();
+    assert_eq!(grown.used_bytes, 85);
+    assert_eq!(grown.process_shared_charges.len(), 1);
+    assert_eq!(grown.process_shared_charge_for(component), 85);
+    assert_eq!(
+        operation
+            .witnessed_reconstruction_requirement(100)
+            .unwrap()
+            .unwrap()
+            .required_bytes(),
+        60,
+        "growth witnesses all related regions, excluding foreign and legacy guards"
+    );
+
+    assert!(owned.try_grow(bytes(20)).is_err());
+    assert_eq!(owned.reserved_bytes(), 50);
+    assert_eq!(
+        authority.snapshot(),
+        grown,
+        "refusal preserves the existing charge"
+    );
+    let demand = operation
+        .witnessed_reconstruction_requirement(100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(demand.required_bytes(), 80);
+    owned.shrink_to(30).unwrap();
+    assert_eq!(authority.snapshot().used_bytes, 65);
+    drop(owned);
+    assert_eq!(authority.snapshot().used_bytes, 35);
+    drop(related);
+    assert_eq!(authority.snapshot().used_bytes, 25);
+    assert!(!demand.can_retry());
+    drop(foreign);
+    assert!(demand.can_retry());
+    outside.try_grow(bytes(5)).unwrap();
+    assert_eq!(outside.reserved_bytes(), 25);
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        25
+    );
+    drop(outside);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+    assert_eq!(authority.snapshot().process_shared_charges, Vec::new());
+}
+
+#[test]
+fn operation_growth_checks_nominal_rss_headroom_only_for_additional_bytes() {
+    const MIB: u64 = 1024 * 1024;
+    let sampled = Arc::new(AtomicU64::new(200 * MIB));
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(bytes(1000 * MIB), {
+        let sampled = Arc::clone(&sampled);
+        Arc::new(move || {
+            let observed = sampled.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: observed,
+                unreclaimable_bytes: observed,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        })
+    }));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(1000 * MIB),
+        Arc::clone(&pressure),
+    ));
+    let operation = authority.begin_operation();
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let mut owned = operation
+        .reserve_process_shared(component, bytes(400 * MIB))
+        .unwrap();
+    // RSS now includes this region's 400 MiB beside the original 200 MiB.
+    sampled.store(600 * MIB, Ordering::Release);
+    owned.try_grow(bytes(20 * MIB)).unwrap();
+    assert_eq!(owned.reserved_bytes(), 420 * MIB);
+    assert_eq!(authority.snapshot().used_bytes, 420 * MIB);
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        420 * MIB
+    );
+    sampled.store(620 * MIB, Ordering::Release);
+    assert!(!pressure.sample_and_publish().unwrap().1.is_over_budget());
+
+    // An actual latch crossing still refuses a tiny increment on this large
+    // operation, even though that increment alone is below the admission floor.
+    sampled.store(950 * MIB, Ordering::Release);
+    assert!(!pressure.state().is_over_budget());
+    let before = authority.snapshot();
+    let refusal = owned.try_grow(bytes(1)).unwrap_err();
+    assert!(refusal.is_observed_over_budget());
+    assert_eq!(refusal.requested_bytes(), 420 * MIB + 1);
+    assert_eq!(owned.reserved_bytes(), 420 * MIB);
+    assert_eq!(authority.snapshot(), before);
+    let demand = operation
+        .witnessed_reconstruction_requirement(authority.limit_bytes())
+        .unwrap()
+        .unwrap();
+    assert_eq!(demand.required_bytes(), u128::from(420 * MIB) + 1);
+    assert_eq!(demand.ceiling, 900 * MIB);
+    owned.shrink_to(400 * MIB).unwrap();
+    assert_eq!(authority.snapshot().used_bytes, 400 * MIB);
+    drop(owned);
+    assert_eq!(authority.snapshot().used_bytes, 0);
+    assert_eq!(authority.snapshot().process_shared_charges, Vec::new());
+    sampled.store(200 * MIB, Ordering::Release);
+    assert!(demand.can_retry());
+}
+
+#[test]
+fn shared_guard_tiny_growth_samples_pressure_and_retains_the_full_refusal_witness() {
+    let unit = RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1;
+    let sampled = Arc::new(AtomicU64::new(0));
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(bytes(100 * unit), {
+        let sampled = Arc::clone(&sampled);
+        Arc::new(move || {
+            let observed = sampled.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: observed,
+                unreclaimable_bytes: observed,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        })
+    }));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(100 * unit),
+        Arc::clone(&pressure),
+    ));
+    let operation = authority.begin_operation();
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let mut owned = operation
+        .reserve_process_shared(component, bytes(70 * unit))
+        .unwrap();
+    sampled.store(95 * unit, Ordering::Release);
+    assert!(!pressure.state().is_over_budget());
+    let refusal = owned.try_grow(bytes(1)).unwrap_err();
+    assert!(refusal.is_observed_over_budget());
+    assert_eq!(refusal.requested_bytes(), 70 * unit + 1);
+    assert_eq!(owned.reserved_bytes(), 70 * unit);
+    assert_eq!(authority.snapshot().used_bytes, 70 * unit);
+    let demand = operation
+        .witnessed_reconstruction_requirement(100 * unit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(demand.required_bytes(), u128::from(70 * unit) + 1);
+    assert_eq!(demand.ceiling, 90 * unit);
+    assert_eq!(
+        authority.lock_state().waiting_requests.get(&(90 * unit)),
+        Some(&(70 * unit + 1))
+    );
+    drop(owned);
+    sampled.store(0, Ordering::Release);
+    assert!(demand.can_retry());
+    assert_eq!(authority.snapshot().process_shared_charges, Vec::new());
+}
+
+#[test]
+fn reconstruction_waits_for_its_whole_owned_request_after_unwind() {
+    let authority = operation_authority(100);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let outside = authority
+        .reserve_process_shared(component, bytes(20))
+        .unwrap();
+    let operation = authority.begin_operation();
+    let owned = operation
+        .reserve_process_shared(component, bytes(70))
+        .unwrap();
+    assert!(
+        operation
+            .reserve_process_shared(component, bytes(20))
+            .is_err()
+    );
+    assert_eq!(authority.lock_state().waiting_requests.get(&100), Some(&90));
+    let demand = operation
+        .witnessed_reconstruction_requirement(100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(demand.required_bytes(), 90);
+    drop(owned);
+    assert!(!demand.can_retry());
+    assert_eq!(authority.snapshot().used_bytes, 20);
+    drop(outside);
+    assert!(demand.can_retry());
+    let epoch = authority.pressure.subscribe_headroom();
+    let before = *epoch.borrow();
+    for _ in 0..8 {
+        assert!(demand.can_retry());
+    }
+    assert_eq!(
+        *epoch.borrow(),
+        before,
+        "ready checks cannot wake themselves"
+    );
+    assert!(authority.lock_state().waiting_requests.is_empty());
+    assert!(authority.lock_state().process_shared_charges.is_empty());
+}
+
+#[test]
+fn reconstruction_includes_exact_discarded_worker_and_source_reservations() {
+    let authority = operation_authority(100);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let outside = authority
+        .reserve_process_shared(component, bytes(15))
+        .unwrap();
+    let worker = authority
+        .reserve(key("p", "w", "g", "worker"), bytes(6))
+        .unwrap();
+    let source = authority
+        .reserve(key("p", "w", "g", "source"), bytes(4))
+        .unwrap();
+    let operation = authority.begin_operation();
+    let owned = operation
+        .reserve_process_shared(component, bytes(60))
+        .unwrap();
+    assert!(
+        operation
+            .reserve_process_shared(component, bytes(20))
+            .is_err()
+    );
+    let construction = operation
+        .witnessed_reconstruction_requirement(100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(construction.required_bytes(), 80);
+    let demand = construction
+        .including_discarded_reservations([&worker, &source])
+        .unwrap();
+    assert_eq!(demand.required_bytes(), 90);
+    drop((worker, source, owned));
+    assert!(
+        !demand.can_retry(),
+        "85 bytes cannot reconstruct the 90-byte operation"
+    );
+    drop(outside);
+    assert!(demand.can_retry());
+}
+
+#[test]
+fn discarded_reservations_require_exact_authority_and_distinct_guards() {
+    let authority = operation_authority(100);
+    let foreign = operation_authority(100);
+    let operation = authority.begin_operation();
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let _owned = operation
+        .reserve_process_shared(component, bytes(10))
+        .unwrap();
+    let demand = operation
+        .witnessed_reconstruction_requirement(100)
+        .unwrap()
+        .unwrap();
+    let worker = authority
+        .reserve(key("p", "w", "g", "worker"), bytes(5))
+        .unwrap();
+    let foreign_worker = foreign
+        .reserve(key("p", "w", "g", "worker"), bytes(5))
+        .unwrap();
+    assert!(matches!(
+        demand
+            .clone()
+            .including_discarded_reservations([&foreign_worker]),
+        Err(super::ResidentMemoryReconstructionDemandFailureV1::AuthorityMismatch)
+    ));
+    assert!(matches!(
+        demand.including_discarded_reservations([&worker, &worker]),
+        Err(super::ResidentMemoryReconstructionDemandFailureV1::DuplicateReservation)
+    ));
+}
+
+#[test]
+fn concurrent_operations_share_component_reporting_without_sharing_identity() {
+    let authority = operation_authority(100);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let first = authority.begin_operation();
+    let second = authority.begin_operation();
+    let related = first.clone();
+    assert!(Arc::ptr_eq(first.authority(), &authority));
+    let first_guard = first.reserve_process_shared(component, bytes(20)).unwrap();
+    let mut related_guard = related
+        .reserve_process_shared(component, bytes(10))
+        .unwrap();
+    let second_guard = std::thread::spawn(move || {
+        let guard = second.reserve_process_shared(component, bytes(50)).unwrap();
+        (second, guard)
+    })
+    .join()
+    .unwrap();
+    assert_eq!(authority.snapshot().process_shared_charges.len(), 1);
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        80
+    );
+    assert!(first.reserve_process_shared(component, bytes(25)).is_err());
+    assert_eq!(
+        first
+            .witnessed_reconstruction_requirement(100)
+            .unwrap()
+            .unwrap()
+            .required_bytes(),
+        55
+    );
+    assert_eq!(
+        second_guard
+            .0
+            .witnessed_reconstruction_requirement(100)
+            .unwrap()
+            .unwrap()
+            .required_bytes(),
+        50
+    );
+    related_guard.shrink_to(5).unwrap();
+    drop(first_guard);
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        55
+    );
+    drop(second_guard);
+    assert_eq!(authority.snapshot().process_shared_charge_for(component), 5);
+    drop(related_guard);
+    assert!(authority.lock_state().process_shared_charges.is_empty());
+}
+
+#[test]
+fn checkpoint_witness_survives_guard_drop_and_uses_its_narrower_ceiling() {
+    let authority = operation_authority(100);
+    let operation = authority.begin_operation();
+    assert!(
+        operation
+            .witnessed_reconstruction_requirement(100)
+            .unwrap()
+            .is_none()
+    );
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let mut guard = operation
+        .reserve_process_shared(component, bytes(70))
+        .unwrap();
+    guard.shrink_to(10).unwrap();
+    drop(guard);
+    let demand = operation
+        .witnessed_reconstruction_requirement(authority.limit_bytes())
+        .unwrap()
+        .unwrap();
+    assert_eq!(demand.required_bytes(), 70);
+    let outside = authority
+        .reserve_process_shared(component, bytes(25))
+        .unwrap();
+    assert!(
+        demand.can_retry(),
+        "ledger refusal keeps the hard-limit ceiling"
+    );
+    let checkpoint = demand.below_ceiling(authority.admission_watermark_bytes());
+    assert_eq!(checkpoint.ceiling, 90);
+    assert!(!checkpoint.can_retry());
+    assert_eq!(checkpoint.clone().below_ceiling(100).ceiling, 90);
+    drop(outside);
+    assert!(checkpoint.can_retry());
+}
+
+#[test]
+fn unrelated_waiter_and_latch_wakes_do_not_admit_a_reconstruction() {
+    let authority = operation_authority(100);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let outside = authority
+        .reserve_process_shared(component, bytes(20))
+        .unwrap();
+    let operation = authority.begin_operation();
+    let owned = operation
+        .reserve_process_shared(component, bytes(70))
+        .unwrap();
+    assert!(
+        operation
+            .reserve_process_shared(component, bytes(20))
+            .is_err()
+    );
+    let demand = operation
+        .witnessed_reconstruction_requirement(100)
+        .unwrap()
+        .unwrap();
+    drop(owned);
+    assert!(!demand.can_retry());
+    let epoch = authority.pressure.subscribe_headroom();
+    let before = *epoch.borrow();
+    authority.wait_for_headroom(1, 100);
+    authority.pressure.publish_observed_resident_bytes(0);
+    assert!(*epoch.borrow() > before);
+    assert!(!demand.can_retry());
+    authority.pressure.publish_observed_resident_bytes(95);
+    let before = *epoch.borrow();
+    authority.pressure.publish_observed_resident_bytes(0);
+    assert!(*epoch.borrow() > before);
+    assert!(!demand.can_retry());
+    assert_eq!(authority.lock_state().waiting_requests.get(&100), Some(&90));
+    drop(outside);
+    assert!(demand.can_retry());
+}
+
+#[test]
+fn reconstruction_registration_observes_releases_on_either_side_of_arming() {
+    let authority = operation_authority(100);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let outside = authority
+        .reserve_process_shared(component, bytes(20))
+        .unwrap();
+    let operation = authority.begin_operation();
+    let owned = operation
+        .reserve_process_shared(component, bytes(70))
+        .unwrap();
+    assert!(
+        operation
+            .reserve_process_shared(component, bytes(20))
+            .is_err()
+    );
+    let demand = operation
+        .witnessed_reconstruction_requirement(100)
+        .unwrap()
+        .unwrap();
+    drop(owned);
+    assert!(!demand.can_retry());
+    let epoch = authority.pressure.subscribe_headroom();
+    let before = *epoch.borrow();
+    drop(outside);
+    assert!(
+        *epoch.borrow() > before,
+        "a release after arming wakes the waiter"
+    );
+    // Hold the settler lock so the concurrent checker cannot register before
+    // the release. Its locked headroom read must see the newly available room.
+    let outside = authority
+        .reserve_process_shared(component, bytes(20))
+        .unwrap();
+    let waiting = authority.pressure.waiting.lock().unwrap();
+    let (started, received) = std::sync::mpsc::channel();
+    let checker = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        demand.can_retry()
+    });
+    received.recv().unwrap();
+    drop(outside);
+    drop(waiting);
+    assert!(checker.join().unwrap());
+    assert!(authority.lock_state().waiting_requests.is_empty());
+}
+
+#[test]
+fn dropped_operations_leave_no_attributed_charges_or_growing_waiters() {
+    let authority = operation_authority(100);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let outside = authority
+        .reserve_process_shared(component, bytes(20))
+        .unwrap();
+    for _ in 0..32 {
+        let operation = authority.begin_operation();
+        let identity = Arc::downgrade(&operation.identity.0);
+        let guard = operation
+            .reserve_process_shared(component, bytes(70))
+            .unwrap();
+        assert!(
+            operation
+                .reserve_process_shared(component, bytes(20))
+                .is_err()
+        );
+        let demand = operation
+            .witnessed_reconstruction_requirement(100)
+            .unwrap()
+            .unwrap();
+        assert!(!demand.can_retry());
+        drop((operation, guard, demand));
+        assert!(
+            identity.upgrade().is_none(),
+            "cancellation releases the exact operation identity"
+        );
+        assert_eq!(authority.snapshot().used_bytes, 20);
+        assert_eq!(authority.lock_state().process_shared_charges.len(), 1);
+        assert_eq!(authority.lock_state().waiting_requests.len(), 1);
+    }
+    drop(outside);
+    assert!(authority.lock_state().process_shared_charges.is_empty());
+    assert!(authority.lock_state().waiting_requests.is_empty());
+    let waiting = authority.pressure.waiting.lock().unwrap();
+    assert!(
+        waiting.len() <= 1,
+        "only the canonical authority may be retained weakly"
+    );
+}
+
+#[test]
+fn observed_growth_refuses_tiny_large_operation_growth_and_preserves_independent_small_admissions()
+{
+    let unit = RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1;
+    let authority = operation_authority(100 * unit);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let operation = authority.begin_operation();
+    let owned = operation
+        .reserve_process_shared(component, bytes(10 * unit))
+        .unwrap();
+    authority
+        .pressure
+        .publish_observed_resident_bytes(95 * unit);
+    let error = operation
+        .reserve_process_shared(component, bytes(2 * unit))
+        .unwrap_err();
+    assert!(error.is_observed_over_budget());
+    assert_eq!(error.requested_bytes(), 12 * unit);
+    assert_eq!(
+        authority.lock_state().waiting_requests.get(&(90 * unit)),
+        Some(&(12 * unit))
+    );
+    let before = authority.snapshot();
+    let tiny = operation
+        .reserve_process_shared(component, bytes(1))
+        .unwrap_err();
+    assert!(tiny.is_observed_over_budget());
+    assert_eq!(tiny.requested_bytes(), 10 * unit + 1);
+    assert_eq!(
+        authority.snapshot(),
+        before,
+        "tiny growth cannot bypass the operation floor"
+    );
+    assert_eq!(
+        authority.lock_state().waiting_requests.get(&(90 * unit)),
+        Some(&(10 * unit + 1))
+    );
+    let independent = authority.begin_operation();
+    let small = independent
+        .reserve_process_shared(component, bytes(unit))
+        .unwrap();
+    let legacy = authority
+        .reserve_process_shared(component, bytes(unit))
+        .unwrap();
+    assert_eq!(small.reserved_bytes(), unit);
+    assert_eq!(legacy.reserved_bytes(), unit);
+    assert_eq!(
+        operation
+            .witnessed_reconstruction_requirement(100 * unit)
+            .unwrap()
+            .unwrap()
+            .required_bytes(),
+        u128::from(12 * unit)
+    );
+    drop((owned, small, legacy));
+}
+
+#[test]
+fn growth_sampling_retains_pressure_constraint_before_any_control_checkpoint() {
+    let unit = RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1;
+    let sampled = Arc::new(AtomicU64::new(10 * unit));
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(bytes(100 * unit), {
+        let sampled = Arc::clone(&sampled);
+        Arc::new(move || {
+            let observed = sampled.load(Ordering::Acquire);
+            Some(ProcessResidentSampleV1 {
+                resident_bytes: observed,
+                unreclaimable_bytes: observed,
+                swapped_bytes: 0,
+                cgroup_headroom_bytes: None,
+            })
+        })
+    }));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        bytes(100 * unit),
+        Arc::clone(&pressure),
+    ));
+    let operation = authority.begin_operation();
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let mut owned = operation
+        .reserve_process_shared(component, bytes(85 * unit))
+        .unwrap();
+    owned.shrink_to(70 * unit).unwrap();
+    sampled.store(91 * unit, Ordering::Release);
+    assert!(!pressure.state().is_over_budget());
+    let refusal = operation
+        .reserve_process_shared(component, bytes(10 * unit))
+        .unwrap_err();
+    assert!(matches!(
+        refusal,
+        ResidentMemoryAdmissionFailureV1::ObservedOverBudget {
+            high_watermark_bytes, ..
+        } if high_watermark_bytes == 90 * unit
+    ));
+    assert!(pressure.state().is_over_budget());
+    assert_eq!(
+        authority.lock_state().waiting_requests.get(&(90 * unit)),
+        Some(&(80 * unit))
+    );
+
+    drop(owned);
+    // No execution control or caller-supplied watermark participates: the
+    // operation must retain the constraint its own reserve just witnessed.
+    let demand = operation
+        .witnessed_reconstruction_requirement(authority.limit_bytes())
+        .unwrap()
+        .unwrap();
+    assert_eq!(demand.required_bytes(), u128::from(85 * unit));
+    assert_eq!(demand.ceiling, 95 * unit, "85@100 conjoined with 80@90");
+    sampled.store(12 * unit, Ordering::Release);
+    assert!(
+        authority
+            .headroom_below(authority.limit_bytes())
+            .available_bytes
+            >= 85 * unit,
+        "the historical hard-limit requirement alone would authorize replay"
+    );
+    assert!(!demand.can_retry());
+    assert!(
+        !pressure.state().is_over_budget(),
+        "latch clearing is insufficient"
+    );
+
+    let epoch = pressure.subscribe_headroom();
+    let before = *epoch.borrow();
+    authority.wait_for_headroom(unit, authority.limit_bytes());
+    pressure.sample_and_publish();
+    assert!(
+        *epoch.borrow() > before,
+        "an unrelated request became feasible"
+    );
+    assert!(!demand.can_retry());
+    let before = *epoch.borrow();
+    sampled.store(10 * unit, Ordering::Release);
+    pressure.sample_and_publish();
+    assert!(
+        *epoch.borrow() > before,
+        "the actual reconstruction now fits"
+    );
+    assert!(demand.can_retry());
+    assert!(
+        85 * unit > 90 * unit - sampled.load(Ordering::Acquire),
+        "max(bytes) at min(ceiling) would incorrectly keep this request parked"
+    );
+    assert!(authority.lock_state().waiting_requests.is_empty());
+}
+
+#[test]
+fn an_overflowing_reconstruction_requirement_stays_unretryable() {
+    let authority = operation_authority(u64::MAX);
+    let component = ResidentMemoryComponentIdV1::new("construction").unwrap();
+    let operation = authority.begin_operation();
+    let mut guard = operation
+        .reserve_process_shared(component, bytes(u64::MAX))
+        .unwrap();
+    assert!(
+        operation
+            .reserve_process_shared(component, bytes(1))
+            .is_err()
+    );
+    assert_eq!(
+        guard.try_grow(bytes(1)).unwrap_err(),
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling {
+            used_bytes: u64::MAX,
+            requested_bytes: 1,
+            limit_bytes: u64::MAX,
+        }
+    );
+    assert_eq!(guard.reserved_bytes(), u64::MAX);
+    let demand = operation
+        .witnessed_reconstruction_requirement(u64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(demand.required_bytes(), u128::from(u64::MAX) + 1);
+    drop(guard);
+    assert!(!demand.can_retry());
+    assert!(authority.lock_state().waiting_requests.is_empty());
+}
+
 fn cgroup_fixture(
     cgroup_membership: Option<&str>,
     memory_max: Option<&str>,
@@ -497,6 +1198,23 @@ fn process_reservations_sum_every_production_ledger_until_released() {
     );
     drop(two);
     drop(second);
+    assert_eq!(reserved(COMPONENT), 0);
+
+    let component = ResidentMemoryComponentIdV1::new(COMPONENT).unwrap();
+    let first_operation = first.begin_operation();
+    let second_operation = first.begin_operation();
+    let mut first_charge = first_operation
+        .reserve_process_shared(component, bytes(7))
+        .unwrap();
+    let second_charge = second_operation
+        .reserve_process_shared(component, bytes(11))
+        .unwrap();
+    assert_eq!(reserved(COMPONENT), 18);
+    first_charge.try_grow(bytes(3)).unwrap();
+    assert_eq!(reserved(COMPONENT), 21);
+    drop(first_charge);
+    assert_eq!(reserved(COMPONENT), 11);
+    drop(second_charge);
     assert_eq!(reserved(COMPONENT), 0);
 }
 
@@ -1853,4 +2571,52 @@ fn sized_admissions_share_the_watermark_without_charging_its_margin() {
     assert_eq!(authority.snapshot().used_bytes, 900);
     drop((reservations, maximum));
     assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn merged_reconstruction_requirements_preserve_each_admission_ceiling() {
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+        bytes(100),
+        Arc::new(|| None),
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(bytes(100), pressure));
+    let operation = authority.begin_operation();
+    let component = ResidentMemoryComponentIdV1::new("merged-construction").unwrap();
+    let held = operation
+        .reserve_process_shared(component, bytes(80))
+        .unwrap();
+    let first = operation
+        .witnessed_reconstruction_requirement(90)
+        .unwrap()
+        .unwrap();
+    let extra = operation
+        .reserve_process_shared(component, bytes(10))
+        .unwrap();
+    let second = operation
+        .witnessed_reconstruction_requirement(100)
+        .unwrap()
+        .unwrap();
+    drop((held, extra));
+    let merged = first.merge(second).unwrap();
+    let outside = authority
+        .reserve(
+            key("project", "worktree", "generation", "outside"),
+            bytes(10),
+        )
+        .unwrap();
+    assert_eq!(merged.required_bytes(), 90);
+    assert!(
+        merged.can_retry(),
+        "both original requirements fit beside ten bytes"
+    );
+    let more = authority
+        .reserve(
+            key("project", "worktree", "generation", "outside"),
+            bytes(1),
+        )
+        .unwrap();
+    assert!(!merged.can_retry());
+    drop(more);
+    assert!(merged.can_retry());
+    drop(outside);
 }
