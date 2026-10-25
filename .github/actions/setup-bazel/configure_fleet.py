@@ -60,7 +60,8 @@ build --dynamic_remote_strategy=remote
 # asupersync and other Rust crates use the fleet first. Do not race large
 # compilations on the hosted VM; local_resources does not cap rustc memory.
 build --strategy=Rustc=remote
-build --strategy=TestRunner=dynamic
+# Tag `local` requires the local strategy; dynamic-only cannot spawn those tests.
+build --strategy=TestRunner=dynamic,local
 build --bes_backend=grpc://ubuntu-main:1985
 build --bes_results_url=https://ubuntu-main.tail039078.ts.net/invocation/
 build --bes_timeout=30s

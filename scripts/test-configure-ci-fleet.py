@@ -58,7 +58,7 @@ class ConfigureCiFleetTest(unittest.TestCase):
             line for line in self.rc.read_text().splitlines() if "--strategy=" in line
         ]
         self.assertIn("build --strategy=Rustc=remote", strategies)
-        self.assertIn("build --strategy=TestRunner=dynamic", strategies)
+        self.assertIn("build --strategy=TestRunner=dynamic,local", strategies)
         self.assertEqual(self.output.read_text(), "enabled=true\n")
 
     def test_offline_executor_clears_previous_fleet_selection(self) -> None:
