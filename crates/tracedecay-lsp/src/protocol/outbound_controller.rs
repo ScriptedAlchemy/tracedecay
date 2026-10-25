@@ -318,6 +318,13 @@ where
     pub(super) fn discard_document_publications(&mut self, uri: &str) {
         self.discard_document_context(uri);
         self.invalidate_document_diagnostics(uri);
+        self.discard_queued_document_publications(uri);
+        self.lifecycle.control.remove_publication(uri);
+        self.diagnostics.published.remove(uri);
+    }
+
+    pub(super) fn discard_queued_document_publications(&mut self, uri: &str) {
+        let mut discarded = false;
         let mut retained = VecDeque::with_capacity(self.outbound.queue.len());
         let mut index = 0_usize;
         while let Some(frame) = self.outbound.queue.pop_front() {
@@ -329,6 +336,7 @@ where
                     .as_ref()
                     .is_some_and(|publication| publication.uri == uri)
             {
+                discarded = true;
                 self.outbound.queued_bytes = self
                     .outbound
                     .queued_bytes
@@ -338,8 +346,11 @@ where
             }
         }
         self.outbound.queue = retained;
-        self.lifecycle.control.remove_publication(uri);
-        self.diagnostics.published.remove(uri);
+        if discarded {
+            // A dropped queue entry was never acknowledged; a fresh identical
+            // report still needs delivery. Preserve already acknowledged dedupe.
+            self.lifecycle.control.remove_publication(uri);
+        }
     }
 
     pub(super) fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {

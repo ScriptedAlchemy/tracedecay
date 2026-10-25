@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use serde_json::{Value, json};
+use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::test_fixtures::digest;
 
 use super::{Feedback, Semantics};
@@ -21,7 +22,7 @@ use crate::overlay::{
 use crate::protocol::{DaemonLspProtocolSession, MAX_QUEUED_OUTBOUND_MESSAGES};
 use crate::provider::{
     DiagnosticRefreshAdmission, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort,
-    GenerationDiagnostics,
+    DiagnosticSnapshotValidation, GenerationDiagnostics,
 };
 use crate::session::AuthorizedLspWorkspace;
 use crate::workspace_diagnostics::{
@@ -75,9 +76,30 @@ struct DiagnosticAuthority {
     next_generation: Mutex<Option<u64>>,
     next_failure: Mutex<Option<&'static str>>,
     next_code: Mutex<Option<String>>,
+    authority_digest: Arc<Mutex<Option<ManifestDigest>>>,
+    validation_pending: Arc<AtomicBool>,
 }
 
 impl CanonicalDiagnosticSnapshotAuthority for DiagnosticAuthority {
+    fn current_authority(
+        &self,
+        _request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+        let digest = Arc::clone(&self.authority_digest);
+        let pending = Arc::clone(&self.validation_pending);
+        Box::pin(std::future::poll_fn(move |_| {
+            if pending.load(Ordering::SeqCst) {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(digest
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| tracedecay_domain::test_fixtures::digest('a'))))
+            }
+        }))
+    }
+
     fn refresh(
         &self,
         request: CanonicalDiagnosticRefreshRequest,
@@ -100,13 +122,19 @@ impl CanonicalDiagnosticSnapshotAuthority for DiagnosticAuthority {
             .overlay
             .as_ref()
             .map_or(0, |overlay| overlay.version);
+        let authority_digest = self
+            .authority_digest
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| digest('a'));
         Box::pin(async move {
             if let Some(failure) = failure {
                 return Err(LspRuntimeFailure::new(failure));
             }
             Ok(GenerationDiagnostics {
                 generation,
-                authority_digest: digest('a'),
+                authority_digest,
                 upstream: vec![GatewayDiagnostic {
                     uri: request.document_uri,
                     range: LspRange {
@@ -172,6 +200,17 @@ impl DiagnosticSnapshotPort for ControlledDiagnosticPort {
             .request_document_refresh(root, document_uri, overlay, source_generation)
     }
 
+    fn validate_document_snapshot(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+        snapshot: &GenerationDiagnostics,
+    ) -> DiagnosticSnapshotValidation {
+        self.adapter
+            .validate_document_snapshot(root, document_uri, overlay, snapshot)
+    }
+
     fn retire_document_refresh(
         &self,
         root: &AdmittedRoot,
@@ -188,6 +227,7 @@ struct Harness {
     runtime: Arc<ControlledRuntime>,
     authority: Arc<DiagnosticAuthority>,
     now_ms: u64,
+    message_duration_ms: u64,
     next_request_id: u64,
 }
 
@@ -228,6 +268,7 @@ impl Harness {
             runtime,
             authority,
             now_ms: 0,
+            message_duration_ms: 1,
             next_request_id: 1,
         };
         let mut capabilities = json!({
@@ -257,7 +298,7 @@ impl Harness {
     }
 
     fn send(&mut self, value: Value) -> Vec<Value> {
-        self.now_ms += 1;
+        self.now_ms += self.message_duration_ms;
         self.session
             .handle_payload(&serde_json::to_vec(&value).unwrap(), self.now_ms);
         self.messages()
@@ -484,6 +525,229 @@ fn save_refreshes_a_snapshot_even_when_the_overlay_version_is_unchanged() {
 }
 
 #[test]
+fn retained_reads_revalidate_authority_before_returning_unchanged() {
+    let mut harness = Harness::new(false);
+    harness.open(1);
+    harness.start_refresh();
+    harness.runtime.complete_next();
+    let old = assert_full(&harness.pull(None), 1, 1);
+    *harness.authority.authority_digest.lock().unwrap() = Some(digest('b'));
+    *harness.authority.next_generation.lock().unwrap() = Some(1);
+    let stale = harness.pull(Some(&old));
+    assert_eq!(stale["error"]["code"], -32802, "{stale}");
+    assert!(stale.get("result").is_none());
+    harness.runtime.complete_next();
+    let current = assert_full(&harness.pull(Some(&old)), 1, 1);
+    assert_ne!(current, old);
+    assert_eq!(harness.pull(Some(&current))["result"]["kind"], "unchanged");
+    assert_eq!(harness.runtime.started(), 2);
+}
+
+#[test]
+fn changed_authority_discards_queued_stale_publications() {
+    let mut harness = Harness::new(true);
+    harness.open(1);
+    harness.start_refresh();
+    harness.runtime.complete_next();
+    harness.session.flush_due(harness.now_ms);
+    *harness.authority.authority_digest.lock().unwrap() = Some(digest('b'));
+    let messages = harness.send(json!({
+        "jsonrpc": "2.0", "id": 999, "method": "textDocument/diagnostic",
+        "params": { "textDocument": { "uri": DOCUMENT } },
+    }));
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["id"] == 999 && message["error"]["code"] == -32802 }),
+        "{messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == DOCUMENT
+        }),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn pending_authority_validation_is_not_consumed_by_background_publication() {
+    let mut harness = Harness::new(false);
+    harness.open(1);
+    harness.start_refresh();
+    harness.runtime.complete_next();
+    let result = assert_full(&harness.pull(None), 1, 1);
+    harness
+        .authority
+        .validation_pending
+        .store(true, Ordering::SeqCst);
+    let pending = harness.pull(Some(&result));
+    assert_eq!(pending["error"]["code"], -32802, "{pending}");
+    assert!(pending.get("result").is_none());
+    harness.session.flush_due(harness.now_ms);
+    harness
+        .authority
+        .validation_pending
+        .store(false, Ordering::SeqCst);
+    harness.runtime.complete_next();
+    harness.session.flush_due(harness.now_ms);
+    assert_eq!(harness.pull(Some(&result))["result"]["kind"], "unchanged");
+    assert_eq!(harness.runtime.started(), 2);
+    assert_eq!(
+        harness.authority.generation.load(Ordering::SeqCst),
+        1,
+        "validation must not execute a new analyzer refresh"
+    );
+}
+
+#[test]
+fn dependency_changes_invalidate_retained_document_diagnostics() {
+    for (method, params) in [
+        (
+            "textDocument/didSave",
+            json!({ "textDocument": { "uri": "file:///root/b.rs" } }),
+        ),
+        (
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": "file:///root/b.rs", "version": 2 },
+                "contentChanges": [{ "text": "pub fn changed_dependency() {}" }],
+            }),
+        ),
+    ] {
+        let mut harness = Harness::new(false);
+        harness.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///root/b.rs", "languageId": "rust", "version": 1,
+                    "text": "pub fn dependency() {}",
+                },
+            }),
+        );
+        harness.open(1);
+        assert_eq!(harness.pull(None)["error"]["code"], -32802);
+        harness.runtime.complete_next();
+        let old_result = assert_full(&harness.pull(None), 1, 1);
+
+        harness.notify(method, params);
+        let pending = harness.pull(Some(&old_result));
+        assert_eq!(pending["error"]["code"], -32802, "{method}: {pending}");
+        assert!(pending.get("result").is_none());
+        while harness
+            .runtime
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|task| task.0.lock().unwrap().is_some())
+        {
+            harness.runtime.complete_next();
+        }
+        let generation = harness.authority.generation.load(Ordering::SeqCst);
+        let new_result = assert_full(&harness.pull(Some(&old_result)), generation, 1);
+        assert_ne!(new_result, old_result);
+        let started = harness.runtime.started();
+        assert_eq!(
+            harness.pull(Some(&new_result))["result"]["kind"],
+            "unchanged"
+        );
+        assert_eq!(harness.runtime.started(), started);
+    }
+}
+
+#[test]
+fn dependency_invalidation_retires_late_work_and_preserves_other_roots() {
+    let mut harness = Harness::new(false);
+    harness.notify(
+        "workspace/didChangeWorkspaceFolders",
+        json!({
+            "event": {
+                "added": [
+                    { "uri": "file:///other", "name": "other" },
+                    { "uri": "file:///root/nested", "name": "nested" },
+                ],
+                "removed": [],
+            },
+        }),
+    );
+    let mutation = harness.session.pending_workspace_folder_mutation().unwrap();
+    harness
+        .session
+        .apply_workspace_folder_mutation(
+            &mutation,
+            AuthorizedLspWorkspace::new(
+                Some(digest('d')),
+                vec![
+                    AdmittedRoot::authorized("file:///root", digest('b')),
+                    AdmittedRoot::authorized("file:///other", digest('e')),
+                    AdmittedRoot::authorized("file:///root/nested", digest('f')),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut unaffected = Vec::new();
+    for (index, uri) in ["file:///other/a.rs", "file:///root/nested/a.rs"]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(harness.pull_document(uri, None)["error"]["code"], -32802);
+        harness.runtime.complete_next();
+        let result = assert_full(&harness.pull_document(uri, None), index as u64 + 1, 0);
+        unaffected.push((uri, result));
+    }
+    harness.open(1);
+    assert_eq!(harness.pull(None)["error"]["code"], -32802);
+    harness.notify(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": "file:///root/b.rs" },
+        }),
+    );
+    assert_eq!(harness.pull(None)["error"]["code"], -32802);
+    // The first A operation finishes after B invalidated its ownership.
+    harness.runtime.complete_next();
+    let late = harness.pull(None);
+    assert_eq!(late["error"]["code"], -32802, "{late}");
+    assert!(late.get("result").is_none());
+    harness.runtime.complete_next();
+    harness.runtime.complete_next();
+    assert_full(&harness.pull(None), 5, 1);
+    for (uri, result) in unaffected {
+        assert_eq!(
+            harness.pull_document(uri, Some(&result))["result"]["kind"],
+            "unchanged"
+        );
+    }
+    assert_eq!(harness.runtime.started(), 5);
+}
+
+#[test]
+fn dependency_invalidation_discards_queued_stale_publications() {
+    let mut harness = Harness::new(true);
+    harness.open(1);
+    harness.start_refresh();
+    harness.runtime.complete_next();
+    harness.session.flush_due(harness.now_ms);
+    // Leave A's completed publication queued while the dependency changes.
+    let messages = harness.notify(
+        "textDocument/didSave",
+        json!({
+            "textDocument": { "uri": "file:///root/b.rs" },
+        }),
+    );
+    assert!(
+        !messages.iter().any(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == DOCUMENT
+        }),
+        "{messages:?}"
+    );
+    assert_eq!(harness.pull(None)["error"]["code"], -32802);
+}
+
+#[test]
 fn late_completion_cannot_answer_a_reopened_document_lifetime() {
     let mut harness = Harness::new(false);
     harness.open(1);
@@ -652,7 +916,7 @@ fn publication_backpressure_does_not_discard_a_completed_snapshot() {
             .session
             .has_outbound_capacity(crate::MAX_PUBLICATION_BYTES)
     );
-    harness.session.poll_diagnostic_refresh(DOCUMENT);
+    harness.session.poll_diagnostic_refresh(DOCUMENT, false);
     harness.messages();
 
     assert_full(&harness.pull(None), 1, 1);
@@ -801,11 +1065,18 @@ fn a_report_too_large_for_push_remains_available_to_pull_without_polling_again()
 #[test]
 fn open_document_snapshots_refuse_new_results_when_the_bound_is_owned() {
     let mut harness = Harness::new(false);
+    // Capacity admission is independent of time; all messages share one tick.
+    harness.message_duration_ms = 0;
     for index in 0..MAX_WORKSPACE_DIAGNOSTIC_RESULTS {
+        // Admit all overlays before computing reports: opening another file
+        // now correctly invalidates dependent reports in the same root.
         let uri = format!("file:///root/open-{index}.rs");
         harness.notify("textDocument/didOpen", json!({
             "textDocument": { "uri": uri, "languageId": "rust", "version": 1, "text": "fn a() {}" },
         }));
+    }
+    for index in 0..MAX_WORKSPACE_DIAGNOSTIC_RESULTS {
+        let uri = format!("file:///root/open-{index}.rs");
         assert_eq!(harness.pull_document(&uri, None)["error"]["code"], -32802);
         harness.runtime.complete_next();
         assert_full(&harness.pull_document(&uri, None), index as u64 + 1, 1);

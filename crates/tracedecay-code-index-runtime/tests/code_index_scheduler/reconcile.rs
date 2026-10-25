@@ -13514,3 +13514,229 @@ fn a_moved_commit_refuses_the_sealed_generation_despite_identical_bytes() {
         "the rebuilt generation must name the commit the checkout is on"
     );
 }
+
+mod diagnostic_authority {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+    use tracedecay_application::ProjectSourceAccessSnapshot;
+    use tracedecay_application::diagnostics_store::DiagnosticsStore;
+    use tracedecay_application::feedback::concrete::open_feedback_runtime;
+    use tracedecay_application::lsp_runtime::{
+        BrokerDiagnosticSnapshotAuthority, ConcreteFeedbackLspSource,
+        DiagnosticsStoreLspFeedbackProjection, LspCodeIndexProjectionIdentityPort,
+        LspTestRunProjectionPort, LspWorkspaceDocumentIndexPort, RegisteredProjectLspAuthority,
+    };
+    use tracedecay_domain::configuration::{
+        AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+    };
+    use tracedecay_domain::test_fixtures::{digest, id};
+    use tracedecay_domain::{ContentDigest, UtcMicros};
+    use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
+    use tracedecay_lsp::{
+        AdmittedRoot, CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
+        ContextProjectionOutcome, FeedbackCycleRequest, FeedbackCycleRuntimePort,
+        IndexedWorkspaceDocuments, LspRuntimeFailure, LspRuntimeFuture,
+    };
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+
+    use super::{
+        CodeIndexSchedulerRegistryV1, GitFixture, test_project_id, wait_for_generation_change,
+        wait_for_live_complete_generation,
+    };
+    use crate::code_index_scheduler::identity::resolved_scope_for_project;
+
+    // Currentness reads must not execute diagnostics, test runs, or workspace sweeps.
+    struct UnexpectedDiagnosticWork;
+
+    impl FeedbackCycleRuntimePort for UnexpectedDiagnosticWork {
+        fn execute(
+            &self,
+            _: FeedbackCycleRequest,
+        ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
+            panic!("authority validation must not execute a feedback cycle")
+        }
+    }
+
+    impl LspTestRunProjectionPort for UnexpectedDiagnosticWork {
+        fn snapshot(
+            &self,
+            _: AdmittedRoot,
+            _: Option<String>,
+            _: Option<ContentDigest>,
+        ) -> LspRuntimeFuture<ContextProjectionOutcome> {
+            panic!("authority validation must not execute tests")
+        }
+    }
+
+    impl LspWorkspaceDocumentIndexPort for UnexpectedDiagnosticWork {
+        fn indexed_documents(
+            &self,
+            _: AdmittedRoot,
+            _: usize,
+        ) -> LspRuntimeFuture<Result<IndexedWorkspaceDocuments, LspRuntimeFailure>> {
+            panic!("document authority validation must not enumerate the workspace")
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostic_authority_changes_when_an_unchanged_documents_dependency_is_published() {
+        let source = "pub fn alpha() -> u32 { 1 }\n";
+        let fixture = GitFixture::new(&[
+            ("src/lib.rs", source),
+            ("src/dependency.rs", "pub fn dependency() -> u32 { 1 }\n"),
+        ]);
+        let storage = TempDir::new().unwrap();
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                storage.path().join("index"),
+            )
+            .await
+            .unwrap();
+        let initial = wait_for_live_complete_generation(&registry, fixture.path()).await;
+        let initial_generation = initial.generation().manifest().generation_id.clone();
+        let scope = resolved_scope_for_project(fixture.path(), &test_project_id()).unwrap();
+        let database_path = storage.path().join("feedback.db");
+        crate::register_test_schema_installer();
+        let database_authority =
+            DatabaseAuthority::acquire_test(&database_path, "diagnostic authority publication")
+                .unwrap();
+        let (database, _guard) = Database::publish_test_runtime(
+            &database_path,
+            &database_authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let access = ProjectSourceAccessSnapshot {
+            scope: scope.clone(),
+            requester: id("actor.diagnostic-authority"),
+            binding: ScopeSourceBinding::new(
+                SourceBindingId::new("binding.diagnostic-authority").unwrap(),
+                SourceKindV1::Cursor,
+                id(digest('a').as_str()),
+                AuthorityRef::Project(scope.project_id.clone()),
+            )
+            .unwrap(),
+            configuration_revision: ConfigurationRevisionId::new(
+                "configuration.diagnostic-authority",
+            )
+            .unwrap(),
+            configuration_digest: digest('b'),
+            configuration_provenance_digest: digest('c'),
+            effective_capabilities: BTreeSet::new(),
+            grant_expires_at: UtcMicros(i64::MAX),
+        };
+        let runtime = Arc::new(
+            open_feedback_runtime(
+                database.clone(),
+                fixture.path(),
+                storage.path().join("handles"),
+                scope.clone(),
+                access,
+            )
+            .await
+            .unwrap(),
+        );
+        let project = Arc::new(
+            RegisteredProjectLspAuthority::new(
+                runtime.clone(),
+                Arc::new(registry.clone()),
+                Arc::new(UnexpectedDiagnosticWork),
+            )
+            .unwrap(),
+        );
+        let projection = Arc::new(DiagnosticsStoreLspFeedbackProjection::new(
+            Arc::new(DiagnosticsStore::new(database)),
+            project.clone(),
+        ));
+        let managed = Arc::new(ConcreteFeedbackLspSource::new(
+            runtime,
+            |_| Arc::new(UnexpectedDiagnosticWork),
+            project.clone(),
+            projection,
+            Arc::new(UnexpectedDiagnosticWork),
+        ));
+        let authority = BrokerDiagnosticSnapshotAuthority::new(
+            Arc::new(tokio::sync::Mutex::new(DiagnosticBroker::new_for_test(
+                fixture.path(),
+                Vec::new(),
+            ))),
+            project,
+            managed,
+            Duration::from_millis(1),
+        );
+        let request = CanonicalDiagnosticRefreshRequest {
+            root: AdmittedRoot::authorized(
+                url::Url::from_directory_path(fixture.path())
+                    .unwrap()
+                    .to_string(),
+                scope.scope_digest,
+            ),
+            document_uri: url::Url::from_file_path(fixture.path().join("src/lib.rs"))
+                .unwrap()
+                .to_string(),
+            overlay: None,
+            source_generation: None,
+            expected_content_digest: Some(ContentDigest::of_bytes(source.as_bytes())),
+            expected_code_generation_id: None,
+            expected_snapshot_digest: None,
+        };
+        let first = authority.current_authority(request.clone()).await.unwrap();
+        assert_eq!(
+            first,
+            authority.current_authority(request.clone()).await.unwrap()
+        );
+        fixture.edit("src/dependency.rs", "pub fn dependency() -> u32 { 2 }\n");
+        registry
+            .notify_hook_paths(fixture.path(), &["src/dependency.rs".to_owned()])
+            .await;
+        let successor =
+            wait_for_generation_change(&registry, fixture.path(), &initial_generation).await;
+        assert_ne!(successor, initial_generation);
+        wait_for_live_complete_generation(&registry, fixture.path()).await;
+        let identity = registry
+            .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
+            .await
+            .unwrap();
+        assert_eq!(
+            identity.document_content_digest,
+            request.expected_content_digest
+        );
+        assert_eq!(
+            authority
+                .current_authority(request.clone())
+                .await
+                .unwrap_err()
+                .class(),
+            "lsp-code-index-source-revision-unavailable"
+        );
+        fixture.commit_all("publish changed dependency");
+        registry
+            .notify_hook_paths(fixture.path(), &["src/dependency.rs".to_owned()])
+            .await;
+        wait_for_generation_change(&registry, fixture.path(), &successor).await;
+        wait_for_live_complete_generation(&registry, fixture.path()).await;
+        let second = authority.current_authority(request.clone()).await.unwrap();
+        assert_ne!(
+            first, second,
+            "unchanged A must observe the real successor containing changed B"
+        );
+        let mut stale = request;
+        stale.expected_code_generation_id = Some(initial_generation);
+        assert_eq!(
+            authority
+                .current_authority(stale)
+                .await
+                .unwrap_err()
+                .class(),
+            "managed-diagnostic-generation-stale"
+        );
+        registry.shutdown().await;
+    }
+}

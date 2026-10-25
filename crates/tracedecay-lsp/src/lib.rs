@@ -125,8 +125,8 @@ pub use provider::{
     AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,
     AnalyzerSupervisor, AnalyzerTransitionError, DiagnosticRefreshAdmission,
     DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort,
-    GenerationDiagnostics, MAX_ANALYZER_RESTARTS, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
-    UnavailableDiagnosticSnapshotProvider,
+    DiagnosticSnapshotValidation, GenerationDiagnostics, MAX_ANALYZER_RESTARTS,
+    MAX_DIAGNOSTIC_OPERATION_ID_BYTES, UnavailableDiagnosticSnapshotProvider,
 };
 pub use session::{
     AuthorizedLspSession, AuthorizedLspWorkspace, CancellationOutcome, CompletionDisposition,

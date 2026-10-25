@@ -8,16 +8,18 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 
+use futures_util::FutureExt;
+
 use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
 use tracedecay_daemon_protocol::ProcessLocalRequestSequence;
 use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
 
 use crate::diagnostics::{LspRange, PositionError};
 use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission, OperationPoll};
-use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner};
+use crate::gateway::{AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner};
 use crate::provider::{
     DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
-    DiagnosticSnapshotPort,
+    DiagnosticSnapshotPort, DiagnosticSnapshotValidation, GenerationDiagnostics,
 };
 use crate::session::AuthorizedLspWorkspace;
 use crate::workspace_diagnostics::WorkspaceDiagnosticSnapshotOutcome;
@@ -401,6 +403,11 @@ struct DiagnosticOperationKey {
     overlay_digest: Option<ContentDigest>,
 }
 
+enum DiagnosticValidationPreparation {
+    Completed(Result<bool, LspRuntimeFailure>),
+    IdentityExhausted,
+}
+
 pub struct DiagnosticSnapshotAdapter {
     runtime: Arc<dyn LspRuntimeSpawner>,
     authority: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
@@ -501,7 +508,16 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
                     target_generation: None,
                 };
                 let operation = Box::pin(async move {
-                    match authority.refresh(request).await {
+                    let refreshed = async {
+                        let diagnostics = authority.refresh(request.clone()).await?;
+                        let current = authority.current_authority(request).await?;
+                        if current != diagnostics.authority_digest {
+                            return Err(LspRuntimeFailure::new("diagnostic-authority-stale"));
+                        }
+                        Ok(diagnostics)
+                    }
+                    .await;
+                    match refreshed {
                         Ok(diagnostics) => DiagnosticSnapshotOutcome::Ready {
                             diagnostics,
                             completed_operation_id: Some(operation_id),
@@ -532,6 +548,90 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
             },
             Err(_) => DiagnosticRefreshAdmission::Rejected {
                 failure_class: "diagnostic-identity-exhausted".to_owned(),
+            },
+        }
+    }
+
+    fn validate_document_snapshot(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+        snapshot: &GenerationDiagnostics,
+    ) -> DiagnosticSnapshotValidation {
+        let key = Self::key(root, document_uri, overlay);
+        let admission = self.operations.admit_with(key, self.runtime.as_ref(), || {
+            // The table owns capacity before even the first poll. A ready read
+            // releases that permit without creating a task; a pending read keeps
+            // the same permit and cancellation ownership as a full refresh.
+            let mut current = self
+                .authority
+                .current_authority(CanonicalDiagnosticRefreshRequest {
+                    root: root.clone(),
+                    document_uri: document_uri.to_owned(),
+                    overlay: overlay.cloned(),
+                    source_generation: Some(snapshot.generation),
+                    expected_content_digest: overlay.map(|overlay| overlay.content_digest.clone()),
+                    expected_code_generation_id: None,
+                    expected_snapshot_digest: None,
+                });
+            if let Some(result) = current.as_mut().now_or_never() {
+                return Err(DiagnosticValidationPreparation::Completed(
+                    result.map(|digest| digest == snapshot.authority_digest),
+                ));
+            }
+            let operation_id = self
+                .next_operation
+                .next_string("lsp-diagnostic-")
+                .map_err(|_| DiagnosticValidationPreparation::IdentityExhausted)?;
+            let snapshot = snapshot.clone();
+            let identity = DiagnosticRefreshIdentity {
+                operation_id: operation_id.clone(),
+                source_generation: Some(snapshot.generation),
+                target_generation: None,
+            };
+            let operation = Box::pin(async move {
+                match current.await {
+                    Ok(digest) if digest == snapshot.authority_digest => {
+                        DiagnosticSnapshotOutcome::Ready {
+                            diagnostics: snapshot,
+                            completed_operation_id: Some(operation_id),
+                        }
+                    }
+                    Ok(_) => DiagnosticSnapshotOutcome::Partial {
+                        source_generation: Some(snapshot.generation),
+                        coverage: "refresh-required".to_owned(),
+                    },
+                    Err(error) => DiagnosticSnapshotOutcome::Failed {
+                        source_generation: Some(snapshot.generation),
+                        failure_class: error.class().to_owned(),
+                    },
+                }
+            }) as LspRuntimeFuture<DiagnosticSnapshotOutcome>;
+            Ok((identity, operation))
+        });
+        match admission {
+            Err(DiagnosticValidationPreparation::Completed(Ok(true))) => {
+                DiagnosticSnapshotValidation::Current
+            }
+            Err(DiagnosticValidationPreparation::Completed(Ok(false))) => {
+                DiagnosticSnapshotValidation::Changed
+            }
+            Err(DiagnosticValidationPreparation::Completed(Err(error))) => {
+                DiagnosticSnapshotValidation::Failed {
+                    failure_class: error.class().to_owned(),
+                }
+            }
+            Err(DiagnosticValidationPreparation::IdentityExhausted) => {
+                DiagnosticSnapshotValidation::Failed {
+                    failure_class: "diagnostic-identity-exhausted".to_owned(),
+                }
+            }
+            Ok(OperationAdmission::Started(identity) | OperationAdmission::Existing(identity)) => {
+                DiagnosticSnapshotValidation::Pending(identity)
+            }
+            Ok(OperationAdmission::Saturated) => DiagnosticSnapshotValidation::Failed {
+                failure_class: "diagnostic-capacity".to_owned(),
             },
         }
     }

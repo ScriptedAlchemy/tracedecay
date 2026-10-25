@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use tracedecay_domain::{ContentDigest, ManifestDigest};
 
 use crate::diagnostics::DiagnosticMerge;
@@ -5,7 +7,7 @@ use crate::gateway::{AdmittedRoot, FeedbackCyclePort, SemanticProviderPort};
 use crate::overlay::{OverlayLifetime, OverlaySnapshot};
 use crate::provider::{
     DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort,
-    GenerationDiagnostics,
+    DiagnosticSnapshotValidation, GenerationDiagnostics,
 };
 use crate::rpc::{DiagnosticSerializationCapabilities, diagnostic_value};
 use crate::workspace_diagnostics::{
@@ -13,7 +15,7 @@ use crate::workspace_diagnostics::{
 };
 
 use super::DaemonLspProtocolSession;
-use super::diagnostics_controller::PublishedDiagnostic;
+use super::diagnostics_controller::{PublishedDiagnostic, valid_refresh_identity};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct DiagnosticDocumentIdentity {
@@ -46,6 +48,7 @@ impl DiagnosticDocumentIdentity {
 pub(super) struct PendingDiagnosticRefresh {
     pub(super) identity: DiagnosticRefreshIdentity,
     pub(super) document: DiagnosticDocumentIdentity,
+    pub(super) validation_only: bool,
 }
 
 pub(super) struct RetainedDiagnosticSnapshot {
@@ -66,6 +69,7 @@ where
         root: &AdmittedRoot,
         uri: &str,
         overlay: Option<&OverlaySnapshot>,
+        for_pull: bool,
     ) -> DiagnosticSnapshotOutcome {
         let document = DiagnosticDocumentIdentity::new(
             root,
@@ -97,11 +101,58 @@ where
             DiagnosticSnapshotOutcome::Partial { ref coverage, .. }
                 if coverage == "refresh-required" =>
             {
-                return self
-                    .diagnostics
-                    .document_snapshots
-                    .get(uri)
-                    .map_or(outcome, |retained| retained.outcome.clone());
+                let Some(retained) = self.diagnostics.document_snapshots.get(uri) else {
+                    return outcome;
+                };
+                let DiagnosticSnapshotOutcome::Ready { diagnostics, .. } = &retained.outcome else {
+                    return retained.outcome.clone();
+                };
+                let source_generation = Some(diagnostics.generation);
+                let validation = self.diagnostics.provider.validate_document_snapshot(
+                    root,
+                    uri,
+                    overlay,
+                    diagnostics,
+                );
+                let outcome = match validation {
+                    DiagnosticSnapshotValidation::Current => return retained.outcome.clone(),
+                    DiagnosticSnapshotValidation::Changed => DiagnosticSnapshotOutcome::Partial {
+                        source_generation,
+                        coverage: "refresh-required".to_owned(),
+                    },
+                    DiagnosticSnapshotValidation::Pending(identity) => {
+                        if valid_refresh_identity(&identity, source_generation) {
+                            self.diagnostics.active_refreshes.insert(
+                                uri.to_owned(),
+                                PendingDiagnosticRefresh {
+                                    identity: identity.clone(),
+                                    document,
+                                    validation_only: for_pull,
+                                },
+                            );
+                            DiagnosticSnapshotOutcome::Refreshing(identity)
+                        } else {
+                            let _ = self.diagnostics.provider.retire_document_refresh(
+                                root,
+                                uri,
+                                &identity.operation_id,
+                            );
+                            DiagnosticSnapshotOutcome::Failed {
+                                source_generation,
+                                failure_class: "invalid-refresh-identity".to_owned(),
+                            }
+                        }
+                    }
+                    DiagnosticSnapshotValidation::Failed { failure_class } => {
+                        DiagnosticSnapshotOutcome::Failed {
+                            source_generation,
+                            failure_class,
+                        }
+                    }
+                };
+                self.diagnostics.document_snapshots.remove(uri);
+                self.discard_queued_document_publications(uri);
+                return outcome;
             }
             DiagnosticSnapshotOutcome::Ready {
                 mut diagnostics,
@@ -255,6 +306,28 @@ where
                 uri,
                 &pending.identity.operation_id,
             );
+        }
+    }
+
+    /// A dependency edit can invalidate any report in its admitted root. Route
+    /// each document through the workspace authority so nested roots stay isolated.
+    pub(super) fn invalidate_root_diagnostics(&mut self, root: &AdmittedRoot) {
+        let documents: BTreeSet<_> = self
+            .diagnostics
+            .document_snapshots
+            .keys()
+            .chain(self.diagnostics.active_refreshes.keys())
+            .chain(self.diagnostics.published.keys())
+            .filter(|uri| self.document_root(uri).is_ok_and(|owner| &owner == root))
+            .cloned()
+            .collect();
+        let invalidated = !documents.is_empty();
+        for uri in documents {
+            self.invalidate_document_diagnostics(&uri);
+            self.discard_queued_document_publications(&uri);
+        }
+        if invalidated {
+            self.queue_diagnostic_refresh();
         }
     }
 

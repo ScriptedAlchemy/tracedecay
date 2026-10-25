@@ -401,6 +401,15 @@ pub enum DiagnosticSnapshotOutcome {
     },
 }
 
+/// Currentness of a retained report, checked against its canonical authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiagnosticSnapshotValidation {
+    Current,
+    Changed,
+    Pending(DiagnosticRefreshIdentity),
+    Failed { failure_class: String },
+}
+
 /// Port implemented by a daemon/application adapter. It is a read projection;
 /// the session retains admitted reports only for its ephemeral lifetime. Refresh methods
 /// are non-blocking: the provider starts canonical upstream/compiler work and
@@ -425,6 +434,16 @@ pub trait DiagnosticSnapshotPort {
         DiagnosticRefreshAdmission::Rejected {
             failure_class: "refresh-unsupported".to_owned(),
         }
+    }
+
+    fn validate_document_snapshot(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _overlay: Option<&OverlaySnapshot>,
+        _snapshot: &GenerationDiagnostics,
+    ) -> DiagnosticSnapshotValidation {
+        DiagnosticSnapshotValidation::Changed
     }
 
     /// Releases one refresh's result ownership and requests task cancellation.
@@ -487,6 +506,16 @@ where
         source_generation: Option<u64>,
     ) -> DiagnosticRefreshAdmission {
         (**self).request_document_refresh(root, document_uri, overlay, source_generation)
+    }
+
+    fn validate_document_snapshot(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+        snapshot: &GenerationDiagnostics,
+    ) -> DiagnosticSnapshotValidation {
+        (**self).validate_document_snapshot(root, document_uri, overlay, snapshot)
     }
 
     fn retire_document_refresh(

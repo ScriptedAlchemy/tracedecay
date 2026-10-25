@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
+use tracedecay_domain::ManifestDigest;
 use tracedecay_lsp::analyzer::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
-    RefreshCommitOutcome,
+    DiagnosticsSnapshot, RefreshCommitOutcome,
 };
 use tracedecay_lsp::analyzer::client::{DiagnosticDocumentCoverage, LspDocument};
 use tracedecay_lsp::{
@@ -163,6 +164,29 @@ where
                 request,
             )
             .await
+        })
+    }
+
+    fn current_authority(
+        &self,
+        mut request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+        let broker = Arc::clone(&self.broker);
+        let documents = Arc::clone(&self.documents);
+        let managed = Arc::clone(&self.managed);
+        Box::pin(async move {
+            let document = documents.load_document(request.clone()).await?;
+            request.expected_content_digest = Some(tracedecay_domain::ContentDigest::of_bytes(
+                document.text.as_bytes(),
+            ));
+            let managed = managed.current_authority(request).await?;
+            let snapshot = broker.lock().await.snapshot();
+            let upstream = upstream_diagnostic_authority_digest(
+                &snapshot,
+                &document.language,
+                &document.relative_path,
+            )?;
+            merged_diagnostic_authority_digest(&upstream, &managed)
         })
     }
 
@@ -328,13 +352,8 @@ where
             "diagnostic-broker-coverage-incomplete",
         ));
     }
-    let upstream_authority_digest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.lsp.upstream-diagnostic-authority.v1",
-        &snapshot.settings,
-        &snapshot.settings_unavailable,
-        document_coverage,
-    ))
-    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))?;
+    let upstream_authority_digest =
+        upstream_diagnostic_authority_digest(&snapshot, &language, &relative_path)?;
     let upstream = snapshot
         .diagnostics
         .into_iter()
@@ -355,18 +374,44 @@ where
             "managed-diagnostic-generation-stale",
         ));
     }
-    let authority_digest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.lsp.merged-diagnostic-authority.v1",
-        upstream_authority_digest,
-        &managed.authority_digest,
-    ))
-    .map_err(|_| LspRuntimeFailure::new("diagnostic-authority-identity-unavailable"))?;
+    let authority_digest =
+        merged_diagnostic_authority_digest(&upstream_authority_digest, &managed.authority_digest)?;
     Ok(GenerationDiagnostics {
         generation: managed.generation,
         authority_digest,
         upstream,
         tracedecay: managed.diagnostics,
     })
+}
+
+fn upstream_diagnostic_authority_digest(
+    snapshot: &DiagnosticsSnapshot,
+    language: &str,
+    relative_path: &str,
+) -> Result<ManifestDigest, LspRuntimeFailure> {
+    let coverage = snapshot
+        .coverage
+        .get(language)
+        .and_then(|coverage| coverage.documents.get(relative_path));
+    tracedecay_domain::canonical_sha256(&(
+        "tracedecay.lsp.upstream-diagnostic-authority.v1",
+        &snapshot.settings,
+        &snapshot.settings_unavailable,
+        coverage,
+    ))
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))
+}
+
+fn merged_diagnostic_authority_digest(
+    upstream: &ManifestDigest,
+    managed: &ManifestDigest,
+) -> Result<ManifestDigest, LspRuntimeFailure> {
+    tracedecay_domain::canonical_sha256(&(
+        "tracedecay.lsp.merged-diagnostic-authority.v1",
+        upstream,
+        managed,
+    ))
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-authority-identity-unavailable"))
 }
 
 fn broker_diagnostic(document_uri: &str, diagnostic: CodeDiagnostic) -> GatewayDiagnostic {
@@ -487,6 +532,13 @@ mod tests {
     struct FixedManagedDiagnostics;
 
     impl ManagedDiagnosticSnapshotPort for FixedManagedDiagnostics {
+        fn current_authority(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+            Box::pin(async { Ok(digest('c')) })
+        }
+
         fn snapshot(
             &self,
             _request: CanonicalDiagnosticRefreshRequest,
@@ -535,6 +587,13 @@ mod tests {
     struct MismatchedManagedDiagnostics;
 
     impl ManagedDiagnosticSnapshotPort for MismatchedManagedDiagnostics {
+        fn current_authority(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+            Box::pin(async { Ok(digest('c')) })
+        }
+
         fn snapshot(
             &self,
             _request: CanonicalDiagnosticRefreshRequest,
