@@ -49,6 +49,9 @@ use super::{
 };
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::resident_memory::{
+    ResidentMemoryReconstructionDemandFailureV1, ResidentMemoryReconstructionDemandV1,
+};
 
 #[cfg(test)]
 mod cold_read_wake_tests;
@@ -1670,24 +1673,276 @@ struct PendingWakeStateV1 {
 /// fits it) is its retry through the headroom wake.
 #[derive(Default)]
 struct MemoryRefusalRetryV1 {
-    /// Work is parked on resident memory. A reader's wake cannot help until
-    /// memory is given back, so readers do not wake the worker meanwhile.
-    waiting: AtomicBool,
+    state: Mutex<MemoryRefusalRetryStateV1>,
+}
+
+#[derive(Default)]
+struct MemoryRefusalRetryStateV1 {
+    waiting: bool,
+    reconstruction: Option<(u64, ResidentMemoryReconstructionDemandV1)>,
 }
 
 impl MemoryRefusalRetryV1 {
     fn wait(&self) {
-        self.waiting.store(true, Ordering::Release);
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waiting = true;
     }
 
-    /// The work landed, or a memory pass is re-checking; readers may wake the
-    /// worker again.
-    fn reset(&self) {
-        self.waiting.store(false, Ordering::Release);
+    fn finish_auxiliary_wait(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A predecessor's text or graph work can finish while a successor's
+        // discarded construction still awaits its complete requirement.
+        state.waiting = state.reconstruction.is_some();
+    }
+
+    fn finish_reconstruction(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reconstruction = None;
+    }
+
+    fn begin_retry(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waiting = false;
     }
 
     fn waiting(&self) -> bool {
-        self.waiting.load(Ordering::Acquire)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waiting
+    }
+
+    fn record_memory_refusal(
+        &self,
+        epoch: &AtomicU64,
+        error: &CodeIndexSchedulerErrorV1,
+    ) -> Result<bool, ResidentMemoryReconstructionDemandFailureV1> {
+        match error {
+            CodeIndexSchedulerErrorV1::ReconstructionMemoryRefused {
+                demand,
+                source_epoch,
+                ..
+            } => self.arm_reconstruction(epoch, *source_epoch, demand.clone()),
+            CodeIndexSchedulerErrorV1::PreparedPublicationRefused { .. } => {
+                self.finish_reconstruction();
+                self.wait();
+                Ok(false)
+            }
+            _ => {
+                self.wait();
+                Ok(false)
+            }
+        }
+    }
+
+    fn arm_reconstruction(
+        &self,
+        epoch: &AtomicU64,
+        expected: u64,
+        demand: ResidentMemoryReconstructionDemandV1,
+    ) -> Result<bool, ResidentMemoryReconstructionDemandFailureV1> {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if epoch.load(Ordering::Acquire) != expected {
+                return Ok(false);
+            }
+            let demand = match state.reconstruction.take() {
+                Some((previous_epoch, previous)) if previous_epoch == expected => {
+                    previous.merge(demand)?
+                }
+                _ => demand,
+            };
+            state.waiting = true;
+            state.reconstruction = Some((expected, demand));
+        }
+        // A fitting release may have arrived before the refusal became
+        // visible. Arm and evaluate immediately, rather than requiring a new
+        // sample or a second unrelated owner release.
+        Ok(self.allow_reconstruction(epoch))
+    }
+
+    fn allow_reconstruction(&self, source_epoch: &AtomicU64) -> bool {
+        let requirement = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let live_epoch = source_epoch.load(Ordering::Acquire);
+            match state.reconstruction.as_ref() {
+                Some((expected, _)) if *expected != live_epoch => {
+                    state.reconstruction = None;
+                    state.waiting = false;
+                    None
+                }
+                Some((_, requirement)) => Some(requirement.clone()),
+                None => None,
+            }
+        };
+        requirement.is_none_or(|requirement| requirement.can_retry())
+    }
+}
+
+#[cfg(test)]
+mod reconstruction_retry_tests {
+    use super::*;
+    use std::num::NonZeroU64;
+    use tracedecay_runtime_core::resident_memory::{
+        ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryPressureV1,
+    };
+
+    fn bytes(value: u64) -> NonZeroU64 {
+        NonZeroU64::new(value).unwrap()
+    }
+
+    #[test]
+    fn reconstruction_gate_preserves_quiescence_across_unrelated_and_banked_wakes() {
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(100),
+            Arc::new(|| None),
+        ));
+        let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+            bytes(100),
+            Arc::clone(&pressure),
+        ));
+        let component = ResidentMemoryComponentIdV1::new("test-construction").unwrap();
+        let mut outside = memory.reserve_process_shared(component, bytes(20)).unwrap();
+        let operation = memory.begin_operation();
+        let held = operation
+            .reserve_process_shared(component, bytes(70))
+            .unwrap();
+        operation
+            .reserve_process_shared(component, bytes(20))
+            .unwrap_err();
+        let demand = operation
+            .witnessed_reconstruction_requirement(100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(demand.required_bytes(), 90);
+        drop(held);
+        let epoch = AtomicU64::new(0);
+        let retry = MemoryRefusalRetryV1::default();
+        assert!(!retry.arm_reconstruction(&epoch, 0, demand).unwrap());
+        assert!(!retry.allow_reconstruction(&epoch));
+        memory.wait_for_headroom(5, 100);
+        outside.shrink_to(19).unwrap();
+        assert!(
+            !retry.allow_reconstruction(&epoch),
+            "an unrelated waiter cannot admit reconstruction"
+        );
+        retry.begin_retry();
+        assert!(
+            !retry.allow_reconstruction(&epoch),
+            "a banked memory permit cannot erase the requirement"
+        );
+        retry.finish_auxiliary_wait();
+        assert!(
+            retry.waiting(),
+            "finishing predecessor work preserves successor waiting"
+        );
+        assert!(
+            !retry.allow_reconstruction(&epoch),
+            "predecessor completion cannot erase successor demand"
+        );
+        drop(outside);
+        assert!(retry.allow_reconstruction(&epoch));
+        retry.finish_reconstruction();
+        retry.finish_auxiliary_wait();
+        assert!(!retry.waiting());
+    }
+
+    #[test]
+    fn refusal_uses_its_actual_control_epoch_without_erasing_a_newer_demand() {
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(100),
+            Arc::new(|| None),
+        ));
+        let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(bytes(100), pressure));
+        let component = ResidentMemoryComponentIdV1::new("test-nested-construction").unwrap();
+        let outside = memory.reserve_process_shared(component, bytes(20)).unwrap();
+        let operation = memory.begin_operation();
+        let held = operation
+            .reserve_process_shared(component, bytes(70))
+            .unwrap();
+        operation
+            .reserve_process_shared(component, bytes(20))
+            .unwrap_err();
+        let demand = operation
+            .witnessed_reconstruction_requirement(100)
+            .unwrap()
+            .unwrap();
+        drop(held);
+        let current = AtomicU64::new(1);
+        let retry = MemoryRefusalRetryV1::default();
+        let old = CodeIndexSchedulerErrorV1::ReconstructionMemoryRefused {
+            detail: "an older source attempt".to_owned(),
+            source_epoch: 0,
+            demand: demand.clone(),
+        };
+        assert!(!retry.record_memory_refusal(&current, &old).unwrap());
+        assert!(
+            !retry.waiting(),
+            "retired input cannot install waiting state"
+        );
+        let successor = CodeIndexSchedulerErrorV1::ReconstructionMemoryRefused {
+            detail: "the actual successor attempt".to_owned(),
+            source_epoch: 1,
+            demand,
+        };
+        assert!(!retry.record_memory_refusal(&current, &successor).unwrap());
+        assert!(!retry.record_memory_refusal(&current, &old).unwrap());
+        retry.finish_auxiliary_wait();
+        assert!(retry.waiting());
+        assert!(!retry.allow_reconstruction(&current));
+        drop(outside);
+        assert!(retry.allow_reconstruction(&current));
+    }
+
+    #[test]
+    fn reconstruction_gate_catches_prior_releases_and_never_reinstalls_an_old_source() {
+        let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(
+            bytes(100),
+            Arc::new(|| None),
+        ));
+        let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(bytes(100), pressure));
+        let component = ResidentMemoryComponentIdV1::new("test-construction-race").unwrap();
+        let outside = memory.reserve_process_shared(component, bytes(20)).unwrap();
+        let operation = memory.begin_operation();
+        let held = operation
+            .reserve_process_shared(component, bytes(70))
+            .unwrap();
+        operation
+            .reserve_process_shared(component, bytes(20))
+            .unwrap_err();
+        let demand = operation
+            .witnessed_reconstruction_requirement(100)
+            .unwrap()
+            .unwrap();
+        drop((held, outside));
+        let epoch = AtomicU64::new(0);
+        let retry = MemoryRefusalRetryV1::default();
+        assert!(
+            retry.arm_reconstruction(&epoch, 0, demand.clone()).unwrap(),
+            "a release before arming needs no second event"
+        );
+        epoch.store(1, Ordering::Release);
+        assert!(retry.allow_reconstruction(&epoch));
+        assert!(!retry.arm_reconstruction(&epoch, 0, demand).unwrap());
+        assert!(
+            retry.allow_reconstruction(&epoch),
+            "the retired pass cannot gate new source"
+        );
     }
 }
 

@@ -7,6 +7,9 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use ignore::WalkBuilder;
 use serde::Serialize;
@@ -263,6 +266,9 @@ fn build_generation(
     }
     let content_identity = content_digest(&identity.finalize());
     let request = CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot: SanitizedCodeSnapshotV1 {
             repository: id("repository.partitioned-codec")?,
             worktree: None,
@@ -297,10 +303,14 @@ fn build_generation(
         MemorySealedPublicationStoreV1::default(),
     )?;
     let published = owner.build_and_publish(request, &ActiveControl)?;
-    let generation = published
-        .decoded()
-        .ok_or("a build without a parent runs cold")?;
-    Ok(Arc::clone(generation))
+    let reader = published.sealed_generation().segment_reader();
+    Ok(Arc::new(
+        CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+            published.manifest_bytes(),
+            &SharedDecodedContentPoolV1::default(),
+            |request, buffer| reader(request, buffer),
+        )?,
+    ))
 }
 
 fn production_config() -> Result<CodeIndexProductionConfigV1, Box<dyn Error>> {

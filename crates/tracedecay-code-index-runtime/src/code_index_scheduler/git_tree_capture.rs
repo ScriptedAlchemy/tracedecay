@@ -656,6 +656,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_bytes: _retained_bytes,
             retained_reservations: _retained_reservations,
         } = captured;
+        drop(_retained_bytes);
         let requested_scope = CodeIndexGenerationScopeV1::for_snapshot(&snapshot);
         // Retained-history generations live inside the active publication
         // pointer, so they need an active generation to ride on. A store with
@@ -698,6 +699,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let generation = owner
             .build_and_publish(
                 CodeIndexBuildRequestV1 {
+                    resident_memory: Arc::clone(&self.resident_memory),
                     snapshot,
                     captured_files,
                     changed_files: changed_paths,
