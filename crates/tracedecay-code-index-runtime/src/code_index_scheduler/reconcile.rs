@@ -42,8 +42,8 @@ use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
     RESIDENT_OWNER_IDLE_WINDOW_V1, ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1, ResidentMemoryReservationV1, ResidentOwnersV1,
-    detected_process_resident_memory_limit_v1,
+    ResidentMemoryKeyV1, ResidentMemoryReconstructionDemandV1, ResidentMemoryReservationV1,
+    ResidentOwnersV1, detected_process_resident_memory_limit_v1,
 };
 
 use tracedecay_code_index::{
@@ -53,9 +53,10 @@ use tracedecay_code_index::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
         CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
-        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-        CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1,
-        CodeIndexRepositoryParseIdentityV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
+        CodeIndexPreparationPort, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
+        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedBuildV1,
+        CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+        CodeIndexSealedGenerationV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
         VerifiedSealedTextGenerationMetadataV1,
     },
 };
@@ -65,7 +66,7 @@ use super::freshness_witness::{
     SourceSweepCacheV1,
 };
 use super::git_tree_capture::{CapturedFileOutcomeV1, CapturedFileRosterV1};
-use super::publication_store::GenerationDecodeBudgetV1;
+use super::publication_store::{GenerationDecodeBudgetV1, UnpublishedCodeIndexPublicationV1};
 use super::{
     CodeGraphActivationStateV1, CodeGraphReplayBindingV1, CodeIndexBuildProgressSlotStateV1,
     CodeIndexBuildProgressSlotV1, CodeIndexBuildProgressStateV1, CodeIndexHintPolicyV1,
@@ -270,6 +271,16 @@ pub enum CodeIndexSchedulerErrorV1 {
     IgnoredDependency(#[from] CodeIndexIgnoredDependencyRefusalV1),
     #[error("code-index worker resident-memory admission refused: {0}")]
     WorkerMemoryAdmission(#[from] ResidentMemoryAdmissionFailureV1),
+    #[error("code-index reconstruction resident-memory admission refused: {detail}")]
+    ReconstructionMemoryRefused {
+        detail: String,
+        source_epoch: u64,
+        demand: ResidentMemoryReconstructionDemandV1,
+    },
+    #[error("code-index prepared publication awaits commit: {error}")]
+    PreparedPublicationRefused {
+        error: CodeIndexPublicationStoreErrorV1,
+    },
     #[error("code-index retained-source resident-memory admission refused: {0}")]
     SnapshotMemoryAdmission(ResidentMemoryAdmissionFailureV1),
     #[error("code-index retained-source resident-memory capacity is unavailable")]
@@ -320,6 +331,8 @@ impl CodeIndexSchedulerErrorV1 {
             | Self::PublicationConflict(_)
             | Self::IgnoredDependency(_)
             | Self::WorkerMemoryAdmission(_)
+            | Self::ReconstructionMemoryRefused { .. }
+            | Self::PreparedPublicationRefused { .. }
             | Self::SnapshotMemoryAdmission(_)
             | Self::SnapshotMemoryCapacityUnavailable
             | Self::WorkerPlan(_) => false,
@@ -442,7 +455,9 @@ impl CodeIndexSchedulerErrorV1 {
             self,
             Self::Production(CodeIndexProductionErrorV1::Publication(
                 CodeIndexPublicationStoreErrorV1::StoreLockContended,
-            ))
+            )) | Self::PreparedPublicationRefused {
+                error: CodeIndexPublicationStoreErrorV1::StoreLockContended
+            }
         )
     }
 
@@ -450,6 +465,11 @@ impl CodeIndexSchedulerErrorV1 {
     /// opposed to a held store lock or a graph operation budget.
     pub(crate) fn is_resident_memory_refusal(&self) -> bool {
         match self {
+            Self::ReconstructionMemoryRefused { .. } => true,
+            Self::PreparedPublicationRefused { error } => matches!(
+                error,
+                CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_)
+            ),
             Self::WorkerMemoryAdmission(failure) | Self::SnapshotMemoryAdmission(failure) => {
                 failure.is_observed_over_budget()
                     || failure.requested_bytes() <= failure.limit_bytes()
@@ -974,7 +994,7 @@ pub struct CodeIndexWorktreeSchedulerV1 {
     /// Process resident-memory authority artifact builds and readers reserve
     /// through. Standalone opens get a private default-limit authority; the
     /// registry rebinds its shared process authority at mount.
-    resident_memory: Arc<ProcessResidentMemoryV1>,
+    pub(super) resident_memory: Arc<ProcessResidentMemoryV1>,
     /// Retained owners an artifact build sheds before its reservation is
     /// refused. Standalone opens get a private empty inventory; the registry
     /// rebinds its inventory at mount.
@@ -1476,26 +1496,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<ResidentMemoryReservationV1, CodeIndexSchedulerErrorV1> {
         let _workers = self.ensure_worker_plan()?;
         let planned_workers = tracedecay_code_index::parallelism::indexing_workers();
-        // Planned from the view admission refuses against: a width the
-        // process cannot hold is refused on every retry.
-        let remaining = self
-            .resident_memory
-            .headroom_below(u64::MAX)
-            .available_bytes;
-        // The process-global worker plan may have been installed against a
-        // larger authority (standalone seed using detected host RAM). This
-        // scheduler's remaining bytes are a different authority: the 6 GiB
-        // default still has to leave the typed non-worker headroom that
-        // `memory_safe_worker_count` already models. Capping to
-        // `remaining / 128MiB` spends that headroom as extra workers, so a
-        // later 31-byte snapshot charge sees used==limit. A remainder that
-        // cannot admit one memory-safe worker still requests one so
-        // admission produces the canonical denial.
-        let affordable_workers =
-            tracedecay_code_index::parallelism::memory_safe_worker_count(remaining);
-        let workers = planned_workers.min(affordable_workers);
+        // This is the pool that will execute the pass. Refuse its actual
+        // scratch demand rather than charging a narrower plan we do not run.
         let requested_bytes = NonZeroU64::new(
-            tracedecay_code_index::parallelism::worker_reservation_bytes(workers.max(1)),
+            tracedecay_code_index::parallelism::worker_reservation_bytes(planned_workers.max(1)),
         )
         .ok_or_else(|| {
             CodeIndexSchedulerErrorV1::Identity(
@@ -1506,6 +1510,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
         let generation_id = CodeGenerationId::new("code-index-worker-active")
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        // A previously installed executor does not replan before each pass.
+        // Admission must still observe current process pressure before it
+        // reserves that executor's actual scratch demand.
+        self.resident_memory.pressure().sample_and_publish();
         self.resident_memory
             .reserve(
                 ResidentMemoryKeyV1 {
@@ -1592,7 +1600,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Checkpoints read that cell directly. The maintenance sampler's cadence
     /// is longer than a linked-worktree capture, so a fence that only watched
     /// epoch and shutdown kept allocating until the cgroup kill line.
-    fn reconcile_control(&self) -> DaemonCodeIndexControlV1 {
+    pub(super) fn reconcile_control(&self) -> DaemonCodeIndexControlV1 {
         DaemonCodeIndexControlV1::new(Arc::clone(&self.epoch), Arc::clone(&self.shutting_down))
             .with_resident_memory(Arc::clone(self.resident_memory.pressure()))
     }
@@ -1745,6 +1753,44 @@ impl CodeIndexWorktreeSchedulerV1 {
             clone_stale_invalidations: Some(clone_stale_invalidations),
             clone_body_changes_observed: Some(clone_body_changes_observed),
             overflow_reconciled,
+        }
+    }
+
+    fn commit_pending_publication(
+        &self,
+        mut pending: UnpublishedCodeIndexPublicationV1,
+        control: DaemonCodeIndexControlV1,
+    ) -> Result<CodeIndexPublishedBuildV1, CodeIndexSchedulerErrorV1> {
+        let mut store = self
+            .publication
+            .clone()
+            .with_reconcile_publication_fence(Arc::clone(&self.hints), control);
+        match store.commit(&mut pending.preparation, &pending.publication) {
+            Ok(bytes) => {
+                let sealed =
+                    CodeIndexSealedGenerationV1::new(bytes, pending.preparation.segment_reader());
+                CodeIndexPublishedBuildV1::new(pending.publication, sealed).map_err(Into::into)
+            }
+            Err(error) => {
+                if matches!(
+                    error,
+                    CodeIndexPublicationStoreErrorV1::Unavailable(_)
+                        | CodeIndexPublicationStoreErrorV1::StoreLockContended
+                        | CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_)
+                ) {
+                    self.publication.restore_unpublished(pending);
+                }
+                if matches!(
+                    error,
+                    CodeIndexPublicationStoreErrorV1::Unavailable(_)
+                        | CodeIndexPublicationStoreErrorV1::StoreLockContended
+                        | CodeIndexPublicationStoreErrorV1::ResidentMemoryRefused(_)
+                ) {
+                    Err(CodeIndexSchedulerErrorV1::PreparedPublicationRefused { error })
+                } else {
+                    Err(CodeIndexProductionErrorV1::Publication(error).into())
+                }
+            }
         }
     }
 
@@ -2084,13 +2130,13 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn republish_unpublished_retained_generation(
         &mut self,
     ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        let Some(pointer) = self
-            .publication
-            .read_publication_pointer()
-            .map_err(CodeIndexProductionErrorV1::Publication)?
-        else {
-            return Ok(None);
-        };
+        if let Some((preparation, publication)) = self.owner.take_unpublished() {
+            self.publication
+                .restore_unpublished(UnpublishedCodeIndexPublicationV1 {
+                    preparation,
+                    publication,
+                });
+        }
         let Some(pending) = self.publication.take_unpublished() else {
             return Ok(None);
         };
@@ -2102,19 +2148,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         };
         if !resolved.authorizes_reuse_of(&self.identity) {
-            self.publication.restore_unpublished(pending);
             return Err(CodeIndexSchedulerErrorV1::Identity(
                 "worktree identity changed under the scheduler".to_owned(),
             ));
         }
         self.identity = resolved;
-        let _worker_memory = match self.reserve_incremental_rebuild_memory() {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                self.publication.restore_unpublished(pending);
-                return Err(error);
-            }
-        };
         let capture = match self.capture_retained_reconcile_attempt() {
             Ok(Some(capture)) => capture,
             Ok(None) => {
@@ -2133,22 +2171,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             git_metadata,
             stat_signature,
         } = capture;
-        if pending.snapshot().reference != captured.snapshot.reference
-            || pending.snapshot().source_revision != captured.snapshot.source_revision
-            || pending.snapshot().content_identity != captured.snapshot.content_identity
+        if pending.publication.snapshot().reference != captured.snapshot.reference
+            || pending.publication.snapshot().source_revision != captured.snapshot.source_revision
+            || pending.publication.snapshot().content_identity != captured.snapshot.content_identity
         {
             return Ok(None);
         }
-        let scope = CodeIndexGenerationScopeV1::for_snapshot(pending.snapshot());
         let began_under = control.expected_epoch();
-        let mut publication = self
-            .publication
-            .for_undecoded_active_rebuild(&pointer)
-            .with_reconcile_publication_fence(Arc::clone(&self.hints), control);
-        let manifest_bytes = publication
-            .publish_atomically(&scope, None, &pending)
-            .map_err(CodeIndexProductionErrorV1::Publication)?;
-        let generation = CodeIndexPublishedBuildV1::new(pending, manifest_bytes)?;
+        let generation = self.commit_pending_publication(pending, control)?;
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         self.mark_reconciled_state(
             git_metadata.clone(),
@@ -2319,7 +2349,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         }
 
-        let _worker_memory = self.reserve_incremental_rebuild_memory()?;
         let Some(capture) = self.capture_retained_reconcile_attempt()? else {
             return Ok(None);
         };
@@ -2336,7 +2365,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         metadata: &VerifiedSealedTextGenerationMetadataV1,
         witness: Option<RestoreFreshnessWitnessV1>,
     ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        let _worker_memory = self.reserve_incremental_rebuild_memory()?;
         let Some(capture) = self.capture_retained_reconcile_attempt()? else {
             return Ok(None);
         };
@@ -2432,9 +2460,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             let reextracted_files = captured.changed_paths.len();
             self.freshness_fence.note_successor_build();
             let pending = self.publication.take_unpublished().filter(|pending| {
-                pending.snapshot().reference == captured.snapshot.reference
-                    && pending.snapshot().source_revision == captured.snapshot.source_revision
-                    && pending.snapshot().content_identity == captured.snapshot.content_identity
+                pending.publication.snapshot().reference == captured.snapshot.reference
+                    && pending.publication.snapshot().source_revision
+                        == captured.snapshot.source_revision
+                    && pending.publication.snapshot().content_identity
+                        == captured.snapshot.content_identity
             });
             let publication = self
                 .publication
@@ -2445,34 +2475,52 @@ impl CodeIndexWorktreeSchedulerV1 {
                 // only the durable write. Republish it without a second
                 // whole-store extract, isolated graph-off retries otherwise
                 // miss their deadline waiting on a cold parser warmup.
-                let scope = CodeIndexGenerationScopeV1::for_snapshot(&captured.snapshot);
-                let mut publication = publication;
-                let manifest_bytes = publication
-                    .publish_atomically(&scope, None, &pending)
-                    .map_err(CodeIndexProductionErrorV1::Publication)?;
-                CodeIndexPublishedBuildV1::new(pending, manifest_bytes)?
+                self.commit_pending_publication(pending, control.clone())?
             } else {
+                let _worker_memory = self.reserve_incremental_rebuild_memory()?;
                 let mut owner =
                     CodeIndexProductionOwnerV1::new(self.production_config.clone(), publication)
                         .map_err(|error| {
                             CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string())
                         })?
                         .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
-                owner
-                    .build_and_publish(
-                        CodeIndexBuildRequestV1 {
-                            snapshot: captured.snapshot,
-                            captured_files: captured.captured_files,
-                            changed_files: captured.changed_paths,
-                            invalidations: BTreeSet::new(),
-                            repository_parse_identity: captured.repository_parse_identity,
-                            ignored_source_admissions: Vec::new(),
-                            sealed_at: now_micros(),
-                            target_projection_key: projection_key()?,
-                        },
+                captured.retained_bytes.clear();
+                let result = owner.build_and_publish(
+                    CodeIndexBuildRequestV1 {
+                        resident_memory: Arc::clone(&self.resident_memory),
+                        snapshot: captured.snapshot,
+                        captured_files: captured.captured_files,
+                        changed_files: captured.changed_paths,
+                        invalidations: BTreeSet::new(),
+                        repository_parse_identity: captured.repository_parse_identity,
+                        ignored_source_admissions: Vec::new(),
+                        sealed_at: now_micros(),
+                        target_projection_key: projection_key()?,
+                    },
+                    &control,
+                );
+                let retained_publication =
+                    if let Some((preparation, publication)) = owner.take_unpublished() {
+                        self.publication
+                            .restore_unpublished(UnpublishedCodeIndexPublicationV1 {
+                                preparation,
+                                publication,
+                            });
+                        true
+                    } else {
+                        false
+                    };
+                let requirement = owner.take_reconstruction_requirement();
+                result.map_err(|error| {
+                    discarded_construction_refusal(
+                        error,
                         &control,
+                        requirement,
+                        retained_publication,
+                        std::iter::once(&_worker_memory).chain(&captured.retained_reservations),
+                        self.resident_memory.admission_watermark_bytes(),
                     )
-                    .map_err(|error| prefer_resident_memory_refusal(&control, error.into()))?
+                })?
             };
             self.require_reusable_publication(&generation)?;
             self.latest_content_identity = Some(snapshot_content_identity);
@@ -3051,8 +3099,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             let mut source_manifest = SourceContentManifestV1::for_snapshot(&captured.snapshot);
             let mut reextracted_files = captured.changed_paths.len();
             self.freshness_fence.note_successor_build();
+            captured.retained_bytes.clear();
+            *self.owner.publication_mut() = self
+                .publication
+                .clone()
+                .with_reconcile_publication_fence(Arc::clone(&self.hints), control.clone());
             let mut generation = self.owner.build_and_publish(
                 CodeIndexBuildRequestV1 {
+                    resident_memory: Arc::clone(&self.resident_memory),
                     snapshot: captured.snapshot,
                     captured_files: captured.captured_files,
                     changed_files: captured.changed_paths,
@@ -3078,8 +3132,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                 snapshot_content_identity = captured.snapshot.content_identity.clone();
                 source_manifest = SourceContentManifestV1::for_snapshot(&captured.snapshot);
                 reextracted_files = captured.changed_paths.len();
+                captured.retained_bytes.clear();
                 generation = self.owner.build_and_publish(
                     CodeIndexBuildRequestV1 {
+                        resident_memory: Arc::clone(&self.resident_memory),
                         snapshot: captured.snapshot,
                         captured_files: captured.captured_files,
                         changed_files: captured.changed_paths,
@@ -3092,10 +3148,34 @@ impl CodeIndexWorktreeSchedulerV1 {
                     &control,
                 );
             }
+            let retained_publication =
+                if let Some((preparation, publication)) = self.owner.take_unpublished() {
+                    self.publication
+                        .restore_unpublished(UnpublishedCodeIndexPublicationV1 {
+                            preparation,
+                            publication,
+                        });
+                    true
+                } else {
+                    false
+                };
+            let requirement = self.owner.take_reconstruction_requirement();
+            let generation = generation.map_err(|error| {
+                discarded_construction_refusal(
+                    error,
+                    &control,
+                    requirement,
+                    retained_publication,
+                    std::iter::once(&_worker_memory).chain(&captured.retained_reservations),
+                    self.resident_memory.admission_watermark_bytes(),
+                )
+            });
             let generation = match generation {
                 Ok(generation) => generation,
-                Err(CodeIndexProductionErrorV1::Interrupted(
-                    tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+                Err(CodeIndexSchedulerErrorV1::Production(
+                    CodeIndexProductionErrorV1::Interrupted(
+                        tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+                    ),
                 )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire) =>
                 {
@@ -3103,12 +3183,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                     std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
                     continue;
                 }
-                Err(error) if control.refused_by_resident_memory() => {
-                    return Err(prefer_resident_memory_refusal(&control, error.into()));
-                }
-                Err(CodeIndexProductionErrorV1::Input(
+                Err(CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Input(
                     CodeIndexInputErrorV1::NoExtractableFiles,
-                )) => {
+                ))) => {
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
                     self.mark_reconciled(source_manifest, control.expected_epoch());
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
@@ -3116,7 +3193,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                         overflow_reconciled,
                     }));
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             self.require_reusable_publication(&generation)?;
             self.latest_content_identity = Some(snapshot_content_identity);
@@ -3620,15 +3697,12 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     /// Bind one decoded generation to this scheduler's per-generation serving
     /// derivations, so every reader of the same generation shares one build.
-    /// The decoded form of `published` for serving: a cold build already
-    /// holds it, a sparse successor is decoded from the store.
+    /// Decode the published generation through the canonical resident-memory
+    /// admission and serving cache, independently of how it was constructed.
     pub(super) fn decoded_publication(
         &self,
         published: &CodeIndexPublishedBuildV1,
     ) -> Result<Arc<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        if let Some(generation) = published.decoded() {
-            return Ok(Arc::clone(generation));
-        }
         let generation_id = &published.manifest().generation_id;
         self.publication
             .load_generation(generation_id)?
@@ -4416,6 +4490,47 @@ fn resident_memory_refused_reconcile() -> CodeIndexSchedulerErrorV1 {
             "measured process RSS is over the admission watermark".to_owned(),
         ),
     ))
+}
+
+/// Capture exact replay charges while worker and source guards still exist.
+/// Prepared publication failures carry no reconstruction demand: their bytes
+/// remain owned and only final commit will be retried.
+pub(super) fn discarded_construction_refusal<'r>(
+    error: CodeIndexProductionErrorV1,
+    control: &DaemonCodeIndexControlV1,
+    requirement: Option<ResidentMemoryReconstructionDemandV1>,
+    retained_publication: bool,
+    discarded: impl IntoIterator<Item = &'r ResidentMemoryReservationV1>,
+    watermark: u64,
+) -> CodeIndexSchedulerErrorV1 {
+    let error = prefer_resident_memory_refusal(control, error.into());
+    if retained_publication {
+        return match error {
+            CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
+                error,
+            )) => CodeIndexSchedulerErrorV1::PreparedPublicationRefused { error },
+            error => error,
+        };
+    }
+    if !error.is_resident_memory_refusal() {
+        return error;
+    }
+    let Some(requirement) = requirement else {
+        return error;
+    };
+    let requirement = if control.refused_by_resident_memory() {
+        requirement.below_ceiling(watermark)
+    } else {
+        requirement
+    };
+    match requirement.including_discarded_reservations(discarded) {
+        Ok(demand) => CodeIndexSchedulerErrorV1::ReconstructionMemoryRefused {
+            detail: error.to_string(),
+            source_epoch: control.expected_epoch(),
+            demand,
+        },
+        Err(failure) => CodeIndexSchedulerErrorV1::Identity(failure.to_string()),
+    }
 }
 
 /// A checkpoint that stopped for RSS is a capacity refusal. Shutdown and a

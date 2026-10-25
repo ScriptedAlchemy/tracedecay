@@ -290,6 +290,7 @@ fn typescript_calls_on_computed_receivers_make_callers_partial() {
     let mut gaps = graph
         .generation
         .unresolved_import_calls()
+        .expect("canonical import calls resolve")
         .into_iter()
         .map(|gap| {
             let span = gap.evidence_span.start_byte as usize..gap.evidence_span.end_byte as usize;

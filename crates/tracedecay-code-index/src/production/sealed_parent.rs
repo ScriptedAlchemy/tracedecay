@@ -7,7 +7,8 @@
 //! reads.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, OnceLock};
+use tracedecay_runtime_core::resident_memory::ResidentMemoryOperationV1;
 
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, FileOccurrenceId, ManifestDigest,
@@ -22,7 +23,9 @@ use super::partitioned_codec::{
     decode_file_segment, decode_generation_evidence, parse_partitioned_manifest,
 };
 use super::resolution_index::ResolutionIndexReaderV1;
-use super::resolution_view::ResolutionFileV1;
+use super::resolution_view::{
+    CompactFileResolutionV1, ResolutionFileFactsV1, ResolutionFileV1, resolution_source_bytes,
+};
 use super::sealed_codec::{FileScopeIdentityV1, restore_file_pages};
 use super::{
     ChunkPolicyRevisionSummaryV1, CodeIndexGenerationStatisticsV1, CodeIndexProductionErrorV1,
@@ -65,12 +68,122 @@ impl CodeIndexSealedGenerationV1 {
         &self.manifest_bytes
     }
 
+    pub fn segment_reader(&self) -> Arc<SealedSegmentReaderV1> {
+        Arc::clone(&self.read_segment)
+    }
+
     /// The authenticated manifest, snapshot, and statistics this generation
     /// seals, parsed without decoding any segment.
     pub fn metadata(
         &self,
     ) -> Result<VerifiedSealedTextGenerationMetadataV1, CodeIndexProductionErrorV1> {
         CodeIndexPublishedGenerationV1::partitioned_text_metadata(&self.manifest_bytes)
+    }
+}
+
+/// A cold build's canonical file segments before its final manifest exists.
+/// The source borrows the real generation identity; it creates no parent or
+/// provisional sealed manifest and never retains a decoded file.
+pub(super) struct StagedFileSourceV1<'a> {
+    manifest: &'a CodeGenerationManifestV1,
+    snapshot: &'a SanitizedCodeSnapshotV1,
+    files: &'a [PartitionedFileSegmentDescriptorV1],
+    read: Arc<SealedSegmentReaderV1>,
+    scope: FileScopeIdentityV1,
+}
+
+impl<'a> StagedFileSourceV1<'a> {
+    pub(super) fn new(
+        manifest: &'a CodeGenerationManifestV1,
+        snapshot: &'a SanitizedCodeSnapshotV1,
+        files: &'a [PartitionedFileSegmentDescriptorV1],
+        read: Arc<SealedSegmentReaderV1>,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        let mut previous = None;
+        for descriptor in files {
+            let file = snapshot
+                .files
+                .get(descriptor.file_key as usize)
+                .ok_or_else(|| contract("staged file segment is outside its snapshot"))?;
+            if file.disposition != tracedecay_domain::SnapshotFileDispositionV1::Present
+                || file.file_occurrence_id != descriptor.file_occurrence_id
+                || previous.is_some_and(|key| key >= descriptor.file_key)
+            {
+                return Err(contract(
+                    "staged file descriptors disagree with their snapshot",
+                ));
+            }
+            previous = Some(descriptor.file_key);
+        }
+        if snapshot
+            .files
+            .iter()
+            .filter(|file| {
+                file.disposition == tracedecay_domain::SnapshotFileDispositionV1::Present
+            })
+            .count()
+            != files.len()
+        {
+            return Err(contract(
+                "staged file descriptors do not cover every present file",
+            ));
+        }
+        Ok(Self {
+            manifest,
+            snapshot,
+            files,
+            read,
+            scope: FileScopeIdentityV1::of(manifest, snapshot),
+        })
+    }
+
+    pub(super) fn decode_file(
+        &self,
+        file_key: u32,
+    ) -> Result<Arc<FileGenerationArtifactsV1>, CodeIndexProductionErrorV1> {
+        let index = self
+            .files
+            .binary_search_by_key(&file_key, |file| file.file_key)
+            .map_err(|_| contract("staged source has no such present file"))?;
+        let descriptor = &self.files[index];
+        let snapshot_file = self
+            .snapshot
+            .files
+            .get(file_key as usize)
+            .ok_or_else(|| contract("staged file key is outside its snapshot"))?;
+        let mut bytes = Vec::new();
+        (self.read)(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &descriptor.segment_digest,
+                size_bytes: descriptor.segment_size_bytes,
+            },
+            &mut bytes,
+        )?;
+        let mut restored = Vec::new();
+        let page = decode_file_segment(
+            descriptor,
+            &self.manifest.generation_id,
+            &self.manifest.snapshot_digest,
+            &self.scope,
+            &bytes,
+            &mut restored,
+        )?;
+        let file = restore_file_pages(vec![page])?
+            .pop()
+            .ok_or_else(|| contract("staged file segment restored no file"))?;
+        if file.authority.logical_path != snapshot_file.logical_path
+            || file.authority.content_digest != snapshot_file.content_digest
+            || snapshot_file
+                .language
+                .as_ref()
+                .map(|language| language.as_str())
+                != Some(file.extraction.language.as_str())
+        {
+            return Err(contract(
+                "staged file segment disagrees with its source snapshot",
+            ));
+        }
+        Ok(file)
     }
 }
 
@@ -299,54 +412,27 @@ fn contract(message: &str) -> CodeIndexProductionErrorV1 {
     CodeIndexProductionErrorV1::Contract(message.to_owned())
 }
 
-/// The first decode failure a lazy view recorded.
-#[derive(Default)]
-pub(super) struct DecodeFailureV1(Mutex<Option<CodeIndexProductionErrorV1>>);
-
-impl DecodeFailureV1 {
-    pub(super) fn record(&self, error: CodeIndexProductionErrorV1) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(error);
-    }
-
-    pub(super) fn take(&self) -> Option<CodeIndexProductionErrorV1> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
-    }
-}
-
-/// One file of a successor generation as resolution reads it: its path and
-/// language from the successor's snapshot, and its artifacts either already
-/// decoded or decoded from the parent's carried segment the first time
-/// resolution reads them.
+/// One successor file retains only binding facts for this resolution pass.
+/// Its parent bytes are read fallibly at the first operation that needs them.
 pub(super) struct SparseFileV1<'p> {
     logical_path: &'p str,
     language: &'p str,
-    artifacts: SparseArtifactsV1<'p>,
+    facts: OnceLock<ChargedResolutionFactsV1>,
+    source: Option<SparseFileSourceV1<'p>>,
 }
 
-enum SparseArtifactsV1<'p> {
-    Decoded(Arc<FileGenerationArtifactsV1>),
-    Carried {
-        decoded: OnceLock<Arc<FileGenerationArtifactsV1>>,
-        source: SparseFileSourceV1<'p>,
-    },
+struct ChargedResolutionFactsV1 {
+    facts: CompactFileResolutionV1,
+    _memory: super::ConstructionMemoryV1,
 }
 
-/// Where a carried file's artifacts decode from, and what stands in when
-/// that decode fails.
 pub(super) struct SparseFileSourceV1<'p> {
     pub(super) parent: &'p SealedParentGenerationV1,
     pub(super) descriptor: &'p PartitionedFileSegmentDescriptorV1,
     pub(super) file_occurrence_id: &'p FileOccurrenceId,
     pub(super) generation_id: &'p CodeGenerationId,
     pub(super) snapshot_digest: &'p ManifestDigest,
-    /// An already decoded file a failed decode is read as. The failure is
-    /// recorded in `failure` and the build refuses before it publishes, so
-    /// nothing derived from the stand-in is sealed.
-    pub(super) stand_in: &'p Arc<FileGenerationArtifactsV1>,
-    pub(super) failure: &'p DecodeFailureV1,
+    pub(super) construction_operation: ResidentMemoryOperationV1,
 }
 
 impl<'p> SparseFileV1<'p> {
@@ -354,12 +440,33 @@ impl<'p> SparseFileV1<'p> {
         logical_path: &'p str,
         language: &'p str,
         artifacts: Arc<FileGenerationArtifactsV1>,
-    ) -> Self {
-        Self {
+        construction_operation: ResidentMemoryOperationV1,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        let mut memory = super::ConstructionMemoryV1::new(construction_operation)?;
+        let facts =
+            CompactFileResolutionV1::from_file(&artifacts, &mut |bytes| memory.resize(bytes))?;
+        drop(artifacts);
+        // Edited artifacts own these shared symbol records throughout the
+        // resolution; this view owns only its handles and copied rows.
+        let bytes = facts
+            .retained_bytes()
+            .saturating_sub(facts.owned_symbol_bytes());
+        let bytes = u64::try_from(bytes).map_err(|_| contract("resolution facts exceed u64"))?;
+        if bytes > memory.charged_bytes {
+            return Err(contract(
+                "resolution facts exceed their admitted clone bound",
+            ));
+        }
+        memory.resize(bytes)?;
+        Ok(Self {
             logical_path,
             language,
-            artifacts: SparseArtifactsV1::Decoded(artifacts),
-        }
+            facts: OnceLock::from(ChargedResolutionFactsV1 {
+                facts,
+                _memory: memory,
+            }),
+            source: None,
+        })
     }
 
     pub(super) fn carried(
@@ -370,45 +477,13 @@ impl<'p> SparseFileV1<'p> {
         Self {
             logical_path,
             language,
-            artifacts: SparseArtifactsV1::Carried {
-                decoded: OnceLock::new(),
-                source,
-            },
+            facts: OnceLock::new(),
+            source: Some(source),
         }
     }
 
-    /// The artifacts, when they are decoded already.
-    pub(super) fn loaded(&self) -> Option<&Arc<FileGenerationArtifactsV1>> {
-        match &self.artifacts {
-            SparseArtifactsV1::Decoded(artifacts) => Some(artifacts),
-            SparseArtifactsV1::Carried { decoded, .. } => decoded.get(),
-        }
-    }
-
-    pub(super) fn artifacts(&self) -> &Arc<FileGenerationArtifactsV1> {
-        match &self.artifacts {
-            SparseArtifactsV1::Decoded(artifacts) => artifacts,
-            SparseArtifactsV1::Carried { decoded, source } => decoded.get_or_init(|| match source
-                .parent
-                .decode_file(
-                    source.descriptor,
-                    source.file_occurrence_id,
-                    source.generation_id,
-                    source.snapshot_digest,
-                ) {
-                Ok(file) => file,
-                Err(error) => {
-                    source.failure.record(error);
-                    Arc::clone(source.stand_in)
-                }
-            }),
-        }
-    }
-}
-
-impl AsRef<FileGenerationArtifactsV1> for SparseFileV1<'_> {
-    fn as_ref(&self) -> &FileGenerationArtifactsV1 {
-        self.artifacts()
+    pub(super) fn loaded(&self) -> Option<&CompactFileResolutionV1> {
+        self.facts.get().map(|charged| &charged.facts)
     }
 }
 
@@ -416,8 +491,50 @@ impl ResolutionFileV1 for SparseFileV1<'_> {
     fn logical_path(&self) -> &str {
         self.logical_path
     }
-
     fn language(&self) -> &str {
         self.language
+    }
+    fn binding(&self) -> Result<&dyn ResolutionFileFactsV1, CodeIndexProductionErrorV1> {
+        if let Some(facts) = self.facts.get() {
+            return Ok(&facts.facts);
+        }
+        let source = self
+            .source
+            .as_ref()
+            .ok_or_else(|| contract("a successor file has no binding source"))?;
+        let file = source.parent.decode_file(
+            source.descriptor,
+            source.file_occurrence_id,
+            source.generation_id,
+            source.snapshot_digest,
+        )?;
+        let source_bytes = u64::try_from(resolution_source_bytes(&file)?)
+            .map_err(|_| contract("resolution source exceeds u64"))?;
+        let mut memory = super::ConstructionMemoryV1::new(source.construction_operation.clone())?;
+        let facts = CompactFileResolutionV1::from_file(&file, &mut |copies| {
+            let overlap = source_bytes
+                .checked_add(copies)
+                .ok_or_else(|| contract("resolution source/clone overlap exceeds u64"))?;
+            memory.resize(overlap)
+        })?;
+        drop(file);
+        let retained = u64::try_from(facts.retained_bytes())
+            .map_err(|_| contract("resolution facts exceed u64"))?;
+        if retained > memory.charged_bytes {
+            return Err(contract(
+                "resolution facts exceed their admitted source/clone bound",
+            ));
+        }
+        memory.resize(retained)?;
+        // Concurrent reads can prepare the same immutable facts; only the
+        // winning compact value remains and every full decode drops here.
+        let _ = self.facts.set(ChargedResolutionFactsV1 {
+            facts,
+            _memory: memory,
+        });
+        self.facts
+            .get()
+            .map(|charged| &charged.facts as &dyn ResolutionFileFactsV1)
+            .ok_or_else(|| contract("a successor file did not retain its binding facts"))
     }
 }

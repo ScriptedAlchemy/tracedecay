@@ -8,6 +8,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::content_digest;
@@ -15,21 +18,19 @@ use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, build_sealed_code_graph_rows, code_graph_projection_identity,
 };
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
+    CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
     CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-    CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1, SealedGenerationFileWindowsV1,
+    MemorySealedPublicationStoreV1, SealedGenerationFileWindowsV1,
     SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
     SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
 };
 use tracedecay_domain::test_fixtures::id;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, FileOccurrenceId, LanguageId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
-    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
-    UtcMicros,
+    ChunkerRevision, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1, RepositoryDirtyStateV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
 };
 use tracedecay_graph_db::{GraphGenerationRowSpill, GraphNamespace, GraphProjectorRevision};
 
@@ -68,34 +69,14 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 /// The counters are process-wide, so measurements run one at a time.
 static MEASUREMENT: Mutex<()> = Mutex::new(());
 
-/// Seals each generation and keeps none of it: these measurements count what
-/// a build and its decode hold, not what a store holds.
-#[derive(Default)]
-struct Publication;
-
-impl CodeIndexAtomicPublicationPort for Publication {
-    fn load_active(
-        &self,
-        _scope: &CodeIndexGenerationScopeV1,
-    ) -> Result<Option<CodeIndexSealedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        Ok(None)
-    }
-
-    fn publish_atomically(
-        &mut self,
-        _scope: &CodeIndexGenerationScopeV1,
-        _expected_active_generation: Option<&CodeGenerationId>,
-        generation: &CodeIndexSealedPublicationV1,
-    ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
-        generation
-            .encode(None, |_| Ok(()))
-            .map(Arc::from)
-            .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))
-    }
-}
-
-fn decoded(built: &CodeIndexPublishedBuildV1) -> &CodeIndexPublishedGenerationV1 {
-    built.decoded().expect("a build without a parent runs cold")
+fn decoded(built: &CodeIndexPublishedBuildV1) -> CodeIndexPublishedGenerationV1 {
+    let reader = built.sealed_generation().segment_reader();
+    CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        built.manifest_bytes(),
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| reader(request, buffer),
+    )
+    .expect("published generation decodes")
 }
 
 struct Active;
@@ -153,6 +134,9 @@ fn request(files: usize) -> CodeIndexBuildRequestV1 {
         )));
     }
     CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot: SanitizedCodeSnapshotV1 {
             repository: id::<RepositoryId>("repository.accounting"),
             worktree: None,
@@ -277,18 +261,19 @@ fn decode(manifest: &[u8], segments: &BTreeMap<String, Vec<u8>>) -> CodeIndexPub
 fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
     const PEAK_BUDGET_BYTES: usize = 19_000_000;
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
-    let built = CodeIndexProductionOwnerV1::new(config(), Publication)
-        .expect("owner")
-        .build_and_publish(request(300), &Active)
-        .expect("build");
-    let (manifest, segments) = seal(decoded(&built));
+    let built =
+        CodeIndexProductionOwnerV1::new(config(), MemorySealedPublicationStoreV1::default())
+            .expect("owner")
+            .build_and_publish(request(300), &Active)
+            .expect("build");
+    let generation = decoded(&built);
+    let (manifest, segments) = seal(&generation);
     // One worker reads four files per window, so the 300-file fixture spans
     // 75 windows the way a production corpus spans its windows.
     tracedecay_code_index::parallelism::force_indexing_workers_for_test(1);
-    let bound = decoded(&built)
-        .graph_build_bound()
-        .expect("graph build bound");
-    let retained = usize::try_from(decoded(&built).retained_bytes()).expect("retained");
+    let bound = generation.graph_build_bound().expect("graph build bound");
+    let retained = usize::try_from(generation.retained_bytes()).expect("retained");
+    drop(generation);
     drop(built);
     let scratch = tempfile::tempdir().expect("scratch");
     let projection =
@@ -333,28 +318,31 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
 }
 
 #[test]
-fn a_full_build_leaves_live_only_what_its_generation_charges() {
+fn a_published_generation_decode_leaves_live_only_what_its_generation_charges() {
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
     // Grammars and extractor registries initialize once per process.
     drop(
-        CodeIndexProductionOwnerV1::new(config(), Publication)
+        CodeIndexProductionOwnerV1::new(config(), MemorySealedPublicationStoreV1::default())
             .expect("owner")
             .build_and_publish(request(300), &Active)
             .expect("warm build"),
     );
 
-    let before = LIVE.load(Ordering::Relaxed);
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), Publication).expect("owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), MemorySealedPublicationStoreV1::default())
+            .expect("owner");
     let built = owner
         .build_and_publish(request(300), &Active)
         .expect("build");
+    // Durable segment ownership is established before measuring the decode.
+    let before = LIVE.load(Ordering::Relaxed);
+    let generation = decoded(&built);
     let live = LIVE.load(Ordering::Relaxed) - before;
-    let retained = usize::try_from(decoded(&built).retained_bytes()).expect("retained");
-    eprintln!("ACCOUNTING full build live {live} retained {retained}");
+    let retained = usize::try_from(generation.retained_bytes()).expect("retained");
     assert_eq!(owner.retained_parse_stats().initial_parses, 300);
     assert!(
         live * 10 <= retained * 11,
-        "a full build left {live} bytes live but its generation charges {retained}"
+        "a published generation decode left {live} bytes live but its generation charges {retained}"
     );
 }
 
@@ -365,26 +353,29 @@ fn a_full_build_leaves_live_only_what_its_generation_charges() {
 fn a_dropped_generation_leaves_nothing_once_the_pool_drops_its_dead_entries() {
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
     drop(
-        CodeIndexProductionOwnerV1::new(config(), Publication)
+        CodeIndexProductionOwnerV1::new(config(), MemorySealedPublicationStoreV1::default())
             .expect("owner")
             .build_and_publish(request(300), &Active)
             .expect("warm build"),
     );
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config(), Publication)
-        .expect("owner")
-        .with_physical_artifact_pool(pool.clone());
-
     let before = LIVE.load(Ordering::Relaxed);
-    drop(
-        owner
-            .build_and_publish(request(300), &Active)
-            .expect("build"),
-    );
+    {
+        let mut owner =
+            CodeIndexProductionOwnerV1::new(config(), MemorySealedPublicationStoreV1::default())
+                .expect("owner")
+                .with_physical_artifact_pool(pool.clone());
+        drop(
+            owner
+                .build_and_publish(request(300), &Active)
+                .expect("build"),
+        );
+        // Release the sole fixture store along with the owner; only the
+        // process-lifetime pool's weak entries remain in this measurement.
+    }
     let pinned = LIVE.load(Ordering::Relaxed).saturating_sub(before);
     pool.release_dead_entries();
     let left = LIVE.load(Ordering::Relaxed).saturating_sub(before);
-    eprintln!("ACCOUNTING dead entries pinned {pinned} left {left}");
     assert_eq!(pool.stats().resident, 0);
     assert!(
         pinned >= 300 * 512,
@@ -399,20 +390,19 @@ fn a_dropped_generation_leaves_nothing_once_the_pool_drops_its_dead_entries() {
 #[test]
 fn retained_bytes_account_for_what_a_decode_leaves_live() {
     let _measurement = MEASUREMENT.lock().unwrap_or_else(PoisonError::into_inner);
-    let built = CodeIndexProductionOwnerV1::new(config(), Publication)
-        .expect("owner")
-        .build_and_publish(request(300), &Active)
-        .expect("build");
-    let (manifest, segments) = seal(decoded(&built));
+    let built =
+        CodeIndexProductionOwnerV1::new(config(), MemorySealedPublicationStoreV1::default())
+            .expect("owner")
+            .build_and_publish(request(300), &Active)
+            .expect("build");
+    let (manifest, segments) = seal(&decoded(&built));
     drop(built);
 
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
     let decoded = decode(&manifest, &segments);
     let live = LIVE.load(Ordering::Relaxed) - before;
-    eprintln!("ACCOUNTING peak {}", PEAK.load(Ordering::Relaxed) - before);
     let retained = usize::try_from(decoded.retained_bytes()).expect("retained");
-    eprintln!("ACCOUNTING live {live} retained {retained}");
     assert!(
         retained * 10 >= live * 9 && retained * 10 <= live * 11,
         "a decode left {live} bytes live but retained_bytes() reports {retained}"

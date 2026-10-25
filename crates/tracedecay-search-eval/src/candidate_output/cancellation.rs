@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::Path;
 use std::{collections::BTreeSet, sync::Arc};
+use tracedecay_runtime_core::resident_memory::{
+    ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
+};
 
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
@@ -60,6 +63,9 @@ pub(super) fn prove_cancellation(
         omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot,
         captured_files: captured,
         changed_files: BTreeSet::new(),

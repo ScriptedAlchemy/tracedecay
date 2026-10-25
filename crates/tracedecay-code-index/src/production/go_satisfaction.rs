@@ -14,10 +14,11 @@ use tracedecay_domain::{
 
 use crate::chunks::CodeIndexUnresolvedReferenceV1;
 
-use super::FileGenerationArtifactsV1;
+use super::CodeIndexProductionErrorV1;
 use super::helpers::edge_order;
 use super::module_resolution::ModuleImportIndexV1;
-use super::resolution_view::ResolutionFileV1;
+use super::resolution_view::ResolutionMemoryChangeV1;
+use super::resolution_view::{ResolutionFileFactsV1, ResolutionFileV1};
 use super::typescript_resolution::split_parent;
 
 #[derive(Default)]
@@ -61,11 +62,10 @@ struct GoFileV1<'a> {
     aliases: HashMap<&'a str, TypeKeyV1<'a>>,
 }
 
-fn package_scope(file: &FileGenerationArtifactsV1) -> Cow<'_, str> {
-    let dir = split_parent(file.authority.logical_path.as_str()).0;
+fn package_scope(file: &dyn ResolutionFileFactsV1) -> Cow<'_, str> {
+    let dir = split_parent(file.logical_path()).0;
     let package = file
-        .artifacts
-        .symbols
+        .symbols()
         .iter()
         .find(|symbol| symbol.kind == NodeKind::GoPackage.as_str())
         .map(|symbol| symbol.simple_name.as_str());
@@ -167,21 +167,28 @@ struct EffectiveV1<'a> {
     reason: Option<String>,
 }
 
-pub(super) fn go_satisfaction<T>(
+pub(super) fn go_satisfaction<T: ResolutionFileV1>(
     files: &[T],
     modules: &ModuleImportIndexV1<'_, T>,
-) -> GoSatisfactionV1
-where
-    T: ResolutionFileV1,
-{
+) -> Result<GoSatisfactionV1, CodeIndexProductionErrorV1> {
+    go_satisfaction_charged(files, modules, &mut |_| Ok(()))
+}
+
+pub(super) fn go_satisfaction_charged<T: ResolutionFileV1>(
+    files: &[T],
+    modules: &ModuleImportIndexV1<'_, T>,
+    charge: &mut dyn FnMut(ResolutionMemoryChangeV1) -> Result<(), CodeIndexProductionErrorV1>,
+) -> Result<GoSatisfactionV1, CodeIndexProductionErrorV1> {
     let scopes = files
         .iter()
         .map(|file| {
-            let file = file.as_ref();
-            (file.extraction.language.as_str() == "go" && !file.artifacts.go_method_sets.is_empty())
-                .then(|| package_scope(file))
+            if file.language() != "go" {
+                return Ok(None);
+            }
+            let file = file.binding()?;
+            Ok((!file.go_method_sets().is_empty()).then(|| package_scope(file)))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, CodeIndexProductionErrorV1>>()?;
     let mut named_types = HashMap::<(&str, &str), Vec<(&SymbolOccurrenceId, SourceSpan)>>::new();
     let mut method_sets = HashMap::<OwnerV1<'_>, HashMap<MethodKeyV1, bool>>::new();
     let mut promotes = HashMap::<OwnerV1<'_>, Vec<PromotedV1>>::new();
@@ -193,10 +200,9 @@ where
         let Some(scope) = scope.as_deref() else {
             continue;
         };
-        let file = file.as_ref();
+        let file = file.binding()?;
         let aliases = file
-            .artifacts
-            .imports
+            .imports()
             .iter()
             .filter(|row| !row.is_glob && !row.is_public)
             .filter_map(|row| {
@@ -209,12 +215,11 @@ where
             .collect();
         let go_file = GoFileV1 { scope, aliases };
         let symbols = file
-            .artifacts
-            .symbols
+            .symbols()
             .iter()
             .map(|symbol| (&symbol.occurrence, symbol))
             .collect::<HashMap<_, _>>();
-        for bound in &file.artifacts.go_method_sets {
+        for bound in file.go_method_sets() {
             let Some(symbol) = symbols.get(&bound.occurrence) else {
                 continue;
             };
@@ -374,6 +379,14 @@ where
         let methods = match expansion {
             Ok(methods) => methods,
             Err(reference_name) => {
+                super::resolution_view::reserve_resolution_vec(&mut gaps, 1, charge)?;
+                charge(ResolutionMemoryChangeV1::Retain(
+                    interface
+                        .occurrence
+                        .as_str()
+                        .len()
+                        .saturating_add(reference_name.len()),
+                ))?;
                 gaps.push(gap(reference_name));
                 continue;
             }
@@ -386,6 +399,13 @@ where
                 continue;
             }
             for (occurrence, span) in named_types.get(owner).into_iter().flatten() {
+                super::resolution_view::reserve_resolution_vec(&mut edges, 1, charge)?;
+                charge(ResolutionMemoryChangeV1::Retain(
+                    super::resident_bytes::edge_endpoint_heap_bytes(
+                        occurrence,
+                        interface.occurrence,
+                    ),
+                ))?;
                 edges.push(CanonicalRelationEdgeV1 {
                     from_occurrence: (*occurrence).clone(),
                     to_occurrence: interface.occurrence.clone(),
@@ -434,6 +454,14 @@ where
             })
             .min();
         if let Some(reference_name) = undecided.and_then(|owner| effective[owner].reason.as_ref()) {
+            super::resolution_view::reserve_resolution_vec(&mut gaps, 1, charge)?;
+            charge(ResolutionMemoryChangeV1::Retain(
+                interface
+                    .occurrence
+                    .as_str()
+                    .len()
+                    .saturating_add(reference_name.len()),
+            ))?;
             gaps.push(gap(reference_name));
         }
     }
@@ -441,7 +469,7 @@ where
     edges.dedup();
     gaps.sort();
     gaps.dedup();
-    GoSatisfactionV1 { edges, gaps }
+    Ok(GoSatisfactionV1 { edges, gaps })
 }
 
 /// What an embedded field or alias target promotes to its owner.

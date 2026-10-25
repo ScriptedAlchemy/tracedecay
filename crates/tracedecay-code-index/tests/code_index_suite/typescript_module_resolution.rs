@@ -216,7 +216,9 @@ fn same_module_export_clauses_bind_the_forwarded_binding() {
 
     // `relayedMissing` forwards an import of a module that is not indexed:
     // no edge, and the call site stays a disclosed gap.
-    let gaps = generation.unresolved_import_calls();
+    let gaps = generation
+        .unresolved_import_calls()
+        .expect("canonical import calls resolve");
     assert!(
         gaps.iter()
             .any(|gap| gap.reference_name == "relayedMissing"),
@@ -391,11 +393,16 @@ fn sealed_replay_recomputes_identical_typescript_edges() {
     let restored = PartitionedSealV1::of(&generation).restored();
     assert_eq!(restored.edges(), generation.edges());
     assert_eq!(
-        restored.unresolved_import_calls(),
-        generation.unresolved_import_calls()
+        restored
+            .unresolved_import_calls()
+            .expect("canonical import calls resolve"),
+        generation
+            .unresolved_import_calls()
+            .expect("canonical import calls resolve")
     );
     let mut unresolved = generation
         .unresolved_import_calls()
+        .expect("canonical import calls resolve")
         .into_iter()
         .map(|reference| reference.reference_name)
         .collect::<Vec<_>>();
@@ -480,6 +487,7 @@ fn undeclared_missing_relative_stays_unresolved() {
         crate::cross_file_import_calls::publish_fixture_tree(root.path(), "undeclared-relative");
     let unresolved = generation
         .unresolved_import_calls()
+        .expect("canonical import calls resolve")
         .into_iter()
         .map(|reference| reference.reference_name)
         .collect::<Vec<_>>();
@@ -689,6 +697,7 @@ fn nested_package_missing_file_is_not_claimed_by_root_mapping() {
         crate::cross_file_import_calls::publish_fixture_tree(root.path(), "nested-package");
     let unresolved = generation
         .unresolved_import_calls()
+        .expect("canonical import calls resolve")
         .into_iter()
         .map(|reference| reference.reference_name)
         .collect::<Vec<_>>();

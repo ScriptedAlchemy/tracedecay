@@ -20,17 +20,16 @@
 //! and proves zero work. Failed or skipped receipts remain inspectable but
 //! cannot activate a projection generation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::borrow::Borrow;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, CodeChunkProjectionReceiptV1, CodeSearchChunkId, ContentDigest,
-    DomainError, ManifestDigest, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
+    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeChunkProjectionReceiptV1, CodeSearchChunkId,
+    ContentDigest, DomainError, ManifestDigest, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
     ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, canonical_sha256,
+    projection_publication_digest_for_receipts,
 };
-
-use super::generations::placeholder_digest;
 
 /// Domain separator for the canonical projection-batch-request digest.
 pub const PROJECTION_REQUEST_SEPARATOR: &str = "tracedecay.projection-batch-request.v1";
@@ -77,14 +76,6 @@ pub struct ChunkProjectionDecisionV1 {
     pub operation: ProjectionOperationV1,
     pub outcome: ProjectionOutcomeV1,
     pub output_digest: Option<ContentDigest>,
-}
-
-/// The partition of the changed-chunk set a chunk belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Partition {
-    AddedOrChanged,
-    Deleted,
-    Reused,
 }
 
 /// The canonical request digest: every request field except the digest
@@ -144,222 +135,218 @@ pub fn decisions_for_noop(_changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjecti
     Vec::new()
 }
 
-/// Request digest work already done, once, for one immutable request.
-///
-/// Every entry point that accepts a request from outside its call chain
-/// recomputes the canonical request digest and re-validates the changed-chunk
-/// set, both O(request) canonical hashes over sets that reach six figures.
-/// Once a chain has done that for a request it does not mutate again, the
-/// same evidence is threaded to the remaining steps instead of hashing the
-/// request two more times.
-pub(crate) struct ProjectionRequestEvidenceV1 {
-    /// `expected_request_digest(request)`, already compared against
-    /// `request.request_digest`.
-    request_digest: ManifestDigest,
-    /// The validated changed-chunk set indexed by chunk identity.
-    partitions: BTreeMap<CodeSearchChunkId, (Partition, DigestPair)>,
+/// Request authentication shared by the expanded and replayed receipt paths.
+pub(crate) fn validate_request(
+    request: &ProjectionBatchRequestV1,
+) -> Result<(), ProjectionReceiptErrorV1> {
+    let expected = expected_request_digest(request)
+        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    if request.request_digest != expected {
+        return Err(ProjectionReceiptErrorV1::DigestMismatch);
+    }
+    request
+        .changes
+        .validate()
+        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    let projection_changed =
+        request.previous_projection_key.as_ref() != Some(&request.target_projection_key);
+    if projection_changed && request.changes.reused_count > 0 {
+        if request.replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange {
+            return Err(ProjectionReceiptErrorV1::Contract(
+                "projection profile change must arrive pre-expanded without a reused complement"
+                    .to_owned(),
+            ));
+        }
+        return Err(ProjectionReceiptErrorV1::ProjectionKeyReplayRequiresAppliedWork);
+    }
+    Ok(())
 }
 
-impl ProjectionRequestEvidenceV1 {
-    /// Record evidence for a request whose digest was just recomputed and
-    /// whose changed-chunk set was just validated by the caller.
-    pub(crate) fn recorded(
-        request_digest: ManifestDigest,
-        changes: &ChangedCodeChunkSetV1,
-    ) -> Self {
-        Self {
-            request_digest,
-            partitions: index_partitions(changes),
-        }
+/// Merge the already canonical partitions without copying their identities or
+/// digests. The request validator owns ordering and partition disjointness.
+#[derive(Clone)]
+pub(crate) struct OrderedProjectionChangesV1<'a> {
+    added: &'a [ChangedCodeChunkV1],
+    deleted: &'a [ChangedCodeChunkV1],
+}
+
+pub(crate) fn ordered_changes(changes: &ChangedCodeChunkSetV1) -> OrderedProjectionChangesV1<'_> {
+    OrderedProjectionChangesV1 {
+        added: &changes.added_or_changed,
+        deleted: &changes.deleted,
     }
 }
 
-/// Whether a batch receipt's publication digest still has to be recomputed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PublicationDigestTrustV1 {
-    /// The receipt crossed a trust boundary, such as durable
-    /// storage, or any other caller, so its self-declared publication digest
-    /// proves nothing until it is recomputed from the receipt's own fields.
-    Unverified,
-    /// The receipt was sealed by [`build_batch_receipt`] earlier in this same
-    /// call chain and has not been touched since, so its publication digest is
-    /// the value that recomputation would produce.
-    SealedInThisChain,
+impl<'a> Iterator for OrderedProjectionChangesV1<'a> {
+    type Item = &'a ChangedCodeChunkV1;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let partition = match (self.added.first(), self.deleted.first()) {
+            (Some(added), Some(deleted)) if added.chunk_id < deleted.chunk_id => &mut self.added,
+            (Some(_), Some(_)) | (None, Some(_)) => &mut self.deleted,
+            (Some(_), None) => &mut self.added,
+            (None, None) => return None,
+        };
+        let (first, rest) = (*partition).split_first()?;
+        *partition = rest;
+        Some(first)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.added.len() + self.deleted.len();
+        (len, Some(len))
+    }
 }
 
-/// Build the complete batch receipt for one projection request from the
-/// projector's affected-chunk decisions. Work-free reused chunks are already
-/// authenticated by the request digest and contribute only to `reused_count`.
-/// Profile replay that re-embeds the reused partition requires Updated/Applied
-/// rows for those chunks and leaves `reused_count` at zero. The receipts are
-/// canonically ordered and the publication digest seals the batch.
-/// Construction is deterministic, so identical requests and decisions yield
-/// identical receipts.
+impl ExactSizeIterator for OrderedProjectionChangesV1<'_> {}
+
+/// Operation and default output are derived from the canonical request row.
+pub(crate) fn applied_operation(change: &ChangedCodeChunkV1) -> ProjectionOperationV1 {
+    match (&change.prior_digest, &change.current_digest) {
+        (_, None) => ProjectionOperationV1::Deleted,
+        (None, Some(_)) => ProjectionOperationV1::Added,
+        (Some(_), Some(_)) => ProjectionOperationV1::Updated,
+    }
+}
+
+fn receipt_from_decision(
+    request: &ProjectionBatchRequestV1,
+    decision: ChunkProjectionDecisionV1,
+) -> CodeChunkProjectionReceiptV1 {
+    CodeChunkProjectionReceiptV1 {
+        projection_key: request.target_projection_key.clone(),
+        request_digest: request.request_digest.clone(),
+        prior_generation: request.changes.from_generation.clone(),
+        source_generation: request.changes.to_generation.clone(),
+        source_manifest_digest: request.changes.manifest_digest.clone(),
+        chunk_id: decision.chunk_id,
+        prior_chunk_digest: decision.prior_chunk_digest,
+        current_chunk_digest: decision.current_chunk_digest,
+        operation: decision.operation,
+        outcome: decision.outcome,
+        output_digest: decision.output_digest,
+    }
+}
+
+pub(crate) fn applied_receipt(
+    request: &ProjectionBatchRequestV1,
+    change: &ChangedCodeChunkV1,
+) -> CodeChunkProjectionReceiptV1 {
+    receipt_from_decision(
+        request,
+        ChunkProjectionDecisionV1 {
+            chunk_id: change.chunk_id.clone(),
+            prior_chunk_digest: change.prior_digest.clone(),
+            current_chunk_digest: change.current_digest.clone(),
+            operation: applied_operation(change),
+            outcome: ProjectionOutcomeV1::Applied,
+            output_digest: change.current_digest.clone(),
+        },
+    )
+}
+
+/// Build expanded public evidence for callers that need the public DTO. Live
+/// publication instead replays these same rows without retaining the vector.
 pub fn build_batch_receipt(
     request: &ProjectionBatchRequestV1,
     decisions: &[ChunkProjectionDecisionV1],
 ) -> Result<ProjectionBatchReceiptV1, ProjectionReceiptErrorV1> {
-    build_batch_receipt_with(request, None, decisions)
-}
-
-/// [`build_batch_receipt`] for a request this chain already verified.
-pub(crate) fn build_batch_receipt_verified(
-    request: &ProjectionBatchRequestV1,
-    evidence: &ProjectionRequestEvidenceV1,
-    decisions: &[ChunkProjectionDecisionV1],
-) -> Result<ProjectionBatchReceiptV1, ProjectionReceiptErrorV1> {
-    build_batch_receipt_with(request, Some(evidence), decisions)
-}
-
-fn build_batch_receipt_with(
-    request: &ProjectionBatchRequestV1,
-    evidence: Option<&ProjectionRequestEvidenceV1>,
-    decisions: &[ChunkProjectionDecisionV1],
-) -> Result<ProjectionBatchReceiptV1, ProjectionReceiptErrorV1> {
-    let expected_request = match evidence {
-        Some(evidence) => evidence.request_digest.clone(),
-        None => expected_request_digest(request)
-            .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?,
-    };
-    if request.request_digest != expected_request {
-        return Err(ProjectionReceiptErrorV1::DigestMismatch);
-    }
-    let reembed_reused = reembeds_reused_chunks(request)?;
-    let recomputed_partitions;
-    let partitions = match evidence {
-        Some(evidence) => &evidence.partitions,
-        None => {
-            recomputed_partitions = partitions_of(&request.changes)?;
-            &recomputed_partitions
-        }
-    };
-
-    let mut seen = BTreeSet::new();
-    let mut receipts = Vec::with_capacity(decisions.len());
-    for decision in decisions {
-        let Some((partition, change)) = partitions.get(&decision.chunk_id) else {
-            return Err(ProjectionReceiptErrorV1::ExtraChunkReceipt(
-                decision.chunk_id.clone(),
-            ));
-        };
-        if !seen.insert(decision.chunk_id.clone()) {
-            return Err(ProjectionReceiptErrorV1::DuplicateChunkReceipt(
-                decision.chunk_id.clone(),
-            ));
-        }
-        check_decision(*partition, change, decision, reembed_reused)?;
-        receipts.push(CodeChunkProjectionReceiptV1 {
-            projection_key: request.target_projection_key.clone(),
-            request_digest: request.request_digest.clone(),
-            prior_generation: request.changes.from_generation.clone(),
-            source_generation: request.changes.to_generation.clone(),
-            source_manifest_digest: request.changes.manifest_digest.clone(),
-            chunk_id: decision.chunk_id.clone(),
-            prior_chunk_digest: decision.prior_chunk_digest.clone(),
-            current_chunk_digest: decision.current_chunk_digest.clone(),
-            operation: decision.operation,
-            outcome: decision.outcome.clone(),
-            output_digest: decision.output_digest.clone(),
-        });
-    }
-    for chunk_id in partitions.keys() {
-        if !seen.contains(chunk_id) {
-            return Err(ProjectionReceiptErrorV1::MissingChunkReceipt(
-                chunk_id.clone(),
-            ));
-        }
-    }
+    validate_request(request)?;
+    let mut receipts = decisions
+        .iter()
+        .cloned()
+        .map(|decision| receipt_from_decision(request, decision))
+        .collect::<Vec<_>>();
     receipts.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-
-    let reused_count = work_free_reused_count(&request.changes, reembed_reused);
-    let mut batch = ProjectionBatchReceiptV1 {
+    if let Some(pair) = receipts
+        .windows(2)
+        .find(|pair| pair[0].chunk_id == pair[1].chunk_id)
+    {
+        return Err(ProjectionReceiptErrorV1::DuplicateChunkReceipt(
+            pair[0].chunk_id.clone(),
+        ));
+    }
+    verify_receipt_rows(request, receipts.iter())?;
+    let publication_digest = projection_publication_digest_for_receipts(
+        &request.target_projection_key,
+        &request.request_digest,
+        &request.changes.to_generation,
+        &request.changes.manifest_digest,
+        &receipts,
+        request.changes.reused_count,
+    )
+    .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    Ok(ProjectionBatchReceiptV1 {
         target_projection_key: request.target_projection_key.clone(),
         request_digest: request.request_digest.clone(),
         source_generation: request.changes.to_generation.clone(),
         source_manifest_digest: request.changes.manifest_digest.clone(),
         receipts,
-        reused_count,
-        publication_digest: placeholder_digest(),
-    };
-    batch.publication_digest = expected_publication_digest(&batch)
-        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
-    Ok(batch)
+        reused_count: request.changes.reused_count,
+        publication_digest,
+    })
 }
 
-/// Verify a batch receipt against its request: request and publication
-/// digests recompute, the receipt set covers the request exactly (no
-/// missing, extra, or duplicate receipts), every receipt carries the
-/// request's projection key and generation watermarks, and every operation,
-/// outcome, and digest is consistent with the request partitions.
+/// Verify every stored batch header, row and digest before accepting evidence
+/// across a trust boundary. Prepared evidence carries no implicit trust here.
 pub fn verify_batch_receipt(
     request: &ProjectionBatchRequestV1,
     batch: &ProjectionBatchReceiptV1,
 ) -> Result<(), ProjectionReceiptErrorV1> {
-    verify_batch_receipt_with(request, None, batch, PublicationDigestTrustV1::Unverified)
-}
-
-/// [`verify_batch_receipt`] for a request this chain already verified, and a
-/// receipt whose publication digest may already be known good.
-pub(crate) fn verify_batch_receipt_verified(
-    request: &ProjectionBatchRequestV1,
-    evidence: &ProjectionRequestEvidenceV1,
-    batch: &ProjectionBatchReceiptV1,
-    publication: PublicationDigestTrustV1,
-) -> Result<(), ProjectionReceiptErrorV1> {
-    verify_batch_receipt_with(request, Some(evidence), batch, publication)
-}
-
-fn verify_batch_receipt_with(
-    request: &ProjectionBatchRequestV1,
-    evidence: Option<&ProjectionRequestEvidenceV1>,
-    batch: &ProjectionBatchReceiptV1,
-    publication: PublicationDigestTrustV1,
-) -> Result<(), ProjectionReceiptErrorV1> {
-    let expected_request = match evidence {
-        Some(evidence) => evidence.request_digest.clone(),
-        None => expected_request_digest(request)
-            .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?,
-    };
-    // The batch is never trusted about the request it answers, even when the
-    // request digest itself was recomputed earlier in this chain.
-    if request.request_digest != expected_request || batch.request_digest != expected_request {
+    validate_request(request)?;
+    if batch.request_digest != request.request_digest {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
-    let reembed_reused = reembeds_reused_chunks(request)?;
     if batch.target_projection_key != request.target_projection_key {
         return Err(ProjectionReceiptErrorV1::WrongProjectionKey);
     }
     if batch.source_generation != request.changes.to_generation
         || batch.source_manifest_digest != request.changes.manifest_digest
     {
-        return Err(ProjectionReceiptErrorV1::CrossGenerationReceipt(
-            batch.receipts.first().map_or_else(
-                || {
-                    CodeSearchChunkId::new("chunk.v1.empty-batch")
-                        .expect("canonical chunk identity")
-                },
-                |receipt| receipt.chunk_id.clone(),
-            ),
-        ));
+        let chunk_id = match batch.receipts.first() {
+            Some(receipt) => receipt.chunk_id.clone(),
+            None => CodeSearchChunkId::new("chunk.v1.empty-batch")
+                .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?,
+        };
+        return Err(ProjectionReceiptErrorV1::CrossGenerationReceipt(chunk_id));
     }
-    if batch
-        .receipts
-        .windows(2)
-        .any(|pair| pair[0].chunk_id >= pair[1].chunk_id)
-    {
-        return Err(ProjectionReceiptErrorV1::NonCanonicalReceiptOrder);
+    verify_receipt_rows(request, batch.receipts.iter())?;
+    if batch.reused_count != request.changes.reused_count {
+        return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
+    let expected = expected_publication_digest(batch)
+        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    if batch.publication_digest != expected {
+        return Err(ProjectionReceiptErrorV1::DigestMismatch);
+    }
+    Ok(())
+}
 
-    let recomputed_partitions;
-    let partitions = match evidence {
-        Some(evidence) => &evidence.partitions,
-        None => {
-            recomputed_partitions = partitions_of(&request.changes)?;
-            &recomputed_partitions
+/// The single row verifier for expanded receipts and live deterministic
+/// replay. It assumes the immutable request has passed `validate_request`.
+/// Only one receipt and one request row need be live at a time.
+pub(crate) fn verify_receipt_rows<I>(
+    request: &ProjectionBatchRequestV1,
+    receipts: I,
+) -> Result<(), ProjectionReceiptErrorV1>
+where
+    I: Iterator + Clone,
+    I::Item: Borrow<CodeChunkProjectionReceiptV1>,
+{
+    let mut previous = None;
+    for row in receipts.clone() {
+        let receipt = row.borrow();
+        if previous
+            .as_ref()
+            .is_some_and(|prior| prior >= &receipt.chunk_id)
+        {
+            return Err(ProjectionReceiptErrorV1::NonCanonicalReceiptOrder);
         }
-    };
-    let mut seen = BTreeSet::new();
-    for receipt in &batch.receipts {
+        previous = Some(receipt.chunk_id.clone());
+    }
+    let mut changes = ordered_changes(&request.changes);
+    for row in receipts {
+        let receipt = row.borrow();
         if receipt.projection_key != request.target_projection_key {
             return Err(ProjectionReceiptErrorV1::WrongProjectionKey);
         }
@@ -372,190 +359,59 @@ fn verify_batch_receipt_with(
                 receipt.chunk_id.clone(),
             ));
         }
-        let Some((partition, change)) = partitions.get(&receipt.chunk_id) else {
+        let Some(change) = changes.next() else {
             return Err(ProjectionReceiptErrorV1::ExtraChunkReceipt(
                 receipt.chunk_id.clone(),
             ));
         };
-        if !seen.insert(receipt.chunk_id.clone()) {
-            return Err(ProjectionReceiptErrorV1::DuplicateChunkReceipt(
-                receipt.chunk_id.clone(),
-            ));
+        if receipt.chunk_id != change.chunk_id {
+            let belongs = request
+                .changes
+                .added_or_changed
+                .binary_search_by(|change| change.chunk_id.cmp(&receipt.chunk_id))
+                .is_ok()
+                || request
+                    .changes
+                    .deleted
+                    .binary_search_by(|change| change.chunk_id.cmp(&receipt.chunk_id))
+                    .is_ok();
+            return Err(if belongs {
+                ProjectionReceiptErrorV1::MissingChunkReceipt(change.chunk_id.clone())
+            } else {
+                ProjectionReceiptErrorV1::ExtraChunkReceipt(receipt.chunk_id.clone())
+            });
         }
-        let decision = ChunkProjectionDecisionV1 {
-            chunk_id: receipt.chunk_id.clone(),
-            prior_chunk_digest: receipt.prior_chunk_digest.clone(),
-            current_chunk_digest: receipt.current_chunk_digest.clone(),
-            operation: receipt.operation,
-            outcome: receipt.outcome.clone(),
-            output_digest: receipt.output_digest.clone(),
-        };
-        check_decision(*partition, change, &decision, reembed_reused)?;
+        check_receipt(change, receipt)?;
     }
-    for chunk_id in partitions.keys() {
-        if !seen.contains(chunk_id) {
-            return Err(ProjectionReceiptErrorV1::MissingChunkReceipt(
-                chunk_id.clone(),
-            ));
-        }
-    }
-
-    let reused_count = work_free_reused_count(&request.changes, reembed_reused);
-    if batch.reused_count != reused_count {
-        return Err(ProjectionReceiptErrorV1::DigestMismatch);
-    }
-    if publication == PublicationDigestTrustV1::Unverified {
-        let expected_publication = expected_publication_digest(batch)
-            .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
-        if batch.publication_digest != expected_publication {
-            return Err(ProjectionReceiptErrorV1::DigestMismatch);
-        }
+    if let Some(change) = changes.next() {
+        return Err(ProjectionReceiptErrorV1::MissingChunkReceipt(
+            change.chunk_id.clone(),
+        ));
     }
     Ok(())
 }
 
-fn reembeds_reused_chunks(
-    request: &ProjectionBatchRequestV1,
-) -> Result<bool, ProjectionReceiptErrorV1> {
-    let projection_changed =
-        request.previous_projection_key.as_ref() != Some(&request.target_projection_key);
-    if projection_changed
-        && request.changes.reused_count > 0
-        && request.replay_reason != ProjectionReplayReasonV1::ProjectionProfileChange
+fn check_receipt(
+    change: &ChangedCodeChunkV1,
+    receipt: &CodeChunkProjectionReceiptV1,
+) -> Result<(), ProjectionReceiptErrorV1> {
+    if receipt.prior_chunk_digest != change.prior_digest
+        || receipt.current_chunk_digest != change.current_digest
+        || receipt.operation != applied_operation(change)
+        || receipt.outcome == ProjectionOutcomeV1::Reused
     {
-        return Err(ProjectionReceiptErrorV1::ProjectionKeyReplayRequiresAppliedWork);
-    }
-    if projection_changed
-        && request.changes.reused_count > 0
-        && request.replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange
-    {
-        return Err(ProjectionReceiptErrorV1::Contract(
-            "projection profile change must arrive pre-expanded without a reused complement"
-                .to_owned(),
+        return Err(ProjectionReceiptErrorV1::InconsistentOperation(
+            receipt.chunk_id.clone(),
         ));
     }
-    Ok(false)
-}
-
-/// Count work-free reused chunks from the request complement. Profile replay
-/// arrives pre-expanded, so `reused_count` is already zero on that path.
-fn work_free_reused_count(changes: &ChangedCodeChunkSetV1, reembed_reused: bool) -> u64 {
-    if reembed_reused {
-        0
-    } else {
-        changes.reused_count
-    }
-}
-
-/// Index the changed-chunk set's partitions by chunk identity, validating
-/// the set first (canonical order, partition shape, and manifest digest are
-/// owned by the domain contract).
-fn partitions_of(
-    changes: &ChangedCodeChunkSetV1,
-) -> Result<BTreeMap<CodeSearchChunkId, (Partition, DigestPair)>, ProjectionReceiptErrorV1> {
-    changes
-        .validate()
-        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
-    Ok(index_partitions(changes))
-}
-
-/// Index an already-validated changed-chunk set by chunk identity.
-///
-/// Reused chunks are a digest-authenticated complement and are not indexed
-/// as per-chunk partitions. `ChangedCodeChunkSetV1::validate` recomputes the
-/// whole set's manifest digest, so it runs once per call chain and the index
-/// is threaded onward.
-fn index_partitions(
-    changes: &ChangedCodeChunkSetV1,
-) -> BTreeMap<CodeSearchChunkId, (Partition, DigestPair)> {
-    let mut partitions = BTreeMap::new();
-    for change in &changes.added_or_changed {
-        partitions.insert(
-            change.chunk_id.clone(),
-            (
-                Partition::AddedOrChanged,
-                DigestPair {
-                    prior: change.prior_digest.clone(),
-                    current: change.current_digest.clone(),
-                },
-            ),
-        );
-    }
-    for change in &changes.deleted {
-        partitions.insert(
-            change.chunk_id.clone(),
-            (
-                Partition::Deleted,
-                DigestPair {
-                    prior: change.prior_digest.clone(),
-                    current: change.current_digest.clone(),
-                },
-            ),
-        );
-    }
-    partitions
-}
-
-/// The digests a request partition declares for one chunk.
-#[derive(Clone, Debug)]
-struct DigestPair {
-    prior: Option<ContentDigest>,
-    current: Option<ContentDigest>,
-}
-
-/// Enforce operation, outcome, and digest consistency between one decision
-/// (or receipt) and the request partition its chunk belongs to.
-fn check_decision(
-    partition: Partition,
-    expected: &DigestPair,
-    decision: &ChunkProjectionDecisionV1,
-    reembed_reused: bool,
-) -> Result<(), ProjectionReceiptErrorV1> {
-    let inconsistent =
-        || ProjectionReceiptErrorV1::InconsistentOperation(decision.chunk_id.clone());
-    if decision.prior_chunk_digest != expected.prior
-        || decision.current_chunk_digest != expected.current
-    {
-        return Err(inconsistent());
-    }
-    if partition != Partition::Reused && decision.outcome == ProjectionOutcomeV1::Reused {
-        return Err(inconsistent());
-    }
-    match partition {
-        Partition::AddedOrChanged => {
-            let expected_operation = if expected.prior.is_none() {
-                ProjectionOperationV1::Added
-            } else {
-                ProjectionOperationV1::Updated
-            };
-            if decision.operation != expected_operation {
-                return Err(inconsistent());
-            }
-        }
-        Partition::Deleted => {
-            if decision.operation != ProjectionOperationV1::Deleted {
-                return Err(inconsistent());
-            }
-        }
-        Partition::Reused => {
-            let valid = if reembed_reused {
-                decision.operation == ProjectionOperationV1::Updated
-                    && decision.outcome == ProjectionOutcomeV1::Applied
-            } else {
-                decision.operation == ProjectionOperationV1::Reused
-                    && decision.outcome == ProjectionOutcomeV1::Reused
-            };
-            if !valid {
-                return Err(inconsistent());
-            }
-        }
-    }
-    // Output digests: an applied upsert emits output; deletions, reuses,
-    // skips, and failures emit none.
-    let emits_output = decision.operation != ProjectionOperationV1::Deleted
-        && decision.outcome == ProjectionOutcomeV1::Applied;
-    if decision.output_digest.is_some() != emits_output {
-        return Err(inconsistent());
+    // Applied upserts require an output, but that output may legitimately
+    // differ from the source digest. Deletions and failed/skipped work have none.
+    let emits_output = receipt.operation != ProjectionOperationV1::Deleted
+        && receipt.outcome == ProjectionOutcomeV1::Applied;
+    if receipt.output_digest.is_some() != emits_output {
+        return Err(ProjectionReceiptErrorV1::InconsistentOperation(
+            receipt.chunk_id.clone(),
+        ));
     }
     Ok(())
 }

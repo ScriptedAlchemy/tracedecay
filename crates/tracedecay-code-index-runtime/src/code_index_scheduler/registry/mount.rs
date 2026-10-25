@@ -729,8 +729,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_pending_wake = Arc::clone(&pending_wake);
         let memory_retry = Arc::new(super::MemoryRefusalRetryV1::default());
         let worker_memory_retry = Arc::clone(&memory_retry);
-        let refused_reconcile_start = Arc::new(super::RefusedReconcileStartV1::default());
-        let worker_refused_reconcile_start = Arc::clone(&refused_reconcile_start);
         let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_build_publication_lock = Arc::clone(&build_publication_lock);
@@ -806,7 +804,6 @@ impl CodeIndexSchedulerRegistryV1 {
             .park_headroom
             .released_by_others(&mut worker_owner_headroom);
         let mut worker_admission_headroom = self.resident_memory.pressure().subscribe_headroom();
-        let worker_resident_memory = Arc::clone(&self.resident_memory);
         // Boxed at definition on purpose: this worker's state machine is the
         // largest future in the daemon (reconcile + text advance + decode +
         // activation + swap inline), and an unboxed `let` materializes the
@@ -912,9 +909,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     .park_headroom
                     .released_by_others(&mut worker_owner_headroom)
                     > worker_owner_headroom_seen
-                    || (worker_admission_headroom.has_changed()
-                        && worker_refused_reconcile_start.admits_retry(&worker_resident_memory));
+                    || worker_admission_headroom.has_changed();
                 if headroom_moved
+                    && worker_memory_retry.allow_reconstruction(&worker_control_epoch)
                     && worktree_waits_for_memory(
                         &worker_text_generation,
                         &worker_convergence_park,
@@ -1033,6 +1030,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 // SQL writer alone.
                 let pass_wake_observed_at = Instant::now();
                 let pass_control_epoch = worker_control_epoch.load(Ordering::Acquire);
+                if !worker_memory_retry.allow_reconstruction(&worker_control_epoch) {
+                    continue;
+                }
                 // A quarantined or backing-off unit must not consume the
                 // pending arrival: the wake stays outstanding so a later
                 // eligible pass still measures its full queue wait.
@@ -1450,7 +1450,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     .is_some_and(LatestCodeTextGenerationV1::query_owners_are_ready);
                 // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
-                let started_pressure = worker_resident_memory.pressure().state();
                 // A sealed successor answers the arrival it claimed; a later
                 // arrival stays pending for its own pass.
                 let (arrival, trigger) = match sealed_successor.as_ref() {
@@ -1478,7 +1477,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .clone();
                 let memory_pass = trigger == CodeIndexCadenceTriggerV1::MemoryHeadroom;
                 if memory_pass {
-                    worker_memory_retry.reset();
+                    worker_memory_retry.begin_retry();
                 }
                 // Memory given back is the retry for a graph refused at the
                 // watermark: its generation activates again on this pass.
@@ -1653,6 +1652,16 @@ impl CodeIndexSchedulerRegistryV1 {
                     tracing::trace_span!("daemon.code_index.reconcile_or_seal"),
                 )
                 .await;
+                // This result belongs to the source attempt that just ended.
+                // Retire its construction gate before any nested successor can
+                // install a new one while this predecessor finishes text work.
+                if matches!(
+                    &source_result,
+                    Ok(Ok(_) | Err(CodeIndexSchedulerErrorV1::PreparedPublicationRefused { .. }))
+                ) {
+                    worker_memory_retry.finish_reconstruction();
+                }
+                let mut nested_memory_refusal = None;
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(
                         event = "code_index_worker_shutdown_observed",
@@ -2409,7 +2418,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             && !worker_complete_generation_requested.load(Ordering::Acquire);
                         if defer_serving_decode {
                             clear_graph_resident_memory_park(&worker_convergence_park);
-                            worker_memory_retry.reset();
+                            worker_memory_retry.finish_auxiliary_wait();
                             Self::release_superseded_serving_seat(
                                 &worker_serving_generation,
                                 &worker_serving_generation_epoch,
@@ -2717,7 +2726,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
                             clear_graph_resident_memory_park(&worker_convergence_park);
-                            worker_memory_retry.reset();
+                            worker_memory_retry.finish_auxiliary_wait();
                         }
                         Err(error) if error.is_graph_activation_refusal() => {
                             next_seat_attempt_at = None;
@@ -2832,6 +2841,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let joined = loop {
                         if !worker_shutting_down.load(Ordering::Acquire)
                             && sealed_successor.is_none()
+                            && worker_memory_retry.allow_reconstruction(&worker_control_epoch)
                             && worker_pending_wake.has_pending_arrival()
                             && let Some(metadata) =
                                 graph_text.as_ref().map(|text| text.metadata().clone())
@@ -2875,14 +2885,40 @@ impl CodeIndexSchedulerRegistryV1 {
                                             "code_index_successor_sealed_during_text_projection",
                                         "an arrival during text projection sealed its successor"
                                     );
+                                    worker_memory_retry.finish_reconstruction();
+                                    nested_memory_refusal = None;
                                     sealed_successor = Some((outcome, arrival, trigger));
                                 }
                                 Ok(Ok(_)) => {}
-                                Ok(Err(error)) => tracing::debug!(
-                                    event = "code_index_successor_seal_during_text_projection_deferred",
-                                    error = %error,
-                                    "the successor seal waits for the next pass"
-                                ),
+                                Ok(Err(error)) => {
+                                    tracing::debug!(
+                                        event = "code_index_successor_seal_during_text_projection_deferred",
+                                        error = %error,
+                                        "the successor seal waits for the next pass"
+                                    );
+                                    if error.is_resident_memory_refusal() {
+                                        match worker_memory_retry
+                                            .record_memory_refusal(&worker_control_epoch, &error)
+                                        {
+                                            Ok(true) => Self::note_wake(
+                                                &worker_pending_wake,
+                                                &worker_wake,
+                                                CodeIndexCadenceTriggerV1::MemoryHeadroom,
+                                            ),
+                                            Ok(false) => {}
+                                            Err(failure) => tracing::error!(error = %failure,
+                                                "the successor construction memory authority changed"),
+                                        }
+                                        park_convergence(
+                                            &worker_convergence_park,
+                                            error.to_string(),
+                                            CONVERGENCE_PARK_REFRESH_RESIDENT_MEMORY_REMEDIATION_V1,
+                                            Some(CodeIndexBuildBlockedReasonV1::ResidentMemory),
+                                            true,
+                                        );
+                                        nested_memory_refusal = Some(error);
+                                    }
+                                }
                                 Err(error) => tracing::warn!(
                                     event = "code_index_successor_seal_during_text_projection_task_failed",
                                     error = %error,
@@ -2946,7 +2982,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         other => other,
                     };
                     if matches!(outcome, PublishedTextProjectionOutcomeV1::Finished) {
-                        worker_memory_retry.reset();
+                        worker_memory_retry.finish_auxiliary_wait();
                     }
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
@@ -2988,6 +3024,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             // proved the move; re-reconciling this generation
                             // would race that seal.
                             if sealed_successor.is_none()
+                                && worker_memory_retry.allow_reconstruction(&worker_control_epoch)
                                 && let Some(text) = graph_text.as_ref()
                             {
                                 let proof_unmoved = worker_source_freshness.serves_verified_source(
@@ -3045,6 +3082,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                         // first seal lost the store lock. Its serving
                                         // owners still need the normal publication pass;
                                         // reducing Published to a bool loses that work.
+                                        worker_memory_retry.finish_reconstruction();
+                                        nested_memory_refusal = None;
                                         sealed_successor = Some((outcome, arrival, trigger));
                                         Self::note_worker_continuation(
                                             &worker_pending_wake,
@@ -3056,11 +3095,29 @@ impl CodeIndexSchedulerRegistryV1 {
                                         event = "code_index_post_projection_source_unverified",
                                         "source moved while text projection ran; the completed generation may only take a stale seat"
                                     ),
-                                    Ok(Err(error)) => tracing::warn!(
-                                        event = "code_index_post_projection_source_verification_failed",
-                                        error = %error,
-                                        "source verification after text projection failed; the completed generation may only take a stale seat"
-                                    ),
+                                    Ok(Err(error)) => {
+                                        tracing::warn!(
+                                            event = "code_index_post_projection_source_verification_failed",
+                                            error = %error,
+                                            "source verification after text projection failed; the completed generation may only take a stale seat"
+                                        );
+                                        if error.is_resident_memory_refusal() {
+                                            match worker_memory_retry.record_memory_refusal(
+                                                &worker_control_epoch,
+                                                &error,
+                                            ) {
+                                                Ok(true) => Self::note_wake(
+                                                    &worker_pending_wake,
+                                                    &worker_wake,
+                                                    CodeIndexCadenceTriggerV1::MemoryHeadroom,
+                                                ),
+                                                Ok(false) => {}
+                                                Err(failure) => tracing::error!(error = %failure,
+                                                    "the successor construction memory authority changed"),
+                                            }
+                                            nested_memory_refusal = Some(error);
+                                        }
+                                    }
                                     Err(error) => tracing::warn!(
                                         event = "code_index_post_projection_source_verification_task_failed",
                                         error = %error,
@@ -3364,21 +3421,41 @@ impl CodeIndexSchedulerRegistryV1 {
                 drop(reconcile_pass.take());
                 worker_byte_pool.release_dead_entries();
                 collect_installed_worker_heaps_when_idle();
-                let refused_for_memory = matches!(
-                    &result,
-                    Ok((Err(error), _, _)) if error.is_resident_memory_refusal()
-                );
+                let memory_refusal = nested_memory_refusal.as_ref().or(match &result {
+                    Ok((Err(error), _, _)) => Some(error),
+                    _ => None,
+                });
+                let refused_for_memory = memory_refusal
+                    .is_some_and(CodeIndexSchedulerErrorV1::is_resident_memory_refusal);
                 let waited_for_memory = worker_residency.refresh_waits_for_memory();
                 worker_residency.set_refresh_waits_for_memory(refused_for_memory);
-                if refused_for_memory {
-                    worker_refused_reconcile_start
-                        .refused(started_pressure, &worker_resident_memory);
-                } else {
-                    worker_refused_reconcile_start.clear();
-                }
-                if let Ok((Err(error), _, _)) = &result
+                if let Some(error) = memory_refusal
                     && refused_for_memory
                 {
+                    {
+                        match worker_memory_retry
+                            .record_memory_refusal(&worker_control_epoch, error)
+                        {
+                            Ok(true) => Self::note_wake(
+                                &worker_pending_wake,
+                                &worker_wake,
+                                CodeIndexCadenceTriggerV1::MemoryHeadroom,
+                            ),
+                            Ok(false) => {}
+                            Err(failure) => {
+                                park_convergence(
+                                    &worker_convergence_park,
+                                    failure.to_string(),
+                                    "the construction memory authority must be restored",
+                                    None,
+                                    false,
+                                );
+                                tracing::error!(event = "code_index_reconstruction_authority_failed", error = %failure,
+                                    "construction retry no longer belongs to the mounted memory authority");
+                                continue;
+                            }
+                        }
+                    }
                     park_convergence(
                         &worker_convergence_park,
                         error.to_string(),
@@ -3697,7 +3774,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     };
                     if matches!(outcome, PublishedTextProjectionOutcomeV1::Finished) {
-                        worker_memory_retry.reset();
+                        worker_memory_retry.finish_auxiliary_wait();
                         worker_serving_generation_changed.send_replace(());
                     }
                     match outcome {
@@ -3935,13 +4012,13 @@ impl CodeIndexSchedulerRegistryV1 {
             .park_headroom
             .released_by_others(&mut owner_headroom);
         let mut admission_headroom = self.resident_memory.pressure().subscribe_headroom();
-        let headroom_resident_memory = Arc::downgrade(&self.resident_memory);
-        let headroom_refused_reconcile_start = Arc::downgrade(&refused_reconcile_start);
         let headroom_pending_wake = Arc::downgrade(&pending_wake);
         let headroom_wake = Arc::downgrade(&wake);
         let headroom_text = Arc::downgrade(&text_generation);
         let headroom_park = Arc::downgrade(&convergence_park);
         let headroom_residency = Arc::downgrade(&residency);
+        let headroom_memory_retry = Arc::downgrade(&memory_retry);
+        let headroom_source_epoch = Arc::downgrade(&epoch);
         spawn_detached("code_index_headroom_watcher", async move {
             let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
                 tracing::error!(
@@ -3980,14 +4057,16 @@ impl CodeIndexSchedulerRegistryV1 {
                         continue;
                     }
                     owner_headroom_seen = by_others;
-                } else if let (Some(resident_memory), Some(refused_start)) = (
-                    headroom_resident_memory.upgrade(),
-                    headroom_refused_reconcile_start.upgrade(),
-                ) && !refused_start.admits_retry(&resident_memory)
-                {
-                    continue;
                 }
-                if worktree_waits_for_memory(&text, &park, &residency) {
+                let (Some(memory_retry), Some(source_epoch)) = (
+                    headroom_memory_retry.upgrade(),
+                    headroom_source_epoch.upgrade(),
+                ) else {
+                    return;
+                };
+                if memory_retry.allow_reconstruction(&source_epoch)
+                    && worktree_waits_for_memory(&text, &park, &residency)
+                {
                     Self::note_wake(
                         &pending_wake,
                         &wake,

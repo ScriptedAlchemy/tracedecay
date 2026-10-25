@@ -16,12 +16,12 @@ use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry}
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
     CodeIndexInterruptionV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
-    CodeIndexProductionOwnerV1, CodeIndexRepositoryParseIdentityV1, MemorySealedPublicationStoreV1,
-    SealedGenerationSegmentPublicationV1, UninterruptibleCodeIndexControlV1,
-    VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
-    VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
-    VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    MemorySealedPublicationStoreV1, SealedGenerationSegmentPublicationV1,
+    SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalCursorV1,
+    VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
+    VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, CompactCandidate, ComponentRevision,
@@ -58,7 +58,7 @@ use tracedecay_query::retrieval::{QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCO
 
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessResidentSampleV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1, ResidentMemoryPressureV1,
+    ResidentMemoryKeyV1, ResidentMemoryPressureV1, detected_process_resident_memory_limit_v1,
 };
 
 /// The request authority every uncancelled fixture request runs under.
@@ -406,6 +406,9 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
         omitted_sources: Vec::new(),
     };
     let request = CodeIndexBuildRequestV1 {
+        resident_memory: std::sync::Arc::new(ProcessResidentMemoryV1::new(
+            detected_process_resident_memory_limit_v1(),
+        )),
         snapshot,
         captured_files: sources
             .iter()
@@ -448,9 +451,13 @@ pub(crate) fn real_lexical_source_fixture_from_sources(
     let published = owner
         .build_and_publish(request, &ArtifactControl { cancelled: false })
         .expect("production generation");
-    let generation = published
-        .decoded()
-        .expect("a build without a parent runs cold");
+    let reader = published.sealed_generation().segment_reader();
+    let generation = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
+        published.manifest_bytes(),
+        &SharedDecodedContentPoolV1::default(),
+        |request, buffer| reader(request, buffer),
+    )
+    .expect("published generation decodes");
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
     let manifest = generation

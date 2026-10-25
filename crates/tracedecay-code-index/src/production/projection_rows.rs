@@ -18,13 +18,15 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeChunkProjectionReceiptV1, CodeGenerationId,
-    CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, ManifestDigest, ProjectionBatchReceiptV1,
+    ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId,
+    CodeSearchChunkV1, ContentDigest, ManifestDigest, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionOperationV1, ProjectionOutcomeV1,
     ProjectionReplayReasonV1,
 };
 
-use super::CodeIndexProductionErrorV1;
+use super::{CodeIndexProductionErrorV1, resident_bytes};
+use crate::projection::ProjectionPublicationHandoffV1;
+use crate::receipts::{applied_operation, applied_receipt, ordered_changes};
 
 fn contract(message: &str) -> CodeIndexProductionErrorV1 {
     CodeIndexProductionErrorV1::Contract(message.to_owned())
@@ -33,7 +35,7 @@ fn contract(message: &str) -> CodeIndexProductionErrorV1 {
 /// Each file's chunks in chunk-id order, by the file's snapshot key. Encoding
 /// and restore both derive it from the file artifacts, so positions agree.
 pub(super) struct FileChunkRostersV1<'a> {
-    files: BTreeMap<u32, Vec<&'a CodeSearchChunkV1>>,
+    files: BTreeMap<u32, Vec<(&'a CodeSearchChunkId, &'a ContentDigest)>>,
 }
 
 impl<'a> FileChunkRostersV1<'a> {
@@ -41,25 +43,101 @@ impl<'a> FileChunkRostersV1<'a> {
         Self {
             files: files
                 .map(|(file_key, chunks)| {
-                    let mut roster = chunks.iter().map(Arc::as_ref).collect::<Vec<_>>();
-                    roster.sort_by(|left, right| left.id.cmp(&right.id));
+                    let mut roster = chunks
+                        .iter()
+                        .map(|chunk| (&chunk.id, &chunk.content_digest))
+                        .collect::<Vec<_>>();
+                    roster.sort_by(|left, right| left.0.cmp(right.0));
                     (file_key, roster)
                 })
                 .collect(),
         }
     }
 
+    /// Cold construction owns only authenticated change rows and their file keys.
+    /// Admission precedes both a new tree entry and a roster reallocation.
+    pub(super) fn from_changes(
+        changes: &'a [ChangedCodeChunkV1],
+        file_keys: &[u32],
+        base: usize,
+        retain: &mut dyn FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
+    ) -> Result<Self, CodeIndexProductionErrorV1> {
+        if changes.len() != file_keys.len() {
+            return Err(contract("cold chunk membership and change rows disagree"));
+        }
+        let mut files = BTreeMap::<u32, Vec<_>>::new();
+        let mut slots = 0_usize;
+        for (change, key) in changes.iter().zip(file_keys) {
+            let digest = change
+                .current_digest
+                .as_ref()
+                .ok_or_else(|| contract("cold chunk has no content digest"))?;
+            if !files.contains_key(key) {
+                retain(
+                    (base
+                        .saturating_add(slots)
+                        .saturating_add(roster_tree_bytes(files.len() + 1)))
+                        as u64,
+                )?;
+            }
+            let tree_bytes = roster_tree_bytes(files.len() + usize::from(!files.contains_key(key)));
+            let roster = files.entry(*key).or_default();
+            if roster.len() == roster.capacity() {
+                let capacity = roster.capacity().saturating_mul(2).max(1);
+                let new_bytes = capacity
+                    .saturating_mul(std::mem::size_of::<(&CodeSearchChunkId, &ContentDigest)>());
+                // The old allocation can remain live while realloc obtains the new one.
+                retain(
+                    (base
+                        .saturating_add(tree_bytes)
+                        .saturating_add(slots)
+                        .saturating_add(new_bytes)) as u64,
+                )?;
+                let old_bytes = roster
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(&CodeSearchChunkId, &ContentDigest)>());
+                roster
+                    .try_reserve_exact(capacity - roster.len())
+                    .map_err(|error| contract(&error.to_string()))?;
+                slots =
+                    slots.saturating_sub(old_bytes).saturating_add(
+                        roster.capacity().saturating_mul(std::mem::size_of::<(
+                            &CodeSearchChunkId,
+                            &ContentDigest,
+                        )>()),
+                    );
+            }
+            roster.push((&change.chunk_id, digest));
+        }
+        let rosters = Self { files };
+        retain((base.saturating_add(rosters.retained_bytes())) as u64)?;
+        Ok(rosters)
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.files.values().fold(roster_tree_bytes(self.files.len()), |bytes, roster| {
+            bytes.saturating_add(roster.capacity().saturating_mul(std::mem::size_of::<(&CodeSearchChunkId, &ContentDigest)>()))
+        })
+    }
+
     fn chunk(
         &self,
         file_key: u32,
         position: u32,
-    ) -> Result<&'a CodeSearchChunkV1, CodeIndexProductionErrorV1> {
+    ) -> Result<(&'a CodeSearchChunkId, &'a ContentDigest), CodeIndexProductionErrorV1> {
         usize::try_from(position)
             .ok()
             .and_then(|position| self.files.get(&file_key)?.get(position))
             .copied()
             .ok_or_else(|| contract("sealed projection row names a chunk outside its file"))
     }
+}
+
+fn roster_tree_bytes(files: usize) -> usize {
+    resident_bytes::btree_bytes(
+        files,
+        std::mem::size_of::<(u32, Vec<(&CodeSearchChunkId, &ContentDigest)>)>(),
+    )
 }
 
 #[derive(Serialize)]
@@ -124,19 +202,47 @@ impl<'a> PersistedProjectionRequestRefV1<'a> {
     pub(super) fn new(
         request: &'a ProjectionBatchRequestV1,
         rosters: &FileChunkRostersV1<'_>,
+        base: usize,
+        retain: &mut dyn FnMut(u64) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let mut positions = HashMap::new();
+        let count = rosters.files.values().map(Vec::len).sum::<usize>();
+        let table_bytes = resident_bytes::hash_table_bytes::<(
+            &CodeSearchChunkId,
+            (u32, u32, &ContentDigest),
+        )>(super::helpers::resolution_hash_capacity(count));
+        retain((base.saturating_add(table_bytes)) as u64)?;
+        let mut positions = HashMap::with_capacity(count);
         for (file_key, roster) in &rosters.files {
             for (position, chunk) in roster.iter().enumerate() {
                 let position = u32::try_from(position)
                     .map_err(|_| contract("sealed file chunk roster exceeds u32"))?;
-                positions.insert(&chunk.id, (*file_key, position, &chunk.content_digest));
+                positions.insert(chunk.0, (*file_key, position, chunk.1));
             }
         }
         let changes = &request.changes;
-        let mut added = Vec::new();
-        let mut changed = Vec::new();
-        let mut rows = Vec::new();
+        let mut counts = [0_usize; 3];
+        for change in &changes.added_or_changed {
+            let located = positions
+                .get(&change.chunk_id)
+                .is_some_and(|(_, _, digest)| change.current_digest.as_ref() == Some(*digest));
+            counts[if !located {
+                2
+            } else if change.prior_digest.is_some() {
+                1
+            } else {
+                0
+            }] += 1;
+        }
+        let vectors = counts[0]
+            .saturating_mul(std::mem::size_of::<(u32, u32)>() + std::mem::size_of::<AddedRunV1>())
+            .saturating_add(
+                counts[1].saturating_mul(std::mem::size_of::<(u32, u32, &ContentDigest)>()),
+            )
+            .saturating_add(counts[2].saturating_mul(std::mem::size_of::<&ChangedCodeChunkV1>()));
+        retain((base.saturating_add(table_bytes).saturating_add(vectors)) as u64)?;
+        let mut added = Vec::with_capacity(counts[0]);
+        let mut changed = Vec::with_capacity(counts[1]);
+        let mut rows = Vec::with_capacity(counts[2]);
         for change in &changes.added_or_changed {
             let located = positions
                 .get(&change.chunk_id)
@@ -150,8 +256,8 @@ impl<'a> PersistedProjectionRequestRefV1<'a> {
             }
         }
         added.sort_unstable();
-        changed.sort_by_key(|(file_key, position, _)| (*file_key, *position));
-        let mut runs: Vec<AddedRunV1> = Vec::new();
+        changed.sort_unstable_by_key(|(file_key, position, _)| (*file_key, *position));
+        let mut runs: Vec<AddedRunV1> = Vec::with_capacity(counts[0]);
         for (file_key, position) in added {
             match runs.last_mut() {
                 Some((run_file, start, count))
@@ -162,7 +268,8 @@ impl<'a> PersistedProjectionRequestRefV1<'a> {
                 _ => runs.push((file_key, position, 1)),
             }
         }
-        Ok(Self {
+        drop(positions);
+        let result = Self {
             request_digest: &request.request_digest,
             changes: PersistedChangeSetRefV1 {
                 from_generation: &changes.from_generation,
@@ -178,7 +285,28 @@ impl<'a> PersistedProjectionRequestRefV1<'a> {
             previous_projection_key: &request.previous_projection_key,
             target_projection_key: &request.target_projection_key,
             replay_reason: request.replay_reason,
-        })
+        };
+        retain((base.saturating_add(result.retained_bytes())) as u64)?;
+        Ok(result)
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.changes
+            .added
+            .capacity()
+            .saturating_mul(std::mem::size_of::<AddedRunV1>())
+            .saturating_add(
+                self.changes
+                    .changed
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(u32, u32, &ContentDigest)>()),
+            )
+            .saturating_add(
+                self.changes
+                    .rows
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<&ChangedCodeChunkV1>()),
+            )
     }
 }
 
@@ -200,18 +328,18 @@ impl PersistedProjectionRequestV1 {
             for position in start..end {
                 let chunk = rosters.chunk(file_key, position)?;
                 added_or_changed.push(ChangedCodeChunkV1 {
-                    chunk_id: chunk.id.clone(),
+                    chunk_id: chunk.0.clone(),
                     prior_digest: None,
-                    current_digest: Some(chunk.content_digest.clone()),
+                    current_digest: Some(chunk.1.clone()),
                 });
             }
         }
         for (file_key, position, prior) in changes.changed {
             let chunk = rosters.chunk(file_key, position)?;
             added_or_changed.push(ChangedCodeChunkV1 {
-                chunk_id: chunk.id.clone(),
+                chunk_id: chunk.0.clone(),
                 prior_digest: Some(prior),
-                current_digest: Some(chunk.content_digest.clone()),
+                current_digest: Some(chunk.1.clone()),
             });
         }
         added_or_changed.extend(changes.rows);
@@ -251,7 +379,7 @@ pub(super) struct PersistedBatchReceiptRefV1<'a> {
 struct PersistedChunkReceiptRefV1<'a> {
     chunk_id: &'a CodeSearchChunkId,
     operation: ProjectionOperationV1,
-    outcome: &'a ProjectionOutcomeV1,
+    outcome: ProjectionOutcomeV1,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_digest: Option<&'a ContentDigest>,
 }
@@ -278,71 +406,46 @@ struct PersistedChunkReceiptV1 {
     output_digest: Option<ContentDigest>,
 }
 
-/// The request's rows in the chunk order a receipt answers them in.
-fn answered_rows(
-    request: &ProjectionBatchRequestV1,
-) -> BTreeMap<&CodeSearchChunkId, &ChangedCodeChunkV1> {
-    request
-        .changes
-        .added_or_changed
-        .iter()
-        .chain(&request.changes.deleted)
-        .map(|change| (&change.chunk_id, change))
-        .collect()
-}
-
-/// The operation a receipt must record for `change`, with the outcome and
-/// output a projector that applied it as requested records.
-fn applied(change: &ChangedCodeChunkV1) -> ProjectionOperationV1 {
-    match (&change.prior_digest, &change.current_digest) {
-        (_, None) => ProjectionOperationV1::Deleted,
-        (None, Some(_)) => ProjectionOperationV1::Added,
-        (Some(_), Some(_)) => ProjectionOperationV1::Updated,
-    }
-}
-
 impl<'a> PersistedBatchReceiptRefV1<'a> {
-    pub(super) fn new(
-        request: &ProjectionBatchRequestV1,
-        receipt: &'a ProjectionBatchReceiptV1,
-    ) -> Result<Self, CodeIndexProductionErrorV1> {
-        let rows = answered_rows(request);
-        if receipt.receipts.len() != rows.len()
-            || receipt
-                .receipts
-                .iter()
-                .zip(rows.keys())
-                .any(|(receipt, chunk_id)| &receipt.chunk_id != *chunk_id)
-        {
-            return Err(contract(
-                "sealed projection receipt does not answer its request rows in chunk order",
-            ));
-        }
-        let exceptions = receipt
-            .receipts
-            .iter()
-            .zip(rows.values())
-            .filter(|(receipt, change)| {
-                receipt.operation != applied(change)
-                    || receipt.outcome != ProjectionOutcomeV1::Applied
-                    || receipt.output_digest != change.current_digest
-            })
-            .map(|(receipt, _)| PersistedChunkReceiptRefV1 {
-                chunk_id: &receipt.chunk_id,
-                operation: receipt.operation,
-                outcome: &receipt.outcome,
-                output_digest: receipt.output_digest.as_ref(),
-            })
-            .collect();
-        Ok(Self {
-            target_projection_key: &receipt.target_projection_key,
-            request_digest: &receipt.request_digest,
-            source_generation: &receipt.source_generation,
-            source_manifest_digest: &receipt.source_manifest_digest,
+    pub(super) fn allocation_bytes(projection: &ProjectionPublicationHandoffV1) -> usize {
+        projection
+            .output_overrides()
+            .len()
+            .saturating_mul(std::mem::size_of::<PersistedChunkReceiptRefV1<'_>>())
+    }
+
+    pub(super) fn allocation_bytes_held(&self) -> usize {
+        self.exceptions
+            .capacity()
+            .saturating_mul(std::mem::size_of::<PersistedChunkReceiptRefV1<'_>>())
+    }
+
+    pub(super) fn new(projection: &'a ProjectionPublicationHandoffV1) -> Self {
+        let mut overrides = projection.output_overrides().iter().peekable();
+        let mut exceptions = Vec::with_capacity(projection.output_overrides().len());
+        exceptions.extend(
+            ordered_changes(&projection.request().changes)
+                .enumerate()
+                .filter_map(|(index, change)| {
+                    overrides
+                        .next_if(|(position, _)| *position == index)
+                        .map(|(_, output)| PersistedChunkReceiptRefV1 {
+                            chunk_id: &change.chunk_id,
+                            operation: applied_operation(change),
+                            outcome: ProjectionOutcomeV1::Applied,
+                            output_digest: Some(output),
+                        })
+                }),
+        );
+        Self {
+            target_projection_key: projection.target_projection_key(),
+            request_digest: projection.request_digest(),
+            source_generation: projection.source_generation(),
+            source_manifest_digest: projection.source_manifest_digest(),
             exceptions,
-            reused_count: receipt.reused_count,
-            publication_digest: &receipt.publication_digest,
-        })
+            reused_count: projection.reused_count(),
+            publication_digest: projection.publication_digest(),
+        }
     }
 }
 
@@ -354,39 +457,31 @@ impl PersistedBatchReceiptV1 {
         self,
         request: &ProjectionBatchRequestV1,
     ) -> Result<ProjectionBatchReceiptV1, CodeIndexProductionErrorV1> {
-        let rows = answered_rows(request);
-        let mut exceptions = self
-            .exceptions
-            .into_iter()
-            .map(|exception| (exception.chunk_id.clone(), exception))
-            .collect::<HashMap<_, _>>();
+        let mut exceptions = HashMap::new();
+        for exception in self.exceptions {
+            if exceptions
+                .insert(exception.chunk_id.clone(), exception)
+                .is_some()
+            {
+                return Err(contract(
+                    "sealed generation receipt repeats a chunk exception",
+                ));
+            }
+        }
+        let rows = ordered_changes(&request.changes);
         let mut receipts = Vec::with_capacity(rows.len());
-        for (chunk_id, change) in rows {
-            let (operation, outcome, output_digest) = match exceptions.remove(chunk_id) {
-                Some(exception) => (
-                    exception.operation,
-                    exception.outcome,
-                    exception.output_digest,
-                ),
-                None => (
-                    applied(change),
-                    ProjectionOutcomeV1::Applied,
-                    change.current_digest.clone(),
-                ),
-            };
-            receipts.push(CodeChunkProjectionReceiptV1 {
-                projection_key: self.target_projection_key.clone(),
-                request_digest: self.request_digest.clone(),
-                prior_generation: request.changes.from_generation.clone(),
-                source_generation: self.source_generation.clone(),
-                source_manifest_digest: self.source_manifest_digest.clone(),
-                chunk_id: chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation,
-                outcome,
-                output_digest,
-            });
+        for change in rows {
+            let mut receipt = applied_receipt(request, change);
+            receipt.projection_key = self.target_projection_key.clone();
+            receipt.request_digest = self.request_digest.clone();
+            receipt.source_generation = self.source_generation.clone();
+            receipt.source_manifest_digest = self.source_manifest_digest.clone();
+            if let Some(exception) = exceptions.remove(&change.chunk_id) {
+                receipt.operation = exception.operation;
+                receipt.outcome = exception.outcome;
+                receipt.output_digest = exception.output_digest;
+            }
+            receipts.push(receipt);
         }
         if !exceptions.is_empty() {
             return Err(contract(
@@ -402,5 +497,91 @@ impl PersistedBatchReceiptV1 {
             reused_count: self.reused_count,
             publication_digest: self.publication_digest,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PersistedBatchReceiptRefV1, PersistedBatchReceiptV1};
+    use crate::projection::{ProjectionPublicationHandoffV1, project_for_publication};
+    use crate::receipts::{
+        ChunkProjectionDecisionV1, build_batch_receipt, expected_request_digest,
+    };
+    use tracedecay_domain::{
+        ChangedCodeChunkSetV1, ContentDigest, ProjectionBatchRequestV1, ProjectionOperationV1,
+        ProjectionOutcomeV1,
+    };
+
+    fn request() -> ProjectionBatchRequestV1 {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let mut request: ProjectionBatchRequestV1 = serde_json::from_value(serde_json::json!({
+            "request_digest": digest,
+            "changes": {
+                "from_generation": null,
+                "to_generation": "generation.v1.aaaaaaaa.00000001",
+                "manifest_digest": digest,
+                "added_or_changed": [{"chunk_id": "chunk.v1.added", "prior_digest": null, "current_digest": digest}],
+                "deleted": [], "reused_count": 0, "reused_digest": digest
+            },
+            "previous_projection_key": null,
+            "target_projection_key": {"kind": "lexical", "schema_revision": "lexical.v1", "profile_digest": digest},
+            "replay_reason": "initial_projection"
+        })).expect("request fixture");
+        request.changes.reused_digest = ChangedCodeChunkSetV1::seal_reused_partition(&[])
+            .expect("empty reuse")
+            .1;
+        request.changes.seal().expect("changes seal");
+        request.request_digest = expected_request_digest(&request).expect("request seal");
+        request
+    }
+
+    #[test]
+    fn compact_receipt_wire_restores_nondefault_outputs_and_rejects_exception_corruption() {
+        let request = request();
+        let change = &request.changes.added_or_changed[0];
+        let output =
+            ContentDigest::new(format!("sha256:{}", "f".repeat(64))).expect("output digest");
+        let expanded = build_batch_receipt(
+            &request,
+            &[ChunkProjectionDecisionV1 {
+                chunk_id: change.chunk_id.clone(),
+                prior_chunk_digest: None,
+                current_chunk_digest: change.current_digest.clone(),
+                operation: ProjectionOperationV1::Added,
+                outcome: ProjectionOutcomeV1::Applied,
+                output_digest: Some(output),
+            }],
+        )
+        .expect("expanded evidence");
+        let handoff = ProjectionPublicationHandoffV1::restore(request.clone(), expanded.clone())
+            .expect("verified handoff");
+        let wire = serde_json::to_value(PersistedBatchReceiptRefV1::new(&handoff))
+            .expect("persist compact receipt");
+        let decoded: PersistedBatchReceiptV1 =
+            serde_json::from_value(wire.clone()).expect("decode");
+        assert_eq!(decoded.expand(&request).expect("restore rows"), expanded);
+
+        let mut duplicate = wire.clone();
+        let exceptions = duplicate["exceptions"].as_array_mut().expect("exceptions");
+        assert_eq!(exceptions.len(), 1);
+        exceptions.push(exceptions[0].clone());
+        let duplicate: PersistedBatchReceiptV1 =
+            serde_json::from_value(duplicate).expect("duplicate wire");
+        assert!(duplicate.expand(&request).is_err());
+
+        let mut extra = wire;
+        extra["exceptions"][0]["chunk_id"] = serde_json::json!("chunk.v1.foreign");
+        let extra: PersistedBatchReceiptV1 = serde_json::from_value(extra).expect("foreign wire");
+        assert!(extra.expand(&request).is_err());
+
+        let default = project_for_publication(request).expect("default publication");
+        let default_wire = serde_json::to_value(PersistedBatchReceiptRefV1::new(&default))
+            .expect("default compact receipt");
+        assert!(
+            default_wire["exceptions"]
+                .as_array()
+                .expect("default exceptions")
+                .is_empty()
+        );
     }
 }
