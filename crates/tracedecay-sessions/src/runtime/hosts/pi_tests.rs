@@ -8,11 +8,14 @@ use tracedecay_domain::{
 };
 
 use super::{
-    PI_AGENT_RELATIVE, PiSource, capture_pi_observations, capture_pi_session, pi_agent_dir_for,
-    session_dir_name,
+    MAX_DISCOVERY_CANDIDATES, MAX_DISCOVERY_FAILURE_EVIDENCE, MAX_DISCOVERY_INPUT_BYTES,
+    MAX_DISCOVERY_UNITS, PI_AGENT_RELATIVE, PiDiscoveryReport, PiSource, capture_pi_observations,
+    capture_pi_session, pi_agent_dir_for, session_dir_name, warn_discovery_failures,
 };
 use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
 use crate::observation::ObservationCancellation;
+use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+use crate::runtime::source::TranscriptDiscoveryBounds;
 
 const FIXTURE_NAME: &str = "2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl";
 const FIXTURE: &str = include_str!(
@@ -56,6 +59,17 @@ impl Layout {
         path
     }
 
+    fn write_malformed_files(&self, count: usize) {
+        for index in 0..count {
+            std::fs::write(
+                self.session_dir()
+                    .join(format!("2026-09-25T16-00-00-000Z_invalid-{index}.jsonl")),
+                "{\"not\":\"a Pi session header\"}\n",
+            )
+            .unwrap();
+        }
+    }
+
     fn source(&self) -> PiSource {
         PiSource::with_agent_dir(&self.agent_dir)
     }
@@ -91,6 +105,129 @@ fn record<'a>(
         .iter()
         .find(|envelope| envelope.stable_record_id().as_str() == stable)
         .unwrap_or_else(|| panic!("no record {stable}"))
+}
+
+#[test]
+fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_failures() {
+    let first = Layout::new();
+    let second = Layout::new();
+    first.write_malformed_files(24);
+    second.write_malformed_files(25);
+    let report = |layout: &Layout| {
+        layout
+            .source()
+            .discover(
+                &layout.project,
+                TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
+                None,
+                HostScanBudget::new(
+                    MAX_DISCOVERY_INPUT_BYTES,
+                    MAX_DISCOVERY_UNITS,
+                    std::time::Instant::now() + HOST_SCAN_WINDOW,
+                    ObservationCancellation::default(),
+                ),
+                None,
+            )
+            .unwrap()
+            .0
+    };
+    let first_report = report(&first);
+    assert_eq!(first_report.failure_count, 24);
+    assert_eq!(first_report.failures.len(), MAX_DISCOVERY_FAILURE_EVIDENCE);
+    let summary_count = |layout: &Layout, discovery: &PiDiscoveryReport| {
+        let (_, output) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
+            warn_discovery_failures(&layout.source().sessions_root(), discovery);
+        });
+        output
+            .matches("additional Pi discovery failures were bounded")
+            .count()
+    };
+    assert_eq!(summary_count(&first, &first_report), 1);
+    assert_eq!(
+        summary_count(&first, &first_report),
+        0,
+        "an unchanged refusal summary is not repeated"
+    );
+    first.write_malformed_files(25);
+    let changed = report(&first);
+    assert_eq!(changed.failure_count, 25);
+    assert_eq!(
+        summary_count(&first, &changed),
+        1,
+        "changed totals are logged"
+    );
+    assert_eq!(
+        summary_count(&second, &report(&second)),
+        1,
+        "another sessions root is logged independently"
+    );
+    for index in MAX_DISCOVERY_FAILURE_EVIDENCE..25 {
+        std::fs::remove_file(
+            first
+                .session_dir()
+                .join(format!("2026-09-25T16-00-00-000Z_invalid-{index}.jsonl")),
+        )
+        .unwrap();
+    }
+    let fully_reported = report(&first);
+    assert_eq!(
+        fully_reported.failure_count,
+        MAX_DISCOVERY_FAILURE_EVIDENCE as u64
+    );
+    assert_eq!(
+        fully_reported.failures.len(),
+        MAX_DISCOVERY_FAILURE_EVIDENCE
+    );
+    assert_eq!(summary_count(&first, &fully_reported), 0);
+    first.write_malformed_files(25);
+    assert_eq!(
+        summary_count(&first, &report(&first)),
+        1,
+        "full failure evidence clears the previous summary"
+    );
+    for index in 0..25 {
+        std::fs::remove_file(
+            first
+                .session_dir()
+                .join(format!("2026-09-25T16-00-00-000Z_invalid-{index}.jsonl")),
+        )
+        .unwrap();
+    }
+    first.write_fixture();
+    let recovered = report(&first);
+    assert_eq!(recovered.failure_count, 0);
+    assert_eq!(summary_count(&first, &recovered), 0);
+    first.write_malformed_files(25);
+    let recurred = report(&first);
+    assert_eq!(
+        summary_count(&first, &recurred),
+        1,
+        "recurrence after recovery is logged"
+    );
+    assert_eq!(summary_count(&first, &recurred), 0);
+}
+
+#[tokio::test]
+async fn repeated_discovery_summary_keeps_malformed_sources_and_coverage_refused() {
+    let layout = Layout::new();
+    let malformed = MAX_DISCOVERY_FAILURE_EVIDENCE + 1;
+    layout.write_malformed_files(malformed);
+    let admission = MemoryHostAdmission::default();
+    for _ in 0..2 {
+        let outcome = capture(&layout, &admission).await;
+        assert_eq!(outcome.discovery_failures, malformed as u64);
+        assert!(outcome.deferred);
+        assert!(admission.observations().is_empty());
+        let coverage = admission
+            .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://pi/v1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            coverage.file_id, 2,
+            "malformed sources retain partial coverage"
+        );
+    }
 }
 
 #[tokio::test]
