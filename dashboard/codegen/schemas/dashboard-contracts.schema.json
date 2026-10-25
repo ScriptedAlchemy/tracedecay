@@ -4090,6 +4090,21 @@
           "type": "string"
         },
         {
+          "const": "capture",
+          "description": "A pass is reading the worktree's files. No generation exists yet.",
+          "type": "string"
+        },
+        {
+          "const": "parse",
+          "description": "A pass is parsing the captured files into generation evidence.",
+          "type": "string"
+        },
+        {
+          "const": "link",
+          "description": "A pass is resolving the parsed files and sealing the generation.",
+          "type": "string"
+        },
+        {
           "const": "graph_publication",
           "description": "Text serving is built and the pass that sealed the generation is\nstill publishing its native graph.",
           "type": "string"
@@ -4097,7 +4112,7 @@
       ]
     },
     "CodeIndexBuildProgressV1": {
-      "description": "The latest committed progress boundary for one active code-index generation.\n\nEvery count is scoped to `generation_id`. The snapshot never includes a\nstaged page: work is reported only after the batch that owns it commits.",
+      "description": "The latest work completed by a code-index pass or sealed generation.\n\nArtifact commit counts include only committed batches. Phase work counts\ndescribe capture, parse, sealing, and graph publication independently of\nartifact commits. Before sealing, no generation or sealed source exists.",
       "properties": {
         "blocked_reason": {
           "anyOf": [
@@ -4188,8 +4203,11 @@
           ]
         },
         "generation_id": {
-          "description": "Exact generation receiving the committed build work.",
-          "type": "string"
+          "description": "Exact generation receiving the committed build work, absent while the\npass that will seal it is still capturing, parsing, or linking.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "last_commit_latency_micros": {
           "description": "Duration of the last committed SQLite batch, when one exists.",
@@ -4201,7 +4219,7 @@
           ]
         },
         "last_progress_micros": {
-          "description": "Unix-epoch timestamp of the last durable progress publication.",
+          "description": "Unix-epoch timestamp of the last progress publication. It advances\nwhenever the pass finishes work in any phase.",
           "format": "int64",
           "type": "integer"
         },
@@ -4217,6 +4235,26 @@
           "$ref": "#/$defs/CodeIndexBuildPhaseV1",
           "description": "Durable pipeline phase that published this snapshot."
         },
+        "phase_completed_units": {
+          "default": null,
+          "description": "Work the current phase has finished, in that phase's own unit: files\nread for `capture`, files parsed for `parse`, files resolved then\nsegments sealed for `link`, and pages written then segments verified\nfor `graph_publication`. Absent for phases the file counts describe.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "phase_total_units": {
+          "default": null,
+          "description": "The current phase's total work, in the same unit as\n[`Self::phase_completed_units`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "producer_incarnation": {
           "description": "Registry-minted scheduler incarnation within one daemon.\n\nA worktree retirement/remount creates a new value. `progress_epoch` is\ncomparable only when both incarnation fields match.",
           "format": "uint64",
@@ -4230,8 +4268,11 @@
           "type": "integer"
         },
         "sealed_source_digest": {
-          "description": "Identity of the sealed source whose authenticated bounds define progress.",
-          "type": "string"
+          "description": "Identity of the sealed source whose authenticated bounds define progress,\nabsent before the pass seals one.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "total_files": {
           "description": "Authenticated sealed-source file bound for this generation.",
@@ -4253,6 +4294,8 @@
         "progress_epoch",
         "sealed_source_digest",
         "phase",
+        "phase_completed_units",
+        "phase_total_units",
         "committed_pages",
         "committed_chunks",
         "committed_imports",

@@ -244,7 +244,7 @@ function BuildProgressReading({
   return (
     <div
       className="flex flex-col gap-1.5 border-b border-edge-subtle pb-1.5 text-3xs leading-snug"
-      data-code-index-progress={progress.generation_id}
+      data-code-index-progress={progress.generation_id ?? undefined}
     >
       <div className="flex min-w-0 items-baseline justify-between gap-2">
         <span className="td-legend">Code progress</span>
@@ -260,8 +260,13 @@ function BuildProgressReading({
       />
       <dl className="flex flex-col gap-1">
         <Row label="generation" mono>
-          {progress.generation_id}
+          {progress.generation_id ?? 'not sealed yet'}
         </Row>
+        {progress.phase_completed_units != null ? (
+          <Row label="phase work">
+            {`${formatCount(progress.phase_completed_units)}${progress.phase_total_units != null ? ` / ${formatCount(progress.phase_total_units)}` : ''} units completed`}
+          </Row>
+        ) : null}
         <Row label="files">
           {`${formatCount(progress.completed_files)} / ${formatCount(progress.total_files)} files`}
         </Row>

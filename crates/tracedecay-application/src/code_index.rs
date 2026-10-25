@@ -9,7 +9,8 @@ use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::CodeGenerationId;
 
 use tracedecay_code_index::{
-    chunks::CodeIndexImportEvidenceV1, production::CodeIndexExecutionControlV1,
+    chunks::CodeIndexImportEvidenceV1,
+    production::{CodeIndexBuildWorkV1, CodeIndexExecutionControlV1},
 };
 use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
@@ -99,7 +100,11 @@ pub struct DaemonCodeIndexControlV1 {
     pressure: Option<Arc<ResidentMemoryPressureV1>>,
     tripped: Arc<AtomicBool>,
     ignores_source_epoch: bool,
+    build_observer: Option<CodeIndexBuildObserverV1>,
 }
+
+/// Receives the work a build reports through its control.
+pub type CodeIndexBuildObserverV1 = Arc<dyn Fn(CodeIndexBuildWorkV1) + Send + Sync>;
 
 impl Default for DaemonCodeIndexControlV1 {
     fn default() -> Self {
@@ -120,7 +125,15 @@ impl DaemonCodeIndexControlV1 {
             pressure: None,
             tripped: Arc::new(AtomicBool::new(false)),
             ignores_source_epoch: false,
+            build_observer: None,
         }
+    }
+
+    /// Report the work this attempt finishes to `observer`.
+    #[must_use]
+    pub fn with_build_observer(mut self, observer: CodeIndexBuildObserverV1) -> Self {
+        self.build_observer = Some(observer);
+        self
     }
 
     /// Run this attempt to completion although a newer source epoch arrives.
@@ -195,6 +208,12 @@ impl CodeIndexExecutionControlV1 for DaemonCodeIndexControlV1 {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
+    }
+
+    fn observe_build_work(&self, work: CodeIndexBuildWorkV1) {
+        if let Some(observer) = &self.build_observer {
+            observer(work);
+        }
     }
 }
 

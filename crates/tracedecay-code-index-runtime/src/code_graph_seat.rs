@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use tracedecay_code_index::graph_projection::CodeGraphPublicationWorkV1;
 use tracedecay_code_index::production::CodeGraphBuildBoundV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
@@ -52,15 +53,18 @@ pub trait CodeGraphSeatLeaseV1: Send {
 
     /// Publishes the retained sealed generation's graph head, building its
     /// rows from the sealed segments when the head has not landed yet.
+    /// `observe` sees the publication's work as it finishes.
     fn publish_verified_snapshot(
         &self,
         request_cancelled: Arc<AtomicBool>,
+        observe: &(dyn Fn(CodeGraphPublicationWorkV1) + Sync),
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
     fn publish_verified_snapshot_admitted(
         &self,
         request_cancelled: Arc<AtomicBool>,
         admission: Arc<dyn CodeGraphBuildAdmissionV1>,
+        observe: &(dyn Fn(CodeGraphPublicationWorkV1) + Sync),
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
     fn recover_verified_snapshot_from_head(

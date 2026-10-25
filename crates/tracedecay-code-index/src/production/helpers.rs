@@ -2,6 +2,7 @@ use super::*;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1, ImportReexportScopeV1};
 use tracedecay_domain::{
@@ -321,6 +322,7 @@ type EdgeEvidenceV1 = (
 /// cannot decide.
 pub(crate) fn collect_edge_evidence<T>(
     files: &[T],
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<EdgeEvidenceV1, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
@@ -332,7 +334,7 @@ where
         edges,
         gaps,
         ambiguous_name_drops,
-    } = resolve_cross_file_references(files)?;
+    } = resolve_cross_file_references(files, control)?;
     let (edges, abstentions) = edge_evidence(files, edges);
     Ok((edges, abstentions, gaps, ambiguous_name_drops))
 }
@@ -382,6 +384,7 @@ where
 #[tracing::instrument(name = "code_index.seal.resolve", level = "trace", skip_all)]
 pub(crate) fn resolve_cross_file_references<T>(
     files: &[T],
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
@@ -392,7 +395,7 @@ where
         let _span = tracing::trace_span!("code_index.seal.reference_index").entered();
         FileSymbolsByNameV1::new(files)
     };
-    resolve_references(files, &by_simple_name, None)
+    resolve_references(files, &by_simple_name, None, Some(control))
 }
 
 /// The retained references a resolution pass decides: per file index, the
@@ -412,7 +415,7 @@ pub(crate) fn resolve_selected_cross_file_references<T>(
 where
     T: ResolutionFileV1,
 {
-    resolve_references(files, by_simple_name, Some(selection))
+    resolve_references(files, by_simple_name, Some(selection), None)
 }
 
 /// A resolution: the cross-file edges, and the references the seal cannot
@@ -486,6 +489,7 @@ fn resolve_references<T>(
     files: &[T],
     by_simple_name: &dyn SymbolsByNameV1,
     selection: Option<&ReferenceSelectionV1>,
+    control: Option<&dyn CodeIndexExecutionControlV1>,
 ) -> Result<CrossFileResolutionV1, CodeIndexProductionErrorV1>
 where
     T: ResolutionFileV1,
@@ -502,13 +506,28 @@ where
     // pushed, so the stable sort and dedup below, and therefore every edge
     // digest downstream, do not depend on the width.
     let units = selection.map_or(files.len(), <[_]>::len);
+    let linked = AtomicU64::new(0);
     let per_file = collect_by_file_index_ordered(units, workers, &|unit| {
+        if let Some(control) = control {
+            lexical_page_source::checkpoint(control)?;
+        }
         let (index, picks) = match selection {
             Some(selection) => (selection[unit].0, Some(selection[unit].1.as_slice())),
             None => (unit, None),
         };
-        resolve_one_file_cross_file_references(files, by_simple_name, &modules, index, picks)
-    })?;
+        let resolved =
+            resolve_one_file_cross_file_references(files, by_simple_name, &modules, index, picks);
+        if let Some(control) = control {
+            let completed = linked.fetch_add(1, Ordering::AcqRel) + 1;
+            control.observe_build_work(CodeIndexBuildWorkV1::Linked {
+                completed,
+                total: units as u64,
+            });
+        }
+        Ok::<_, CodeIndexProductionErrorV1>(resolved)
+    })?
+    .into_iter()
+    .collect::<Result<Vec<_>, CodeIndexProductionErrorV1>>()?;
     let ambiguous_name_drops = per_file
         .iter()
         .fold(0_u64, |total, (_, _, drops)| total.saturating_add(*drops));

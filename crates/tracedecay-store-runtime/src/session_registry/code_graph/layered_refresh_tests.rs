@@ -525,6 +525,7 @@ fn layered_report(runtime: &super::RetainedCodeGraphRuntimeV1) -> Option<CodeGra
             &registration,
             &mut |_| Ok(()),
             &|| Ok(()),
+            &|_| {},
         )
         .expect("rebuild the generation's rows")
         .1

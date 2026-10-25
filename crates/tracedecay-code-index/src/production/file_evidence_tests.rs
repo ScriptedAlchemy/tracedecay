@@ -53,9 +53,10 @@ impl CodeIndexAtomicPublicationPort for CountingStoreV1 {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
+        _control: &dyn super::CodeIndexExecutionControlV1,
     ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
         self.inner
-            .publish_atomically(scope, expected_active_generation, generation)
+            .publish_atomically(scope, expected_active_generation, generation, _control)
     }
 }
 

@@ -917,7 +917,7 @@ export type CodeGraphServingReadinessV1 =
 
 export type CodeIndexBuildBlockedReasonV1 = "artifact_store_unavailable" | "publication_authority_corrupt" | "resident_memory" | "retry_backoff" | "source_unavailable";
 
-export type CodeIndexBuildPhaseV1 = "bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "graph_publication";
+export type CodeIndexBuildPhaseV1 = "bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "capture" | "parse" | "link" | "graph_publication";
 
 export type CodeIndexBuildProgressV1 = {
   blocked_reason: CodeIndexBuildBlockedReasonV1 | null;
@@ -933,14 +933,16 @@ export type CodeIndexBuildProgressV1 = {
   elapsed_micros: number;
   estimated_remaining_seconds: number | null;
   files_per_second: number | null;
-  generation_id: string;
+  generation_id: string | null;
   last_commit_latency_micros: number | null;
   last_progress_micros: number;
   lexical_units_per_second: number | null;
   phase: CodeIndexBuildPhaseV1;
+  phase_completed_units: number | null;
+  phase_total_units: number | null;
   producer_incarnation: number;
   progress_epoch: number;
-  sealed_source_digest: string;
+  sealed_source_digest: string | null;
   total_files: number;
   total_lexical_units: number;
 };

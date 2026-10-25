@@ -33,7 +33,9 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
-use tracedecay_code_index::graph_projection::CodeGraphLayeredReportV1;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphLayeredReportV1, CodeGraphPublicationWorkV1,
+};
 use tracedecay_code_index_runtime::{
     CodeGraphBuildAdmissionV1, CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1,
     CodeGraphSeatRuntimePortV1,
@@ -1286,17 +1288,19 @@ impl RetainedCodeGraphRuntimeV1 {
         level = "trace",
         skip_all
     )]
+    #[cfg(test)]
     pub fn publish_verified_snapshot(
         &self,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
-        self.publish_verified_snapshot_with_admission(request_cancelled, None)
+        self.publish_verified_snapshot_with_admission(request_cancelled, None, &|_| {})
     }
 
     fn publish_verified_snapshot_with_admission(
         &self,
         request_cancelled: Arc<AtomicBool>,
         admission: Option<Arc<dyn CodeGraphBuildAdmissionV1>>,
+        observe: &(dyn Fn(CodeGraphPublicationWorkV1) + Sync),
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         // The project-shard build permit is claimed before any row is built
         // and held through publication so 1/2/4/8 worktree scopes cannot
@@ -1430,6 +1434,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 &context,
                 &mut staging_release,
                 admission.as_deref(),
+                observe,
             )
         })
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?
@@ -1900,6 +1905,7 @@ impl RetainedCodeGraphRuntimeV1 {
             tracedecay_code_index::production::CodeGraphBuildBoundV1,
         ) -> std::result::Result<(), GraphDbError>,
         check: &dyn Fn() -> std::result::Result<(), GraphDbError>,
+        observe: &dyn Fn(CodeGraphPublicationWorkV1),
     ) -> std::result::Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError>
     {
         let layered_spill = |base: super::code_graph_manifest::LayeredBaseV1<'_>| match base {
@@ -1947,6 +1953,7 @@ impl RetainedCodeGraphRuntimeV1 {
             &cold_spill,
             admit,
             check,
+            observe,
         )
     }
 
@@ -1962,6 +1969,7 @@ impl RetainedCodeGraphRuntimeV1 {
         context: &GraphPublicationOperationContextV1<'_>,
         staging_release: &mut Option<GraphProjectionIdentityV1>,
         admission: Option<&dyn CodeGraphBuildAdmissionV1>,
+        observe: &(dyn Fn(CodeGraphPublicationWorkV1) + Sync),
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         // A request cancelled or expired before publication starts must
         // answer its typed interruption before touching the publication
@@ -2004,12 +2012,13 @@ impl RetainedCodeGraphRuntimeV1 {
                 let _span =
                     tracing::trace_span!("daemon.session_registry.publish_snapshot.verify_source")
                         .entered();
-                super::code_graph_manifest::verify_sealed_generation_source_from_roots(
+                super::code_graph_manifest::verify_observed_sealed_generation_source_from_roots(
                     &self.generations_root,
                     &self.replay_root,
                     &self.sealed_state_digest,
                     &self.verified_segments,
                     &check,
+                    observe,
                 )
             }?;
             revalidate_stable_sealed_source(&proof, &self.replay_root, &check)
@@ -2050,6 +2059,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 &registration,
                 &mut admit,
                 &check,
+                observe,
             );
             #[cfg(any(test, feature = "test-helpers"))]
             PUBLICATION_PROJECTION_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
@@ -3103,22 +3113,24 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
     fn publish_verified_snapshot(
         &self,
         request_cancelled: Arc<AtomicBool>,
+        observe: &(dyn Fn(CodeGraphPublicationWorkV1) + Sync),
     ) -> std::result::Result<
         tracedecay_graph_db::VerifiedGraphSnapshot,
         tracedecay_graph_db::GraphDbError,
     > {
-        Self::publish_verified_snapshot(self, request_cancelled)
+        self.publish_verified_snapshot_with_admission(request_cancelled, None, observe)
     }
 
     fn publish_verified_snapshot_admitted(
         &self,
         request_cancelled: Arc<AtomicBool>,
         admission: Arc<dyn CodeGraphBuildAdmissionV1>,
+        observe: &(dyn Fn(CodeGraphPublicationWorkV1) + Sync),
     ) -> std::result::Result<
         tracedecay_graph_db::VerifiedGraphSnapshot,
         tracedecay_graph_db::GraphDbError,
     > {
-        self.publish_verified_snapshot_with_admission(request_cancelled, Some(admission))
+        self.publish_verified_snapshot_with_admission(request_cancelled, Some(admission), observe)
     }
 
     fn recover_verified_snapshot_from_head(

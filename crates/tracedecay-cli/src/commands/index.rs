@@ -252,10 +252,8 @@ const INIT_WAIT_SLICE_MS: u64 = 30_000;
 const INIT_WAIT_SLICE: Duration = Duration::from_millis(INIT_WAIT_SLICE_MS);
 
 /// How long `init --wait` keeps waiting once the daemon stops reporting work
-/// toward the first generation. Capture, extraction, and graph publication
-/// publish no build progress for minutes on a large repository, so liveness
-/// is the scheduler's own indexing, restore, or verification claim, not a
-/// progress counter.
+/// toward the first generation. Liveness is the scheduler's own indexing,
+/// restore, or verification claim, not a progress counter.
 const INIT_WAIT_STALL_WINDOW: Duration = Duration::from_secs(120);
 
 fn init_queued_not_ready_receipt(project_path: &Path) -> String {
@@ -484,10 +482,14 @@ impl std::fmt::Display for FirstGenerationStall {
 }
 
 fn build_progress_summary(progress: &CodeIndexBuildProgressV1) -> String {
-    format!(
-        "{:?} {}/{} files",
-        progress.phase, progress.completed_files, progress.total_files
-    )
+    match (progress.phase_completed_units, progress.phase_total_units) {
+        (Some(completed), Some(total)) => format!("{:?} {completed}/{total}", progress.phase),
+        (Some(completed), None) => format!("{:?} {completed}", progress.phase),
+        _ => format!(
+            "{:?} {}/{} files",
+            progress.phase, progress.completed_files, progress.total_files
+        ),
+    }
 }
 
 fn first_generation_wait_outcome(
@@ -695,12 +697,14 @@ mod daemon_precondition_tests {
         blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
     ) -> CodeIndexBuildProgressV1 {
         CodeIndexBuildProgressV1 {
-            generation_id: "generation.v1.first".to_owned(),
+            generation_id: Some("generation.v1.first".to_owned()),
             daemon_incarnation: 1,
             producer_incarnation: 1,
             progress_epoch: completed_files + 1,
-            sealed_source_digest: "digest".to_owned(),
+            sealed_source_digest: Some("digest".to_owned()),
             phase: CodeIndexBuildPhaseV1::SourceScan,
+            phase_completed_units: None,
+            phase_total_units: None,
             committed_pages: completed_files,
             committed_chunks: 0,
             committed_imports: 0,

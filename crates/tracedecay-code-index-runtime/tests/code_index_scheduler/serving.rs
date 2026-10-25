@@ -3034,7 +3034,10 @@ fn progress_owner_epoch_rejects_original_a_after_a_b_a_replacement() {
         progress_snapshot_for_generation(&generation_a, 99),
     ));
     let after_stale_original = slot.snapshot().expect("current A snapshot");
-    assert_eq!(after_stale_original.generation_id, generation_a.as_str());
+    assert_eq!(
+        after_stale_original.generation_id.as_deref(),
+        Some(generation_a.as_str())
+    );
     assert_eq!(after_stale_original.committed_pages, 3);
     assert_eq!(
         after_stale_original.progress_epoch, replacement_a.progress_epoch,
@@ -3384,8 +3387,8 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
     );
     let replacement_progress = build_progress_snapshot(&scheduler);
     assert_eq!(
-        replacement_progress.generation_id,
-        replacement.generation().manifest().generation_id.as_str()
+        replacement_progress.generation_id.as_deref(),
+        Some(replacement.generation().manifest().generation_id.as_str())
     );
     assert!(replacement_progress.progress_epoch > original_progress.progress_epoch);
     original.publish_text_progress_phase(
@@ -7796,4 +7799,95 @@ fn first_pass_publishes_advancing_progress_before_its_generation_exists() {
         progress.progress_epoch
     );
     assert!(progress.last_progress_micros >= pass_started_micros);
+    assert_eq!(progress.phase, CodeIndexBuildPhaseV1::Link);
+    assert_eq!(progress.generation_id, None);
+    assert_eq!(progress.sealed_source_digest, None);
+    assert!(
+        progress
+            .phase_completed_units
+            .is_some_and(|segments| segments > 0),
+        "the sealing step reports the segments it wrote"
+    );
+
+    // A pass that seals nothing leaves the slot as it found it.
+    assert!(matches!(
+        scheduler.reconcile_now().expect("unchanged source"),
+        crate::code_index_scheduler::CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    let after_noop = build_progress_snapshot(&scheduler);
+    assert_eq!(after_noop.phase, CodeIndexBuildPhaseV1::Link);
+    assert_eq!(
+        after_noop.phase_completed_units,
+        progress.phase_completed_units
+    );
+    assert!(after_noop.progress_epoch >= progress.progress_epoch);
+}
+
+#[test]
+fn graph_publication_work_advances_only_its_generations_progress() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn value() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest
+        .advance_text_serving(64)
+        .expect("finish text projection")
+    {}
+    let ready = build_progress_snapshot(&scheduler);
+    assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
+
+    latest.text.publish_graph_publication_work(Some(
+        tracedecay_code_index::graph_projection::CodeGraphPublicationWorkV1::PagesWritten {
+            written: 1,
+            total: 2,
+        },
+    ));
+    let first = build_progress_snapshot(&scheduler);
+    assert!(first.progress_epoch > ready.progress_epoch);
+    assert!(first.last_progress_micros >= ready.last_progress_micros);
+    assert_eq!(first.phase_completed_units, Some(1));
+    assert_eq!(first.phase_total_units, Some(2));
+
+    latest.text.publish_graph_publication_work(Some(
+        tracedecay_code_index::graph_projection::CodeGraphPublicationWorkV1::PagesWritten {
+            written: 2,
+            total: 2,
+        },
+    ));
+    let second = build_progress_snapshot(&scheduler);
+    assert!(second.progress_epoch > first.progress_epoch);
+    assert!(second.last_progress_micros >= first.last_progress_micros);
+    assert_eq!(second.phase_completed_units, Some(2));
+
+    latest.text.publish_graph_publication_work(None);
+    let finished = build_progress_snapshot(&scheduler);
+    assert!(finished.progress_epoch > second.progress_epoch);
+    assert_eq!(finished.phase_completed_units, None);
+    assert_eq!(finished.phase_total_units, None);
+
+    scheduler
+        .build_progress_slot()
+        .write()
+        .expect("progress slot")
+        .replace_generation(CodeGenerationId::new("generation.replacement").expect("generation"));
+    latest.text.publish_graph_publication_work(Some(
+        tracedecay_code_index::graph_projection::CodeGraphPublicationWorkV1::PagesWritten {
+            written: 1,
+            total: 2,
+        },
+    ));
+    assert!(
+        scheduler
+            .build_progress_slot()
+            .read()
+            .expect("progress slot")
+            .snapshot()
+            .is_none(),
+        "a retired publisher must not restore its generation's snapshot"
+    );
 }

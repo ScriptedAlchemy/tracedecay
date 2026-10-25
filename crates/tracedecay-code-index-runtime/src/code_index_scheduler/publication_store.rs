@@ -43,10 +43,10 @@ use tracedecay_runtime_core::resident_memory::{
 use tracedecay_code_index::{
     chunks::content_digest,
     production::{
-        CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
-        CodeIndexGenerationScopeV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
-        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1,
+        CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexBuildWorkV1,
+        CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
+        CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexPublishedGenerationV1, CodeIndexSealedGenerationV1, CodeIndexSealedPublicationV1,
         SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1, SealedSegmentReaderV1,
         SharedDecodedContentPoolV1, SharedPhysicalCodeArtifactPoolV1,
         VerifiedSealedTextGenerationMetadataV1,
@@ -2733,6 +2733,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         _scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
         *self
             .unpublished_candidate
@@ -2904,6 +2905,11 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         let mut evidence_pack = TemporaryEvidencePackV1::create(evidence_temporary_path)?;
         let mut staged_segments = StagedGenerationSegmentsV1::new();
         let mut referenced_segment_bytes = 0_u64;
+        let mut segments_written = 0_u64;
+        let mut observe_segment_written = || {
+            segments_written += 1;
+            control.observe_build_work(CodeIndexBuildWorkV1::Sealed { segments_written });
+        };
         self.seal_encoded_segment_bytes.store(0, Ordering::Relaxed);
         self.seal_existing_segment_bytes_read
             .store(0, Ordering::Relaxed);
@@ -2930,6 +2936,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                             self.stage_segment(digest, bytes, &mut staged_segments)
                         }
                         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                        observe_segment_written();
                         #[cfg(test)]
                         if let Some(observer) = self.seal_segment_observer.as_ref() {
                             observer();
@@ -2954,6 +2961,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                             self.stage_segment(digest, bytes, &mut staged_segments)
                         }
                         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                        observe_segment_written();
                         referenced_segment_bytes =
                             referenced_segment_bytes.saturating_add(segment_size);
                     }
@@ -2975,6 +2983,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                             self.stage_segment(page_digest, bytes, &mut staged_segments)
                         }
                         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+                        observe_segment_written();
                         referenced_segment_bytes =
                             referenced_segment_bytes.saturating_add(segment_size);
                     }

@@ -194,6 +194,8 @@ describe('summaries', () => {
         progress_epoch: 1,
         sealed_source_digest: 'sha256:x',
         phase: 'bulk_commit',
+        phase_completed_units: null,
+        phase_total_units: null,
         committed_pages: 1,
         committed_chunks: 1,
         committed_imports: 0,

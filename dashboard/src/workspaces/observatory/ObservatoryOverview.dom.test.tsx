@@ -418,6 +418,8 @@ function freshnessPayload() {
           progress_epoch: 1,
           sealed_source_digest: 'sha256:sealed',
           phase: 'index_build',
+          phase_completed_units: null,
+          phase_total_units: null,
           committed_pages: 16,
           committed_chunks: 10_000,
           committed_imports: 480,

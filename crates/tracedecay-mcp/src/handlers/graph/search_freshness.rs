@@ -55,6 +55,9 @@ pub(super) enum ServedGenerationV1<'a> {
 
 fn phase_label(phase: CodeIndexBuildPhaseV1) -> &'static str {
     match phase {
+        CodeIndexBuildPhaseV1::Capture => "capture",
+        CodeIndexBuildPhaseV1::Parse => "parse",
+        CodeIndexBuildPhaseV1::Link => "link",
         CodeIndexBuildPhaseV1::SourceScan => "source_scan",
         CodeIndexBuildPhaseV1::RelationalPreparation => "relational_preparation",
         CodeIndexBuildPhaseV1::BulkCommit => "bulk_commit",
@@ -388,12 +391,14 @@ mod tests {
             ..CodeIndexWorktreeFreshnessV1::default()
         };
         state.progress = Some(CodeIndexBuildProgressV1 {
-            generation_id: "generation.next".to_owned(),
+            generation_id: Some("generation.next".to_owned()),
             daemon_incarnation: 1,
             producer_incarnation: 1,
             progress_epoch: 1,
-            sealed_source_digest: "sha256:fixture".to_owned(),
+            sealed_source_digest: Some("sha256:fixture".to_owned()),
             phase: CodeIndexBuildPhaseV1::BulkCommit,
+            phase_completed_units: None,
+            phase_total_units: None,
             committed_pages: 0,
             committed_chunks: 0,
             committed_imports: 0,

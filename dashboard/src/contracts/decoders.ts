@@ -2471,12 +2471,13 @@ export const CodeIndexBuildBlockedReasonV1Schema: z.ZodEnum<{ "artifact_store_un
 
 A phase is not inferred from scheduler state. The mounted registry publishes
 the exact phase that owns the active generation. */
-export const CodeIndexBuildPhaseV1Schema: z.ZodType<"bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "graph_publication", unknown> = z.union([z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]), z.literal("graph_publication")]);
+export const CodeIndexBuildPhaseV1Schema: z.ZodType<"bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "capture" | "parse" | "link" | "graph_publication", unknown> = z.union([z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]), z.literal("capture"), z.literal("parse"), z.literal("link"), z.literal("graph_publication")]);
 
-/** The latest committed progress boundary for one active code-index generation.
+/** The latest work completed by a code-index pass or sealed generation.
 
-Every count is scoped to `generation_id`. The snapshot never includes a
-staged page: work is reported only after the batch that owns it commits. */
+Artifact commit counts include only committed batches. Phase work counts
+describe capture, parse, sealing, and graph publication independently of
+artifact commits. Before sealing, no generation or sealed source exists. */
 export const CodeIndexBuildProgressV1Schema: z.ZodObject<{
   blocked_reason: z.ZodType<CodeIndexBuildBlockedReasonV1 | null, unknown>;
   committed_chunks: z.ZodType<number, unknown>;
@@ -2491,14 +2492,16 @@ export const CodeIndexBuildProgressV1Schema: z.ZodObject<{
   elapsed_micros: z.ZodType<number, unknown>;
   estimated_remaining_seconds: z.ZodType<number | null, unknown>;
   files_per_second: z.ZodType<number | null, unknown>;
-  generation_id: z.ZodType<string, unknown>;
+  generation_id: z.ZodType<string | null, unknown>;
   last_commit_latency_micros: z.ZodType<number | null, unknown>;
   last_progress_micros: z.ZodType<number, unknown>;
   lexical_units_per_second: z.ZodType<number | null, unknown>;
   phase: z.ZodType<CodeIndexBuildPhaseV1, unknown>;
+  phase_completed_units: z.ZodType<number | null, unknown>;
+  phase_total_units: z.ZodType<number | null, unknown>;
   producer_incarnation: z.ZodType<number, unknown>;
   progress_epoch: z.ZodType<number, unknown>;
-  sealed_source_digest: z.ZodType<string, unknown>;
+  sealed_source_digest: z.ZodType<string | null, unknown>;
   total_files: z.ZodType<number, unknown>;
   total_lexical_units: z.ZodType<number, unknown>;
 }> = z.object({
@@ -2515,14 +2518,16 @@ export const CodeIndexBuildProgressV1Schema: z.ZodObject<{
   elapsed_micros: z.number().int().min(0),
   estimated_remaining_seconds: z.number().int().min(0).nullable(),
   files_per_second: z.number().nullable(),
-  generation_id: z.string(),
+  generation_id: z.string().nullable(),
   last_commit_latency_micros: z.number().int().min(0).nullable(),
   last_progress_micros: z.number().int(),
   lexical_units_per_second: z.number().nullable(),
   phase: z.lazy(() => CodeIndexBuildPhaseV1Schema),
+  phase_completed_units: z.number().int().min(0).nullable(),
+  phase_total_units: z.number().int().min(0).nullable(),
   producer_incarnation: z.number().int().min(0),
   progress_epoch: z.number().int().min(0),
-  sealed_source_digest: z.string(),
+  sealed_source_digest: z.string().nullable(),
   total_files: z.number().int().min(0),
   total_lexical_units: z.number().int().min(0),
 });

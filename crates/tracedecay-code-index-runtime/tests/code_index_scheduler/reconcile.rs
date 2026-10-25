@@ -1823,6 +1823,7 @@ fn sealed_segment_graph_store(
             .expect("row spill"),
         &mut |_| Ok(()),
         &|| Ok(()),
+        &|_| {},
     )
     .expect("code graph rows")
     .materialize(&|| Ok(()))
@@ -11591,8 +11592,9 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             progress
                 .snapshot()
                 .expect("generation A ready progress")
-                .generation_id,
-            generation_a.as_str()
+                .generation_id
+                .as_deref(),
+            Some(generation_a.as_str())
         );
         progress.owner_epoch
     };
@@ -11775,7 +11777,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             }
         };
         if let Some((owner_epoch, Some(progress))) = progress
-            && progress.generation_id == generation_c.as_str()
+            && progress.generation_id.as_deref() == Some(generation_c.as_str())
             && progress.committed_pages > 0
         {
             assert!(owner_epoch > owner_epoch_a);
@@ -12371,8 +12373,8 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         tokio::time::sleep(Duration::from_millis(2)).await;
     };
     assert_eq!(
-        progress_mid_build.generation_id,
-        sealed_generation_id.as_str(),
+        progress_mid_build.generation_id.as_deref(),
+        Some(sealed_generation_id.as_str()),
         "the live build progress must belong to the retained generation"
     );
     // Exact and lexical owners must finish and serve while native graph
@@ -12405,8 +12407,8 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         "the pre-edit observation must own the retained generation"
     );
     assert_eq!(
-        progress_before_retry.generation_id,
-        sealed_generation_id.as_str(),
+        progress_before_retry.generation_id.as_deref(),
+        Some(sealed_generation_id.as_str()),
         "the pre-edit progress must belong to the retained generation"
     );
 
@@ -12463,7 +12465,10 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         let progress = progress
             .snapshot()
             .expect("changed text progress remains visible during graph retry");
-        assert_eq!(progress.generation_id, refreshed_generation_id.as_str());
+        assert_eq!(
+            progress.generation_id.as_deref(),
+            Some(refreshed_generation_id.as_str())
+        );
         assert_ne!(progress.generation_id, progress_before_retry.generation_id);
         assert_eq!(
             progress.phase,

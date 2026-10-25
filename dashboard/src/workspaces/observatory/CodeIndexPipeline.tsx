@@ -78,8 +78,8 @@ export function CodeIndexPipeline({
         )
       ) : (
         <div className="mt-2 flex flex-col gap-2">
-          {progress.map((build) => (
-            <CodeIndexBuildCard key={build.generation_id} progress={build} />
+          {progress.map((build, index) => (
+            <CodeIndexBuildCard key={build.generation_id ?? `unsealed-${index}`} progress={build} />
           ))}
         </div>
       )}
@@ -168,7 +168,7 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
   return (
     <article
       className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2.5"
-      data-code-index-generation={progress.generation_id}
+      data-code-index-generation={progress.generation_id ?? undefined}
     >
       <p className="flex flex-wrap items-baseline justify-between gap-x-2 text-body">
         <span className="font-medium text-text-secondary">
@@ -176,16 +176,27 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
         </span>
       </p>
       <progress
-        aria-label={`Code progress for ${progress.generation_id}`}
+        aria-label={`Code progress for ${progress.generation_id ?? 'the unsealed pass'}`}
         className="mt-1.5 h-1.5 w-full accent-accent"
         max={100}
         value={percentage}
       />
       <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm leading-snug">
         <dt className="text-text-muted">generation</dt>
-        <dd className="truncate text-right font-mono text-text-secondary" title={progress.generation_id}>
-          {progress.generation_id}
+        <dd
+          className="truncate text-right font-mono text-text-secondary"
+          title={progress.generation_id ?? undefined}
+        >
+          {progress.generation_id ?? 'not sealed yet'}
         </dd>
+        {progress.phase_completed_units != null ? (
+          <>
+            <dt className="text-text-muted">phase work</dt>
+            <dd className="text-right text-text-secondary">
+              {`${formatCount(progress.phase_completed_units)}${progress.phase_total_units != null ? ` / ${formatCount(progress.phase_total_units)}` : ''} units completed`}
+            </dd>
+          </>
+        ) : null}
         <dt className="text-text-muted">files</dt>
         <dd className="text-right text-text-secondary">
           {formatCount(progress.completed_files)} / {formatCount(progress.total_files)} files
@@ -312,8 +323,12 @@ export function isCurrentOrNewerCodeIndexProgress(
 }
 
 export function codeIndexProgressPercentage(progress: CodeIndexBuildProgressV1): number {
+  const phaseCompleted = progress.phase_completed_units;
+  const phaseTotal = progress.phase_total_units;
   const completed =
-    progress.total_lexical_units > 0
+    phaseCompleted != null && phaseTotal != null && phaseTotal > 0
+      ? phaseCompleted / phaseTotal
+      : progress.total_lexical_units > 0
       ? progress.completed_lexical_units / progress.total_lexical_units
       : progress.phase === 'ready'
         ? 1
@@ -323,6 +338,12 @@ export function codeIndexProgressPercentage(progress: CodeIndexBuildProgressV1):
 
 export function codeIndexPhaseLabel(phase: CodeIndexBuildProgressV1['phase']): string {
   switch (phase) {
+    case 'capture':
+      return 'capture';
+    case 'parse':
+      return 'parse';
+    case 'link':
+      return 'link';
     case 'source_scan':
       return 'source scan';
     case 'relational_preparation':

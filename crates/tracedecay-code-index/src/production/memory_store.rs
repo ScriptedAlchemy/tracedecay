@@ -203,6 +203,7 @@ impl CodeIndexAtomicPublicationPort for MemorySealedPublicationStoreV1 {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
+        _control: &dyn super::CodeIndexExecutionControlV1,
     ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
         let incumbent = || {
             self.state()

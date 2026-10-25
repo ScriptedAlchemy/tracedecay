@@ -468,11 +468,19 @@ impl CodeGraphActivationAuthorityV1 {
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-                native_runtime::spawn_blocking(move || match admission {
-                    Some(admission) => retained
-                        .publish_verified_snapshot_admitted(cancellation, admission)
-                        .map(drop),
-                    None => retained.publish_verified_snapshot(cancellation).map(drop),
+                let text = latest.clone();
+                native_runtime::spawn_blocking(move || {
+                    let observe = |work| text.publish_graph_publication_work(Some(work));
+                    let published = match admission {
+                        Some(admission) => retained
+                            .publish_verified_snapshot_admitted(cancellation, admission, &observe)
+                            .map(drop),
+                        None => retained
+                            .publish_verified_snapshot(cancellation, &observe)
+                            .map(drop),
+                    };
+                    text.publish_graph_publication_work(None);
+                    published
                 })
                 .await
                 .map_err(|error| {
@@ -833,8 +841,10 @@ impl LatestCompleteCodeIndexV1 {
         let snapshot = {
             let _span =
                 tracing::trace_span!("code_graph.activation.publish_verified_snapshot").entered();
-            retained
-                .publish_verified_snapshot(Arc::clone(&cancellation))
+            let observe = |work| self.text.publish_graph_publication_work(Some(work));
+            let published = retained.publish_verified_snapshot(Arc::clone(&cancellation), &observe);
+            self.text.publish_graph_publication_work(None);
+            published
                 .map_err(CodeGraphProjectionError::from)
                 .inspect_err(|error| {
                     // The publication stopped at the measured-RSS watermark.

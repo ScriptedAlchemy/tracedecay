@@ -3259,3 +3259,54 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         assert_eq!(Arc::strong_count(&runtime.authority), graph_leases);
     });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_publication_reports_pages_written_and_segments_verified() {
+    use tracedecay_code_index::graph_projection::CodeGraphPublicationWorkV1;
+
+    let fixture = sealed_generation_fixture(
+        "project.graph-publication-progress",
+        "pub fn publication_progress_value() -> usize { 7 }\n",
+    )
+    .await;
+    let observed = Mutex::new(Vec::new());
+    let observe = |work| observed.lock().expect("observed work").push(work);
+    tracedecay_code_index_runtime::CodeGraphSeatLeaseV1::publish_verified_snapshot(
+        &fixture.runtime,
+        Arc::new(AtomicBool::new(false)),
+        &observe,
+    )
+    .expect("publish the code graph");
+
+    let observed = observed.into_inner().expect("observed work");
+    let pages = observed
+        .iter()
+        .filter_map(|work| match work {
+            CodeGraphPublicationWorkV1::PagesWritten { written, total } => Some((*written, *total)),
+            CodeGraphPublicationWorkV1::SegmentsVerified { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let total = pages
+        .first()
+        .map(|(_, total)| *total)
+        .expect("pages written");
+    assert_eq!(
+        pages,
+        (1..=total)
+            .map(|written| (written, total))
+            .collect::<Vec<_>>(),
+        "every graph page is reported once, in order"
+    );
+    let verified = observed
+        .iter()
+        .filter_map(|work| match work {
+            CodeGraphPublicationWorkV1::SegmentsVerified { verified } => Some(*verified),
+            CodeGraphPublicationWorkV1::PagesWritten { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        verified.first(),
+        Some(&1),
+        "verification reports each segment it reads"
+    );
+}

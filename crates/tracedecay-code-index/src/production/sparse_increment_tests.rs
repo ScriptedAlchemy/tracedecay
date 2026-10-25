@@ -557,6 +557,7 @@ fn ambiguity_census_preserves_unknown_parent_count() {
                 Arc::new(legacy),
                 CodeIndexColdBuildReasonV1::NoParent,
             ),
+            &UninterruptibleCodeIndexControlV1,
         )
         .expect("legacy publication");
     let after = ambiguous_rust_tree(NO_AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");

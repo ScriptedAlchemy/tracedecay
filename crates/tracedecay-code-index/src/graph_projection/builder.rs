@@ -37,6 +37,16 @@ use super::{
     symbol_entity, symbol_entity_id, validate_edge,
 };
 
+/// Work a sealed graph publication finished, reported as it happens so the
+/// caller can publish progress while the publication runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeGraphPublicationWorkV1 {
+    /// `written` of the generation's `total` graph pages were written.
+    PagesWritten { written: u64, total: u64 },
+    /// `verified` sealed segments were re-read and verified before seating.
+    SegmentsVerified { verified: u64 },
+}
+
 /// Builds a sealed generation's code graph from its on-disk file segments and
 /// spills the rows, never assembling the generation.
 ///
@@ -44,8 +54,9 @@ use super::{
 /// graph-output page per snapshot file. This pass streams those pages into
 /// both the row spill and the independently readable base attachment. The
 /// spill sorts and merges rows into the canonical order used by serving and
-/// recovered-digest verification.
+/// recovered-digest verification. `observe` sees each page written.
 #[tracing::instrument(name = "code_index.graph.build_rows", level = "trace", skip_all)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_sealed_code_graph_rows(
     projection: GraphProjectionIdentity,
     source: &SealedGenerationFileWindowsV1,
@@ -54,6 +65,7 @@ pub fn build_sealed_code_graph_rows(
     mut spill: GraphGenerationRowSpill,
     admit: &mut dyn FnMut(CodeGraphBuildBoundV1) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: &dyn Fn(CodeGraphPublicationWorkV1),
 ) -> Result<SpilledGraphGeneration, SealedCodeGraphRowsError> {
     check()?;
     if projection.projection != self::projection()? {
@@ -81,12 +93,14 @@ pub fn build_sealed_code_graph_rows(
     {
         let _span = tracing::trace_span!("code_index.graph.build_rows.emit").entered();
         {
-            for descriptor in &descriptors {
+            let total = descriptors.len() as u64;
+            for (written, descriptor) in (1..).zip(&descriptors) {
                 check()?;
                 let page = pages.read_page(descriptor)?;
                 attachment.write_page(descriptor, &page)?;
                 let rows = emit_persisted_code_graph_page(&projection, &generation, &page, check)?;
                 spill.push_batch(rows.entities, rows.relations, check)?;
+                observe(CodeGraphPublicationWorkV1::PagesWritten { written, total });
             }
             attachment.finish()?;
             Ok::<(), SealedCodeGraphRowsError>(())

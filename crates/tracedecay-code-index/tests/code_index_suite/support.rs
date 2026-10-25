@@ -212,6 +212,7 @@ impl PartitionedSealV1 {
             spill,
             &mut |_| Ok(()),
             check,
+            &|_| {},
         )?;
         Ok(spilled.materialize(&|| Ok(()))?)
     }

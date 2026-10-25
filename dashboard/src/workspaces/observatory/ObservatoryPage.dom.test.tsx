@@ -527,6 +527,8 @@ function codeIndexFreshnessEnvelope() {
             progress_epoch: 1,
             sealed_source_digest: 'sha256:sealed-source-catchup',
             phase: 'bulk_commit',
+            phase_completed_units: null,
+            phase_total_units: null,
             committed_pages: 16,
             committed_chunks: 10_000,
             committed_imports: 480,

@@ -389,6 +389,9 @@ function FindingRows({
 // Code-index pipeline
 
 const PHASES: readonly CodeIndexBuildProgressV1['phase'][] = [
+  'capture',
+  'parse',
+  'link',
   'source_scan',
   'relational_preparation',
   'bulk_commit',

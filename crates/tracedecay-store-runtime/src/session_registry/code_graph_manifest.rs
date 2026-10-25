@@ -6,8 +6,8 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::{
-    CodeGraphLayeredReportV1, CodeGraphProjectionError, SealedCodeGraphRowsError,
-    build_layered_code_graph_rows, build_sealed_code_graph_rows,
+    CodeGraphLayeredReportV1, CodeGraphProjectionError, CodeGraphPublicationWorkV1,
+    SealedCodeGraphRowsError, build_layered_code_graph_rows, build_sealed_code_graph_rows,
 };
 use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, SealedGenerationFileWindowsV1, SealedGenerationSegmentReadV1,
@@ -490,6 +490,7 @@ fn spill_verified_seal_graph(
         tracedecay_code_index::production::CodeGraphBuildBoundV1,
     ) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: &dyn Fn(CodeGraphPublicationWorkV1),
 ) -> Result<SpilledGraphGeneration, GraphDbError> {
     with_verified_segments(
         &seal.sealed_state_digest,
@@ -504,6 +505,7 @@ fn spill_verified_seal_graph(
                 spill,
                 admit,
                 check,
+                observe,
             )
         },
     )
@@ -557,6 +559,7 @@ pub(super) fn spill_sealed_generation_graph_from_roots(
         spill,
         &mut |_| Ok(()),
         check,
+        &|_| {},
     )
 }
 
@@ -646,6 +649,7 @@ pub(super) fn graph_rows_from_roots(
         tracedecay_code_index::production::CodeGraphBuildBoundV1,
     ) -> Result<(), GraphDbError>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: &dyn Fn(CodeGraphPublicationWorkV1),
 ) -> Result<(GraphGenerationRows, Option<CodeGraphLayeredReportV1>), GraphDbError> {
     let seal = open_seal_from_roots(
         generations_root,
@@ -702,6 +706,7 @@ pub(super) fn graph_rows_from_roots(
         cold_spill()?,
         admit,
         check,
+        observe,
     )?;
     Ok((spilled.into(), None))
 }
@@ -1034,23 +1039,7 @@ fn verify_checked_seal(
     level = "trace",
     skip_all
 )]
-fn verify_checked_seal_bundle(
-    path: &std::path::Path,
-    segments_root: &std::path::Path,
-    expected_digest: &str,
-    verified: &VerifiedSealedSegmentsV1,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(), GraphDbError> {
-    verify_checked_seal_bundle_with_evidence_barrier(
-        path,
-        segments_root,
-        expected_digest,
-        verified,
-        check,
-        || {},
-    )
-}
-
+#[cfg(test)]
 fn verify_checked_seal_bundle_with_evidence_barrier(
     path: &std::path::Path,
     segments_root: &std::path::Path,
@@ -1059,6 +1048,28 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
     check: &dyn Fn() -> Result<(), GraphDbError>,
     evidence_barrier: impl FnOnce(),
 ) -> Result<(), GraphDbError> {
+    verify_observed_seal_bundle(
+        path,
+        segments_root,
+        expected_digest,
+        verified,
+        check,
+        evidence_barrier,
+        &|_| {},
+    )
+}
+
+/// `observe` sees each segment read the verification finishes.
+fn verify_observed_seal_bundle(
+    path: &std::path::Path,
+    segments_root: &std::path::Path,
+    expected_digest: &str,
+    verified: &VerifiedSealedSegmentsV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    evidence_barrier: impl FnOnce(),
+    observe: &dyn Fn(CodeGraphPublicationWorkV1),
+) -> Result<(), GraphDbError> {
+    let mut segments_verified = 0_u64;
     let mut file = verify_checked_seal(path, expected_digest, check)?;
     let mut prefix = vec![0_u8; SEAL_READ_CHECK_BYTES];
     let read = file
@@ -1125,6 +1136,10 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                         buffer,
                     )?;
                     proof.borrow_mut().hashed(digest, fingerprint);
+                    segments_verified += 1;
+                    observe(CodeGraphPublicationWorkV1::SegmentsVerified {
+                        verified: segments_verified,
+                    });
                     Ok(())
                 }
                 tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
@@ -1144,7 +1159,12 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                         })?,
                         request,
                         buffer,
-                    )
+                    )?;
+                    segments_verified += 1;
+                    observe(CodeGraphPublicationWorkV1::SegmentsVerified {
+                        verified: segments_verified,
+                    });
+                    Ok(())
                 }
             }
         },
@@ -1174,12 +1194,32 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
 /// Proves that the durable source backing an already-decoded generation still
 /// exists under its canonical-or-retained authority with the exact digest.
 /// This reads and hashes the bounded source without decoding or projecting it.
+#[cfg(test)]
 pub(super) fn verify_sealed_generation_source_from_roots(
     generations_root: &std::path::Path,
     replay_root: &std::path::Path,
     sealed_state_digest: &SealedGraphStateDigest,
     verified: &VerifiedSealedSegmentsV1,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(), GraphDbError> {
+    verify_observed_sealed_generation_source_from_roots(
+        generations_root,
+        replay_root,
+        sealed_state_digest,
+        verified,
+        check,
+        &|_| {},
+    )
+}
+
+/// `observe` sees each sealed segment the verification reads.
+pub(super) fn verify_observed_sealed_generation_source_from_roots(
+    generations_root: &std::path::Path,
+    replay_root: &std::path::Path,
+    sealed_state_digest: &SealedGraphStateDigest,
+    verified: &VerifiedSealedSegmentsV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: &dyn Fn(CodeGraphPublicationWorkV1),
 ) -> Result<(), GraphDbError> {
     let digest = sha256_hex_suffix(sealed_state_digest.as_str())
         .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
@@ -1195,7 +1235,15 @@ pub(super) fn verify_sealed_generation_source_from_roots(
         digest,
         check,
         |path, expected_digest, check| {
-            verify_checked_seal_bundle(path, &segments_root, expected_digest, verified, check)
+            verify_observed_seal_bundle(
+                path,
+                &segments_root,
+                expected_digest,
+                verified,
+                check,
+                || {},
+                observe,
+            )
         },
     )
 }
@@ -1466,6 +1514,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
             spill,
             &mut |_| Ok(()),
             check,
+            &|_| {},
         )
     }
 }

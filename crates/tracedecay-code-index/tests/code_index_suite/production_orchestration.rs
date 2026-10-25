@@ -94,9 +94,10 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
+        _control: &dyn tracedecay_code_index::production::CodeIndexExecutionControlV1,
     ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
         self.sealed
-            .publish_atomically(scope, expected_active_generation, generation)
+            .publish_atomically(scope, expected_active_generation, generation, _control)
     }
 }
 
@@ -126,6 +127,7 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
+        _control: &dyn tracedecay_code_index::production::CodeIndexExecutionControlV1,
     ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
         let pointer = self
             .pointer
@@ -134,7 +136,7 @@ impl CodeIndexAtomicPublicationPort for PartialKeyPublicationStore {
             .get_or_insert_with(|| scope.clone())
             .clone();
         self.sealed
-            .publish_atomically(&pointer, expected_active_generation, generation)
+            .publish_atomically(&pointer, expected_active_generation, generation, _control)
     }
 }
 

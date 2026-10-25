@@ -356,12 +356,14 @@ fn progress_snapshot_for_generation(
     committed_pages: u64,
 ) -> tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1 {
     tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1 {
-        generation_id: generation_id.as_str().to_owned(),
+        generation_id: Some(generation_id.as_str().to_owned()),
         daemon_incarnation: 1,
         producer_incarnation: 1,
         progress_epoch: 0,
-        sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
+        sealed_source_digest: Some(format!("sha256:{}", "a".repeat(64))),
         phase: tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit,
+        phase_completed_units: None,
+        phase_total_units: None,
         committed_pages,
         committed_chunks: committed_pages,
         committed_imports: 0,

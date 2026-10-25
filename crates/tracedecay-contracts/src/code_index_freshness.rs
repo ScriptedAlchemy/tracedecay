@@ -21,6 +21,12 @@ use tracedecay_domain::errors::TraceDecayError;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeIndexBuildPhaseV1 {
+    /// A pass is reading the worktree's files. No generation exists yet.
+    Capture,
+    /// A pass is parsing the captured files into generation evidence.
+    Parse,
+    /// A pass is resolving the parsed files and sealing the generation.
+    Link,
     SourceScan,
     RelationalPreparation,
     BulkCommit,
@@ -50,14 +56,16 @@ pub enum CodeIndexBuildBlockedReasonV1 {
     PublicationAuthorityCorrupt,
 }
 
-/// The latest committed progress boundary for one active code-index generation.
+/// The latest work completed by a code-index pass or sealed generation.
 ///
-/// Every count is scoped to `generation_id`. The snapshot never includes a
-/// staged page: work is reported only after the batch that owns it commits.
+/// Artifact commit counts include only committed batches. Phase work counts
+/// describe capture, parse, sealing, and graph publication independently of
+/// artifact commits. Before sealing, no generation or sealed source exists.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CodeIndexBuildProgressV1 {
-    /// Exact generation receiving the committed build work.
-    pub generation_id: String,
+    /// Exact generation receiving the committed build work, absent while the
+    /// pass that will seal it is still capturing, parsing, or linking.
+    pub generation_id: Option<String>,
     /// Durable daemon-authority epoch that produced this snapshot.
     ///
     /// This orders snapshots across daemon restarts without relying on wall
@@ -70,10 +78,21 @@ pub struct CodeIndexBuildProgressV1 {
     pub producer_incarnation: u64,
     /// Monotonic publication epoch for replacing delayed progress reads.
     pub progress_epoch: u64,
-    /// Identity of the sealed source whose authenticated bounds define progress.
-    pub sealed_source_digest: String,
+    /// Identity of the sealed source whose authenticated bounds define progress,
+    /// absent before the pass seals one.
+    pub sealed_source_digest: Option<String>,
     /// Durable pipeline phase that published this snapshot.
     pub phase: CodeIndexBuildPhaseV1,
+    /// Work the current phase has finished, in that phase's own unit: files
+    /// read for `capture`, files parsed for `parse`, files resolved then
+    /// segments sealed for `link`, and pages written then segments verified
+    /// for `graph_publication`. Absent for phases the file counts describe.
+    #[serde(default)]
+    pub phase_completed_units: Option<u64>,
+    /// The current phase's total work, in the same unit as
+    /// [`Self::phase_completed_units`].
+    #[serde(default)]
+    pub phase_total_units: Option<u64>,
     /// Source pages committed to the artifact database.
     pub committed_pages: u64,
     /// Search chunks committed to the artifact database.
@@ -116,7 +135,8 @@ pub struct CodeIndexBuildProgressV1 {
     pub lexical_units_per_second: Option<f64>,
     /// Estimated remaining build duration, absent without a truthful rate.
     pub estimated_remaining_seconds: Option<u64>,
-    /// Unix-epoch timestamp of the last durable progress publication.
+    /// Unix-epoch timestamp of the last progress publication. It advances
+    /// whenever the pass finishes work in any phase.
     pub last_progress_micros: i64,
     /// Reason the active generation cannot currently advance, when known.
     pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,

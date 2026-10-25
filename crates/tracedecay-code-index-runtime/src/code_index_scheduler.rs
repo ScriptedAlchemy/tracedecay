@@ -214,6 +214,7 @@ mod graph_activation;
 pub mod identity;
 pub mod ignored_dependencies;
 pub mod observability;
+mod pass_progress;
 mod privacy;
 mod publication_store;
 pub mod queries;

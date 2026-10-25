@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use gix::bstr::ByteSlice;
-use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_code_index::production::CodeIndexProductionOwnerV1;
+use tracedecay_code_index::production::{CodeIndexBuildWorkV1, CodeIndexExecutionControlV1};
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
     CodeSourceOmissionReasonV1, OmittedCodeSourceV1, SanitizationReceiptId, SanitizedCodeFileV1,
@@ -392,7 +392,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
-        self.capture_git_tree_snapshot(source, control, false)
+        self.capture_git_tree_snapshot(source, control, false, None)
     }
 
     /// HEAD's tree standing in for a clean checkout. Git stores a symlink as
@@ -404,8 +404,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self,
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
+        observer: Option<&dyn CodeIndexExecutionControlV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
-        self.capture_git_tree_snapshot(source, control, true)
+        self.capture_git_tree_snapshot(source, control, true, observer)
     }
 
     fn capture_git_tree_snapshot(
@@ -413,6 +414,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
         refuse_source_links: bool,
+        observer: Option<&dyn CodeIndexExecutionControlV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         control.termination().map_or(Ok(()), Err)?;
         let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
@@ -458,8 +460,15 @@ impl CodeIndexWorktreeSchedulerV1 {
             source.tree.clone(),
             control,
             |visitor| {
-                for entry in entries {
+                let total = entries.len() as u64;
+                for (index, entry) in entries.into_iter().enumerate() {
                     control.termination().map_or(Ok(()), Err)?;
+                    if let Some(observer) = observer {
+                        observer.observe_build_work(CodeIndexBuildWorkV1::Captured {
+                            completed: index as u64,
+                            total,
+                        });
+                    }
                     if entry.mode.is_tree() || entry.mode.is_commit() {
                         continue;
                     }
@@ -479,6 +488,12 @@ impl CodeIndexWorktreeSchedulerV1 {
                         })?;
                     }
                     visitor(entry.filepath.as_ref(), &blob.data)?;
+                }
+                if let Some(observer) = observer {
+                    observer.observe_build_work(CodeIndexBuildWorkV1::Captured {
+                        completed: total,
+                        total,
+                    });
                 }
                 Ok(())
             },

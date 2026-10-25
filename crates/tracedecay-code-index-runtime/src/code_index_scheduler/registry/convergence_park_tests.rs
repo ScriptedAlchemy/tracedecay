@@ -619,7 +619,7 @@ async fn graph_activation_starts_before_the_published_text_projection_commits_a_
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .snapshot()
-        .filter(|progress| progress.generation_id == generation_id.as_str())
+        .filter(|progress| progress.generation_id.as_deref() == Some(generation_id.as_str()))
         .map_or(0, |progress| progress.committed_pages);
     assert_eq!(
         committed_pages, 0,

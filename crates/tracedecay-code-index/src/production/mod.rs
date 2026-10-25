@@ -2,7 +2,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use rayon::prelude::*;
@@ -276,10 +279,28 @@ pub struct CodeIndexCapturedFileV1 {
     pub sensitivity_level: SensitivityLevelV1,
 }
 
+/// Work a build finished, reported as it happens so a caller can publish
+/// progress while the build runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexBuildWorkV1 {
+    /// `completed` of the pass's `total` worktree files were read.
+    Captured { completed: u64, total: u64 },
+    /// `completed` of the generation's `total` present files were parsed.
+    Parsed { completed: u64, total: u64 },
+    /// Every file is parsed; resolution began.
+    Linking,
+    /// `completed` of the generation's `total` files finished resolution.
+    Linked { completed: u64, total: u64 },
+    /// The publication store made `segments_written` of the generation's
+    /// sealed segments durable.
+    Sealed { segments_written: u64 },
+}
+
 /// Synchronous checkpoints exposed by an application/daemon request.
 pub trait CodeIndexExecutionControlV1: Sync {
     fn is_cancelled(&self) -> bool;
     fn is_deadline_exceeded(&self) -> bool;
+    fn observe_build_work(&self, _work: CodeIndexBuildWorkV1) {}
 }
 
 /// A control that never interrupts. Sealed seating uses it when the caller
@@ -416,12 +437,13 @@ pub trait CodeIndexAtomicPublicationPort {
 
     /// Seal `generation`'s segments and manifest and make it the scope's
     /// active generation in one compare-and-swap, returning the manifest
-    /// bytes it sealed.
+    /// bytes it sealed. `control` observes each segment made durable.
     fn publish_atomically(
         &mut self,
         scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1>;
 }
 
@@ -2128,6 +2150,7 @@ where
                             &scope,
                             lookup.cas_incumbent.as_ref(),
                             CodeIndexSealedPublicationV1::Sparse(Arc::new(sparse)),
+                            control,
                         );
                     }
                     Err(reason) => reason,
@@ -2164,6 +2187,7 @@ where
             &scope,
             lookup.cas_incumbent.as_ref(),
             CodeIndexSealedPublicationV1::Cold(Arc::new(candidate), cold_reason),
+            control,
         )
     }
 
@@ -2222,7 +2246,7 @@ where
                         tracing::trace_span!("code_index.build.assemble.graph_outputs").entered();
                     {
                         let (edges, abstentions, gaps, ambiguous_name_drops) =
-                            collect_edge_evidence(&staged.files)?;
+                            collect_edge_evidence(&staged.files, control)?;
                         let mut unresolved = resolution_outputs::unresolved_calls_for_edges(
                             &staged.files,
                             &edges,
@@ -2291,11 +2315,12 @@ where
         scope: &CodeIndexGenerationScopeV1,
         expected: Option<&CodeGenerationId>,
         publication: CodeIndexSealedPublicationV1,
+        control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedBuildV1, CodeIndexProductionErrorV1> {
         let manifest_bytes = {
             let _span = tracing::trace_span!("code_index.build.publish").entered();
             self.publication
-                .publish_atomically(scope, expected, &publication)
+                .publish_atomically(scope, expected, &publication, control)
         }?;
         let published = CodeIndexPublishedBuildV1::new(publication, manifest_bytes)?;
         crate::observe::record_generation_state("queryable");
@@ -2341,10 +2366,12 @@ where
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
         let retained_parses = &self.retained_parses;
+        let total = present_files.len() as u64;
+        let parsed = AtomicU64::new(0);
         let extracted = {
             let _span = tracing::trace_span!("code_index.collect.materialize_full").entered();
             collect_bounded_ordered(&present_files, |file| {
-                materialize_present_file(
+                let artifact = materialize_present_file(
                     config,
                     physical_artifacts,
                     retained_parses,
@@ -2358,7 +2385,10 @@ where
                     file,
                     captured_files,
                     control,
-                )
+                )?;
+                let completed = parsed.fetch_add(1, Ordering::AcqRel) + 1;
+                control.observe_build_work(CodeIndexBuildWorkV1::Parsed { completed, total });
+                Ok::<_, CodeIndexProductionErrorV1>(artifact)
             })
         }?;
         // Parallel completion order is intentionally not cache authority.
@@ -2373,6 +2403,7 @@ where
         #[cfg(any(test, feature = "test-helpers"))]
         hold_after_cold_extraction_for_test(control)?;
         lexical_page_source::checkpoint(control)?;
+        control.observe_build_work(CodeIndexBuildWorkV1::Linking);
         staged_generation(manifest.generation_id.clone(), files)
     }
 }

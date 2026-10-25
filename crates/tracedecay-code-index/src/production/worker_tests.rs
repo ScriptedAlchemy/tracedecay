@@ -115,6 +115,63 @@ fn fresh_generation_resolves_seal_references_once() {
     assert_eq!(super::helpers::take_seal_reference_resolutions(), 1);
 }
 
+#[test]
+fn cold_build_reports_parse_and_link_work_without_changing_its_seal() {
+    #[derive(Default)]
+    struct ObservingControl {
+        work: Mutex<Vec<CodeIndexBuildWorkV1>>,
+    }
+
+    impl CodeIndexExecutionControlV1 for ObservingControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+
+        fn observe_build_work(&self, work: CodeIndexBuildWorkV1) {
+            self.work.lock().expect("observed work").push(work);
+        }
+    }
+
+    let request = worker_request_with_source(
+        "file.worker.progress",
+        1_100_000,
+        b"pub fn caller() { target(); }\npub fn target() {}\n",
+    );
+    let control = ObservingControl::default();
+    let mut observed =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .expect("observed owner");
+    let published = observed
+        .build_and_publish(request.clone(), &control)
+        .expect("observed build");
+    assert_eq!(
+        control.work.into_inner().expect("observed work"),
+        [
+            CodeIndexBuildWorkV1::Parsed {
+                completed: 1,
+                total: 1,
+            },
+            CodeIndexBuildWorkV1::Linking,
+            CodeIndexBuildWorkV1::Linked {
+                completed: 1,
+                total: 1,
+            },
+        ]
+    );
+
+    let mut unobserved =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .expect("unobserved owner");
+    let unchanged = unobserved
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
+        .expect("unobserved build");
+    assert_eq!(published.manifest_bytes(), unchanged.manifest_bytes());
+}
+
 /// A generation sealed by one build is reused by the next when only inputs
 /// that do not shape stored bytes differ, and only a stored-shape authority
 /// retires it. Upgrades restart the daemon, so this is what keeps a sealed
@@ -271,6 +328,7 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
                     Arc::new(active),
                     CodeIndexColdBuildReasonV1::NoParent,
                 ),
+                &UninterruptibleCodeIndexControlV1,
             )
             .expect("historical generation seals");
     }

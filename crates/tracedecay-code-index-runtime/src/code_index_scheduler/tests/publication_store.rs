@@ -1070,7 +1070,12 @@ fn retired_fence_cancels_a_generation_seal_between_segments() {
     }));
 
     let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+        .publish_atomically(
+            &generation.sealed_scope(),
+            None,
+            &cold(&generation),
+            &UninterruptibleCodeIndexControlV1,
+        )
         .expect_err("shutdown signalled mid-seal must stop the publication");
     assert!(
         matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
@@ -1176,7 +1181,12 @@ fn publishing_many_new_segments_syncs_the_segments_directory_once() {
     }));
 
     publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+        .publish_atomically(
+            &generation.sealed_scope(),
+            None,
+            &cold(&generation),
+            &UninterruptibleCodeIndexControlV1,
+        )
         .expect("publish a fresh multi-segment generation");
 
     let segment_count = published_segments.load(std::sync::atomic::Ordering::Acquire);
@@ -1267,7 +1277,12 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         .expect("seed corrupt immutable evidence target");
 
     let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+        .publish_atomically(
+            &generation.sealed_scope(),
+            None,
+            &cold(&generation),
+            &UninterruptibleCodeIndexControlV1,
+        )
         .expect_err("a conflicting aggregate pack must fail publication");
     assert!(
         error
@@ -1324,7 +1339,12 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     std::fs::write(&colliding_manifest, b"wrong immutable generation manifest")
         .expect("seed corrupt immutable generation target");
     let error = publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+        .publish_atomically(
+            &generation.sealed_scope(),
+            None,
+            &cold(&generation),
+            &UninterruptibleCodeIndexControlV1,
+        )
         .expect_err("a post-pack manifest collision must fail publication");
     assert!(
         error
@@ -2397,6 +2417,7 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
             &latest.generation.sealed_scope(),
             Some(&active_generation),
             &cold(&latest.generation),
+            &UninterruptibleCodeIndexControlV1,
         )
         .expect("identical immutable generation republishes");
     assert_eq!(
@@ -2687,7 +2708,12 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
 
         let mut refusing = publication.for_undecoded_active_rebuild(&observed);
         let error = refusing
-            .publish_atomically(&scope, None, &cold(&seeded))
+            .publish_atomically(
+                &scope,
+                None,
+                &cold(&seeded),
+                &UninterruptibleCodeIndexControlV1,
+            )
             .expect_err("a pointer that moved under the writer must refuse the publication");
         assert!(
             matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
@@ -2707,7 +2733,12 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     write_repaired_pointer(&pointer_path, &mut restored);
     let mut admitting = publication.for_undecoded_active_rebuild(&observed);
     admitting
-        .publish_atomically(&scope, None, &cold(&seeded))
+        .publish_atomically(
+            &scope,
+            None,
+            &cold(&seeded),
+            &UninterruptibleCodeIndexControlV1,
+        )
         .expect("the observed identity still admits the rebuild");
 }
 
@@ -3609,7 +3640,12 @@ fn a_sweep_never_collects_segments_a_publication_has_not_yet_named() {
     }));
 
     publication
-        .publish_atomically(&generation.sealed_scope(), None, &cold(&generation))
+        .publish_atomically(
+            &generation.sealed_scope(),
+            None,
+            &cold(&generation),
+            &UninterruptibleCodeIndexControlV1,
+        )
         .expect("publish while sibling sweeps run");
 
     let sweeps = sweeps.lock().expect("sweep observations");

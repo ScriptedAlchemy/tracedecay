@@ -86,6 +86,7 @@ impl CodeIndexAtomicPublicationPort for Publication {
         _scope: &CodeIndexGenerationScopeV1,
         _expected_active_generation: Option<&CodeGenerationId>,
         generation: &CodeIndexSealedPublicationV1,
+        _control: &dyn tracedecay_code_index::production::CodeIndexExecutionControlV1,
     ) -> Result<Arc<[u8]>, CodeIndexPublicationStoreErrorV1> {
         generation
             .encode(None, |_| Ok(()))
@@ -310,6 +311,7 @@ fn a_sealed_graph_build_holds_windows_not_the_decoded_generation() {
         spill,
         &mut |_| Ok(()),
         &|| Ok(()),
+        &|_| {},
     )
     .expect("sealed graph builds");
     let peak = PEAK.load(Ordering::Relaxed) - before;

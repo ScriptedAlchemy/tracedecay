@@ -50,8 +50,8 @@ use tracedecay_code_index::{
     graph_projection::CodeGraphProjectionError,
     languages::StaticLanguageRegistry,
     production::{
-        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-        CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
+        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexBuildWorkV1,
+        CodeIndexCapturedFileV1, CodeIndexExecutionControlV1, CodeIndexGenerationCompatibilityV1,
         CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexInputErrorV1,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1,
@@ -65,6 +65,7 @@ use super::freshness_witness::{
     SourceSweepCacheV1,
 };
 use super::git_tree_capture::{CapturedFileOutcomeV1, CapturedFileRosterV1};
+use super::pass_progress::UnsealedPassProgressV1;
 use super::publication_store::GenerationDecodeBudgetV1;
 use super::{
     CodeGraphActivationStateV1, CodeGraphReplayBindingV1, CodeIndexBuildProgressSlotStateV1,
@@ -2144,9 +2145,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut publication = self
             .publication
             .for_undecoded_active_rebuild(&pointer)
-            .with_reconcile_publication_fence(Arc::clone(&self.hints), control);
+            .with_reconcile_publication_fence(Arc::clone(&self.hints), control.clone());
         let manifest_bytes = publication
-            .publish_atomically(&scope, None, &pending)
+            .publish_atomically(&scope, None, &pending, &control)
             .map_err(CodeIndexProductionErrorV1::Publication)?;
         let generation = CodeIndexPublishedBuildV1::new(pending, manifest_bytes)?;
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
@@ -2448,7 +2449,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 let scope = CodeIndexGenerationScopeV1::for_snapshot(&captured.snapshot);
                 let mut publication = publication;
                 let manifest_bytes = publication
-                    .publish_atomically(&scope, None, &pending)
+                    .publish_atomically(&scope, None, &pending, &control)
                     .map_err(CodeIndexProductionErrorV1::Publication)?;
                 CodeIndexPublishedBuildV1::new(pending, manifest_bytes)?
             } else {
@@ -2676,12 +2677,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .elapsed_micros();
                             let snapshot = CodeIndexBuildProgressV1 {
-                                generation_id: progress_generation.as_str().to_owned(),
+                                generation_id: Some(progress_generation.as_str().to_owned()),
                                 daemon_incarnation: progress_daemon_incarnation,
                                 producer_incarnation: progress_producer_incarnation,
                                 progress_epoch: 0,
-                                sealed_source_digest: progress_digest.clone(),
+                                sealed_source_digest: Some(progress_digest.clone()),
                                 phase: CodeIndexBuildPhaseV1::SourceScan,
+                                phase_completed_units: None,
+                                phase_total_units: None,
                                 committed_pages: 0,
                                 committed_chunks: 0,
                                 committed_imports: 0,
@@ -2938,8 +2941,21 @@ impl CodeIndexWorktreeSchedulerV1 {
         // witness is sampled at `mark_reconciled`, after that side effect, so
         // the next ready probe does not see this pass as stale.
         let mut overflow_reconciled = false;
+        let pass_progress = UnsealedPassProgressV1::claim(
+            &self.build_progress,
+            self.progress_daemon_incarnation,
+            self.progress_producer_incarnation,
+        );
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
             let control = self.reconcile_control();
+            let control = match pass_progress.as_ref() {
+                Some(claim) => {
+                    claim.progress().begin_attempt();
+                    let progress = Arc::clone(claim.progress());
+                    control.with_build_observer(Arc::new(move |work| progress.observe(work)))
+                }
+                None => control,
+            };
             // Every earlier attempt was cancelled by a newer source epoch. A
             // source that changes faster than a pass lasts would cancel this
             // one too, so it seals what it captured; the epoch that
@@ -3119,6 +3135,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(error) => return Err(error.into()),
             };
             self.require_reusable_publication(&generation)?;
+            if let Some(claim) = pass_progress {
+                claim.sealed();
+            }
             self.latest_content_identity = Some(snapshot_content_identity);
             self.mark_reconciled(source_manifest, control.expected_epoch());
             return Ok(CodeIndexReconcileOutcomeV1::Published(
@@ -4089,6 +4108,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                         deadline: None,
                         cancellation: None,
                     },
+                    control,
                 ) {
                 Ok(captured) => {
                     *self
@@ -4186,6 +4206,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             .collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
         let _scan_batch = tracedecay_privacy::code_source_scan_batch();
+        let total = candidates.len() as u64;
+        let captured_count = AtomicU64::new(0);
         let outcomes = tracedecay_code_index::parallelism::install(|| {
             use rayon::prelude::*;
             candidates
@@ -4196,12 +4218,20 @@ impl CodeIndexWorktreeSchedulerV1 {
                             return Err(cancelled_code_index_reconcile());
                         }
                         ignored_dependencies::checkpoint_if_present(control)?;
-                        self.capture_admitted_candidate(
+                        let outcome = self.capture_admitted_candidate(
                             &registry,
                             logical_path,
                             control,
                             admitted_paths.contains(logical_path.as_str()),
-                        )
+                        )?;
+                        if let Some(control) = control {
+                            let completed = captured_count.fetch_add(1, Ordering::AcqRel) + 1;
+                            control.observe_build_work(CodeIndexBuildWorkV1::Captured {
+                                completed,
+                                total,
+                            });
+                        }
+                        Ok(outcome)
                     })
                 })
                 .collect::<Vec<_>>()

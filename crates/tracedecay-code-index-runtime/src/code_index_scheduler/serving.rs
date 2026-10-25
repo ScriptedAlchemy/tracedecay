@@ -51,7 +51,8 @@ use tracedecay_runtime_core::resident_memory::{
 
 use tracedecay_code_index::{
     graph_projection::{
-        CodeGraphEvidenceReader, CodeGraphProjectionStore, CodeGraphServingWarmthV1,
+        CodeGraphEvidenceReader, CodeGraphProjectionStore, CodeGraphPublicationWorkV1,
+        CodeGraphServingWarmthV1,
     },
     production::{
         CodeIndexExecutionControlV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
@@ -216,6 +217,62 @@ impl CodeIndexBuildProgressSlotStateV1 {
         self.snapshot = Some(Arc::new(snapshot));
 
         true
+    }
+
+    /// Claim the slot for a pass that has sealed nothing yet, returning the
+    /// owner epoch and the snapshot the pass found. Only a slot no generation
+    /// owns accepts the claim: a seated generation's snapshot stays the
+    /// authority while its successor builds.
+    pub(super) fn claim_unsealed_pass(
+        &mut self,
+    ) -> Option<(u64, Option<Arc<CodeIndexBuildProgressV1>>)> {
+        if self.generation_id.is_some() {
+            return None;
+        }
+        self.owner_epoch = self.owner_epoch.saturating_add(1).max(1);
+        Some((self.owner_epoch, self.snapshot()))
+    }
+
+    pub(super) fn publish_unsealed_pass(
+        &mut self,
+        owner_epoch: u64,
+        mut snapshot: CodeIndexBuildProgressV1,
+    ) -> bool {
+        if self.generation_id.is_some() || self.owner_epoch != owner_epoch {
+            return false;
+        }
+        self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
+        snapshot.progress_epoch = self.progress_epoch;
+        self.snapshot = Some(Arc::new(snapshot));
+        true
+    }
+
+    /// A pass that ended without a generation leaves the slot as it found
+    /// it, so status does not report work that stopped. The restored snapshot
+    /// takes a new epoch so readers do not discard it as a delayed one.
+    pub(super) fn release_unsealed_pass(
+        &mut self,
+        owner_epoch: u64,
+        found: Option<Arc<CodeIndexBuildProgressV1>>,
+    ) {
+        if self.generation_id.is_some() || self.owner_epoch != owner_epoch {
+            return;
+        }
+        self.owner_epoch = self.owner_epoch.saturating_add(1).max(1);
+        let unchanged = match (&self.snapshot, &found) {
+            (Some(current), Some(found)) => Arc::ptr_eq(current, found),
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+        match found {
+            Some(found) => {
+                let _ = self.publish_unsealed_pass(self.owner_epoch, found.as_ref().clone());
+            }
+            None => self.snapshot = None,
+        }
     }
 
     pub(super) fn block_current(&mut self, reason: CodeIndexBuildBlockedReasonV1) {
@@ -2555,7 +2612,8 @@ impl LatestCodeTextGenerationV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .snapshot()
                 .filter(|snapshot| {
-                    snapshot.generation_id == self.metadata.manifest().generation_id.as_str()
+                    snapshot.generation_id.as_deref()
+                        == Some(self.metadata.manifest().generation_id.as_str())
                 })
                 .and_then(|snapshot| snapshot.last_commit_latency_micros)
         });
@@ -2576,12 +2634,14 @@ impl LatestCodeTextGenerationV1 {
         let estimated_remaining_seconds =
             estimated_remaining_seconds.filter(|_| phase_has_file_rate_estimate(phase));
         let snapshot = CodeIndexBuildProgressV1 {
-            generation_id: self.metadata.manifest().generation_id.as_str().to_owned(),
+            generation_id: Some(self.metadata.manifest().generation_id.as_str().to_owned()),
             daemon_incarnation: self.text_progress_daemon_incarnation,
             producer_incarnation: self.text_progress_producer_incarnation,
             progress_epoch: 0,
-            sealed_source_digest: build.sealed_identity.digest.as_str().to_owned(),
+            sealed_source_digest: Some(build.sealed_identity.digest.as_str().to_owned()),
             phase,
+            phase_completed_units: None,
+            phase_total_units: None,
             committed_pages: progress.next_page_ordinal,
             committed_chunks: progress.completed_chunks,
             committed_imports: progress.completed_imports,
@@ -2622,12 +2682,14 @@ impl LatestCodeTextGenerationV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed_micros();
         Ok(CodeIndexBuildProgressV1 {
-            generation_id: generation_id.as_str().to_owned(),
+            generation_id: Some(generation_id.as_str().to_owned()),
             daemon_incarnation: self.text_progress_daemon_incarnation,
             producer_incarnation: self.text_progress_producer_incarnation,
             progress_epoch: 0,
-            sealed_source_digest: sealed_identity.digest.as_str().to_owned(),
+            sealed_source_digest: Some(sealed_identity.digest.as_str().to_owned()),
             phase: CodeIndexBuildPhaseV1::Ready,
+            phase_completed_units: None,
+            phase_total_units: None,
             committed_pages: artifact.page_count(),
             committed_chunks: artifact.total_chunks(),
             committed_imports: artifact.total_imports(),
@@ -2706,6 +2768,49 @@ impl LatestCodeTextGenerationV1 {
                 let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
             }
         };
+    }
+
+    /// Report the work this generation's graph publication finished; `None`
+    /// once the publication ended.
+    ///
+    /// Only the Ready snapshot carries it. Status projects that snapshot as
+    /// `graph_publication` while the graph is pending; a text projection that
+    /// is still building reports its own progress.
+    pub(super) fn publish_graph_publication_work(&self, work: Option<CodeGraphPublicationWorkV1>) {
+        let (completed, total) = match work {
+            Some(CodeGraphPublicationWorkV1::PagesWritten { written, total }) => {
+                (Some(written), Some(total))
+            }
+            Some(CodeGraphPublicationWorkV1::SegmentsVerified { verified }) => {
+                (Some(verified), None)
+            }
+            None => (None, None),
+        };
+        let generation_id = &self.metadata.manifest().generation_id;
+        let elapsed_micros = self
+            .text_progress_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed_micros();
+        let mut slot = self
+            .text_progress_slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = slot.snapshot() else {
+            return;
+        };
+        if current.phase != CodeIndexBuildPhaseV1::Ready
+            || current.generation_id.as_deref() != Some(generation_id.as_str())
+            || (completed.is_none() && current.phase_completed_units.is_none())
+        {
+            return;
+        }
+        let mut snapshot = current.as_ref().clone();
+        snapshot.phase_completed_units = completed;
+        snapshot.phase_total_units = total;
+        snapshot.elapsed_micros = elapsed_micros;
+        snapshot.last_progress_micros = now_micros().0;
+        let _ = slot.publish(generation_id, self.text_progress_owner_epoch, snapshot);
     }
 
     /// Publish the typed reason a text-artifact wake could not advance.

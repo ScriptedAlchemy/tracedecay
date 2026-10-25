@@ -428,7 +428,7 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
             .expect("an active edit");
         assert_eq!(
             edited.edges,
-            collect_edge_evidence(&edited.files)
+            collect_edge_evidence(&edited.files, &UninterruptibleCodeIndexControlV1)
                 .expect("whole edge evidence")
                 .0,
             "{language}: edges of the first build after the restart"

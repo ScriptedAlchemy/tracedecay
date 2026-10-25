@@ -130,6 +130,41 @@ describe('Code index freshness', () => {
     expect(text).toContain('240ms');
   });
 
+  it('renders capture progress without inventing a sealed generation', async () => {
+    renderFreshness('loading', {
+      worktrees: [
+        {
+          ...worktree(),
+          latest_generation_id: null,
+          snapshot_content_identity: null,
+          sealed_at_micros: null,
+          staleness_state: 'indexing',
+          progress: {
+            ...progress(),
+            generation_id: null,
+            sealed_source_digest: null,
+            phase: 'capture',
+            phase_completed_units: 3,
+            phase_total_units: 4,
+            completed_files: 0,
+            total_files: 0,
+            files_per_second: null,
+            lexical_units_per_second: null,
+            estimated_remaining_seconds: null,
+          },
+        },
+      ],
+      note: 'live daemon scheduler state',
+    });
+
+    const reading = await screen.findByRole('progressbar', { name: 'Code progress' });
+    expect(reading.getAttribute('value')).toBe('75');
+    expect(screen.getByText('capture · 75.0%')).toBeTruthy();
+    expect(screen.getByText('not sealed yet')).toBeTruthy();
+    expect(screen.getByText('3 / 4 units completed')).toBeTruthy();
+    expect(document.querySelector('[data-code-index-progress]')).toBeNull();
+  });
+
   it('renders bounded artifact restore progress separately from a rebuild', async () => {
     renderFreshness('loading', {
       worktrees: [
@@ -896,6 +931,8 @@ function progress() {
     progress_epoch: 1,
     sealed_source_digest: 'sha256:sealed-source-catchup',
     phase: 'bulk_commit',
+    phase_completed_units: null,
+    phase_total_units: null,
     committed_pages: 16,
     committed_chunks: 10_000,
     committed_imports: 480,
