@@ -315,6 +315,9 @@ importers:
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5
+      jsdom:
+        specifier: ^30.0.0
+        version: 30.1.3
       typescript:
         specifier: ^7.0.0
         version: 7.0.2

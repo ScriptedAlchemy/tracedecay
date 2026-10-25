@@ -41,11 +41,13 @@ button.primary { border: 1px solid var(--td-border); background: var(--td-panel)
 button:disabled { opacity: 0.5; cursor: default; }
 input[type="search"] { font: inherit; flex: 1; min-width: 160px; padding: 5px 8px; border: 1px solid var(--td-border); border-radius: 6px; background: var(--td-bg); color: var(--td-fg); }
 form.search { display: flex; gap: 6px; }
+form.project-search { flex-wrap: wrap; }
+form.project-search input { min-width: 0; flex-basis: 200px; }
 section.panel { border: 1px solid var(--td-border); border-radius: 8px; padding: 8px 10px; background: var(--td-panel); display: grid; gap: 6px; }
 section.panel h2 { font-size: 12px; margin: 0; text-transform: uppercase; letter-spacing: 0.04em; color: var(--td-muted); display: flex; gap: 6px; align-items: center; }
 ul.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 ul.list li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-ul.list li .loc { color: var(--td-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+ul.list li .loc { color: var(--td-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
 code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .badge { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 11px; border: 1px solid var(--td-border); color: var(--td-muted); background: var(--td-bg); }
 .badge.ok { color: var(--td-ok); border-color: var(--td-ok); }
