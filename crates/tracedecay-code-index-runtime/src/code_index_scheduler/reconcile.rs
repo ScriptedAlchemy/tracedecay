@@ -4503,7 +4503,20 @@ pub(super) fn discarded_construction_refusal<'r>(
     discarded: impl IntoIterator<Item = &'r ResidentMemoryReservationV1>,
     watermark: u64,
 ) -> CodeIndexSchedulerErrorV1 {
-    let error = prefer_resident_memory_refusal(control, error.into());
+    // The publication port reports a retired source fence as CompareAndSwap.
+    // Recover the attempt's cancellation identity so the scheduler retries a
+    // superseded seal instead of parking it as a deterministic source failure.
+    // An actual pointer conflict with a live control keeps its original error.
+    let error = if matches!(
+        error,
+        CodeIndexProductionErrorV1::Publication(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
+    ) && control.is_cancelled()
+    {
+        cancelled_code_index_reconcile()
+    } else {
+        error.into()
+    };
+    let error = prefer_resident_memory_refusal(control, error);
     if retained_publication {
         return match error {
             CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(

@@ -1101,6 +1101,36 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
 }
 
 #[test]
+fn source_supersession_during_sealing_retries_the_reconcile() {
+    let fixture = GitFixture::new(&[
+        ("src/first.rs", "pub fn first() {}\n"),
+        ("src/second.rs", "pub fn second() {}\n"),
+    ]);
+    let store = TempDir::new().expect("publication store");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let epoch = Arc::clone(&scheduler.epoch);
+    let superseded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = Arc::clone(&superseded);
+    scheduler.publication = scheduler
+        .publication
+        .clone()
+        .with_segments_dir_sync_observer_for_test(Arc::new(move || {
+            if !observed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                DaemonCodeIndexControlV1::advance(&epoch);
+            }
+        }));
+
+    published(scheduler.reconcile_now().expect("superseded seal retries"));
+    assert!(superseded.load(std::sync::atomic::Ordering::Acquire));
+    let active = scheduler.latest_complete().expect("successor is readable");
+    assert_eq!(active.generation.snapshot().files.len(), 2);
+}
+
+#[test]
 fn retired_fence_cancels_a_generation_seal_between_segments() {
     // One segment per file: shutdown is signalled after the first durable
     // segment, exactly where a TERM lands on a large worktree's first build.
