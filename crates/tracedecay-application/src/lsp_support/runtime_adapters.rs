@@ -5,11 +5,13 @@ use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_domain::ManifestDigest;
+#[cfg(test)]
+use tracedecay_lsp::analyzer::broker::DiagnosticsSnapshot;
 use tracedecay_lsp::analyzer::broker::{
-    CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
-    DiagnosticsSnapshot, RefreshCommitOutcome,
+    BrokerDocumentEvidence, CodeDiagnostic, DiagnosticBroker,
+    DiagnosticSeverity as BrokerDiagnosticSeverity, RefreshCommitOutcome,
 };
-use tracedecay_lsp::analyzer::client::{DiagnosticDocumentCoverage, LspDocument};
+use tracedecay_lsp::analyzer::client::LspDocument;
 use tracedecay_lsp::{
     AdmittedRoot, CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
     CanonicalWorkspaceDiagnosticRefreshRequest, DiagnosticSource, GatewayDiagnostic,
@@ -179,13 +181,14 @@ where
             request.expected_content_digest = Some(tracedecay_domain::ContentDigest::of_bytes(
                 document.text.as_bytes(),
             ));
+            let document_uri = request.document_uri.clone();
             let managed = managed.current_authority(request).await?;
-            let snapshot = broker.lock().await.snapshot();
-            let upstream = upstream_diagnostic_authority_digest(
-                &snapshot,
-                &document.language,
-                &document.relative_path,
-            )?;
+            let evidence = broker
+                .lock()
+                .await
+                .document_diagnostic_evidence(&document)
+                .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-unavailable"))?;
+            let (upstream, _) = project_upstream_evidence(evidence, document_uri.as_str())?;
             merged_diagnostic_authority_digest(&upstream, &managed)
         })
     }
@@ -307,26 +310,33 @@ where
         document.text.as_bytes(),
     ));
     let language = document.language.clone();
-    let relative_path = document.relative_path.clone();
-    let (prepared, immediate_snapshot) = {
+    let (prepared, immediate_evidence) = {
         let mut broker = broker.lock().await;
         let prepared = broker
-            .prepare_refresh(&language, vec![document])
+            .prepare_refresh(&language, vec![document.clone()])
             .await
             .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-preparation-failed"))?;
-        let immediate_snapshot = prepared.is_none().then(|| broker.snapshot());
-        (prepared, immediate_snapshot)
+        let immediate_evidence = if prepared.is_none() {
+            Some(
+                broker
+                    .document_diagnostic_evidence(&document)
+                    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-coverage-incomplete"))?,
+            )
+        } else {
+            None
+        };
+        (prepared, immediate_evidence)
     };
-    let requires_publication = prepared.is_some();
-    let snapshot = if let Some(prepared) = prepared {
+    let evidence = if let Some(prepared) = prepared {
         let completed = prepared.collect_diagnostics(diagnostics_quiet_window).await;
+        let mut broker = broker.lock().await;
         match broker
-            .lock()
-            .await
             .finish_refresh_snapshot(completed)
             .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-refresh-failed"))?
         {
-            RefreshCommitOutcome::Applied(snapshot) => *snapshot,
+            RefreshCommitOutcome::Applied(_) => broker
+                .document_diagnostic_evidence(&document)
+                .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-coverage-incomplete"))?,
             RefreshCommitOutcome::Superseded => {
                 return Err(LspRuntimeFailure::new(
                     "diagnostic-broker-refresh-superseded",
@@ -334,32 +344,11 @@ where
             }
         }
     } else {
-        immediate_snapshot
+        immediate_evidence
             .ok_or_else(|| LspRuntimeFailure::new("diagnostic-broker-snapshot-unavailable"))?
     };
-    let document_coverage = snapshot
-        .coverage
-        .get(&language)
-        .and_then(|coverage| coverage.documents.get(&relative_path));
-    if requires_publication
-        && !matches!(
-            document_coverage,
-            Some(DiagnosticDocumentCoverage::Published { content_digest, .. })
-                if Some(content_digest) == request.expected_content_digest.as_ref()
-        )
-    {
-        return Err(LspRuntimeFailure::new(
-            "diagnostic-broker-coverage-incomplete",
-        ));
-    }
-    let upstream_authority_digest =
-        upstream_diagnostic_authority_digest(&snapshot, &language, &relative_path)?;
-    let upstream = snapshot
-        .diagnostics
-        .into_iter()
-        .filter(|diagnostic| diagnostic.language == language && diagnostic.file == relative_path)
-        .map(|diagnostic| broker_diagnostic(request.document_uri.as_str(), diagnostic))
-        .collect();
+    let (upstream_authority_digest, upstream) =
+        project_upstream_evidence(evidence, request.document_uri.as_str())?;
     let expected_code_generation_id = request.expected_code_generation_id.clone();
     let expected_snapshot_digest = request.expected_snapshot_digest.clone();
     let managed = managed.snapshot(request).await?;
@@ -384,22 +373,52 @@ where
     })
 }
 
-fn upstream_diagnostic_authority_digest(
-    snapshot: &DiagnosticsSnapshot,
-    language: &str,
-    relative_path: &str,
-) -> Result<ManifestDigest, LspRuntimeFailure> {
-    let coverage = snapshot
-        .coverage
-        .get(language)
-        .and_then(|coverage| coverage.documents.get(relative_path));
-    tracedecay_domain::canonical_sha256(&(
+fn project_upstream_evidence(
+    evidence: BrokerDocumentEvidence,
+    document_uri: &str,
+) -> Result<(ManifestDigest, Vec<GatewayDiagnostic>), LspRuntimeFailure> {
+    let (settings, settings_unavailable, coverage, nonparticipation, diagnostics) = match evidence {
+        BrokerDocumentEvidence::Published {
+            settings,
+            settings_unavailable,
+            coverage,
+            diagnostics,
+        } => (
+            settings,
+            settings_unavailable,
+            Some(coverage),
+            None,
+            diagnostics,
+        ),
+        BrokerDocumentEvidence::NotParticipating {
+            settings,
+            settings_unavailable,
+            reason,
+        } => (
+            settings,
+            settings_unavailable,
+            None,
+            Some(reason),
+            Vec::new(),
+        ),
+    };
+    let (upstream, identity) = tracedecay_lsp::project_upstream_diagnostics(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| broker_diagnostic(document_uri, diagnostic))
+            .collect(),
+    )
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))?;
+    let digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.lsp.upstream-diagnostic-authority.v1",
-        &snapshot.settings,
-        &snapshot.settings_unavailable,
+        settings,
+        settings_unavailable,
         coverage,
+        nonparticipation,
+        identity,
     ))
-    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))?;
+    Ok((digest, upstream))
 }
 
 fn merged_diagnostic_authority_digest(

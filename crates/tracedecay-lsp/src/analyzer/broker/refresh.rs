@@ -10,13 +10,14 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracedecay_runtime_core::native_runtime;
 
 use super::super::client::{
-    DiagnosticDocumentCoverage, DiagnosticRefreshResult, DiagnosticRootCoverage, LspDocument,
-    LspRefreshError, LspRefreshTimeouts, StdioLspClientStartup,
+    CollectedDocumentPublication, DiagnosticDocumentCoverage, DiagnosticRefreshResult,
+    DiagnosticRootCoverage, DocumentRefreshClaim, LspDocument, LspRefreshError, LspRefreshTimeouts,
+    StdioLspClientStartup,
 };
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
 use super::super::launch::AnalyzerLaunch;
-use super::EngineState;
 use super::shared_client::{AnalyzerClientUse, SharedAnalyzerClient};
+use super::{EngineState, LspSessionKey};
 use crate::AnalyzerEvent;
 
 pub(crate) struct RefreshBatch {
@@ -27,6 +28,7 @@ pub(crate) struct RefreshBatch {
     pub(crate) launch: AnalyzerLaunch,
     pub(crate) documents: Vec<LspDocument>,
     pub(crate) client: Arc<SharedAnalyzerClient>,
+    pub(crate) claims: Vec<DocumentRefreshClaim>,
 }
 
 /// Each analyzer may wait behind at most this many independent workspace-root
@@ -112,6 +114,8 @@ pub struct CompletedRefresh {
     pub(crate) epoch: u64,
     pub(crate) result: std::result::Result<DiagnosticRefreshResult, RefreshFailure>,
     pub(crate) root_failures: BTreeMap<PathBuf, RefreshFailure>,
+    pub(super) sources: Vec<(LspSessionKey, Arc<SharedAnalyzerClient>)>,
+    pub(crate) publications: Vec<CollectedDocumentPublication>,
 }
 
 impl CompletedRefresh {
@@ -171,10 +175,24 @@ impl PreparedRefresh {
         let language = self.language.clone();
         let command = self.spawn.command.clone();
         let epoch = self.epoch;
+        let sources = self
+            .batches
+            .iter()
+            .map(|batch| {
+                (
+                    LspSessionKey {
+                        language: language.clone(),
+                        command: command.clone(),
+                        workspace_root: batch.workspace_root.clone(),
+                    },
+                    Arc::clone(&batch.client),
+                )
+            })
+            .collect();
         let collected = self.collect(timeouts).await;
-        let (result, root_failures) = match collected {
-            Ok((result, failures)) => (Ok(result), failures),
-            Err(error) => (Err(error), BTreeMap::new()),
+        let (result, root_failures, publications) = match collected {
+            Ok((result, failures, publications)) => (Ok(result), failures, publications),
+            Err(error) => (Err(error), BTreeMap::new(), Vec::new()),
         };
         CompletedRefresh {
             language,
@@ -182,6 +200,8 @@ impl PreparedRefresh {
             epoch,
             result,
             root_failures,
+            sources,
+            publications,
         }
     }
 
@@ -189,7 +209,11 @@ impl PreparedRefresh {
         self,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<
-        (DiagnosticRefreshResult, BTreeMap<PathBuf, RefreshFailure>),
+        (
+            DiagnosticRefreshResult,
+            BTreeMap<PathBuf, RefreshFailure>,
+            Vec<CollectedDocumentPublication>,
+        ),
         RefreshFailure,
     > {
         // Batches run concurrently inside this future rather than as spawned
@@ -237,9 +261,11 @@ impl PreparedRefresh {
         completed.sort_by_key(|(ordinal, _, _, _)| *ordinal);
         let mut refresh = DiagnosticRefreshResult::default();
         let mut failures = BTreeMap::new();
+        let mut publications = Vec::new();
         for (_, workspace_root, documents, result) in completed {
             match result {
-                Ok(Ok((_, batch))) => {
+                Ok(Ok((_, batch, accepted))) => {
+                    publications.extend(accepted);
                     refresh.diagnostics.extend(batch.diagnostics);
                     refresh.coverage.documents.extend(batch.coverage.documents);
                     refresh
@@ -278,7 +304,7 @@ impl PreparedRefresh {
                 }
             }
         }
-        Ok((refresh, failures))
+        Ok((refresh, failures, publications))
     }
 }
 
@@ -290,7 +316,14 @@ async fn collect_refresh_batch(
     spawn: AnalyzerSpawn,
     timeouts: LspRefreshTimeouts,
     _run_permit: OwnedSemaphorePermit,
-) -> std::result::Result<(usize, DiagnosticRefreshResult), RefreshFailure> {
+) -> std::result::Result<
+    (
+        usize,
+        DiagnosticRefreshResult,
+        Vec<CollectedDocumentPublication>,
+    ),
+    RefreshFailure,
+> {
     let AnalyzerSpawn { command, args } = spawn;
     let launch = batch.launch;
     let shared = batch.client;
@@ -311,8 +344,14 @@ async fn collect_refresh_batch(
             )));
         };
         let mut use_of_analyzer = AnalyzerClientUse::new(&shared, client_slot, attempt, None);
-        let startup =
-            StdioLspClientStartup::start(launch, args, batch.workspace_root.clone(), timeouts);
+        let startup = StdioLspClientStartup::start(
+            launch,
+            args,
+            batch.workspace_root.clone(),
+            timeouts,
+            Arc::clone(&shared.documents),
+            attempt,
+        );
         match startup {
             Ok(startup) => use_of_analyzer.start(startup),
             Err(error) => {
@@ -359,7 +398,7 @@ async fn collect_refresh_batch(
     let result = match use_of_analyzer.client.as_mut() {
         Some(client) => {
             client
-                .collect_document_diagnostics(&project_root, batch.documents, timeouts)
+                .collect_claimed_diagnostics(&project_root, batch.documents, timeouts, batch.claims)
                 .await
         }
         None => Err(LspRefreshError::Transport {
@@ -367,9 +406,9 @@ async fn collect_refresh_batch(
         }),
     };
     match result {
-        Ok(diagnostics) => {
+        Ok((diagnostics, publications)) => {
             use_of_analyzer.restore(AnalyzerEvent::Ready);
-            Ok((ordinal, diagnostics))
+            Ok((ordinal, diagnostics, publications))
         }
         Err(error) => {
             let failure = RefreshFailure::client(&error);
