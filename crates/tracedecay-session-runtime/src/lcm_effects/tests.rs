@@ -26,6 +26,8 @@ use tracedecay_store::{
 };
 
 mod compression_ownership;
+#[cfg(unix)]
+mod summarizer_retries;
 
 fn session(provider: &str, session_id: &str) -> SessionRecord {
     SessionRecord {
