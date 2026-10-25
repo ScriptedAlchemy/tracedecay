@@ -30,7 +30,11 @@ runs:
           $env:CARGO_HOME,
           $env:RUSTUP_HOME,
           "$env:USERPROFILE\.cargo",
-          "$env:USERPROFILE\.rustup"
+          "$env:USERPROFILE\.rustup",
+          # setup-bazel keeps its build outputs and caches outside the checkout.
+          "D:\b",
+          "D:\b-disk",
+          "D:\b-repo"
         ) | Where-Object { $_ } | Select-Object -Unique
         foreach ($path in $exclusions) {
           Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
@@ -47,3 +51,4 @@ runs:
         New-Item -ItemType Directory -Path $fastTemp -Force | Out-Null
         "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
