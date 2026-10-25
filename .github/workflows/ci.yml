@@ -308,7 +308,7 @@ jobs:
               *) echo "Expected a Bazel target pattern: $target" >&2; exit 1 ;;
             esac
           done
-          bazel test --config=ci --jobs=2 --test_output=all "${targets[@]}"
+          bazel test --config=ci --test_output=all "${targets[@]}"
 
       - name: Upload failed test diagnostics
         if: failure()
@@ -624,7 +624,7 @@ jobs:
               *) echo "Expected a Bazel target pattern: $target" >&2; exit 1 ;;
             esac
           done
-          bazel test --config=ci --test_output=all "${targets[@]}"
+          bazel test --config=ci --jobs=2 --test_output=all "${targets[@]}"
 
       - name: Upload failed test diagnostics
         if: failure()
