@@ -2,15 +2,17 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::BTreeMap;
 
 use tracedecay_domain::{
-    CandidateContribution, EvidenceRole, ExactClass, FixedPointScore, FreshnessCompatibilityV1,
-    FusedCandidate, OccurrenceProvenance, RankedCandidate, RankingDecision, RankingDecisionKind,
-    RetrievalAnchorId, RetrievalSourceRoleV1, RetrieverKind, SourceFreshness, UtcMicros,
+    CandidateContribution, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactClass,
+    FixedPointScore, FreshnessCompatibilityV1, FusedCandidate, OccurrenceProvenance,
+    RankedCandidate, RankingDecision, RankingDecisionKind, RetrievalAnchorId,
+    RetrievalSourceRoleV1, RetrieverKind, RetrieverOutcome, SourceFreshness, UtcMicros,
 };
 
 use super::{composition_lanes, corpus_lanes, id, mixed_caps, no_caps, profile};
+use crate::retrieval::fusion::same_source_fusion_tests::legacy_compose;
 use crate::retrieval::fusion::{
     CompositionKernel, CompositionOutputV1, DeterministicFixedPointFusion, FusionStageInput,
-    digest_candidate_set,
+    RetrievalCursorKeyringV1, digest_candidate_set,
 };
 use crate::retrieval::ordering::{OrderedFusedCandidates, decision_cmp};
 use crate::retrieval::stage_counters;
@@ -331,6 +333,11 @@ fn composition_sorts_once_and_keeps_one_provenance_per_fused_candidate() {
     // The corpus must actually exercise ties, clusters, and collapse.
     assert_eq!(output.ranked_candidates.len(), 18);
     assert_eq!(collapsed.len(), 8);
+
+    assert_eq!(
+        work.compact_sorts, 1,
+        "compact candidates are sorted only by fusion"
+    );
 
     assert_eq!(
         work.fused_sorts, 1,
@@ -745,4 +752,148 @@ fn saturated_scores_preserve_retriever_strength_before_identity_ties() {
         compare_fused(&stronger, &weaker),
         RetrieverKind::Lexical.cmp(&RetrieverKind::Graph)
     );
+}
+
+#[test]
+fn fused_duplicate_accounting_matches_the_former_pipeline_and_cursors() {
+    let kernel = CompositionKernel::new(id("ranking.fixture.v1"));
+    let mut lanes = corpus_lanes();
+    let shared = lanes
+        .iter()
+        .find_map(|(lane, outcome)| match (lane, outcome) {
+            (RetrieverKind::Lexical, RetrieverOutcome::Complete(batch)) => batch
+                .candidates
+                .iter()
+                .find(|candidate| candidate.anchor_id.as_str() == "anchor.c04")
+                .cloned(),
+            _ => None,
+        })
+        .expect("lexical duplicate fixture");
+    let exact_batch = lanes
+        .iter_mut()
+        .find_map(|(lane, outcome)| match (lane, outcome) {
+            (RetrieverKind::ExactLiteral, RetrieverOutcome::Complete(batch)) => Some(batch),
+            _ => None,
+        })
+        .expect("exact fixture lane");
+    let exact = &mut exact_batch.candidates[0];
+    let evidence = exact_batch
+        .evidence_by_occurrence
+        .remove(&exact.source_occurrence_id)
+        .expect("old exact evidence");
+    *exact = tracedecay_domain::CompactCandidate {
+        retriever: exact.retriever,
+        retriever_revision: exact.retriever_revision.clone(),
+        score_domain: exact.score_domain.clone(),
+        raw_score: exact.raw_score,
+        ordinal_rank: exact.ordinal_rank,
+        exact_admission_proof: exact.exact_admission_proof.clone(),
+        ..shared
+    };
+    exact_batch
+        .evidence_by_occurrence
+        .insert(exact.source_occurrence_id.clone(), evidence);
+
+    let request = super::request();
+    let query = EphemeralSanitizedQueryViewV1::sanitize(
+        "duplicate fusion fixture",
+        id("sanitizer.fixture"),
+        id("normalization.fixture"),
+    )
+    .unwrap();
+    let keyring = RetrievalCursorKeyringV1::new(
+        request.scope.privacy_domain.clone(),
+        id("cursor-key.fixture"),
+        1,
+        vec![7_u8; 32],
+        100,
+    )
+    .unwrap();
+    let anchor_tiers: std::collections::BTreeMap<RetrievalAnchorId, u32> =
+        std::collections::BTreeMap::from([(id("anchor.c20"), 2)]);
+
+    for (graph_threshold, policy) in [(0, no_caps()), (600_000, mixed_caps())] {
+        for permutation in 0..6 {
+            let mut permuted = lanes.clone();
+            let offset = permutation % permuted.len();
+            permuted.rotate_left(offset);
+            if permutation % 2 != 0 {
+                permuted.reverse();
+            }
+            for (_, outcome) in &mut permuted {
+                if let RetrieverOutcome::Complete(batch) = outcome {
+                    if !batch.candidates.is_empty() {
+                        let offset = permutation % batch.candidates.len();
+                        batch.candidates.rotate_left(offset);
+                    }
+                    if permutation % 2 != 0 {
+                        batch.candidates.reverse();
+                    }
+                    for (ordinal, candidate) in batch.candidates.iter_mut().enumerate() {
+                        candidate.ordinal_rank = ordinal as u32;
+                    }
+                }
+            }
+            let mut profile = profile();
+            profile
+                .minimum_calibrated_feature_micros
+                .insert(RetrieverKind::Graph, graph_threshold);
+            let input = FusionStageInput {
+                profile,
+                lanes: composition_lanes(permuted),
+            };
+            let expected = legacy_compose(&kernel, &input, &policy, &anchor_tiers)
+                .expect("former pipeline composes this admitted fixture");
+            stage_counters::reset();
+            let actual = kernel
+                .compose_with_anchor_tiers(&input, &policy, &anchor_tiers)
+                .expect("integrated fusion preserves admission");
+            assert_eq!(stage_counters::snapshot().compact_sorts, 1);
+            assert_eq!(
+                actual, expected,
+                "permutation {permutation}, graph threshold {graph_threshold}"
+            );
+            assert_eq!(
+                digest_candidate_set(&actual.ranked_candidates).unwrap(),
+                digest_candidate_set(&expected.ranked_candidates).unwrap(),
+            );
+            assert!(
+                actual.dedupe_decisions.iter().any(|decision| {
+                    decision.decision.kind == RankingDecisionKind::SameSourceDuplicateCollapse
+                        && decision.collapsed_occurrences.len() == 2
+                }),
+                "three lanes must exercise duplicate accounting, including filtered contributions"
+            );
+            let mut cursor = None;
+            loop {
+                let actual_page = kernel
+                    .paginate_at(
+                        &request,
+                        &query,
+                        &keyring,
+                        &actual,
+                        5,
+                        cursor.as_ref(),
+                        UtcMicros(10),
+                    )
+                    .unwrap();
+                let expected_page = kernel
+                    .paginate_at(
+                        &request,
+                        &query,
+                        &keyring,
+                        &expected,
+                        5,
+                        cursor.as_ref(),
+                        UtcMicros(10),
+                    )
+                    .unwrap();
+                assert_eq!(actual_page, expected_page);
+                cursor = actual_page.cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+        }
+    }
 }

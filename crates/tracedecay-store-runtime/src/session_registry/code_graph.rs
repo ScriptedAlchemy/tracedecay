@@ -695,6 +695,9 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     /// Registry-owned per-project-publication-shard locks; see
     /// `DaemonSessionRuntimeRegistryV1::code_graph_publication_gates`.
     publication_locks: Arc<CodeGraphShardPublicationLocksV1>,
+    /// Segments this project shard's publications already proved, so a
+    /// successor's source proof reads only the segments its edit re-sealed.
+    verified_segments: Arc<super::verified_sealed_segments::VerifiedSealedSegmentsV1>,
     /// The measured-RSS admission cell sealed publication answers to. Bound
     /// from the manifest provider so every corpus-sized graph build obeys one
     /// authority; tests substitute an isolated cell.
@@ -2005,6 +2008,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     &self.generations_root,
                     &self.replay_root,
                     &self.sealed_state_digest,
+                    &self.verified_segments,
                     &check,
                 )
             }?;
@@ -2702,6 +2706,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 session_registry_error("bind code graph replay route", error.to_string())
             })?;
         let publication_locks = self.retain_project_publication_locks(&project_shard);
+        let verified_segments = self.project_verified_segments(&project_shard);
         Ok(RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
             resident_memory_pressure: Arc::clone(
@@ -2718,7 +2723,25 @@ impl DaemonSessionRuntimeRegistryV1 {
             lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
             operation_task_owner: Arc::clone(&self.operation_task_owner),
             publication_locks,
+            verified_segments,
         })
+    }
+
+    /// The project shard's proven-segment record. Unlike the publication
+    /// locks it outlives every retained runtime, because each publication
+    /// mints a fresh runtime and the record exists to carry one publication's
+    /// proof to the next. It holds one generation's segments per root.
+    fn project_verified_segments(
+        &self,
+        project_shard: &StoreShardIdV1,
+    ) -> Arc<super::verified_sealed_segments::VerifiedSealedSegmentsV1> {
+        Arc::clone(
+            self.code_graph_verified_segments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(project_shard.clone())
+                .or_default(),
+        )
     }
 
     pub async fn release_one_sealed_generation_staging_rows(

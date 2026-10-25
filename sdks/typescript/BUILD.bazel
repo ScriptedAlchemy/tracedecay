@@ -34,7 +34,7 @@ js_binary(
 
 vitest_bin.vitest_test(
     name = "unit_test",
-    data = [":pkg", ":node_modules"] + glob(["test/**", "*.json", "*.ts"]),
+    data = [":pkg", ":node_modules", "//crates/tracedecay-sdk:sse_framing_fixture"] + glob(["test/**", "*.json", "*.ts"]),
     args = ["run", "--exclude", "test/installed-package.test.ts"],
     chdir = package_name(),
 )

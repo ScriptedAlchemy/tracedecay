@@ -344,6 +344,12 @@ pub(super) fn add_present_typescript_file(
 fn cross_file_edges_require_path_binding_evidence() {
     let sources = [
         (
+            "file.binding.feedback-consumer",
+            "crates/consumer/src/lib.rs",
+            "rust",
+            "use tracedecay_contracts::feedback::{CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1};\npub fn project(tests: CanonicalAffectedTestsProjectionV1, impact: CanonicalFeedbackImpactProjectionV1) { let _ = (tests, impact); }\n",
+        ),
+        (
             "file.binding.other-read",
             "crates/other/src/read.rs",
             "rust",
@@ -360,6 +366,12 @@ fn cross_file_edges_require_path_binding_evidence() {
             "crates/tracedecay-contracts/src/feedback/read.rs",
             "rust",
             "pub struct CanonicalAffectedTestsProjectionV1;\npub struct CanonicalFeedbackImpactProjectionV1;\n",
+        ),
+        (
+            "file.binding.contracts-lib",
+            "crates/tracedecay-contracts/src/lib.rs",
+            "rust",
+            "pub mod feedback;\n",
         ),
         (
             "file.binding.model",
@@ -456,6 +468,27 @@ fn cross_file_edges_require_path_binding_evidence() {
             .filter(|edge| &edge.to_occurrence == target)
             .count()
     };
+    let incoming_sites = |target: &SymbolOccurrenceId| {
+        let mut sites = generation
+            .edges()
+            .iter()
+            .filter(|edge| &edge.to_occurrence == target)
+            .map(|edge| (edge.from_occurrence.clone(), edge.kind))
+            .collect::<Vec<_>>();
+        sites.sort();
+        sites
+    };
+    let mut reexport_and_type_sites = vec![
+        (
+            occurrence("crates/tracedecay-contracts/src/feedback/mod.rs::read"),
+            RelationEdgeKindV1::Uses,
+        ),
+        (
+            occurrence("crates/consumer/src/lib.rs::project"),
+            RelationEdgeKindV1::TypeOf,
+        ),
+    ];
+    reexport_and_type_sites.sort();
 
     assert_eq!(incoming(&str_helper), 1, "only the same-file call is real");
     assert_eq!(
@@ -465,11 +498,22 @@ fn cross_file_edges_require_path_binding_evidence() {
     );
     assert_eq!(incoming(&real), 1, "the qualified Rust path remains bound");
     assert_eq!(
-        incoming(&affected_tests),
-        1,
-        "the grouped re-export makes mod.rs a dependent of read.rs",
+        incoming_sites(&affected_tests),
+        reexport_and_type_sites,
+        "the grouped re-export and dependent parameter type retain their exact owners",
     );
-    assert_eq!(incoming(&feedback_impact), 1);
+    assert_eq!(
+        incoming_sites(&feedback_impact),
+        reexport_and_type_sites,
+        "both grouped bindings preserve the same import and type evidence",
+    );
+    assert_eq!(
+        incoming(&occurrence(
+            "crates/other/src/read.rs::CanonicalAffectedTestsProjectionV1"
+        )),
+        0,
+        "a same-named struct off the re-export path stays unbound",
+    );
     assert_eq!(
         incoming(&imported),
         1,
@@ -3430,7 +3474,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         buffer.extend_from_slice(&bytes[start..end]);
         Ok(())
     };
-    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
+    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
         .expect("the fixture's own segments must verify against its manifest");
     for (corrupted, _) in PARTITIONED_FORMAT_SEGMENTS {
         let flip = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
@@ -3449,7 +3493,12 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             Ok(())
         };
         assert!(
-            CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, flip).is_err(),
+            CodeIndexPublishedGenerationV1::verify_partitioned_sealed(
+                &manifest,
+                |_, _| false,
+                flip
+            )
+            .is_err(),
             "one flipped byte in segment {corrupted} must fail authentication"
         );
         let decoded = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
@@ -3637,7 +3686,8 @@ fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
     for refusal in [
         CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest).err(),
         CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest).err(),
-        CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read).err(),
+        CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
+            .err(),
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
             &manifest,
             &SharedDecodedContentPoolV1::default(),
@@ -3780,7 +3830,7 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         buffer.extend_from_slice(&bytes[start..end]);
         Ok(())
     };
-    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, read)
+    CodeIndexPublishedGenerationV1::verify_partitioned_sealed(&manifest, |_, _| false, read)
         .expect("a child encoded without reuse must be self-sufficient");
     assert_eq!(
         CodeIndexPublishedGenerationV1::decode_partitioned_sealed(

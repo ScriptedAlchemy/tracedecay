@@ -2973,8 +2973,12 @@ impl CodeIndexPublishedGenerationV1 {
         Ok(Some(identities))
     }
 
+    /// Authenticate every segment the manifest `bytes` names against its
+    /// content address. A whole segment `already_verified` vouches for is
+    /// not read: the caller proved those exact bytes carry that digest.
     pub fn verify_partitioned_sealed(
         bytes: &[u8],
+        mut already_verified: impl FnMut(&ManifestDigest, u64) -> bool,
         mut read_segment: impl FnMut(
             SealedGenerationSegmentReadV1<'_>,
             &mut Vec<u8>,
@@ -2999,6 +3003,9 @@ impl CodeIndexPublishedGenerationV1 {
                     .map(|segment| (&segment.segment_digest, segment.segment_size_bytes)),
             );
         for (digest, size_bytes) in per_file {
+            if already_verified(digest, size_bytes) {
+                continue;
+            }
             segment.clear();
             read_segment(
                 SealedGenerationSegmentReadV1::Whole { digest, size_bytes },
@@ -3026,6 +3033,9 @@ impl CodeIndexPublishedGenerationV1 {
         })?;
         evidence.finish()?;
         for descriptor in &generation.code_graph_pages {
+            if already_verified(&descriptor.page_digest, descriptor.size_bytes) {
+                continue;
+            }
             segment.clear();
             read_segment(
                 SealedGenerationSegmentReadV1::Whole {

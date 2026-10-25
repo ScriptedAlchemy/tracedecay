@@ -1,0 +1,77 @@
+{
+  "limit_bytes": 65536,
+  "cases": [
+    {
+      "name": "data line including LF exceeds the limit",
+      "outcome": "oversized",
+      "prefix": "event: item\nid: 0\ndata: ",
+      "repeat": "a",
+      "count": 65530,
+      "suffix": "\n\n"
+    },
+    {
+      "name": "comment including LF exceeds the limit",
+      "outcome": "oversized",
+      "prefix": ":",
+      "repeat": "a",
+      "count": 65535,
+      "suffix": "\n\n"
+    },
+    {
+      "name": "unknown field including CRLF exceeds the limit",
+      "outcome": "oversized",
+      "prefix": "unknown: ",
+      "repeat": "a",
+      "count": 65526,
+      "suffix": "\r\n\r\n"
+    },
+    {
+      "name": "many small data fields exceed retained frame bytes",
+      "outcome": "oversized",
+      "prefix": "event: item\nid: 0\n",
+      "repeat": "data: abcdefghijklmnopqrstuvwxyz0123456789\n",
+      "count": 1800,
+      "suffix": "\n"
+    },
+    {
+      "name": "event value exceeds the line limit",
+      "outcome": "oversized",
+      "prefix": "event: ",
+      "repeat": "a",
+      "count": 65529,
+      "suffix": "\n\n"
+    },
+    {
+      "name": "id value exceeds the line limit",
+      "outcome": "oversized",
+      "prefix": "id: ",
+      "repeat": "a",
+      "count": 65532,
+      "suffix": "\n\n"
+    },
+    {
+      "name": "comment exactly at the raw LF line limit",
+      "outcome": "valid",
+      "prefix": ":",
+      "repeat": "a",
+      "count": 65534,
+      "suffix": "\n\n"
+    },
+    {
+      "name": "unknown field exactly at the raw CRLF line limit",
+      "outcome": "valid",
+      "prefix": "unknown: ",
+      "repeat": "a",
+      "count": 65525,
+      "suffix": "\r\n\r\n"
+    },
+    {
+      "name": "near-limit multiline UTF-8 data",
+      "outcome": "valid_open",
+      "prefix": "event: open\ndata: {\"event\":\"open\",\"data\":{\"correlation_id\":\"request.operation\",\ndata: \"padding\":\"",
+      "repeat": "🙂",
+      "count": 16320,
+      "suffix": "\"\ndata: ,\"frontier\":{\"next_sequence\":0,\"retained_from_sequence\":0,\"resume_token\":\"resume\"}}}\n\n"
+    }
+  ]
+}

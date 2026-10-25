@@ -716,6 +716,88 @@ const SSE_OPEN_FRAME: &str = concat!(
 );
 
 #[test]
+fn sse_framing_policy_matches_the_typescript_client() {
+    #[derive(serde::Deserialize)]
+    struct FramingCase {
+        name: String,
+        outcome: String,
+        prefix: String,
+        repeat: String,
+        count: usize,
+        suffix: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct FramingFixtures {
+        limit_bytes: usize,
+        cases: Vec<FramingCase>,
+    }
+    let fixtures: FramingFixtures =
+        serde_json::from_str(include_str!("../fixtures/sse-framing.json")).unwrap();
+    assert_eq!(fixtures.limit_bytes, SSE_FRAME_LIMIT_BYTES);
+    for fixture in fixtures.cases {
+        let fragment = format!(
+            "{}{}{}",
+            fixture.prefix,
+            fixture.repeat.repeat(fixture.count),
+            fixture.suffix
+        );
+        let body = if fixture.outcome == "valid_open" {
+            fragment
+        } else {
+            format!("{SSE_OPEN_FRAME}{fragment}")
+        };
+        if fixture.outcome == "oversized" {
+            let base_url = serve_abandonable_event_stream(body);
+            let client =
+                Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+                    .build()
+                    .unwrap();
+            let mut stream = client
+                .stream_operation(
+                    "request.operation",
+                    StreamOptions {
+                        resume: None,
+                        max_reconnects: 3,
+                    },
+                )
+                .unwrap();
+            assert_eq!(stream.next().unwrap().unwrap().event, "open");
+            assert!(
+                matches!(
+                    stream.next(),
+                    Some(Err(ClientError::StreamFrameTooLarge {
+                        limit_bytes: SSE_FRAME_LIMIT_BYTES
+                    }))
+                ),
+                "{} must refuse before delivery",
+                fixture.name
+            );
+            assert!(
+                stream.next().is_none(),
+                "{} must not reconnect",
+                fixture.name
+            );
+        } else {
+            let body = format!("{body}{}", terminal_frame("completed", "completed"));
+            let (base_url, server) = serve(vec![event_response(&body)]);
+            let client =
+                Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+                    .build()
+                    .unwrap();
+            let events = client
+                .stream_operation("request.operation", StreamOptions::default())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|error| panic!("{}: {error}", fixture.name));
+            assert_eq!(events.len(), 2, "{}", fixture.name);
+            assert_eq!(events[0].event, "open", "{}", fixture.name);
+            assert!(events[1].terminal(), "{}", fixture.name);
+            server.join().unwrap();
+        }
+    }
+}
+
+#[test]
 fn oversized_sse_lines_and_frames_are_refused_without_delivery_or_reconnect() {
     let single_line = format!(
         "{SSE_OPEN_FRAME}event: item\nid: 0\ndata: {}\n\n",

@@ -1,9 +1,13 @@
 //! A sealed graph binds every call site it can and discloses the rest, so a
 //! relation answer is complete only when no call site went unbound.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tracedecay_code_index::graph_projection::{CodeGraphInteractiveReader, CodeGraphSymbolRefV1};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphReadCostMeter,
+    CodeGraphSymbolRefV1,
+};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::NeverCancelled;
@@ -434,4 +438,186 @@ fn typescript_ambiguous_local_calls_do_not_poison_imported_call_resolution() {
         assert!(graph.callees_partial("ts/app.ts::scope::shadowed"));
         assert!(!graph.callees_partial("ts/app.ts::clear"));
     }
+}
+
+/// Every symbol the callers surface lists for `qualified_name`: the incoming
+/// call and reference relations it reads.
+fn callers_and_references(graph: &SealedGraph, qualified_name: &str) -> Vec<String> {
+    let mut sources = graph
+        .reader
+        .callers(
+            &[graph.symbol(qualified_name)],
+            &[
+                RelationEdgeKindV1::Calls,
+                RelationEdgeKindV1::Uses,
+                RelationEdgeKindV1::TypeOf,
+                RelationEdgeKindV1::Annotates,
+            ],
+            1_000,
+            Arc::new(NeverCancelled),
+        )
+        .expect("caller read")
+        .into_iter()
+        .flatten()
+        .map(|edge| {
+            edge.neighbor
+                .metadata
+                .expect("caller metadata")
+                .qualified_name
+        })
+        .collect::<Vec<_>>();
+    sources.sort();
+    sources
+}
+
+fn rust_reexport_graph() -> SealedGraph {
+    sealed_graph_of(&[
+        (
+            "runtime/Cargo.toml",
+            "[package]\nname = \"runtime\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "runtime/src/lib.rs",
+            "mod workflow;\n\npub use workflow::install_schema;\n",
+        ),
+        (
+            "runtime/src/workflow.rs",
+            "mod schema;\n\npub use schema::{SCHEMA_VERSION, install_schema};\n\npub fn open() {\n    install_schema();\n}\n",
+        ),
+        (
+            "runtime/src/workflow/schema.rs",
+            "pub const SCHEMA_VERSION: u32 = 1;\n\npub fn install_schema() {}\n",
+        ),
+        (
+            "store/Cargo.toml",
+            "[package]\nname = \"store\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "store/src/lib.rs",
+            "use runtime::install_schema;\n\npub fn start() {\n    install_schema();\n}\n",
+        ),
+    ])
+}
+
+#[test]
+fn rust_reexports_preserve_import_sites_and_real_calls() {
+    let graph = rust_reexport_graph();
+
+    assert_eq!(
+        graph.callers("runtime/src/workflow/schema.rs::install_schema"),
+        ["runtime/src/workflow.rs::open", "store/src/lib.rs::start"]
+    );
+    assert_eq!(
+        callers_and_references(&graph, "runtime/src/workflow/schema.rs::install_schema"),
+        [
+            "runtime/src/workflow.rs::open",
+            "runtime/src/workflow.rs::schema",
+            "store/src/lib.rs::start",
+        ],
+        "raw adjacency retains module-owned re-export sites for dependencies and rename"
+    );
+}
+
+#[test]
+fn rust_caller_keys_preserve_physical_truncation_when_import_owners_are_hidden() {
+    let graph = rust_reexport_graph();
+    let kinds = [RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses];
+    let constant = CodeGraphSymbolRefV1::for_occurrence(
+        &graph.symbol("runtime/src/workflow/schema.rs::SCHEMA_VERSION"),
+    )
+    .unwrap();
+    let cold_cost = CodeGraphReadCostMeter::start();
+    assert!(matches!(
+        graph.reader.metered(&cold_cost).caller_keys(
+            std::slice::from_ref(&constant),
+            &kinds,
+            1,
+            Arc::new(NeverCancelled),
+        ),
+        Err(CodeGraphProjectionError::Unavailable(_))
+    ));
+    assert_eq!(
+        cold_cost.receipt().catalog_symbols,
+        0,
+        "caller reads cannot implicitly build a catalog"
+    );
+    // Callable queries admit the ready generation catalog before traversal.
+    graph.reader.files(100, Arc::new(NeverCancelled)).unwrap();
+    let physical_window = graph
+        .reader
+        .relation_keys(
+            std::slice::from_ref(&constant),
+            &kinds,
+            true,
+            1,
+            Arc::new(NeverCancelled),
+        )
+        .unwrap();
+    assert_eq!(physical_window.per_seed[0].len(), 1);
+    assert!(physical_window.truncated);
+    let filtered_window = graph
+        .reader
+        .caller_keys(
+            std::slice::from_ref(&constant),
+            &kinds,
+            1,
+            Arc::new(NeverCancelled),
+        )
+        .unwrap();
+    assert!(filtered_window.per_seed[0].is_empty());
+    assert!(
+        filtered_window.truncated,
+        "hidden imports cannot fabricate complete empty callers"
+    );
+    let complete = graph
+        .reader
+        .caller_keys(&[constant], &kinds, 2, Arc::new(NeverCancelled))
+        .unwrap();
+    assert!(complete.per_seed[0].is_empty());
+    assert!(!complete.truncated);
+
+    let function = CodeGraphSymbolRefV1::for_occurrence(
+        &graph.symbol("runtime/src/workflow/schema.rs::install_schema"),
+    )
+    .unwrap();
+    let raw = graph
+        .reader
+        .relation_keys(
+            std::slice::from_ref(&function),
+            &kinds,
+            true,
+            5,
+            Arc::new(NeverCancelled),
+        )
+        .unwrap();
+    assert_eq!(raw.per_seed[0].len(), 3);
+    let cost = CodeGraphReadCostMeter::start();
+    let callable = graph
+        .reader
+        .metered(&cost)
+        .caller_keys(&[function], &kinds, 5, Arc::new(NeverCancelled))
+        .unwrap();
+    assert!(!callable.truncated);
+    assert_eq!(
+        callable.per_seed[0].len(),
+        2,
+        "only real callers consume the logical result count"
+    );
+    assert_eq!(
+        callable.per_seed[0]
+            .iter()
+            .map(|key| key.neighbor.clone())
+            .collect::<BTreeSet<_>>(),
+        ["runtime/src/workflow.rs::open", "store/src/lib.rs::start"]
+            .iter()
+            .map(|name| { CodeGraphSymbolRefV1::for_occurrence(&graph.symbol(name)).unwrap() })
+            .collect::<BTreeSet<_>>()
+    );
+    let receipt = cost.receipt();
+    assert_eq!(
+        receipt.point_reads.graph_sealed, 0,
+        "import owner kinds come from the admitted catalog, not entity reads"
+    );
+    assert_eq!(receipt.point_reads.graph_staging, 0);
+    assert_eq!(receipt.catalog_symbols, 1);
 }

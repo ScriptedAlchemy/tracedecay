@@ -125,7 +125,7 @@ pub(crate) async fn run_summary_convergence_page(
         };
         let processed: Pin<
             Box<dyn Future<Output = Result<LcmSummaryConvergenceSession, LcmError>> + Send + '_>,
-        > = Box::pin(process_candidate(&database, candidate, now_unix_ms));
+        > = Box::pin(process_candidate(&database, candidate));
         sessions.push(processed.await?);
     }
     let summary_retry: Pin<Box<dyn Future<Output = Result<Option<i64>, LcmError>> + Send + '_>> =
@@ -140,6 +140,7 @@ pub(crate) async fn run_summary_convergence_page(
         (None, Some(relation)) => Some(relation),
         (None, None) => None,
     };
+    let now_unix_ms = unix_millis()?;
     let next_retry_delay = next_retry_at
         .map(|retry_at| {
             u64::try_from(retry_at.saturating_sub(now_unix_ms).max(0))
@@ -336,7 +337,6 @@ async fn load_next_retry(database: &RegisteredGlobalDbLeaseV1) -> Result<Option<
 async fn process_candidate(
     database: &RegisteredGlobalDbLeaseV1,
     mut candidate: LcmSummaryConvergenceCandidate,
-    now_unix_ms: i64,
 ) -> Result<LcmSummaryConvergenceSession, LcmError> {
     let protection = match database
         .lcm_protect_session_raw_messages_page(
@@ -349,7 +349,7 @@ async fn process_candidate(
         .await
     {
         Ok(page) => page,
-        Err(error) => return record_candidate_error(database, candidate, error, now_unix_ms).await,
+        Err(error) => return record_candidate_error(database, candidate, error).await,
     };
     let Some(refreshed_candidate) =
         load_session_candidate(database, &candidate.provider, &candidate.session_id).await?
@@ -398,7 +398,7 @@ async fn process_candidate(
         let (_, has_more) = match invalidation {
             Ok(page) => page,
             Err(error) => {
-                return record_candidate_error(database, candidate, error, now_unix_ms).await;
+                return record_candidate_error(database, candidate, error).await;
             }
         };
         let Some(refreshed_candidate) =
@@ -435,7 +435,7 @@ async fn process_candidate(
         {
             Ok(bounded) => bounded,
             Err(error) => {
-                return record_candidate_error(database, candidate, error, now_unix_ms).await;
+                return record_candidate_error(database, candidate, error).await;
             }
         };
     let response = &bounded.response;
@@ -445,10 +445,10 @@ async fn process_candidate(
         Ok(LcmCompressionOutcome::NeedsSummary(_)) => {
             let error =
                 LcmError::Db("retained compression left an unresolved summary request".to_string());
-            return record_candidate_error(database, candidate, error, now_unix_ms).await;
+            return record_candidate_error(database, candidate, error).await;
         }
         Err(error) => {
-            return record_candidate_error(database, candidate, error, now_unix_ms).await;
+            return record_candidate_error(database, candidate, error).await;
         }
     };
     let (state, disposition, failure_code) = if let Some(reason) = deferred_reason {
@@ -506,7 +506,6 @@ async fn record_candidate_error(
     database: &RegisteredGlobalDbLeaseV1,
     candidate: LcmSummaryConvergenceCandidate,
     error: LcmError,
-    now_unix_ms: i64,
 ) -> Result<LcmSummaryConvergenceSession, LcmError> {
     if matches!(
         error,
@@ -522,13 +521,16 @@ async fn record_candidate_error(
             _ => SessionTemporalRefreshRetryClass::Storage,
         };
         let delay = session_refresh_retry_delay(class, failure_count);
+        // The failed provider run may have outlasted the backoff. Start the
+        // next attempt's delay when the failure settles, not when its page began.
+        let next_attempt_at_ms = unix_millis()?.saturating_add(duration_millis(delay)?);
         (
             LcmSummaryConvergenceQueueState::Retryable,
             LcmSummaryConvergenceDisposition::Retryable {
                 reason: reason.to_string(),
             },
             failure_count,
-            now_unix_ms.saturating_add(duration_millis(delay)?),
+            next_attempt_at_ms,
         )
     } else {
         (

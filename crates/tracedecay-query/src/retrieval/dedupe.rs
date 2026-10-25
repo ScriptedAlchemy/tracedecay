@@ -1,5 +1,5 @@
 //! Source-aware dedupe stage contracts (Plan 15 pipeline steps 4 and 8:
-//! duplicate rows from one immutable source occurrence are collapsed before
+//! duplicate rows from one immutable source occurrence are accounted for by
 //! fusion; cross-source copies collapse only through an evidence-backed
 //! logical-copy relation; independent corroboration and contradictions are
 //! preserved).
@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    CompactCandidate, EvidenceRole, FusedCandidate, LogicalCopyClusterId, RankingDecision,
-    RankingDecisionKind, SourceOccurrenceId,
+    EvidenceRole, FusedCandidate, LogicalCopyClusterId, RankingDecision, RankingDecisionKind,
+    SourceOccurrenceId,
 };
 
 use super::ordering::{OrderedFusedCandidates, decision_cmp};
@@ -44,67 +44,6 @@ pub struct DedupeDecisionV1 {
 pub struct DeterministicDedupe;
 
 impl DeterministicDedupe {
-    /// Identify byte-identical source occurrence/evidence pairs before
-    /// fusion. Their occurrence row collapses in the fused candidate while
-    /// every retriever contribution remains attributable.
-    #[tracing::instrument(name = "query.dedupe.collapse", level = "trace", skip_all)]
-    pub fn collapse_compact_candidates(
-        &self,
-        mut candidates: Vec<CompactCandidate>,
-    ) -> Result<(Vec<CompactCandidate>, Vec<DedupeDecisionV1>), DedupeStageError> {
-        candidates.sort_by(|left, right| {
-            left.source_occurrence_id
-                .cmp(&right.source_occurrence_id)
-                .then_with(|| {
-                    left.retriever_evidence_anchor
-                        .cmp(&right.retriever_evidence_anchor)
-                })
-                .then_with(|| left.anchor_id.cmp(&right.anchor_id))
-                .then_with(|| left.logical_evidence_id.cmp(&right.logical_evidence_id))
-                .then_with(|| left.retriever.cmp(&right.retriever))
-        });
-        let mut decisions = Vec::new();
-        let mut index = 0;
-        while index < candidates.len() {
-            let first = &candidates[index];
-            let mut end = index + 1;
-            while end < candidates.len()
-                && candidates[end].source_occurrence_id == first.source_occurrence_id
-                && candidates[end].retriever_evidence_anchor == first.retriever_evidence_anchor
-                && candidates[end].anchor_id == first.anchor_id
-                && candidates[end].logical_evidence_id == first.logical_evidence_id
-            {
-                end += 1;
-            }
-            let selected = &candidates[index];
-            if end - index > 1 {
-                let decision = RankingDecision {
-                    kind: RankingDecisionKind::SameSourceDuplicateCollapse,
-                    retriever: None,
-                    policy_anchor: None,
-                    evidence_anchor: Some(selected.retriever_evidence_anchor.clone()),
-                    detail: format!(
-                        "collapsed {} duplicate occurrence rows for {}; retained every retriever contribution",
-                        end - index - 1,
-                        selected.source_occurrence_id
-                    ),
-                };
-                decisions.push(DedupeDecisionV1 {
-                    kept_occurrence: selected.source_occurrence_id.clone(),
-                    collapsed_occurrences: candidates[index + 1..end]
-                        .iter()
-                        .map(|candidate| candidate.source_occurrence_id.clone())
-                        .collect(),
-                    collapsed_candidates: Vec::new(),
-                    copy_cluster: selected.logical_copy_cluster_id.clone(),
-                    decision,
-                });
-            }
-            index = end;
-        }
-        Ok((candidates, decisions))
-    }
-
     /// Select one representative per evidence-backed logical-copy cluster.
     ///
     /// The input is already in fused order, so a cluster's representative is
