@@ -919,7 +919,7 @@ while True:
             replacement["result"]["items"],
             json!([{
                 "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
-                "severity": 1, "source": "upstream", "message": "replacement finding",
+                "severity": 1, "code": null, "source": "upstream", "message": "replacement finding",
             }])
         );
         assert_eq!(harness.managed.snapshots.load(Ordering::SeqCst), 2);

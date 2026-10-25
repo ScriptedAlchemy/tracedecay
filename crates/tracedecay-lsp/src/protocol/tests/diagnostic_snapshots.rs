@@ -1239,12 +1239,11 @@ fn validation_harness() -> (Harness, String) {
         .iter()
         .find(|message| message["method"] == "workspace/diagnostic/refresh")
         .unwrap();
-    assert!(
-        harness
-            .send(json!({
-                "jsonrpc": "2.0", "id": refresh["id"], "result": null,
-            }))
-            .is_empty()
+    assert_eq!(
+        harness.send(json!({
+            "jsonrpc": "2.0", "id": refresh["id"], "result": null,
+        })),
+        Vec::<Value>::new()
     );
     (harness, result_id)
 }
@@ -1378,7 +1377,7 @@ fn settled_ready_validation_is_consumed_once_and_preserves_the_generation_floor(
         .store(false, Ordering::SeqCst);
     harness.runtime.complete_next();
     harness.session.flush_due(harness.now_ms);
-    assert!(harness.messages().is_empty());
+    assert_eq!(harness.messages(), Vec::<Value>::new());
 
     *harness.authority.next_generation.lock().unwrap() = Some(0);
     harness.notify(
@@ -1456,7 +1455,7 @@ fn late_validation_cannot_answer_a_reopened_document_or_retire_its_refresh() {
         .store(false, Ordering::SeqCst);
     harness.runtime.complete_next();
     harness.session.flush_due(harness.now_ms);
-    assert!(harness.messages().is_empty());
+    assert_eq!(harness.messages(), Vec::<Value>::new());
     let pending = harness.pull(Some(&result_id));
     assert_eq!(pending["error"]["code"], -32802, "{pending}");
     assert!(pending["error"]["data"]["operationId"].as_str().is_some());
