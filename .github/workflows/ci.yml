@@ -46,44 +46,7 @@ env:
 jobs:
   # Drafts run repository and frontend checks. Ready PRs and pushes also run
   # the Bazel Linux authority; dispatch can request OS and host journeys.
-  scope-gate:
-    name: Scope gate
-    permissions:
-      contents: read
-      pull-requests: read
-      checks: read
-      actions: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      run-heavy: ${{ steps.decide.outputs.run-heavy }}
-      run-os: ${{ steps.decide.outputs.run-os }}
-      run-hosts: ${{ steps.decide.outputs.run-hosts }}
-    steps:
-      - name: Decide what this run may spend
-        id: decide
-        env:
-          EVENT: ${{ github.event_name }}
-          DRAFT: ${{ github.event.pull_request.draft || false }}
-          RUN_OS: ${{ inputs.run_os || false }}
-          RUN_HOSTS: ${{ inputs.run_hosts || false }}
-        run: |
-          heavy=true
-          if [[ $EVENT == pull_request && $DRAFT == true ]]; then
-            heavy=false
-          fi
-          os=false
-          hosts=false
-          if [[ $EVENT == workflow_dispatch ]]; then
-            [[ $RUN_OS == true ]] && os=true
-            [[ $RUN_HOSTS == true ]] && hosts=true
-          fi
-          {
-            echo "run-heavy=$heavy"
-            echo "run-os=$os"
-            echo "run-hosts=$hosts"
-          } >>"$GITHUB_OUTPUT"
-          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts (event=$EVENT)"
+  # Job conditions evaluate that policy before a runner is scheduled.
 
   # One dev-profile `tracedecay` binary for the explicitly requested stock
   # host integrations. Ordinary Linux validation needs no CLI artifact, so
@@ -93,8 +56,7 @@ jobs:
       contents: read
       id-token: write
     name: Build debug CLI
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_hosts }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -281,8 +243,7 @@ jobs:
       contents: read
       id-token: write
     name: Test macOS
-    needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-os == 'true' && (inputs.native_platform == 'all' || inputs.native_platform == 'macos') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_os && (inputs.native_platform == 'all' || inputs.native_platform == 'macos') }}
     runs-on: macos-26
     timeout-minutes: 330
     steps:
@@ -375,8 +336,8 @@ jobs:
       contents: read
       id-token: write
     name: Test Linux (${{ matrix.shard }})
-    needs: [scope-gate, gates]
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: gates
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
@@ -592,8 +553,8 @@ jobs:
   # Preserves the "Test Linux" check name for branch protection.
   linux-test-result:
     name: Test Linux
-    needs: [scope-gate, linux-test]
-    if: ${{ always() && !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: linux-test
+    if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -603,11 +564,10 @@ jobs:
   windows-test:
     # Branch protection requires this check name.
     name: Test Windows
-    needs: scope-gate
     if: >-
-      ${{ needs.scope-gate.outputs.run-heavy == 'true' &&
+      ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
       (github.event_name != 'workflow_dispatch' ||
-      (needs.scope-gate.outputs.run-os == 'true' &&
+      (inputs.run_os &&
       (inputs.native_platform == 'all' || inputs.native_platform == 'windows'))) }}
     runs-on: windows-latest
     timeout-minutes: 330
@@ -634,10 +594,12 @@ jobs:
       - name: Build and type-check the Windows workspace
         if: ${{ github.event_name != 'workflow_dispatch' }}
         shell: bash
-        run: bazel build --config=ci //...
+        # Compile and link every target, but defer unused test runfiles trees.
+        # Bazel still materializes runfiles required by build-time tools.
+        run: bazel build --config=ci --nobuild_runfile_links //...
 
       - name: Build and test native targets
-        if: ${{ github.event_name == 'workflow_dispatch' && needs.scope-gate.outputs.run-os == 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_os }}
         shell: bash
         env:
           BAZEL_TARGETS: ${{ inputs.native_targets || '//...' }}
@@ -668,12 +630,50 @@ jobs:
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
 
+      # The cache archive shares D: with the build output. Discard the
+      # disposable output base after diagnostics are uploaded; the sibling
+      # compiled and repository caches survive clean --expunge. Keep this
+      # synchronous so the archive cannot race deletion for the same space.
+      # Explicit dispatches can also prime and verify a branch's cache.
+      - name: Reclaim Windows build outputs before caching
+        id: windows-cache-space
+        if: always() && !cancelled() && (github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch') && steps.bazel.outputs.disk-cache-key != ''
+        shell: pwsh
+        run: |
+          $drive = [System.IO.DriveInfo]::new('D:\')
+          Write-Host "Free bytes before output cleanup: $($drive.AvailableFreeSpace)"
+          bazel clean --expunge
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Free bytes after output cleanup: $($drive.AvailableFreeSpace)"
+
       - name: Save compiled Bazel actions
-        if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+        if: always() && !cancelled() && steps.windows-cache-space.outcome == 'success'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      # cache/save treats archive and upload failures as warnings. A lookup
+      # checks persistence without downloading the multi-GB archive again.
+      - name: Look up the saved Windows action cache
+        id: windows-cache-verify
+        if: always() && !cancelled() && steps.windows-cache-space.outcome == 'success'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
+          lookup-only: true
+
+      - name: Require the Windows action cache to be persisted
+        if: always() && !cancelled() && steps.windows-cache-space.outcome == 'success'
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.windows-cache-verify.outputs.cache-hit }}
+        run: |
+          if [[ "$CACHE_HIT" != true ]]; then
+            echo '::error::The Windows compiled cache was not saved. Check archive and upload diagnostics above.'
+            exit 1
+          fi
 
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
@@ -682,8 +682,8 @@ jobs:
       contents: read
       id-token: write
     name: Clippy
-    needs: [scope-gate, gates]
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: gates
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     # Same image as Test Linux so rustc action keys can restore that job's
     # disk cache (proc-macros, build scripts, grammar cc, matching rlibs)
     # when this job's own prefix misses. ARM isolated Clippy from that
@@ -721,8 +721,8 @@ jobs:
   # are ordinary `//...` targets that the Clippy job compiles.
   feature-gates:
     name: Feature gates
-    needs: [scope-gate, gates]
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: gates
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -743,8 +743,8 @@ jobs:
       contents: read
       id-token: write
     name: Shipped CLI build (x86_64-linux)
-    needs: [scope-gate, gates]
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    needs: gates
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -850,8 +850,8 @@ jobs:
 
   hermes-integration:
     name: Hermes integration (stock)
-    needs: [scope-gate, debug-cli]
-    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
+    needs: debug-cli
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_hosts }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -902,8 +902,8 @@ jobs:
 
   host-stock-integration:
     name: Claude Code + OpenCode integration (stock)
-    needs: [scope-gate, debug-cli]
-    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
+    needs: debug-cli
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_hosts }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -944,3 +944,4 @@ jobs:
         env:
           TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
         run: scripts/opencode_stock_integration.sh
+
