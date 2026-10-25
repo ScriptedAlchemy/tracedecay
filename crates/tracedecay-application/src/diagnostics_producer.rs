@@ -11,7 +11,7 @@
 //! generation carries one snapshot of all their merged findings, but a project
 //! is rechecked only when the generation changed a file that can change what
 //! tsc reports for it; the rest republish their previous result without
-//! running tsc. Each run's outcome is recorded per project root, and each
+//! running tsc. Each run's outcome is published to the owning project's status handle, and each
 //! tsconfig's check within it, so a read can name the real state of the
 //! project that owns the file it asked about (still running, compiler failed,
 //! compiler missing, nothing resolved) instead of a bare "no producer" or a
@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, RwLock};
 
 use futures_util::FutureExt;
 use futures_util::future::join_all;
@@ -82,52 +82,75 @@ pub enum TypeScriptProjectCheckV1 {
     },
 }
 
-#[derive(Clone)]
-struct ProducerRecord {
+/// The latest producer outcome of one project owner: the run and how each
+/// tsconfig fared in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeScriptProducerStatusV1 {
     run: CompilerProducerRunV1,
     checks: BTreeMap<PathBuf, TypeScriptProjectCheckV1>,
 }
 
-fn last_runs() -> &'static Mutex<BTreeMap<PathBuf, ProducerRecord>> {
-    static LAST_RUNS: OnceLock<Mutex<BTreeMap<PathBuf, ProducerRecord>>> = OnceLock::new();
-    LAST_RUNS.get_or_init(|| Mutex::new(BTreeMap::new()))
+impl TypeScriptProducerStatusV1 {
+    #[must_use]
+    pub fn new(
+        run: CompilerProducerRunV1,
+        checks: BTreeMap<PathBuf, TypeScriptProjectCheckV1>,
+    ) -> Self {
+        Self { run, checks }
+    }
+
+    #[must_use]
+    pub fn run(&self) -> &CompilerProducerRunV1 {
+        &self.run
+    }
 }
 
-fn last_record(project_root: &Path) -> Option<ProducerRecord> {
-    last_runs()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(project_root)
-        .cloned()
+/// Read view of one project owner's producer status. The producer task and the
+/// owner's diagnostics reads share one handle created with the owner, so a
+/// successor owner at the same path starts with no status and a superseded
+/// producer can only publish into the handle it was given.
+#[derive(Clone, Debug, Default)]
+pub struct TypeScriptProducerStatusHandleV1 {
+    latest: Arc<RwLock<Option<Arc<TypeScriptProducerStatusV1>>>>,
 }
 
-/// The most recent producer run recorded for `project_root`, if any.
-#[must_use]
-pub fn last_producer_run(project_root: &Path) -> Option<CompilerProducerRunV1> {
-    last_record(project_root).map(|record| record.run)
-}
+impl TypeScriptProducerStatusHandleV1 {
+    fn publish(&self, status: TypeScriptProducerStatusV1) {
+        *self
+            .latest
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(status));
+    }
 
-fn record_producer_run(
-    project_root: &Path,
-    run: &CompilerProducerRunV1,
-    checks: BTreeMap<PathBuf, TypeScriptProjectCheckV1>,
-) {
-    let record = ProducerRecord {
-        run: run.clone(),
-        checks,
-    };
-    last_runs()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(project_root.to_path_buf(), record);
+    /// The most recent producer status, if the producer has run.
+    #[must_use]
+    pub fn current(&self) -> Option<Arc<TypeScriptProducerStatusV1>> {
+        self.latest
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// What one project root's producer remembers between generations: the file
 /// digests of the generation it last checked and how each project fared.
-#[derive(Default)]
 pub struct TypeScriptProducerStateV1 {
+    status: TypeScriptProducerStatusHandleV1,
     checked_files: Option<BTreeMap<String, ContentDigest>>,
     projects: BTreeMap<PathBuf, ProjectResult>,
+}
+
+impl TypeScriptProducerStateV1 {
+    /// State for one project owner's producer, publishing its status into
+    /// `status`.
+    #[must_use]
+    pub fn new(status: TypeScriptProducerStatusHandleV1) -> Self {
+        Self {
+            status,
+            checked_files: None,
+            projects: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -154,8 +177,8 @@ const CONCURRENT_CHECKS: usize = 4;
 /// `build_info_dir`, only when `identity` changed a file that can change what
 /// tsc reports for it since the generation `state` last checked; every other
 /// project republishes its previous result without running tsc. The outcome
-/// is recorded for [`last_producer_run`], and each tsconfig's check for
-/// [`typescript_diagnostics_availability`].
+/// and each tsconfig's check are published to the status handle `state` was
+/// built with, which [`typescript_diagnostics_availability`] reads.
 ///
 /// A clean project publishes an empty snapshot, which is what lets a read
 /// answer "no diagnostics" as evidence instead of as a missing producer.
@@ -185,7 +208,9 @@ pub async fn run_typescript_producer_v1(
         &mut checks,
     )
     .await;
-    record_producer_run(project_root, &run, checks);
+    state
+        .status
+        .publish(TypeScriptProducerStatusV1::new(run.clone(), checks));
     run
 }
 
@@ -477,11 +502,12 @@ pub enum TypeScriptDiagnosticsAvailabilityV1 {
 
 /// Resolves what a read can truthfully say about the TypeScript producer: the
 /// project owning `file` (or, for a workspace read, the first checkable one),
-/// its filesystem state, and the last recorded run.
+/// its filesystem state, and the owner's last published run.
 #[must_use]
 pub fn typescript_diagnostics_availability(
     project_root: &Path,
     file: Option<&Path>,
+    status: &TypeScriptProducerStatusHandleV1,
 ) -> TypeScriptDiagnosticsAvailabilityV1 {
     let project = match file {
         Some(file) => match typescript_file_owner(project_root, file) {
@@ -504,12 +530,12 @@ pub fn typescript_diagnostics_availability(
     let TypeScriptProject { tsconfig, compiler } = project;
     match compiler {
         Some(compiler) => {
-            let record = last_record(project_root);
+            let status = status.current();
             TypeScriptDiagnosticsAvailabilityV1::Configured {
-                check: record
+                check: status
                     .as_ref()
-                    .and_then(|record| record.checks.get(&tsconfig).cloned()),
-                last_run: record.map(|record| record.run),
+                    .and_then(|status| status.checks.get(&tsconfig).cloned()),
+                last_run: status.map(|status| status.run.clone()),
                 tsconfig,
                 compiler,
             }
@@ -542,9 +568,9 @@ mod tests {
     use tracedecay_runtime_core::test_executable::write_executable_script;
 
     use super::{
-        CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProjectCheckV1,
-        compiler_diagnostic, last_producer_run, record_producer_run,
-        typescript_diagnostics_availability,
+        CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1,
+        TypeScriptProducerStatusHandleV1, TypeScriptProducerStatusV1, TypeScriptProjectCheckV1,
+        compiler_diagnostic, typescript_diagnostics_availability,
     };
     #[cfg(unix)]
     use super::{TypeScriptProducerStateV1, run_typescript_producer_v1};
@@ -585,16 +611,21 @@ mod tests {
     }
 
     #[test]
-    fn the_last_run_is_recorded_per_project_root() {
-        let root = tempfile::tempdir().expect("project root");
-        assert_eq!(last_producer_run(root.path()), None);
+    fn a_status_handle_publishes_to_its_owner_only() {
+        let owner = TypeScriptProducerStatusHandleV1::default();
+        assert_eq!(owner.current(), None);
         let run = CompilerProducerRunV1::CompilerFailed {
             reason: "tsc exited with 2".to_owned(),
         };
-        record_producer_run(root.path(), &run, BTreeMap::new());
-        assert_eq!(last_producer_run(root.path()), Some(run));
-        let other = tempfile::tempdir().expect("other root");
-        assert_eq!(last_producer_run(other.path()), None);
+        owner.publish(TypeScriptProducerStatusV1::new(
+            run.clone(),
+            BTreeMap::new(),
+        ));
+        assert_eq!(
+            owner.current().map(|status| status.run().clone()),
+            Some(run)
+        );
+        assert_eq!(TypeScriptProducerStatusHandleV1::default().current(), None);
     }
 
     /// A read about a file reports the check of the tsconfig that owns it,
@@ -615,9 +646,9 @@ mod tests {
         let failed = TypeScriptProjectCheckV1::Failed {
             reason: "TS5083: Cannot read file".to_owned(),
         };
-        record_producer_run(
-            root,
-            &CompilerProducerRunV1::CodeIndexGenerationUnavailable,
+        let status = TypeScriptProducerStatusHandleV1::default();
+        status.publish(TypeScriptProducerStatusV1::new(
+            CompilerProducerRunV1::CodeIndexGenerationUnavailable,
             BTreeMap::from([
                 (
                     root.join("packages/app/tsconfig.json"),
@@ -625,11 +656,15 @@ mod tests {
                 ),
                 (lib.clone(), failed.clone()),
             ]),
-        );
+        ));
 
         let TypeScriptDiagnosticsAvailabilityV1::Configured {
             tsconfig, check, ..
-        } = typescript_diagnostics_availability(root, Some(Path::new("packages/lib/src/a.ts")))
+        } = typescript_diagnostics_availability(
+            root,
+            Some(Path::new("packages/lib/src/a.ts")),
+            &status,
+        )
         else {
             panic!("lib owns its sources and the root compiler checks it");
         };
@@ -797,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn only_projects_a_generation_changed_are_rechecked() {
         let fixture = ProducerFixture::new();
-        let mut state = TypeScriptProducerStateV1::default();
+        let mut state = TypeScriptProducerStateV1::new(TypeScriptProducerStatusHandleV1::default());
         let both = vec![
             (
                 "file.packages.app.src.index.ts".to_owned(),
@@ -846,5 +881,37 @@ mod tests {
             published("generation.producer.4", 1, 2)
         );
         assert_eq!(fixture.checked(), ["broken"]);
+    }
+
+    /// A producer run reports to the handle of the owner it was built for. A
+    /// successor owner opened at the same path reads no status until its own
+    /// producer runs, so the predecessor's run is never taken for its own.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_successor_owner_does_not_inherit_the_predecessors_status() {
+        let fixture = ProducerFixture::new();
+        let predecessor = TypeScriptProducerStatusHandleV1::default();
+        let mut state = TypeScriptProducerStateV1::new(predecessor.clone());
+        let run = fixture.run("generation.producer.1", &mut state).await;
+        assert_eq!(
+            predecessor.current().map(|status| status.run().clone()),
+            Some(run)
+        );
+
+        let successor = TypeScriptProducerStatusHandleV1::default();
+        let file = Path::new("packages/app/src/index.ts");
+        let TypeScriptDiagnosticsAvailabilityV1::Configured {
+            check, last_run, ..
+        } = typescript_diagnostics_availability(&fixture.root, Some(file), &successor)
+        else {
+            panic!("app is checkable");
+        };
+        assert_eq!((check, last_run), (None, None));
+        let TypeScriptDiagnosticsAvailabilityV1::Configured { check, .. } =
+            typescript_diagnostics_availability(&fixture.root, Some(file), &predecessor)
+        else {
+            panic!("app is checkable");
+        };
+        assert_eq!(check, Some(TypeScriptProjectCheckV1::Checked));
     }
 }

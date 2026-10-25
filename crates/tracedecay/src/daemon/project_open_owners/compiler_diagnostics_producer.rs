@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_application::diagnostics_producer::{
-    CompilerProducerRunV1, TypeScriptProducerStateV1, run_typescript_producer_v1,
+    CompilerProducerRunV1, TypeScriptProducerStateV1, TypeScriptProducerStatusHandleV1,
+    run_typescript_producer_v1,
 };
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
@@ -39,6 +40,7 @@ pub(super) fn spawn_typescript_diagnostics_producer(
     project_root: PathBuf,
     scope: &tracedecay_contracts::ResolvedScope,
     graph: Arc<tracedecay_project::project::TraceDecay>,
+    status: TypeScriptProducerStatusHandleV1,
 ) -> bool {
     if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
         &invocation.code_index_schedulers,
@@ -72,7 +74,7 @@ pub(super) fn spawn_typescript_diagnostics_producer(
             let schedulers = invocation.code_index_schedulers.clone();
             let mut signals = CodeIndexOwnerSignalsV1::subscribe(&schedulers, &project_root).await;
             let build_info_dir = graph.store_layout().data_root.join(BUILD_INFO_DIR);
-            let mut state = TypeScriptProducerStateV1::default();
+            let mut state = TypeScriptProducerStateV1::new(status);
             // One producer run per generation, whatever its outcome: the root's
             // signals also wake on serving and pass changes, and a project
             // whose compiler keeps failing must not re-run it on each of them.

@@ -30,6 +30,7 @@ use super::runtime::{
 };
 use super::symbol_graph::SymbolGraphCursorPort;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
+use crate::diagnostics_producer::TypeScriptProducerStatusHandleV1;
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::DiagnosticQueryCursor;
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
@@ -868,6 +869,7 @@ pub struct ProductionPrimitiveOpenRequestV1 {
     convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
+    compiler_status: TypeScriptProducerStatusHandleV1,
 }
 
 impl ProductionPrimitiveOpenRequestV1 {
@@ -878,6 +880,7 @@ impl ProductionPrimitiveOpenRequestV1 {
         temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
         access: ProjectSourceAccessSnapshot,
         admitted_root_uri: String,
+        compiler_status: TypeScriptProducerStatusHandleV1,
     ) -> Self {
         Self {
             source_runtime,
@@ -890,6 +893,7 @@ impl ProductionPrimitiveOpenRequestV1 {
             convergence_park: code.convergence_park,
             access,
             admitted_root_uri,
+            compiler_status,
         }
     }
 }
@@ -910,6 +914,7 @@ pub async fn open_production_primitive_runtime(
         convergence_park,
         access,
         admitted_root_uri,
+        compiler_status,
     } = request;
     let database = source_runtime.db().clone();
     let project_root = source_runtime.project_root().to_path_buf();
@@ -987,6 +992,7 @@ pub async fn open_production_primitive_runtime(
         test_runs,
         test_run_scope,
         convergence_park,
+        compiler_status,
     )
 }
 
