@@ -402,7 +402,7 @@ pub enum DiagnosticSnapshotOutcome {
 }
 
 /// Port implemented by a daemon/application adapter. It is a read projection;
-/// no diagnostic record is owned or persisted by the gateway. Refresh methods
+/// the session retains admitted reports only for its ephemeral lifetime. Refresh methods
 /// are non-blocking: the provider starts canonical upstream/compiler work and
 /// later reports `Ready` with the matching completed operation identity.
 /// Unsaved overlays are ephemeral inputs and must never be persisted by the
@@ -425,6 +425,17 @@ pub trait DiagnosticSnapshotPort {
         DiagnosticRefreshAdmission::Rejected {
             failure_class: "refresh-unsupported".to_owned(),
         }
+    }
+
+    /// Releases one refresh's result ownership and requests task cancellation.
+    /// A successful retirement does not prove accepted analyzer work has stopped.
+    fn retire_document_refresh(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _operation_id: &str,
+    ) -> bool {
+        false
     }
 
     fn supports_workspace_diagnostics(&self) -> bool {
@@ -476,6 +487,15 @@ where
         source_generation: Option<u64>,
     ) -> DiagnosticRefreshAdmission {
         (**self).request_document_refresh(root, document_uri, overlay, source_generation)
+    }
+
+    fn retire_document_refresh(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        operation_id: &str,
+    ) -> bool {
+        (**self).retire_document_refresh(root, document_uri, operation_id)
     }
 
     fn supports_workspace_diagnostics(&self) -> bool {

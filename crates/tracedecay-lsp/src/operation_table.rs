@@ -178,6 +178,28 @@ where
             false
         }
     }
+
+    /// Retires one exact operation without requiring a caller to reconstruct
+    /// the input key after that document's lifetime has already changed.
+    pub(crate) fn cancel_matching(&self, matches: impl Fn(&K, &M) -> bool) -> bool
+    where
+        K: Clone,
+    {
+        let pending = {
+            let mut in_flight = self.in_flight();
+            let key = in_flight
+                .iter()
+                .find(|(key, pending)| matches(key, &pending.metadata))
+                .map(|(key, _)| key.clone());
+            key.and_then(|key| in_flight.remove(&key))
+        };
+        if let Some(pending) = pending {
+            pending.task.abort();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl<K, M, T> Drop for BoundedOperationTable<K, M, T> {

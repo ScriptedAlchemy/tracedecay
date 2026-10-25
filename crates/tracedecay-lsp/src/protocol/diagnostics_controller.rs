@@ -1,4 +1,7 @@
-use super::outbound_controller::PublicationTag;
+use super::diagnostic_snapshots::{
+    DiagnosticDocumentIdentity, PendingDiagnosticRefresh, RetainedDiagnosticSnapshot,
+};
+use super::outbound_controller::{PublicationRejection, PublicationTag};
 use super::workspace_diagnostics_controller::WorkspaceDiagnosticResultIdentity;
 use super::{
     BTreeMap, ConnectionLocalRequestSequence, DaemonLspProtocolSession, DebouncedDiagnosticKind,
@@ -27,13 +30,6 @@ pub(super) struct PublishedDiagnostic {
     pub(super) scope_set_digest: Option<ManifestDigest>,
 }
 
-#[derive(Clone)]
-pub(super) struct PendingDiagnosticRefresh {
-    pub(super) identity: DiagnosticRefreshIdentity,
-    pub(super) overlay_version: i64,
-    pub(super) scope_digest: Option<ManifestDigest>,
-    pub(super) scope_set_digest: Option<ManifestDigest>,
-}
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct NativeDiagnosticSnapshot {
     pub(super) version: i64,
@@ -47,6 +43,7 @@ where
     pub(super) provider: D,
     pub(super) debounce: OverlayDiagnosticDebouncer,
     pub(super) published: BTreeMap<String, PublishedDiagnostic>,
+    pub(super) document_snapshots: BTreeMap<String, RetainedDiagnosticSnapshot>,
     pub(super) native_upstream: BTreeMap<String, NativeDiagnosticSnapshot>,
     pub(super) cursor_native_mode: bool,
     pub(super) next_server_request_id: ConnectionLocalRequestSequence,
@@ -67,6 +64,7 @@ where
             provider,
             debounce: OverlayDiagnosticDebouncer::default(),
             published: BTreeMap::new(),
+            document_snapshots: BTreeMap::new(),
             native_upstream: BTreeMap::new(),
             cursor_native_mode: false,
             next_server_request_id: ConnectionLocalRequestSequence::starting_at(1),
@@ -234,6 +232,7 @@ where
         self.diagnostics
             .native_upstream
             .insert(uri.clone(), snapshot);
+        self.invalidate_document_diagnostics(&uri);
         if !self
             .diagnostics
             .debounce
@@ -267,14 +266,24 @@ where
         self.poll_diagnostic_refresh(uri);
         let overlay = self.lifecycle.overlays.snapshot(uri);
         let root = self.document_root(uri)?;
-        let outcome = self
-            .diagnostics
-            .provider
-            .document_diagnostics(&root, uri, overlay.as_ref());
+        let outcome = self.document_diagnostic_snapshot(&root, uri, overlay.as_ref());
         let version = overlay.as_ref().map_or(0, |overlay| overlay.version);
-        let source_generation = diagnostic_source_generation(&outcome);
-        let _refresh_failure =
-            self.request_diagnostic_refresh(uri, version, overlay.as_ref(), source_generation);
+        if !matches!(&outcome, DiagnosticSnapshotOutcome::Ready { .. }) {
+            let source_generation = diagnostic_source_generation(&outcome);
+            if let Some(failure_class) =
+                self.request_diagnostic_refresh(uri, overlay.as_ref(), source_generation)
+                && (matches!(&outcome, DiagnosticSnapshotOutcome::Partial { coverage, .. }
+                    if coverage == "refresh-required")
+                    || matches!(&outcome, DiagnosticSnapshotOutcome::Refreshing(_)))
+            {
+                return Err(refresh_pending_failure(
+                    None,
+                    None,
+                    None,
+                    Some(failure_class),
+                ));
+            }
+        }
         let diagnostics = match outcome {
             DiagnosticSnapshotOutcome::Ready { diagnostics, .. } => diagnostics,
             DiagnosticSnapshotOutcome::Refreshing(refresh) => {
@@ -303,31 +312,8 @@ where
                 ));
             }
         };
+        self.diagnostics.debounce.cancel(uri);
         let generation = diagnostics.generation;
-        if self
-            .diagnostics
-            .published
-            .get(uri)
-            .is_some_and(|published| {
-                published.version == version
-                    && published.generation > generation
-                    && published.scope_digest == root.scope_digest().cloned()
-                    && published.scope_set_digest
-                        == self
-                            .lifecycle
-                            .gateway
-                            .workspace()
-                            .scope_set_digest()
-                            .cloned()
-            })
-        {
-            return Err(refresh_pending_failure(
-                None,
-                None,
-                None,
-                Some("superseded-generation".to_owned()),
-            ));
-        }
         let result_id = diagnostic_result_id(
             self.lifecycle.gateway.workspace().scope_set_digest(),
             root.scope_digest(),
@@ -358,22 +344,6 @@ where
                 DiagnosticSerializationCapabilities::pull(self.lifecycle.gateway.capabilities()),
             ));
         }
-        if overlay.is_some() {
-            self.diagnostics.published.insert(
-                uri.to_owned(),
-                PublishedDiagnostic {
-                    version,
-                    generation,
-                    scope_digest: root.scope_digest().cloned(),
-                    scope_set_digest: self
-                        .lifecycle
-                        .gateway
-                        .workspace()
-                        .scope_set_digest()
-                        .cloned(),
-                },
-            );
-        }
         Ok(value)
     }
 
@@ -395,12 +365,15 @@ where
                         .get(&scheduled.uri)
                         .map_or(0, |published| published.generation);
                     self.discard_document_publications(&scheduled.uri);
-                    if self.publish_diagnostics(
-                        &scheduled.uri,
-                        scheduled.version,
-                        generation,
-                        Vec::new(),
-                    ) {
+                    if self
+                        .publish_diagnostics(
+                            &scheduled.uri,
+                            scheduled.version,
+                            generation,
+                            Vec::new(),
+                        )
+                        .is_ok()
+                    {
                         self.diagnostics.published.remove(&scheduled.uri);
                         self.queue_diagnostic_refresh();
                     }
@@ -410,23 +383,20 @@ where
                     let Ok(root) = self.document_root(&scheduled.uri) else {
                         continue;
                     };
-                    let outcome = self.diagnostics.provider.document_diagnostics(
-                        &root,
-                        &scheduled.uri,
-                        overlay.as_ref(),
-                    );
-                    let source_generation = diagnostic_source_generation(&outcome);
-                    let _ = self.request_diagnostic_refresh(
-                        &scheduled.uri,
-                        scheduled.version,
-                        overlay.as_ref(),
-                        source_generation,
-                    );
+                    let outcome =
+                        self.document_diagnostic_snapshot(&root, &scheduled.uri, overlay.as_ref());
                     if let DiagnosticSnapshotOutcome::Ready { diagnostics, .. } = outcome {
                         let _ = self.publish_complete_snapshot(
                             &scheduled.uri,
                             scheduled.version,
                             diagnostics,
+                        );
+                    } else {
+                        let source_generation = diagnostic_source_generation(&outcome);
+                        let _ = self.request_diagnostic_refresh(
+                            &scheduled.uri,
+                            overlay.as_ref(),
+                            source_generation,
                         );
                     }
                 }
@@ -437,21 +407,29 @@ where
     pub(super) fn request_diagnostic_refresh(
         &mut self,
         uri: &str,
-        version: i64,
         overlay: Option<&crate::overlay::OverlaySnapshot>,
         source_generation: Option<u64>,
     ) -> Option<String> {
+        let Ok(root) = self.document_root(uri) else {
+            return Some("document-root-unavailable".to_owned());
+        };
+        let document = DiagnosticDocumentIdentity::new(
+            &root,
+            self.lifecycle.gateway.workspace().scope_set_digest(),
+            overlay,
+        );
         if self
             .diagnostics
             .active_refreshes
             .get(uri)
-            .is_some_and(|pending| pending.overlay_version == version)
+            .is_some_and(|pending| pending.document == document)
         {
             return None;
         }
-        let Ok(root) = self.document_root(uri) else {
-            return Some("document-root-unavailable".to_owned());
-        };
+        self.retire_diagnostic_refresh(uri);
+        if !self.reserve_document_diagnostic_snapshot(uri) {
+            return Some("diagnostic-result-capacity".to_owned());
+        }
         match self.diagnostics.provider.request_document_refresh(
             &root,
             uri,
@@ -461,21 +439,18 @@ where
             DiagnosticRefreshAdmission::Started(identity)
             | DiagnosticRefreshAdmission::AlreadyRunning(identity) => {
                 if !valid_refresh_identity(&identity, source_generation) {
+                    let _ = self.diagnostics.provider.retire_document_refresh(
+                        &root,
+                        uri,
+                        &identity.operation_id,
+                    );
                     return Some("invalid-refresh-identity".to_owned());
                 }
+                self.diagnostics.document_snapshots.remove(uri);
+                self.diagnostics.debounce.cancel(uri);
                 self.diagnostics.active_refreshes.insert(
                     uri.to_owned(),
-                    PendingDiagnosticRefresh {
-                        identity,
-                        overlay_version: version,
-                        scope_digest: root.scope_digest().cloned(),
-                        scope_set_digest: self
-                            .lifecycle
-                            .gateway
-                            .workspace()
-                            .scope_set_digest()
-                            .cloned(),
-                    },
+                    PendingDiagnosticRefresh { identity, document },
                 );
                 None
             }
@@ -498,63 +473,38 @@ where
         let Some(pending) = self.diagnostics.active_refreshes.get(uri).cloned() else {
             return;
         };
-        let version = self.lifecycle.overlays.version(uri).unwrap_or_default();
-        if version != pending.overlay_version {
-            self.diagnostics.active_refreshes.remove(uri);
-            return;
-        }
         let overlay = self.lifecycle.overlays.snapshot(uri);
+        let version = overlay.as_ref().map_or(0, |overlay| overlay.version);
         let Ok(root) = self.document_root(uri) else {
-            self.diagnostics.active_refreshes.remove(uri);
+            self.invalidate_document_diagnostics(uri);
             return;
         };
-        if pending.scope_digest != root.scope_digest().cloned()
-            || pending.scope_set_digest
-                != self
-                    .lifecycle
-                    .gateway
-                    .workspace()
-                    .scope_set_digest()
-                    .cloned()
+        if pending.document
+            != DiagnosticDocumentIdentity::new(
+                &root,
+                self.lifecycle.gateway.workspace().scope_set_digest(),
+                overlay.as_ref(),
+            )
         {
-            self.diagnostics.active_refreshes.remove(uri);
+            self.invalidate_document_diagnostics(uri);
             return;
         }
-        match self
-            .diagnostics
-            .provider
-            .document_diagnostics(&root, uri, overlay.as_ref())
-        {
+        match self.document_diagnostic_snapshot(&root, uri, overlay.as_ref()) {
             DiagnosticSnapshotOutcome::Ready {
                 diagnostics,
                 completed_operation_id,
             } if completed_operation_id.as_deref()
                 == Some(pending.identity.operation_id.as_str()) =>
             {
-                let generation = diagnostics.generation;
-                let target_matches = pending
-                    .identity
-                    .target_generation
-                    .is_none_or(|target| target == generation);
-                let source_not_superseded = pending
-                    .identity
-                    .source_generation
-                    .is_none_or(|source| generation >= source);
-                let publication_not_superseded =
-                    self.diagnostics.published.get(uri).is_none_or(|published| {
-                        published.version != version || published.generation <= generation
-                    });
-                if target_matches && source_not_superseded && publication_not_superseded {
-                    if self.publish_complete_snapshot(uri, version, diagnostics) {
-                        self.diagnostics.active_refreshes.remove(uri);
-                    }
-                } else {
-                    self.diagnostics.active_refreshes.remove(uri);
+                if self.publish_complete_snapshot(uri, version, diagnostics)
+                    != Err(PublicationRejection::Backpressured)
+                {
+                    self.retire_diagnostic_refresh(uri);
                 }
             }
             DiagnosticSnapshotOutcome::Partial { .. }
             | DiagnosticSnapshotOutcome::Failed { .. } => {
-                self.diagnostics.active_refreshes.remove(uri);
+                self.retire_diagnostic_refresh(uri);
                 self.queue_diagnostic_refresh();
             }
             DiagnosticSnapshotOutcome::Ready { .. } | DiagnosticSnapshotOutcome::Refreshing(_) => {}
@@ -566,7 +516,7 @@ where
         uri: &str,
         version: i64,
         snapshot: crate::provider::GenerationDiagnostics,
-    ) -> bool {
+    ) -> Result<(), PublicationRejection> {
         let generation = snapshot.generation;
         if self
             .diagnostics
@@ -576,7 +526,7 @@ where
                 published.version == version && published.generation > generation
             })
         {
-            return false;
+            return Err(PublicationRejection::Discarded);
         }
         let merged = self.merge_document_diagnostics(
             uri,
@@ -587,19 +537,23 @@ where
                 .capabilities()
                 .publish_diagnostics_data,
         );
-        if self
+        let publication = if self
             .lifecycle
             .gateway
             .capabilities()
             .supports_publish_diagnostics
-            && !self.publish_diagnostics(
+        {
+            self.publish_diagnostics(
                 uri,
                 version,
                 generation,
                 self.scope_diagnostic_related_information(merged.items),
             )
-        {
-            return false;
+        } else {
+            Ok(())
+        };
+        if publication == Err(PublicationRejection::Backpressured) {
+            return publication;
         }
         self.diagnostics.published.insert(
             uri.to_owned(),
@@ -619,7 +573,7 @@ where
             },
         );
         self.queue_diagnostic_refresh();
-        true
+        publication
     }
 
     #[tracing::instrument(name = "lsp_diagnostics_merge_document", level = "trace", skip_all)]
@@ -665,14 +619,14 @@ where
         version: i64,
         generation: u64,
         diagnostics: Vec<GatewayDiagnostic>,
-    ) -> bool {
+    ) -> Result<(), PublicationRejection> {
         if !self
             .lifecycle
             .gateway
             .capabilities()
             .supports_publish_diagnostics
         {
-            return false;
+            return Err(PublicationRejection::Discarded);
         }
         let capabilities = self.lifecycle.gateway.capabilities();
         let mut params = json!({

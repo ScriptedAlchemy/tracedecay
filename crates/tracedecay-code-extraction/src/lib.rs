@@ -149,7 +149,10 @@ pub use rust_extractor::RustExtractor;
 pub use scala_extractor::ScalaExtractor;
 pub use svelte_extractor::SvelteExtractor;
 pub use swift_extractor::SwiftExtractor;
-pub use typescript_extractor::{TypeScriptExtractor, is_test_framework_call_signature};
+pub use typescript_extractor::{
+    TypeScriptExtractor, TypeScriptModuleReference, TypeScriptModuleReferenceKind,
+    TypeScriptModuleReferences, TypeScriptModuleSpecifier, is_test_framework_call_signature,
+};
 
 // Medium
 #[cfg(feature = "lang-bash")]
@@ -267,11 +270,11 @@ pub trait LanguageExtractor: Send + Sync {
             "MS BASIC 2.0" => "msbasic2".to_owned(),
             "Objective-C" => "objc".to_owned(),
             "QuickBASIC" => "qbasic".to_owned(),
-            "TypeScript" => match file_path.rsplit('.').next() {
-                Some("tsx") => "tsx".to_owned(),
-                Some("js" | "jsx") => "javascript".to_owned(),
-                _ => "typescript".to_owned(),
-            },
+            "TypeScript" => TypeScriptExtractor::grammar_for_extension(
+                file_path.rsplit('.').next().unwrap_or("ts"),
+            )
+            .0
+            .to_owned(),
             "VB.NET" => "vbnet".to_owned(),
             language => language.to_ascii_lowercase(),
         }

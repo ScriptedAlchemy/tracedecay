@@ -76,6 +76,7 @@ pub const MAX_QUEUED_OUTBOUND_MESSAGES: usize = 64;
 pub(crate) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/nativeDiagnostics";
 
 mod context_controller;
+mod diagnostic_snapshots;
 mod diagnostics_controller;
 mod dynamic_diagnostics_controller;
 mod lifecycle_controller;
@@ -284,6 +285,8 @@ where
             .cloned()
             .collect::<Vec<_>>();
         self.clear_removed_workspace_root_state(&removed_roots);
+        self.clear_document_diagnostics();
+        self.diagnostics.published.clear();
         self.diagnostics.workspace_snapshots.clear();
         self.diagnostics.workspace_failures.clear();
         self.lifecycle.gateway.replace_workspace(workspace);
@@ -491,6 +494,7 @@ where
     }
 
     fn invalidate_document(&mut self, uri: &str) {
+        self.invalidate_document_diagnostics(uri);
         self.diagnostics.workspace_snapshots.clear();
         self.diagnostics.workspace_failures.clear();
         self.discard_document_context(uri);

@@ -48,3 +48,16 @@ its request/result schemas, route, effect, idempotency, cancellation, and
 deadline contract. `operations::UNAVAILABLE_OPERATIONS` is generated from the
 same registry for cataloged operations that still lack a canonical schema or
 SDK transport; those entries do not acquire callable methods.
+
+## Resuming an operation stream
+
+An `open` event's `frontier.next_sequence` reports how far the server has
+published. It is not the subscriber's delivered position. The client refreshes
+the frontier's resume token while holding its delivered cursor until an event
+or explicit gap is consumed. A gap advances to `last_missing_sequence + 1` and
+reports the missing range instead of silently skipping it.
+
+For manual resume, set `StreamResume.next_sequence` to one past the last event
+or gap your application consumed, or zero if it consumed only `open`. Resuming
+exactly one past completion delivers the retained terminal receipt once and
+ends. Automatic reconnect remains opt-in through `StreamOptions.max_reconnects`.

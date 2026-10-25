@@ -7,6 +7,7 @@
 //! module never consults `PATH` or the process environment for either.
 
 use std::fmt::Write as _;
+use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -77,12 +78,14 @@ pub(super) fn summarize_with_cursor_agent(
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
                     "timed out waiting for `{}`",
                     config.cursor_agent_bin.display()
                 ),
-            });
+            )
+            .into());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
