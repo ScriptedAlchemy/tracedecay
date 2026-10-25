@@ -34,10 +34,10 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tracedecay_code_extraction::{LanguageExtractor, TypeScriptExtractor};
+use tracedecay_code_extraction::{TypeScriptExtractor, TypeScriptModuleSpecifier};
 use tracedecay_domain::blank_json_comments;
 use tracedecay_domain::errors::Result;
-use tree_sitter::Node;
+use tree_sitter::{Node, Tree};
 
 use super::{
     EcosystemAudit, EcosystemStatus, ProjectFiles, UnmountedFile, normalized, relative_display,
@@ -76,7 +76,7 @@ struct NodePackage {
     /// Project-relative manifest path.
     manifest: String,
     /// Files a runner, bundler, or type-checker starts from.
-    entries: Vec<PathBuf>,
+    entries: BTreeSet<PathBuf>,
     /// `compilerOptions.paths` rules, already anchored to a base directory.
     aliases: Vec<AliasRule>,
     /// `compilerOptions.baseUrl` directories, for bare specifiers.
@@ -218,11 +218,11 @@ fn audit_with_reader(
         .map(|(dir, sources)| node_package(files, dir, &owned_files, sources, reader))
         .collect::<Vec<_>>();
 
-    let entry_point_count = packages.iter().map(|package| package.entries.len()).sum();
     let mounted = packages
         .iter_mut()
         .flat_map(|package| walk_imports(files.root(), package, &owned_files, reader))
         .collect::<HashSet<_>>();
+    let entry_point_count = packages.iter().map(|package| package.entries.len()).sum();
     let omissions = packages
         .iter()
         .flat_map(|package| {
@@ -286,8 +286,8 @@ fn audit_with_reader(
     }
 }
 
-/// Reads one `package.json` (and the tsconfigs and config files beside it) into
-/// the entry points and alias rules the walk needs.
+/// Reads package and tsconfig declarations and discovers entry files. Root
+/// config literals join the entry set when the import walk parses that file.
 #[tracing::instrument(
     name = "code_index.unmounted_files.ts.package",
     level = "trace",
@@ -366,32 +366,13 @@ fn node_package(
         }
     }
 
-    // Config files are loaded by tooling, and the paths they name are entry
-    // points that appear nowhere else. Reading their string literals finds
-    // those without executing anyone's config.
+    // Tooling loads root config files. Their declared entry paths are read
+    // from the same syntax tree as their imports during the walk.
     for candidate in sources
         .iter()
         .filter(|file| file.parent() == Some(dir) && is_config_file(file))
     {
         entries.insert((*candidate).to_path_buf());
-        let Some(source) = coverage.read(project_root, candidate, reader) else {
-            continue;
-        };
-        let Some(literals) = config_string_literals(candidate, &source) else {
-            coverage.omit(
-                project_root,
-                candidate,
-                "TypeScript config could not be parsed without syntax errors",
-            );
-            continue;
-        };
-        for literal in literals {
-            for resolved in resolve_relative(dir, &literal) {
-                if owned.contains(resolved.as_path()) {
-                    entries.insert(resolved);
-                }
-            }
-        }
     }
 
     // Roots a runner discovers by convention rather than by declaration,
@@ -407,7 +388,7 @@ fn node_package(
         name,
         dir: dir.to_path_buf(),
         manifest: relative_display(project_root, &manifest_path),
-        entries: entries.into_iter().collect(),
+        entries,
         aliases,
         base_urls,
         coverage,
@@ -569,43 +550,32 @@ fn tsconfig_declarations(
 }
 
 /// Every static string literal in a config file's syntax tree.
-fn config_string_literals(file: &Path, source: &str) -> Option<Vec<String>> {
-    let tree = parse_typescript(file, source)?;
+fn config_string_literals(source: &str, tree: &Tree) -> std::result::Result<Vec<String>, String> {
     if tree.root_node().has_error() {
-        return None;
+        return Err("TypeScript config contains syntax errors".to_owned());
     }
     let mut out = Vec::new();
-    collect_config_string_literals(source, tree.root_node(), &mut out);
-    Some(out)
+    collect_config_string_literals(source, tree.root_node(), &mut out)?;
+    Ok(out)
 }
 
-fn collect_config_string_literals(source: &str, node: Node<'_>, out: &mut Vec<String>) {
-    match node.kind() {
-        "string" => {
-            if let Some(literal) = node.utf8_text(source.as_bytes()).ok().and_then(unquote) {
-                out.push(literal);
-            }
-            return;
+fn collect_config_string_literals(
+    source: &str,
+    node: Node<'_>,
+    out: &mut Vec<String>,
+) -> std::result::Result<(), String> {
+    if matches!(node.kind(), "string" | "template_string") {
+        if let Some(literal) = TypeScriptExtractor::string_literal_value(source, node)? {
+            out.push(literal);
         }
-        "template_string" => {
-            let mut cursor = node.walk();
-            let is_static = node
-                .named_children(&mut cursor)
-                .all(|child| child.kind() != "template_substitution");
-            if is_static
-                && let Some(literal) = node.utf8_text(source.as_bytes()).ok().and_then(unquote)
-            {
-                out.push(literal);
-            }
-            return;
-        }
-        _ => {}
+        return Ok(());
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_config_string_literals(source, child, out);
+        collect_config_string_literals(source, child, out)?;
     }
+    Ok(())
 }
 
 /// Breadth-first traversal of one package's import graph from its entry points.
@@ -632,7 +602,37 @@ fn walk_imports(
         let Some(source) = package.coverage.read(root, &file, reader) else {
             continue;
         };
-        for specifier in module_specifiers(root, &file, &source, &mut package.coverage) {
+        let Some(extension) = file.extension().and_then(|ext| ext.to_str()) else {
+            package
+                .coverage
+                .omit(root, &file, "source file has no supported extension");
+            continue;
+        };
+        let tree = match TypeScriptExtractor::parse_source(&source, extension) {
+            Ok(tree) => tree,
+            Err(error) => {
+                package.coverage.omit(root, &file, error);
+                continue;
+            }
+        };
+        if file.parent() == Some(package.dir.as_path()) && is_config_file(&file) {
+            match config_string_literals(&source, &tree) {
+                Ok(literals) => {
+                    for literal in literals {
+                        for target in resolve_relative(&package.dir, &literal) {
+                            if owned.contains(target.as_path()) {
+                                package.entries.insert(target.clone());
+                                if mounted.insert(target.clone()) {
+                                    queue.push_back(target);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => package.coverage.omit(root, &file, error),
+            }
+        }
+        for specifier in module_specifiers(root, &file, &source, &tree, &mut package.coverage) {
             for target in resolve_specifier(package, &file, &specifier) {
                 if owned.contains(target.as_path()) && mounted.insert(target.clone()) {
                     queue.push_back(target);
@@ -645,96 +645,32 @@ fn walk_imports(
 
 /// Every module specifier one file names.
 ///
-/// `import` statements, `export … from`, and `require(…)` come from the same
-/// extractor the code graph is built from, so the audit and the graph cannot
-/// disagree about those forms. Dynamic `import(…)` is still read off the
-/// tree-sitter grammar because the extractor does not emit that form as
-/// import evidence today.
+/// The extraction owner shares static import syntax with the graph and also
+/// distinguishes literal dynamic imports from expressions. Reachability may
+/// follow a literal without asserting an unconditional execution relationship;
+/// expressions remain the named blind spot in the audit response.
 fn module_specifiers(
     root: &Path,
     file: &Path,
     source: &str,
+    tree: &Tree,
     coverage: &mut AuditCoverage,
 ) -> Vec<String> {
-    let logical_path = file.to_string_lossy().into_owned();
-    let mut specifiers = TypeScriptExtractor
-        .extract_artifact(&logical_path, source)
-        .imports
-        .into_iter()
-        .map(|evidence| evidence.module_specifier)
-        .collect::<Vec<_>>();
-
-    match parse_typescript(file, source) {
-        Some(tree) => {
-            if tree.root_node().has_error() {
-                coverage.omit(root, file, "source contains syntax errors");
-            }
-            collect_reexports_and_calls(source, tree.root_node(), &mut specifiers);
-        }
-        None => coverage.omit(root, file, "source parser unavailable"),
+    let evidence = TypeScriptExtractor::extract_module_references(source, tree);
+    for error in evidence.errors {
+        coverage.omit(root, file, error);
     }
+    let mut specifiers = evidence
+        .references
+        .into_iter()
+        .filter_map(|reference| match reference.specifier {
+            TypeScriptModuleSpecifier::Literal(value) => Some(value),
+            TypeScriptModuleSpecifier::Expression => None,
+        })
+        .collect::<Vec<_>>();
     specifiers.sort();
     specifiers.dedup();
     specifiers
-}
-
-fn parse_typescript(file: &Path, source: &str) -> Option<tree_sitter::Tree> {
-    let key = match file.extension().and_then(|ext| ext.to_str()) {
-        Some("tsx") => "tsx",
-        Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
-        _ => "typescript",
-    };
-    let language = tracedecay_code_extraction::ts_provider::try_language(key).ok()?;
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&language).ok()?;
-    parser.parse(source, None)
-}
-
-fn collect_reexports_and_calls(source: &str, node: Node<'_>, out: &mut Vec<String>) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "export_statement" | "import_require_clause" => {
-                if let Some(text) = child
-                    .child_by_field_name("source")
-                    .and_then(|source_node| source_node.utf8_text(source.as_bytes()).ok())
-                    && let Some(literal) = unquote(text)
-                {
-                    out.push(literal);
-                }
-            }
-            "call_expression" => {
-                let callee = child
-                    .child_by_field_name("function")
-                    .and_then(|callee| callee.utf8_text(source.as_bytes()).ok())
-                    .unwrap_or_default();
-                if matches!(callee, "require" | "import")
-                    && let Some(argument) = child
-                        .child_by_field_name("arguments")
-                        .and_then(|arguments| arguments.named_child(0))
-                    && let Some(literal) =
-                        argument.utf8_text(source.as_bytes()).ok().and_then(unquote)
-                {
-                    out.push(literal);
-                }
-            }
-            _ => {}
-        }
-        collect_reexports_and_calls(source, child, out);
-    }
-}
-
-fn unquote(text: &str) -> Option<String> {
-    let text = text.trim();
-    for quote in ['"', '\'', '`'] {
-        if let Some(inner) = text
-            .strip_prefix(quote)
-            .and_then(|rest| rest.strip_suffix(quote))
-        {
-            return Some(inner.to_owned());
-        }
-    }
-    None
 }
 
 /// The files a specifier may name, from the importing file's position.
@@ -1194,10 +1130,7 @@ mod tests {
         assert!(audit.unmounted.is_empty());
         let note = audit.note.expect("config omission");
         assert!(note.contains("rsbuild.config.ts"), "{note}");
-        assert!(
-            note.contains("could not be parsed without syntax errors"),
-            "{note}"
-        );
+        assert!(note.contains("contains syntax errors"), "{note}");
     }
 
     /// A `package.json` script names the file it runs, and that file is an

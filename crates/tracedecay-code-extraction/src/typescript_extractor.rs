@@ -16,8 +16,14 @@ use crate::types::{
 };
 
 mod imports;
+mod module_references;
+mod string_literals;
 mod test_calls;
 
+pub use module_references::{
+    TypeScriptModuleReference, TypeScriptModuleReferenceKind, TypeScriptModuleReferences,
+    TypeScriptModuleSpecifier,
+};
 pub use test_calls::is_test_framework_call_signature;
 
 /// Extracts code graph nodes and edges from TypeScript/JavaScript source files
@@ -118,14 +124,25 @@ impl TypeScriptExtractor {
         .with_conservative_clone_bodies(
             &tree,
             source,
-            match ext {
-                "tsx" => "tsx",
-                "js" | "jsx" => "javascript",
-                _ => "typescript",
-            },
+            Self::grammar_for_extension(ext).0,
             file_path,
         )
         .artifact
+    }
+
+    /// Read module references from the exact tree and source already owned by
+    /// the caller. This does not construct graph, complexity, or clone facts.
+    /// Conditional `require` and dynamic `import` references express possible
+    /// reachability, not unconditional execution or file-scoped bindings.
+    pub fn extract_module_references(source: &str, tree: &Tree) -> TypeScriptModuleReferences {
+        module_references::extract_module_references(source, tree)
+    }
+
+    /// Cook a parser-recognized string or substitution-free template literal.
+    /// `None` is a nonliteral expression; errors identify syntax or values that
+    /// cannot be decoded exactly. The node must belong to this exact source.
+    pub fn string_literal_value(source: &str, node: TsNode<'_>) -> Result<Option<String>, String> {
+        string_literals::string_literal_value(source.as_bytes(), node)
     }
 
     fn extract_tree_artifact(
@@ -204,15 +221,30 @@ impl TypeScriptExtractor {
         "<anonymous>".to_string()
     }
 
-    /// Parse source code into a tree-sitter AST, selecting grammar by file extension.
-    fn parse_source(source: &str, extension: &str) -> Result<Tree, String> {
-        let (key, label) = match extension {
-            "ts" | "astro" | "svelte" => ("typescript", "TypeScript"),
-            "tsx" => ("tsx", "TSX"),
-            "js" | "jsx" => ("javascript", "JavaScript"),
-            other => (other, other),
-        };
+    /// Parse with the same grammar policy as graph and retained extraction.
+    /// Grammar failures remain errors; callers must also inspect syntax errors
+    /// on the returned tree when complete coverage is required.
+    pub fn parse_source(source: &str, extension: &str) -> Result<Tree, String> {
+        let (key, label) = Self::grammar_for_extension(extension);
         crate::ts_provider::parse_extractor_source_with_labeled_lookup(key, label, source)
+    }
+
+    pub(crate) fn grammar_for_extension(extension: &str) -> (&str, &str) {
+        if extension.eq_ignore_ascii_case("tsx") {
+            ("tsx", "TSX")
+        } else if ["ts", "mts", "cts", "astro", "svelte"]
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        {
+            ("typescript", "TypeScript")
+        } else if ["js", "jsx", "mjs", "cjs"]
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        {
+            ("javascript", "JavaScript")
+        } else {
+            (extension, extension)
+        }
     }
 
     /// Visit all children of a node.
@@ -2012,7 +2044,7 @@ impl TypeScriptExtractor {
 
 impl crate::LanguageExtractor for TypeScriptExtractor {
     fn extensions(&self) -> &[&str] {
-        &["ts", "tsx", "js", "jsx"]
+        &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
     }
 
     fn language_name(&self) -> &'static str {
