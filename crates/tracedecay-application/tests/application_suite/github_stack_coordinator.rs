@@ -54,7 +54,7 @@ fn signal_at(
 #[derive(Default)]
 struct MemoryStore {
     signals: Mutex<BTreeMap<tracedecay_domain::StackSignalId, StackSignalV1>>,
-    pending: Mutex<Vec<(StackPendingDeliveryV1, StackSignalV1)>>,
+    appended: Mutex<Vec<(tracedecay_domain::ActorId, tracedecay_domain::StackSignalId)>>,
     authorization_losses:
         Mutex<Vec<(tracedecay_domain::StackSignalId, tracedecay_domain::ActorId)>>,
     saturate_after_persist: Mutex<bool>,
@@ -73,41 +73,16 @@ impl StackCoordinatorStore for MemoryStore {
             });
         }
         signals.insert(signal.signal_id.clone(), signal.clone());
-        self.pending
-            .lock()
-            .unwrap()
-            .extend(recipients.into_iter().map(|recipient| {
-                (
-                    StackPendingDeliveryV1 {
-                        recipient,
-                        signal_id: signal.signal_id.clone(),
-                    },
-                    signal.clone(),
-                )
-            }));
+        self.appended.lock().unwrap().extend(
+            recipients
+                .into_iter()
+                .map(|recipient| (recipient, signal.signal_id.clone())),
+        );
         if *self.saturate_after_persist.lock().unwrap() {
             Err(StackCoordinatorErrorV1::Saturated)
         } else {
             Ok(())
         }
-    }
-
-    async fn pending_deliveries(
-        &self,
-    ) -> Result<Vec<(StackPendingDeliveryV1, StackSignalV1)>, StackCoordinatorErrorV1> {
-        Ok(self.pending.lock().unwrap().clone())
-    }
-
-    async fn acknowledge(
-        &self,
-        watermark_id: &tracedecay_domain::StackDeliveryWatermarkId,
-        deliveries: &[StackPendingDeliveryV1],
-    ) -> Result<(), StackCoordinatorErrorV1> {
-        let acknowledged = deliveries.iter().cloned().collect::<BTreeSet<_>>();
-        self.pending.lock().unwrap().retain(|(delivery, signal)| {
-            signal.watermark_id != *watermark_id || !acknowledged.contains(delivery)
-        });
-        Ok(())
     }
 
     async fn signal(
@@ -156,24 +131,6 @@ impl StackDeliveryAuthorizationPort for Authorization {
         } else {
             StackDeliveryAuthorizationV1::Authorized
         }
-    }
-}
-
-#[derive(Default)]
-struct RecordingDelivery {
-    batches: Mutex<Vec<StackDeliveryBatchV1>>,
-    fail_next: Mutex<bool>,
-}
-
-impl StackDeliveryPort for RecordingDelivery {
-    async fn deliver(&self, batch: &StackDeliveryBatchV1) -> Result<(), StackCoordinatorErrorV1> {
-        let mut fail_next = self.fail_next.lock().unwrap();
-        if *fail_next {
-            *fail_next = false;
-            return Err(StackCoordinatorErrorV1::Unavailable);
-        }
-        self.batches.lock().unwrap().push(batch.clone());
-        Ok(())
     }
 }
 
@@ -455,14 +412,14 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
 }
 
 #[tokio::test]
-async fn mounted_owner_dedupes_debounced_signals_but_drains_all_material_overflow() {
+async fn mounted_owner_dedupes_debounced_signals_and_appends_all_material_overflow() {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let exact_scope = scope(91);
     let store = MemoryStore::default();
     let authorization = Authorization::default();
-    let delivery = RecordingDelivery::default();
     let recipients = (0..65).map(actor).collect::<Vec<_>>();
     *authorization.recipients.lock().unwrap() = recipients;
+    authorization.denied.lock().unwrap().insert(actor(64));
 
     let first = signal_at(
         &exact_scope,
@@ -498,21 +455,14 @@ async fn mounted_owner_dedupes_debounced_signals_but_drains_all_material_overflo
             .unwrap();
     }
 
-    authorization.denied.lock().unwrap().insert(actor(64));
-    let delivered = coordinator
-        .drain_due(&store, &authorization, &delivery, UtcMicros(2_000_000))
-        .await
-        .unwrap();
-    assert_eq!(delivered, 64 * 130);
-    assert!(store.pending.lock().unwrap().is_empty());
-    assert_eq!(store.authorization_losses.lock().unwrap().len(), 130);
     {
-        let batches = delivery.batches.lock().unwrap();
-        assert!(batches.len() > 1);
-        assert!(batches.iter().all(|batch| {
-            batch.recipients.len() <= MAX_BATCH_RECIPIENTS
-                && batch.signals.len() <= MAX_BATCH_SIGNALS
-        }));
+        let appended = store.appended.lock().unwrap();
+        assert_eq!(appended.len(), 64 * 130);
+        assert!(
+            appended
+                .iter()
+                .all(|(recipient, _)| recipient != &actor(64))
+        );
     }
     assert_eq!(
         coordinator
@@ -524,6 +474,23 @@ async fn mounted_owner_dedupes_debounced_signals_but_drains_all_material_overflo
             )
             .await,
         Err(StackCoordinatorErrorV1::Denied)
+    );
+    assert_eq!(
+        store.authorization_losses.lock().unwrap().as_slice(),
+        &[(expanded_id.clone().unwrap(), actor(64))],
+        "a denied read records the recipient's authorization loss"
+    );
+    assert!(
+        coordinator
+            .expand_transition(
+                &store,
+                &authorization,
+                &actor(1),
+                expanded_id.as_ref().unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_some()
     );
     *authorization.recipients.lock().unwrap() = vec![actor(64)];
     assert_eq!(
@@ -597,7 +564,7 @@ async fn transition_signal_and_circuit_policy_reject_stale_or_tampered_identity(
 }
 
 #[tokio::test]
-async fn durable_saturation_and_restart_delivery_preserve_material_work() {
+async fn durable_saturation_retains_material_work_for_a_later_read() {
     let exact_scope = scope(93);
     let store = MemoryStore::default();
     let authorization = Authorization::default();
@@ -610,32 +577,18 @@ async fn durable_saturation_and_restart_delivery_preserve_material_work() {
             .await,
         Err(StackCoordinatorErrorV1::Saturated)
     );
-    assert_eq!(store.signal(&signal.signal_id).await.unwrap(), Some(signal));
-    assert_eq!(store.pending.lock().unwrap().len(), 1);
+    assert_eq!(
+        store.signal(&signal.signal_id).await.unwrap(),
+        Some(signal.clone())
+    );
+    assert_eq!(store.appended.lock().unwrap().len(), 1);
 
-    *store.saturate_after_persist.lock().unwrap() = false;
-    let failed_delivery = RecordingDelivery::default();
-    *failed_delivery.fail_next.lock().unwrap() = true;
     assert_eq!(
         DaemonGitHubStackCoordinatorV1::default()
-            .drain_due(&store, &authorization, &failed_delivery, UtcMicros(2),)
+            .expand_transition(&store, &authorization, &actor(1), &signal.signal_id)
             .await,
-        Err(StackCoordinatorErrorV1::Unavailable)
+        Ok(Some(signal))
     );
-    assert_eq!(store.pending.lock().unwrap().len(), 1);
-    assert_eq!(
-        DaemonGitHubStackCoordinatorV1::default()
-            .drain_due(
-                &store,
-                &authorization,
-                &RecordingDelivery::default(),
-                UtcMicros(2),
-            )
-            .await
-            .unwrap(),
-        1
-    );
-    assert!(store.pending.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -645,7 +598,6 @@ async fn debounce_classes_and_five_minute_dedupe_ttl_advance_independently() {
     let store = MemoryStore::default();
     let authorization = Authorization::default();
     *authorization.recipients.lock().unwrap() = vec![actor(1)];
-    let delivery = RecordingDelivery::default();
     let ready = signal_at(
         &exact_scope,
         StackSignalKindV1::DependencyReady,
@@ -658,42 +610,30 @@ async fn debounce_classes_and_five_minute_dedupe_ttl_advance_independently() {
         digest('c'),
         UtcMicros(0),
     );
+    let conflict = signal_at(
+        &exact_scope,
+        StackSignalKindV1::ActualConflict,
+        digest('b'),
+        UtcMicros(0),
+    );
+    assert!(!ready.is_due(UtcMicros(249_999)));
+    assert!(ready.is_due(UtcMicros(250_000)));
+    assert!(!drift.is_due(UtcMicros(999_999)));
+    assert!(drift.is_due(UtcMicros(1_000_000)));
+    assert!(
+        conflict.is_due(UtcMicros(0)),
+        "material signals are never debounced"
+    );
+
     coordinator
-        .enqueue_transition(&store, &authorization, &exact_scope, ready.clone())
+        .enqueue_transition(&store, &authorization, &exact_scope, ready)
         .await
         .unwrap();
     coordinator
         .enqueue_transition(&store, &authorization, &exact_scope, drift)
         .await
         .unwrap();
-    assert_eq!(
-        coordinator
-            .drain_due(&store, &authorization, &delivery, UtcMicros(249_999))
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        coordinator
-            .drain_due(&store, &authorization, &delivery, UtcMicros(250_000))
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        coordinator
-            .drain_due(&store, &authorization, &delivery, UtcMicros(999_999))
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        coordinator
-            .drain_due(&store, &authorization, &delivery, UtcMicros(1_000_000))
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(store.appended.lock().unwrap().len(), 2);
 
     let duplicate = signal_at(
         &exact_scope,
@@ -705,7 +645,7 @@ async fn debounce_classes_and_five_minute_dedupe_ttl_advance_independently() {
         .enqueue_transition(&store, &authorization, &exact_scope, duplicate)
         .await
         .unwrap();
-    assert!(store.pending.lock().unwrap().is_empty());
+    assert_eq!(store.appended.lock().unwrap().len(), 2);
     let after_ttl = signal_at(
         &exact_scope,
         StackSignalKindV1::DependencyReady,
@@ -716,7 +656,7 @@ async fn debounce_classes_and_five_minute_dedupe_ttl_advance_independently() {
         .enqueue_transition(&store, &authorization, &exact_scope, after_ttl)
         .await
         .unwrap();
-    assert_eq!(store.pending.lock().unwrap().len(), 1);
+    assert_eq!(store.appended.lock().unwrap().len(), 3);
 }
 
 #[test]
@@ -788,20 +728,6 @@ impl StackCoordinatorStore for YieldingAppendStore {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         self.inner.append_signal(signal, recipients).await
-    }
-
-    async fn pending_deliveries(
-        &self,
-    ) -> Result<Vec<(StackPendingDeliveryV1, StackSignalV1)>, StackCoordinatorErrorV1> {
-        self.inner.pending_deliveries().await
-    }
-
-    async fn acknowledge(
-        &self,
-        watermark_id: &tracedecay_domain::StackDeliveryWatermarkId,
-        deliveries: &[StackPendingDeliveryV1],
-    ) -> Result<(), StackCoordinatorErrorV1> {
-        self.inner.acknowledge(watermark_id, deliveries).await
     }
 
     async fn signal(

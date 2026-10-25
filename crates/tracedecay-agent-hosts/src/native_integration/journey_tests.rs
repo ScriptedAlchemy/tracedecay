@@ -604,8 +604,7 @@ async fn preflight(
     preview.as_ref().clone()
 }
 
-/// Mounts from a thread with no Tokio runtime entered, so the stack runtime's
-/// drain loop cannot borrow the test's Tokio runtime.
+/// Mounts from a native blocking thread, as the daemon's project-open does.
 async fn mount_stack_runtime_off_tokio(
     owner: super::registry::DaemonNativeIntegrationOwner,
     database: RegisteredGlobalDbLeaseV1,
@@ -928,20 +927,20 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         .enqueue_from_preflight(occupied_signal.clone(), &live_context)
         .await
         .expect("enqueue destination-occupied dependency-ready signal");
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if stack_runtime
-                .pending_host_deliveries()
-                .await
-                .is_ok_and(|pending| pending.len() == 3)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("publish stack signals to host");
+    assert_eq!(
+        database
+            .pending_github_stack_deliveries(
+                project_id.as_str(),
+                destination_scope.scope_digest.as_str(),
+                None,
+            )
+            .await
+            .expect("pending page")
+            .len(),
+        3,
+        "enqueued signals are readable by the host without a promotion step"
+    );
+    assert_eq!(stack_runtime.has_due_pending_delivery().await, Ok(true));
 
     let cancellation = CancellationSignal::active("cancel.native.journey.declared-conflict.expand")
         .expect("expand cancellation");
@@ -992,6 +991,48 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         expanded_preview.disposition,
         NativeIntegrationPreviewDispositionV1::NativeConflict { .. }
     ));
+    let debounced = StackSignalV1::seal(
+        &destination_scope,
+        StackSignalDraftV1 {
+            stack_revision_id: signal.stack_revision_id.clone(),
+            stack_revision_digest: signal.stack_revision_digest.clone(),
+            kind: StackSignalKindV1::StackTipDrift,
+            state_digest: digest('7'),
+            github_stack_digest: None,
+            observed_at: now,
+        },
+    )
+    .expect("debounced signal");
+    stack_runtime
+        .enqueue_from_preflight(debounced.clone(), &live_context)
+        .await
+        .expect("enqueue debounced signal");
+    assert_eq!(
+        stack_runtime
+            .expand(
+                GitHubStackSignalExpandSurfaceRequest {
+                    signal_id: Some(debounced.signal_id.clone()),
+                    expected_watermark_id: None,
+                }
+                .into_application_request(live_context.clone()),
+                &cancellation,
+            )
+            .await,
+        Err(GitHubStackSignalExpandPortError::Unavailable),
+        "a debounced signal is not readable before its window ends"
+    );
+    assert_eq!(
+        database
+            .github_stack_recipient_state(
+                project_id.as_str(),
+                debounced.signal_id.as_str(),
+                requester.as_str(),
+            )
+            .await
+            .expect("debounced recipient state"),
+        Some(GitHubStackDeliveryStateV1::Pending),
+        "an early read settles nothing"
+    );
     let occupied = stack_runtime
         .expand(
             GitHubStackSignalExpandSurfaceRequest {
@@ -1038,7 +1079,7 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
             )
             .await
             .expect("other recipient state"),
-        Some(GitHubStackDeliveryStateV1::HostPending)
+        Some(GitHubStackDeliveryStateV1::Pending)
     );
     let stored = database
         .github_stack_signal(project_id.as_str(), signal.signal_id.as_str())
@@ -1373,20 +1414,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
                 .enqueue_from_preflight(stack_signal.clone(), &live_context)
                 .await
                 .expect("enqueue terminal signal");
-            tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    if stack_runtime
-                        .pending_host_deliveries()
-                        .await
-                        .is_ok_and(|pending| pending.len() == 1)
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .expect("publish terminal signal");
+            assert_eq!(stack_runtime.has_due_pending_delivery().await, Ok(true));
             let expanded = stack_runtime
                 .expand(
                     GitHubStackSignalExpandSurfaceRequest {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -398,95 +398,6 @@ impl DaemonGitHubStackCoordinatorV1 {
         Ok(())
     }
 
-    #[tracing::instrument(name = "usecases.stack.drain", level = "trace", skip_all)]
-    pub async fn drain_due<
-        S: StackCoordinatorStore,
-        A: StackDeliveryAuthorizationPort,
-        D: StackDeliveryPort,
-    >(
-        &self,
-        store: &S,
-        authorization: &A,
-        delivery: &D,
-        now: UtcMicros,
-    ) -> Result<usize, StackCoordinatorErrorV1> {
-        let mut pending = store.pending_deliveries().await?;
-        pending.retain(|(_, signal)| {
-            signal.kind.is_material()
-                || signal
-                    .observed_at
-                    .0
-                    .saturating_add(signal.kind.debounce_micros())
-                    <= now.0
-        });
-        pending.sort_by(|(ld, ls), (rd, rs)| {
-            (ls.observed_at, &ls.signal_id, &ld.recipient).cmp(&(
-                rs.observed_at,
-                &rs.signal_id,
-                &rd.recipient,
-            ))
-        });
-        let mut delivered = 0;
-        while !pending.is_empty() {
-            let watermark = pending[0].1.watermark_id.clone();
-            let mut recipients = BTreeSet::new();
-            let mut signal_ids = BTreeSet::new();
-            let mut deliveries = Vec::new();
-            let mut acknowledged = Vec::new();
-            let mut signals = BTreeMap::new();
-            let mut consumed = 0;
-            for (item, signal) in &pending {
-                if signal.watermark_id != watermark
-                    || (recipients.len() >= MAX_BATCH_RECIPIENTS
-                        && !recipients.contains(&item.recipient))
-                    || (signal_ids.len() >= MAX_BATCH_SIGNALS
-                        && !signal_ids.contains(&item.signal_id))
-                {
-                    break;
-                }
-                consumed += 1;
-                match authorization.authorize(&item.recipient, signal).await {
-                    StackDeliveryAuthorizationV1::Authorized => {
-                        recipients.insert(item.recipient.clone());
-                        signal_ids.insert(item.signal_id.clone());
-                        deliveries.push(item.clone());
-                        acknowledged.push(item.clone());
-                        signals
-                            .entry(signal.signal_id.clone())
-                            .or_insert_with(|| signal.clone());
-                    }
-                    outcome @ (StackDeliveryAuthorizationV1::Denied
-                    | StackDeliveryAuthorizationV1::Stale) => {
-                        store
-                            .record_authorization_loss(signal, &item.recipient, outcome)
-                            .await?;
-                        acknowledged.push(item.clone())
-                    }
-                    StackDeliveryAuthorizationV1::Unavailable => {}
-                }
-            }
-            if consumed == 0 {
-                return Err(StackCoordinatorErrorV1::Invalid(
-                    "fanout batch made no progress".to_owned(),
-                ));
-            }
-            let batch = StackDeliveryBatchV1 {
-                watermark_id: watermark.clone(),
-                recipients: recipients.into_iter().collect(),
-                signals: signals.into_values().collect(),
-                deliveries,
-                partial: consumed < pending.len(),
-            };
-            if !batch.recipients.is_empty() {
-                delivery.deliver(&batch).await?;
-                delivered += batch.deliveries.len();
-            }
-            store.acknowledge(&watermark, &acknowledged).await?;
-            pending.drain(..consumed);
-        }
-        Ok(delivered)
-    }
-
     #[tracing::instrument(name = "usecases.stack.expand", level = "trace", skip_all)]
     pub async fn expand_transition<S: StackCoordinatorStore, A: StackDeliveryAuthorizationPort>(
         &self,
@@ -500,8 +411,17 @@ impl DaemonGitHubStackCoordinatorV1 {
         };
         match authorization.authorize(recipient, &signal).await {
             StackDeliveryAuthorizationV1::Authorized => Ok(Some(signal)),
-            StackDeliveryAuthorizationV1::Denied => Err(StackCoordinatorErrorV1::Denied),
-            StackDeliveryAuthorizationV1::Stale => Err(StackCoordinatorErrorV1::Stale),
+            outcome @ (StackDeliveryAuthorizationV1::Denied
+            | StackDeliveryAuthorizationV1::Stale) => {
+                store
+                    .record_authorization_loss(&signal, recipient, outcome)
+                    .await?;
+                Err(if outcome == StackDeliveryAuthorizationV1::Denied {
+                    StackCoordinatorErrorV1::Denied
+                } else {
+                    StackCoordinatorErrorV1::Stale
+                })
+            }
             StackDeliveryAuthorizationV1::Unavailable => Err(StackCoordinatorErrorV1::Unavailable),
         }
     }
