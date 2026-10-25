@@ -17,6 +17,9 @@ inputs:
   cache-key:
     description: Disk-cache name (see the setup-bazel action).
     required: true
+  prepared-build:
+    description: Whether the caller already configured Bazel for this build.
+    default: "false"
   tailscale-client-id:
     description: Restricted OIDC client for compatible trusted CI builds.
     default: ""
@@ -31,6 +34,7 @@ runs:
   steps:
     - uses: ./.github/actions/setup-bazel
       id: bazel
+      if: inputs.prepared-build != 'true'
       with:
         cache-key: ${{ inputs.cache-key }}
         tailscale-client-id: ${{ inputs.tailscale-client-id }}
