@@ -12,6 +12,11 @@ py_test(
     imports = ["."],
     legacy_create_init = 0,
     main = "test_run_real_model.py",
+    # The runner owns agents and daemons through POSIX process groups.
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
 )
 
 filegroup(
