@@ -1,19 +1,19 @@
 //! Daemon-local runtime for durable GitHub stack transition delivery.
 //!
 //! The coordinator awaits the registered database directly through the
-//! native-integration project owner's delivery store. Publication advances a durable row only to `host_pending`; authenticated
-//! MCP expansion is the sole settlement path.
+//! native-integration project owner's delivery store. A signal stays
+//! `pending` in that store until the authenticated host read that expands it
+//! settles it; there is no background task between enqueue and that read.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, OptionalStackPreflightPort, StackCircuitPolicyV1,
     StackCoordinatorErrorV1, StackCoordinatorStore, StackDeliveryAuthorizationPort,
-    StackDeliveryAuthorizationV1, StackDeliveryBatchV1, StackDeliveryPort, StackPendingDeliveryV1,
-    StackSignalV1,
+    StackDeliveryAuthorizationV1, StackSignalV1,
 };
 use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
@@ -30,20 +30,17 @@ use tracedecay_contracts::{
 use tracedecay_domain::{
     ActorId, ManifestDigest, NativeIntegrationApprovalV1, NativeIntegrationSelectionV1,
     NativeIntegrationTerminalOutcomeV1, NativeIntegrationUnavailabilityV1, ProjectId,
-    StackDeliveryWatermarkId, StackSignalId, StackSignalKindV1, UtcMicros, canonical_sha256,
+    StackSignalId, StackSignalKindV1, UtcMicros, canonical_sha256,
 };
 
 use tracedecay_global_db::{
-    GitHubStackDeliveryKeyV1, GitHubStackDeliveryRecordV1, GitHubStackDeliveryStateV1,
-    GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
-    MAX_GITHUB_STACK_DELIVERY_BATCH_V1, RegisteredGlobalDbLeaseV1,
+    GitHubStackDeliveryRecordV1, GitHubStackDeliveryStateV1, GitHubStackSignalAppendOutcomeV1,
+    GitHubStackSignalRecordV1, RegisteredGlobalDbLeaseV1,
 };
-use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 use super::registry::DaemonProjectNativeIntegrationService;
 use super::store::DaemonNativeIntegrationStore;
 
-const STACK_DELIVERY_TICK: Duration = Duration::from_millis(250);
 const STACK_CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
 const STACK_CIRCUIT_OPEN_MICROS: i64 = 30_000_000;
 
@@ -66,36 +63,6 @@ impl DaemonStackDeliveryStoreV1 {
             .await
     }
 
-    async fn pending(&self) -> Result<Vec<GitHubStackDeliveryRecordV1>, String> {
-        self.database
-            .pending_github_stack_deliveries(&self.project_id, MAX_GITHUB_STACK_DELIVERY_BATCH_V1)
-            .await
-    }
-
-    async fn publish(
-        &self,
-        watermark_id: &StackDeliveryWatermarkId,
-        deliveries: Vec<GitHubStackDeliveryKeyV1>,
-    ) -> Result<(), String> {
-        self.database
-            .publish_github_stack_deliveries(&self.project_id, watermark_id.as_str(), &deliveries)
-            .await
-    }
-
-    async fn acknowledge(
-        &self,
-        watermark_id: &StackDeliveryWatermarkId,
-        deliveries: Vec<GitHubStackDeliveryKeyV1>,
-    ) -> Result<(), String> {
-        self.database
-            .acknowledge_github_stack_deliveries(
-                &self.project_id,
-                watermark_id.as_str(),
-                &deliveries,
-            )
-            .await
-    }
-
     async fn signal(
         &self,
         signal_id: &StackSignalId,
@@ -105,16 +72,16 @@ impl DaemonStackDeliveryStoreV1 {
             .await
     }
 
-    async fn oldest_pending(
+    async fn pending(
         &self,
         scope: &ResolvedScope,
-        recipient: &ActorId,
-    ) -> Result<Option<GitHubStackDeliveryRecordV1>, String> {
+        recipient: Option<&ActorId>,
+    ) -> Result<Vec<GitHubStackDeliveryRecordV1>, String> {
         self.database
-            .oldest_host_pending_github_stack_delivery(
+            .pending_github_stack_deliveries(
                 &self.project_id,
                 scope.scope_digest.as_str(),
-                recipient.as_str(),
+                recipient.map(ActorId::as_str),
             )
             .await
     }
@@ -153,19 +120,6 @@ impl DaemonStackDeliveryStoreV1 {
                 &self.project_id,
                 signal_id.as_str(),
                 recipient.as_str(),
-            )
-            .await
-    }
-
-    async fn pending_host(
-        &self,
-        scope: &ResolvedScope,
-    ) -> Result<Vec<GitHubStackDeliveryRecordV1>, String> {
-        self.database
-            .pending_host_github_stack_deliveries(
-                &self.project_id,
-                scope.scope_digest.as_str(),
-                MAX_GITHUB_STACK_DELIVERY_BATCH_V1,
             )
             .await
     }
@@ -359,13 +313,26 @@ impl StackRuntimePortsV1 {
         Ok(signal)
     }
 
-    async fn pending_host_for_scope(
+    /// The scope's `pending` signals that are readable now, oldest first,
+    /// for one recipient or for every recipient. Reading changes no state.
+    async fn due_pending(
         &self,
-    ) -> Result<Vec<GitHubStackDeliveryRecordV1>, StackCoordinatorErrorV1> {
-        self.store
-            .pending_host(&self.scope)
+        recipient: Option<&ActorId>,
+        now: UtcMicros,
+    ) -> Result<Vec<StackSignalV1>, StackCoordinatorErrorV1> {
+        let mut due = Vec::new();
+        for delivery in self
+            .store
+            .pending(&self.scope, recipient)
             .await
-            .map_err(Self::database_error)
+            .map_err(Self::database_error)?
+        {
+            let signal = self.record_to_signal(&delivery.signal)?;
+            if signal.is_due(now) {
+                due.push(signal);
+            }
+        }
+        Ok(due)
     }
 }
 
@@ -392,48 +359,6 @@ impl StackCoordinatorStore for StackRuntimePortsV1 {
             GitHubStackSignalAppendOutcomeV1::Appended { .. }
             | GitHubStackSignalAppendOutcomeV1::Replayed { .. } => Ok(()),
         }
-    }
-
-    async fn pending_deliveries(
-        &self,
-    ) -> Result<Vec<(StackPendingDeliveryV1, StackSignalV1)>, StackCoordinatorErrorV1> {
-        self.store
-            .pending()
-            .await
-            .map_err(Self::database_error)?
-            .into_iter()
-            .map(|delivery| {
-                let signal = self.record_to_signal(&delivery.signal)?;
-                let recipient = ActorId::new(delivery.recipient).map_err(|error| {
-                    StackCoordinatorErrorV1::Invalid(format!("decode stack recipient: {error}"))
-                })?;
-                Ok((
-                    StackPendingDeliveryV1 {
-                        recipient,
-                        signal_id: signal.signal_id.clone(),
-                    },
-                    signal,
-                ))
-            })
-            .collect()
-    }
-
-    async fn acknowledge(
-        &self,
-        watermark_id: &StackDeliveryWatermarkId,
-        deliveries: &[StackPendingDeliveryV1],
-    ) -> Result<(), StackCoordinatorErrorV1> {
-        let keys = deliveries
-            .iter()
-            .map(|delivery| GitHubStackDeliveryKeyV1 {
-                signal_id: delivery.signal_id.as_str().to_owned(),
-                recipient: delivery.recipient.as_str().to_owned(),
-            })
-            .collect();
-        self.store
-            .acknowledge(watermark_id, keys)
-            .await
-            .map_err(Self::database_error)
     }
 
     async fn signal(
@@ -463,6 +388,17 @@ impl StackCoordinatorStore for StackRuntimePortsV1 {
             ));
         }
         self.validate_scope(signal)?;
+        let state = self
+            .store
+            .recipient_state(&signal.signal_id, recipient)
+            .await
+            .map_err(Self::database_error)?;
+        if !matches!(
+            state,
+            Some(GitHubStackDeliveryStateV1::Pending | GitHubStackDeliveryStateV1::Deferred)
+        ) {
+            return Ok(());
+        }
         self.store
             .authorization_lost(&signal.signal_id, recipient)
             .await
@@ -541,43 +477,6 @@ impl StackDeliveryAuthorizationPort for StackRuntimePortsV1 {
     }
 }
 
-impl StackDeliveryPort for StackRuntimePortsV1 {
-    #[tracing::instrument(
-        name = "daemon.native_integration.stack_deliver",
-        level = "trace",
-        skip_all
-    )]
-    async fn deliver(&self, batch: &StackDeliveryBatchV1) -> Result<(), StackCoordinatorErrorV1> {
-        if batch.deliveries.is_empty()
-            || batch.deliveries.len() > MAX_GITHUB_STACK_DELIVERY_BATCH_V1
-        {
-            return Err(StackCoordinatorErrorV1::Invalid(
-                "invalid GitHub stack delivery batch".to_owned(),
-            ));
-        }
-        for signal in &batch.signals {
-            self.validate_scope(signal)?;
-            if signal.watermark_id != batch.watermark_id {
-                return Err(StackCoordinatorErrorV1::Invalid(
-                    "delivery batch watermark mismatch".to_owned(),
-                ));
-            }
-        }
-        let keys = batch
-            .deliveries
-            .iter()
-            .map(|delivery| GitHubStackDeliveryKeyV1 {
-                signal_id: delivery.signal_id.as_str().to_owned(),
-                recipient: delivery.recipient.as_str().to_owned(),
-            })
-            .collect();
-        self.store
-            .publish(&batch.watermark_id, keys)
-            .await
-            .map_err(Self::database_error)
-    }
-}
-
 fn map_native_preflight_error(error: NativeIntegrationContractError) -> StackCoordinatorErrorV1 {
     match error {
         NativeIntegrationContractError::Port(NativeIntegrationPortError::Cancelled) => {
@@ -617,39 +516,12 @@ impl OptionalStackPreflightPort for StackRuntimePortsV1 {
     }
 }
 
-/// One project-bound runtime with a bounded drain task, cancelled with its
-/// native-integration owner; no global task or fallback route is created.
+/// One project-bound runtime. It owns no task: every delivery step runs inside
+/// an enqueue or an authenticated host read.
 pub struct DaemonGitHubStackRuntimeV1 {
     scope: ResolvedScope,
     coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
     ports: StackRuntimePortsV1,
-    tick_task: NativeTask<()>,
-}
-
-/// Drains due deliveries every [`STACK_DELIVERY_TICK`] after the previous
-/// drain finishes, so a slow drain never runs back to back. Ends only when
-/// its task is aborted or no native timer starts.
-async fn drain_loop(coordinator: Arc<DaemonGitHubStackCoordinatorV1>, ports: StackRuntimePortsV1) {
-    loop {
-        let drained = match StackRuntimePortsV1::now() {
-            Ok(now) => coordinator.drain_due(&ports, &ports, &ports, now).await,
-            Err(error) => Err(error),
-        };
-        match drained {
-            Ok(_) => {}
-            Err(StackCoordinatorErrorV1::Unavailable) => {
-                tracing::debug!(
-                    "GitHub stack drain deferred because its durable store is unavailable"
-                );
-            }
-            Err(error) => tracing::warn!(?error, "GitHub stack delivery drain failed"),
-        }
-        if let Err(error) = native_runtime::sleep_until(Instant::now() + STACK_DELIVERY_TICK).await
-        {
-            tracing::warn!(%error, "GitHub stack delivery drain stopped without a timer");
-            return;
-        }
-    }
 }
 
 // A `BTreeMap` of these runtimes proves the native service before `Send`
@@ -663,12 +535,10 @@ const _: fn(&DaemonGitHubStackRuntimeV1) = |value| {
         scope,
         coordinator,
         ports,
-        tick_task,
     } = value;
     assert_send_sync(scope);
     assert_send_sync(coordinator);
     assert_send_sync(ports);
-    assert_send_sync(tick_task);
 };
 
 impl DaemonGitHubStackRuntimeV1 {
@@ -712,13 +582,10 @@ impl DaemonGitHubStackRuntimeV1 {
             authorizations: Arc::new(Mutex::new(BTreeMap::new())),
             preflight_outcomes: Arc::new(Mutex::new(BTreeMap::new())),
         };
-        let tick_task = NativeTask::spawn(drain_loop(Arc::clone(&coordinator), ports.clone()))
-            .map_err(|_| StackCoordinatorErrorV1::Unavailable)?;
         Ok(Arc::new(Self {
             scope,
             coordinator,
             ports,
-            tick_task,
         }))
     }
 
@@ -819,10 +686,14 @@ impl DaemonGitHubStackRuntimeV1 {
         }
     }
 
-    pub async fn pending_host_deliveries(
-        &self,
-    ) -> Result<Vec<GitHubStackDeliveryRecordV1>, StackCoordinatorErrorV1> {
-        self.ports.pending_host_for_scope().await
+    /// Whether any recipient has a signal readable now. It changes no state,
+    /// so it can back an opaque availability hint.
+    pub async fn has_due_pending_delivery(&self) -> Result<bool, StackCoordinatorErrorV1> {
+        Ok(!self
+            .ports
+            .due_pending(None, StackRuntimePortsV1::now()?)
+            .await?
+            .is_empty())
     }
 
     async fn expand_request(
@@ -859,13 +730,12 @@ impl DaemonGitHubStackRuntimeV1 {
             Some(signal_id) => signal_id.clone(),
             None => self
                 .ports
-                .store
-                .oldest_pending(&self.scope, request.context().actor())
+                .due_pending(Some(request.context().actor()), now)
                 .await
                 .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?
-                .map(|delivery| StackSignalId::new(delivery.signal.signal_id))
-                .transpose()
-                .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?
+                .into_iter()
+                .next()
+                .map(|signal| signal.signal_id)
                 .ok_or(GitHubStackSignalExpandPortError::Concealed)?,
         };
         let signal = self
@@ -884,6 +754,9 @@ impl DaemonGitHubStackRuntimeV1 {
             .is_some_and(|expected| expected != &signal.watermark_id)
         {
             return Err(GitHubStackSignalExpandPortError::Stale);
+        }
+        if !signal.is_due(now) {
+            return Err(GitHubStackSignalExpandPortError::Unavailable);
         }
         let preview_by_state = self
             .ports
@@ -1030,12 +903,6 @@ impl GitHubStackSignalExpandPort for DaemonGitHubStackRuntimeV1 {
     }
 }
 
-impl Drop for DaemonGitHubStackRuntimeV1 {
-    fn drop(&mut self) {
-        self.tick_task.abort();
-    }
-}
-
 fn map_expand_error(error: StackCoordinatorErrorV1) -> GitHubStackSignalExpandPortError {
     match error {
         StackCoordinatorErrorV1::Denied => GitHubStackSignalExpandPortError::Concealed,
@@ -1050,7 +917,7 @@ fn map_expand_error(error: StackCoordinatorErrorV1) -> GitHubStackSignalExpandPo
 #[cfg(test)]
 mod tests {
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
-    use tracedecay_runtime_core::native_runtime::NativeTaskOutcome;
+    use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
     use super::*;
 
@@ -1083,16 +950,17 @@ mod tests {
                     vec!["actor.stack-native-worker".to_owned()],
                 )
                 .await?;
-            store.pending().await
+            store
+                .signal(&StackSignalId::new("signal.stack-native-worker").expect("signal id"))
+                .await
         })
         .expect("native task admitted");
 
-        let NativeTaskOutcome::Completed(pending) = task.wait().await else {
+        let NativeTaskOutcome::Completed(stored) = task.wait().await else {
             panic!("store task did not complete");
         };
-        let pending = pending.expect("store calls settle on a native worker");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].recipient, "actor.stack-native-worker");
+        let stored = stored.expect("store calls settle on a native worker");
+        assert!(stored.is_some());
         assert_eq!(
             native_runtime::native_thread_writer_waits(),
             writer_waits,

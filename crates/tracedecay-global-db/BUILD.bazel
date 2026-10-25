@@ -152,27 +152,10 @@ rust_test(
     data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
-rust_test(
-    name = "stack_delivery_batch",
-    tags = ["manual"],
-    use_libtest_harness = False,
-    srcs = glob(["benches/**/*.rs"]),
-    crate_root = "benches/stack_delivery_batch.rs",
-    edition = crate_edition(),
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+eval-helpers_+test-helpers__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__dev", "//crates/tracedecay-privacy:tracedecay-privacy__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-runtime_+test-transport__dev", "//crates/tracedecay-session-temporal-store:tracedecay-session-temporal-store__+test-helpers_+test-transport__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
-    aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = perf_rustc_flags(1),
-    crate_features = ["test-helpers"],
-    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
-    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
-)
-
 filegroup(
     name = "benchmark_binaries",
     testonly = True,
-    srcs = [":lcm_expansion__binary", ":session_activity_reads__binary", ":stack_delivery_batch__binary"],
+    srcs = [":lcm_expansion__binary", ":session_activity_reads__binary"],
 )
 
 rust_test(
