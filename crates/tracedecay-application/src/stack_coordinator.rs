@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,13 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::native_runtime;
 
 mod transition;
-pub use transition::*;
+pub use transition::{
+    DEDUPE_TTL_MICROS, MAX_DAEMON_PREFLIGHTS, MAX_REPOSITORY_PREFLIGHTS, OptionalPreflightV1,
+    OptionalStackPreflightPort, StackCircuitPolicyV1, StackCoordinatorStore,
+    StackDeliveryAuthorizationPort, StackDeliveryAuthorizationV1, StackSignalDraftV1,
+    StackSignalV1,
+};
+use transition::{DriftInterval, stack_drift};
 
 pub const MAX_GITHUB_STACK_LAYERS_V1: usize = 100;
 const PREFLIGHT_JOIN_WAIT_SLICE: Duration = Duration::from_millis(25);
@@ -54,7 +60,7 @@ struct PreflightKey {
 }
 
 struct InFlight {
-    result: Mutex<Option<Result<OptionalPreflightDispositionV1, StackCoordinatorErrorV1>>>,
+    result: Mutex<Option<Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>>>,
     complete: Notify,
 }
 
@@ -398,95 +404,6 @@ impl DaemonGitHubStackCoordinatorV1 {
         Ok(())
     }
 
-    #[tracing::instrument(name = "usecases.stack.drain", level = "trace", skip_all)]
-    pub async fn drain_due<
-        S: StackCoordinatorStore,
-        A: StackDeliveryAuthorizationPort,
-        D: StackDeliveryPort,
-    >(
-        &self,
-        store: &S,
-        authorization: &A,
-        delivery: &D,
-        now: UtcMicros,
-    ) -> Result<usize, StackCoordinatorErrorV1> {
-        let mut pending = store.pending_deliveries().await?;
-        pending.retain(|(_, signal)| {
-            signal.kind.is_material()
-                || signal
-                    .observed_at
-                    .0
-                    .saturating_add(signal.kind.debounce_micros())
-                    <= now.0
-        });
-        pending.sort_by(|(ld, ls), (rd, rs)| {
-            (ls.observed_at, &ls.signal_id, &ld.recipient).cmp(&(
-                rs.observed_at,
-                &rs.signal_id,
-                &rd.recipient,
-            ))
-        });
-        let mut delivered = 0;
-        while !pending.is_empty() {
-            let watermark = pending[0].1.watermark_id.clone();
-            let mut recipients = BTreeSet::new();
-            let mut signal_ids = BTreeSet::new();
-            let mut deliveries = Vec::new();
-            let mut acknowledged = Vec::new();
-            let mut signals = BTreeMap::new();
-            let mut consumed = 0;
-            for (item, signal) in &pending {
-                if signal.watermark_id != watermark
-                    || (recipients.len() >= MAX_BATCH_RECIPIENTS
-                        && !recipients.contains(&item.recipient))
-                    || (signal_ids.len() >= MAX_BATCH_SIGNALS
-                        && !signal_ids.contains(&item.signal_id))
-                {
-                    break;
-                }
-                consumed += 1;
-                match authorization.authorize(&item.recipient, signal).await {
-                    StackDeliveryAuthorizationV1::Authorized => {
-                        recipients.insert(item.recipient.clone());
-                        signal_ids.insert(item.signal_id.clone());
-                        deliveries.push(item.clone());
-                        acknowledged.push(item.clone());
-                        signals
-                            .entry(signal.signal_id.clone())
-                            .or_insert_with(|| signal.clone());
-                    }
-                    outcome @ (StackDeliveryAuthorizationV1::Denied
-                    | StackDeliveryAuthorizationV1::Stale) => {
-                        store
-                            .record_authorization_loss(signal, &item.recipient, outcome)
-                            .await?;
-                        acknowledged.push(item.clone())
-                    }
-                    StackDeliveryAuthorizationV1::Unavailable => {}
-                }
-            }
-            if consumed == 0 {
-                return Err(StackCoordinatorErrorV1::Invalid(
-                    "fanout batch made no progress".to_owned(),
-                ));
-            }
-            let batch = StackDeliveryBatchV1 {
-                watermark_id: watermark.clone(),
-                recipients: recipients.into_iter().collect(),
-                signals: signals.into_values().collect(),
-                deliveries,
-                partial: consumed < pending.len(),
-            };
-            if !batch.recipients.is_empty() {
-                delivery.deliver(&batch).await?;
-                delivered += batch.deliveries.len();
-            }
-            store.acknowledge(&watermark, &acknowledged).await?;
-            pending.drain(..consumed);
-        }
-        Ok(delivered)
-    }
-
     #[tracing::instrument(name = "usecases.stack.expand", level = "trace", skip_all)]
     pub async fn expand_transition<S: StackCoordinatorStore, A: StackDeliveryAuthorizationPort>(
         &self,
@@ -500,19 +417,31 @@ impl DaemonGitHubStackCoordinatorV1 {
         };
         match authorization.authorize(recipient, &signal).await {
             StackDeliveryAuthorizationV1::Authorized => Ok(Some(signal)),
-            StackDeliveryAuthorizationV1::Denied => Err(StackCoordinatorErrorV1::Denied),
-            StackDeliveryAuthorizationV1::Stale => Err(StackCoordinatorErrorV1::Stale),
+            outcome @ (StackDeliveryAuthorizationV1::Denied
+            | StackDeliveryAuthorizationV1::Stale) => {
+                store
+                    .record_authorization_loss(&signal, recipient, outcome)
+                    .await?;
+                Err(if outcome == StackDeliveryAuthorizationV1::Denied {
+                    StackCoordinatorErrorV1::Denied
+                } else {
+                    StackCoordinatorErrorV1::Stale
+                })
+            }
             StackDeliveryAuthorizationV1::Unavailable => Err(StackCoordinatorErrorV1::Unavailable),
         }
     }
 
+    /// Runs `preflight` through the scope's circuit and bounded admission.
+    /// Identical in-flight requests share one execution: the owner's full
+    /// result, including its preview, reaches every joined waiter.
     pub async fn optional_preflight<P: OptionalStackPreflightPort>(
         &self,
         preflight: &P,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
         now: UtcMicros,
-    ) -> Result<OptionalPreflightDispositionV1, StackCoordinatorErrorV1> {
+    ) -> Result<OptionalPreflightV1, StackCoordinatorErrorV1> {
         let revision_digest = match &request.topology.selection {
             tracedecay_contracts::NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
                 revision_digest,
@@ -520,7 +449,11 @@ impl DaemonGitHubStackCoordinatorV1 {
             } => revision_digest.clone(),
             tracedecay_contracts::NativeIntegrationSelectionBindingV1::IndependentBranch {
                 ..
-            } => return Ok(OptionalPreflightDispositionV1::Denied),
+            } => {
+                return Ok(OptionalPreflightV1::Completed(
+                    NativeIntegrationPreflightOutcomeV1::Denied,
+                ));
+            }
         };
         let key = PreflightKey {
             repository_id: request.topology.destination.repository_id.clone(),
@@ -540,7 +473,7 @@ impl DaemonGitHubStackCoordinatorV1 {
             .cloned()
             .ok_or(StackCoordinatorErrorV1::Unavailable)?;
         if !self.admit_circuit(&circuit_key, now)? {
-            return Ok(OptionalPreflightDispositionV1::SuppressedOpenCircuit);
+            return Ok(OptionalPreflightV1::SuppressedOpenCircuit);
         }
         let (flight, owner) = {
             let mut state = self.preflights.lock().map_err(lock_error)?;
@@ -557,7 +490,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                 {
                     drop(state);
                     self.fail_circuit(&circuit_key, &policy, now)?;
-                    return Ok(OptionalPreflightDispositionV1::Saturated);
+                    return Ok(OptionalPreflightV1::Saturated);
                 }
                 state.daemon_active += 1;
                 *state
@@ -579,7 +512,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                 // between the read and the wait still wakes this joiner.
                 let completed = flight.complete.notified();
                 if let Some(result) = flight.result.lock().map_err(lock_error)?.clone() {
-                    return result;
+                    return result.map(OptionalPreflightV1::Completed);
                 }
                 if cancellation.is_cancelled() {
                     return Err(StackCoordinatorErrorV1::Cancelled);
@@ -596,47 +529,17 @@ impl DaemonGitHubStackCoordinatorV1 {
                 .await;
             }
         }
-        let result = preflight
-            .preflight(request, cancellation)
-            .await
-            .map(classify_preflight);
-        *flight.result.lock().map_err(lock_error)? = Some(result.clone());
-        flight.complete.notify_waiters();
-        let mut state = self.preflights.lock().map_err(lock_error)?;
-        state.in_flight.remove(&key);
-        state.daemon_active = state.daemon_active.saturating_sub(1);
-        if let Some(active) = state.repository_active.get_mut(&key.repository_id) {
-            *active = active.saturating_sub(1);
-            if *active == 0 {
-                state.repository_active.remove(&key.repository_id);
-            }
-        }
-        drop(state);
-        match &result {
-            Ok(OptionalPreflightDispositionV1::Complete) => {
-                self.circuits
-                    .lock()
-                    .map_err(lock_error)?
-                    .remove(&circuit_key);
-            }
-            Ok(
-                OptionalPreflightDispositionV1::Partial
-                | OptionalPreflightDispositionV1::Cancelled
-                | OptionalPreflightDispositionV1::Unavailable,
-            )
-            | Err(
-                StackCoordinatorErrorV1::Cancelled
-                | StackCoordinatorErrorV1::Unavailable
-                | StackCoordinatorErrorV1::Saturated,
-            ) => self.fail_circuit(&circuit_key, &policy, now)?,
-            Ok(_)
-            | Err(
-                StackCoordinatorErrorV1::Denied
-                | StackCoordinatorErrorV1::Stale
-                | StackCoordinatorErrorV1::Invalid(_),
-            ) => self.reopen_half_open(&circuit_key, &policy, now)?,
-        }
-        result
+        let owned = OwnedFlight {
+            coordinator: self,
+            key,
+            flight,
+            circuit_key,
+            policy,
+            now,
+            finished: false,
+        };
+        let result = preflight.preflight(request, cancellation).await;
+        owned.finish(result).map(OptionalPreflightV1::Completed)
     }
 
     fn admit_circuit(
@@ -818,6 +721,121 @@ impl DaemonGitHubStackCoordinatorV1 {
     }
 }
 
+/// An abandoned owner must release admission and wake its joined waiters.
+struct OwnedFlight<'a> {
+    coordinator: &'a DaemonGitHubStackCoordinatorV1,
+    key: PreflightKey,
+    flight: Arc<InFlight>,
+    circuit_key: CircuitKey,
+    policy: StackCircuitPolicyV1,
+    now: UtcMicros,
+    finished: bool,
+}
+
+impl OwnedFlight<'_> {
+    fn finish(
+        mut self,
+        result: Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
+    ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
+        self.release(result)
+    }
+
+    fn release(
+        &mut self,
+        result: Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
+    ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
+        self.finished = true;
+        let effect = circuit_effect(&result);
+        let settled = (|| {
+            let mut state = self.coordinator.preflights.lock().map_err(lock_error)?;
+            state.in_flight.remove(&self.key);
+            state.daemon_active = state.daemon_active.saturating_sub(1);
+            if let Some(active) = state.repository_active.get_mut(&self.key.repository_id) {
+                *active = active.saturating_sub(1);
+                if *active == 0 {
+                    state.repository_active.remove(&self.key.repository_id);
+                }
+            }
+            // Settle before a successor can acquire the freed admission slot.
+            match effect {
+                CircuitEffect::Close => self
+                    .coordinator
+                    .circuits
+                    .lock()
+                    .map(|mut circuits| {
+                        circuits.remove(&self.circuit_key);
+                    })
+                    .map_err(lock_error),
+                CircuitEffect::Fail => {
+                    self.coordinator
+                        .fail_circuit(&self.circuit_key, &self.policy, self.now)
+                }
+                CircuitEffect::ReopenHalfOpen => {
+                    self.coordinator
+                        .reopen_half_open(&self.circuit_key, &self.policy, self.now)
+                }
+            }
+        })();
+        let mut result = settled.and(result);
+        let mut published = match self.flight.result.lock() {
+            Ok(published) => published,
+            Err(error) => {
+                result = Err(invalid(&error));
+                error.into_inner()
+            }
+        };
+        *published = Some(result.clone());
+        drop(published);
+        self.flight.complete.notify_waiters();
+        result
+    }
+}
+
+impl Drop for OwnedFlight<'_> {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Err(error) = self.release(Err(StackCoordinatorErrorV1::Unavailable))
+        {
+            tracing::debug!(?error, "GitHub stack preflight owner was abandoned");
+        }
+    }
+}
+
+enum CircuitEffect {
+    Close,
+    Fail,
+    ReopenHalfOpen,
+}
+
+fn circuit_effect(
+    result: &Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
+) -> CircuitEffect {
+    match result {
+        Ok(NativeIntegrationPreflightOutcomeV1::Preview(_)) => CircuitEffect::Close,
+        Ok(
+            NativeIntegrationPreflightOutcomeV1::Partial
+            | NativeIntegrationPreflightOutcomeV1::DurabilityUncertain
+            | NativeIntegrationPreflightOutcomeV1::ResetRequired
+            | NativeIntegrationPreflightOutcomeV1::Cancelled
+            | NativeIntegrationPreflightOutcomeV1::Unavailable,
+        )
+        | Err(
+            StackCoordinatorErrorV1::Cancelled
+            | StackCoordinatorErrorV1::Unavailable
+            | StackCoordinatorErrorV1::Saturated,
+        ) => CircuitEffect::Fail,
+        Ok(
+            NativeIntegrationPreflightOutcomeV1::Stale
+            | NativeIntegrationPreflightOutcomeV1::Denied,
+        )
+        | Err(
+            StackCoordinatorErrorV1::Denied
+            | StackCoordinatorErrorV1::Stale
+            | StackCoordinatorErrorV1::Invalid(_),
+        ) => CircuitEffect::ReopenHalfOpen,
+    }
+}
+
 fn build_snapshot(
     scope: &ResolvedScope,
     provider: &ProviderId,
@@ -875,25 +893,6 @@ fn generation_id(
         digest.as_str().replace(':', ".")
     ))
     .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)
-}
-
-fn classify_preflight(
-    outcome: NativeIntegrationPreflightOutcomeV1,
-) -> OptionalPreflightDispositionV1 {
-    match outcome {
-        NativeIntegrationPreflightOutcomeV1::Preview(_) => OptionalPreflightDispositionV1::Complete,
-        NativeIntegrationPreflightOutcomeV1::Partial
-        | NativeIntegrationPreflightOutcomeV1::DurabilityUncertain
-        | NativeIntegrationPreflightOutcomeV1::ResetRequired => {
-            OptionalPreflightDispositionV1::Partial
-        }
-        NativeIntegrationPreflightOutcomeV1::Stale => OptionalPreflightDispositionV1::Stale,
-        NativeIntegrationPreflightOutcomeV1::Denied => OptionalPreflightDispositionV1::Denied,
-        NativeIntegrationPreflightOutcomeV1::Unavailable => {
-            OptionalPreflightDispositionV1::Unavailable
-        }
-        NativeIntegrationPreflightOutcomeV1::Cancelled => OptionalPreflightDispositionV1::Cancelled,
-    }
 }
 
 fn invalid(error: impl std::fmt::Display) -> StackCoordinatorErrorV1 {

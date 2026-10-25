@@ -175,13 +175,29 @@ impl OptionalStackPreflightPort for PreflightOutcomes {
     }
 }
 
-#[derive(Default)]
 struct BlockingPreflight {
     state: Mutex<(usize, bool)>,
     changed: Condvar,
+    outcome: Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
+}
+
+impl Default for BlockingPreflight {
+    fn default() -> Self {
+        Self::returning(Ok(NativeIntegrationPreflightOutcomeV1::Unavailable))
+    }
 }
 
 impl BlockingPreflight {
+    fn returning(
+        outcome: Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
+    ) -> Self {
+        Self {
+            state: Mutex::new((0, false)),
+            changed: Condvar::new(),
+            outcome,
+        }
+    }
+
     fn wait_for_active(&self, expected: usize) {
         let mut state = self.state.lock().unwrap();
         while state.0 < expected {
@@ -207,7 +223,37 @@ impl OptionalStackPreflightPort for BlockingPreflight {
         while !state.1 {
             state = self.changed.wait(state).unwrap();
         }
-        Ok(NativeIntegrationPreflightOutcomeV1::Unavailable)
+        self.outcome.clone()
+    }
+}
+
+struct NeverFinishes;
+
+impl OptionalStackPreflightPort for NeverFinishes {
+    async fn preflight(
+        &self,
+        _request: &NativeIntegrationPreflightRequestV1,
+        _cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
+        std::future::pending().await
+    }
+}
+
+struct EventPreflight<'a> {
+    release: &'a tokio::sync::Notify,
+    calls: Mutex<usize>,
+    outcome: Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>,
+}
+
+impl OptionalStackPreflightPort for EventPreflight<'_> {
+    async fn preflight(
+        &self,
+        _request: &NativeIntegrationPreflightRequestV1,
+        _cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
+        *self.calls.lock().unwrap() += 1;
+        self.release.notified().await;
+        self.outcome.clone()
     }
 }
 
@@ -364,56 +410,58 @@ async fn half_open_circuit_rejects_stale_and_denied_but_success_closes() {
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(10))
             .await
             .unwrap(),
-        OptionalPreflightDispositionV1::Unavailable
+        OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Unavailable)
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(11))
             .await
             .unwrap(),
-        OptionalPreflightDispositionV1::SuppressedOpenCircuit
+        OptionalPreflightV1::SuppressedOpenCircuit
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(110))
             .await
             .unwrap(),
-        OptionalPreflightDispositionV1::Stale
+        OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Stale)
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(111))
             .await
             .unwrap(),
-        OptionalPreflightDispositionV1::SuppressedOpenCircuit
+        OptionalPreflightV1::SuppressedOpenCircuit
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(210))
             .await
             .unwrap(),
-        OptionalPreflightDispositionV1::Denied
+        OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Denied)
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(211))
             .await
             .unwrap(),
-        OptionalPreflightDispositionV1::SuppressedOpenCircuit
+        OptionalPreflightV1::SuppressedOpenCircuit
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(310))
             .await
             .unwrap(),
-        OptionalPreflightDispositionV1::Complete
+        OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Preview(Box::new(
+            complete_preview()
+        )))
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(311))
             .await
             .unwrap(),
-        OptionalPreflightDispositionV1::Unavailable
+        OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Unavailable)
     );
     assert_eq!(*preflight.calls.lock().unwrap(), 5);
 }
@@ -470,13 +518,13 @@ fn preflight_admission_enforces_repository_and_daemon_bounds() {
             UtcMicros(10),
         ))
         .unwrap(),
-        OptionalPreflightDispositionV1::Saturated
+        OptionalPreflightV1::Saturated
     );
     preflight.release();
     for handle in handles {
         assert_eq!(
             handle.join().unwrap().unwrap(),
-            OptionalPreflightDispositionV1::Unavailable
+            OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Unavailable)
         );
     }
 
@@ -508,13 +556,13 @@ fn preflight_admission_enforces_repository_and_daemon_bounds() {
             UtcMicros(20),
         ))
         .unwrap(),
-        OptionalPreflightDispositionV1::Saturated
+        OptionalPreflightV1::Saturated
     );
     preflight.release();
     for handle in handles {
         assert_eq!(
             handle.join().unwrap().unwrap(),
-            OptionalPreflightDispositionV1::Unavailable
+            OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Unavailable)
         );
     }
 }
@@ -551,48 +599,275 @@ fn joined_preflight_observes_cancellation_without_waiting_for_owner() {
     preflight.release();
     assert_eq!(
         owner.join().unwrap().unwrap(),
-        OptionalPreflightDispositionV1::Unavailable
+        OptionalPreflightV1::Completed(NativeIntegrationPreflightOutcomeV1::Unavailable)
     );
 }
 
 #[test]
-fn joined_preflight_returns_the_single_owner_result() {
+fn joined_preflights_share_the_full_result_in_either_consumption_order() {
+    let cases = [
+        Ok(NativeIntegrationPreflightOutcomeV1::Preview(Box::new(
+            complete_preview(),
+        ))),
+        Ok(NativeIntegrationPreflightOutcomeV1::Partial),
+        Ok(NativeIntegrationPreflightOutcomeV1::DurabilityUncertain),
+        Ok(NativeIntegrationPreflightOutcomeV1::ResetRequired),
+        Ok(NativeIntegrationPreflightOutcomeV1::Stale),
+        Ok(NativeIntegrationPreflightOutcomeV1::Denied),
+        Ok(NativeIntegrationPreflightOutcomeV1::Cancelled),
+        Err(StackCoordinatorErrorV1::Unavailable),
+    ];
+    for (case, expected) in cases.into_iter().enumerate() {
+        for joiner_first in [false, true] {
+            let coordinator = DaemonGitHubStackCoordinatorV1::default();
+            let release = tokio::sync::Notify::new();
+            let preflight = EventPreflight {
+                release: &release,
+                calls: Mutex::new(0),
+                outcome: expected.clone(),
+            };
+            let request = preflight_request(500 + case);
+            register_policy(&coordinator, &request);
+            let cancellation = CancellationSignal::active("cancel.stack.shared").unwrap();
+            run(async {
+                let mut owner = Box::pin(coordinator.optional_preflight(
+                    &preflight,
+                    &request,
+                    &cancellation,
+                    UtcMicros(50),
+                ));
+                let mut joiner = Box::pin(coordinator.optional_preflight(
+                    &preflight,
+                    &request,
+                    &cancellation,
+                    UtcMicros(50),
+                ));
+                std::future::poll_fn(|cx| {
+                    assert!(owner.as_mut().poll(cx).is_pending());
+                    assert!(joiner.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                release.notify_one();
+                let published = std::future::poll_fn(|cx| match owner.as_mut().poll(cx) {
+                    std::task::Poll::Ready(result) => std::task::Poll::Ready(result),
+                    std::task::Poll::Pending => panic!("released owner must finish"),
+                })
+                .await;
+                let expected = expected.clone().map(OptionalPreflightV1::Completed);
+                if joiner_first {
+                    assert_eq!(joiner.await, expected, "case {case} joiner");
+                    assert_eq!(published, expected, "case {case} owner");
+                } else {
+                    assert_eq!(published, expected, "case {case} owner");
+                    assert_eq!(joiner.await, expected, "case {case} joiner");
+                }
+                assert_eq!(*preflight.calls.lock().unwrap(), 1, "case {case} ran once");
+            });
+        }
+    }
+}
+
+#[test]
+fn different_request_identities_do_not_share_a_flight() {
     let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
     let preflight = Arc::new(BlockingPreflight::default());
-    let request = preflight_request(300);
-    register_policy(&coordinator, &request);
-    let spawn = |suffix: &'static str| {
+    let first = preflight_request(600);
+    let mut second = first.clone();
+    second.preview_id = NativeIntegrationPreviewId::new("preview.stack.other-identity").unwrap();
+    let mut other_revision = first.clone();
+    let NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
+        declared_revision,
+        revision_id,
+        revision_digest,
+        ..
+    } = &mut other_revision.topology.selection
+    else {
+        panic!("declared request");
+    };
+    **declared_revision = BranchStackRevisionV1::new(
+        declared_revision.stack_id.clone(),
+        BranchStackRevisionId::new("revision.stack.other").unwrap(),
+        declared_revision.inventory_snapshot_id.clone(),
+        declared_revision.inventory_epoch,
+        declared_revision.source,
+        declared_revision.nodes.clone(),
+        declared_revision.edges.clone(),
+    )
+    .unwrap();
+    *revision_id = declared_revision.revision_id.clone();
+    *revision_digest = declared_revision.digest.clone();
+    let mut other_scope = first.clone();
+    other_scope.topology.destination = ResolvedScope::new(
+        first.topology.destination.project_id.clone(),
+        first.topology.destination.repository_id.clone(),
+        WorktreeId::new("worktree.stack.other").unwrap(),
+        first.topology.destination.reference.clone(),
+    )
+    .unwrap();
+    register_policy(&coordinator, &first);
+    register_policy(&coordinator, &other_scope);
+    let spawn = |request: NativeIntegrationPreflightRequestV1, suffix: &'static str| {
         let coordinator = Arc::clone(&coordinator);
         let preflight = Arc::clone(&preflight);
-        let request = request.clone();
         std::thread::spawn(move || {
             run(coordinator.optional_preflight(
                 preflight.as_ref(),
                 &request,
-                &CancellationSignal::active(format!("cancel.stack.single-flight.{suffix}"))
-                    .unwrap(),
-                UtcMicros(40),
+                &CancellationSignal::active(format!("cancel.stack.identity.{suffix}")).unwrap(),
+                UtcMicros(60),
             ))
         })
     };
-    let owner = spawn("owner");
-    preflight.wait_for_active(1);
-    let joiner = spawn("joiner");
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    let handles = [
+        spawn(first, "first"),
+        spawn(second, "second"),
+        spawn(other_revision, "revision"),
+        spawn(other_scope, "scope"),
+    ];
+    preflight.wait_for_active(4);
     preflight.release();
+    for handle in handles {
+        assert_eq!(
+            handle.join().unwrap(),
+            Ok(OptionalPreflightV1::Completed(
+                NativeIntegrationPreflightOutcomeV1::Unavailable
+            ))
+        );
+    }
+}
 
-    assert_eq!(
-        owner.join().unwrap(),
-        Ok(OptionalPreflightDispositionV1::Unavailable)
-    );
-    assert_eq!(
-        joiner.join().unwrap(),
-        Ok(OptionalPreflightDispositionV1::Unavailable),
-        "a joiner returns the owner's published result"
-    );
-    assert_eq!(
-        preflight.state.lock().unwrap().0,
-        1,
-        "the joined request runs native preflight once"
-    );
+#[test]
+fn joined_timeout_leaves_the_owner_running_and_preserves_its_result() {
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let request = preflight_request(650);
+    register_policy(&coordinator, &request);
+    let cancellation = CancellationSignal::active("cancel.stack.timeout").unwrap();
+    let release = tokio::sync::Notify::new();
+    let preflight = EventPreflight {
+        release: &release,
+        calls: Mutex::new(0),
+        outcome: Ok(NativeIntegrationPreflightOutcomeV1::Partial),
+    };
+    run(async {
+        let mut owner = Box::pin(coordinator.optional_preflight(
+            &preflight,
+            &request,
+            &cancellation,
+            UtcMicros(65),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(owner.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            coordinator
+                .optional_preflight(&preflight, &request, &cancellation, UtcMicros(65))
+                .await,
+            Err(StackCoordinatorErrorV1::Unavailable)
+        );
+        release.notify_one();
+        assert_eq!(
+            owner.await,
+            Ok(OptionalPreflightV1::Completed(
+                NativeIntegrationPreflightOutcomeV1::Partial
+            ))
+        );
+        assert_eq!(*preflight.calls.lock().unwrap(), 1);
+        release.notify_one();
+        assert_eq!(
+            coordinator
+                .optional_preflight(&preflight, &request, &cancellation, UtcMicros(66))
+                .await,
+            Ok(OptionalPreflightV1::Completed(
+                NativeIntegrationPreflightOutcomeV1::Partial
+            ))
+        );
+        assert_eq!(*preflight.calls.lock().unwrap(), 2);
+    });
+}
+
+#[test]
+fn abandoned_owner_wakes_its_waiter_and_frees_admission() {
+    let coordinator = DaemonGitHubStackCoordinatorV1::default();
+    let request = preflight_request(700);
+    register_policy(&coordinator, &request);
+    let cancellation = CancellationSignal::active("cancel.stack.abandoned").unwrap();
+    run(async {
+        let mut owner = Box::pin(coordinator.optional_preflight(
+            &NeverFinishes,
+            &request,
+            &cancellation,
+            UtcMicros(70),
+        ));
+        let mut joiner = Box::pin(coordinator.optional_preflight(
+            &NeverFinishes,
+            &request,
+            &cancellation,
+            UtcMicros(70),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(owner.as_mut().poll(cx).is_pending());
+            assert!(joiner.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        drop(owner);
+
+        assert_eq!(
+            joiner.await,
+            Err(StackCoordinatorErrorV1::Unavailable),
+            "the joined waiter is released instead of timing out"
+        );
+        let requests: Vec<_> = (0..MAX_REPOSITORY_PREFLIGHTS)
+            .map(|index| {
+                let mut admitted = request.clone();
+                admitted.preview_id =
+                    NativeIntegrationPreviewId::new(format!("preview.stack.abandoned.{index}"))
+                        .unwrap();
+                admitted
+            })
+            .collect();
+        let mut held = Vec::new();
+        for admitted in &requests {
+            let mut abandoned = Box::pin(coordinator.optional_preflight(
+                &NeverFinishes,
+                admitted,
+                &cancellation,
+                UtcMicros(71),
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(abandoned.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            held.push(abandoned);
+        }
+        let mut saturated = request.clone();
+        saturated.preview_id = NativeIntegrationPreviewId::new("preview.stack.saturated").unwrap();
+        assert_eq!(
+            coordinator
+                .optional_preflight(&NeverFinishes, &saturated, &cancellation, UtcMicros(71))
+                .await,
+            Ok(OptionalPreflightV1::Saturated)
+        );
+        drop(held);
+        let preflight = PreflightOutcomes {
+            outcomes: Mutex::new(VecDeque::from([Ok(
+                NativeIntegrationPreflightOutcomeV1::Partial,
+            )])),
+            calls: Mutex::new(0),
+        };
+        assert_eq!(
+            coordinator
+                .optional_preflight(&preflight, &request, &cancellation, UtcMicros(72))
+                .await,
+            Ok(OptionalPreflightV1::Completed(
+                NativeIntegrationPreflightOutcomeV1::Partial
+            )),
+            "abandoned flights left no slot or registry entry behind"
+        );
+    });
 }

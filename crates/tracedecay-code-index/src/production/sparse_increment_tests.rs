@@ -275,6 +275,103 @@ fn a_comment_on_a_called_module_reseals_over_the_parent() {
     );
 }
 
+/// Symbols are kept in occurrence order, and a comment re-keys every
+/// occurrence of its file, so the edit reorders same-named symbols without
+/// changing any of them. Files that only spell those names, and whose calls
+/// bind elsewhere, keep their decisions without being decoded.
+#[test]
+fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
+    let util = (0..8)
+        .map(|n| {
+            format!("pub struct Kind{n};\nimpl Kind{n} {{ pub fn new() -> Self {{ Kind{n} }} }}\n")
+        })
+        .collect::<String>()
+        + UTIL;
+    let edited = format!("{util}// probe line\n");
+    let other = "pub struct Other;\nimpl Other { pub fn new() -> Self { Other } }\n";
+    let callers = (0..4)
+        .map(|n| {
+            (
+                format!("src/caller{n}.rs"),
+                format!("pub fn caller{n}() {{ let _ = crate::other::Other::new(); }}\n"),
+            )
+        })
+        .collect::<Vec<_>>();
+    fn caller_tree<'a>(
+        util: &'a str,
+        other: &'a str,
+        callers: &'a [(String, String)],
+    ) -> Vec<(&'a str, &'a str, &'a str)> {
+        let mut tree = rust_tree(util, MAIN);
+        tree.push(("src/other.rs", RUST, other));
+        tree.extend(
+            callers
+                .iter()
+                .map(|(path, source)| (path.as_str(), RUST, source.as_str())),
+        );
+        tree
+    }
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    let parent = publish(
+        &mut incremental,
+        &caller_tree(&util, other, &callers),
+        1_100_000,
+    );
+    let manifest = store
+        .manifest_bytes(&parent.manifest().generation_id)
+        .expect("parent manifest");
+    let manifest =
+        super::partitioned_codec::parse_partitioned_manifest(&manifest).expect("manifest parses");
+    let snapshot = request(&caller_tree(&util, other, &callers), 0)
+        .snapshot
+        .files;
+    let segment_of = |path: &str| {
+        let key = snapshot
+            .iter()
+            .position(|file| file.logical_path == path)
+            .expect("parent file");
+        manifest
+            .file_segments
+            .iter()
+            .find(|segment| segment.file_key as usize == key)
+            .map(|segment| segment.segment_digest.clone())
+            .expect("parent file segment")
+    };
+    let untouched = callers
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .chain(["src/other.rs"])
+        .map(|path| (path, segment_of(path)))
+        .collect::<Vec<_>>();
+    let reads_before = untouched
+        .iter()
+        .map(|(_, digest)| store.segment_reads(digest))
+        .collect::<Vec<_>>();
+
+    let sparse = publish(
+        &mut incremental,
+        &caller_tree(&edited, other, &callers),
+        1_200_000,
+    );
+    assert_eq!(
+        sparse.cold_reason(),
+        None,
+        "a comment seals over its parent"
+    );
+    for ((path, digest), before) in untouched.iter().zip(reads_before) {
+        assert_eq!(
+            store.segment_reads(digest),
+            before,
+            "{path} names `new` but binds nowhere in the edited file, so its segment stays sealed"
+        );
+    }
+    assert_sparse_matches_cold(
+        &caller_tree(&util, other, &callers),
+        &caller_tree(&edited, other, &callers),
+    );
+}
+
 #[test]
 fn a_new_cross_file_call_binds_in_the_successor() {
     let main = "pub fn run() -> u32 { crate::util::helper() + crate::util::other() + crate::sibling::sibling() }\n";
