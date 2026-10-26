@@ -1,14 +1,17 @@
 diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
 --- a/rust/private/rustc.bzl
 +++ b/rust/private/rustc.bzl
-@@ -1108,7 +1108,8 @@
+@@ -1108,10 +1108,11 @@
      for build_env_file in build_env_files:
          process_wrapper_flags.add("--env-file", build_env_file)
- 
+
 -    process_wrapper_flags.add_all(build_flags_files, before_each = "--arg-file")
 +    if toolchain.exec_triple.system != "windows":
 +        process_wrapper_flags.add_all(build_flags_files, before_each = "--arg-file")
- 
+     if bin_link_flags:
+         process_wrapper_flags.add("--bin-arg-file", bin_link_flags)
+         process_wrapper_flags.add("--cargo-bin-name", getattr(attr, "cargo_bin_name", "") or ctx.label.name)
+
      all_allowed_unstable_features = []
      if getattr(ctx.attr, "unstable_rust_features_config", None):
 @@ -1591,6 +1592,15 @@
