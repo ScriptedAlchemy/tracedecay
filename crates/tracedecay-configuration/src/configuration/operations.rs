@@ -617,7 +617,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::config::registry::ConfigurationRegistry;
+    use crate::config::registry::{ConfigurationRegistry, ConfigurationRegistryError};
     use tracedecay_domain::configuration::{
         AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
         ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1, ConfigurationValueV1,
@@ -823,6 +823,121 @@ mod tests {
             },
         );
         assert_eq!(result, Err(ConfigurationError::PolicyWideningForbidden));
+    }
+
+    #[test]
+    fn direct_mutation_rejects_retired_sync_settings() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let layer = ConfigurationLayerIdV1::Project {
+            project_id: id::<ProjectId>("project.configuration.sync"),
+        };
+        let retained = DirectConfigurationMutation::Set {
+            layer: layer.clone(),
+            key: SettingKey::new("sync.watch_max_projects.v1").unwrap(),
+            value: Box::new(ConfigurationValueV1::Unsigned(7)),
+        };
+        assert_eq!(validate_direct_mutation(&registry, &retained), Ok(()));
+
+        for raw_key in [
+            "sync.full_sync_escalation_files.v1",
+            "sync.max_concurrent_syncs.v1",
+        ] {
+            let key = SettingKey::new(raw_key).unwrap();
+            let expected = ConfigurationError::validation(
+                ConfigurationRegistryError::UnknownSetting(key.clone()),
+            );
+            let set = DirectConfigurationMutation::Set {
+                layer: layer.clone(),
+                key: key.clone(),
+                value: Box::new(ConfigurationValueV1::Unsigned(9)),
+            };
+            for mutation in [
+                set.clone(),
+                DirectConfigurationMutation::Unset {
+                    layer: layer.clone(),
+                    key,
+                },
+                DirectConfigurationMutation::Batch {
+                    mutations: vec![retained.clone(), set],
+                },
+            ] {
+                assert_eq!(
+                    validate_direct_mutation(&registry, &mutation),
+                    Err(expected.clone()),
+                    "retired settings must reject every direct write form: {mutation:?}"
+                );
+            }
+        }
+    }
+
+    #[asupersync::test]
+    async fn retired_sync_settings_are_absent_from_list_and_get() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let store = Store {
+            current: ConfigurationCurrentStateV1 {
+                revision_id: id("configuration.revision.sync"),
+                snapshot: crate::config::resolver::resolve_configuration(&registry, &[])
+                    .unwrap()
+                    .snapshot,
+            },
+            saved: Mutex::new(None),
+            replay: Mutex::new(None),
+        };
+        let authorization = Authorization {
+            current: CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: 1,
+                grant_digest: digest('c'),
+                scope_digest: digest('a'),
+                policy_epoch: 7,
+                policy_digest: policy_digest('b'),
+            },
+        };
+        let scope = Scope {
+            evidence: ScopeRevalidationEvidenceV1 {
+                resolved_scope_digest: digest('a'),
+                membership_digest: None,
+                authorization_policy_digest: policy_digest('b'),
+                policy_epoch: 7,
+            },
+        };
+        let operations = ConfigurationControlPlaneOperations::new(
+            &registry,
+            &store,
+            &scope,
+            &authorization,
+            clock,
+        );
+        let actor = AuthorizedActor {
+            actor_id: id::<ActorId>("actor.configuration.sync"),
+        };
+        let listed = operations.list(actor.clone()).await.unwrap();
+        let retained_key = SettingKey::new("sync.watch_max_projects.v1").unwrap();
+        assert!(listed.iter().any(|setting| setting.key == retained_key));
+        assert_eq!(
+            operations
+                .get(actor.clone(), retained_key)
+                .await
+                .unwrap()
+                .effective_value,
+            ConfigurationValueV1::Unsigned(32)
+        );
+
+        for raw_key in [
+            "sync.full_sync_escalation_files.v1",
+            "sync.max_concurrent_syncs.v1",
+        ] {
+            let key = SettingKey::new(raw_key).unwrap();
+            assert!(
+                !listed.iter().any(|setting| setting.key == key),
+                "{raw_key}"
+            );
+            assert_eq!(
+                operations.get(actor.clone(), key.clone()).await,
+                Err(ConfigurationError::validation(
+                    ConfigurationRegistryError::UnknownSetting(key)
+                ))
+            );
+        }
     }
 
     #[test]

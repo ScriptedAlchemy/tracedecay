@@ -56,10 +56,14 @@ pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executa
 /// project's snapshot through v1.0.0-beta.61 and now live only in the profile
 /// store ([`PROFILE_SETTING_KEYS_V1`]). `diagnostics.prewarm.v1` shipped
 /// through v1.0.0-beta.83 and left with the compile-on-read cargo prewarm.
+/// The full-sync escalation and concurrent-sync settings were retired because
+/// sync execution does not read them.
 pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
     "diagnostics.prewarm.v1",
     "index.git_ignore.v1",
     "semantic.runtime.v1",
+    "sync.full_sync_escalation_files.v1",
+    "sync.max_concurrent_syncs.v1",
     "sync.orphan_db_gc_days.v1",
     "user.upload_enabled.v1",
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
@@ -112,8 +116,6 @@ pub const SYNC_SESSION_START_SYNC_SETTING_KEY: &str = "sync.session_start_sync.v
 pub const SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY: &str =
     "sync.session_start_stale_threshold_secs.v1";
 pub const SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY: &str = "sync.backstop_interval_mins.v1";
-pub const SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY: &str = "sync.full_sync_escalation_files.v1";
-pub const SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY: &str = "sync.max_concurrent_syncs.v1";
 pub const SYNC_BRANCH_GC_DAYS_SETTING_KEY: &str = "sync.branch_gc_days.v1";
 pub const SYNC_AUTO_INIT_SETTING_KEY: &str = "sync.auto_init.v1";
 pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_branches.v1";
@@ -154,8 +156,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
     SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
