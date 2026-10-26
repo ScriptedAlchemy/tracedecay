@@ -66,6 +66,8 @@ static PI_DISCOVERY_FAILURE_GATE: StateChangeLogGate<
     String,
     (PiDiscoveryFailureKind, io::ErrorKind),
 > = StateChangeLogGate::new();
+static PI_DISCOVERY_SUMMARY_GATE: StateChangeLogGate<PathBuf, (u64, usize)> =
+    StateChangeLogGate::new();
 
 /// The agent directory Pi loads for `home`. `PI_CODING_AGENT_DIR` relocates
 /// it only to an absolute directory inside `home`: a sandbox or tempdir home
@@ -560,7 +562,7 @@ pub(crate) async fn capture_pi_sweep(
             )
             .await
             .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
-            warn_discovery_failures(&discovery);
+            warn_discovery_failures(&source.sessions_root(), &discovery);
             let discovery_truncated = discovery.files.is_truncated();
             let discovery_skipped = discovery.files.skipped_oversized_entries;
             let last_discovered_entry = if cancellation.is_cancelled() {
@@ -915,7 +917,7 @@ async fn persist_coverage(
     .await
 }
 
-fn warn_discovery_failures(discovery: &PiDiscoveryReport) {
+fn warn_discovery_failures(sessions_root: &Path, discovery: &PiDiscoveryReport) {
     for failure in &discovery.failures {
         if !PI_DISCOVERY_FAILURE_GATE.admit(
             failure.source_digest.clone(),
@@ -931,7 +933,18 @@ fn warn_discovery_failures(discovery: &PiDiscoveryReport) {
             "Pi session discovery is incomplete"
         );
     }
-    if discovery.failure_count > discovery.failures.len() as u64 {
+    let summary_key = sessions_root.to_path_buf();
+    let fully_reported = discovery.failure_count <= discovery.failures.len() as u64;
+    if fully_reported {
+        // An interrupted empty sweep has not established recovery; keep the
+        // last admitted summary so the next complete pass does not re-log it.
+        if discovery.scan_complete || discovery.failure_count > 0 {
+            PI_DISCOVERY_SUMMARY_GATE.clear(&summary_key);
+        }
+    } else if PI_DISCOVERY_SUMMARY_GATE.admit(
+        summary_key,
+        (discovery.failure_count, discovery.failures.len()),
+    ) {
         tracing::warn!(
             provider = PROVIDER,
             failure_count = discovery.failure_count,
