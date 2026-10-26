@@ -95,6 +95,16 @@ compiler outputs: a separate temporary mount can make Rust's artifact renames
 fail with `EXDEV`. The action root may be separate from the CAS cache, but must
 remain on the intended build volume.
 
+NativeLink's macOS directory cache uses APFS `clonefile` automatically, with a
+hardlink fallback. For many actions sharing a large toolchain, enable
+`directory_cache.experimental_subtree_caching` so unchanged subtrees can be
+prepared once and cloned across different action roots. Size `max_entries` and
+`max_size_bytes` for subtree entries as well as roots; nested entries count their
+logical sizes even when APFS shares their physical blocks. Confirm nonzero
+`clonefile_hits` and `subtree_hits` in the directory-cache summary on a real run.
+When input preparation stalls with little network activity, inspect local disk
+throughput and the external drive's negotiated USB speed before tuning RPC limits.
+
 See [CI fleet configuration](ci-remote-builds.md) for hosted runners, dynamic
 execution, and restricted Tailscale enrollment.
 
