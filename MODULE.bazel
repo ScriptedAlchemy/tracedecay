@@ -50,6 +50,13 @@ rust.toolchain(
         "fastbuild": "1",
         "opt": "3",
     },
+    # fastbuild emits no Rust debug information. Avoid declaring redundant
+    # Windows PDB outputs and caching a second copy for every executable.
+    strip_level = {
+        "dbg": "none",
+        "fastbuild": "debuginfo",
+        "opt": "debuginfo",
+    },
     versions = ["nightly/2026-10-25"],
     rustfmt_version = "nightly/2026-10-25",
     rust_analyzer_version = "nightly/2026-10-25",
