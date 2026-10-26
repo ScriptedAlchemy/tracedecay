@@ -591,7 +591,9 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
-          cache-key: ci-windows-test
+          # The previous PDB-producing cache restored an 11 GiB archive.
+          # Start a new generation for the changed compile/link configuration.
+          cache-key: ci-windows-test-v2
 
       - name: Build and type-check the Windows workspace
         if: ${{ github.event_name != 'workflow_dispatch' }}
