@@ -87,6 +87,13 @@ test:ci --test_summary=terse
 # Suites spawn host tools such as ast-grep, node, and git.
 test:ci --test_env=PATH
 
+# MSVC's fastbuild feature otherwise appends /DEBUG:FASTLINK even when Rust
+# emits no debug information. Avoid those unused databases and their cache
+# copies in the hosted compile/test lane; explicit dbg builds remain available.
+build:ci-windows --config=ci
+build:ci-windows --features=-generate_pdb_file
+build:ci-windows --host_features=-generate_pdb_file
+
 # Platform configs expand here, after generic build defaults, so their
 # workspace-status command and compiler environment take precedence.
 build --enable_platform_specific_config

@@ -51,6 +51,14 @@ rust.toolchain(
         "fastbuild": "0",
         "opt": "3",
     },
+    # fastbuild already emits no Rust debug information. Tell rules_rust not
+    # to declare a Windows PDB for each binary or copy it into the action cache.
+    # Explicit debug builds retain their symbols.
+    strip_level = {
+        "dbg": "none",
+        "fastbuild": "debuginfo",
+        "opt": "debuginfo",
+    },
     versions = [RUST_VERSION],
     rustfmt_version = RUST_VERSION,
     rust_analyzer_version = RUST_VERSION,
