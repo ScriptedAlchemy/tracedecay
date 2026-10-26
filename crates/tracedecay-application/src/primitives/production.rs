@@ -858,6 +858,7 @@ pub struct ProductionPrimitiveCodeAuthoritiesV1 {
     pub convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
 }
 
+#[derive(Clone)]
 pub struct ProductionPrimitiveOpenRequestV1 {
     source_runtime: Arc<SourceReadContext>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
@@ -869,7 +870,6 @@ pub struct ProductionPrimitiveOpenRequestV1 {
     convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
-    compiler_status: TypeScriptProducerStatusHandleV1,
 }
 
 impl ProductionPrimitiveOpenRequestV1 {
@@ -880,7 +880,6 @@ impl ProductionPrimitiveOpenRequestV1 {
         temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
         access: ProjectSourceAccessSnapshot,
         admitted_root_uri: String,
-        compiler_status: TypeScriptProducerStatusHandleV1,
     ) -> Self {
         Self {
             source_runtime,
@@ -893,8 +892,31 @@ impl ProductionPrimitiveOpenRequestV1 {
             convergence_park: code.convergence_park,
             access,
             admitted_root_uri,
-            compiler_status,
         }
+    }
+
+    pub fn validate_registration_root(
+        &self,
+        project_root: &Path,
+    ) -> Result<(), ApplicationContractError> {
+        if self.source_runtime.project_root() != project_root {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "application primitive registration root",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_retained(
+        &self,
+        runtime: &PrimitiveProjectRuntime,
+    ) -> Result<(), ApplicationContractError> {
+        runtime.validate_reopen(
+            self.source_runtime.db(),
+            &self.session_db,
+            &self.access,
+            &self.admitted_root_uri,
+        )
     }
 }
 
@@ -914,7 +936,6 @@ pub async fn open_production_primitive_runtime(
         convergence_park,
         access,
         admitted_root_uri,
-        compiler_status,
     } = request;
     let database = source_runtime.db().clone();
     let project_root = source_runtime.project_root().to_path_buf();
@@ -992,7 +1013,7 @@ pub async fn open_production_primitive_runtime(
         test_runs,
         test_run_scope,
         convergence_park,
-        compiler_status,
+        TypeScriptProducerStatusHandleV1::default(),
     )
 }
 
