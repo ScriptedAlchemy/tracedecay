@@ -995,7 +995,7 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     event["model"] = json!("cursor-fixture");
     event["file_path"] = json!(project.join("src/lib.rs"));
     event["edits"] = json!([{"old_string": "", "new_string": "pub fn shared_edit() {}"}]);
-    event["session_id"] = json!("session-advisory-proximity");
+    event["session_id"] = json!("session-cursor-advisory-proximity");
     event["cursor_version"] = json!("fixture");
     event["workspace_roots"] = json!([project.clone()]);
     event["user_email"] = json!("redacted@example.invalid");
@@ -1107,7 +1107,10 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
     ))
     .unwrap();
-    codex_meta["payload"]["id"] = json!("session-advisory-proximity");
+    // The two hosts own distinct sessions. Reusing the Cursor session ID
+    // makes canonical Git evidence reject the conflicting provider lineage.
+    let codex_session = "session-codex-advisory-proximity";
+    codex_meta["payload"]["id"] = json!(codex_session);
     codex_meta["payload"]["cwd"] = json!(project.clone());
     let codex_message: Value = serde_json::from_str(include_str!(
         "../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
@@ -1123,7 +1126,7 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "../../../../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
     ))
     .unwrap();
-    stop["session_id"] = json!("session-advisory-proximity");
+    stop["session_id"] = json!(codex_session);
     stop["turn_id"] = json!("turn-advisory-proximity-stop");
     stop["cwd"] = json!(project.clone());
     stop["model"] = json!("codex-fixture");
