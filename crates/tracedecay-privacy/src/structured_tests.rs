@@ -1,5 +1,6 @@
 use super::structured::{
-    StructuredSanitizationError, StructuredSanitizationLimits, sanitize_structured_payload,
+    StructuredSanitizationError, StructuredSanitizationLimits, sanitize_provider_metadata_json,
+    sanitize_structured_payload,
 };
 
 const SECRET: &str = "sk-test-123456789012345678901234";
@@ -88,6 +89,50 @@ fn structured_limits_deny_raw_expansion_depth_and_item_overruns() {
     assert_eq!(
         items.unwrap_err(),
         StructuredSanitizationError::ItemCountExceeded
+    );
+}
+
+#[test]
+fn bom_json_parsing_preserves_raw_byte_limits_and_metadata_redaction() {
+    let raw = r#"{"safe":"kept"}"#;
+    let with_bom = format!("\u{feff}{raw}");
+    let plain_limits =
+        StructuredSanitizationLimits::new(raw.len(), 128, 8, 8).expect("valid limits");
+    let plain = sanitize_structured_payload(raw.as_bytes(), plain_limits)
+        .expect("unprefixed input fits its exact byte allowance");
+    assert!(plain.was_structurally_parsed());
+    assert_eq!(
+        sanitize_structured_payload(with_bom.as_bytes(), plain_limits).unwrap_err(),
+        StructuredSanitizationError::RawBytesExceeded,
+        "the BOM's three original bytes still count toward raw admission"
+    );
+
+    let bom_limits =
+        StructuredSanitizationLimits::new(with_bom.len(), 128, 8, 8).expect("valid limits");
+    let prefixed = sanitize_structured_payload(with_bom.as_bytes(), bom_limits)
+        .expect("BOM input fits its exact byte allowance");
+    assert!(prefixed.was_structurally_parsed());
+    assert_eq!(prefixed.payload(), plain.payload());
+    assert_eq!(
+        sanitize_provider_metadata_json(&with_bom, raw.len() as u64),
+        None
+    );
+    assert_eq!(
+        sanitize_provider_metadata_json(&with_bom, with_bom.len() as u64).as_ref(),
+        Some(plain.payload())
+    );
+
+    let private_metadata = "\u{feff}{\"vault_passphrase\":\"ordinary-value\",\"safe\":\"kept\"}";
+    assert_eq!(
+        sanitize_provider_metadata_json(private_metadata, 4096),
+        Some(serde_json::json!({
+            "vault_passphrase": "[TraceDecay redacted: sensitive field]",
+            "safe": "kept"
+        }))
+    );
+    assert_eq!(
+        sanitize_structured_payload(b"\xef\xbb\xbf{\"key\":1,\"key\":2}", limits()).unwrap_err(),
+        StructuredSanitizationError::UnsafeJsonStructure
     );
 }
 

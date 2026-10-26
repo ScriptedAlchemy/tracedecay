@@ -1,7 +1,7 @@
 use tracedecay_domain::canonical_text::is_tagged_lowercase_hex;
 
 use super::length_prefixed_sha256_hex;
-use super::structured_text::sanitize_provider_metadata_text;
+use super::structured_text::sanitize_structured_text;
 
 const PROTECTION_DOMAIN_V1: &[u8] = b"tracedecay.structural-identity-protection.v1";
 const PROTECTION_PREFIX_V1: &str = "privacy.structural-id.v1.";
@@ -28,8 +28,13 @@ pub fn protect_sensitive_structural_id(value: &str) -> Result<String, Structural
     if is_already_protected_structural_id(value) {
         return Ok(value.to_owned());
     }
-    let sanitized = sanitize_provider_metadata_text(value).ok_or(StructuralIdProtectionError)?;
-    if sanitized == value {
+    let sanitized = sanitize_structured_text(value).map_err(|_| StructuralIdProtectionError)?;
+    // Native IDs can resemble documents with sensitive keys. Their only
+    // retained representation is an opaque digest, so quarantine requires
+    // protection rather than refusing the observation. Scan failures still
+    // propagate without admitting the original identifier.
+    let quarantined = !sanitized.quarantine_findings().is_empty();
+    if !quarantined && sanitized.into_parts().0 == value {
         return Ok(value.to_owned());
     }
 
@@ -99,6 +104,31 @@ mod tests {
             protect_sensitive_structural_id(opaque_path_source).unwrap(),
             opaque_path_source
         );
+    }
+
+    #[test]
+    fn quarantined_native_record_ids_are_protected_without_losing_identity() {
+        let session = "session_280d6113-53d5-460d-b519-9cf819759a28";
+        let ids = [format!("{session}:22"), format!("{session}:main:22")];
+        let mut protected_ids = Vec::new();
+        for id in ids {
+            let protected = protect_sensitive_structural_id(&id).unwrap();
+            assert!(is_already_protected_structural_id(&protected));
+            assert!(!protected.contains(session));
+            assert_eq!(protect_sensitive_structural_id(&id).unwrap(), protected);
+            assert_eq!(
+                protect_sensitive_structural_id(&protected).unwrap(),
+                protected
+            );
+            protected_ids.push(protected);
+        }
+        assert_ne!(protected_ids[0], protected_ids[1]);
+    }
+
+    #[test]
+    fn structural_id_scan_limits_still_refuse_admission() {
+        let oversized = "x".repeat(crate::structured::MAX_STRUCTURED_TEXT_BYTES + 1);
+        assert!(protect_sensitive_structural_id(&oversized).is_err());
     }
 
     #[test]
