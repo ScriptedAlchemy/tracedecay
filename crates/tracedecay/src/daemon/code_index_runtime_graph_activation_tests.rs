@@ -418,6 +418,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         project_database,
         policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         seated: Arc::default(),
+        resident_memory: unconstrained_resident_memory(),
     };
 
     let activated = latest.clone();
@@ -545,6 +546,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         project_database: Arc::clone(&project_database),
         policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         seated: Arc::default(),
+        resident_memory: unconstrained_resident_memory(),
     };
     activation
         .activate(
@@ -3090,4 +3092,18 @@ async fn the_catalog_warm_after_publication_reserves_resident_memory() {
         "the published catalog is measured as its owner, not left reserved"
     );
     mount.shutdown().await;
+}
+
+/// An authority whose own limit is the machine's, with no measured
+/// pressure, for activations whose admission is not under test.
+fn unconstrained_resident_memory() -> Arc<ProcessResidentMemoryV1> {
+    let limit =
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1();
+    Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        )),
+    ))
 }

@@ -16,8 +16,8 @@ use super::super::{CodeGraphProjectionError, CodeGraphSymbolBindingV1, symbol_en
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::resident_bytes::{
-    ARC_HEADER_BYTES, hash_table_bytes, import_heap_bytes, opt, snapshot_file_heap_bytes,
-    symbol_heap_bytes, unresolved_heap_bytes, vec_bytes,
+    ARC_HEADER_BYTES, btree_bytes, hash_table_bytes, import_heap_bytes, opt,
+    snapshot_file_heap_bytes, symbol_heap_bytes, unresolved_heap_bytes, vec_bytes,
 };
 
 /// One symbol as the interactive surface knows it. `metadata` is present for
@@ -596,12 +596,15 @@ pub(super) struct CatalogBuilder {
     /// Two distinct file occurrences claiming the same logical path in one
     /// generation is a corrupt projection, refused while the catalog is
     /// built rather than resolved by picking a winner.
-    pub(super) by_logical_path: BTreeMap<String, FileOccurrenceId>,
+    by_logical_path: BTreeMap<String, FileOccurrenceId>,
     pub(super) files: BTreeMap<FileOccurrenceId, SanitizedCodeFileV1>,
     unresolved_call_sources: BTreeMap<String, Vec<SymbolOccurrenceId>>,
-    pub(super) unresolved_sources_by_entity: BTreeMap<GraphEntityId, SymbolOccurrenceId>,
+    unresolved_sources_by_entity: BTreeMap<GraphEntityId, SymbolOccurrenceId>,
     symbols_by_kind: BTreeMap<String, u64>,
     symbols_by_logical_path: BTreeMap<String, u64>,
+    /// Heap the entries hold beyond their inline slots: strings, records,
+    /// and list slots, the latter at twice their length for `Vec` growth.
+    heap: usize,
 }
 
 impl CatalogBuilder {
@@ -617,7 +620,97 @@ impl CatalogBuilder {
             unresolved_sources_by_entity: BTreeMap::new(),
             symbols_by_kind: BTreeMap::new(),
             symbols_by_logical_path: BTreeMap::new(),
+            heap: 0,
         }
+    }
+
+    /// An upper bound on what the builder holds: every map's B-tree nodes
+    /// and the heap its entries own.
+    pub(super) fn held_bytes(&self) -> usize {
+        fn tree<K, V>(map: &BTreeMap<K, V>) -> usize {
+            btree_bytes(map.len(), size_of::<(K, V)>())
+        }
+        self.heap
+            .saturating_add(tree(&self.symbols))
+            .saturating_add(tree(&self.by_qualified_name))
+            .saturating_add(tree(&self.by_simple_name))
+            .saturating_add(tree(&self.by_file))
+            .saturating_add(tree(&self.by_logical_path))
+            .saturating_add(tree(&self.files))
+            .saturating_add(tree(&self.unresolved_call_sources))
+            .saturating_add(tree(&self.unresolved_sources_by_entity))
+            .saturating_add(tree(&self.symbols_by_kind))
+            .saturating_add(tree(&self.symbols_by_logical_path))
+    }
+
+    /// The sorted arrays [`Self::finish`] freezes the maps into, which it
+    /// allocates while their trees are still live.
+    pub(super) fn frozen_bytes(&self) -> usize {
+        fn array<K, V>(map: &BTreeMap<K, V>) -> usize {
+            map.len().saturating_mul(size_of::<(K, V)>())
+        }
+        array(&self.symbols)
+            .saturating_add(array(&self.by_qualified_name))
+            .saturating_add(array(&self.by_simple_name))
+            .saturating_add(array(&self.by_file))
+            .saturating_add(array(&self.by_logical_path))
+            .saturating_add(array(&self.files))
+            .saturating_add(array(&self.unresolved_call_sources))
+            .saturating_add(array(&self.unresolved_sources_by_entity))
+            .saturating_add(array(&self.symbols_by_kind))
+            .saturating_add(array(&self.symbols_by_logical_path))
+            .saturating_add(self.symbols.len().saturating_mul(size_of::<usize>()))
+    }
+
+    /// Records a file and its logical path, refusing a duplicate file or a
+    /// path two file occurrences claim.
+    pub(super) fn insert_file(
+        &mut self,
+        record: SanitizedCodeFileV1,
+    ) -> Result<(), CodeGraphProjectionError> {
+        let id = record.file_occurrence_id.as_str().len();
+        let path = record.logical_path.len();
+        let previous = self.by_logical_path.insert(
+            record.logical_path.clone(),
+            record.file_occurrence_id.clone(),
+        );
+        if let Some(existing) = previous
+            && existing != record.file_occurrence_id
+        {
+            return Err(CodeGraphProjectionError::Corrupt(format!(
+                "code graph logical path `{}` is claimed by more than one file occurrence",
+                record.logical_path
+            )));
+        }
+        let heap = snapshot_file_heap_bytes(&record);
+        if self
+            .files
+            .insert(record.file_occurrence_id.clone(), record)
+            .is_some()
+        {
+            return Err(CodeGraphProjectionError::Corrupt(
+                "code graph contains a duplicate file entity".to_owned(),
+            ));
+        }
+        self.heap = self
+            .heap
+            .saturating_add(heap)
+            .saturating_add(path)
+            .saturating_add(id.saturating_mul(2));
+        Ok(())
+    }
+
+    /// Records which symbol of `entity` makes unresolved calls.
+    pub(super) fn insert_unresolved_source(
+        &mut self,
+        entity: GraphEntityId,
+        occurrence: SymbolOccurrenceId,
+    ) {
+        self.heap = self
+            .heap
+            .saturating_add(entity.as_str().len())
+            .saturating_add(occurrence.as_str().len());
+        self.unresolved_sources_by_entity.insert(entity, occurrence);
     }
 
     /// The logical path a `calls`/`uses` endpoint is bound to.
@@ -638,7 +731,8 @@ impl CatalogBuilder {
         generation: GraphGenerationId,
         layer: Option<CatalogLayerV1>,
         imports: Vec<CodeIndexImportEvidenceV1>,
-        dependency_edges: &[(SymbolOccurrenceId, SymbolOccurrenceId)],
+        dependency_edge_counts: BTreeMap<(String, String), u64>,
+        dependency_edges: u64,
     ) -> InteractiveCatalog {
         let mut files_by_language = BTreeMap::new();
         for file in self.files.values() {
@@ -648,28 +742,14 @@ impl CatalogBuilder {
                     .or_default() += 1;
             }
         }
-        let mut dependency_edge_counts = BTreeMap::<(String, String), u64>::new();
-        for (from, to) in dependency_edges {
-            if let (Some(source), Some(target)) =
-                (self.bound_logical_path(from), self.bound_logical_path(to))
-                && source != target
-            {
-                *dependency_edge_counts
-                    .entry((source.to_owned(), target.to_owned()))
-                    .or_default() += 1;
-            }
-        }
         let semantic_edges = self.symbols.values().map(|symbol| symbol.outgoing).sum();
         let files: SortedMap<_, _> = self.files.into();
         let symbols: SortedMap<_, _> = self.symbols.into();
         let source_order = source_order_indices(&symbols);
         let symbols_by_logical_path: SortedMap<_, _> = self.symbols_by_logical_path.into();
         let dependency_edge_counts: SortedMap<_, _> = dependency_edge_counts.into();
-        let file_dependencies = fold_file_dependencies(
-            &dependency_edge_counts,
-            &files,
-            dependency_edges.len() as u64,
-        );
+        let file_dependencies =
+            fold_file_dependencies(&dependency_edge_counts, &files, dependency_edges);
         InteractiveCatalog {
             generation,
             layer,
@@ -694,42 +774,85 @@ impl CatalogBuilder {
     }
 
     pub(super) fn insert(&mut self, occurrence: SymbolOccurrenceId, record: CatalogSymbol) {
+        // A list slot is one id clone and, with `Vec` doubling, at most two
+        // inline slots.
+        let slot = occurrence
+            .as_str()
+            .len()
+            .saturating_add(2 * size_of::<SymbolOccurrenceId>());
+        let mut heap = occurrence
+            .as_str()
+            .len()
+            .saturating_add(record.binding.as_ref().map_or(0, binding_heap_bytes))
+            .saturating_add(record.metadata.as_ref().map_or(0, symbol_heap_bytes))
+            .saturating_add(vec_bytes(
+                &record.unresolved_calls,
+                record.unresolved_calls.capacity(),
+                unresolved_heap_bytes,
+            ));
         for reference in record.unresolved_call_sites() {
+            let callee = unresolved_callee_name(&reference.reference_name);
+            if !self.unresolved_call_sources.contains_key(callee) {
+                heap = heap.saturating_add(callee.len());
+            }
             let sources = self
                 .unresolved_call_sources
-                .entry(unresolved_callee_name(&reference.reference_name).to_owned())
+                .entry(callee.to_owned())
                 .or_default();
             if sources.last() != Some(&occurrence) {
                 sources.push(occurrence.clone());
+                heap = heap.saturating_add(slot);
             }
         }
         if let Some(metadata) = &record.metadata {
+            if !self.symbols_by_kind.contains_key(&metadata.kind) {
+                heap = heap.saturating_add(metadata.kind.len());
+            }
             *self
                 .symbols_by_kind
                 .entry(metadata.kind.clone())
                 .or_default() += 1;
+            if !self
+                .by_qualified_name
+                .contains_key(&metadata.qualified_name)
+            {
+                heap = heap.saturating_add(metadata.qualified_name.len());
+            }
             self.by_qualified_name
                 .entry(metadata.qualified_name.clone())
                 .or_default()
                 .push(occurrence.clone());
+            let simple_name = derived_simple_name(&metadata.qualified_name);
+            if !self.by_simple_name.contains_key(&simple_name) {
+                heap = heap.saturating_add(simple_name.len());
+            }
             self.by_simple_name
-                .entry(derived_simple_name(&metadata.qualified_name))
+                .entry(simple_name)
                 .or_default()
                 .push(occurrence.clone());
+            heap = heap.saturating_add(slot.saturating_mul(2));
         }
         if let Some(binding) = &record.binding {
             if let Some(path) = &binding.logical_path {
+                if !self.symbols_by_logical_path.contains_key(path) {
+                    heap = heap.saturating_add(path.len());
+                }
                 *self
                     .symbols_by_logical_path
                     .entry(path.clone())
                     .or_default() += 1;
             }
+            if !self.by_file.contains_key(&binding.file) {
+                heap = heap.saturating_add(binding.file.as_str().len());
+            }
             self.by_file
                 .entry(binding.file.clone())
                 .or_default()
                 .push(occurrence.clone());
+            heap = heap.saturating_add(slot);
         }
         self.symbols.insert(occurrence, record);
+        self.heap = self.heap.saturating_add(heap);
     }
 }
 

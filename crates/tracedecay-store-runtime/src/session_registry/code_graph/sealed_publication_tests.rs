@@ -3259,3 +3259,100 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         assert_eq!(Arc::strong_count(&runtime.authority), graph_leases);
     });
 }
+
+/// A catalog build reserves what it holds from the process authority while
+/// it runs, so an authority that cannot cover the heap the build allocates
+/// refuses it, and one that can admits it and gets every byte back once the
+/// catalog is published and measured as its own owner. A refused build
+/// leaves the catalog warmable rather than failed.
+///
+/// Fails if the build is uncharged, if its charge undercounts the heap it
+/// holds at its peak by more than a tenth, if a refusal poisons the catalog,
+/// or if the charge outlives the build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_builds_reserve_the_heap_they_hold() {
+    use std::num::NonZeroU64;
+    use tracedecay_code_index::graph_projection::{
+        CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphServingWarmthV1,
+    };
+    use tracedecay_runtime_core::resident_memory::{
+        ProcessResidentMemoryV1, ResidentMemoryPressureV1,
+    };
+
+    let fixture =
+        sealed_generation_fixture("project.catalog-build-charge", &accounting_source(600)).await;
+    let snapshot = || {
+        fixture
+            .runtime
+            .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+            .expect("seal the code graph")
+    };
+    let warm = |store: &CodeGraphProjectionStore| {
+        store.warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+    };
+    let uncharged =
+        CodeGraphProjectionStore::from_verified_snapshot(snapshot(), fixture.generation_id.clone())
+            .expect("projection store over the sealed snapshot");
+    uncharged.warm_serving_engine().expect("engine warm");
+    let (warmed, _, peak) = crate::thread_allocation::live_and_peak_during(|| warm(&uncharged));
+    warmed.expect("an uncharged catalog warms");
+    let peak = u64::try_from(peak).expect("a build allocates");
+
+    let charged = |limit: u64| {
+        let limit = NonZeroU64::new(limit).expect("nonzero limit");
+        let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+            limit,
+            Arc::new(ResidentMemoryPressureV1::with_sampler(
+                limit,
+                Arc::new(|| None),
+            )),
+        ));
+        let store = CodeGraphProjectionStore::from_verified_snapshot_charged(
+            snapshot(),
+            fixture.generation_id.clone(),
+            Arc::clone(&memory),
+        )
+        .expect("charged projection store");
+        store.warm_serving_engine().expect("engine warm");
+        (store, memory)
+    };
+
+    let (refused, memory) = charged(peak / 10 * 9);
+    let refusal = warm(&refused).expect_err("an authority short of the build's heap refuses it");
+    assert!(
+        matches!(
+            &refusal,
+            CodeGraphProjectionError::BudgetExhausted { budget, .. }
+                if budget == tracedecay_graph_db::GraphBudgetKind::ResidentMemory.as_str()
+        ),
+        "the refusal is the typed resident-memory refusal: {refusal:?}"
+    );
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        0,
+        "a refused build keeps no charge"
+    );
+    assert!(
+        matches!(
+            refused.serving_warmth().expect("warmth"),
+            CodeGraphServingWarmthV1::Warming(_)
+        ),
+        "a refused build leaves the catalog to warm again, not failed"
+    );
+
+    let (admitted, memory) = charged(peak * 2);
+    warm(&admitted).expect("an authority with room admits the build");
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        0,
+        "the published catalog is measured as its owner, not left charged"
+    );
+    assert_eq!(
+        admitted.interactive_catalog_bytes(),
+        uncharged.interactive_catalog_bytes(),
+        "the charged build publishes the same catalog"
+    );
+}
