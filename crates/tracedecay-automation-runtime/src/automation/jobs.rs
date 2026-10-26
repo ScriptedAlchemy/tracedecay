@@ -44,7 +44,6 @@ const JOB_COMMAND_TIMEOUT_SECS: u64 = 30;
 const JOB_COMMAND_OUTPUT_CAP_CHARS: usize = 16 * 1024;
 const JOB_SKILL_BODY_CAP_CHARS: usize = 4_000;
 const DEFAULT_JOB_FAILURE_COOLDOWN_SECS: u64 = 300;
-const DEFAULT_JOB_STALE_LOCK_SECS: u64 = 6 * 60 * 60;
 const WEBHOOK_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -179,15 +178,8 @@ fn job_lock_key(job_id: &str) -> String {
 pub(super) async fn try_acquire_job_task_lock(
     dashboard_root: &Path,
     job_id: &str,
-    now_secs: i64,
 ) -> Result<Option<AutomationTaskLock>> {
-    AutomationTaskLock::try_acquire_keyed(
-        dashboard_root,
-        &job_lock_key(job_id),
-        Some(DEFAULT_JOB_STALE_LOCK_SECS),
-        now_secs,
-    )
-    .await
+    AutomationTaskLock::try_acquire_keyed(dashboard_root, &job_lock_key(job_id)).await
 }
 
 #[tracing::instrument(name = "automation.jobs.load", level = "trace", skip_all)]
@@ -546,9 +538,7 @@ async fn run_retained_user_job(
         return ctx.skipped(reason).await.map_err(Into::into);
     }
 
-    let now_secs = current_timestamp();
-    let Some(task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id, now_secs).await?
-    else {
+    let Some(task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id).await? else {
         let reason = if trigger == AutomationTrigger::Scheduler {
             AutomationSkipReasonV1::SchedulerLockActive
         } else {

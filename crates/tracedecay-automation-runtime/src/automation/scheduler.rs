@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,6 @@ use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt;
-use cap_std::time::SystemClock;
 use serde::{Deserialize, Serialize};
 pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
 use tracedecay_automation::evidence_budget::{
@@ -32,10 +31,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_private_fs::FileLease;
 
 const DEFAULT_FAILURE_COOLDOWN_SECS: u64 = 300;
-const DEFAULT_STALE_LOCK_SECS: u64 = 6 * 60 * 60;
-const AUTOMATION_TASK_LOCK_TOKEN_BYTES: usize = 32;
-const MAX_AUTOMATION_TASK_LOCK_BYTES: u64 = 1024;
-const AUTOMATION_TASK_LOCK_CLEANUP_ATTEMPTS: u32 = 3;
+const MAX_PRE_LEASE_TASK_LOCK_BYTES: u64 = 1024;
 const SCHEDULER_CONTROL_FILENAME: &str = "automation_scheduler_control.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -162,41 +158,13 @@ pub(crate) fn task_disabled_skip(task: AgentTaskKind) -> AutomationSkipReasonV1 
     }
 }
 
+/// Exclusive admission for one automation task key. The task owns this value
+/// for its whole lifetime, including retained effect settlement; dropping it
+/// releases the cross-process lease.
 #[derive(Debug)]
 pub struct AutomationTaskLock {
-    path: PathBuf,
-    ownership_token: String,
-    staging_path: Option<PathBuf>,
-}
-
-#[derive(Debug)]
-enum TaskLockPublicationError {
-    Definite(std::io::Error),
-    CommitUncertain {
-        error: std::io::Error,
-        cleanup_owner: AutomationTaskLock,
-    },
-}
-
-enum TaskLockStagingCreationError {
-    Definite(std::io::Error),
-    #[cfg(windows)]
-    CommitUncertain {
-        error: std::io::Error,
-        staging_path: PathBuf,
-    },
-}
-
-impl From<std::io::Error> for TaskLockPublicationError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Definite(error)
-    }
-}
-
-impl From<std::io::Error> for TaskLockStagingCreationError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Definite(error)
-    }
+    _lease: FileLease,
+    _publication_coordination: FileLease,
 }
 
 pub fn scheduler_control_path(dashboard_root: &Path) -> PathBuf {
@@ -264,36 +232,25 @@ fn save_scheduler_control_blocking(dashboard_root: &Path, bytes: &[u8]) -> std::
 }
 
 impl AutomationTaskLock {
-    pub async fn try_acquire(
-        dashboard_root: &Path,
-        task: AgentTaskKind,
-        stale_after_secs: Option<u64>,
-        now_secs: i64,
-    ) -> Result<Option<Self>> {
-        Self::try_acquire_keyed(dashboard_root, task_key(task), stale_after_secs, now_secs).await
+    pub async fn try_acquire(dashboard_root: &Path, task: AgentTaskKind) -> Result<Option<Self>> {
+        Self::try_acquire_keyed(dashboard_root, task_key(task)).await
     }
 
     /// Acquires a lock under an arbitrary key. User-defined jobs lock per
     /// job (`user_job_<id>`) so concurrent jobs never serialize on the shared
     /// fixed-task lock name.
     #[tracing::instrument(name = "automation.scheduler.task_lock", level = "trace", skip_all)]
-    pub async fn try_acquire_keyed(
-        dashboard_root: &Path,
-        key: &str,
-        stale_after_secs: Option<u64>,
-        now_secs: i64,
-    ) -> Result<Option<Self>> {
+    pub async fn try_acquire_keyed(dashboard_root: &Path, key: &str) -> Result<Option<Self>> {
         // cap-std ambient opens walk each component. On macOS `/var` is a
         // firmlink to `/private/var`; opening the unresolved tempfile spelling
         // can ENOENT under concurrent create. Resolve the existing prefix first.
         let lock_dir = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(
             &dashboard_root.join("automation_locks"),
         );
-        let path = lock_dir.join(format!("{key}.lock"));
-        let ownership_token = new_automation_task_lock_token()?;
-        let error_path = path.clone();
+        let key = key.to_owned();
+        let error_dir = lock_dir.clone();
         tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            try_acquire_task_lock_blocking(&path, &ownership_token, stale_after_secs, now_secs)
+            try_acquire_task_lock_blocking(&lock_dir, &key)
         })
         .await
         .map_err(|error| TraceDecayError::Config {
@@ -301,88 +258,10 @@ impl AutomationTaskLock {
         })?
         .map_err(|error| TraceDecayError::Config {
             message: format!(
-                "failed to acquire automation lock '{}': {error}",
-                error_path.display()
+                "failed to acquire automation lock under '{}': {error}",
+                error_dir.display()
             ),
         })
-    }
-}
-
-/// Releases the lock file synchronously, without ever calling into the tokio
-/// runtime.
-///
-/// Task-lock release must be synchronous: callers (and tests such as
-/// `retained_settlement_guard_owns_task_lock_until_drop`) rely on the lock file
-/// being gone the instant `drop` returns. The cleanup itself is genuinely
-/// blocking, a file coordination lock, `sync_all`/parent-directory fsyncs, and
-/// `std::thread::sleep` backoff between retries, so it is tempting to hand the
-/// owning worker's run queue away with `tokio::task::block_in_place`.
-///
-/// That is not sound here, because this guard is reachable from inside tokio's
-/// own blocking-pool spawn path. When a runtime has begun shutting down,
-/// `blocking::pool::Spawner::spawn_task` (tokio 1.53.1) shuts a refused task
-/// down *while holding* the pool's non-reentrant `parking_lot` mutex, which
-/// drops the task's future, and with it any `AutomationTaskLock` the future
-/// owned, such as the `Arc<RetainedAutomationSettlementState>` captured by
-/// `start_retained_automation_settlement_inner`. `block_in_place` re-enters
-/// `spawn_task` on that same thread to hand off the worker core, so the release
-/// self-deadlocks on the mutex it is already under; the runtime's
-/// `BlockingPool::shutdown` then waits for that thread forever.
-///
-/// Blocking a worker for one unlink plus its fsyncs is the cost of being
-/// correct in a destructor. Callers that care about worker latency release the
-/// guard from `spawn_blocking` instead of dropping it on a worker.
-impl Drop for AutomationTaskLock {
-    fn drop(&mut self) {
-        let path = &self.path;
-        let ownership_token = &self.ownership_token;
-        let staging_slot = &mut self.staging_path;
-        match retry_exact_task_lock_cleanup(|| {
-            remove_owned_task_lock_blocking(path, ownership_token)
-        }) {
-            Ok(()) => {
-                if let Some(staging_path) = staging_slot.take()
-                    && let Err(error) = retry_exact_task_lock_cleanup(|| {
-                        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
-                            &staging_path,
-                        )
-                        .map(|_| ())
-                    })
-                {
-                    tracing::warn!(
-                        path = %path.display(),
-                        staging_path = %staging_path.display(),
-                        error = %error,
-                        "failed to retire exact automation task-lock staging ownership"
-                    );
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    staging_path = ?staging_slot.as_deref(),
-                    error = %error,
-                    "failed to release exact automation task-lock ownership; preserving retained staging evidence"
-                );
-            }
-        }
-    }
-}
-
-fn retry_exact_task_lock_cleanup<Operation>(mut operation: Operation) -> std::io::Result<()>
-where
-    Operation: FnMut() -> std::io::Result<()>,
-{
-    let mut attempt = 1_u32;
-    loop {
-        match operation() {
-            Ok(()) => return Ok(()),
-            Err(_) if attempt < AUTOMATION_TASK_LOCK_CLEANUP_ATTEMPTS => {
-                std::thread::sleep(std::time::Duration::from_millis(5_u64 << (attempt - 1)));
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
     }
 }
 
@@ -801,12 +680,6 @@ pub fn cron_is_due(cron: &CronSchedule, last_completed_at: Option<i64>, now_secs
     }
 }
 
-pub fn stale_lock_secs(config: &AutomationConfig, task: AgentTaskKind) -> Option<u64> {
-    task_config(config, task)
-        .and_then(|task_config| task_config.stale_lock_secs)
-        .or(Some(DEFAULT_STALE_LOCK_SECS))
-}
-
 /// User jobs carry their own schedule/enabled state (see
 /// `automation::jobs`), so the fixed-task config lookup falls back to a
 /// disabled default that makes the fixed-task gates skip them.
@@ -870,414 +743,49 @@ pub(crate) fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
     (now_secs - completed_at) as u64
 }
 
-fn new_automation_task_lock_token() -> Result<String> {
-    let mut random = [0_u8; AUTOMATION_TASK_LOCK_TOKEN_BYTES];
-    getrandom::fill(&mut random).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to generate automation task-lock ownership token: {error}"),
-    })?;
-    Ok(hex::encode(random))
-}
-
-fn resolve_task_lock_parent(path: &Path) -> std::io::Result<PathBuf> {
-    let (parent, name) = path.parent().zip(path.file_name()).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "automation task-lock path requires a parent and file name",
-        )
-    })?;
-    // Resolve OS directory aliases without hiding a final symlink from no-follow checks.
-    Ok(
-        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(parent)
-            .join(name),
-    )
-}
-
+/// Keeps both stable coordination files locked through task settlement. Older
+/// daemons lock `<key>.lock.lock` only around owner publication and cleanup:
+/// checking their owner record under that lock closes the pre-publication
+/// race, and retaining it prevents an old daemon publishing during this task.
+/// Neither coordination inode may be unlinked, even when retiring a dead owner.
 fn try_acquire_task_lock_blocking(
-    path: &Path,
-    ownership_token: &str,
-    stale_after_secs: Option<u64>,
-    now_secs: i64,
+    lock_dir: &Path,
+    key: &str,
 ) -> std::io::Result<Option<AutomationTaskLock>> {
-    let path = resolve_task_lock_parent(path)?;
-    if let Some(parent) = path.parent() {
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(lock_dir)?;
+    let Some(lease) = open_task_lease(&lock_dir.join(format!("{key}.lease")))? else {
+        return Ok(None);
+    };
+    let lock_path = lock_dir.join(format!("{key}.lock"));
+    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
+    let Some(publication_coordination) = open_task_lease(&coordination_path)? else {
+        return Ok(None);
+    };
+    if !retire_pre_lease_owner(&lock_path)? {
+        return Ok(None);
     }
-    let coordination = acquire_task_lock_coordination(&path)?;
-    for attempt in 0..2 {
-        match create_task_lock_file(&path, ownership_token, now_secs) {
-            Ok(task_lock) => return Ok(Some(task_lock)),
-            Err(TaskLockPublicationError::Definite(error))
-                if error.kind() == std::io::ErrorKind::AlreadyExists =>
-            {
-                let Some(snapshot) = read_task_lock_snapshot(&path)? else {
-                    continue;
-                };
-                if attempt == 0 && task_lock_is_reclaimable(&snapshot, stale_after_secs, now_secs) {
-                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&path)?;
-                    continue;
-                }
-                return Ok(None);
-            }
-            Err(TaskLockPublicationError::Definite(error)) => return Err(error),
-            Err(TaskLockPublicationError::CommitUncertain {
-                error,
-                cleanup_owner,
-            }) => {
-                drop(coordination);
-                drop(cleanup_owner);
-                return Err(error);
-            }
-        }
-    }
-    Ok(None)
+    Ok(Some(AutomationTaskLock {
+        _lease: lease,
+        _publication_coordination: publication_coordination,
+    }))
 }
 
-fn create_task_lock_file(
-    path: &Path,
-    ownership_token: &str,
-    now_secs: i64,
-) -> std::result::Result<AutomationTaskLock, TaskLockPublicationError> {
-    let (task_lock, staging_path) = publish_task_lock_file(path, ownership_token, now_secs)?;
-    let cleanup_result =
-        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&staging_path)
-            .map(|_| ());
-    let sync_result = tracedecay_private_fs::framed_log::sync_parent_directory(
-        path,
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
-    );
-    Ok(task_lock.settle_published_staging(&staging_path, cleanup_result, sync_result))
-}
-
-#[cfg(test)]
-fn create_task_lock_file_with_post_publish<Cleanup, SyncParent>(
-    path: &Path,
-    ownership_token: &str,
-    now_secs: i64,
-    cleanup_published_staging: Cleanup,
-    sync_published_parent: SyncParent,
-) -> std::result::Result<AutomationTaskLock, TaskLockPublicationError>
-where
-    Cleanup: FnOnce(&Path) -> std::io::Result<()>,
-    SyncParent: FnOnce(&Path) -> std::io::Result<()>,
-{
-    let (task_lock, staging_path) = publish_task_lock_file(path, ownership_token, now_secs)?;
-    let cleanup_result = cleanup_published_staging(&staging_path);
-    let sync_result = sync_published_parent(path);
-    Ok(task_lock.settle_published_staging(&staging_path, cleanup_result, sync_result))
-}
-
-fn publish_task_lock_file(
-    path: &Path,
-    ownership_token: &str,
-    now_secs: i64,
-) -> std::result::Result<(AutomationTaskLock, PathBuf), TaskLockPublicationError> {
-    let prepared =
-        prepare_task_lock_publication(path, ownership_token, now_secs).map_err(|failure| {
-            match failure {
-                TaskLockStagingCreationError::Definite(error) => {
-                    TaskLockPublicationError::Definite(error)
-                }
-                #[cfg(windows)]
-                TaskLockStagingCreationError::CommitUncertain {
-                    error,
-                    staging_path,
-                } => {
-                    let cleanup_error = cleanup_unpublished_task_lock_staging(
-                        &staging_path,
-                        "automation task-lock staging creation failed",
-                        error,
-                    );
-                    TaskLockPublicationError::Definite(cleanup_error)
-                }
-            }
-        })?;
-    let link_result = prepared.parent.hard_link(
-        &prepared.staging_name,
-        &prepared.parent,
-        &prepared.destination_name,
-    );
-    settle_task_lock_link_result(path, ownership_token, prepared.staging_path, link_result)
-}
-
-#[cfg(test)]
-fn publish_task_lock_file_after_committed_link_error(
-    path: &Path,
-    ownership_token: &str,
-    now_secs: i64,
-) -> std::result::Result<(AutomationTaskLock, PathBuf), TaskLockPublicationError> {
-    let prepared =
-        prepare_task_lock_publication(path, ownership_token, now_secs).map_err(|failure| {
-            match failure {
-                TaskLockStagingCreationError::Definite(error) => {
-                    TaskLockPublicationError::Definite(error)
-                }
-                #[cfg(windows)]
-                TaskLockStagingCreationError::CommitUncertain {
-                    error,
-                    staging_path,
-                } => TaskLockPublicationError::Definite(cleanup_unpublished_task_lock_staging(
-                    &staging_path,
-                    "automation task-lock staging creation failed",
-                    error,
-                )),
-            }
-        })?;
-    prepared
-        .parent
-        .hard_link(
-            &prepared.staging_name,
-            &prepared.parent,
-            &prepared.destination_name,
-        )
-        .map_err(TaskLockPublicationError::Definite)?;
-    settle_task_lock_link_result(
-        path,
-        ownership_token,
-        prepared.staging_path,
-        Err(std::io::Error::other(
-            "injected commit-uncertain hard-link result",
-        )),
-    )
-}
-
-struct PreparedTaskLockPublication {
-    parent: Dir,
-    destination_name: std::ffi::OsString,
-    staging_name: std::ffi::OsString,
-    staging_path: PathBuf,
-}
-
-fn prepare_task_lock_publication(
-    path: &Path,
-    ownership_token: &str,
-    now_secs: i64,
-) -> std::result::Result<PreparedTaskLockPublication, TaskLockStagingCreationError> {
-    let path = resolve_task_lock_parent(path)?;
-    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
-    let parent_path = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "automation task-lock path has no parent",
-        )
-    })?;
-    let destination_name = path
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "automation task-lock path has no file name",
-            )
-        })?;
-    let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
-    let staging_path = task_lock_staging_path(&path, ownership_token)?;
-    let staging_name = staging_path
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "automation task-lock staging path has no file name",
-            )
-        })?;
-    tracedecay_runtime_core::storage::reject_symlink_components(
-        &staging_path,
-        "automation task-lock staging",
-    )?;
+fn open_task_lease(path: &Path) -> std::io::Result<Option<FileLease>> {
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lease")?;
     #[cfg(windows)]
-    let mut file =
-        match tracedecay_runtime_core::windows_security::create_private_file(&staging_path) {
-            Ok(file) => file,
-            Err(error) => {
-                return if staging_path.try_exists().unwrap_or(true) {
-                    Err(TaskLockStagingCreationError::CommitUncertain {
-                        error,
-                        staging_path,
-                    })
-                } else {
-                    Err(TaskLockStagingCreationError::Definite(error))
-                };
-            }
-        };
-    #[cfg(not(windows))]
-    let mut file = {
-        let mut options = cap_std::fs::OpenOptions::new();
-        options
-            .create_new(true)
-            .write(true)
-            .follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        options.mode(0o600);
-        parent.open_with(&staging_name, &options)?
-    };
-    let started_at =
-        tracedecay_runtime_core::lifecycle_lease::process_start_time(std::process::id());
-    let payload = match started_at {
-        Some(started_at) => format!(
-            "pid={}\ncreated_at={now_secs}\nstarted_at={started_at}\ntoken={ownership_token}\n",
-            std::process::id()
-        ),
-        None => format!(
-            "pid={}\ncreated_at={now_secs}\ntoken={ownership_token}\n",
-            std::process::id()
-        ),
-    };
-    let write_result = file
-        .write_all(payload.as_bytes())
-        .and_then(|()| file.sync_all());
-    if let Err(error) = write_result {
-        drop(file);
-        return Err(TaskLockStagingCreationError::Definite(
-            cleanup_unpublished_task_lock_staging(
-                &staging_path,
-                "automation task-lock staging write failed",
-                error,
-            ),
-        ));
-    }
-    drop(file);
-
-    Ok(PreparedTaskLockPublication {
-        parent,
-        destination_name,
-        staging_name,
-        staging_path,
-    })
-}
-
-fn settle_task_lock_link_result(
-    path: &Path,
-    ownership_token: &str,
-    staging_path: PathBuf,
-    link_result: std::io::Result<()>,
-) -> std::result::Result<(AutomationTaskLock, PathBuf), TaskLockPublicationError> {
-    let owned_task_lock = || AutomationTaskLock {
-        path: path.to_path_buf(),
-        ownership_token: ownership_token.to_owned(),
-        staging_path: None,
-    };
-    match link_result {
-        Ok(()) => Ok((owned_task_lock(), staging_path)),
-        Err(link_error) => match read_task_lock_snapshot(path) {
-            Ok(Some(snapshot)) if snapshot.ownership_token.as_deref() == Some(ownership_token) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %link_error,
-                    "automation task-lock hard-link result was uncertain, but exact ownership is visible"
-                );
-                Ok((owned_task_lock(), staging_path))
-            }
-            Ok(_) => Err(TaskLockPublicationError::Definite(
-                cleanup_unpublished_task_lock_staging(
-                    &staging_path,
-                    "automation task-lock publication failed",
-                    link_error,
-                ),
-            )),
-            Err(inspect_error) => {
-                let mut cleanup_owner = owned_task_lock();
-                cleanup_owner.staging_path = Some(staging_path);
-                Err(TaskLockPublicationError::CommitUncertain {
-                    error: std::io::Error::new(
-                        inspect_error.kind(),
-                        format!(
-                            "automation task-lock hard-link result was uncertain: {link_error}; exact ownership inspection failed: {inspect_error}"
-                        ),
-                    ),
-                    cleanup_owner,
-                })
-            }
-        },
-    }
-}
-
-fn task_lock_staging_path(path: &Path, ownership_token: &str) -> std::io::Result<PathBuf> {
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "automation task-lock path has no file name",
-        )
-    })?;
-    let mut staging_name = std::ffi::OsString::from(".");
-    staging_name.push(file_name);
-    staging_name.push(format!(".{ownership_token}.tmp"));
-    Ok(path.with_file_name(staging_name))
-}
-
-fn cleanup_unpublished_task_lock_staging(
-    staging_path: &Path,
-    context: &str,
-    error: std::io::Error,
-) -> std::io::Error {
-    match tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(staging_path) {
-        Ok(_) => std::io::Error::new(error.kind(), format!("{context}: {error}")),
-        Err(cleanup_error) => std::io::Error::other(format!(
-            "{context}: {error}; staging cleanup failed: {cleanup_error}"
-        )),
-    }
-}
-
-impl AutomationTaskLock {
-    fn settle_published_staging(
-        mut self,
-        staging_path: &Path,
-        cleanup_result: std::io::Result<()>,
-        sync_result: std::io::Result<()>,
-    ) -> Self {
-        if let Err(error) = cleanup_result {
-            tracing::warn!(
-                path = %self.path.display(),
-                staging_path = %staging_path.display(),
-                error = %error,
-                "automation task lock is owned, but its published staging link could not be retired"
-            );
-            self.staging_path = Some(staging_path.to_path_buf());
-        }
-        if let Err(error) = sync_result {
-            tracing::warn!(
-                path = %self.path.display(),
-                error = %error,
-                "automation task lock is owned, but its publication durability is uncertain"
-            );
-        }
-        self
-    }
-}
-
-fn remove_owned_task_lock_blocking(path: &Path, ownership_token: &str) -> std::io::Result<()> {
-    let _coordination = acquire_task_lock_coordination(path)?;
-    let Some(snapshot) = read_task_lock_snapshot(path)? else {
-        return Ok(());
-    };
-    if snapshot.ownership_token.as_deref() != Some(ownership_token) {
-        return Ok(());
-    }
-    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path).map(|_| ())
-}
-
-fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<FileLease> {
-    let path = resolve_task_lock_parent(path)?;
-    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&path);
-    tracedecay_runtime_core::storage::reject_symlink_components(
-        &coordination_path,
-        "automation task-lock coordination",
-    )?;
-    #[cfg(windows)]
-    let file = tracedecay_runtime_core::windows_security::open_or_create_private_lock_file(
-        &coordination_path,
-    )?;
+    let file = tracedecay_runtime_core::windows_security::open_or_create_private_lock_file(path)?;
     #[cfg(not(windows))]
     let file = {
-        let parent_path = coordination_path.parent().ok_or_else(|| {
+        let parent_path = path.parent().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "automation task-lock coordination path has no parent",
+                "automation task lease path has no parent",
             )
         })?;
-        let file_name = coordination_path.file_name().ok_or_else(|| {
+        let file_name = path.file_name().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "automation task-lock coordination path has no file name",
+                "automation task lease path has no file name",
             )
         })?;
         let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
@@ -1289,8 +797,8 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<FileLease> {
             .follow(FollowSymlinks::No);
         #[cfg(unix)]
         options.mode(0o600);
-        // Concurrent acquirers race the first creation of this coordination
-        // file; the shared helper absorbs the spurious Darwin `ENOENT`.
+        // Concurrent acquirers race the first creation of this file; the
+        // shared helper absorbs the spurious Darwin `ENOENT`.
         let file = tracedecay_private_fs::capability_dir::open_or_create_with(
             &parent, file_name, &options,
         )?
@@ -1302,41 +810,60 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<FileLease> {
         }
         file
     };
-    file.lock()?;
-    let file = FileLease::held(file, "automation.task_lock.coordination");
-    file.sync_all()?;
-    tracedecay_private_fs::framed_log::sync_parent_directory(
-        &coordination_path,
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::Strict,
-    )?;
-    Ok(file)
+    match file.try_lock() {
+        Ok(()) => Ok(Some(FileLease::held(file, "automation.task_lock"))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
-struct AutomationTaskLockSnapshot {
+/// Before the lease, a task lock was a `<key>.lock` file naming its owner's
+/// pid and process start time, published beside a `<key>.lock.lock`
+/// coordination file. A live old-format holder still owns the key, so the
+/// lease alone must not admit a second task. Returns `false` while such a
+/// holder lives. Records of a confirmed-dead or pid-reused owner are retired;
+/// ownership that cannot be verified is a typed error, never abandonment.
+/// The caller must own the stable publication coordination through settlement.
+fn retire_pre_lease_owner(lock_path: &Path) -> std::io::Result<bool> {
+    if let Some(owner) = read_pre_lease_owner(lock_path)? {
+        let Some(pid) = owner.pid else {
+            return Err(unverifiable_pre_lease_owner(lock_path));
+        };
+        match process_state(pid) {
+            ProcessState::Live if !recorded_owner_was_reused(pid, owner.started_at) => {
+                return Ok(false);
+            }
+            ProcessState::Unknown => return Err(unverifiable_pre_lease_owner(lock_path)),
+            ProcessState::Live | ProcessState::Dead => {
+                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(lock_path)?;
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn unverifiable_pre_lease_owner(lock_path: &Path) -> std::io::Error {
+    std::io::Error::other(format!(
+        "pre-lease automation task lock '{}' has unverifiable ownership; stop older TraceDecay processes and delete it",
+        lock_path.display()
+    ))
+}
+
+struct PreLeaseOwner {
     pid: Option<u32>,
-    created_at: Option<i64>,
-    /// Process start time recorded when the lock was published. Absent on
-    /// locks written before start-time fencing, and when the publisher could
-    /// not read its own start time.
+    /// Absent on locks written before start-time fencing, and when the
+    /// publisher could not read its own start time.
     started_at: Option<u64>,
-    ownership_token: Option<String>,
 }
 
-fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTaskLockSnapshot>> {
-    let path = resolve_task_lock_parent(path)?;
-    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
-    let parent_path = path.parent().ok_or_else(|| {
-        std::io::Error::new(
+fn read_pre_lease_owner(path: &Path) -> std::io::Result<Option<PreLeaseOwner>> {
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lock")?;
+    let (Some(parent_path), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "automation task-lock path has no parent",
-        )
-    })?;
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "automation task-lock path has no file name",
-        )
-    })?;
+            "automation task-lock path requires a parent and file name",
+        ));
+    };
     let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
@@ -1345,40 +872,18 @@ fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTask
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let metadata = file.metadata()?;
-    let mut bytes = Vec::with_capacity(MAX_AUTOMATION_TASK_LOCK_BYTES as usize);
+    let mut bytes = Vec::with_capacity(MAX_PRE_LEASE_TASK_LOCK_BYTES as usize);
     (&mut file)
-        .take(MAX_AUTOMATION_TASK_LOCK_BYTES + 1)
+        .take(MAX_PRE_LEASE_TASK_LOCK_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    let contents = (bytes.len() as u64 <= MAX_AUTOMATION_TASK_LOCK_BYTES)
+    let contents = (bytes.len() as u64 <= MAX_PRE_LEASE_TASK_LOCK_BYTES)
         .then(|| std::str::from_utf8(&bytes).ok())
         .flatten();
-    let pid = contents
-        .and_then(|contents| parse_unique_lock_field(contents, "pid="))
-        .and_then(|value| value.parse::<u32>().ok());
-    let payload_created_at = contents
-        .and_then(|contents| parse_unique_lock_field(contents, "created_at="))
-        .and_then(|value| value.parse::<i64>().ok());
-    let started_at = contents
-        .and_then(|contents| parse_unique_lock_field(contents, "started_at="))
-        .and_then(|value| value.parse::<u64>().ok());
-    let ownership_token = contents
-        .and_then(|contents| parse_unique_lock_field(contents, "token="))
-        .filter(|value| valid_automation_task_lock_token(value))
-        .map(str::to_owned);
-    let created_at = payload_created_at.or_else(|| {
-        metadata
-            .modified()
-            .ok()?
-            .duration_since(SystemClock::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-    });
-    Ok(Some(AutomationTaskLockSnapshot {
-        pid,
-        created_at,
-        started_at,
-        ownership_token,
+    let field =
+        |prefix: &str| contents.and_then(|contents| parse_unique_lock_field(contents, prefix));
+    Ok(Some(PreLeaseOwner {
+        pid: field("pid=").and_then(|value| value.parse().ok()),
+        started_at: field("started_at=").and_then(|value| value.parse().ok()),
     }))
 }
 
@@ -1388,63 +893,6 @@ fn parse_unique_lock_field<'a>(contents: &'a str, prefix: &str) -> Option<&'a st
         .filter_map(|line| line.strip_prefix(prefix).map(str::trim));
     let value = values.next()?;
     values.next().is_none().then_some(value)
-}
-
-fn valid_automation_task_lock_token(token: &str) -> bool {
-    token.len() == AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2
-        && token
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn task_lock_is_reclaimable(
-    snapshot: &AutomationTaskLockSnapshot,
-    stale_after_secs: Option<u64>,
-    now_secs: i64,
-) -> bool {
-    match snapshot.pid {
-        Some(pid) => match process_state(pid) {
-            // A confirmed-dead owner cannot still be inside the critical
-            // section. Age is irrelevant: a reused PID would look live, not
-            // dead, so waiting `stale_after_secs` only delays the retry.
-            ProcessState::Dead => true,
-            // Unknown liveness stays on the age gate. A missing age bound
-            // means the caller disabled that fallback.
-            ProcessState::Unknown => {
-                age_lock_is_reclaimable(snapshot.created_at, stale_after_secs, now_secs)
-            }
-            // A live PID is the owner only when its start time matches the
-            // one published with the lock. A mismatch is PID reuse (including
-            // a process this user cannot signal). A live PID with no recorded
-            // start time is a legacy lock and is not stolen.
-            ProcessState::Live => recorded_owner_was_reused(pid, snapshot.started_at),
-        },
-        // The payload could not yield a pid (missing, oversized, non-UTF-8,
-        // or duplicate `pid=` lines). Fall back to age-based staleness using
-        // `created_at`, which `read_task_lock_snapshot` already backfills
-        // from the file's mtime when the payload has no parseable
-        // `created_at=` field.
-        None => age_lock_is_reclaimable(snapshot.created_at, stale_after_secs, now_secs),
-    }
-}
-
-fn age_lock_is_reclaimable(
-    created_at: Option<i64>,
-    stale_after_secs: Option<u64>,
-    now_secs: i64,
-) -> bool {
-    let Some(stale_after_secs) = stale_after_secs else {
-        return false;
-    };
-    match created_at {
-        Some(created_at) => elapsed_secs(created_at, now_secs) >= stale_after_secs,
-        // Crash-debris escape hatch: no parseable pid AND no readable
-        // creation time (payload and mtime both unavailable) means the
-        // lock can never be aged by any other path, so treat it as
-        // reclaimable rather than permanently wedging the scheduler
-        // tick behind garbage lock contents.
-        None => true,
-    }
 }
 
 fn recorded_owner_was_reused(pid: u32, recorded_started_at: Option<u64>) -> bool {
@@ -1559,6 +1007,8 @@ fn windows_process_state(pid: u32) -> ProcessState {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::super::backend::{AgentTaskFailureClass, AgentTaskRetryAttempt};
@@ -2427,518 +1877,514 @@ evidence about it",
         assert!(!cron_is_due(&cron, Some(3_600), 3_600));
     }
 
+    async fn acquire(root: &Path, key: &str) -> Option<AutomationTaskLock> {
+        AutomationTaskLock::try_acquire_keyed(root, key)
+            .await
+            .expect("task-lock acquisition")
+    }
+
+    /// Replays the shipped owner's publication/cleanup coordination in a real
+    /// process, with a pipe barrier before publication rather than a timing race.
     #[test]
-    fn published_task_lock_uncertainty_returns_owner_and_drop_retries_staging() {
-        let temp = tempdir().unwrap();
-        let lock_dir = temp.path().join("automation_locks");
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
-            .unwrap();
+    fn task_lock_process_participant() {
+        let Some(root) = std::env::var_os("TRACEDECAY_TEST_TASK_LOCK_ROOT") else {
+            return;
+        };
+        let lock_dir = PathBuf::from(root);
+        let old = std::env::var("TRACEDECAY_TEST_TASK_LOCK_OWNER").unwrap() == "old";
         let lock_path = lock_dir.join("memory_curator.lock");
-        let ownership_token = "a".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
-        let staging_path = task_lock_staging_path(&lock_path, &ownership_token).unwrap();
-        let task_lock = create_task_lock_file_with_post_publish(
-            &lock_path,
-            &ownership_token,
-            100,
-            |_| {
-                Err(std::io::Error::other(
-                    "injected staging cleanup uncertainty",
-                ))
-            },
-            |_| Err(std::io::Error::other("injected parent sync uncertainty")),
-        )
-        .unwrap();
-
-        assert!(lock_path.exists());
-        assert!(staging_path.exists());
-        let contender_token = "b".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
-        assert!(
-            try_acquire_task_lock_blocking(&lock_path, &contender_token, Some(10), 200)
-                .unwrap()
-                .is_none(),
-            "publication uncertainty must still return a live token owner"
-        );
-
-        drop(task_lock);
-        assert!(!lock_path.exists());
-        assert!(
-            !staging_path.exists(),
-            "guard drop must retry its exact staging residue"
-        );
+        let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
+        let mut coordination = None;
+        let mut task = None;
+        for command in std::io::stdin().lock().lines() {
+            let answer = match command.unwrap().as_str() {
+                "prepare" if old => {
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(&coordination_path)
+                        .unwrap();
+                    match file.try_lock() {
+                        Ok(()) => {
+                            coordination = Some(FileLease::held(file, "test.old-task"));
+                            "held"
+                        }
+                        Err(std::fs::TryLockError::WouldBlock) => "busy",
+                        Err(error) => panic!("old coordination: {error}"),
+                    }
+                }
+                "publish" if old => {
+                    assert!(coordination.is_some());
+                    assert!(!lock_path.exists());
+                    // The production publisher hard-linked a synced staging
+                    // file under this lock. Keep that publication ordering.
+                    let staging = lock_dir.join("old-owner-staging");
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&staging)
+                        .unwrap();
+                    writeln!(file, "pid={}\ncreated_at=0", std::process::id()).unwrap();
+                    file.sync_all().unwrap();
+                    std::fs::hard_link(&staging, &lock_path).unwrap();
+                    std::fs::remove_file(staging).unwrap();
+                    drop(coordination.take());
+                    "executing"
+                }
+                "finish" if old => {
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&coordination_path)
+                        .unwrap();
+                    file.lock().unwrap();
+                    let guard = FileLease::held(file, "test.old-task-cleanup");
+                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
+                        &lock_path,
+                    )
+                    .unwrap();
+                    drop(guard);
+                    "released"
+                }
+                "acquire" if !old => {
+                    assert!(task.is_none());
+                    task = try_acquire_task_lock_blocking(&lock_dir, "memory_curator").unwrap();
+                    if task.is_some() { "held" } else { "busy" }
+                }
+                "release" if !old => {
+                    assert!(task.take().is_some());
+                    "released"
+                }
+                command => panic!("unexpected task-lock process command: {command}"),
+            };
+            println!("task-lock:{answer}");
+            std::io::stdout().flush().unwrap();
+        }
     }
 
-    #[test]
-    fn exact_task_lock_cleanup_retries_before_abandoning_owner_evidence() {
-        let mut attempts = 0_u32;
-        retry_exact_task_lock_cleanup(|| {
-            attempts += 1;
-            if attempts < AUTOMATION_TASK_LOCK_CLEANUP_ATTEMPTS {
-                Err(std::io::Error::other("injected transient cleanup failure"))
-            } else {
-                Ok(())
-            }
-        })
-        .unwrap();
-
-        assert_eq!(attempts, AUTOMATION_TASK_LOCK_CLEANUP_ATTEMPTS);
+    struct TaskLockProcess {
+        child: Child,
+        input: ChildStdin,
+        output: BufReader<ChildStdout>,
     }
 
-    #[test]
-    fn committed_hard_link_error_adopts_visible_exact_owner() {
-        let temp = tempdir().unwrap();
-        let lock_dir = temp.path().join("automation_locks");
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
-            .unwrap();
-        let lock_path = lock_dir.join("session_reflector.lock");
-        let ownership_token = "e".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
-
-        let (task_lock, staging_path) =
-            publish_task_lock_file_after_committed_link_error(&lock_path, &ownership_token, 100)
+    impl TaskLockProcess {
+        fn spawn(lock_dir: &Path, owner: &str) -> Self {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "automation::scheduler::tests::task_lock_process_participant",
+                    "--nocapture",
+                ])
+                .env("TRACEDECAY_TEST_TASK_LOCK_ROOT", lock_dir)
+                .env("TRACEDECAY_TEST_TASK_LOCK_OWNER", owner)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
                 .unwrap();
-        let cleanup_result =
-            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&staging_path)
-                .map(|_| ());
-        let task_lock = task_lock.settle_published_staging(&staging_path, cleanup_result, Ok(()));
+            Self {
+                input: child.stdin.take().unwrap(),
+                output: BufReader::new(child.stdout.take().unwrap()),
+                child,
+            }
+        }
 
-        assert_eq!(
-            read_task_lock_snapshot(&lock_path)
-                .unwrap()
-                .unwrap()
-                .ownership_token
-                .as_deref(),
-            Some(ownership_token.as_str()),
-        );
-        let contender_token = "f".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
-        assert!(
-            try_acquire_task_lock_blocking(&lock_path, &contender_token, Some(10), 200)
-                .unwrap()
-                .is_none(),
-            "a commit-uncertain hard link with visible exact ownership must deny contenders"
-        );
-
-        drop(task_lock);
-        assert!(!lock_path.exists());
+        fn command(&mut self, command: &str) -> String {
+            writeln!(self.input, "{command}").unwrap();
+            self.input.flush().unwrap();
+            loop {
+                let mut line = String::new();
+                assert_ne!(self.output.read_line(&mut line).unwrap(), 0, "child exited");
+                if let Some((_, answer)) = line.split_once("task-lock:") {
+                    return answer.trim().to_owned();
+                }
+            }
+        }
     }
 
-    #[cfg(unix)]
+    impl Drop for TaskLockProcess {
+        fn drop(&mut self) {
+            // Also reap the child if a regression assertion unwinds before
+            // the parent's explicit release. Never leave fixture owners alive.
+            let _ = self.child.kill();
+            self.child.wait().unwrap();
+        }
+    }
+
     #[test]
-    fn task_lock_coordination_rejects_final_symlink() {
+    fn old_and_new_processes_exclude_publication_and_execution_until_release() {
         let temp = tempdir().unwrap();
         let lock_dir = temp.path().join("automation_locks");
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
             .unwrap();
         let lock_path = lock_dir.join("memory_curator.lock");
         let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
-        let outside = temp.path().join("outside-lock-target");
-        std::fs::write(&outside, b"unchanged").unwrap();
-        std::os::unix::fs::symlink(&outside, &coordination_path).unwrap();
+        let mut old = TaskLockProcess::spawn(&lock_dir, "old");
+        let mut new = TaskLockProcess::spawn(&lock_dir, "new");
 
-        let error = try_acquire_task_lock_blocking(
-            &lock_path,
-            &"1".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2),
-            Some(10),
-            200,
-        )
-        .unwrap_err();
+        assert_eq!(old.command("prepare"), "held");
+        let stable_inode = std::fs::metadata(&coordination_path).unwrap();
+        assert!(
+            !lock_path.exists(),
+            "old holder is paused before publication"
+        );
+        let new_admission = new.command("acquire");
+        assert_eq!(old.command("publish"), "executing");
+        assert_eq!(
+            new_admission, "busy",
+            "old task published and executes: admitting new before publication runs both tasks"
+        );
+        assert_eq!(new.command("acquire"), "busy", "old task still executes");
+        assert_eq!(old.command("finish"), "released");
 
+        assert_eq!(new.command("acquire"), "held");
         assert!(!lock_path.exists());
-        assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
-        assert!(coordination_path.is_symlink());
-        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            old.command("prepare"),
+            "busy",
+            "new task must retain old publication coordination for its whole lifetime"
+        );
+        let mut next = TaskLockProcess::spawn(&lock_dir, "new");
+        assert_eq!(next.command("acquire"), "busy");
+        assert_eq!(new.command("release"), "released");
+
+        assert_eq!(old.command("prepare"), "held");
+        assert_eq!(old.command("publish"), "executing");
+        assert_eq!(next.command("acquire"), "busy");
+        assert_eq!(old.command("finish"), "released");
+        assert_eq!(next.command("acquire"), "held");
+        assert_eq!(next.command("release"), "released");
+        assert_eq!(new.command("acquire"), "held");
+        drop(new);
+        assert_eq!(
+            old.command("prepare"),
+            "held",
+            "process death releases legacy coordination too"
+        );
+        assert_eq!(old.command("publish"), "executing");
+        assert_eq!(next.command("acquire"), "busy");
+        assert_eq!(old.command("finish"), "released");
+        assert_eq!(next.command("acquire"), "held");
+        assert_eq!(next.command("release"), "released");
+        assert!(coordination_path.exists(), "coordination is never unlinked");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(coordination_path).unwrap().ino(),
+                stable_inode.ino(),
+                "all generations must coordinate on the same inode"
+            );
+        }
+        #[cfg(not(unix))]
+        drop(stable_inode);
+    }
+
+    #[tokio::test]
+    async fn same_key_admits_one_holder_until_release_and_other_keys_are_independent() {
+        let root = tempdir().unwrap();
+        let first = acquire(root.path(), "memory_curator")
+            .await
+            .expect("first holder");
+        assert!(acquire(root.path(), "memory_curator").await.is_none());
+        let other = acquire(root.path(), "session_reflector")
+            .await
+            .expect("a different key is independent");
+
+        drop(first);
+        let next = acquire(root.path(), "memory_curator")
+            .await
+            .expect("explicit release admits the next holder");
+        drop((other, next));
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_both_task_coordination_locks() {
+        let root = tempdir().unwrap();
+        let holder_root = root.path().to_path_buf();
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let _guard = acquire(&holder_root, "cancelled").await.unwrap();
+            held_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        held_rx.await.unwrap();
+        assert!(acquire(root.path(), "cancelled").await.is_none());
+        let coordination_path = root.path().join("automation_locks/cancelled.lock.lock");
+        let old = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(coordination_path)
+            .unwrap();
+        assert!(matches!(
+            old.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        holder.abort();
+        assert!(holder.await.unwrap_err().is_cancelled());
+        old.try_lock()
+            .expect("cancellation releases old coordination");
+        old.unlock().unwrap();
+        assert!(acquire(root.path(), "cancelled").await.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_same_key_admission_has_exactly_one_winner() {
+        let root = tempdir().unwrap();
+        let attempts = (0..16).map(|_| {
+            let root = root.path().to_path_buf();
+            tokio::spawn(async move { acquire(&root, "contended").await })
+        });
+        let mut winners = 0;
+        let mut held = Vec::new();
+        for attempt in attempts {
+            if let Some(lock) = attempt.await.unwrap() {
+                winners += 1;
+                held.push(lock);
+            }
+        }
+        assert_eq!(winners, 1);
+    }
+
+    #[tokio::test]
+    async fn release_keeps_the_lease_file_so_exclusion_never_splits_across_inodes() {
+        let root = tempdir().unwrap();
+        let lease_path = root.path().join("automation_locks/memory_curator.lease");
+        drop(acquire(root.path(), "memory_curator").await.unwrap());
+        assert!(
+            lease_path.exists(),
+            "release must not unlink the lease file"
+        );
+        #[cfg(unix)]
+        let before = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&lease_path).unwrap().ino()
+        };
+        let held = acquire(root.path(), "memory_curator").await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(&lease_path).unwrap().ino(), before);
+        }
+        let foreign_open = std::fs::File::open(&lease_path).unwrap();
+        assert!(
+            matches!(
+                foreign_open.try_lock_shared(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ),
+            "the lease is a kernel lock any other process observes"
+        );
+        drop(held);
+        foreign_open
+            .try_lock_shared()
+            .expect("release unlocks for other open file descriptions");
+    }
+
+    #[test]
+    fn release_needs_no_tokio_runtime() {
+        let temp = tempdir().unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        let guard = try_acquire_task_lock_blocking(&lock_dir, "no_runtime")
+            .unwrap()
+            .expect("fresh key");
+        drop(guard);
+        try_acquire_task_lock_blocking(&lock_dir, "no_runtime")
+            .unwrap()
+            .expect("drop released synchronously");
     }
 
     #[cfg(unix)]
     #[test]
-    fn task_lock_rejects_final_symlink_without_touching_target() {
+    fn task_coordination_symlinks_are_rejected_without_touching_their_targets() {
         let temp = tempdir().unwrap();
-        let real = temp.path().join("real");
-        let alias = temp.path().join("alias");
-        std::fs::create_dir(&real).unwrap();
-        std::os::unix::fs::symlink(&real, &alias).unwrap();
-        let lock_path = alias.join("task.lock");
-        let outside = temp.path().join("outside");
-        let token = "1".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
-        let contents = format!("pid=invalid\ncreated_at=1\ntoken={token}\n");
-        std::fs::write(&outside, &contents).unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
+            .unwrap();
+        let outside = temp.path().join("outside-lock-target");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        for (key, suffix) in [("lease_symlink", "lease"), ("old_symlink", "lock.lock")] {
+            let path = lock_dir.join(format!("{key}.{suffix}"));
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+
+            let error = try_acquire_task_lock_blocking(&lock_dir, key).unwrap_err();
+
+            assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+            assert!(path.is_symlink());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_lease_owner_symlink_denial_releases_both_coordination_locks() {
+        let temp = tempdir().unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
+            .unwrap();
+        let outside = temp.path().join("outside-owner");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        let lock_path = lock_dir.join("memory_curator.lock");
         std::os::unix::fs::symlink(&outside, &lock_path).unwrap();
 
-        assert!(read_task_lock_snapshot(&lock_path).is_err());
-        assert!(prepare_task_lock_publication(&lock_path, &token, 200).is_err());
-        assert!(remove_owned_task_lock_blocking(&lock_path, &token).is_err());
-        assert!(try_acquire_task_lock_blocking(&lock_path, &token, Some(0), 200).is_err());
+        assert!(try_acquire_task_lock_blocking(&lock_dir, "memory_curator").is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
         assert!(lock_path.is_symlink());
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), contents);
-        assert!(!tracedecay_runtime_core::storage::append_lock_path(&outside).exists());
+        // Remove only the fixture symlink; the denied acquisition must leave
+        // both stable lock files reusable, without touching the outside target.
+        std::fs::remove_file(lock_path).unwrap();
+        assert!(
+            try_acquire_task_lock_blocking(&lock_dir, "memory_curator")
+                .unwrap()
+                .is_some()
+        );
     }
 
-    #[test]
-    fn uncertain_old_task_lock_guard_preserves_replacement_token() {
-        let temp = tempdir().unwrap();
-        let lock_dir = temp.path().join("automation_locks");
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
-            .unwrap();
-        let lock_path = lock_dir.join("skill_writer.lock");
-        let old_token = "c".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
-        let old_staging_path = task_lock_staging_path(&lock_path, &old_token).unwrap();
-        let old_lock = create_task_lock_file_with_post_publish(
-            &lock_path,
-            &old_token,
-            100,
-            |_| {
-                Err(std::io::Error::other(
-                    "injected staging cleanup uncertainty",
-                ))
-            },
-            |_| Ok(()),
+    fn write_pre_lease_lock(lock_dir: &Path, key: &str, payload: &[u8]) -> PathBuf {
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(lock_dir).unwrap();
+        let lock_path = lock_dir.join(format!("{key}.lock"));
+        std::fs::write(&lock_path, payload).unwrap();
+        std::fs::write(
+            tracedecay_runtime_core::storage::append_lock_path(&lock_path),
+            b"",
         )
         .unwrap();
-        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&lock_path).unwrap();
-
-        let replacement_token = "d".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
-        let replacement = create_task_lock_file(&lock_path, &replacement_token, 200).unwrap();
-        let replacement_record = std::fs::read_to_string(&lock_path).unwrap();
-
-        drop(old_lock);
-        assert_eq!(
-            std::fs::read_to_string(&lock_path).unwrap(),
-            replacement_record,
-            "the uncertain prior guard must not unlink a newer owner token"
-        );
-        assert!(
-            !old_staging_path.exists(),
-            "the prior guard must retire only its exact staging residue"
-        );
-
-        drop(replacement);
-        assert!(!lock_path.exists());
+        lock_path
     }
 
     #[test]
-    fn task_lock_is_reclaimable_with_unparseable_pid_and_stale_created_at() {
-        let snapshot = AutomationTaskLockSnapshot {
-            pid: None,
-            created_at: Some(100),
-            started_at: None,
-            ownership_token: None,
+    fn live_pre_lease_holder_keeps_the_key_and_its_files() {
+        let temp = tempdir().unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        let payload = format!("pid={}\ncreated_at=0\n", std::process::id());
+        let lock_path = write_pre_lease_lock(&lock_dir, "memory_curator", payload.as_bytes());
+
+        assert!(
+            try_acquire_task_lock_blocking(&lock_dir, "memory_curator")
+                .unwrap()
+                .is_none(),
+            "a live old-format holder must keep exclusion however old its lock is"
+        );
+        assert!(lock_path.exists());
+        assert!(
+            try_acquire_task_lock_blocking(&lock_dir, "other_key")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    fn reaped_pid() -> u32 {
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/C", "exit"])
+        } else {
+            ("true", &[])
         };
-        assert!(
-            task_lock_is_reclaimable(&snapshot, Some(10), 200),
-            "an unparseable pid must fall back to created_at staleness"
-        );
-    }
-
-    #[test]
-    fn task_lock_is_reclaimable_with_unparseable_pid_and_fresh_created_at() {
-        let snapshot = AutomationTaskLockSnapshot {
-            pid: None,
-            created_at: Some(195),
-            started_at: None,
-            ownership_token: None,
-        };
-        assert!(
-            !task_lock_is_reclaimable(&snapshot, Some(10), 200),
-            "a fresh created_at must not be reclaimable even without a pid"
-        );
-    }
-
-    #[test]
-    fn task_lock_is_reclaimable_with_no_pid_and_no_created_at_is_crash_debris() {
-        let snapshot = AutomationTaskLockSnapshot {
-            pid: None,
-            created_at: None,
-            started_at: None,
-            ownership_token: None,
-        };
-        assert!(
-            task_lock_is_reclaimable(&snapshot, Some(10), 200),
-            "a lock with neither a parseable pid nor any created_at (payload \
-             and mtime both unavailable) must not be permanently wedged"
-        );
-    }
-
-    #[test]
-    fn task_lock_is_reclaimable_denies_live_process_regardless_of_age() {
-        let snapshot = AutomationTaskLockSnapshot {
-            pid: Some(std::process::id()),
-            created_at: Some(0),
-            started_at: None,
-            ownership_token: None,
-        };
-        assert!(
-            !task_lock_is_reclaimable(&snapshot, Some(10), 200),
-            "a live owner must never be reclaimed, no matter how old the lock is"
-        );
-    }
-
-    fn reapable_process_program() -> &'static str {
-        if cfg!(windows) { "cmd" } else { "true" }
-    }
-
-    fn reapable_process_args() -> &'static [&'static str] {
-        if cfg!(windows) { &["/C", "exit"] } else { &[] }
-    }
-
-    #[test]
-    fn task_lock_is_reclaimable_for_a_fresh_confirmed_dead_pid() {
-        let mut child = std::process::Command::new(reapable_process_program())
-            .args(reapable_process_args())
+        let mut child = std::process::Command::new(program)
+            .args(args)
             .spawn()
             .expect("spawn a process to reap");
-        let dead_pid = child.id();
-        child.wait().expect("reap lock owner");
-        assert!(
-            matches!(process_state(dead_pid), ProcessState::Dead),
-            "the reaped child must be a confirmed-dead owner"
-        );
-        let snapshot = AutomationTaskLockSnapshot {
-            pid: Some(dead_pid),
-            created_at: Some(200),
-            started_at: None,
-            ownership_token: None,
-        };
-        assert!(
-            task_lock_is_reclaimable(&snapshot, Some(6 * 60 * 60), 200),
-            "a confirmed-dead owner must be reclaimed immediately, not after the age gate"
-        );
-        assert!(
-            task_lock_is_reclaimable(&snapshot, None, 200),
-            "disabling the age fallback must not keep a dead owner's lock"
-        );
+        let pid = child.id();
+        child.wait().expect("reap process");
+        assert!(matches!(process_state(pid), ProcessState::Dead));
+        pid
     }
 
     #[test]
-    fn task_lock_is_reclaimable_when_a_live_pid_start_time_does_not_match() {
-        let Some(live_started_at) =
-            tracedecay_runtime_core::lifecycle_lease::process_start_time(std::process::id())
-        else {
-            return;
-        };
-        let mismatched = live_started_at.saturating_add(1);
-        let snapshot = AutomationTaskLockSnapshot {
-            pid: Some(std::process::id()),
-            created_at: Some(200),
-            started_at: Some(mismatched),
-            ownership_token: None,
-        };
-        assert!(
-            task_lock_is_reclaimable(&snapshot, None, 200),
-            "a reused PID must not keep a lock published by a different process start"
-        );
-        let same_owner = AutomationTaskLockSnapshot {
-            started_at: Some(live_started_at),
-            ..snapshot
-        };
-        assert!(
-            !task_lock_is_reclaimable(&same_owner, Some(0), 10_000),
-            "a matching start time is the same owner even when the lock is old"
-        );
-    }
-
-    #[test]
-    fn task_lock_is_reclaimed_end_to_end_when_payload_is_garbage_and_stale_after_is_zero() {
+    fn dead_pre_lease_owner_is_retired_without_replacing_coordination() {
         let temp = tempdir().unwrap();
         let lock_dir = temp.path().join("automation_locks");
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
-            .unwrap();
-        let lock_path = lock_dir.join("garbage_payload.lock");
+        let payload = format!("pid={}\ncreated_at=0\n", reaped_pid());
+        let lock_path = write_pre_lease_lock(&lock_dir, "memory_curator", payload.as_bytes());
+        let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
 
-        // A payload larger than MAX_AUTOMATION_TASK_LOCK_BYTES (and not even
-        // valid `key=value` text) means read_task_lock_snapshot can parse no
-        // pid at all. With stale_after_secs = Some(0), the created_at
-        // fallback (the file's own mtime) always qualifies as stale, so the
-        // lock must still be reclaimable on the retry attempt inside
-        // try_acquire_task_lock_blocking rather than wedging forever.
-        let garbage = vec![0xFFu8; 2000];
-        assert!(garbage.len() as u64 > MAX_AUTOMATION_TASK_LOCK_BYTES);
-        std::fs::write(&lock_path, &garbage).unwrap();
-
-        let contender_token = "9".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
-        let acquired = try_acquire_task_lock_blocking(&lock_path, &contender_token, Some(0), 200)
+        let held = try_acquire_task_lock_blocking(&lock_dir, "memory_curator")
             .unwrap()
-            .expect("a garbage-payload lock with stale_after_secs=0 must be reclaimable");
+            .expect("a confirmed-dead old holder no longer owns the key");
 
-        let snapshot = read_task_lock_snapshot(&lock_path).unwrap().unwrap();
-        assert_eq!(
-            snapshot.ownership_token.as_deref(),
-            Some(contender_token.as_str()),
-            "the contender's fresh token must now own the lock"
+        assert!(!lock_path.exists());
+        assert!(coordination_path.exists());
+        let old = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&coordination_path)
+            .unwrap();
+        assert!(matches!(
+            old.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        old.try_lock()
+            .expect("release admits the old coordination inode");
+        old.unlock().unwrap();
+    }
+
+    #[test]
+    fn reused_pid_pre_lease_lock_is_retired() {
+        let live_started_at =
+            tracedecay_runtime_core::lifecycle_lease::process_start_time(std::process::id())
+                .expect("current process start-time evidence");
+        let temp = tempdir().unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        let payload = format!(
+            "pid={}\nstarted_at={}\n",
+            std::process::id(),
+            live_started_at.saturating_add(1)
         );
+        let lock_path = write_pre_lease_lock(&lock_dir, "memory_curator", payload.as_bytes());
 
-        drop(acquired);
+        try_acquire_task_lock_blocking(&lock_dir, "memory_curator")
+            .unwrap()
+            .expect("a pid reused by a different process start is not the old owner");
         assert!(!lock_path.exists());
     }
 
-    /// Acquires a real task lock off-runtime so each release-path test starts
-    /// from the same live-owner state.
-    fn acquire_lock_for_release_test(lock_path: &Path) -> AutomationTaskLock {
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(
-            lock_path.parent().unwrap(),
-        )
-        .unwrap();
-        try_acquire_task_lock_blocking(
-            lock_path,
-            &"c".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2),
-            Some(10),
-            100,
-        )
-        .unwrap()
-        .expect("a fresh lock path must be acquirable")
-    }
-
-    /// A contender must be able to take the lock the instant the guard's drop
-    /// returns.
-    fn assert_lock_released(lock_path: &Path) {
-        assert!(
-            !lock_path.exists(),
-            "guard drop must remove the lock file synchronously"
-        );
-        let contender = try_acquire_task_lock_blocking(
-            lock_path,
-            &"d".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2),
-            Some(10),
-            200,
-        )
-        .unwrap()
-        .expect("a released lock must be immediately acquirable by a contender");
-        drop(contender);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_lock_release_completes_on_a_multi_thread_worker() {
-        let temp = tempdir().unwrap();
-        let lock_path = temp
-            .path()
-            .join("automation_locks")
-            .join("multi_thread_worker.lock");
-
-        // Acquire the way production does (spawn_blocking), then move the guard
-        // back onto an async worker so its drop runs on the runtime.
-        let acquire_path = lock_path.clone();
-        let guard = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            acquire_lock_for_release_test(&acquire_path)
-        })
-        .await
-        .unwrap();
-        assert!(lock_path.exists());
-
-        drop(guard);
-        assert_lock_released(&lock_path);
-    }
-
-    /// The ordering that wedged `daemon::tests::rmcp_route` for a full drain
-    /// bound: a worker offers a blocking task to a pool that has already begun
-    /// shutting down, and tokio's `blocking::pool::Spawner::spawn_task` shuts
-    /// the refused task down *while holding* the pool's non-reentrant mutex.
-    /// The refused closure owns this guard, so its release runs under that
-    /// mutex, and a release that re-enters the runtime never returns, leaving
-    /// `BlockingPool::shutdown` waiting for the thread forever.
-    ///
-    /// Ordering is fixed by channels, not timing: the worker is parked until
-    /// after `shutdown_timeout` has returned, so the pool is provably closed
-    /// before `spawn_blocking` is offered and the refusal branch is the only
-    /// branch reachable. The `shutdown_timeout` budget only bounds tokio's
-    /// attempt to join the deliberately parked worker.
     #[test]
-    fn task_lock_release_survives_a_drop_inside_a_refused_spawn_blocking() {
+    fn unverifiable_pre_lease_lock_is_an_error_not_abandonment() {
         let temp = tempdir().unwrap();
-        let lock_path = temp
-            .path()
-            .join("automation_locks")
-            .join("refused_spawn_blocking.lock");
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-        let guard = acquire_lock_for_release_test(&lock_path);
-        assert!(lock_path.exists());
+        let lock_dir = temp.path().join("automation_locks");
+        let lock_path = write_pre_lease_lock(&lock_dir, "memory_curator", &[0xFF; 2000]);
 
-        let (on_worker_tx, on_worker_rx) = std::sync::mpsc::channel();
-        let (pool_closed_tx, pool_closed_rx) = std::sync::mpsc::channel();
-        let (offered_tx, offered_rx) = std::sync::mpsc::channel();
-        runtime.spawn(async move {
-            // Reached only from a worker thread, which is the sole context
-            // where the release can re-enter the blocking spawner.
-            on_worker_tx.send(()).unwrap();
-            pool_closed_rx.recv().unwrap();
-            let _refused = tokio::task::spawn_blocking(move || drop(guard));
-            offered_tx.send(()).unwrap();
-        });
-        on_worker_rx.recv().unwrap();
-
-        runtime.shutdown_timeout(std::time::Duration::from_millis(50));
-        pool_closed_tx.send(()).unwrap();
-
-        offered_rx
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .expect("releasing the guard under the blocking pool's own mutex must not deadlock");
-        assert_lock_released(&lock_path);
+        assert!(try_acquire_task_lock_blocking(&lock_dir, "memory_curator").is_err());
+        assert!(lock_path.exists(), "unverified ownership must be preserved");
+        assert!(
+            try_acquire_task_lock_blocking(&lock_dir, "memory_curator").is_err(),
+            "the lease taken by the failed attempt must have been released"
+        );
     }
 
     #[test]
-    fn task_lock_release_works_with_no_tokio_runtime() {
+    fn pre_lease_owner_checks_preserve_live_and_unknown_records() {
         let temp = tempdir().unwrap();
-        let lock_path = temp.path().join("automation_locks").join("no_runtime.lock");
+        let lock_dir = temp.path().join("automation_locks");
+        let pid = std::process::id();
+        let started_at = tracedecay_runtime_core::lifecycle_lease::process_start_time(pid)
+            .expect("current process start-time evidence");
+        let live = format!("pid={pid}\nstarted_at={started_at}\ncreated_at=0\n");
+        let live_path = write_pre_lease_lock(&lock_dir, "live", live.as_bytes());
         assert!(
-            tokio::runtime::Handle::try_current().is_err(),
-            "this test must run without a runtime handle so the inline path is exercised"
+            try_acquire_task_lock_blocking(&lock_dir, "live")
+                .unwrap()
+                .is_none()
         );
-
-        let guard = acquire_lock_for_release_test(&lock_path);
-        assert!(lock_path.exists());
-        drop(guard);
-        assert_lock_released(&lock_path);
-    }
-
-    #[tokio::test]
-    async fn task_lock_release_completes_on_a_current_thread_runtime() {
-        let temp = tempdir().unwrap();
-        let lock_path = temp
-            .path()
-            .join("automation_locks")
-            .join("current_thread.lock");
-        assert_eq!(
-            tokio::runtime::Handle::current().runtime_flavor(),
-            tokio::runtime::RuntimeFlavor::CurrentThread,
-            "#[tokio::test] must default to the current-thread flavor for this case"
-        );
-
-        let guard = acquire_lock_for_release_test(&lock_path);
-        assert!(lock_path.exists());
-        drop(guard);
-        assert_lock_released(&lock_path);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_lock_release_from_spawn_blocking_owner_does_not_panic() {
-        let temp = tempdir().unwrap();
-        let lock_path = temp
-            .path()
-            .join("automation_locks")
-            .join("settlement_owner.lock");
-
-        // The settlement-owner pattern in daemon::automation_effect acquires and
-        // drops the guard entirely inside spawn_blocking, which is where callers
-        // that cannot afford to block a worker are expected to release it.
-        let owned_path = lock_path.clone();
-        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let guard = acquire_lock_for_release_test(&owned_path);
-            assert!(owned_path.exists());
-            drop(guard);
-            assert!(!owned_path.exists());
-        })
-        .await
-        .expect("dropping the guard inside spawn_blocking must not panic");
-
-        assert_lock_released(&lock_path);
+        assert_eq!(std::fs::read(live_path).unwrap(), live.as_bytes());
+        for (key, payload) in [
+            ("unknown", "pid=0\ncreated_at=0\n".to_owned()),
+            ("duplicate", format!("pid={pid}\npid={pid}\ncreated_at=0\n")),
+            ("missing", "created_at=0\n".to_owned()),
+        ] {
+            let path = write_pre_lease_lock(&lock_dir, key, payload.as_bytes());
+            assert!(try_acquire_task_lock_blocking(&lock_dir, key).is_err());
+            assert_eq!(std::fs::read(path).unwrap(), payload.as_bytes());
+        }
     }
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_task_locks_acquire_through_symlinked_dashboard_prefix() {
-        // cap-std ambient opens walk each component. A prefix symlink
-        // (`tmp/link` → `tmp/real`, or macOS `/var` → `/private/var`) must
-        // resolve before Dir::open_ambient_dir or concurrent acquires ENOENT.
+        // A prefix symlink (`tmp/link` -> `tmp/real`, or macOS `/var` ->
+        // `/private/var`) must resolve before cap-std walks the components or
+        // concurrent acquires ENOENT.
         let temp = tempdir().unwrap();
         let real = temp.path().join("real");
         let link = temp.path().join("link");
@@ -2948,22 +2394,10 @@ evidence about it",
 
         let first_root = dashboard_root.clone();
         let second_root = dashboard_root;
-        let first = tokio::spawn(async move {
-            AutomationTaskLock::try_acquire_keyed(&first_root, "concurrent-a", Some(10), 100).await
-        });
-        let second = tokio::spawn(async move {
-            AutomationTaskLock::try_acquire_keyed(&second_root, "concurrent-b", Some(10), 100).await
-        });
-        let first = first
-            .await
-            .expect("join first lock")
-            .expect("first lock acquire through prefix symlink");
-        let second = second
-            .await
-            .expect("join second lock")
-            .expect("second lock acquire through prefix symlink");
+        let first = tokio::spawn(async move { acquire(&first_root, "concurrent-a").await });
+        let second = tokio::spawn(async move { acquire(&second_root, "concurrent-b").await });
         assert!(
-            first.is_some() && second.is_some(),
+            first.await.unwrap().is_some() && second.await.unwrap().is_some(),
             "distinct keys under a shared lock dir must both acquire"
         );
     }
