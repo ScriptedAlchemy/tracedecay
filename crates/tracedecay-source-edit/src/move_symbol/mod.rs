@@ -26,8 +26,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
 
 use crate::edits::{
-    EditSymbolV1, LeadingKind, classify_leading_line, edit_success_message,
-    edit_symbol_from_summary, resolve_symbol_for_edit, splice_lines,
+    EditSymbolV1, edit_success_message, edit_symbol_from_summary, is_inner_doc_line,
+    resolve_symbol_for_edit, splice_lines,
 };
 
 use fs_guards::{
@@ -130,8 +130,7 @@ pub(crate) async fn move_symbol(
     // module, not the following item. Advance past it so the source keeps its
     // module doc and the destination doesn't receive a stray `//!` mid-file
     // (a hard E0753).
-    while start < end_inclusive && classify_leading_line(src_lines[start]) == LeadingKind::InnerDoc
-    {
+    while start < end_inclusive && is_inner_doc_line(src_lines[start]) {
         start += 1;
     }
     let moved_text = src_lines[start..=end_inclusive].join("\n");
