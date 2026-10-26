@@ -221,6 +221,20 @@ NO_DEFAULT_FEATURES = "!no-default-features"
 PRODUCTION_CONTEXT = ("tracedecay", "normal,build", frozenset())
 
 
+def owner_pkg(repo_rel, repo=REPO):
+    """Honor existing Bazel package boundaries before creating a shared package."""
+    for directory in (repo_rel.parent, *repo_rel.parent.parents):
+        if directory == Path("."):
+            break
+        if any((repo / directory / name).is_file() for name in ("BUILD.bazel", "BUILD")):
+            group = repo_rel.parent.relative_to(directory)
+            return directory.as_posix(), "" if group == Path(".") else group.as_posix()
+    parts = repo_rel.parts
+    if parts[0] == "crates":
+        return "/".join(parts[:2]), "/".join(parts[2:-1])
+    return parts[0], "/".join(parts[1:-1])
+
+
 def normalize_default_alias(feats, feature_table):
     """Add `default` when it is only an alias for features already enabled.
 
@@ -904,14 +918,6 @@ def main():
     # shared between member crates) need a filegroup in their own package.
     out_of_pkg = {}  # (top_dir, group_dir) -> set of crate_root paths in package
 
-    def owner_pkg(repo_rel):
-        """Package dir that owns repo_rel plus the group dir inside it. Crates
-        members own their subtree. Other top-level dirs own theirs."""
-        parts = repo_rel.parts
-        if parts[0] == "crates":
-            return "/".join(parts[:2]), "/".join(parts[2:-1])
-        return parts[0], "/".join(parts[1:-1])
-
     def group_label(repo_rel, *, sources=False):
         """filegroup label + pkg-relative file label for an out-of-package
         file, registering the group for emission in the owning package."""
@@ -1560,7 +1566,7 @@ def main():
         name member crate roots, so they need none."""
         rules = []
         for gname, entry in sorted(by_pkg.get(pkg_dir, {}).items()):
-            pattern = entry.get("pattern", f'{entry["glob"]}/**')
+            pattern = entry.get("pattern", f'{entry["glob"]}/**' if entry["glob"] else "**")
             exclude = ""
             if entry.get("sources"):
                 pattern += "/*.rs"
@@ -1680,6 +1686,8 @@ def main():
             # other members reach into this one's subtree for.
             outputs[path] += "\n" + "\n\n".join(package_rules(pkg_dir, False)) + "\n"
             continue
+        if not path.exists() and path.with_name("BUILD").is_file():
+            path = path.with_name("BUILD")
         rendered = render_shared(path, pkg_dir)
         if rendered is None:
             obsolete.append(path)
