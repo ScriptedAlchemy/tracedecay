@@ -67,7 +67,8 @@ to `ProcessResidentMemoryV1` under the `code_index.construction.v1`
 component, through `ResidentMemoryOperationV1::reserve_process_shared`. A
 refused build parks until its witnessed reconstruction demand fits, so a
 concurrent second cold pass waits instead of stacking past the limit.
-Serving decodes the published generation through the admitted decode cache.
+Serving uses the published generation's decode cache and recorded admission
+demand.
 
 The same isolated cold pass on the release daemon now measures as follows.
 Each value is one run. `footprint` reports the physical footprint peak, and
@@ -86,12 +87,15 @@ occupancy reached 2.53 GB on `t3code` while 268 MB was reserved. The catalog
 then stays resident as the 833 MB `graph_catalog` owner. That warm is a
 separate admission gap and is outside this design.
 
-A decode of the generation still costs its full `retained_bytes`.
-Admission reserves that amount under `code-index-generation-decode-v1` before
-a measured decode, and the `decoded_generation` owner reports it while the
-decode is held. The proposals below lower that
-charge and the residency while a decode is held. They do not change what
-admission charges.
+A decoded generation retains its full `retained_bytes`. When a decode peak
+measurement exists, admission reserves the larger of
+`decode_peak_growth_bytes` and `retained_bytes` under
+`code-index-generation-decode-v1`. Without a peak measurement, admission uses
+the retained bytes. A first active-generation decode with no recorded demand
+currently takes no reservation. The `decoded_generation` owner reports
+retained residency while the decode is held. The proposals below target both
+retained residency and transient decode demand. They do not change these
+admission rules or close the first-unmeasured-decode gap.
 
 ## Proposed decoded encoding
 
@@ -105,8 +109,8 @@ remaining size no longer justifies the next change.
    `PolicyRevisionId`. The decoder and the builder intern each distinct value
    once per generation and clone the `Arc` into every record. Each newtype
    serializes through `as_str()`, so wire bytes and canonical digests do not
-   change. The workspace does not enable serde's `rc` feature, and this
-   change does not need it. The per-chunk cost of the six values drops from six
+   change. Explicit string serialization requires no additional serde feature
+   changes. The per-chunk cost of the six values drops from six
    heap allocations to six reference-count increments. Hoisting the fields
    out of `CodeSearchChunkV1` would save the 16-byte pointers too, but it
    changes a domain contract that every chunk consumer reads. Do that only if
@@ -123,7 +127,10 @@ remaining size no longer justifies the next change.
    request shrinks to one run per file.
 3. **Derive the document chunk roster.** Drop `document.chunk_ids` from the
    decoded file page and derive the roster from the page's chunk records in
-   chunk-id order. The sealed segment already omits the roster.
+   their existing file-row order. The document roster must match those rows
+   positionally. The chunker orders rows by source span and grain, with chunk
+   ID only as a tie-breaker. The separate projection roster uses chunk-id
+   order. The sealed segment already omits the document roster.
 4. **Keep clone token streams interned.** Hold each file's interned string
    table and integer token codes in memory, as `clone_rows.rs` writes them.
    Rebuild the occurrence from the file authority when a caller asks for it.
@@ -164,22 +171,27 @@ exceeding the limit.
 
 ## Measure the win
 
-Use the release daemon on a fresh clone in an isolated profile, the same
-journey that produced the numbers above:
+Use the task-supplied checkout and the release daemon in an isolated temporary
+profile. Do not create a clone or another project-data copy. The earlier
+figures are historical measurements, not instructions to preserve that setup.
 
 1. Build the release CLI with
    `bazel build --config=release //crates/tracedecay-cli:tracedecay`.
-2. Start the daemon with a fresh `TRACEDECAY_DATA_DIR` and `HOME`, then run
-   `tracedecay init <clone>`.
-3. While the cold pass runs, sample `tracedecay status --json <clone>`.
+2. Start the daemon with `TRACEDECAY_DATA_DIR` and `HOME` inside the temporary
+   profile, then run `tracedecay init <checkout>`.
+3. While the cold pass runs, sample `tracedecay status --json <checkout>`.
    Record `memory.resident_bytes`, `memory.reserved_bytes`, and
    `memory.reservations`.
 4. Run a query that decodes the generation, then record the
    `decoded_generation` bytes in `memory.owners`. That value is the
-   generation's `retained_bytes`.
+   generation's `retained_bytes`. Record the measured decode peak separately
+   and compare admission against the larger demand.
 5. Record the on-disk size of the project's `code-index-v1/` store. The size
    must not change. A change in size means a decoded change reached the
    sealed bytes.
+
+Stop and join the isolated daemon before removing its temporary profile.
+Do not read or reset the operator's active profile.
 
 For the per-part split, sum the `resident_bytes.rs` helpers per part:
 `chunk_bytes` with each identity and revision string summed separately,
