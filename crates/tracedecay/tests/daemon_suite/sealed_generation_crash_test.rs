@@ -4,20 +4,24 @@
 //! temporary name, flushed once, and only then named; the manifest and the
 //! active pointer follow. A kill after the pointer is durable must restart on
 //! the exact sealed bytes. A kill before it must leave the prior generation
-//! published and no partial generation or temporary behind once the restarted
-//! daemon rebuilds.
+//! published, then rebuild and collect the abandoned publication through the
+//! restarted daemon's scheduled maintenance.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index_retention::code_index_generations::{
+    CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationStoreLockV1,
     code_generation_segments_root, code_text_artifacts_root, scoped_code_index_store_root,
+    try_acquire_code_generation_store_read_lock,
 };
+use tracedecay_configuration::RetentionConfig;
+use tracedecay_maintenance::tick::MaintenanceCadence;
 
 use crate::code_index_journey::{
     RECEIPT_TIMEOUT, commit_all, exact_identity, git, initialize_tracedecay,
@@ -26,8 +30,11 @@ use crate::code_index_journey::{
 use crate::common::{IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_with};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-const PUBLICATION_TEMPORARY_PREFIXES: [&str; 2] =
-    [".segment-publication.", ".evidence-pack-publication."];
+const PUBLICATION_TEMPORARY_PREFIXES: [&str; 3] = [
+    ".segment-publication.",
+    ".evidence-pack-publication.",
+    CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1,
+];
 
 fn scope_root(home: &Path, project: &Path) -> PathBuf {
     let layout =
@@ -89,10 +96,47 @@ fn publication_temporaries(scope: &Path) -> Vec<String> {
         .collect()
 }
 
-fn segments_entry_count(scope: &Path) -> usize {
-    fs::read_dir(code_generation_segments_root(scope))
-        .expect("segments directory")
-        .count()
+fn hold_publication_commit(scope: &Path) -> CodeGenerationStoreLockV1 {
+    let deadline = Instant::now() + RECEIPT_TIMEOUT;
+    loop {
+        if let Some(lease) = try_acquire_code_generation_store_read_lock(scope)
+            .expect("read lease on the published generation")
+        {
+            return lease;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the published generation stayed busy"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+fn has_staged_file_segment(scope: &Path) -> bool {
+    for entry in fs::read_dir(code_generation_segments_root(scope)).expect("segments directory") {
+        let entry = entry.expect("segments entry");
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1)
+        {
+            continue;
+        }
+        let staged = match fs::read_dir(entry.path()) {
+            Ok(staged) => staged,
+            // A source update can retire an earlier preparation before its
+            // successor starts. Observe the successor on the next probe.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("read generation preparation: {error}"),
+        };
+        if staged
+            .map(|entry| entry.expect("staged segment entry"))
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("segment-"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn write_batch(project: &Path, files: u32, symbols: u32) {
@@ -229,11 +273,17 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
     )
     .await;
     let scope = scope_root(environment.home(), &project);
+    // The real reader lease permits segment preparation but excludes the
+    // final publication transaction. Keep it through SIGKILL so even a fast
+    // writer cannot advance the pointer between observation and the kill.
+    let publication_hold = hold_publication_commit(&scope);
     let prior_pointer = active_pointer(&scope);
     let prior_family = sealed_family(&scope);
-    let prior_entries = segments_entry_count(&scope);
 
-    write_batch(&project, 128, 16);
+    // The reader lease fixes the kill point; a large batch is unnecessary
+    // and can spread abandoned-file collection across several maintenance
+    // ticks. Keep this multi-file publication within one bounded sweep.
+    write_batch(&project, 16, 16);
     let batch_revision = commit_all(&project, "install the batch the killed seal was writing");
     let receipt = tool(
         &socket,
@@ -243,10 +293,10 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
     )
     .await;
     assert_eq!(receipt["status"], "queued", "refresh receipt: {receipt}");
-    // The seal's first segment write is the first new entry beside the prior
-    // generation's segments; kill the daemon while that seal is in flight.
+    // Segments now accumulate inside one preparation directory. Top-level
+    // entry counts only advance when commit names the complete batch.
     let deadline = Instant::now() + RECEIPT_TIMEOUT;
-    while segments_entry_count(&scope) < prior_entries + 2 {
+    while !has_staged_file_segment(&scope) {
         assert!(
             Instant::now() < deadline,
             "the refresh never started sealing its segments"
@@ -254,6 +304,7 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let killed = daemon.kill_and_wait().expect("SIGKILL the sealing daemon");
+    drop(publication_hold);
     assert!(
         !killed.success(),
         "SIGKILL must not look like a graceful exit"
@@ -271,6 +322,11 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
             "the kill damaged the prior generation's durable file {path}"
         );
     }
+    let abandoned_temporaries = publication_temporaries(&scope);
+    assert!(
+        !abandoned_temporaries.is_empty(),
+        "the interrupted seal must leave publication work for recovery"
+    );
 
     daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
     let rebuilt = wait_for_terminal_generation(
@@ -281,13 +337,30 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
         "refs/heads/main",
         Some(&batch_revision),
         Some(&prior.generation_id),
-        "crash_probe_0127_015",
-        Some("src/batch/file_0127.rs"),
+        "crash_probe_0015_015",
+        Some("src/batch/file_0015.rs"),
     )
     .await;
     assert_ne!(rebuilt.generation_id, prior.generation_id);
+    // Rebuilding does not run retention: its next admitted tick is one retry
+    // delay away (a minute under the default policy). Start the unchanged
+    // completion budget after that scheduled delay. Observe only the killed
+    // seal's names, since a live successor may legitimately prepare work.
+    let cadence = MaintenanceCadence::new(Duration::from_hours(
+        RetentionConfig::default().interval_hours.max(1),
+    ));
+    let deadline = Instant::now() + cadence.retry_delay() + RECEIPT_TIMEOUT;
+    let pending_temporaries = || {
+        publication_temporaries(&scope)
+            .into_iter()
+            .filter(|name| abandoned_temporaries.contains(name))
+            .collect::<Vec<_>>()
+    };
+    while !pending_temporaries().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(
-        publication_temporaries(&scope),
+        pending_temporaries(),
         Vec::<String>::new(),
         "the restarted daemon must collect the killed seal's temporaries"
     );
