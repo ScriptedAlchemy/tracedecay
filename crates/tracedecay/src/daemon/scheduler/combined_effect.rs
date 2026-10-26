@@ -1020,13 +1020,6 @@ mod tests {
         paths
     }
 
-    fn now_secs() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("wall clock")
-            .as_secs() as i64
-    }
-
     struct RecordingEarlyGateBackend {
         calls: AtomicUsize,
     }
@@ -1379,14 +1372,19 @@ mod tests {
         let current_skill_task_lock = fixture
             .dashboard_root
             .join("automation_locks")
-            .join("skill_writer.lock");
+            .join("skill_writer.lease");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !current_skill_task_lock.is_file() {
+            while !std::fs::File::open(&current_skill_task_lock).is_ok_and(|file| {
+                matches!(
+                    file.try_lock_shared(),
+                    Err(std::fs::TryLockError::WouldBlock)
+                )
+            }) {
                 tokio::select! {
                     outcome = &mut effect => {
                         panic!("partial replay returned before current abandonment: {outcome:?}")
                     }
-                    () = tokio::task::yield_now() => {}
+                    () = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
                 }
             }
         })
@@ -1396,8 +1394,6 @@ mod tests {
             tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
                 &fixture.dashboard_root,
                 AgentTaskKind::SkillWriter,
-                None,
-                now_secs(),
             )
             .await
             .expect("competing skill task lock")
@@ -1448,8 +1444,6 @@ mod tests {
             tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
                 &fixture.dashboard_root,
                 AgentTaskKind::SkillWriter,
-                None,
-                now_secs(),
             )
             .await
             .expect("post-abandonment skill task lock")
