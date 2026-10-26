@@ -85,11 +85,15 @@ fn path_memo_key(prefix: &str, path: &Path) -> String {
     key
 }
 
-/// Cheap `(len, mtime seconds)` file stamp; any append or rewrite changes it.
+/// Cheap `(len, mtime, inode)` file stamp; any append, rewrite, or
+/// replacement changes it. The inode (unix) closes the equal-length,
+/// timestamp-preserving replacement case an atomic rename produces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct PathFileStamp {
     len: u64,
     mtime_secs: u64,
+    #[allow(dead_code, reason = "windows keeps the slot for symmetry")]
+    inode: u64,
 }
 
 fn file_stamp(metadata: &std::fs::Metadata) -> PathFileStamp {
@@ -97,21 +101,28 @@ fn file_stamp(metadata: &std::fs::Metadata) -> PathFileStamp {
     // the same second changes the stamp, so a fixed malformed file is
     // retried immediately instead of after the next whole-second tick.
     #[cfg(unix)]
-    let mtime_secs = {
+    let (mtime_secs, inode) = {
         use std::os::unix::fs::MetadataExt;
-        metadata.mtime().unsigned_abs().saturating_mul(1_000_000_000)
-            + metadata.mtime_nsec().unsigned_abs()
+        (
+            metadata.mtime().unsigned_abs().saturating_mul(1_000_000_000)
+                + metadata.mtime_nsec().unsigned_abs(),
+            metadata.ino(),
+        )
     };
     #[cfg(not(unix))]
-    let mtime_secs = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
+    let (mtime_secs, inode) = (
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0),
+        0,
+    );
     PathFileStamp {
         len: metadata.len(),
         mtime_secs,
+        inode,
     }
 }
 
@@ -129,8 +140,10 @@ async fn path_memo_matches(
         Ok(Some(ParseOffset {
             byte_offset: len,
             mtime: mtime_secs,
-            ..
-        })) if len == stamp.len && mtime_secs == stamp.mtime_secs
+            file_id: inode,
+        })) if len == stamp.len
+            && mtime_secs == stamp.mtime_secs
+            && inode == stamp.inode
     )
 }
 
@@ -150,7 +163,7 @@ async fn write_path_memo(
             ParseOffset {
                 byte_offset: stamp.len,
                 mtime: stamp.mtime_secs,
-                file_id: 0,
+                file_id: stamp.inode,
             },
         )
         .await
@@ -412,7 +425,11 @@ impl PiSource {
                                 continue;
                             }
                             Err((kind, error)) => {
-                                if let Some(stamp) = candidate_stamp {
+                                if let (PiDiscoveryFailureKind::InvalidSessionHeader, Some(stamp)) =
+                                    (kind, candidate_stamp)
+                                {
+                                    // Only a malformed header is deterministic;
+                                    // an unavailable header stays retryable.
                                     invalid_header_skip_record(&candidate, stamp);
                                 }
                                 discovery.record_failure(kind, &candidate, &error, &mut budget);
@@ -928,7 +945,10 @@ async fn admit_scheduled_file(
         }
         Err((kind, error)) => {
             warn_isolated_source(path, kind, error.kind());
-            if let Some(stamp) = stamp {
+            if let (PiDiscoveryFailureKind::InvalidSessionHeader, Some(stamp)) = (kind, stamp) {
+                // Only a malformed header quarantines durably; an
+                // unavailable header (sharing violation, transient io)
+                // stays retryable on every sweep.
                 write_path_memo(facade, scope, PI_QUARANTINE_MEMO_PREFIX, path, stamp).await;
             }
             outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);

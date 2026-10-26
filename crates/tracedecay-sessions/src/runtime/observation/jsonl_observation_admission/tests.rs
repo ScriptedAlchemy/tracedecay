@@ -2792,19 +2792,38 @@ fn refusal_memo_floor_applies_only_within_its_generation() {
         key: "memo".to_string(),
         loaded_generation: 7,
         loaded_through: 900,
+        loaded_fingerprint: 55,
         refused_through: 900,
+        fingerprint: 55,
         dirty: false,
+        fallback_warned: false,
     };
     assert_eq!(memo.floor_for(7, 100), Some(900), "behind the memo floor");
     assert_eq!(memo.floor_for(7, 900), None, "at the floor is not behind it");
     assert_eq!(memo.floor_for(8, 100), None, "a new generation re-evaluates");
     assert_eq!(memo.floor_for(0, 0), None, "an unknown generation re-evaluates");
-    memo.record_refusal(7, 1200);
+    memo.record_refusal(7, 1200, 77);
     assert!(memo.dirty, "advancing the mark marks the memo dirty");
     assert_eq!(memo.refused_through, 1200);
-    memo.record_refusal(7, 1000);
+    assert_eq!(memo.fingerprint, 77);
+    memo.record_refusal(7, 1000, 88);
     assert_eq!(
         memo.refused_through, 1200,
         "the memo mark never regresses within a pass"
+    );
+    let mut unfingerprinted = super::RefusalMemo {
+        key: "memo".to_string(),
+        loaded_generation: 7,
+        loaded_through: 900,
+        loaded_fingerprint: 0,
+        refused_through: 900,
+        fingerprint: 0,
+        dirty: false,
+        fallback_warned: false,
+    };
+    assert_eq!(
+        unfingerprinted.floor_for(7, 100),
+        None,
+        "a memo without a fingerprint cannot validate the skipped prefix"
     );
 }
