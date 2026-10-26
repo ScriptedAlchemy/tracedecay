@@ -101,5 +101,40 @@ class TestResourceOwnershipTests(unittest.TestCase):
             self.assertEqual(sources, {root / "tests/owned/main.rs"})
 
 
+class SharedPackageOwnershipTests(unittest.TestCase):
+    def test_nested_package_owns_embedded_fixture(self) -> None:
+        gen = load_gen_builds()
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            package = root / "evals/agent_adoption"
+            package.mkdir(parents=True)
+            (root / "evals/BUILD.bazel").write_text("# generated parent")
+            for build_name in ("BUILD.bazel", "BUILD"):
+                build = package / build_name
+                build.write_text("# handwritten package")
+                self.assertEqual(
+                    gen.owner_pkg(Path("evals/agent_adoption/fixture/Cargo.lock"), root),
+                    ("evals/agent_adoption", "fixture"),
+                )
+                self.assertEqual(
+                    gen.owner_pkg(Path("evals/agent_adoption/input.json"), root),
+                    ("evals/agent_adoption", ""),
+                )
+                build.unlink()
+
+    def test_unowned_fixtures_keep_shared_package_layout(self) -> None:
+        gen = load_gen_builds()
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            self.assertEqual(
+                gen.owner_pkg(Path("tests/fixtures/example.json"), root),
+                ("tests", "fixtures"),
+            )
+            self.assertEqual(
+                gen.owner_pkg(Path("crates/example/tests/input.json"), root),
+                ("crates/example", "tests"),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

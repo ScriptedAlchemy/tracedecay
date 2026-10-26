@@ -23,6 +23,36 @@ exports_files(["fixtures/claude-schemas/hooks.schema.json", "fixtures/claude-sch
 )
 
 filegroup(
+    name = "fixtures_context_eval_project_src_auth",
+    srcs = glob(["fixtures/context_eval_project/src/auth/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["fixtures/context_eval_project/src/auth/login.rs", "fixtures/context_eval_project/src/auth/session.rs"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "fixtures_context_eval_project_src_net",
+    srcs = glob(["fixtures/context_eval_project/src/net/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["fixtures/context_eval_project/src/net/retry.rs"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "fixtures_context_eval_project_src_storage",
+    srcs = glob(["fixtures/context_eval_project/src/storage/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["fixtures/context_eval_project/src/storage/config_store.rs"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "fixtures_cursor-schemas",
     srcs = glob(["fixtures/cursor-schemas/**"]),
     visibility = ["//visibility:public"],
@@ -223,6 +253,46 @@ exports_files(["fixtures/remote_tls/alternate-root.crt.pem", "fixtures/remote_tl
 )
 
 filegroup(
+    name = "fixtures_search_quality",
+    srcs = glob(["fixtures/search_quality/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["fixtures/search_quality/query-lexical-graph-workload-v1.json"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "fixtures_search_quality_corpus_cargo-slot_src",
+    srcs = glob(["fixtures/search_quality/corpus/cargo-slot/src/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["fixtures/search_quality/corpus/cargo-slot/src/main.rust.fixture"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "fixtures_search_quality_corpus_crates_tracedecay-domain_src",
+    srcs = glob(["fixtures/search_quality/corpus/crates/tracedecay-domain/src/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["fixtures/search_quality/corpus/crates/tracedecay-domain/src/integration.rs", "fixtures/search_quality/corpus/crates/tracedecay-domain/src/repository.rs", "fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "fixtures_search_quality_corpus_crates_tracedecay-domain_src_research",
+    srcs = glob(["fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/canonical.rs", "fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/coverage.rs", "fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/error.rs", "fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/time.rs", "fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "fixtures_transcript_golden_cline_like",
     srcs = glob(["fixtures/transcript_golden/cline_like/**"]),
     visibility = ["//visibility:public"],
@@ -268,7 +338,7 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-exports_files(["fixtures/context_eval_labeled.json", "fixtures/message_search_eval_labeled.json"],
+exports_files(["fixtures/context_eval_labeled.json", "fixtures/message_search_eval_labeled.json", "fixtures/sample.dockerfile"],
     visibility = ["//visibility:public"],
 )
 
