@@ -1948,6 +1948,13 @@ impl RefusalMemo {
     }
 
     /// Best-effort durable persist; a failure keeps the in-memory mark.
+    ///
+    /// The plain parse-offset writer is monotonic on `mtime`, and a prefix
+    /// fingerprint is unordered — a later refusal with a smaller fingerprint
+    /// value would write as a no-op and strand the durable floor behind the
+    /// in-memory one. The fingerprint therefore travels in `mtime` only as
+    /// storage; the write itself is an exact compare-and-swap replace, which
+    /// orders on nothing but the pair it carries.
     async fn persist_snapshot(
         admission: &dyn HostAdmission,
         scope: &ObservationScopeV1,
@@ -1955,18 +1962,26 @@ impl RefusalMemo {
         generation: u64,
     ) {
         let (key, refused_through, fingerprint) = snapshot;
+        let next = tracedecay_store::ParseOffset {
+            byte_offset: refused_through,
+            mtime: fingerprint,
+            file_id: generation,
+        };
+        let expected = match admission.get_parse_offset(scope, &key).await {
+            Ok(Some(current)) => current,
+            _ => tracedecay_store::ParseOffset {
+                byte_offset: 0,
+                mtime: 0,
+                file_id: 0,
+            },
+        };
         if let Err(error) = admission
-            .advance_parse_offset(
-                scope,
-                &key,
-                tracedecay_store::ParseOffset {
-                    byte_offset: refused_through,
-                    mtime: fingerprint,
-                    file_id: generation,
-                },
-            )
+            .replace_parse_offset(scope, &key, expected, next)
             .await
         {
+            // A lost CAS means a peer moved the same memo; the in-memory
+            // mark still bounds this pass, and the winner's row is at least
+            // as fresh as ours for the same generation.
             tracing::debug!(
                 key = %key,
                 error = ?error,
@@ -2310,7 +2325,7 @@ impl ActiveAdmission<'_> {
                                     .refusal_memo
                                     .lock()
                                     .unwrap_or_else(PoisonError::into_inner);
-                                (std::mem::take(&mut memo.fallback_warned), checkpoint)
+                                (std::mem::replace(&mut memo.fallback_warned, true), checkpoint)
                             };
                             if already_warned {
                                 tracing::debug!(
