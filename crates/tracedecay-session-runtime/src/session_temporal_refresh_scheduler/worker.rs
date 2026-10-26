@@ -365,9 +365,17 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             ) || history_outcome
                 .as_ref()
                 .is_some_and(SessionHistoricalIngestOutcome::made_progress);
-            if history_requires_projection {
-                // A pass that made progress proves the blocked cause healed:
-                // the backoff resets so the next wake runs at full cadence.
+            // A pass that made progress does NOT prove the blocked cause
+            // healed: one healthy provider advancing while another stays
+            // blocked reports Blocked { made_progress: true }, and the
+            // blocked provider would be re-read at full cadence again. The
+            // backoff resets only on an outcome with no blocker at all.
+            if history_requires_projection
+                && !matches!(
+                    history_outcome,
+                    Some(SessionHistoricalIngestOutcome::Blocked { .. })
+                )
+            {
                 blocked_history_attempts = 0;
                 blocked_history_until = None;
             }
