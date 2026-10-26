@@ -711,13 +711,17 @@ async fn apply_project_automation_patch_via_surface(
     patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
 ) -> Arc<crate::mcp::McpServer> {
     apply_project_setting_via_surface(engine, handshake, |snapshot| {
-        let configured =
-            tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-                snapshot,
-            )
-            .expect("decode pinned automation configuration");
+        let key = tracedecay_domain::configuration::SettingKey::new(
+            tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
+        )
+        .unwrap();
+        let tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(configured) =
+            &snapshot.effective_values[&key]
+        else {
+            panic!("fixture snapshot must contain typed automation settings");
+        };
         let desired = tracedecay_automation_runtime::automation::config::effective_config(
-            &configured,
+            configured,
             Some(&patch),
         )
         .expect("apply automation configuration patch");

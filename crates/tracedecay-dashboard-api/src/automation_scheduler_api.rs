@@ -89,6 +89,7 @@ async fn set_scheduler_paused(
     state: &DashboardState,
     paused: bool,
 ) -> std::result::Result<(), JsonError> {
+    effective_automation_config(state).map_err(|err| internal_error(&err))?;
     save_scheduler_control(
         &state.dashboard_root,
         &AutomationSchedulerControl { paused },

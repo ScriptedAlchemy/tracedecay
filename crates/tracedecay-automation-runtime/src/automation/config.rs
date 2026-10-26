@@ -7,36 +7,7 @@ pub use tracedecay_automation::config::{
     ScheduleResolutionError, admit_config,
 };
 
-use tracedecay_domain::configuration::{
-    AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey,
-};
-use tracedecay_domain::errors::{Result, TraceDecayError};
-
-pub fn from_configuration_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<AutomationConfig> {
-    snapshot
-        .validate()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("invalid pinned configuration snapshot: {error}"),
-        })?;
-    let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("invalid automation setting key: {error}"),
-        }
-    })?;
-    let ConfigurationValueV1::AutomationSettings(config) = snapshot
-        .effective_values
-        .get(&key)
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "pinned configuration snapshot is missing automation settings".to_owned(),
-        })?
-    else {
-        return Err(TraceDecayError::Config {
-            message: "pinned automation setting has the wrong value kind".to_owned(),
-        });
-    };
-    validate_config(config)?;
-    Ok((**config).clone())
-}
+use tracedecay_domain::errors::Result;
 
 pub fn effective_config(
     global: &AutomationConfig,

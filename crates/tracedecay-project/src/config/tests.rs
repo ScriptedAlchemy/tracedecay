@@ -223,11 +223,11 @@ mod runtime_configuration_cutover {
     use tempfile::TempDir;
     use tracedecay_application::advisory::github_runtime::daemon_owned_github_source_binding_v1;
     use tracedecay_domain::configuration::{
-        AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
-        ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
-        ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
-        ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1,
-        INDEX_EXCLUDE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+        AUTOMATION_SETTINGS_SETTING_KEY, AuthorityRef, AutomationSettingsV1, ConfigurationGrantId,
+        ConfigurationGrantReceiptId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+        ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
+        ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
         SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, ScopeSourceBinding, SettingKey,
         SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
     };
@@ -262,6 +262,267 @@ mod runtime_configuration_cutover {
     /// under the retired root-derived digest carries.
     fn retired_locator_digest() -> LocatorDigest {
         LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).expect("retired locator digest")
+    }
+
+    #[asupersync::test]
+    async fn stored_invalid_automation_schedule_keeps_project_reads_available() {
+        let profile = TempDir::new().unwrap();
+        for enabled in [false, true] {
+            let root = TempDir::new().unwrap();
+            let project_id = project_id(if enabled {
+                "project.invalid-enabled-schedule"
+            } else {
+                "project.invalid-disabled-schedule"
+            });
+            tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+                root.path(),
+                project_id.as_str(),
+            )
+            .unwrap();
+            let layout =
+                tracedecay_runtime_core::storage::resolve_layout(root.path(), profile.path())
+                    .unwrap();
+            std::fs::create_dir_all(&layout.data_root).unwrap();
+            let host_runtime = HostAdmissionTestRuntimeV1::project(
+                profile.path(),
+                root.path(),
+                project_id.clone(),
+            )
+            .await
+            .unwrap();
+            let database = host_runtime
+                .registered_database_arc(
+                    tracedecay_sessions::admission::HostAdmissionScope::Project,
+                )
+                .unwrap();
+            crate::config::install_usecase_runtime_configuration_authority().unwrap();
+            let target =
+                crate::config::runtime_configuration_target_for_layout(root.path(), &layout)
+                    .unwrap();
+            let mut settings = AutomationSettingsV1 {
+                enabled,
+                ..AutomationSettingsV1::default()
+            };
+            settings.tasks.memory_curator.enabled = enabled;
+            settings.tasks.memory_curator.schedule = Some("after lunch".to_owned());
+            settings.validate().unwrap();
+            let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
+            let revision = revision_id("configuration.invalid-schedule");
+            let resolved = resolve_configuration(
+                &ConfigurationRegistry::core().unwrap(),
+                &[ConfigurationLayerV1 {
+                    layer: ConfigurationLayerIdV1::Project {
+                        project_id: project_id.clone(),
+                    },
+                    revision_id: revision.clone(),
+                    entries: BTreeMap::from([
+                        (
+                            SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).unwrap(),
+                            ConfigurationValueV1::SourceBindings(vec![
+                                crate::config::daemon_project_source_binding(&target).unwrap(),
+                            ]),
+                        ),
+                        (
+                            key.clone(),
+                            ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
+                        ),
+                    ]),
+                }],
+            )
+            .unwrap();
+            let store = GlobalDbConfigurationControlStore::new_registered(database.as_ref());
+            store
+                .initialize_canonical(&revision, &resolved, UtcMicros(1))
+                .await
+                .unwrap();
+            let session = tracedecay_sessions::runtime::SessionRecord {
+                provider: "cursor".to_owned(),
+                session_id: "schedule-isolation".to_owned(),
+                project_key: root.path().display().to_string(),
+                project_path: root.path().display().to_string(),
+                title: None,
+                started_at: Some(10),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            };
+            let message = tracedecay_sessions::runtime::SessionMessageRecord {
+                provider: session.provider.clone(),
+                message_id: "schedule-isolation-message".to_owned(),
+                session_id: session.session_id.clone(),
+                role: "user".to_owned(),
+                timestamp: Some(11),
+                ordinal: 1,
+                text: "Lexical retrieval remains available for this project.".to_owned(),
+                kind: Some("message".to_owned()),
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: None,
+            };
+            host_runtime
+                .seed_session_messages_for_test(
+                    tracedecay_sessions::admission::HostAdmissionScope::Project,
+                    &session,
+                    &[message],
+                )
+                .await
+                .unwrap();
+
+            let (_, opened) = crate::config::open_runtime_configuration_for_registered_database(
+                root.path(),
+                &layout,
+                database.clone(),
+            )
+            .await
+            .expect("invalid automation grammar must not refuse ordinary project open")
+            .into_parts();
+            let (runtime, pinned) = ProjectConfigurationRuntime::open(opened).unwrap();
+            assert_eq!(pinned.revision_id(), &revision);
+            assert!(matches!(
+                pinned.admitted_automation(),
+                Err(tracedecay_domain::errors::TraceDecayError::Automation(_))
+            ));
+            assert_eq!(
+                pinned.snapshot().effective_values.get(&key),
+                Some(&ConfigurationValueV1::AutomationSettings(Box::new(
+                    settings.clone()
+                )))
+            );
+            assert!(pinned.config().max_file_size > 0);
+            let hits = database
+                .search_session_messages(
+                    "cursor",
+                    Some(&session.project_key),
+                    "Lexical retrieval",
+                    10,
+                )
+                .await
+                .unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].message.message_id, "schedule-isolation-message");
+            assert_eq!(
+                runtime.client().current().await.unwrap().revision_id(),
+                &revision
+            );
+
+            let mutation = DirectConfigurationMutation::Set {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: project_id.clone(),
+                },
+                key,
+                value: Box::new(ConfigurationValueV1::AutomationSettings(Box::new({
+                    settings.tasks.memory_curator.schedule = Some("every 10m".to_owned());
+                    settings
+                }))),
+            };
+            let authority = ConfigurationMutationAuthority {
+                receipt: ConfigurationMutationGrantReceiptV1::issue(
+                    ConfigurationGrantReceiptId::new("configuration.grant-receipt.schedule-repair")
+                        .unwrap(),
+                    ConfigurationGrantId::new("configuration.grant.schedule-repair").unwrap(),
+                    ActorId::new("actor.schedule-repair").unwrap(),
+                    ConfigurationMutationOperationV1::DirectMutation,
+                    mutation.target_scope_digest().unwrap(),
+                    revision.clone(),
+                    1,
+                    AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                    ConfigurationMutationSinkV1::ConfigurationStore,
+                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                    Some(
+                        ConfigurationIdempotencyKey::new("configuration.schedule-repair").unwrap(),
+                    ),
+                    UtcMicros(1),
+                    UtcMicros(100),
+                )
+                .unwrap(),
+            };
+            let receipt =
+                ConfigurationControlStore::commit_direct(&store, &authority, &mutation, &revision)
+                    .await
+                    .unwrap();
+            let repaired = host_runtime
+                .ensure_runtime_configuration_for_test(root.path(), &layout)
+                .await
+                .unwrap();
+            assert_eq!(repaired.revision_id(), &receipt.result_revision_id);
+            assert_eq!(
+                repaired.admitted_automation().unwrap().schedule(
+                    tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator
+                ),
+                Some(
+                    tracedecay_automation_runtime::automation::config::AutomationSchedule::Interval {
+                        every_secs: 600
+                    }
+                )
+            );
+            assert!(
+                pinned.admitted_automation().is_err(),
+                "the old pin stays immutable"
+            );
+            assert_eq!(
+                database
+                    .search_session_messages(
+                        "cursor",
+                        Some(&session.project_key),
+                        "Lexical retrieval",
+                        10
+                    )
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            let sibling_root = TempDir::new().unwrap();
+            let sibling_id = ProjectId::new(if enabled {
+                "project.valid-enabled-schedule-sibling"
+            } else {
+                "project.valid-disabled-schedule-sibling"
+            })
+            .unwrap();
+            tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+                sibling_root.path(),
+                sibling_id.as_str(),
+            )
+            .unwrap();
+            let sibling_layout = tracedecay_runtime_core::storage::resolve_layout(
+                sibling_root.path(),
+                profile.path(),
+            )
+            .unwrap();
+            let sibling = HostAdmissionTestRuntimeV1::project(
+                profile.path(),
+                sibling_root.path(),
+                sibling_id.clone(),
+            )
+            .await
+            .unwrap();
+            let sibling_pin = sibling
+                .ensure_runtime_configuration_for_test(sibling_root.path(), &sibling_layout)
+                .await
+                .unwrap();
+            assert!(sibling_pin.admitted_automation().is_ok());
+            assert_eq!(sibling_pin.target().project_id, sibling_id);
+            assert_ne!(sibling_pin.target().project_id, pinned.target().project_id);
+            assert_eq!(
+                sibling
+                    .registered_database_arc(
+                        tracedecay_sessions::admission::HostAdmissionScope::Project
+                    )
+                    .unwrap()
+                    .search_session_messages("cursor", None, "Lexical retrieval", 10)
+                    .await
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
     }
 
     #[test]

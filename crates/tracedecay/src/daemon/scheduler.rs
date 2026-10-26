@@ -1994,7 +1994,7 @@ async fn effective_automation_config_for_project(
             current.snapshot,
         )?
     };
-    let settings = configuration.config().automation.clone();
+    let settings = configuration.admitted_automation()?;
     let configuration_digest = pinned_automation_configuration_digest(
         configuration.revision_id(),
         &configuration.snapshot().effective_behavior_digest,
