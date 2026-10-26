@@ -6,7 +6,7 @@ package(default_visibility = ["//visibility:public"])
 load("@c//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
-load("//scripts:bazel/rust_test.bzl", "development_rustc_flags", "rust_test")
+load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
 
 rust_library(
     name = "tracedecay-code-extraction",
@@ -20,7 +20,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars"],
 )
 
@@ -36,7 +36,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
 )
 
@@ -52,7 +52,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     crate_features = [],
 )
 
@@ -68,7 +68,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     crate_features = ["lang-json", "lang-markdown", "lite", "medium-grammars"],
 )
 
@@ -95,7 +95,7 @@ rust_binary(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__+test-helpers__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
 )
 
@@ -108,7 +108,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__+test-helpers__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
@@ -123,7 +123,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__+test-helpers__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/main/**", "vendor/**"], allow_empty = True),
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "tests/main/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
@@ -138,7 +138,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__+test-helpers__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
@@ -153,7 +153,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(2),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
     data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )

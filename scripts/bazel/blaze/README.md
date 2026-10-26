@@ -32,9 +32,6 @@ Cargo-only path. Native diagnostics,
 fallback explanations and exit status pass through.
 These commands also use Bazel's `RUSTC_BOOTSTRAP=1` environment so pinned stable
 Cargo honors that policy's unstable shallow-dependency setting.
-Development and test profiles compile every workspace crate and dependency at
-optimization level 0. This also lets Blaze reuse rustc's incremental executable
-for workspace edits. Release jobs select the optimized `dist` configuration.
 Use Cargo's package/target/feature flags for focused runs. Required integration-test
 features still apply; `--workspace` alone does not enable them.
 
@@ -106,6 +103,12 @@ Normal Bazel Rust compilation and tests remain the correctness authority and the
 source of canonical artifacts. Blaze's incremental diagnostics do not fully
 replace rustc's borrow checking. This target does not replace existing correctness
 jobs, release builds or published artifacts.
+
+The full workspace CI run selects Cargo's `perf` profile, which retains debug
+assertions and overflow checks while optimizing the tokenizer, graph and hash
+kernels used by production-scale fixtures. Ordinary development builds keep
+the unoptimized `dev` profile. CI stores its compiled artifacts under
+`target/blaze/perf` and includes the profile in its cache identity.
 
 Native Cargo uses manifest sources and does **not** apply `MODULE.bazel`'s
 asupersync scheduler and blocking-pool stack patches, AWS include-path patch, or

@@ -6,7 +6,7 @@ package(default_visibility = ["//visibility:public"])
 load("@c//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
-load("//scripts:bazel/rust_test.bzl", "development_rustc_flags", "rust_test")
+load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
 
 rust_library(
     name = "tracedecay-capture",
@@ -20,7 +20,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-store:tracedecay-store", "//crates/tracedecay-tokenizer:tracedecay-tokenizer"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
 )
 
@@ -36,7 +36,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tokenizer:tracedecay-tokenizer__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
 )
 
@@ -49,7 +49,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tokenizer:tracedecay-tokenizer__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
@@ -64,7 +64,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tokenizer:tracedecay-tokenizer__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(1),
     crate_features = [],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/capture_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/capture_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:runtime_fixtures_providers_home_.codex_sessions_2026_07", "//benchmark_data:runtime_fixtures_providers_home_.cursor_projects_fixture-runtime-project_agent-transcripts"],
@@ -79,7 +79,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tokenizer:tracedecay-tokenizer__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = development_rustc_flags(),
+    rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
     data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
 )

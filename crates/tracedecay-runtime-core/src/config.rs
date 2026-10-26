@@ -18,8 +18,9 @@ pub const DB_FILENAME: &str = "tracedecay.db";
 /// Filename of the user-level global database inside the profile root.
 pub const GLOBAL_DB_FILENAME: &str = "global.db";
 
-/// Output directories a cargo target dir may hold for this workspace,
-/// including existing artifacts from the former `perf` profile.
+/// Output directories a cargo target dir may hold for this workspace: the
+/// built-in profiles plus the `perf` profile that `cargo test-ci`/`test-all`
+/// and the CI test lanes build with (see `Cargo.toml` `[profile.perf]`).
 /// Heuristics that recognise "inside a cargo target dir" by layout must
 /// accept every entry, or they silently switch off under one profile.
 pub const CARGO_PROFILE_DIRS: &[&str] = &["debug", "release", "perf"];

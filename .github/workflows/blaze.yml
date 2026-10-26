@@ -67,7 +67,7 @@ jobs:
           mkdir -p "$BLAZE_HOME" "$BLAZE_CACHE" "$CARGO_HOME"
           chmod 700 "$BLAZE_HOME"
           {
-            echo "prefix=blaze-1-${RUNNER_OS}-${RUNNER_ARCH}-rust-1.99.0-${BLAZE_REVISION}-dev-workspace-${CONFIG_HASH}"
+            echo "prefix=blaze-1-${RUNNER_OS}-${RUNNER_ARCH}-rust-1.99.0-${BLAZE_REVISION}-perf-workspace-${CONFIG_HASH}"
             echo "lock=${LOCK_HASH}"
             echo "source=$(git rev-parse HEAD)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             echo "tool-key=blaze-native-1-${RUNNER_OS}-${RUNNER_ARCH}-ubuntu-24.04-rust-1.99.0-${BLAZE_REVISION}-${BOOTSTRAP_HASH}"
@@ -76,7 +76,7 @@ jobs:
             echo "$BLAZE_CACHE/*.pack"
             echo PATHS
             echo 'artifact-paths<<PATHS'
-            echo 'target/blaze/debug'
+            echo 'target/blaze/perf'
             echo 'target/blaze/ra-jit'
             echo 'target/blaze/rust-analyzer'
             echo '!target/blaze/**/*.log'
@@ -200,18 +200,18 @@ jobs:
         run: |
           bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR" \
             //scripts/bazel/blaze:blaze -- build \
-            --workspace --bins --locked --profile dev --features "$WORKSPACE_FEATURES"
+            --workspace --bins --locked --profile perf --features "$WORKSPACE_FEATURES"
           bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR" \
             //scripts/bazel/blaze:blaze -- build \
             --package tracedecay-cli --example tracedecay-host-cli-fixture \
-            --locked --profile dev --features "$WORKSPACE_FEATURES"
+            --locked --profile perf --features "$WORKSPACE_FEATURES"
 
       - name: Run the full workspace test selection with Blaze
         id: test
         run: |
           bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR" \
             //scripts/bazel/blaze:blaze -- test \
-            --workspace --locked --profile dev --no-fail-fast --features "$WORKSPACE_FEATURES"
+            --workspace --locked --profile perf --no-fail-fast --features "$WORKSPACE_FEATURES"
 
       - name: Report native engine and compiler fallback status
         id: status

@@ -44,11 +44,12 @@ RUST_VERSION = "1.99.0"
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
-    # Match Cargo: development and test dependencies are unoptimized;
-    # release configurations use opt-level 3.
+    # Bazel's default fastbuild mirrors the assertion-enabled Cargo perf
+    # profile. Generated targets and the .bazelrc block refine its opt-level
+    # per crate; releases use opt-level 3.
     opt_level = {
         "dbg": "0",
-        "fastbuild": "0",
+        "fastbuild": "1",
         "opt": "3",
     },
     # fastbuild already emits no Rust debug information. Tell rules_rust not

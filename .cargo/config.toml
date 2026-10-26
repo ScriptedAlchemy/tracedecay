@@ -101,10 +101,11 @@ linker = "scripts/macos-sign-linker.sh"
 [alias]
 # Full Rust test suite. Requires cargo-nextest:
 # https://nexte.st/docs/installation/pre-built-binaries/
-# Both aliases use the unoptimized test profile inherited from dev.
-# Hosted CI runs the corresponding Bazel targets.
-test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers,tracedecay/search-eval"
+# Full-suite aliases share the assertion-enabled perf profile. Hosted CI
+# runs Bazel targets generated from the same per-crate optimization levels.
+# Extra filters append, for example: cargo test-ci --locked -E 'binary(=x)'.
+test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers,tracedecay/search-eval --cargo-profile perf"
 # Deliberately broader than CI: every optional feature (test-transport
 # acceptance suites, …) under the same cargo profile, with the
 # default nextest policy (no retries).
-test-all = "nextest run --workspace --all-features --no-fail-fast"
+test-all = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"

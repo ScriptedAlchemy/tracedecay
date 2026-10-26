@@ -375,10 +375,10 @@ The existing `large_repos` benchmark also provides a finite audit through the
 production composition. Build it with
 `bazel build //crates/tracedecay:large_repos`, then pass
 `$(bazel info bazel-bin)/crates/tracedecay/large_repos` explicitly to the wrapper.
-This uses the unoptimized development configuration.
+This uses the assertion-enabled optimization levels from Cargo's `perf` profile.
 
 ```sh
-TRACEDECAY_BENCH_PROFILE=dev scripts/run-tool-performance.sh \
+TRACEDECAY_BENCH_PROFILE=perf scripts/run-tool-performance.sh \
   --bin /absolute/path/to/large_repos-executable \
   --samples 1 \
   --report /absolute/path/to/tool-audit.json

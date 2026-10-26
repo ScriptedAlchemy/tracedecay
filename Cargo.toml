@@ -144,7 +144,7 @@ xattr = "1"
 zeroize = "1.9.0"
 
 [profile.bench]
-opt-level = 0
+opt-level = 3
 debug = false
 debug-assertions = false
 overflow-checks = false
@@ -166,15 +166,15 @@ strip = "symbols"
 # debug=1 against 45.7 MiB without debuginfo, which was blowing the shared
 # build-cache budget and turning evictions into repeat 5-minute misses.
 #
-# Development, tests, and Blaze use unoptimized code across the entire graph.
-# Optimized CI artifacts are built only by release jobs.
+# Ordinary development and focused tests remain unoptimized. Full CI uses
+# the assertion-enabled perf profile so production-scale fixtures exercise
+# the same bounded readiness contracts as the optimized product.
 [profile.dev]
 debug = "line-tables-only"
 incremental = true
 opt-level = 0
 
-# Focused root unit tests retain test assertions while keeping rustc's
-# code-generation working set bounded on developer hosts.
+# Focused root unit tests retain assertions with a bounded codegen working set.
 [profile.bounded-test]
 inherits = "test"
 debug = 0
@@ -184,6 +184,76 @@ codegen-units = 1
 
 [profile.dev.package."*"]
 debug = 0
+
+[profile.perf]
+inherits = "dev"
+opt-level = 1
+debug-assertions = true
+overflow-checks = true
+
+# Serde/DTO glue spends most compilation time in LLVM and does not benefit
+# from the kernel optimization used by the generation-scale suites.
+[profile.perf.package.tracedecay-daemon-protocol]
+opt-level = 0
+
+[profile.perf.package.tracedecay-contracts]
+opt-level = 0
+
+# A cold tokenizer loads its embedded vocabulary and compiles BPE regexes.
+# At opt-level 0 that startup alone exceeds the proposal journey's budget.
+[profile.perf.package.tiktoken-rs]
+opt-level = 2
+
+[profile.perf.package.regex]
+opt-level = 2
+
+# Code-index and graph-publication suites build production-scale generations.
+[profile.perf.package.tracedecay-code-extraction]
+opt-level = 2
+
+[profile.perf.package.tracedecay-code-index]
+opt-level = 2
+
+[profile.perf.package.tracedecay-code-index-runtime]
+opt-level = 2
+
+[profile.perf.package.tracedecay-domain]
+opt-level = 2
+
+[profile.perf.package.tracedecay-graph-db]
+opt-level = 2
+
+[profile.perf.package.tracedecay-runtime-core]
+opt-level = 2
+
+[profile.perf.package.tracedecay-rusqlite-runtime]
+opt-level = 2
+
+[profile.perf.package.tracedecay-store]
+opt-level = 2
+
+[profile.perf.package.grafeo-adapters]
+opt-level = 2
+
+[profile.perf.package.grafeo-common]
+opt-level = 2
+
+[profile.perf.package.grafeo-core]
+opt-level = 2
+
+[profile.perf.package.grafeo-engine]
+opt-level = 2
+
+[profile.perf.package.grafeo-storage]
+opt-level = 2
+
+[profile.perf.package.serde_json]
+opt-level = 2
+
+# Canonical replay integrity hashes multi-megabyte sources inside the exact
+# SQL transaction budget; unoptimized hashing exceeds that budget.
+[profile.perf.package.sha2]
+opt-level = 3
 
 # The upstream Rust grammar rejects `#[cfg(...)]` attributes on
 # struct-destructuring fields. Our fork carries tree-sitter/tree-sitter-rust#301

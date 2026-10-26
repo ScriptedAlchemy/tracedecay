@@ -736,8 +736,11 @@ jobs:
       - name: Test generator feature policy and Cargo tree parsing
         run: bazel test --config=ci --test_output=errors //scripts:gen_builds_test
 
-  # Validate the production feature graph and packaging without optimization.
-  # Release workflows own the optimized shipping compile.
+  # The configuration users actually receive: the release build of
+  # `tracedecay-cli`, whose default features are `production`. Nothing else on
+  # a push compiles it, so a break confined to the release graph (the
+  # mimalloc allocator, the embedded dashboard, opt-level 3) would otherwise
+  # first appear while a release is being cut.
   shipped-cli:
     permissions:
       contents: read
@@ -753,9 +756,9 @@ jobs:
         id: cli
         uses: ./.github/actions/build-cli
         with:
-          config: ci
-          dest: target/x86_64-unknown-linux-gnu/debug
-          cache-key: ci-production-x86_64-unknown-linux-gnu
+          config: release
+          dest: target/x86_64-unknown-linux-gnu/release
+          cache-key: release-x86_64-unknown-linux-gnu
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
@@ -783,7 +786,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          binary="$GITHUB_WORKSPACE/target/x86_64-unknown-linux-gnu/debug/tracedecay"
+          binary="$GITHUB_WORKSPACE/target/x86_64-unknown-linux-gnu/release/tracedecay"
           smoke_work="$(mktemp -d)"
           trap 'rm -rf -- "$smoke_work"' EXIT
           TRACEDECAY_BIN="$binary" bazel run //scripts:mcp-conformance-smoke.sh
