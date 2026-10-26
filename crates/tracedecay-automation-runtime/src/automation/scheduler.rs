@@ -164,6 +164,7 @@ pub(crate) fn task_disabled_skip(task: AgentTaskKind) -> AutomationSkipReasonV1 
 #[derive(Debug)]
 pub struct AutomationTaskLock {
     _lease: FileLease,
+    _publication_coordination: FileLease,
 }
 
 pub fn scheduler_control_path(dashboard_root: &Path) -> PathBuf {
@@ -742,9 +743,11 @@ pub(crate) fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
     (now_secs - completed_at) as u64
 }
 
-/// Takes the nonblocking exclusive lease on the key's stable coordination
-/// file. The file is never unlinked on release: replacing the inode would let
-/// two holders each lock a different file.
+/// Keeps both stable coordination files locked through task settlement. Older
+/// daemons lock `<key>.lock.lock` only around owner publication and cleanup:
+/// checking their owner record under that lock closes the pre-publication
+/// race, and retaining it prevents an old daemon publishing during this task.
+/// Neither coordination inode may be unlinked, even when retiring a dead owner.
 fn try_acquire_task_lock_blocking(
     lock_dir: &Path,
     key: &str,
@@ -753,10 +756,18 @@ fn try_acquire_task_lock_blocking(
     let Some(lease) = open_task_lease(&lock_dir.join(format!("{key}.lease")))? else {
         return Ok(None);
     };
-    if !retire_pre_lease_task_lock(lock_dir, key)? {
+    let lock_path = lock_dir.join(format!("{key}.lock"));
+    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
+    let Some(publication_coordination) = open_task_lease(&coordination_path)? else {
+        return Ok(None);
+    };
+    if !retire_pre_lease_owner(&lock_path)? {
         return Ok(None);
     }
-    Ok(Some(AutomationTaskLock { _lease: lease }))
+    Ok(Some(AutomationTaskLock {
+        _lease: lease,
+        _publication_coordination: publication_coordination,
+    }))
 }
 
 fn open_task_lease(path: &Path) -> std::io::Result<Option<FileLease>> {
@@ -810,28 +821,23 @@ fn open_task_lease(path: &Path) -> std::io::Result<Option<FileLease>> {
 /// pid and process start time, published beside a `<key>.lock.lock`
 /// coordination file. A live old-format holder still owns the key, so the
 /// lease alone must not admit a second task. Returns `false` while such a
-/// holder lives. Artifacts of a confirmed-dead or pid-reused owner are
-/// retired; ownership that cannot be verified is a typed error, never
-/// treated as abandoned.
-fn retire_pre_lease_task_lock(lock_dir: &Path, key: &str) -> std::io::Result<bool> {
-    let lock_path = lock_dir.join(format!("{key}.lock"));
-    if let Some(owner) = read_pre_lease_owner(&lock_path)? {
+/// holder lives. Records of a confirmed-dead or pid-reused owner are retired;
+/// ownership that cannot be verified is a typed error, never abandonment.
+/// The caller must own the stable publication coordination through settlement.
+fn retire_pre_lease_owner(lock_path: &Path) -> std::io::Result<bool> {
+    if let Some(owner) = read_pre_lease_owner(lock_path)? {
         let Some(pid) = owner.pid else {
-            return Err(unverifiable_pre_lease_owner(&lock_path));
+            return Err(unverifiable_pre_lease_owner(lock_path));
         };
         match process_state(pid) {
             ProcessState::Live if !recorded_owner_was_reused(pid, owner.started_at) => {
                 return Ok(false);
             }
-            ProcessState::Unknown => return Err(unverifiable_pre_lease_owner(&lock_path)),
+            ProcessState::Unknown => return Err(unverifiable_pre_lease_owner(lock_path)),
             ProcessState::Live | ProcessState::Dead => {
-                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&lock_path)?;
+                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(lock_path)?;
             }
         }
-    }
-    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
-    if coordination_path.symlink_metadata().is_ok() {
-        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&coordination_path)?;
     }
     Ok(true)
 }
@@ -1001,13 +1007,14 @@ fn windows_process_state(pid: u32) -> ProcessState {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::super::backend::{AgentTaskFailureClass, AgentTaskRetryAttempt};
     use super::super::backend_identity::BACKEND_IDENTITY_SUPPRESSED;
     use super::super::config::AutomationTaskSet;
     use super::*;
-    use std::io::Write;
     use tempfile::tempdir;
     use tracedecay_automation::evidence_budget::{
         SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
@@ -1876,6 +1883,205 @@ evidence about it",
             .expect("task-lock acquisition")
     }
 
+    /// Replays the shipped owner's publication/cleanup coordination in a real
+    /// process, with a pipe barrier before publication rather than a timing race.
+    #[test]
+    fn task_lock_process_participant() {
+        let Some(root) = std::env::var_os("TRACEDECAY_TEST_TASK_LOCK_ROOT") else {
+            return;
+        };
+        let lock_dir = PathBuf::from(root);
+        let old = std::env::var("TRACEDECAY_TEST_TASK_LOCK_OWNER").unwrap() == "old";
+        let lock_path = lock_dir.join("memory_curator.lock");
+        let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
+        let mut coordination = None;
+        let mut task = None;
+        for command in std::io::stdin().lock().lines() {
+            let answer = match command.unwrap().as_str() {
+                "prepare" if old => {
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(&coordination_path)
+                        .unwrap();
+                    match file.try_lock() {
+                        Ok(()) => {
+                            coordination = Some(FileLease::held(file, "test.old-task"));
+                            "held"
+                        }
+                        Err(std::fs::TryLockError::WouldBlock) => "busy",
+                        Err(error) => panic!("old coordination: {error}"),
+                    }
+                }
+                "publish" if old => {
+                    assert!(coordination.is_some());
+                    assert!(!lock_path.exists());
+                    // The production publisher hard-linked a synced staging
+                    // file under this lock. Keep that publication ordering.
+                    let staging = lock_dir.join("old-owner-staging");
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&staging)
+                        .unwrap();
+                    writeln!(file, "pid={}\ncreated_at=0", std::process::id()).unwrap();
+                    file.sync_all().unwrap();
+                    std::fs::hard_link(&staging, &lock_path).unwrap();
+                    std::fs::remove_file(staging).unwrap();
+                    drop(coordination.take());
+                    "executing"
+                }
+                "finish" if old => {
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&coordination_path)
+                        .unwrap();
+                    file.lock().unwrap();
+                    let guard = FileLease::held(file, "test.old-task-cleanup");
+                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
+                        &lock_path,
+                    )
+                    .unwrap();
+                    drop(guard);
+                    "released"
+                }
+                "acquire" if !old => {
+                    assert!(task.is_none());
+                    task = try_acquire_task_lock_blocking(&lock_dir, "memory_curator").unwrap();
+                    if task.is_some() { "held" } else { "busy" }
+                }
+                "release" if !old => {
+                    assert!(task.take().is_some());
+                    "released"
+                }
+                command => panic!("unexpected task-lock process command: {command}"),
+            };
+            println!("task-lock:{answer}");
+            std::io::stdout().flush().unwrap();
+        }
+    }
+
+    struct TaskLockProcess {
+        child: Child,
+        input: ChildStdin,
+        output: BufReader<ChildStdout>,
+    }
+
+    impl TaskLockProcess {
+        fn spawn(lock_dir: &Path, owner: &str) -> Self {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "automation::scheduler::tests::task_lock_process_participant",
+                    "--nocapture",
+                ])
+                .env("TRACEDECAY_TEST_TASK_LOCK_ROOT", lock_dir)
+                .env("TRACEDECAY_TEST_TASK_LOCK_OWNER", owner)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            Self {
+                input: child.stdin.take().unwrap(),
+                output: BufReader::new(child.stdout.take().unwrap()),
+                child,
+            }
+        }
+
+        fn command(&mut self, command: &str) -> String {
+            writeln!(self.input, "{command}").unwrap();
+            self.input.flush().unwrap();
+            loop {
+                let mut line = String::new();
+                assert_ne!(self.output.read_line(&mut line).unwrap(), 0, "child exited");
+                if let Some((_, answer)) = line.split_once("task-lock:") {
+                    return answer.trim().to_owned();
+                }
+            }
+        }
+    }
+
+    impl Drop for TaskLockProcess {
+        fn drop(&mut self) {
+            // Also reap the child if a regression assertion unwinds before
+            // the parent's explicit release. Never leave fixture owners alive.
+            let _ = self.child.kill();
+            self.child.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn old_and_new_processes_exclude_publication_and_execution_until_release() {
+        let temp = tempdir().unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
+            .unwrap();
+        let lock_path = lock_dir.join("memory_curator.lock");
+        let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
+        let mut old = TaskLockProcess::spawn(&lock_dir, "old");
+        let mut new = TaskLockProcess::spawn(&lock_dir, "new");
+
+        assert_eq!(old.command("prepare"), "held");
+        let stable_inode = std::fs::metadata(&coordination_path).unwrap();
+        assert!(
+            !lock_path.exists(),
+            "old holder is paused before publication"
+        );
+        let new_admission = new.command("acquire");
+        assert_eq!(old.command("publish"), "executing");
+        assert_eq!(
+            new_admission, "busy",
+            "old task published and executes: admitting new before publication runs both tasks"
+        );
+        assert_eq!(new.command("acquire"), "busy", "old task still executes");
+        assert_eq!(old.command("finish"), "released");
+
+        assert_eq!(new.command("acquire"), "held");
+        assert!(!lock_path.exists());
+        assert_eq!(
+            old.command("prepare"),
+            "busy",
+            "new task must retain old publication coordination for its whole lifetime"
+        );
+        let mut next = TaskLockProcess::spawn(&lock_dir, "new");
+        assert_eq!(next.command("acquire"), "busy");
+        assert_eq!(new.command("release"), "released");
+
+        assert_eq!(old.command("prepare"), "held");
+        assert_eq!(old.command("publish"), "executing");
+        assert_eq!(next.command("acquire"), "busy");
+        assert_eq!(old.command("finish"), "released");
+        assert_eq!(next.command("acquire"), "held");
+        assert_eq!(next.command("release"), "released");
+        assert_eq!(new.command("acquire"), "held");
+        drop(new);
+        assert_eq!(
+            old.command("prepare"),
+            "held",
+            "process death releases legacy coordination too"
+        );
+        assert_eq!(old.command("publish"), "executing");
+        assert_eq!(next.command("acquire"), "busy");
+        assert_eq!(old.command("finish"), "released");
+        assert_eq!(next.command("acquire"), "held");
+        assert_eq!(next.command("release"), "released");
+        assert!(coordination_path.exists(), "coordination is never unlinked");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(coordination_path).unwrap().ino(),
+                stable_inode.ino(),
+                "all generations must coordinate on the same inode"
+            );
+        }
+        #[cfg(not(unix))]
+        drop(stable_inode);
+    }
+
     #[tokio::test]
     async fn same_key_admits_one_holder_until_release_and_other_keys_are_independent() {
         let root = tempdir().unwrap();
@@ -1892,6 +2098,36 @@ evidence about it",
             .await
             .expect("explicit release admits the next holder");
         drop((other, next));
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_both_task_coordination_locks() {
+        let root = tempdir().unwrap();
+        let holder_root = root.path().to_path_buf();
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let _guard = acquire(&holder_root, "cancelled").await.unwrap();
+            held_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        held_rx.await.unwrap();
+        assert!(acquire(root.path(), "cancelled").await.is_none());
+        let coordination_path = root.path().join("automation_locks/cancelled.lock.lock");
+        let old = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(coordination_path)
+            .unwrap();
+        assert!(matches!(
+            old.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        holder.abort();
+        assert!(holder.await.unwrap_err().is_cancelled());
+        old.try_lock()
+            .expect("cancellation releases old coordination");
+        old.unlock().unwrap();
+        assert!(acquire(root.path(), "cancelled").await.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1961,21 +2197,48 @@ evidence about it",
 
     #[cfg(unix)]
     #[test]
-    fn lease_path_symlink_is_rejected_without_touching_its_target() {
+    fn task_coordination_symlinks_are_rejected_without_touching_their_targets() {
         let temp = tempdir().unwrap();
         let lock_dir = temp.path().join("automation_locks");
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
             .unwrap();
         let outside = temp.path().join("outside-lock-target");
         std::fs::write(&outside, b"unchanged").unwrap();
-        let lease_path = lock_dir.join("memory_curator.lease");
-        std::os::unix::fs::symlink(&outside, &lease_path).unwrap();
+        for (key, suffix) in [("lease_symlink", "lease"), ("old_symlink", "lock.lock")] {
+            let path = lock_dir.join(format!("{key}.{suffix}"));
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
 
-        let error = try_acquire_task_lock_blocking(&lock_dir, "memory_curator").unwrap_err();
+            let error = try_acquire_task_lock_blocking(&lock_dir, key).unwrap_err();
 
-        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+            assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+            assert!(path.is_symlink());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_lease_owner_symlink_denial_releases_both_coordination_locks() {
+        let temp = tempdir().unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
+            .unwrap();
+        let outside = temp.path().join("outside-owner");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        let lock_path = lock_dir.join("memory_curator.lock");
+        std::os::unix::fs::symlink(&outside, &lock_path).unwrap();
+
+        assert!(try_acquire_task_lock_blocking(&lock_dir, "memory_curator").is_err());
         assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
-        assert!(lease_path.is_symlink());
+        assert!(lock_path.is_symlink());
+        // Remove only the fixture symlink; the denied acquisition must leave
+        // both stable lock files reusable, without touching the outside target.
+        std::fs::remove_file(lock_path).unwrap();
+        assert!(
+            try_acquire_task_lock_blocking(&lock_dir, "memory_curator")
+                .unwrap()
+                .is_some()
+        );
     }
 
     fn write_pre_lease_lock(lock_dir: &Path, key: &str, payload: &[u8]) -> PathBuf {
@@ -2028,7 +2291,7 @@ evidence about it",
     }
 
     #[test]
-    fn dead_pre_lease_holder_artifacts_are_retired_on_acquisition() {
+    fn dead_pre_lease_owner_is_retired_without_replacing_coordination() {
         let temp = tempdir().unwrap();
         let lock_dir = temp.path().join("automation_locks");
         let payload = format!("pid={}\ncreated_at=0\n", reaped_pid());
@@ -2040,17 +2303,27 @@ evidence about it",
             .expect("a confirmed-dead old holder no longer owns the key");
 
         assert!(!lock_path.exists());
-        assert!(!coordination_path.exists());
+        assert!(coordination_path.exists());
+        let old = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&coordination_path)
+            .unwrap();
+        assert!(matches!(
+            old.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
         drop(held);
+        old.try_lock()
+            .expect("release admits the old coordination inode");
+        old.unlock().unwrap();
     }
 
     #[test]
     fn reused_pid_pre_lease_lock_is_retired() {
-        let Some(live_started_at) =
+        let live_started_at =
             tracedecay_runtime_core::lifecycle_lease::process_start_time(std::process::id())
-        else {
-            return;
-        };
+                .expect("current process start-time evidence");
         let temp = tempdir().unwrap();
         let lock_dir = temp.path().join("automation_locks");
         let payload = format!(
@@ -2078,6 +2351,32 @@ evidence about it",
             try_acquire_task_lock_blocking(&lock_dir, "memory_curator").is_err(),
             "the lease taken by the failed attempt must have been released"
         );
+    }
+
+    #[test]
+    fn pre_lease_owner_checks_preserve_live_and_unknown_records() {
+        let temp = tempdir().unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        let pid = std::process::id();
+        let started_at = tracedecay_runtime_core::lifecycle_lease::process_start_time(pid)
+            .expect("current process start-time evidence");
+        let live = format!("pid={pid}\nstarted_at={started_at}\ncreated_at=0\n");
+        let live_path = write_pre_lease_lock(&lock_dir, "live", live.as_bytes());
+        assert!(
+            try_acquire_task_lock_blocking(&lock_dir, "live")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read(live_path).unwrap(), live.as_bytes());
+        for (key, payload) in [
+            ("unknown", "pid=0\ncreated_at=0\n".to_owned()),
+            ("duplicate", format!("pid={pid}\npid={pid}\ncreated_at=0\n")),
+            ("missing", "created_at=0\n".to_owned()),
+        ] {
+            let path = write_pre_lease_lock(&lock_dir, key, payload.as_bytes());
+            assert!(try_acquire_task_lock_blocking(&lock_dir, key).is_err());
+            assert_eq!(std::fs::read(path).unwrap(), payload.as_bytes());
+        }
     }
 
     #[cfg(unix)]

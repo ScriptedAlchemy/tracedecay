@@ -1451,7 +1451,23 @@ mod recorded_failure_tests {
                 .is_none()
         );
 
+        let old_coordination = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(
+                root.path()
+                    .join("automation_locks/session_reflector.lock.lock"),
+            )
+            .expect("old publisher coordination");
+        assert!(matches!(
+            old_coordination.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
         drop(settlement_guard);
+        old_coordination
+            .try_lock()
+            .expect("settlement releases old publisher coordination");
+        old_coordination.unlock().expect("release old publisher");
         assert!(
             AutomationTaskLock::try_acquire(root.path(), AgentTaskKind::SessionReflector,)
                 .await
