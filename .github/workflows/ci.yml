@@ -336,7 +336,6 @@ jobs:
       contents: read
       id-token: write
     name: Test Linux (${{ matrix.shard }})
-    needs: gates
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -684,7 +683,6 @@ jobs:
       contents: read
       id-token: write
     name: Clippy
-    needs: gates
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     # Same image as Test Linux so rustc action keys can restore that job's
     # disk cache (proc-macros, build scripts, grammar cc, matching rlibs)
@@ -723,7 +721,6 @@ jobs:
   # are ordinary `//...` targets that the Clippy job compiles.
   feature-gates:
     name: Feature gates
-    needs: gates
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -745,7 +742,6 @@ jobs:
       contents: read
       id-token: write
     name: Shipped CLI build (x86_64-linux)
-    needs: gates
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
