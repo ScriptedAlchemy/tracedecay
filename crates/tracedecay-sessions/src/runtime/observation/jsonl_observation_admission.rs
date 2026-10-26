@@ -1,6 +1,7 @@
 use asupersync::channel::watch;
 use futures_util::future::AbortHandle;
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU64;
@@ -1843,6 +1844,124 @@ struct ActiveAdmission<'request> {
     generation: ObservationSourceGenerationV1,
     file_identity: u64,
     cancellation: ObservationCancellation,
+    /// Durable never-regressing frontier of deterministically refused bytes
+    /// for this (source, scope). See [`RefusalMemo`].
+    refusal_memo: Mutex<RefusalMemo>,
+}
+
+/// A durable secondary frontier for deterministic content refusals.
+///
+/// The primary convergence mechanism is the cover-past cursor advance, but
+/// that advance can fail non-retryably (cursor bookkeeping conflicts) or be
+/// lost to a store rewrite, and every daemon restart used to re-pay the
+/// whole refusal storm. This memo records, per (source, scope), the highest
+/// `end_offset` refused under one file generation. When a later pass sees a
+/// durable cursor behind that mark for the same generation, admission
+/// resumes from the memo instead of re-reading and re-refusing the same
+/// records. A changed file generation invalidates the memo naturally.
+struct RefusalMemo {
+    key: String,
+    /// Durable state loaded at pass start: `(generation, refused_through)`.
+    loaded_generation: u64,
+    loaded_through: u64,
+    /// This pass's high-water mark and whether it needs persisting.
+    refused_through: u64,
+    dirty: bool,
+}
+
+impl RefusalMemo {
+    fn key_for(provider: &str, source: &ObservationSourceIdentityV1) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay-refusal-memo-v1");
+        hasher.update(provider.as_bytes());
+        hasher.update(source.session_id().as_str().as_bytes());
+        hasher.update(source.source_key().as_str().as_bytes());
+        let digest = hasher.finalize();
+        let mut key = String::with_capacity(64);
+        key.push_str("host-memo://");
+        key.push_str(provider);
+        key.push_str("/refused/v1/");
+        for byte in &digest[..8] {
+            key.push_str(&format!("{byte:02x}"));
+        }
+        key
+    }
+
+    async fn load(
+        admission: &dyn HostAdmission,
+        provider: &str,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> Self {
+        let key = Self::key_for(provider, source);
+        let (loaded_generation, loaded_through) =
+            match admission.get_parse_offset(scope, &key).await {
+                Ok(Some(offset)) => (offset.file_id, offset.byte_offset),
+                _ => (0, 0),
+            };
+        Self {
+            key,
+            loaded_generation,
+            loaded_through,
+            refused_through: loaded_through,
+            dirty: false,
+        }
+    }
+
+    /// The resume floor applies only when the durable cursor carries the
+    /// same generation the memo was written under; a fresh or rewritten
+    /// source re-evaluates its records once.
+    fn floor_for(&self, generation: u64, cursor_position: u64) -> Option<u64> {
+        (self.loaded_generation == generation
+            && generation != 0
+            && self.loaded_through > cursor_position)
+            .then_some(self.loaded_through)
+    }
+
+    fn record_refusal(&mut self, generation: u64, refused_through: u64) {
+        if generation != 0 && refused_through > self.refused_through {
+            self.refused_through = refused_through;
+            self.dirty = true;
+        }
+    }
+
+    /// Takes this memo's dirty snapshot and clears the flag, so the caller
+    /// can await the durable write without holding any lock.
+    fn take_persist_snapshot(&mut self) -> Option<(String, u64)> {
+        if !self.dirty {
+            return None;
+        }
+        self.dirty = false;
+        Some((self.key.clone(), self.refused_through))
+    }
+
+    /// Best-effort durable persist; a failure keeps the in-memory mark.
+    async fn persist_snapshot(
+        admission: &dyn HostAdmission,
+        scope: &ObservationScopeV1,
+        snapshot: (String, u64),
+        generation: u64,
+    ) {
+        let (key, refused_through) = snapshot;
+        if let Err(error) = admission
+            .advance_parse_offset(
+                scope,
+                &key,
+                tracedecay_store::ParseOffset {
+                    byte_offset: refused_through,
+                    mtime: 0,
+                    file_id: generation,
+                },
+            )
+            .await
+        {
+            tracing::debug!(
+                key = %key,
+                error = ?error,
+                "refusal memo persist failed; the next pass will re-check"
+            );
+        }
+    }
 }
 
 impl ActiveAdmission<'_> {
@@ -2121,25 +2240,75 @@ impl ActiveAdmission<'_> {
                 if is_deterministic_content_refusal(&outcome)
                     && !self.cancellation.is_cancelled() =>
             {
-                tracing::warn!(
-                    provider = self.provider,
-                    session = self.source.session_id().as_str(),
-                    offset = checkpoint.offset,
-                    reason = outcome.reason_code.unwrap_or("host_admission_refused"),
-                    cause = outcome.cause.as_deref().unwrap_or("unspecified"),
-                    "admission refused a record; covering past it"
-                );
-                self.advance_coverage(
-                    expected_cursor,
-                    checkpoint,
-                    if outcome.reason_code == Some("observation_identity_collision") {
-                        ObservationCoverageReason::ObservationIdentityCollision
-                    } else {
-                        ObservationCoverageReason::AdmissionRefused
-                    },
-                    None,
-                )
-                .await?;
+                let generation_id = self.generation.generation_id();
+                let repeat = {
+                    let mut memo = self
+                        .refusal_memo
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let repeat =
+                        generation_id == memo.loaded_generation && checkpoint.offset < memo.loaded_through;
+                    memo.record_refusal(generation_id, checkpoint.end_offset);
+                    repeat
+                };
+                if repeat {
+                    // The refusal memo already covered this range; the durable
+                    // cursor is behind the memo, so this is known ground.
+                    tracing::debug!(
+                        provider = self.provider,
+                        session = self.source.session_id().as_str(),
+                        offset = checkpoint.offset,
+                        reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                        "deterministic refusal repeated below the memo frontier"
+                    );
+                } else {
+                    tracing::warn!(
+                        provider = self.provider,
+                        session = self.source.session_id().as_str(),
+                        offset = checkpoint.offset,
+                        reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                        cause = outcome.cause.as_deref().unwrap_or("unspecified"),
+                        "admission refused a record; covering past it"
+                    );
+                }
+                let advance_reason = if outcome.reason_code == Some("observation_identity_collision")
+                {
+                    ObservationCoverageReason::ObservationIdentityCollision
+                } else {
+                    ObservationCoverageReason::AdmissionRefused
+                };
+                if let Err(error) = self
+                    .advance_coverage(expected_cursor, checkpoint, advance_reason, None)
+                    .await
+                {
+                    match error {
+                        TranscriptIngestError::NonDurableRecord { .. } => {
+                            // A non-retryable cursor-advance failure must not
+                            // fail the whole file pass: that turns one stuck
+                            // cursor into an infinite re-read + re-refuse loop.
+                            // Advance in-memory and let the durable refusal
+                            // memo bound the next pass's re-work.
+                            tracing::warn!(
+                                provider = self.provider,
+                                session = self.source.session_id().as_str(),
+                                offset = checkpoint.offset,
+                                "refusal coverage advance failed; advancing in-memory only"
+                            );
+                            *expected_cursor =
+                                Some(self.cursor_at(checkpoint.end_offset, checkpoint.resume_fingerprint)?);
+                        }
+                        other => return Err(other),
+                    }
+                }
+                let snapshot = self
+                    .refusal_memo
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take_persist_snapshot();
+                if let Some(snapshot) = snapshot {
+                    RefusalMemo::persist_snapshot(self.admission, &self.scope, snapshot, generation_id)
+                        .await;
+                }
                 Ok(DurableFrameDisposition::Refused)
             }
             Err(outcome) => {
@@ -2341,19 +2510,30 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
     }
-    let previous = expected_cursor
+    let refusal_memo = RefusalMemo::load(admission, provider, &source, &scope).await;
+    let mut previous = expected_cursor
         .as_ref()
         .map_or(StoredCursor::default(), |cursor| StoredCursor {
             position: cursor.position(),
             mtime: 0,
             file_id: cursor.generation().generation_id(),
         });
+    // Secondary refusal frontier: when the durable cursor sits behind the
+    // memo for this generation, resume from the memo. The memo offset is a
+    // frame `end_offset`, so it is line-aligned; the resume fingerprint is
+    // dropped so the jump is not mistaken for a diverged prefix.
     let resume_state = expected_cursor.as_ref().and_then(|cursor| {
-        Some(JsonlResumeState {
-            generation: cursor.generation().generation_id(),
-            file_identity: cursor.file_identity()?,
-            fingerprint: cursor.resume_fingerprint()?,
-        })
+        let floored = refusal_memo.floor_for(cursor.generation().generation_id(), cursor.position());
+        if let Some(floor) = floored {
+            previous.position = floor;
+            None
+        } else {
+            Some(JsonlResumeState {
+                generation: cursor.generation().generation_id(),
+                file_identity: cursor.file_identity()?,
+                fingerprint: cursor.resume_fingerprint()?,
+            })
+        }
     });
     let had_expected_cursor = expected_cursor.is_some();
     let previous_generation = expected_cursor
@@ -2476,6 +2656,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         generation,
         file_identity: raw.file_identity,
         cancellation,
+        refusal_memo: Mutex::new(refusal_memo),
     };
     let mut skipped = raw.skipped.iter().copied().peekable();
     let mut pending: Vec<DurableJsonlFrame> = Vec::new();
