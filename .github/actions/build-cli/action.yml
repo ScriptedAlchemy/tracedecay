@@ -7,9 +7,9 @@ inputs:
   config:
     description: >-
       Bazel config. `dist` is the shipping-tuned compile (thin LTO, strip,
-      codegen-units=1). `release` is opt-level 3 without LTO, the CI / cargo
-      `--release` equivalent; tracedecay-cli's default features are
-      `production`, the release source profile. `ci` is a dev-profile build.
+      codegen-units=1). `release` is opt-level 3 without LTO. Only release
+      jobs select optimized configurations; tracedecay-cli's default features are
+      `production`, the release source profile. `ci` is unoptimized.
     required: true
   dest:
     description: Directory the binary is copied into, as tracedecay[.exe].

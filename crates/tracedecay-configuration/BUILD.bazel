@@ -6,7 +6,7 @@ package(default_visibility = ["//visibility:public"])
 load("@c//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
-load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
+load("//scripts:bazel/rust_test.bzl", "development_rustc_flags", "rust_test")
 
 rust_library(
     name = "tracedecay-configuration",
@@ -20,7 +20,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-automation:tracedecay-automation", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-global-db:tracedecay-global-db", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-policy:tracedecay-policy", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-session-memory:tracedecay-session-memory"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
+    rustc_flags = development_rustc_flags(),
     crate_features = [],
 )
 
@@ -36,7 +36,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-automation:tracedecay-automation__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__dev", "//crates/tracedecay-policy:tracedecay-policy__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__dev", "//crates/tracedecay-session-memory:tracedecay-session-memory__+test-transport__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
+    rustc_flags = development_rustc_flags(),
     crate_features = ["test-helpers"],
 )
 
@@ -52,7 +52,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-automation:tracedecay-automation", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-global-db:tracedecay-global-db__d1d92290ab9", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-policy:tracedecay-policy", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-session-memory:tracedecay-session-memory__d708e4dea92"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
+    rustc_flags = development_rustc_flags(),
     crate_features = [],
 )
 
@@ -68,7 +68,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-automation:tracedecay-automation", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-global-db:tracedecay-global-db__d59e53d4792", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-policy:tracedecay-policy", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-session-memory:tracedecay-session-memory__dc4cc807ff6"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
+    rustc_flags = development_rustc_flags(),
     crate_features = [],
 )
 
@@ -84,7 +84,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-automation:tracedecay-automation", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-global-db:tracedecay-global-db__d37f7709403", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-policy:tracedecay-policy", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-session-memory:tracedecay-session-memory__d43158f6601"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(1),
+    rustc_flags = development_rustc_flags(),
     crate_features = [],
 )
 
@@ -97,7 +97,7 @@ rust_test(
     deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-automation:tracedecay-automation__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__dev", "//crates/tracedecay-policy:tracedecay-policy__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__dev", "//crates/tracedecay-session-memory:tracedecay-session-memory__+test-transport__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = perf_rustc_flags(1),
+    rustc_flags = development_rustc_flags(),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
     data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
 )

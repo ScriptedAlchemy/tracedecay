@@ -204,14 +204,12 @@ _isolated_rust_test = rule(
     test = True,
 )
 
-def perf_rustc_flags(opt_level):
-    """The Cargo `perf` profile for one crate outside `-c opt`: its opt-level
-    with debug assertions and overflow checks. `-c opt` (release) keeps the
-    toolchain's opt-level 3 without them."""
+def development_rustc_flags():
+    """Keep development and tests unoptimized; release uses toolchain defaults."""
     return select({
         "//:opt_mode": [],
         "//conditions:default": [
-            "-Copt-level={}".format(opt_level),
+            "-Copt-level=0",
             "-Cdebug-assertions=on",
             "-Coverflow-checks=on",
         ],

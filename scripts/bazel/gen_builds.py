@@ -323,25 +323,6 @@ class CargoQuery:
         )
 
 
-def perf_opt_levels(workspace):
-    """Cargo `perf` opt-level per package name, the profile hosted CI tests
-    with. `perf` inherits `dev`, so a package resolves to its perf override,
-    then its dev override, then the perf and dev profile defaults."""
-    profiles = tomllib.loads((workspace / "Cargo.toml").read_text(encoding="utf-8"))["profile"]
-    perf = profiles.get("perf", {})
-    dev = profiles.get("dev", {})
-    default = perf.get("opt-level", dev.get("opt-level", 0))
-    names = set(perf.get("package", {})) | set(dev.get("package", {}))
-    levels = {}
-    for name in names - {"*"}:
-        for profile in (perf, dev):
-            level = profile.get("package", {}).get(name, {}).get("opt-level")
-            if level is not None:
-                levels[name] = level
-                break
-    return default, levels
-
-
 def cargo_metadata(query):
     return json.loads(
         query.run(["metadata", "--locked", "--format-version", "1", "--no-deps", "-q",
@@ -730,7 +711,6 @@ def main():
     meta = cargo_metadata(query)
     members = {p["name"]: p for p in meta["packages"]}
     validate_production_features(members)
-    opt_default, opt_levels = perf_opt_levels(workspace)
     dir_of = {
         p["name"]: Path(p["manifest_path"]).parent.relative_to(workspace).as_posix()
         for p in meta["packages"]
@@ -1126,12 +1106,8 @@ def main():
             size = test_sizes.pop(target, None)
             return f'    size = "{size}",' if size else None
 
-        # Mirror the Cargo `perf` profile hosted CI tests with: the package's
-        # opt-level with debug assertions and overflow checks on. `-c opt`
-        # (release) keeps the toolchain's own opt-level 3 without assertions.
-        rustc_flags_attr = (
-            f"    rustc_flags = perf_rustc_flags({opt_levels.get(name, opt_default)}),"
-        )
+        # Development and CI are unoptimized; release uses the opt toolchain.
+        rustc_flags_attr = "    rustc_flags = development_rustc_flags(),"
         used_names = set()
 
         def unique_name(want):
@@ -1164,7 +1140,7 @@ def main():
             f'load("@{CRATE_HUB}//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")\n'
             'load("@rules_rust//cargo:defs.bzl", "cargo_build_script")\n'
             'load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")\n'
-            'load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")\n'
+            'load("//scripts:bazel/rust_test.bzl", "development_rustc_flags", "rust_test")\n'
         )
         if name == "tracedecay-sdk":
             out.append('load("@aspect_rules_js//js:defs.bzl", "js_library")\n')
@@ -1629,29 +1605,7 @@ def main():
             return None
         return BANNER + "\n" + block + "\n"
 
-    # External crates Cargo's perf profile optimizes past the dev default.
-    # rules_rust matches per-crate flags on a prefix of the crate root's exec
-    # path, which carries the canonical name of the crate_universe repository
-    # (`rules_rust++crate+<hub>__<name>-<version>`).
     locked = tomllib.loads((workspace / "Cargo.lock").read_text(encoding="utf-8"))["package"]
-    external_flags = []
-    for package in sorted(locked, key=lambda pkg: (pkg["name"], pkg["version"])):
-        level = opt_levels.get(package["name"])
-        if package["name"] in members or level is None:
-            continue
-        prefix = f"external/rules_rust++crate+{CRATE_HUB}__{package['name']}-{package['version']}/"
-        external_flags.append(
-            f'build "--@rules_rust//rust/settings:per_crate_rustc_flag={prefix}@-Copt-level={level}"'
-        )
-    bazelrc = workspace / ".bazelrc"
-    rc_block = (
-        GEN_BEGIN
-        + "\n# Cargo perf opt-levels for external crates (see [profile.perf]).\n"
-        + "\n".join(external_flags)
-        + "\n"
-        + GEN_END
-    )
-    outputs[bazelrc] = splice_generated(bazelrc.read_text(encoding="utf-8"), rc_block, bazelrc)
     module = workspace / "MODULE.bazel"
     outputs[module] = splice_generated(
         module.read_text(encoding="utf-8"), target_feature_annotations(query, locked), module

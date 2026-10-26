@@ -63,7 +63,7 @@ class BuildEvalBinaryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(self.built))
         self.assertIn(
-            "build --config=release //crates/tracedecay-cli:tracedecay",
+            "build --config=ci //crates/tracedecay-cli:tracedecay",
             self.log.read_text(),
         )
         self.assertIn("tracedecay 1.2.3", result.stderr)
@@ -88,7 +88,7 @@ class BuildEvalBinaryTest(unittest.TestCase):
         result = self.run_script(FAKE_BUILD_RC="1")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
-        self.assertIn("bazel build --config=release //crates/tracedecay-cli:tracedecay", result.stderr)
+        self.assertIn("bazel build --config=ci //crates/tracedecay-cli:tracedecay", result.stderr)
 
     def test_explicit_binary_skips_the_build(self):
         explicit = self.built.with_name("candidate")
@@ -117,7 +117,7 @@ class BuildEvalBinaryTest(unittest.TestCase):
         result = self.run_script(TRACEDECAY_BIN=str(self.built.with_name("absent")))
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
-        self.assertIn("bazel build --config=release //crates/tracedecay-cli:tracedecay", result.stderr)
+        self.assertIn("bazel build --config=ci //crates/tracedecay-cli:tracedecay", result.stderr)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@
 #
 # Env:
 #   TRACEDECAY_BIN                  explicit binary; skips the build
-#   TRACEDECAY_EVAL_BAZEL_CONFIG    Bazel config to build with (default: release;
+#   TRACEDECAY_EVAL_BAZEL_CONFIG    Bazel config to build with (default: ci;
 #                                   `dist` adds thin LTO and symbol stripping to
 #                                   build the exact release bytes)
 #
@@ -21,7 +21,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target="//crates/tracedecay-cli:tracedecay"
-config="${TRACEDECAY_EVAL_BAZEL_CONFIG:-release}"
+config="${TRACEDECAY_EVAL_BAZEL_CONFIG:-ci}"
 build_cmd="bazel build --config=$config $target"
 
 fail() {

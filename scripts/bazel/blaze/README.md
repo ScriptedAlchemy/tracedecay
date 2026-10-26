@@ -21,6 +21,9 @@ Cargo-only path. Native diagnostics,
 fallback explanations and exit status pass through.
 These commands also use Bazel's `RUSTC_BOOTSTRAP=1` environment so pinned stable
 Cargo honors that policy's unstable shallow-dependency setting.
+Development and test profiles compile every workspace crate and dependency at
+optimization level 0. This also lets Blaze reuse rustc's incremental executable
+for workspace edits. Release jobs select the optimized `dist` configuration.
 Use Cargo's package/target/feature flags for focused runs. Required integration-test
 features still apply; `--workspace` alone does not enable them.
 

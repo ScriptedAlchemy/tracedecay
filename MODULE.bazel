@@ -44,12 +44,11 @@ RUST_VERSION = "1.99.0"
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
-    # Cargo's dev profile compiles every crate at opt-level 1 and release at
-    # 3; generated targets and the .bazelrc block refine per crate from the
-    # perf profile.
+    # Match Cargo: development and test dependencies are unoptimized;
+    # release configurations use opt-level 3.
     opt_level = {
         "dbg": "0",
-        "fastbuild": "1",
+        "fastbuild": "0",
         "opt": "3",
     },
     versions = [RUST_VERSION],

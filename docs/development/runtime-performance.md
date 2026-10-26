@@ -373,11 +373,12 @@ while the lane runs. For OS-level counters, read
 
 The existing `large_repos` benchmark also provides a finite audit through the
 production composition. Build it with
-`cargo bench -p tracedecay --profile perf --features test-helpers,test-transport --bench large_repos --no-run`,
-then pass the executable printed by Cargo explicitly to the wrapper.
+`bazel build //crates/tracedecay:large_repos`, then pass
+`$(bazel info bazel-bin)/crates/tracedecay/large_repos` explicitly to the wrapper.
+This uses the unoptimized development configuration.
 
 ```sh
-TRACEDECAY_BENCH_PROFILE=perf scripts/run-tool-performance.sh \
+TRACEDECAY_BENCH_PROFILE=dev scripts/run-tool-performance.sh \
   --bin /absolute/path/to/large_repos-executable \
   --samples 1 \
   --report /absolute/path/to/tool-audit.json
