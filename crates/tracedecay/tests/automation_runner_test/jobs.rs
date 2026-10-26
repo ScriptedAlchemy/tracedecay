@@ -18,7 +18,7 @@ use tracedecay_automation_runtime::automation::jobs::{
     run_user_job_with_backend_for_retained_settlement, save_jobs, validate_job,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
-    AutomationSchedule, cron_is_due, parse_schedule,
+    AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule,
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::errors::TraceDecayError;
@@ -1056,9 +1056,10 @@ async fn manual_job_trigger_respects_existing_per_job_lock() {
     let dashboard_root = temp.path().join("dashboard");
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
-    let lock_dir = dashboard_root.join("automation_locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(lock_dir.join("user_job_locked-job.lock"), b"9999999999").unwrap();
+    let _held = AutomationTaskLock::try_acquire_keyed(&dashboard_root, "user_job_locked-job")
+        .await
+        .unwrap()
+        .expect("fixture owns the per-job lock");
 
     let job = sample_job("locked-job");
     let config = enabled_job_config();
@@ -1091,9 +1092,10 @@ async fn disabled_automation_skip_precedes_existing_per_job_lock() {
     let dashboard_root = temp.path().join("dashboard");
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
-    let lock_dir = dashboard_root.join("automation_locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(lock_dir.join("user_job_disabled-job.lock"), b"9999999999").unwrap();
+    let _held = AutomationTaskLock::try_acquire_keyed(&dashboard_root, "user_job_disabled-job")
+        .await
+        .unwrap()
+        .expect("fixture owns the per-job lock");
 
     let job = sample_job("disabled-job");
     let mut config = enabled_job_config();
@@ -1295,22 +1297,11 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
             .is_none(),
         "a new interval job is advisory-due before effect admission"
     );
-    let lock_path = dashboard_root
-        .join("automation_locks")
-        .join("user_job_prefilter-gap.lock");
-    assert!(
-        !lock_path.exists(),
-        "the advisory prefilter must release its reservation lock"
-    );
-    fs::write(
-        &lock_path,
-        format!(
-            "pid={}\ncreated_at={}\n",
-            std::process::id(),
-            current_timestamp()
-        ),
-    )
-    .unwrap();
+    let _raced_in =
+        AutomationTaskLock::try_acquire_keyed(&dashboard_root, "user_job_prefilter-gap")
+            .await
+            .unwrap()
+            .expect("the advisory prefilter must release its reservation lock");
 
     let backend = ContentBackend::new("unused");
     let retained = run_user_job_with_backend_for_retained_settlement(
