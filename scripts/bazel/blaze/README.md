@@ -82,6 +82,9 @@ or its own checksum-pinned download. `bazel run //scripts/bazel/blaze:blaze --
 toolchain` reports the selection. Bazel's `cargo_host_tools` provisions the compiler
 used to build Blaze; it lacks `rust-src` and is not passed off as the complete
 runtime toolchain. An explicit incomplete `RUSTC` is rejected by upstream.
+When `CARGO` names an absolute executable, its directory also leads the launched
+process's `PATH`: upstream's unit-graph loader invokes bare `cargo`, and a
+different shell broker can otherwise discard its JSON output and force fallback.
 
 ## Correctness and workspace prerequisites
 

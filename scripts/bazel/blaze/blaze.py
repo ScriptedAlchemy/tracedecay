@@ -37,6 +37,11 @@ def main():
     if "BLAZE_CACHE" not in env:
         env.setdefault("RA_JIT_CACHE", str(state / "store"))
     env.setdefault("CARGO_TARGET_DIR", str(state / "cargo"))
+    # The pinned engine also launches bare `cargo` for its unit graph. Honor
+    # the explicit toolchain there instead of a different PATH broker/shim.
+    cargo = env.get("CARGO")
+    if cargo and Path(cargo).is_absolute():
+        env["PATH"] = os.pathsep.join((str(Path(cargo).parent), env.get("PATH", os.defpath)))
 
     args = sys.argv[1:]
     if args and args[0] in {"build", "test", "run", "check"}:
