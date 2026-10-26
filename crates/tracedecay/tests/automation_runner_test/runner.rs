@@ -238,8 +238,7 @@ async fn memory_curator_runner_recovers_stale_scheduler_lock_file() {
     let lock_path = lock_dir.join("memory_curator.lock");
     fs::write(&lock_path, "pid=999999\ncreated_at=100\n").unwrap();
     let backend = JsonBackend::new(json!({"ops": []}));
-    let mut config = scheduler_config(None, None);
-    config.tasks.memory_curator.stale_lock_secs = Some(1);
+    let config = scheduler_config(None, None);
 
     let run = run_memory_curator(
         &cg,
