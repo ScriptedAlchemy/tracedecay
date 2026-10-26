@@ -2134,10 +2134,12 @@ def main() -> int:
     with open(os.path.join(run_dir, "scoreboard.json"), "w") as f:
         json.dump(scoreboard, f, indent=2)
         f.write("\n")
-    with open(os.path.join(run_dir, "report.md"), "w") as f:
-        f.write(render_report(scoreboard))
+    report = render_report(scoreboard)
+    with open(os.path.join(run_dir, "report.md"), "w", encoding="utf-8") as f:
+        f.write(report)
 
-    print(render_report(scoreboard))
+    sys.stdout.reconfigure(encoding="utf-8")
+    print(report)
     return 0
 
 

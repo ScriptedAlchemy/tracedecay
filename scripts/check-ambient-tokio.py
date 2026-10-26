@@ -275,7 +275,7 @@ def check(root: Path) -> tuple[int, list[Finding]]:
         if resolved in skipped or any(parent in skipped_dirs for parent in resolved.parents):
             continue
         scanned += 1
-        findings += check_file(str(path.relative_to(root)), source, code)
+        findings += check_file(path.relative_to(root).as_posix(), source, code)
     return scanned, findings
 
 
