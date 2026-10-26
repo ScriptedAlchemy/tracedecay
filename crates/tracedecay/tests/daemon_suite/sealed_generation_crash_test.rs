@@ -4,14 +4,14 @@
 //! temporary name, flushed once, and only then named; the manifest and the
 //! active pointer follow. A kill after the pointer is durable must restart on
 //! the exact sealed bytes. A kill before it must leave the prior generation
-//! published and no partial generation or temporary behind once the restarted
-//! daemon rebuilds.
+//! published, then rebuild and collect the abandoned publication through the
+//! restarted daemon's scheduled maintenance.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -20,6 +20,8 @@ use tracedecay_code_index_retention::code_index_generations::{
     code_generation_segments_root, code_text_artifacts_root, scoped_code_index_store_root,
     try_acquire_code_generation_store_read_lock,
 };
+use tracedecay_configuration::RetentionConfig;
+use tracedecay_maintenance::tick::MaintenanceCadence;
 
 use crate::code_index_journey::{
     RECEIPT_TIMEOUT, commit_all, exact_identity, git, initialize_tracedecay,
@@ -278,7 +280,10 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
     let prior_pointer = active_pointer(&scope);
     let prior_family = sealed_family(&scope);
 
-    write_batch(&project, 128, 16);
+    // The reader lease fixes the kill point; a large batch is unnecessary
+    // and can spread abandoned-file collection across several maintenance
+    // ticks. Keep this multi-file publication within one bounded sweep.
+    write_batch(&project, 16, 16);
     let batch_revision = commit_all(&project, "install the batch the killed seal was writing");
     let receipt = tool(
         &socket,
@@ -317,6 +322,11 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
             "the kill damaged the prior generation's durable file {path}"
         );
     }
+    let abandoned_temporaries = publication_temporaries(&scope);
+    assert!(
+        !abandoned_temporaries.is_empty(),
+        "the interrupted seal must leave publication work for recovery"
+    );
 
     daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
     let rebuilt = wait_for_terminal_generation(
@@ -327,19 +337,30 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
         "refs/heads/main",
         Some(&batch_revision),
         Some(&prior.generation_id),
-        "crash_probe_0127_015",
-        Some("src/batch/file_0127.rs"),
+        "crash_probe_0015_015",
+        Some("src/batch/file_0015.rs"),
     )
     .await;
     assert_ne!(rebuilt.generation_id, prior.generation_id);
-    // The exclusive segment sweep owns abandoned preparation directories;
-    // it runs independently of the restarted daemon's generation rebuild.
-    let deadline = Instant::now() + RECEIPT_TIMEOUT;
-    while !publication_temporaries(&scope).is_empty() && Instant::now() < deadline {
+    // Rebuilding does not run retention: its next admitted tick is one retry
+    // delay away (a minute under the default policy). Start the unchanged
+    // completion budget after that scheduled delay. Observe only the killed
+    // seal's names, since a live successor may legitimately prepare work.
+    let cadence = MaintenanceCadence::new(Duration::from_hours(
+        RetentionConfig::default().interval_hours.max(1),
+    ));
+    let deadline = Instant::now() + cadence.retry_delay() + RECEIPT_TIMEOUT;
+    let pending_temporaries = || {
+        publication_temporaries(&scope)
+            .into_iter()
+            .filter(|name| abandoned_temporaries.contains(name))
+            .collect::<Vec<_>>()
+    };
+    while !pending_temporaries().is_empty() && Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(
-        publication_temporaries(&scope),
+        pending_temporaries(),
         Vec::<String>::new(),
         "the restarted daemon must collect the killed seal's temporaries"
     );
