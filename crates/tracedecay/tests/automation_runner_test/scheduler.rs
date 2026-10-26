@@ -8,9 +8,10 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
-    AutomationSchedule, AutomationSchedulerControl, AutomationTaskLock, SessionActivity,
-    host_receipt_decision, load_scheduler_control, parse_schedule, save_scheduler_control,
-    schedule_decision, scheduler_control_path,
+    AutomationSchedule, AutomationScheduleDecision, AutomationSchedulerControl, AutomationTaskLock,
+    SessionActivity, host_receipt_decision as admitted_host_receipt_decision,
+    load_scheduler_control, resolve_schedule, save_scheduler_control,
+    schedule_decision as admitted_schedule_decision, scheduler_control_path,
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::ProjectId;
@@ -18,6 +19,42 @@ use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::support::{SeedSessionMessage, scheduler_record_for, seed_session_message_in_db};
+
+fn schedule_decision(
+    config: &AutomationConfig,
+    executable: Option<&std::path::Path>,
+    task: AgentTaskKind,
+    records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
+    now_secs: i64,
+) -> AutomationScheduleDecision {
+    admitted_schedule_decision(
+        &tracedecay_automation::config::admit_config(config).unwrap(),
+        executable,
+        task,
+        records,
+        activity,
+        now_secs,
+    )
+}
+
+fn host_receipt_decision(
+    config: &AutomationConfig,
+    executable: Option<&std::path::Path>,
+    task: AgentTaskKind,
+    records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
+    now_secs: i64,
+) -> AutomationScheduleDecision {
+    admitted_host_receipt_decision(
+        &tracedecay_automation::config::admit_config(config).unwrap(),
+        executable,
+        task,
+        records,
+        activity,
+        now_secs,
+    )
+}
 
 async fn scheduler_session_runtime(
     root: &std::path::Path,
@@ -78,31 +115,73 @@ fn record(
 }
 
 #[test]
-fn scheduler_parses_manual_aliases_and_intervals() {
-    assert_eq!(parse_schedule(None).unwrap(), AutomationSchedule::Manual);
-    assert_eq!(
-        parse_schedule(Some("manual")).unwrap(),
-        AutomationSchedule::Manual
-    );
-    assert_eq!(
-        parse_schedule(Some("interval")).unwrap(),
-        AutomationSchedule::ConfiguredInterval
-    );
-    assert_eq!(
-        parse_schedule(Some("weekly")).unwrap(),
-        AutomationSchedule::Interval {
-            every_secs: 7 * 24 * 60 * 60
+fn schedules_resolve_once_into_one_timing_policy() {
+    let every = |every_secs| AutomationSchedule::Interval { every_secs };
+    for (schedule, interval_secs, expected) in [
+        (None, None, AutomationSchedule::Manual),
+        (None, Some(60), AutomationSchedule::Manual),
+        (Some("manual"), Some(60), AutomationSchedule::Manual),
+        (Some("off"), None, AutomationSchedule::Manual),
+        (Some("interval"), Some(900), every(900)),
+        (Some("weekly"), None, every(7 * 24 * 60 * 60)),
+        (Some("weekly"), Some(5), every(7 * 24 * 60 * 60)),
+        (Some("every 15m"), None, every(900)),
+        (Some("interval:2h"), Some(5), every(7200)),
+    ] {
+        assert_eq!(
+            resolve_schedule(schedule, interval_secs).unwrap(),
+            expected,
+            "{schedule:?} with {interval_secs:?}"
+        );
+    }
+    for (schedule, interval_secs) in [
+        (Some("interval"), None),
+        (Some("interval"), Some(0)),
+        (Some("after lunch"), Some(60)),
+    ] {
+        assert!(
+            resolve_schedule(schedule, interval_secs).is_err(),
+            "{schedule:?} with {interval_secs:?} must be refused, not fall through to manual"
+        );
+    }
+}
+
+#[test]
+fn interval_schedule_without_a_period_is_invalid_not_manual() {
+    let config = automation_config(Some("interval"), None);
+    assert!(tracedecay_automation::config::admit_config(&config).is_err());
+}
+
+#[test]
+fn admitted_schedules_preserve_due_boundaries_and_do_not_follow_input_mutation() {
+    for (schedule, interval, boundary) in [
+        ("interval", Some(600), 700),
+        ("every 10m", Some(5), 700),
+        ("*/15 * * * *", None, 900),
+    ] {
+        let mut input = automation_config(Some(schedule), interval);
+        let admitted = tracedecay_automation::config::admit_config(&input).unwrap();
+        let records = [record(
+            "previous",
+            AgentTaskKind::MemoryCurator,
+            AutomationRunStatus::Succeeded,
+            100,
+        )];
+        input.tasks.memory_curator.schedule = Some("after lunch".to_owned());
+        input.tasks.memory_curator.interval_secs = None;
+        assert!(tracedecay_automation::config::admit_config(&input).is_err());
+        for now in [boundary - 1, boundary, boundary + 1, boundary] {
+            let decision = admitted_schedule_decision(
+                &admitted,
+                None,
+                AgentTaskKind::MemoryCurator,
+                &records,
+                SessionActivity::none(),
+                now,
+            );
+            assert_eq!(decision.is_due(), now >= boundary, "{schedule} at {now}");
         }
-    );
-    assert_eq!(
-        parse_schedule(Some("every 15m")).unwrap(),
-        AutomationSchedule::Interval { every_secs: 900 }
-    );
-    assert_eq!(
-        parse_schedule(Some("interval:2h")).unwrap(),
-        AutomationSchedule::Interval { every_secs: 7200 }
-    );
-    assert!(parse_schedule(Some("after lunch")).is_err());
+    }
 }
 
 #[test]

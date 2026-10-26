@@ -5,6 +5,8 @@
 //! snapshot and submits a revision-fenced project mutation through the same
 //! application runtime as every other configuration write.
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -25,7 +27,7 @@ use super::DashboardState;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{
-    AutomationConfig, AutomationConfigPatch, effective_config, from_configuration_snapshot,
+    AdmittedAutomationConfig, AutomationConfig, AutomationConfigPatch, effective_config,
 };
 use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
@@ -107,7 +109,7 @@ pub async fn patch_config(
         }])
     })?;
 
-    let application_outcome = if candidate == current {
+    let application_outcome = if candidate == **current {
         None
     } else {
         let project_id = state
@@ -165,11 +167,11 @@ pub(crate) fn effective_automation_config(
     state: &DashboardState,
 ) -> tracedecay_domain::errors::Result<(
     ConfigurationRevisionId,
-    AutomationConfig,
+    Arc<AdmittedAutomationConfig>,
     LcmSummarizerExecutableV1,
 )> {
     let pinned = state.cached_runtime_configuration()?;
-    let config = from_configuration_snapshot(pinned.snapshot())?;
+    let config = pinned.config().automation.clone();
     Ok((
         pinned.revision_id().clone(),
         config,

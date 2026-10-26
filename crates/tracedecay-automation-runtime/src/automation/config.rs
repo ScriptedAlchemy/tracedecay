@@ -1,9 +1,10 @@
 //! Runtime adapter for daemon-owned automation configuration.
 
 pub use tracedecay_automation::config::{
-    AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
-    AutomationSchedule, AutomationTaskConfig, AutomationTaskPatch, AutomationTaskSet, CronSchedule,
-    DEFAULT_SCHEDULER_TICK_SECS, RetentionConfig, parse_schedule,
+    AdmittedAutomationConfig, AutomationBackend, AutomationConfig, AutomationConfigPatch,
+    AutomationHostMode, AutomationSchedule, AutomationTaskConfig, AutomationTaskPatch,
+    AutomationTaskSet, CronSchedule, DEFAULT_SCHEDULER_TICK_SECS, RetentionConfig,
+    ScheduleResolutionError, admit_config,
 };
 
 use tracedecay_domain::configuration::{

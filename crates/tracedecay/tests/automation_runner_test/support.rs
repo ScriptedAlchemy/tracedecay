@@ -1286,21 +1286,21 @@ pub(crate) fn scheduler_config(
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
-                schedule: Some("interval".to_string()),
+                schedule: interval_secs.map(|_| "interval".to_string()),
                 interval_secs,
                 cooldown_secs,
                 ..AutomationTaskConfig::default()
             },
             session_reflector: AutomationTaskConfig {
                 enabled: true,
-                schedule: Some("interval".to_string()),
+                schedule: interval_secs.map(|_| "interval".to_string()),
                 interval_secs,
                 cooldown_secs,
                 ..AutomationTaskConfig::default()
             },
             skill_writer: AutomationTaskConfig {
                 enabled: true,
-                schedule: Some("interval".to_string()),
+                schedule: interval_secs.map(|_| "interval".to_string()),
                 interval_secs,
                 cooldown_secs,
                 ..AutomationTaskConfig::default()

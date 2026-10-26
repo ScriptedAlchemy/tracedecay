@@ -18,7 +18,7 @@ use super::backend::{
     AgentTaskRetryReport, BackendRetryPolicy, agent_task_contract, prompt_version,
     run_agent_task_with_retry_report, task_key,
 };
-use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode, admit_config};
 use super::config_error;
 use super::jobs::effect_receipt::ExternalAutomationEffectReceipt;
 use super::run_ledger::{
@@ -547,13 +547,14 @@ fn scheduler_gate_with_lock_retention<'a>(
                 return Ok((SchedulerGate::Proceed(lock), None));
             }
 
+            let config = admit_config(config)?;
             let summary =
                 load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?;
             let activity = load_session_activity(sessions_db).await;
             let decision_now_secs = current_timestamp();
             let decision = if trigger == AutomationTrigger::HostReceipt {
                 super::scheduler::host_receipt_decision(
-                    config,
+                    &config,
                     executable,
                     task,
                     summary.records(),
@@ -562,7 +563,7 @@ fn scheduler_gate_with_lock_retention<'a>(
                 )
             } else {
                 schedule_decision(
-                    config,
+                    &config,
                     executable,
                     task,
                     summary.records(),

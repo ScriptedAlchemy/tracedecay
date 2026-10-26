@@ -16,13 +16,14 @@ pub use tracedecay_global_db::configuration::{registry, resolver};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use tracedecay_automation::config::{AdmittedAutomationConfig, admit_config};
 use tracedecay_contracts::{ConfigurationSettingActionV1, ConfigurationSettingFindingV1};
 use tracedecay_domain::configuration::{
-    ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
-    LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
+    AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationRevisionId, ConfigurationSnapshotV1,
+    ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
@@ -42,6 +43,7 @@ use model::{RetentionConfig, SyncConfig, TelemetryConfig};
 /// Settings decoded from one resolved configuration snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTraceDecayConfig {
+    pub automation: Arc<AdmittedAutomationConfig>,
     /// `index.exclude.v1` and `index.include.v1`, compiled once: the path
     /// policy the code index, its freshness proof, and source walks share.
     pub index_paths: IndexPathPolicyV1,
@@ -251,6 +253,14 @@ fn runtime_config_from_snapshot(
         config_error(format!("invalid resolved configuration snapshot: {error}"))
     })?;
     Ok(RuntimeTraceDecayConfig {
+        automation: match required_setting(snapshot, AUTOMATION_SETTINGS_SETTING_KEY)? {
+            ConfigurationValueV1::AutomationSettings(settings) => {
+                Arc::new(admit_config(settings).map_err(|error| {
+                    config_error(format!("invalid automation settings: {error}"))
+                })?)
+            }
+            _ => return Err(config_error("expected automation settings")),
+        },
         index_paths: IndexPathPolicyV1::new(
             applied_index_patterns(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
             applied_index_patterns(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
@@ -600,5 +610,37 @@ mod tests {
             "a retargeted pin must share, not copy, its snapshot"
         );
         assert_eq!(moved.config(), pinned.config());
+    }
+
+    #[test]
+    fn pin_admits_schedules_and_refuses_invalid_persisted_timing() {
+        let key =
+            SettingKey::new(tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY)
+                .unwrap();
+        let mut settings = tracedecay_automation::config::AutomationConfig::default();
+        settings.tasks.memory_curator.schedule = Some("every 10m".to_owned());
+        settings.tasks.memory_curator.interval_secs = Some(5);
+        let snapshot = resolved(BTreeMap::from([(
+            key.clone(),
+            ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
+        )]));
+        let pin = PinnedRuntimeConfiguration::new(target(), revision(), snapshot).unwrap();
+        let task = tracedecay_automation::backend::AgentTaskKind::MemoryCurator;
+        assert_eq!(
+            pin.config().automation.schedule(task),
+            Some(tracedecay_automation::config::AutomationSchedule::Interval { every_secs: 600 })
+        );
+        for _ in 0..4 {
+            assert_eq!(pin.clone().config().automation, pin.config().automation);
+        }
+        for schedule in ["interval", "after lunch"] {
+            settings.tasks.memory_curator.schedule = Some(schedule.to_owned());
+            settings.tasks.memory_curator.interval_secs = None;
+            let snapshot = resolved(BTreeMap::from([(
+                key.clone(),
+                ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
+            )]));
+            assert!(PinnedRuntimeConfiguration::new(target(), revision(), snapshot).is_err());
+        }
     }
 }
