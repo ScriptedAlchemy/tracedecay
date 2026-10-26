@@ -1,5 +1,10 @@
 # Bazel CI on the private fleet
 
+Repository checks, Linux tests, Clippy, production feature validation, and the
+shipped CLI build run independently. They share no generated artifacts between
+jobs, so fleet work can start while repository checks run. Each check still
+reports its own result before merge.
+
 GitHub-hosted runners remain the workflow runners. Linux x86_64 test shards
 and Clippy, plus repository gates and the shipped CLI build, connect to the
 private NativeLink coordinator through the official Tailscale action. GitHub

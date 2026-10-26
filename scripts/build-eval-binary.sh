@@ -29,10 +29,15 @@ fail() {
   exit 2
 }
 
+# MSYS `pwd -W` keeps the path usable by native Windows callers.
+absolute() {
+  echo "$(cd "$(dirname "$1")" && { pwd -W 2>/dev/null || pwd; })/$(basename "$1")"
+}
+
 if [[ -n "${TRACEDECAY_BIN:-}" ]]; then
   [[ -f "$TRACEDECAY_BIN" && -x "$TRACEDECAY_BIN" ]] ||
     fail "TRACEDECAY_BIN=$TRACEDECAY_BIN is not an executable file; unset it to build the default with: $build_cmd"
-  bin="$(cd "$(dirname "$TRACEDECAY_BIN")" && pwd)/$(basename "$TRACEDECAY_BIN")"
+  bin="$(absolute "$TRACEDECAY_BIN")"
   origin="explicit TRACEDECAY_BIN"
 else
   command -v bazel >/dev/null 2>&1 ||
@@ -49,6 +54,7 @@ else
   bin="$bazel_bin/crates/tracedecay-cli/tracedecay${exe}"
   [[ -f "$bin" && -x "$bin" ]] ||
     fail "expected a binary at $bin after: $build_cmd"
+  bin="$(absolute "$bin")"
   origin="bazel --config=$config $target"
 fi
 
