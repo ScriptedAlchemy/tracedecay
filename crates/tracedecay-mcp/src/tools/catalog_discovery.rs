@@ -4,9 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use crate::handlers::multi_root_tool_name;
-use crate::{
-    ToolDefinition, context_description, context_warming_description, get_tool_definitions,
-};
+use crate::{ToolDefinition, get_tool_definitions};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_api::{WorkOperation, WorkflowOperation};
@@ -26,8 +24,8 @@ use super::dispatch::McpDispatchMetadataError;
 ///
 /// The live key space is profile × capability-set digest × scope digest.
 /// Production callers share one default profile and one project scope; tests
-/// add a handful of capability-set variants. Budget and node count are patched
-/// onto a hit and are not keys.
+/// add a handful of capability-set variants. Descriptions remain static across
+/// runtime state changes.
 const DISCOVERY_CACHE_MAX_ENTRIES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -93,8 +91,8 @@ fn discovery_cache_key(
     }
 }
 
-/// Node-independent compose: tool definitions, catalog filter, and
-/// dispatch-contract metadata. Context descriptions are patched on serve.
+/// Compose static tool definitions, the catalog filter, and dispatch-contract
+/// metadata for the admitted capability and scope authority.
 fn compose_node_independent_definitions(
     profile_id: &ProfileId,
     authorized_capabilities: &BTreeSet<CapabilityId>,
@@ -215,56 +213,16 @@ fn discovery_cache_get_or_insert(
     Ok(entry)
 }
 
-fn context_description_for(node_count: Option<u64>, budget: u8) -> String {
-    match node_count {
-        None => context_warming_description(budget),
-        Some(node_count) => context_description(node_count, budget),
-    }
-}
-
-fn patch_context_description_in_payload(
-    payload: &mut Value,
-    description: String,
-) -> Result<(), McpDispatchMetadataError> {
-    let tools = payload
-        .get_mut("tools")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| {
-            McpDispatchMetadataError::Initialization(
-                "cached tools/list payload is missing the tools array".to_owned(),
-            )
-        })?;
-    for tool in tools {
-        if tool.get("name").and_then(Value::as_str) == Some("tracedecay_context") {
-            let object = tool.as_object_mut().ok_or_else(|| {
-                McpDispatchMetadataError::Initialization(
-                    "cached tracedecay_context entry is not an object".to_owned(),
-                )
-            })?;
-            object.insert("description".to_owned(), Value::String(description));
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
 /// Decodes the live `tools/list` discovery payload into tool definitions for
 /// assertions.
 #[cfg(test)]
-pub(crate) fn get_catalog_filtered_tool_definitions_with_budget(
-    node_count: u64,
-    budget: u8,
+pub(crate) fn get_catalog_filtered_tool_definitions(
     profile_id: &ProfileId,
     authorized_capabilities: &BTreeSet<CapabilityId>,
     available_scope: &BTreeSet<ScopeDimension>,
 ) -> Result<Vec<ToolDefinition>, McpDispatchMetadataError> {
-    let mut payload = catalog_discovery_tools_list_payload(
-        Some(node_count),
-        budget,
-        profile_id,
-        authorized_capabilities,
-        available_scope,
-    )?;
+    let mut payload =
+        catalog_discovery_tools_list_payload(profile_id, authorized_capabilities, available_scope)?;
     let tools = payload.get_mut("tools").map(Value::take).ok_or_else(|| {
         McpDispatchMetadataError::Initialization(
             "cached tools/list payload is missing the tools array".to_owned(),
@@ -279,24 +237,18 @@ pub(crate) fn get_catalog_filtered_tool_definitions_with_budget(
 
 /// Composed `{"tools": [...]}` discovery payload for `tools/list`.
 ///
-/// A hit clones the cached `Value` once and patches only the dynamic
-/// `tracedecay_context` description. It does not deep-clone definitions or
-/// re-serialize dispatch contracts.
+/// Descriptions are static: hosts cache the list for a session, so live state
+/// such as warming is reported per response, never here. A hit clones the
+/// cached `Value` once and does not deep-clone definitions or re-serialize
+/// dispatch contracts.
 pub fn catalog_discovery_tools_list_payload(
-    node_count: Option<u64>,
-    budget: u8,
     profile_id: &ProfileId,
     authorized_capabilities: &BTreeSet<CapabilityId>,
     available_scope: &BTreeSet<ScopeDimension>,
 ) -> Result<Value, McpDispatchMetadataError> {
     let entry =
         discovery_cache_get_or_insert(profile_id, authorized_capabilities, available_scope)?;
-    let mut payload = (*entry).clone();
-    patch_context_description_in_payload(
-        &mut payload,
-        context_description_for(node_count, budget),
-    )?;
-    Ok(payload)
+    Ok((*entry).clone())
 }
 
 pub fn default_catalog_discovery_authority()
@@ -312,15 +264,13 @@ pub fn default_catalog_discovery_authority()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{explore_call_budget, project_catalog_discovery_scope};
+    use crate::project_catalog_discovery_scope;
 
     #[test]
     fn catalog_filtered_discovery_advertises_dispatch_contracts() {
         let profile_id = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
             .expect("default profile");
-        let definitions = get_catalog_filtered_tool_definitions_with_budget(
-            0,
-            explore_call_budget(0),
+        let definitions = get_catalog_filtered_tool_definitions(
             &profile_id,
             &default_catalog_discovery_authority().expect("default discovery authority"),
             &project_catalog_discovery_scope(),
@@ -428,9 +378,7 @@ mod tests {
     #[test]
     fn catalog_filter_preserves_non_catalog_tools_and_filters_catalog_bindings() {
         let profile = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-        let definitions = get_catalog_filtered_tool_definitions_with_budget(
-            10_000,
-            4,
+        let definitions = get_catalog_filtered_tool_definitions(
             &profile,
             &BTreeSet::new(),
             &project_catalog_discovery_scope(),
@@ -548,19 +496,17 @@ mod tests {
     }
 
     #[test]
-    fn discovery_advertises_rewrite_and_the_requested_context_budget() {
+    fn discovery_advertises_rewrite_with_a_state_free_context_description() {
         let (profile, authority, scope) = default_discovery_inputs();
-        let payload =
-            catalog_discovery_tools_list_payload(Some(6_000), 4, &profile, &authority, &scope)
-                .expect("discovery payload");
+        let payload = catalog_discovery_tools_list_payload(&profile, &authority, &scope)
+            .expect("discovery payload");
         assert_rewrite_is_advertised(&payload);
+        let description = advertised_tool(&payload, "tracedecay_context")["description"]
+            .as_str()
+            .expect("context description");
         assert!(
-            advertised_tool(&payload, "tracedecay_context")["description"]
-                .as_str()
-                .expect("context description")
-                .contains("This project (6000 nodes) allows 4 broad context calls."),
-            "{}",
-            advertised_tool(&payload, "tracedecay_context")["description"]
+            !description.contains("warming") && !description.contains("broad context calls"),
+            "{description}"
         );
     }
 
@@ -569,17 +515,10 @@ mod tests {
         with_isolated_discovery_cache(|| {
             let (profile, full_authority, scope) = default_discovery_inputs();
             let empty_authority = BTreeSet::new();
-            let full =
-                catalog_discovery_tools_list_payload(Some(0), 3, &profile, &full_authority, &scope)
-                    .expect("full-authority payload");
-            let empty = catalog_discovery_tools_list_payload(
-                Some(0),
-                3,
-                &profile,
-                &empty_authority,
-                &scope,
-            )
-            .expect("empty-authority payload");
+            let full = catalog_discovery_tools_list_payload(&profile, &full_authority, &scope)
+                .expect("full-authority payload");
+            let empty = catalog_discovery_tools_list_payload(&profile, &empty_authority, &scope)
+                .expect("empty-authority payload");
             assert_rewrite_is_advertised(&full);
             assert!(advertises(&full, "tracedecay_search"));
             assert!(advertises(&full, "tracedecay_configuration_get"));
@@ -587,16 +526,11 @@ mod tests {
             assert!(advertises(&empty, "tracedecay_multi_root_execute"));
 
             let full_again =
-                catalog_discovery_tools_list_payload(Some(0), 3, &profile, &full_authority, &scope)
+                catalog_discovery_tools_list_payload(&profile, &full_authority, &scope)
                     .expect("full-authority cache hit");
-            let empty_again = catalog_discovery_tools_list_payload(
-                Some(0),
-                3,
-                &profile,
-                &empty_authority,
-                &scope,
-            )
-            .expect("empty-authority cache hit");
+            let empty_again =
+                catalog_discovery_tools_list_payload(&profile, &empty_authority, &scope)
+                    .expect("empty-authority cache hit");
             assert_rewrite_is_advertised(&full_again);
             assert!(advertises(&full_again, "tracedecay_search"));
             assert!(!advertises(&empty_again, "tracedecay_search"));
@@ -605,8 +539,6 @@ mod tests {
             let mut without_configuration = scope.clone();
             without_configuration.remove(&ScopeDimension::ConfigurationLayer);
             let scoped = catalog_discovery_tools_list_payload(
-                Some(0),
-                3,
                 &profile,
                 &full_authority,
                 &without_configuration,
@@ -615,8 +547,6 @@ mod tests {
             assert_rewrite_is_advertised(&scoped);
             assert!(!advertises(&scoped, "tracedecay_configuration_get"));
             let scoped_again = catalog_discovery_tools_list_payload(
-                Some(0),
-                3,
                 &profile,
                 &full_authority,
                 &without_configuration,

@@ -3251,8 +3251,11 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         })
         .and_then(|tool| tool["description"].as_str())
         .expect("portable context tool description");
-    assert!(portable_context_description.contains("3 broad context calls"));
-    assert!(portable_context_description.contains("graph is still warming"));
+    assert!(
+        !portable_context_description.contains("warming")
+            && !portable_context_description.contains("broad context calls"),
+        "the context description must not embed runtime state: {portable_context_description}"
+    );
 
     tokio::time::timeout(PHASE_TIMEOUT, async {
         while attempts.load(std::sync::atomic::Ordering::Relaxed) == 0 {
@@ -3630,8 +3633,11 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         .find(|tool| tool["name"] == json!("tracedecay_context"))
         .and_then(|tool| tool["description"].as_str())
         .expect("context tool description");
-    assert!(context_description.contains("3 broad context calls"));
-    assert!(context_description.contains("graph is still warming"));
+    assert!(
+        !context_description.contains("warming")
+            && !context_description.contains("broad context calls"),
+        "the context description must not embed runtime state: {context_description}"
+    );
 
     while engine
         .project_open_attempts
