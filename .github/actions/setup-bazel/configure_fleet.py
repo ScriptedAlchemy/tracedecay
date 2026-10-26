@@ -47,9 +47,11 @@ build --remote_executor=grpc://{host}:{port}
 build --remote_cache=grpc://{host}:{port}
 build --remote_instance_name=main
 build --remote_timeout=600
-# Retry infrastructure failures locally; compiler and test failures still fail.
-build --remote_local_fallback
-build --remote_local_fallback_strategy=sandboxed
+# Survive brief coordinator restarts; five retries expire in about 3s.
+build --remote_retries=10
+# Fleet compilation must not fall back onto the smaller hosted VM.
+# Dynamic tests still have their explicitly scheduled local branch.
+build --noremote_local_fallback
 build --remote_download_outputs=toplevel
 build --jobs=40
 build --local_resources=cpu=HOST_CPUS

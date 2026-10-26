@@ -47,13 +47,13 @@ class ConfigureCiFleetTest(unittest.TestCase):
             for option in shlex.split(line, comments=True)[1:]
         }
 
-    def test_reachable_executor_prefers_remote_rust_with_sandboxed_fallback(self) -> None:
+    def test_reachable_executor_prefers_remote_rust_without_hosted_fallback(self) -> None:
         self.endpoint.listen()
         self.assertTrue(self.configure())
         options = self.options()
         self.assertEqual(options["--config"], "rbe-linux")
-        self.assertIn("--remote_local_fallback", options)
-        self.assertEqual(options["--remote_local_fallback_strategy"], "sandboxed")
+        self.assertIn("--noremote_local_fallback", options)
+        self.assertEqual(options["--remote_retries"], "10")
         strategies = [
             line for line in self.rc.read_text().splitlines() if "--strategy=" in line
         ]
