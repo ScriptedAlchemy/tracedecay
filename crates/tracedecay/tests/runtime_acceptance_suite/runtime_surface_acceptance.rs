@@ -448,6 +448,45 @@ async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
     );
 }
 
+async fn request_lsp_with_retrigger(
+    session: &mut DaemonLspSessionClient,
+    request_id: u64,
+    method: &str,
+    params: Value,
+) -> Value {
+    // A warming analyzer replies with ServerCancelled and retriggerRequest.
+    // Respect that client-facing signal after reconnect as well as initial
+    // startup, while keeping every attempt inside one 90-second budget.
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let mut attempt = 0_u64;
+        loop {
+            // The gateway rejects duplicate request ids, including retriggers.
+            let attempt_id = request_id + attempt * 10_000;
+            send_lsp(
+                session,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": attempt_id,
+                    "method": method,
+                    "params": params.clone(),
+                }),
+            )
+            .await;
+            let response = poll_lsp_response(session, attempt_id).await;
+            if !response["error"]["data"]["retriggerRequest"]
+                .as_bool()
+                .unwrap_or(false)
+            {
+                return response;
+            }
+            attempt += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("daemon LSP {method} request {request_id} timed out after 90s"))
+}
+
 async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
     let shutdown_request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -2623,35 +2662,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             }),
         ),
     ] {
-        // A warming analyzer is answered with ServerCancelled carrying
-        // retriggerRequest, which is the gateway's "ask again" signal rather
-        // than a failure. A compliant client re-sends on it, under one outer
-        // budget, instead of treating the first not-ready reply as the answer.
-        // Each attempt needs its own id; the gateway rejects a duplicate.
-        let retrigger_deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        let mut attempt = 0_u64;
-        let navigation = loop {
-            let attempt_id = request_id + attempt * 10_000;
-            send_lsp(
-                &mut session,
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": attempt_id,
-                    "method": method,
-                    "params": params.clone(),
-                }),
-            )
-            .await;
-            let response = poll_lsp_response(&mut session, attempt_id).await;
-            let retrigger = response["error"]["data"]["retriggerRequest"]
-                .as_bool()
-                .unwrap_or(false);
-            if !retrigger || std::time::Instant::now() >= retrigger_deadline {
-                break response;
-            }
-            attempt += 1;
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        };
+        let navigation = request_lsp_with_retrigger(&mut session, request_id, method, params).await;
         assert!(
             navigation.get("result").is_some(),
             "{method} must return a standard LSP result: {navigation}"
@@ -3222,17 +3233,13 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         .reconnect(deadline, cancellation)
         .await
         .expect("reconnect production LSP session");
-    send_lsp(
+    let after_reconnect = request_lsp_with_retrigger(
         &mut session,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 701,
-            "method": "textDocument/documentSymbol",
-            "params": { "textDocument": { "uri": document_uri } },
-        }),
+        701,
+        "textDocument/documentSymbol",
+        serde_json::json!({ "textDocument": { "uri": document_uri } }),
     )
     .await;
-    let after_reconnect = poll_lsp_response(&mut session, 701).await;
     assert!(
         after_reconnect.get("result").is_some(),
         "reconnected client must retain standard navigation: {after_reconnect}"

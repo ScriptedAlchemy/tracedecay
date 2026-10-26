@@ -17,7 +17,7 @@ use tracedecay_session_temporal_store::{
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::PoisonError;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -1178,7 +1178,9 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
 }
 
 struct PanicOnceProjector {
-    panicked: AtomicBool,
+    calls: std::sync::atomic::AtomicUsize,
+    retry_started: Arc<tokio::sync::Notify>,
+    resume_retry: Arc<tokio::sync::Notify>,
 }
 
 impl SessionTemporalRefreshProjector for PanicOnceProjector {
@@ -1187,9 +1189,15 @@ impl SessionTemporalRefreshProjector for PanicOnceProjector {
         _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
-        let should_panic = !self.panicked.swap(true, Ordering::AcqRel);
         Box::pin(async move {
-            assert!(!should_panic, "injected refresh worker panic");
+            let call = self.calls.fetch_add(1, Ordering::AcqRel);
+            assert_ne!(call, 0, "injected refresh worker panic");
+            // Hold the first recovery invocation for observation; subsequent
+            // storage retries must not wait for a second test-owned release.
+            if call == 1 {
+                self.retry_started.notify_one();
+                self.resume_retry.notified().await;
+            }
             Ok(empty_projection_effect(&recovery))
         })
     }
@@ -1201,11 +1209,15 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
     let authority =
         registered_test_database(&temp, "worker-recovery", HostAdmissionScope::Profile).await;
     let db = authority.database();
+    let retry_started = Arc::new(tokio::sync::Notify::new());
+    let resume_retry = Arc::new(tokio::sync::Notify::new());
     let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
     configure_scheduler(
         &mut registry,
         Arc::new(PanicOnceProjector {
-            panicked: AtomicBool::new(false),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            retry_started: Arc::clone(&retry_started),
+            resume_retry: Arc::clone(&resume_retry),
         }),
         SessionTemporalRefreshPolicy::default(),
     );
@@ -1215,17 +1227,22 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         .await
         .unwrap();
     assert!(wake.wake());
-    let recovering = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let status = registry.profile_worker_status(db.db_path()).await;
-            if status.unavailable_reason == Some(SessionTemporalRefreshUnavailableReason::Stalled) {
-                break status;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    let restarted = tokio::time::timeout(Duration::from_secs(1), retry_started.notified()).await;
+    // Inspect a held recovery pass, not the short backoff before it starts.
+    // Replacing a task has not recovered its durable backlog yet.
+    let recovering = registry.profile_worker_status(db.db_path()).await;
+    resume_retry.notify_one();
+    restarted.expect("the supervisor should restart the panicked worker");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        registry.wait_profile_idle(db.db_path()),
+    )
     .await
-    .expect("worker should expose its stalled pre-progress recovery");
+    .expect("the restarted worker should drain its recovered backlog");
+    assert_eq!(
+        recovering.unavailable_reason,
+        Some(SessionTemporalRefreshUnavailableReason::Stalled)
+    );
     assert_eq!(recovering.backlog, 1);
     assert_eq!(
         recovering.blocker,
@@ -1235,7 +1252,6 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         recovering.retry_class,
         Some(SessionTemporalRefreshRetryClass::Projector)
     );
-    registry.wait_profile_idle(db.db_path()).await;
     let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     assert!(store.running_session_refreshes().await.unwrap().is_empty());
     let recovered = registry.profile_worker_status(db.db_path()).await;

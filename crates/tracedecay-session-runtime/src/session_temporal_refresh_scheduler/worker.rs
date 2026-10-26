@@ -247,7 +247,8 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         policy,
     };
     let _instrumentation = SessionTemporalRefreshWorkerInstrumentation::new(&state);
-    state.mark_running();
+    // The registry marks the first worker running. A replacement must retain
+    // its panic blocker until a pass succeeds, just like other retry classes.
     loop {
         if state.cancelled.load(Ordering::Acquire) {
             return;

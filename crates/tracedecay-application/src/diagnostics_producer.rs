@@ -23,14 +23,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use futures_util::FutureExt;
-use futures_util::future::join_all;
+use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use tokio::sync::Semaphore;
 use tracedecay_domain::{CodeGenerationId, ContentDigest, UtcMicros};
 use tracedecay_lsp::{
-    SearchedTsconfig, TypeScriptFileOwner, TypeScriptProject, TypeScriptProjectConfigInputs,
-    run_typescript_compiler, typescript_build_info_program, typescript_file_owner,
-    typescript_install_command, typescript_projects,
+    SearchedTsconfig, TypeScriptCompilerAdmission, TypeScriptFileOwner, TypeScriptProject,
+    TypeScriptProjectConfigInputs, run_typescript_compiler, typescript_build_info_program,
+    typescript_file_owner, typescript_install_command, typescript_projects,
 };
 use tracedecay_runtime_core::native_runtime;
 
@@ -136,6 +135,7 @@ impl TypeScriptProducerStatusHandleV1 {
 /// digests of the generation it last checked and how each project fared.
 pub struct TypeScriptProducerStateV1 {
     status: TypeScriptProducerStatusHandleV1,
+    admission: TypeScriptCompilerAdmission,
     checked_files: Option<BTreeMap<String, ContentDigest>>,
     projects: BTreeMap<PathBuf, ProjectResult>,
 }
@@ -144,9 +144,13 @@ impl TypeScriptProducerStateV1 {
     /// State for one project owner's producer, publishing its status into
     /// `status`.
     #[must_use]
-    pub fn new(status: TypeScriptProducerStatusHandleV1) -> Self {
+    pub fn new(
+        status: TypeScriptProducerStatusHandleV1,
+        admission: TypeScriptCompilerAdmission,
+    ) -> Self {
         Self {
             status,
+            admission,
             checked_files: None,
             projects: BTreeMap::new(),
         }
@@ -165,10 +169,6 @@ enum ProjectResult {
         reason: String,
     },
 }
-
-/// Projects checked at once. Each check is one mostly single-threaded tsc
-/// process, and a large project holds over a gigabyte while it runs.
-const CONCURRENT_CHECKS: usize = 4;
 
 /// Publishes the merged findings of each project's own TypeScript compiler as
 /// the compiler pillar's clean-generation snapshot for `identity`.
@@ -261,7 +261,7 @@ async fn produce(
     }
     let reused = results.len();
     let checked = stale.len();
-    results.extend(check_projects(project_root, build_info_dir, stale).await);
+    results.extend(check_projects(project_root, build_info_dir, stale, &state.admission).await);
     state.checked_files = Some(files);
 
     let mut parsed = Vec::new();
@@ -375,12 +375,13 @@ fn needs_check(
     })
 }
 
-/// Checks `stale` projects, at most [`CONCURRENT_CHECKS`] at a time, each
-/// against its own build-info in `build_info_dir`.
+/// The lazy window bounds waiting futures; the shared admission accounts for
+/// children until supervision has killed and reaped them.
 async fn check_projects(
     project_root: &Path,
     build_info_dir: &Path,
     stale: Vec<(PathBuf, PathBuf)>,
+    admission: &TypeScriptCompilerAdmission,
 ) -> BTreeMap<PathBuf, ProjectResult> {
     if stale.is_empty() {
         return BTreeMap::new();
@@ -406,22 +407,20 @@ async fn check_projects(
             })
             .collect();
     }
-    let permits = Arc::new(Semaphore::new(CONCURRENT_CHECKS));
-    let checks = stale
-        .into_iter()
+    futures_util::stream::iter(stale)
         .map(|(tsconfig, compiler)| {
             let build_info = build_info_dir.join(build_info_file_name(&tsconfig));
             let root = project_root.to_path_buf();
-            let permits = Arc::clone(&permits);
             async move {
                 let check = async {
-                    let Ok(_permit) = permits.acquire().await else {
-                        return ProjectResult::Failed {
-                            reason: "the TypeScript check admission closed".to_owned(),
-                        };
-                    };
-                    match run_typescript_compiler(&compiler, &root, &tsconfig, Some(&build_info))
-                        .await
+                    match run_typescript_compiler(
+                        admission,
+                        &compiler,
+                        &root,
+                        &tsconfig,
+                        Some(&build_info),
+                    )
+                    .await
                     {
                         Ok(reported) => ProjectResult::Checked {
                             reported: reported.into_iter().map(compiler_diagnostic).collect(),
@@ -441,8 +440,9 @@ async fn check_projects(
                 (tsconfig, result)
             }
         })
-        .collect::<Vec<_>>();
-    join_all(checks).await.into_iter().collect()
+        .buffer_unordered(admission.concurrency())
+        .collect()
+        .await
 }
 
 /// One build-info file per tsconfig path, so linked worktrees sharing a store
@@ -557,13 +557,17 @@ mod tests {
 
     #[cfg(unix)]
     use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::sync::Arc;
 
     #[cfg(unix)]
     use tracedecay_domain::UtcMicros;
     #[cfg(unix)]
     use tracedecay_domain::test_fixtures::id;
     #[cfg(unix)]
-    use tracedecay_lsp::typescript_projects;
+    use tracedecay_lsp::{TypeScriptCompilerAdmission, typescript_projects};
+    #[cfg(unix)]
+    use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
     #[cfg(unix)]
     use tracedecay_runtime_core::test_executable::write_executable_script;
 
@@ -579,6 +583,13 @@ mod tests {
     use crate::diagnostics_publication::CodeIndexPublicationIdentityV1;
     #[cfg(unix)]
     use crate::diagnostics_store::DiagnosticsStore;
+
+    #[cfg(unix)]
+    fn admission() -> TypeScriptCompilerAdmission {
+        TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+        )))
+    }
 
     #[test]
     fn tsc_report_lines_become_compiler_pillar_diagnostics() {
@@ -832,7 +843,10 @@ mod tests {
     #[tokio::test]
     async fn only_projects_a_generation_changed_are_rechecked() {
         let fixture = ProducerFixture::new();
-        let mut state = TypeScriptProducerStateV1::new(TypeScriptProducerStatusHandleV1::default());
+        let mut state = TypeScriptProducerStateV1::new(
+            TypeScriptProducerStatusHandleV1::default(),
+            admission(),
+        );
         let both = vec![
             (
                 "file.packages.app.src.index.ts".to_owned(),
@@ -891,7 +905,7 @@ mod tests {
     async fn a_successor_owner_does_not_inherit_the_predecessors_status() {
         let fixture = ProducerFixture::new();
         let predecessor = TypeScriptProducerStatusHandleV1::default();
-        let mut state = TypeScriptProducerStateV1::new(predecessor.clone());
+        let mut state = TypeScriptProducerStateV1::new(predecessor.clone(), admission());
         let run = fixture.run("generation.producer.1", &mut state).await;
         assert_eq!(
             predecessor.current().map(|status| status.run().clone()),
@@ -913,5 +927,76 @@ mod tests {
             panic!("app is checkable");
         };
         assert_eq!(check, Some(TypeScriptProjectCheckV1::Checked));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn isolated_producers_share_compiler_admission_and_keep_partial_findings() {
+        let fixtures = [
+            ProducerFixture::new(),
+            ProducerFixture::new(),
+            ProducerFixture::new(),
+        ];
+        let counter = tempfile::tempdir().unwrap();
+        for fixture in &fixtures {
+            let compiler = fixture.root.join("node_modules/.bin/tsc");
+            let script = std::fs::read_to_string(&compiler).unwrap();
+            let script = script.replacen(
+                "#!/bin/sh\n",
+                &format!(
+                    "#!/bin/sh\n\
+                     d='{}'\n\
+                     mkdir \"$d/active.$$\"\n\
+                     ls -d \"$d\"/active.* | wc -l >> \"$d/seen\"\n\
+                     sleep 0.3\n\
+                     rmdir \"$d/active.$$\"\n",
+                    counter.path().display(),
+                ),
+                1,
+            );
+            write_executable_script(&compiler, script).unwrap();
+        }
+        let admission = admission();
+        let mut states = fixtures
+            .iter()
+            .map(|_| {
+                TypeScriptProducerStateV1::new(
+                    TypeScriptProducerStatusHandleV1::default(),
+                    admission.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let runs = futures_util::future::join_all(
+            fixtures
+                .iter()
+                .zip(states.iter_mut())
+                .map(|(fixture, state)| fixture.run("generation.shared", state)),
+        )
+        .await;
+        assert!(
+            runs.iter()
+                .all(|run| run == &published("generation.shared", 3, 0)),
+            "{runs:?}"
+        );
+        for fixture in &fixtures {
+            assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
+            assert_eq!(fixture.findings("generation.shared").await.len(), 2);
+        }
+        let counts = std::fs::read_to_string(counter.path().join("seen")).unwrap();
+        let counts = counts
+            .lines()
+            .map(|line| line.trim().parse::<usize>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(counts.len(), 9);
+        assert!(
+            counts.iter().all(|count| *count <= admission.concurrency()),
+            "{counts:?}"
+        );
+        assert!(counts.iter().any(|count| *count > 1), "{counts:?}");
+        assert_eq!(
+            std::fs::read_dir(counter.path()).unwrap().count(),
+            1,
+            "every child removed its active marker",
+        );
     }
 }

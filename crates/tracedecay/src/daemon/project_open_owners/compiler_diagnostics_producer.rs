@@ -49,6 +49,10 @@ pub(super) fn spawn_typescript_diagnostics_producer(
         log_producer_event(&project_root, "code_index_disabled");
         return false;
     }
+    let Some(admission) = invocation.compiler_admission.get().cloned() else {
+        log_producer_event(&project_root, "compiler_admission_unavailable");
+        return false;
+    };
     owner.spawn_background_task(tracing::Instrument::instrument(
         async move {
             let Some(projects) = discover_projects(&project_root).await else {
@@ -74,7 +78,7 @@ pub(super) fn spawn_typescript_diagnostics_producer(
             let schedulers = invocation.code_index_schedulers.clone();
             let mut signals = CodeIndexOwnerSignalsV1::subscribe(&schedulers, &project_root).await;
             let build_info_dir = graph.store_layout().data_root.join(BUILD_INFO_DIR);
-            let mut state = TypeScriptProducerStateV1::new(status);
+            let mut state = TypeScriptProducerStateV1::new(status, admission);
             // One producer run per generation, whatever its outcome: the root's
             // signals also wake on serving and pass changes, and a project
             // whose compiler keeps failing must not re-run it on each of them.
