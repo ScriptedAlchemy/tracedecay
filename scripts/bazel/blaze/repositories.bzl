@@ -38,6 +38,11 @@ def _blaze_repository_impl(ctx):
                 rustc_bin = tools.get_child("rustc" + suffix),
                 binary = binary,
                 cargo_manifest = ctx.path("crates/ra-jit/Cargo.toml"),
+                # A cold build compiles rust-analyzer, Cranelift, and the native
+                # driver. CI was still compiling new dependencies at the
+                # helper's generic 600-second cutoff; workspace tests keep
+                # their own deadlines after this compiler is provisioned.
+                timeout = 1800,
                 environment = {
                     "RA_JIT_GIT_SHA": _COMMIT,
                     "RUSTC_WORKSPACE_WRAPPER": "",
