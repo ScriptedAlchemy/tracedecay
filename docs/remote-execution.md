@@ -84,8 +84,13 @@ including the action UUID, temporary fixture home, and `.tracedecay/daemon.sock`
 must be shorter than 104 bytes on macOS and 108 bytes on Linux. Validate the
 full path from an executed test; checking only the work directory misses this
 limit. Worker sandboxes must allow Unix socket bind/connect inside the owned
-action directories. Keep action `TMPDIR` on the same writable filesystem and
-mount as
+action directories. On macOS, give the CAS and action trees matching sandbox
+rights, including Unix socket permissions: macOS rejects hardlinks between
+paths with different sandbox rights even when both allow file reads and writes.
+Verify a CAS-to-action hardlink under the actual worker profile before starting
+the worker. Scope these permissions to the worker-owned trees.
+
+Keep action `TMPDIR` on the same writable filesystem and mount as
 compiler outputs: a separate temporary mount can make Rust's artifact renames
 fail with `EXDEV`. The action root may be separate from the CAS cache, but must
 remain on the intended build volume.
