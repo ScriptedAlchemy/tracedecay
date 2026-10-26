@@ -82,6 +82,21 @@ pub(crate) fn recover_deterministically_corrupt_container_with<T>(
         Err(other) => return Err(other),
     };
     if second_fault != first_fault {
+        // A drifting fault is terminal for this container and invisible by
+        // design: nothing is deleted and nothing is rebuilt, and every
+        // later open repeats the verdict. Say so once per decision, at
+        // error level, with the operator action — on one machine three
+        // containers sat in this state for 4-10 days, distinguishable from
+        // healthy only by a leftover lock file.
+        tracing::error!(
+            event = "store_corrupt_not_deterministic",
+            container = %container.display(),
+            first_fault = %first_fault,
+            second_fault = %second_fault,
+            "graph container corruption is not deterministic; deletion refused. \
+             This store stays corrupt until an operator acts: move the medium, \
+             or rebuild the project store from its canonical replay authorities."
+        );
         return Err(GraphDbError::Corrupt {
             message: format!(
                 "graph container corruption is not deterministic; refusing deletion: \
