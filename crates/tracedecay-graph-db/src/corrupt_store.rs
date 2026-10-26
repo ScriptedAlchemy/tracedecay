@@ -85,9 +85,8 @@ pub(crate) fn recover_deterministically_corrupt_container_with<T>(
         // A drifting fault is terminal for this container and invisible by
         // design: nothing is deleted and nothing is rebuilt, and every
         // later open repeats the verdict. Say so once per decision, at
-        // error level, with the operator action — on one machine three
-        // containers sat in this state for 4-10 days, distinguishable from
-        // healthy only by a leftover lock file.
+        // error level, with the operator action, so a permanently corrupt
+        // container is not indistinguishable from a healthy one.
         tracing::error!(
             event = "store_corrupt_not_deterministic",
             container = %container.display(),
@@ -353,12 +352,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let container = seeded_family(temp.path());
 
-        let error = recover_deterministically_corrupt_container(
-            &container,
-            "block 18 CRC mismatch",
-            &|| Err(corrupt("block 7 CRC mismatch")),
-        )
-        .unwrap_err();
+        let (error, logs) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
+            recover_deterministically_corrupt_container(
+                &container,
+                "block 18 CRC mismatch",
+                &|| Err(corrupt("block 7 CRC mismatch")),
+            )
+            .unwrap_err()
+        });
+        assert_eq!(
+            logs.matches("store_corrupt_not_deterministic").count(),
+            1,
+            "the drifting-fault refusal must log its operator event exactly once"
+        );
 
         assert!(
             matches!(&error, GraphDbError::Corrupt { message }
