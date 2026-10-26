@@ -16,7 +16,9 @@ use std::time::Instant;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_code_index_retention::code_index_generations::{
+    CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationStoreLockV1,
     code_generation_segments_root, code_text_artifacts_root, scoped_code_index_store_root,
+    try_acquire_code_generation_store_read_lock,
 };
 
 use crate::code_index_journey::{
@@ -26,8 +28,11 @@ use crate::code_index_journey::{
 use crate::common::{IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_with};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-const PUBLICATION_TEMPORARY_PREFIXES: [&str; 2] =
-    [".segment-publication.", ".evidence-pack-publication."];
+const PUBLICATION_TEMPORARY_PREFIXES: [&str; 3] = [
+    ".segment-publication.",
+    ".evidence-pack-publication.",
+    CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1,
+];
 
 fn scope_root(home: &Path, project: &Path) -> PathBuf {
     let layout =
@@ -89,10 +94,47 @@ fn publication_temporaries(scope: &Path) -> Vec<String> {
         .collect()
 }
 
-fn segments_entry_count(scope: &Path) -> usize {
-    fs::read_dir(code_generation_segments_root(scope))
-        .expect("segments directory")
-        .count()
+fn hold_publication_commit(scope: &Path) -> CodeGenerationStoreLockV1 {
+    let deadline = Instant::now() + RECEIPT_TIMEOUT;
+    loop {
+        if let Some(lease) = try_acquire_code_generation_store_read_lock(scope)
+            .expect("read lease on the published generation")
+        {
+            return lease;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the published generation stayed busy"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+fn has_staged_file_segment(scope: &Path) -> bool {
+    for entry in fs::read_dir(code_generation_segments_root(scope)).expect("segments directory") {
+        let entry = entry.expect("segments entry");
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1)
+        {
+            continue;
+        }
+        let staged = match fs::read_dir(entry.path()) {
+            Ok(staged) => staged,
+            // A source update can retire an earlier preparation before its
+            // successor starts. Observe the successor on the next probe.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("read generation preparation: {error}"),
+        };
+        if staged
+            .map(|entry| entry.expect("staged segment entry"))
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("segment-"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn write_batch(project: &Path, files: u32, symbols: u32) {
@@ -229,9 +271,12 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
     )
     .await;
     let scope = scope_root(environment.home(), &project);
+    // The real reader lease permits segment preparation but excludes the
+    // final publication transaction. Keep it through SIGKILL so even a fast
+    // writer cannot advance the pointer between observation and the kill.
+    let publication_hold = hold_publication_commit(&scope);
     let prior_pointer = active_pointer(&scope);
     let prior_family = sealed_family(&scope);
-    let prior_entries = segments_entry_count(&scope);
 
     write_batch(&project, 128, 16);
     let batch_revision = commit_all(&project, "install the batch the killed seal was writing");
@@ -243,10 +288,10 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
     )
     .await;
     assert_eq!(receipt["status"], "queued", "refresh receipt: {receipt}");
-    // The seal's first segment write is the first new entry beside the prior
-    // generation's segments; kill the daemon while that seal is in flight.
+    // Segments now accumulate inside one preparation directory. Top-level
+    // entry counts only advance when commit names the complete batch.
     let deadline = Instant::now() + RECEIPT_TIMEOUT;
-    while segments_entry_count(&scope) < prior_entries + 2 {
+    while !has_staged_file_segment(&scope) {
         assert!(
             Instant::now() < deadline,
             "the refresh never started sealing its segments"
@@ -254,6 +299,7 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let killed = daemon.kill_and_wait().expect("SIGKILL the sealing daemon");
+    drop(publication_hold);
     assert!(
         !killed.success(),
         "SIGKILL must not look like a graceful exit"
@@ -286,6 +332,12 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
     )
     .await;
     assert_ne!(rebuilt.generation_id, prior.generation_id);
+    // The exclusive segment sweep owns abandoned preparation directories;
+    // it runs independently of the restarted daemon's generation rebuild.
+    let deadline = Instant::now() + RECEIPT_TIMEOUT;
+    while !publication_temporaries(&scope).is_empty() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(
         publication_temporaries(&scope),
         Vec::<String>::new(),
