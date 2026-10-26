@@ -323,10 +323,9 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
         "retained dispatch must not publish either admitted ledger before settlement"
     );
 
-    let now = current_timestamp();
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
         assert!(
-            AutomationTaskLock::try_acquire(&cg.store_layout().dashboard_root, task, None, now,)
+            AutomationTaskLock::try_acquire(&cg.store_layout().dashboard_root, task)
                 .await
                 .unwrap()
                 .is_none(),
@@ -336,10 +335,9 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
     drop(settlement_guards);
 
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
-        let reacquired =
-            AutomationTaskLock::try_acquire(&cg.store_layout().dashboard_root, task, None, now)
-                .await
-                .unwrap();
+        let reacquired = AutomationTaskLock::try_acquire(&cg.store_layout().dashboard_root, task)
+            .await
+            .unwrap();
         assert!(
             reacquired.is_some(),
             "{task:?} lock must release with its guard"
@@ -554,15 +552,11 @@ async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
         let cg = init_project(temp.path()).await;
         seed_project_session_activity(&cg).await;
         let config = scheduler_config(Some(3600), None);
-        let active_lock = AutomationTaskLock::try_acquire(
-            &cg.store_layout().dashboard_root,
-            locked_task,
-            None,
-            current_timestamp(),
-        )
-        .await
-        .unwrap()
-        .expect("fixture must own the task lock");
+        let active_lock =
+            AutomationTaskLock::try_acquire(&cg.store_layout().dashboard_root, locked_task)
+                .await
+                .unwrap()
+                .expect("fixture must own the task lock");
         let backend = CombinedJsonBackend::new(combined_output_fixture());
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 

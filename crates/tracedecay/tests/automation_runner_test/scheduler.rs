@@ -1315,14 +1315,13 @@ async fn task_lock_reclaims_stale_dead_pid_lock_file() {
     let dead_pid = reaped_task_lock_child_pid();
     std::fs::write(&lock_path, format!("pid={dead_pid}\ncreated_at=100\n")).unwrap();
 
-    let lock =
-        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 200)
-            .await
-            .unwrap();
+    let lock = AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator)
+        .await
+        .unwrap();
 
     assert!(lock.is_some());
+    assert!(!lock_path.exists(), "a dead owner's lock file is retired");
     drop(lock);
-    assert!(!lock_path.exists());
 }
 
 #[cfg(any(unix, windows))]
@@ -1339,17 +1338,16 @@ async fn task_lock_reclaims_a_fresh_dead_pid_without_waiting_out_the_age_gate() 
     )
     .unwrap();
 
-    let lock =
-        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 200)
-            .await
-            .unwrap();
+    let lock = AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator)
+        .await
+        .unwrap();
 
     assert!(
         lock.is_some(),
         "a confirmed-dead owner must not block the next scheduler tick for stale_lock_secs"
     );
+    assert!(!lock_path.exists(), "a dead owner's lock file is retired");
     drop(lock);
-    assert!(!lock_path.exists());
 }
 
 #[tokio::test]
@@ -1364,10 +1362,9 @@ async fn task_lock_keeps_live_pid_lock_file() {
     )
     .unwrap();
 
-    let lock =
-        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::SkillWriter, Some(10), 200)
-            .await
-            .unwrap();
+    let lock = AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::SkillWriter)
+        .await
+        .unwrap();
 
     assert!(lock.is_none());
     assert!(lock_path.exists());
@@ -1393,136 +1390,14 @@ async fn task_lock_keeps_foreign_live_pid_past_stale_threshold() {
     )
     .unwrap();
 
-    let lock = AutomationTaskLock::try_acquire(
-        temp.path(),
-        AgentTaskKind::SessionReflector,
-        Some(10),
-        200,
-    )
-    .await
-    .unwrap();
+    let lock = AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::SessionReflector)
+        .await
+        .unwrap();
 
     assert!(lock.is_none());
     assert!(lock_path.exists());
     child.kill().unwrap();
     child.wait().unwrap();
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn old_task_lock_guard_cannot_remove_replacement_token() {
-    let temp = tempdir().unwrap();
-    let lock_path = temp
-        .path()
-        .join("automation_locks")
-        .join("memory_curator.lock");
-    let first =
-        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 100)
-            .await
-            .unwrap()
-            .unwrap();
-    let first_record = std::fs::read_to_string(&lock_path).unwrap();
-    let first_token = task_lock_token(&first_record);
-    let dead_pid = reaped_task_lock_child_pid();
-    std::fs::write(
-        &lock_path,
-        format!("pid={dead_pid}\ncreated_at=100\ntoken={first_token}\n"),
-    )
-    .unwrap();
-
-    let replacement =
-        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 200)
-            .await
-            .unwrap()
-            .unwrap();
-    let replacement_record = std::fs::read_to_string(&lock_path).unwrap();
-    assert_ne!(task_lock_token(&replacement_record), first_token);
-
-    drop(first);
-    assert_eq!(
-        std::fs::read_to_string(&lock_path).unwrap(),
-        replacement_record,
-        "the prior guard must not unlink a newer owner's exact token"
-    );
-    let third =
-        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 300)
-            .await
-            .unwrap();
-    assert!(third.is_none());
-
-    drop(replacement);
-    assert!(!lock_path.exists());
-}
-
-#[tokio::test]
-async fn cancelled_task_lock_acquisition_cleans_detached_owner() {
-    use std::future::Future;
-
-    let temp = tempdir().unwrap();
-    let root = temp.path().to_path_buf();
-    let lock_dir = root.join("automation_locks");
-    std::fs::create_dir_all(&lock_dir).unwrap();
-    let lock_path = lock_dir.join("skill_writer.lock");
-    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
-    #[cfg(windows)]
-    let coordination = {
-        let file = tracedecay_runtime_core::windows_security::open_or_create_private_lock_file(
-            &coordination_path,
-        )
-        .unwrap();
-        file.lock().unwrap();
-        file
-    };
-    #[cfg(not(windows))]
-    let coordination =
-        tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&coordination_path)
-            .unwrap();
-    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
-    let mut submitted_tx = Some(submitted_tx);
-    let acquire = tokio::spawn(async move {
-        let mut future = Box::pin(AutomationTaskLock::try_acquire(
-            &root,
-            AgentTaskKind::SkillWriter,
-            Some(10),
-            200,
-        ));
-        std::future::poll_fn(move |context| {
-            let poll = future.as_mut().poll(context);
-            if poll.is_pending()
-                && let Some(submitted_tx) = submitted_tx.take()
-            {
-                let _ = submitted_tx.send(());
-            }
-            poll
-        })
-        .await
-    });
-    submitted_rx.await.unwrap();
-    acquire.abort();
-    assert!(acquire.await.unwrap_err().is_cancelled());
-    coordination.unlock().unwrap();
-    drop(coordination);
-
-    let acquired = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            if let Some(lock) = AutomationTaskLock::try_acquire(
-                temp.path(),
-                AgentTaskKind::SkillWriter,
-                Some(10),
-                200,
-            )
-            .await
-            .unwrap()
-            {
-                break lock;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("detached acquisition must release its exact owner token");
-    drop(acquired);
-    assert!(!lock_path.exists());
 }
 
 #[cfg(any(unix, windows))]
@@ -1568,14 +1443,6 @@ fn reaped_task_lock_child_pid() -> u32 {
     child.kill().unwrap();
     child.wait().unwrap();
     pid
-}
-
-#[cfg(any(unix, windows))]
-fn task_lock_token(record: &str) -> &str {
-    record
-        .lines()
-        .find_map(|line| line.strip_prefix("token="))
-        .unwrap()
 }
 
 #[cfg(any(unix, windows))]

@@ -57,9 +57,7 @@ pub async fn evaluate_and_record_scheduler_skip(
         .map(Some);
     }
 
-    let lock_time = current_timestamp();
-    let Some(_task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id, lock_time).await?
-    else {
+    let Some(_task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id).await? else {
         crate::automation::scheduler_trace::observe_skip_reason(
             AutomationSkipReasonV1::SchedulerLockActive,
         );
@@ -123,8 +121,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
         .map(Some);
     }
 
-    let Some(_task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id, now_secs).await?
-    else {
+    let Some(_task_lock) = try_acquire_job_task_lock(dashboard_root, &job.id).await? else {
         return record_scheduler_lock_skip(
             dashboard_root,
             config,
