@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,15 @@ import carry_claude_profile  # noqa: E402
 import grade  # noqa: E402
 
 FAILURES: list[str] = []
+
+
+def bash() -> str:
+    """Git Bash on Windows, where the System32 bash.exe is the WSL launcher."""
+    if os.name == "nt" and (git := shutil.which("git")):
+        git_bash = Path(git).resolve().parents[1] / "bin" / "bash.exe"
+        if git_bash.is_file():
+            return str(git_bash)
+    return shutil.which("bash") or "bash"
 
 
 def check(name: str, cond: bool, extra: str = "") -> None:
@@ -932,7 +942,7 @@ def test_claude_permissions():
     native = {"Read", "Write", "Edit", "Glob", "Grep", "Task", "Agent", "Skill"}
     for condition in grade.CONDITIONS:
         result = subprocess.run(
-            ["bash", "-c", 'source "$1" && claude_allowed_tools "$2" "$3"',
+            [bash(), "-c", 'source "$1" && claude_allowed_tools "$2" "$3"',
              "permissions", str(Path(HERE) / "claude_tools.sh"), condition, "/tmp/eval binary"],
             capture_output=True, text=True,
         )
@@ -1097,7 +1107,7 @@ def test_carry_claude_profile():
               set(carried) == {"env", "model"} and carried["model"] == "k3[1m]"
               and carried["env"]["ANTHROPIC_BASE_URL"] == "https://example.invalid/")
         check("carry: copy is read-only",
-              oct(os.stat(dest).st_mode & 0o777) == "0o400")
+              oct(os.stat(dest).st_mode & 0o777) == ("0o444" if os.name == "nt" else "0o400"))
         with open(src, "w") as fh:
             json.dump({"permissions": {"allow": []}}, fh)
         dest2 = os.path.join(td, "none.json")
