@@ -37,6 +37,9 @@ def main():
     if "BLAZE_CACHE" not in env:
         env.setdefault("RA_JIT_CACHE", str(state / "store"))
     env.setdefault("CARGO_TARGET_DIR", str(state / "cargo"))
+    # A spare loads another compiler database while Cargo builds. Shared hosts
+    # need the sequential cold start unless the operator explicitly opts in.
+    env.setdefault("BLAZE_SPARE", env.get("RA_JIT_SPARE", "0"))
     # The pinned engine also launches bare `cargo` for its unit graph. Honor
     # the explicit toolchain there instead of a different PATH broker/shim.
     cargo = env.get("CARGO")

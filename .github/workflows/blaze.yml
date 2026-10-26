@@ -27,6 +27,8 @@ jobs:
       NATIVE_BLAZE_BIN_DIR: ${{ github.workspace }}/target/blaze/tool/bin
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/blaze
       CARGO_TERM_COLOR: always
+      # Bound concurrent cold rustc jobs; the launcher also disables spare warming.
+      CARGO_BUILD_JOBS: '2'
       WORKSPACE_FEATURES: tracedecay/test-helpers,tracedecay/test-transport,tracedecay/search-eval,tracedecay-cli/test-transport,tracedecay-query/production
     steps:
       # Search-eval fixtures resolve historical source commits locally.
@@ -177,6 +179,7 @@ jobs:
           PY
 
       - name: Validate the cached native tool layout
+        id: runtime
         run: |
           python3 - <<'PY'
           import os
@@ -219,7 +222,7 @@ jobs:
             //scripts/bazel/blaze:blaze -- status 2>&1 | tee "$RUNNER_TEMP/blaze-status.txt"
 
       - name: Stop the daemon before saving persistent artifacts
-        if: always() && steps.status.outcome == 'success'
+        if: always() && steps.runtime.outcome == 'success'
         run: >-
           bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR"
           //scripts/bazel/blaze:blaze -- stop
