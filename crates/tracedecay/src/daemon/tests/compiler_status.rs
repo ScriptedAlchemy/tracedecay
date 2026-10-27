@@ -550,6 +550,96 @@ async fn route_eviction_reopen_reads_retained_compiler_status_with_leased_siblin
             .await;
     assert!(preserved_work_matches);
     preserved_work_registration.expect("rejected candidates leave current Work authority intact");
+
+    // Retain A while a route captures B, then commit C before the route can
+    // publish. The configuration writer fence must refuse B without changing A.
+    drop(
+        apply_project_setting_via_surface(&engine, sibling_handshake.as_ref().unwrap(), |_| {
+            (
+                tracedecay_domain::configuration::SettingKey::new(
+                    tracedecay_domain::configuration::TELEMETRY_TIMINGS_SETTING_KEY,
+                )
+                .unwrap(),
+                tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+            )
+        })
+        .await,
+    );
+    let candidate_configuration = configured
+        .cg()
+        .await
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .unwrap();
+    assert_ne!(
+        current_configuration.revision_id(),
+        candidate_configuration.revision_id()
+    );
+    let (candidate_captured, allow_refresh) = engine
+        .invocation
+        .service
+        .pause_work_runtime_refresh(primary.clone())
+        .await;
+    let ((_, raced_matches, raced_registration), latest_configuration) = tokio::join!(
+        register_work_for_configuration(&engine, &primary, &configured, &candidate_configuration),
+        async {
+            candidate_captured.await.expect("Work candidate captured");
+            drop(
+                apply_project_setting_via_surface(
+                    &engine,
+                    sibling_handshake.as_ref().unwrap(),
+                    |_| {
+                        (
+                            tracedecay_domain::configuration::SettingKey::new(
+                                tracedecay_domain::configuration::TELEMETRY_TIMINGS_SETTING_KEY,
+                            )
+                            .unwrap(),
+                            tracedecay_domain::configuration::ConfigurationValueV1::Boolean(false),
+                        )
+                    },
+                )
+                .await,
+            );
+            let latest = configured
+                .cg()
+                .await
+                .configuration_runtime()
+                .client()
+                .current()
+                .await
+                .unwrap();
+            assert_ne!(candidate_configuration.revision_id(), latest.revision_id());
+            allow_refresh.send(()).expect("resume Work refresh");
+            latest
+        },
+    );
+    assert!(!raced_matches);
+    assert!(
+        matches!(raced_registration, Err(TraceDecayError::Config { ref message })
+            if message == "Work configuration changed during reopen"),
+        "a durable commit before publication must refuse the superseded candidate: {raced_registration:?}"
+    );
+    let (_, unchanged_work_matches, unchanged_work_registration) =
+        register_work_for_configuration(&engine, &primary, &configured, &current_configuration)
+            .await;
+    assert!(
+        unchanged_work_matches,
+        "refusing B must leave the complete previously installed A authority intact"
+    );
+    unchanged_work_registration.expect("same-pin admission remains valid after a later commit");
+    let (_, latest_work_matches, latest_work_registration) =
+        register_work_for_configuration(&engine, &primary, &configured, &latest_configuration)
+            .await;
+    assert!(!latest_work_matches);
+    latest_work_registration.expect("the durable current C authority can be installed");
+    let (_, installed_work_matches, installed_work_registration) =
+        register_work_for_configuration(&engine, &primary, &configured, &latest_configuration)
+            .await;
+    assert!(installed_work_matches);
+    installed_work_registration.expect("C remains admitted after publication");
+
     assert!(Arc::ptr_eq(
         &retained_runtime.compiler_status().current().unwrap(),
         &refreshed.compiler_status().current().unwrap(),

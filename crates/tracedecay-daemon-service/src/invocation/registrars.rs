@@ -4,7 +4,9 @@ use super::*;
 use tracedecay_application::feedback::ProductionFeedbackCyclePartsV1;
 use tracedecay_contracts::AnalyzerAdmittedDiagnosticProviderV1;
 use tracedecay_contracts::diagnostics::FeedbackDiagnosticProviderAdmissionV1;
-use tracedecay_global_db::configuration::contracts::ports::ConfigurationOperationFuture;
+use tracedecay_global_db::configuration::contracts::ports::{
+    ConfigurationCurrentStateV1, ConfigurationOperationFuture,
+};
 use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
 
 mod lsp;
@@ -1087,17 +1089,7 @@ impl DaemonWorkRuntimeRegistrar {
                         "Work configuration refresh requires its registered configuration authority"
                             .to_owned(),
                 })?;
-            let current = configuration
-                .runtime
-                .client()
-                .current_state()
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "Work configuration refresh could not read current state: {error}"
-                    ),
-                })?;
-            Some((retained, current))
+            Some((retained, configuration))
         } else {
             None
         };
@@ -1109,73 +1101,106 @@ impl DaemonWorkRuntimeRegistrar {
                 message: "registered Work runtime requires the mounted observability producer"
                     .to_owned(),
             })?;
+        let reconcile = |registered: &mut RegisteredWorkRuntime,
+                         current: Option<&ConfigurationCurrentStateV1>| {
+            // Store authority only. The evidence-retrieval adapter is
+            // built fresh by every route that mounts it, so comparing
+            // its object identity refused the second route of one
+            // project, a linked worktree, or a reopen of a route
+            // whose server was replaced, and left it permanently
+            // degraded. Its own project scope is already proven by
+            // `grant.scope` and the authority digest.
+            if registered.database.binding() == database.binding()
+                && registered.database.verified_locator() == database.verified_locator()
+                && registered.actor == actor
+                && registered.grant.digest == grant.digest
+                && registered.grant.scope == grant.scope
+                && registered.authority_digest == authority_digest
+            {
+                if !registered.configuration_matches(
+                    &policy_digest,
+                    &configuration_digest,
+                    &work_topology_policy,
+                    &proposal_routing,
+                ) {
+                    // Currentness is checked under the configuration
+                    // writer lane. The captured incumbent also prevents
+                    // overwriting a newer registration.
+                    let Some((captured, _)) = &refresh else {
+                        return Err(TraceDecayError::Config {
+                            message: "Work configuration changed during reopen".to_owned(),
+                        });
+                    };
+                    if !registered.configuration_matches(
+                        &captured.policy_digest,
+                        &captured.configuration_digest,
+                        &captured.work_topology_policy,
+                        &captured.proposal_routing,
+                    ) || !current.is_some_and(|current| {
+                        proposal_routing.matches_current_configuration(current)
+                    }) {
+                        return Err(TraceDecayError::Config {
+                            message: "Work configuration changed during reopen".to_owned(),
+                        });
+                    }
+                }
+                let recovery = registered
+                    .workflow_fan_out_recovery
+                    .clone()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: "Workflow fan-out recovery owner is not mounted".to_owned(),
+                    })?;
+                registered.grant = grant.clone();
+                registered.policy_digest = policy_digest.clone();
+                registered.configuration_digest = configuration_digest.clone();
+                registered.work_topology_policy = work_topology_policy.clone();
+                registered.proposal_routing = proposal_routing.clone();
+                registered.evidence_retrieval = evidence_retrieval.clone();
+                recovery.refresh_admission(registered);
+                return Ok(());
+            }
+            Err(TraceDecayError::Config {
+                message: "a different Work authority is already registered for this project"
+                    .to_owned(),
+            })
+        };
+        if let Some((_, configuration)) = &refresh {
+            #[cfg(any(test, feature = "test-helpers"))]
+            if let Some(pause) = self
+                .service
+                .take_work_runtime_refresh_pause(&project_root)
+                .await
+            {
+                let _ = pause.candidate_captured.send(());
+                let _ = pause.allow_refresh.await;
+            }
+            return configuration
+                .runtime
+                .configuration_store()
+                .with_current_state(|current| {
+                    self.service
+                        .project_runtimes
+                        .reconcile_registered(&project_root, |registered| {
+                            reconcile(registered, Some(current))
+                        })?
+                        .ok_or_else(|| TraceDecayError::Config {
+                            message: "Work configuration changed during reopen".to_owned(),
+                        })
+                })
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "Work configuration refresh could not fence current state: {error}"
+                    ),
+                })?;
+        }
+        // Initial admission and an unchanged retained pin keep their existing
+        // lifetime. Only a replacement must prove currentness at publication.
         self.service
             .project_runtimes
             .register_or_reconcile(
                 project_root.clone(),
-                |registered: &mut RegisteredWorkRuntime| {
-                    // Store authority only. The evidence-retrieval adapter is
-                    // built fresh by every route that mounts it, so comparing
-                    // its object identity refused the second route of one
-                    // project, a linked worktree, or a reopen of a route
-                    // whose server was replaced, and left it permanently
-                    // degraded. Its own project scope is already proven by
-                    // `grant.scope` and the authority digest.
-                    if registered.database.binding() == database.binding()
-                        && registered.database.verified_locator() == database.verified_locator()
-                        && registered.actor == actor
-                        && registered.grant.digest == grant.digest
-                        && registered.grant.scope == grant.scope
-                        && registered.authority_digest == authority_digest
-                    {
-                        if !registered.configuration_matches(
-                            &policy_digest,
-                            &configuration_digest,
-                            &work_topology_policy,
-                            &proposal_routing,
-                        ) {
-                            // The durable current-state read belongs to this
-                            // captured incumbent. Check both inside the registry
-                            // transition so a delayed reopen cannot overwrite a
-                            // newer installed configuration.
-                            let Some((captured, current)) = &refresh else {
-                                return Err(TraceDecayError::Config {
-                                    message: "Work configuration changed during reopen".to_owned(),
-                                });
-                            };
-                            if !registered.configuration_matches(
-                                &captured.policy_digest,
-                                &captured.configuration_digest,
-                                &captured.work_topology_policy,
-                                &captured.proposal_routing,
-                            ) || !proposal_routing.matches_current_configuration(current)
-                            {
-                                return Err(TraceDecayError::Config {
-                                    message: "Work configuration changed during reopen".to_owned(),
-                                });
-                            }
-                        }
-                        let recovery = registered.workflow_fan_out_recovery.clone().ok_or_else(
-                            || TraceDecayError::Config {
-                                message: "Workflow fan-out recovery owner is not mounted"
-                                    .to_owned(),
-                            },
-                        )?;
-                        registered.grant = grant.clone();
-                        registered.policy_digest = policy_digest.clone();
-                        registered.configuration_digest = configuration_digest.clone();
-                        registered.work_topology_policy = work_topology_policy.clone();
-                        registered.proposal_routing = proposal_routing.clone();
-                        registered.evidence_retrieval = evidence_retrieval.clone();
-                        recovery.refresh_admission(registered);
-                        return Ok(());
-                    }
-                    Err(TraceDecayError::Config {
-                        message:
-                            "a different Work authority is already registered for this project"
-                                .to_owned(),
-                    })
-                },
+                |registered| reconcile(registered, None),
                 || async {
                     let durable_write_signal =
                         super::types::WorkDurableWriteSignalV1::default();
