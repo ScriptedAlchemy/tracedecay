@@ -183,10 +183,9 @@ pub use feedback::{
     GitHubReviewThreadIdV1, MAX_CI_FAILURE_CALLER_EVIDENCE_V1, MAX_CI_FAILURE_RERUN_HINTS_V1,
     MAX_CI_FAILURE_TEST_EVIDENCE_V1, MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1,
     MAX_GITHUB_REVIEW_THREAD_PATH_BYTES_V1, PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
-    ProviderEvaluationStateV1, ProximityAddressV1, ProximityBranchWorktreeIncompatibilityV1,
-    ProximityContributionIdV1, ProximityContributionV1, ProximityCoverageV1, ProximityInclusionV1,
-    ProximityObservationIdV1, ProximityRelationPathKindV1, ProximityRelationPathV1,
-    ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1,
+    ProviderEvaluationStateV1, ProximityAddressV1, ProximityContributionIdV1,
+    ProximityContributionV1, ProximityCoverageV1, ProximityInclusionV1, ProximityObservationIdV1,
+    ProximityRelationPathKindV1, ProximityRelationPathV1, ProximityWarningClassV1,
     derive_feedback_finding_id, derive_overlay_feedback_finding_id,
 };
 pub use git::{

@@ -94,7 +94,7 @@ unauthorized external action after completing independent, authorized work.
   resolves Rust dependencies from the workspace manifests and `Cargo.lock`.
 - After changing Rust dependencies, run
   `CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c`.
-  Then run `bazel run //scripts:bazel/gen_builds.py`.
+  Then run `bazel run //scripts:gen_builds`.
   Use `CARGO_BAZEL_REPIN=<crate>` for a targeted dependency update. Commit
   the refreshed lockfile and generated targets together.
 - Code generation: `bazel run //sdks/codegen:generate -- <output-root>`

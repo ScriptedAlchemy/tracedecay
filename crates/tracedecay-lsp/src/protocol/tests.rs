@@ -18,6 +18,7 @@ use tracedecay_domain::{ContentDigest, ManifestDigest};
 use tracedecay_tool_catalog::{BindingSurface, CatalogContributionInputV1, CatalogContributionV1};
 
 mod diagnostic_publication;
+mod diagnostic_snapshots;
 mod semantic_lifecycle;
 mod workspace_diagnostics;
 

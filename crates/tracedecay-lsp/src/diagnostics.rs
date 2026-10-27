@@ -7,6 +7,8 @@
 use std::collections::BTreeSet;
 
 use crate::analyzer::broker::DiagnosticSeverity;
+use crate::rpc::{DiagnosticSerializationCapabilities, diagnostic_value};
+use tracedecay_domain::ManifestDigest;
 
 pub const MAX_DOCUMENT_DIAGNOSTICS: usize = 200;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
@@ -321,6 +323,32 @@ pub fn merge_diagnostics(
     DiagnosticMerge::new(upstream, tracedecay)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("diagnostic projection identity is unavailable")]
+pub struct DiagnosticProjectionError;
+
+/// Returns the bounded upstream projection and its full observable identity.
+pub fn project_upstream_diagnostics(
+    diagnostics: Vec<GatewayDiagnostic>,
+) -> Result<(Vec<GatewayDiagnostic>, ManifestDigest), DiagnosticProjectionError> {
+    let items = merge_diagnostics(diagnostics, Vec::new()).into_items();
+    let identity = items
+        .iter()
+        .map(|item| {
+            (
+                &item.uri,
+                diagnostic_value(
+                    item.clone(),
+                    DiagnosticSerializationCapabilities::full_identity(),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let digest =
+        tracedecay_domain::canonical_sha256(&identity).map_err(|_| DiagnosticProjectionError)?;
+    Ok((items, digest))
+}
+
 /// UTF position conversion failures are explicit; positions inside a surrogate
 /// pair are never rounded to a neighboring byte.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -464,6 +492,39 @@ mod tests {
             related_information: Vec::new(),
             data: None,
         }
+    }
+
+    #[test]
+    fn upstream_projection_identity_uses_normalized_order_and_complete_wire_fields() {
+        let a = diagnostic(DiagnosticSource::Upstream, "a");
+        let b = diagnostic(DiagnosticSource::TraceDecay, "b");
+        let (items, digest) =
+            project_upstream_diagnostics(vec![b.clone(), a.clone(), a.clone()]).unwrap();
+        let (reordered, reordered_digest) =
+            project_upstream_diagnostics(vec![a.clone(), b]).unwrap();
+        assert_eq!(items, reordered);
+        assert_eq!(digest, reordered_digest);
+        assert!(
+            items
+                .iter()
+                .all(|item| item.source == DiagnosticSource::Upstream)
+        );
+
+        let (_, original) = project_upstream_diagnostics(vec![a.clone()]).unwrap();
+        let mut related = a.clone();
+        related
+            .related_information
+            .push(GatewayDiagnosticRelatedInformation {
+                uri: "file:///root/b.rs".to_owned(),
+                range: a.range,
+                message: "related".to_owned(),
+            });
+        let (_, with_related) = project_upstream_diagnostics(vec![related]).unwrap();
+        assert_ne!(original, with_related);
+        let mut described = a;
+        described.code_description_uri = Some("https://example.test/diagnostic".to_owned());
+        let (_, with_description) = project_upstream_diagnostics(vec![described]).unwrap();
+        assert_ne!(original, with_description);
     }
 
     #[test]
