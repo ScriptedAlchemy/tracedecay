@@ -3031,3 +3031,28 @@ async fn refusal_warnings_latch_per_pass_and_recur_for_new_uncovered_records() {
     assert_eq!(next.frames_refused, 1);
     assert_eq!(warnings.load(Ordering::Relaxed), 2);
 }
+
+/// The refusal memo's floor applies only within its recorded generation and
+/// never regresses: it is a secondary frontier, not a cursor replacement.
+#[test]
+fn refusal_memo_floor_applies_only_within_its_generation() {
+    let mut memo = super::RefusalMemo {
+        key: "memo".to_string(),
+        loaded_generation: 7,
+        loaded_through: 900,
+        refused_through: 900,
+        dirty: false,
+    };
+    assert_eq!(memo.floor_for(7, 100), Some(900), "behind the memo floor");
+    assert_eq!(memo.floor_for(7, 900), None, "at the floor is not behind it");
+    assert_eq!(memo.floor_for(8, 100), None, "a new generation re-evaluates");
+    assert_eq!(memo.floor_for(0, 0), None, "an unknown generation re-evaluates");
+    memo.record_refusal(7, 1200);
+    assert!(memo.dirty, "advancing the mark marks the memo dirty");
+    assert_eq!(memo.refused_through, 1200);
+    memo.record_refusal(7, 1000);
+    assert_eq!(
+        memo.refused_through, 1200,
+        "the memo mark never regresses within a pass"
+    );
+}
