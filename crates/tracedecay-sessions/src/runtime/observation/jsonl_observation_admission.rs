@@ -29,9 +29,9 @@ use crate::observation::{
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
-    JsonlFrameDeferral, JsonlIoAccounting, JsonlPrefixRecovery, JsonlResumeState,
-    MAX_JSONL_FRAMES_PER_BATCH, MAX_JSONL_RECORD_BYTES, RawJsonlRecord, RawJsonlSkippedRange,
-    RawJsonlSkippedReason, TranscriptIngestError, TranscriptIngestResult,
+    JsonlFirstFrameWitness, JsonlFrameDeferral, JsonlIoAccounting, JsonlPrefixRecovery,
+    JsonlResumeState, MAX_JSONL_FRAMES_PER_BATCH, MAX_JSONL_RECORD_BYTES, RawJsonlRecord,
+    RawJsonlSkippedRange, RawJsonlSkippedReason, TranscriptIngestError, TranscriptIngestResult,
     try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit,
 };
 use tracedecay_privacy::{
@@ -266,6 +266,12 @@ pub(in crate::runtime) struct JsonlObservationScan {
 }
 
 impl JsonlObservationScan {
+    /// First-frame evidence from the same canonical prefix that authorized this
+    /// page. Resumed pages carry it through their validated prefix digest.
+    pub fn first_frame_witness(&self) -> Option<JsonlFirstFrameWitness> {
+        self.page.first_frame_witness
+    }
+
     /// Raw frames in this exact bounded admission page. Host-specific state
     /// may use this view for decisions that require pairing two native records
     /// without issuing a second file read or copying the page bytes.
@@ -614,6 +620,7 @@ struct SharedJsonlFrame {
 }
 
 struct SharedJsonlPage {
+    first_frame_witness: Option<JsonlFirstFrameWitness>,
     frames: Vec<SharedJsonlFrame>,
     lazy_preparation: tokio::sync::Mutex<()>,
     skipped: Vec<RawJsonlSkippedRange>,
@@ -1281,6 +1288,7 @@ fn build_shared_jsonl_page_with_frame_limit(
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?;
     }
     Ok(Arc::new(SharedJsonlPage {
+        first_frame_witness: raw.first_frame_witness,
         frames,
         lazy_preparation: tokio::sync::Mutex::new(()),
         skipped: raw.skipped,

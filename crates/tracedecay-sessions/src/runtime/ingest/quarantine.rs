@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
@@ -31,7 +32,8 @@ pub(crate) struct SourceKey {
     stream: Option<Box<str>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Witness {
     identity: [u8; 32],
     len: u64,
@@ -105,6 +107,10 @@ impl SourceLedger {
 }
 
 impl Witness {
+    pub(crate) fn len(self) -> u64 {
+        self.len
+    }
+
     pub(crate) fn settled_file(
         path: &Path,
         metadata: &std::fs::Metadata,
@@ -119,7 +125,7 @@ impl Witness {
         }))
     }
 
-    fn content(parts: &[&[u8]]) -> Self {
+    pub(crate) fn content(parts: &[&[u8]]) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-content-witness-v1");
         let mut len = 0u64;
