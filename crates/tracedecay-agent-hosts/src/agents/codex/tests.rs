@@ -1,6 +1,9 @@
 use super::*;
 use crate::agents::host_bundle::HostComponentV1;
-use crate::agents::safe_write_json_file;
+use crate::agents::{
+    observed_bundle_discovery_matches, safe_write_json_file, unexpected_bundle_entrypoints,
+};
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
@@ -742,12 +745,13 @@ fn install_ctx(home: &Path) -> InstallContext {
 /// Core install leaves them.
 fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let install_dir = codex_plugin_install_dir(home);
+    let profile = ProfileRoot::under_home(home);
     install_codex_plugin_bundle(
         &install_dir,
         tracedecay_bin,
         &ServeArgs::default(),
         InstallScope::Global,
-        home,
+        profile.data_dir(),
     )?;
     install_codex_marketplace_entry(
         &codex_personal_marketplace_path(home),
@@ -780,6 +784,92 @@ fn write_exact_native_activation(home: &Path, tracedecay_bin: &str) {
     )
     .unwrap();
     copy_rendered_bundle_to_native_cache(home, tracedecay_bin);
+}
+
+// Only evaluated when an activation assertion fails: identify the failing
+// production stage and bounded byte differences without printing bundle contents.
+fn native_activation_diagnostics(
+    profile: &ProfileRoot,
+    home: &Path,
+    tracedecay_bin: &str,
+) -> String {
+    const MAX_DETAILS: usize = 8;
+    let serve_args = ServeArgs::default();
+    let mut details = vec![format!(
+        "marketplace={:?}; manifest={:?}; enabled={:?}; cache_matches={:?}",
+        codex_exact_personal_marketplace_name(home),
+        codex_source_manifest_matches_catalog_version(home),
+        codex_plugin_enabled(home),
+        codex_loaded_cache_matches_rendered_bundle(
+            profile,
+            home,
+            Some((tracedecay_bin, &serve_args))
+        ),
+    )];
+    let rendered = match rendered_global_plugin_files(tracedecay_bin, &serve_args) {
+        Ok(rendered) => rendered,
+        Err(error) => return format!("{}; render error={error}", details.join("\n")),
+    };
+    let source = codex_plugin_install_dir(home);
+    let cache = codex_plugin_current_cached_install_dir(home);
+    let fingerprint =
+        |bytes: &[u8]| format!("len={} sha256={:x}", bytes.len(), Sha256::digest(bytes));
+    let mut differences = Vec::new();
+    let mut difference_count = 0;
+    for (relative, expected) in &rendered {
+        for (label, root) in [("source", &source), ("cache", &cache)] {
+            let observed = std::fs::read(root.join(relative));
+            if observed
+                .as_ref()
+                .is_ok_and(|bytes| bytes.as_slice() == expected.as_bytes())
+            {
+                continue;
+            }
+            difference_count += 1;
+            if differences.len() < MAX_DETAILS {
+                let observed = match observed {
+                    Ok(bytes) => fingerprint(&bytes),
+                    Err(error) => format!("error={:?}", error.kind()),
+                };
+                differences.push(format!(
+                    "{label}/{relative}: actual({observed}), expected({})",
+                    fingerprint(expected.as_bytes()),
+                ));
+            }
+        }
+    }
+    details.push(format!(
+        "differing_files={difference_count}; first {MAX_DETAILS}={differences:?}"
+    ));
+    let relatives = rendered
+        .iter()
+        .map(|(relative, _)| (*relative).to_string())
+        .collect();
+    match codex_expected_discovery_relatives(profile.data_dir(), home, relatives) {
+        Ok(expected) => {
+            details.push(format!(
+                "discovery_matches={:?}",
+                observed_bundle_discovery_matches(
+                    &source,
+                    &cache,
+                    &expected,
+                    CODEX_DISCOVERY_ROOTS
+                ),
+            ));
+            for (label, root) in [("source", &source), ("cache", &cache)] {
+                match unexpected_bundle_entrypoints(root, &expected, CODEX_DISCOVERY_ROOTS) {
+                    Ok(paths) => details.push(format!(
+                        "{label} unexpected_entrypoints={}; first {MAX_DETAILS}={:?}",
+                        paths.len(),
+                        &paths[..paths.len().min(MAX_DETAILS)],
+                    )),
+                    Err(error) => details.push(format!("{label} discovery error={error}")),
+                }
+            }
+        }
+        Err(()) => details.push("expected discovery error".to_string()),
+    }
+    details.join("\n")
 }
 
 #[test]
@@ -884,7 +974,9 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             home.path(),
             Some((old_bin, &ServeArgs::default()))
         )
-        .unwrap()
+        .unwrap(),
+        "initial native activation: {}",
+        native_activation_diagnostics(profile, home.path(), old_bin),
     );
 
     let retired_skill =
@@ -897,7 +989,9 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             home.path(),
             Some((old_bin, &ServeArgs::default()))
         )
-        .unwrap()
+        .unwrap(),
+        "retired cache entry must deactivate: {}",
+        native_activation_diagnostics(profile, home.path(), old_bin),
     );
     std::fs::remove_file(retired_skill).unwrap();
     assert!(
@@ -906,7 +1000,9 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             home.path(),
             Some((old_bin, &ServeArgs::default()))
         )
-        .unwrap()
+        .unwrap(),
+        "removing retired entry must reactivate: {}",
+        native_activation_diagnostics(profile, home.path(), old_bin),
     );
 
     std::fs::write(
@@ -920,7 +1016,9 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             home.path(),
             Some((old_bin, &ServeArgs::default()))
         )
-        .unwrap()
+        .unwrap(),
+        "cache byte drift must deactivate: {}",
+        native_activation_diagnostics(profile, home.path(), old_bin),
     );
     copy_rendered_bundle_to_native_cache(home.path(), old_bin);
     assert!(
@@ -929,7 +1027,9 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             home.path(),
             Some((old_bin, &ServeArgs::default()))
         )
-        .unwrap()
+        .unwrap(),
+        "refreshing original bundle must reactivate: {}",
+        native_activation_diagnostics(profile, home.path(), old_bin),
     );
 
     install_codex_personal_bootstrap(home.path(), new_bin).unwrap();
@@ -939,7 +1039,9 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             home.path(),
             Some((new_bin, &ServeArgs::default()))
         )
-        .unwrap()
+        .unwrap(),
+        "binary relocation must require refresh: {}",
+        native_activation_diagnostics(profile, home.path(), new_bin),
     );
     copy_rendered_bundle_to_native_cache(home.path(), new_bin);
     assert!(
@@ -948,7 +1050,9 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
             home.path(),
             Some((new_bin, &ServeArgs::default()))
         )
-        .unwrap()
+        .unwrap(),
+        "refreshing relocated bundle must reactivate: {}",
+        native_activation_diagnostics(profile, home.path(), new_bin),
     );
 }
 
