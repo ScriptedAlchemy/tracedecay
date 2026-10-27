@@ -21,6 +21,7 @@ use tracedecay_host_admission::{
 };
 use tracedecay_private_fs::framed_log::sync_latency;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_session_memory::event_lane::{self, ActivityFamilyV1};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
@@ -194,6 +195,7 @@ async fn file_edit_commit_failure_queues_no_sync() {
 #[tokio::test]
 async fn file_edit_request_acks_durable_work_while_effect_is_held() {
     let (cg, project, authority) = init_indexed_repo().await;
+    let project_root = canonical_existing_identity(project.path()).unwrap();
     let mut live_activity = event_lane::subscribe().unwrap();
     let spool = TempDir::new().unwrap();
     let broker = default_spool_broker(spool.path());
@@ -210,7 +212,7 @@ async fn file_edit_request_acks_durable_work_while_effect_is_held() {
         let entered = Arc::clone(&entered);
         let release = Arc::clone(&release);
         let effects = Arc::clone(&effects);
-        let expected_root = project.path().canonicalize().unwrap();
+        let expected_root = project_root.clone();
         Arc::new(move |root, paths| {
             assert_eq!(root, expected_root);
             assert_eq!(paths, ["src/lib.rs"]);
@@ -263,7 +265,7 @@ async fn file_edit_request_acks_durable_work_while_effect_is_held() {
     let mut queued_activity = Vec::new();
     while let Ok(record) = live_activity.try_recv() {
         if record.pulse.family == ActivityFamilyV1::CodeIndex
-            && record.pulse.project_root == project.path()
+            && record.pulse.project_root == project_root
         {
             queued_activity.push(record);
         }
@@ -291,7 +293,7 @@ async fn incremental_path_hints_emit_activity_only_for_queued_paths() {
         .with_code_index_reconcile_sink(success_reconcile_sink())
         .with_code_index_hook_sink({
             let effects = Arc::clone(&effects);
-            let root = project.path().to_path_buf();
+            let root = canonical_existing_identity(project.path()).unwrap();
             Arc::new(move |effect_root, paths| {
                 assert_eq!(effect_root, root);
                 assert_eq!(paths, ["src/lib.rs"]);
@@ -328,7 +330,7 @@ async fn retained_file_edits_reconcile_branch_drift_without_blocking_the_source(
         .unwrap();
     let effects = Arc::new(AtomicUsize::new(0));
     let available = Arc::new(AtomicBool::new(false));
-    let root = project.path().canonicalize().unwrap();
+    let root = canonical_existing_identity(project.path()).unwrap();
     let mut context = registered_context(cg, &authority);
     context.host_admission_broker = Some(Arc::clone(&broker));
     context = context.with_code_index_hook_sink({
@@ -518,7 +520,7 @@ async fn retained_file_edits_replay_once_on_each_exact_linked_worktree() {
         assert_eq!(decoded_scope, scope);
         broker.admit(name, &encoded).await.unwrap();
         plans.push(decoded);
-        roots.push(root);
+        roots.push(canonical_existing_identity(&root).unwrap());
     }
     let mut context = registered_context(cg, &authority);
     context.host_admission_broker = Some(Arc::clone(&broker));

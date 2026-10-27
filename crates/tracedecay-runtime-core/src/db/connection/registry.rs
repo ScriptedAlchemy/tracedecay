@@ -249,8 +249,9 @@ pub(super) struct DatabaseInner {
     runtime: DatabaseRuntimeAttachment,
     /// Descriptor-derived identity reported by the physical attachment.
     pub(super) opened_file_identity: u64,
-    /// Serializes logical writers sharing this canonical database slot.
-    pub(super) writer: Arc<asupersync::sync::Mutex<()>>,
+    /// Serializes admission, while each transaction owns its SQL state and rollback.
+    /// A caller panic must release capacity rather than poison a unit-valued lock.
+    pub(super) writer: Arc<asupersync::sync::Semaphore>,
     /// Coalesces and retains background memory-graph catch-up for this exact
     /// relational attachment.
     pub(super) memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1,
@@ -379,7 +380,7 @@ impl DatabaseInner {
             canonical_path: runtime.client().canonical_path().to_path_buf(),
             runtime,
             opened_file_identity,
-            writer: Arc::new(asupersync::sync::Mutex::new(())),
+            writer: Arc::new(asupersync::sync::Semaphore::new(1)),
             memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1::default(),
             memory_graph_reconciliation_telemetry: Arc::new(
                 ProjectMemoryReconciliationTelemetryV1::default(),

@@ -767,8 +767,11 @@ pub fn normalize_git_remote_url(remote: &str) -> Option<String> {
 /// names, or `None` for a network remote.
 #[must_use]
 pub fn local_remote_path(remote: &str) -> Option<PathBuf> {
-    let remote = remote.trim();
-    let path = Path::new(remote.strip_prefix("file://").unwrap_or(remote));
+    let remote = gix::url::parse(remote.trim()).ok()?;
+    if remote.scheme != gix::url::Scheme::File || remote.host.is_some() {
+        return None;
+    }
+    let path = Path::new(std::str::from_utf8(&remote.path).ok()?);
     path.is_absolute().then(|| path.to_path_buf())
 }
 

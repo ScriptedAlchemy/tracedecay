@@ -1,6 +1,7 @@
 // View state shared by the MCP server (producer) and the MCP App (consumer).
 // Every variant is a truthful daemon-backed state; the app never synthesizes
 // data the daemon did not report.
+import type { ProjectRegistrySummary } from "@tracedecay/sdk";
 
 export type ProjectRef = {
   readonly project_id: string;
@@ -8,6 +9,14 @@ export type ProjectRef = {
   readonly project_root: string;
   readonly head_branch: string | null;
   readonly default_branch: string | null;
+};
+
+export type ProjectListing = {
+  readonly projects: readonly ProjectRef[];
+  readonly limit: number;
+  readonly truncated: boolean;
+  /** Canonical counts describe this returned page, not the entire registry. */
+  readonly summary: ProjectRegistrySummary;
 };
 
 export type FreshnessState =
@@ -152,7 +161,9 @@ export type ViewState =
   | {
       readonly page: "projects";
       readonly daemon: DaemonState;
-      readonly projects: Section<readonly ProjectRef[]>;
+      /** An empty query selects the recent-project listing. */
+      readonly query: string;
+      readonly projects: Section<ProjectListing>;
     }
   | {
       readonly page: "search";

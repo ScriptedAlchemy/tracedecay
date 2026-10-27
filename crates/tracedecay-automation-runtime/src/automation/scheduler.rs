@@ -1020,6 +1020,7 @@ mod tests {
         SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
     };
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
+    use tracedecay_private_fs::{create_private_file, open_private_file};
     #[cfg(unix)]
     use tracedecay_runtime_core::storage::with_durable_namespace_sync_fault_for_test;
 
@@ -1899,13 +1900,13 @@ evidence about it",
         for command in std::io::stdin().lock().lines() {
             let answer = match command.unwrap().as_str() {
                 "prepare" if old => {
-                    let file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(&coordination_path)
-                        .unwrap();
+                    let file = match create_private_file(&coordination_path) {
+                        Ok(file) => file,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            open_private_file(&coordination_path).unwrap()
+                        }
+                        Err(error) => panic!("create old coordination: {error}"),
+                    };
                     match file.try_lock() {
                         Ok(()) => {
                             coordination = Some(FileLease::held(file, "test.old-task"));
@@ -1921,11 +1922,7 @@ evidence about it",
                     // The production publisher hard-linked a synced staging
                     // file under this lock. Keep that publication ordering.
                     let staging = lock_dir.join("old-owner-staging");
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&staging)
-                        .unwrap();
+                    let mut file = create_private_file(&staging).unwrap();
                     writeln!(file, "pid={}\ncreated_at=0", std::process::id()).unwrap();
                     file.sync_all().unwrap();
                     std::fs::hard_link(&staging, &lock_path).unwrap();
@@ -2244,12 +2241,16 @@ evidence about it",
     fn write_pre_lease_lock(lock_dir: &Path, key: &str, payload: &[u8]) -> PathBuf {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(lock_dir).unwrap();
         let lock_path = lock_dir.join(format!("{key}.lock"));
-        std::fs::write(&lock_path, payload).unwrap();
-        std::fs::write(
-            tracedecay_runtime_core::storage::append_lock_path(&lock_path),
-            b"",
-        )
-        .unwrap();
+        create_private_file(&lock_path)
+            .unwrap()
+            .write_all(payload)
+            .unwrap();
+        drop(
+            create_private_file(&tracedecay_runtime_core::storage::append_lock_path(
+                &lock_path,
+            ))
+            .unwrap(),
+        );
         lock_path
     }
 

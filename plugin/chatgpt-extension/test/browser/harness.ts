@@ -16,7 +16,8 @@ type HostRecord = {
 
 declare global {
   interface Window {
-    __mcpCall: (name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
+    __mcpCall: (requestId: number, name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
+    __mcpCancel: (requestId: number) => Promise<void>;
     __host: {
       record: HostRecord;
       sendToolResult: (result: CallToolResult) => Promise<void>;
@@ -51,9 +52,24 @@ const bridge = new AppBridge(
   { hostContext },
 );
 
-bridge.oncalltool = async (params) => {
+let nextRequestId = 0;
+bridge.oncalltool = async (params, extra) => {
+  const signal = extra.mcpReq.signal;
+  signal.throwIfAborted();
+  const requestId = ++nextRequestId;
+  let cancellation: Promise<void> | undefined;
+  const onAbort = (): void => {
+    cancellation = window.__mcpCancel(requestId);
+    void cancellation.catch(() => undefined);
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
   note(`tools/call ${params.name} ${JSON.stringify(params.arguments ?? {})}`);
-  return window.__mcpCall(params.name, params.arguments ?? {});
+  try {
+    return await window.__mcpCall(requestId, params.name, params.arguments ?? {});
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    await cancellation;
+  }
 };
 bridge.onupdatemodelcontext = async (params) => {
   record.modelContext.push(params);

@@ -617,6 +617,8 @@ async fn unchanged_codex_contract_failure_is_quarantined_without_reopening() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-10-09T10-00-00-invalid.jsonl");
     std::fs::write(&path, "{}\n").unwrap();
+    // Directory discovery emits native components, including on Windows.
+    let path = path.components().collect::<std::path::PathBuf>();
     let settled = crate::runtime::source::spin_until_jsonl_change_settled(&path);
     let hub = crate::runtime::hosts::codex::CodexDiscoveryHub::default();
     hub.register("project", Some(home.path()));

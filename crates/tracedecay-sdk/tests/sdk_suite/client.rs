@@ -910,10 +910,14 @@ fn near_limit_multiline_sse_frames_still_decode() {
 }
 
 fn terminal_frame(event: &str, receipt_termination: &str) -> String {
+    terminal_frame_at(event, receipt_termination, 0)
+}
+
+fn terminal_frame_at(event: &str, receipt_termination: &str, sequence: u64) -> String {
     format!(
         concat!(
-            "event: {event}\nid: 0\n",
-            "data: {{\"event\":\"{event}\",\"data\":{{\"sequence\":0,\"terminal\":{{",
+            "event: {event}\nid: {sequence}\n",
+            "data: {{\"event\":\"{event}\",\"data\":{{\"sequence\":{sequence},\"terminal\":{{",
             "\"termination\":\"{event}\",\"receipt\":{{\"started_at\":1,\"ended_at\":2,",
             "\"effective_deadline\":{{\"expires_at\":3}},\"cancellation\":null,",
             "\"budget\":{{\"units_consumed\":1,\"bytes_consumed\":1,\"elapsed_micros\":1}},",
@@ -921,7 +925,313 @@ fn terminal_frame(event: &str, receipt_termination: &str) -> String {
         ),
         event = event,
         receipt = receipt_termination,
+        sequence = sequence,
     )
+}
+
+fn cursor_open_frame(next_sequence: u64, retained: u64, token: &str) -> String {
+    let event = json!({"event": "open", "data": {
+        "correlation_id": "request.operation",
+        "frontier": {"next_sequence": next_sequence,
+            "retained_from_sequence": retained, "resume_token": token}
+    }});
+    format!("event: open\ndata: {event}\n\n")
+}
+
+fn cursor_item_frame(sequence: u64) -> String {
+    let event = json!({"event": "item", "data": {
+        "sequence": sequence, "item": {"kind": "accepted"}
+    }});
+    format!("event: item\nid: {sequence}\ndata: {event}\n\n")
+}
+
+fn cursor_gap_frame(sequence: u64, first: u64, last: u64, next: u64, retained: u64) -> String {
+    let event = json!({"event": "resume_gap", "data": {
+        "sequence": sequence,
+        "gap": {"first_missing_sequence": first, "last_missing_sequence": last,
+            "frontier": {"next_sequence": next, "retained_from_sequence": retained,
+                "resume_token": "resume.gap"}}
+    }});
+    format!("event: resume_gap\nid: {sequence}\ndata: {event}\n\n")
+}
+
+#[test]
+fn open_only_reconnects_keep_the_last_delivered_cursor() {
+    for delivered_first in [false, true] {
+        let open = cursor_open_frame(3, 0, "resume.initial");
+        let first_item = cursor_item_frame(0);
+        let last = format!(
+            "{}{}",
+            cursor_item_frame(1),
+            terminal_frame_at("completed", "completed", 2)
+        );
+        let first = format!("{open}{}", if delivered_first { &first_item } else { "" });
+        let final_body = format!(
+            "{open}{}{last}",
+            if delivered_first { "" } else { &first_item }
+        );
+        let (base_url, server) = serve(vec![
+            event_response(&first),
+            event_response(&open),
+            event_response(&final_body),
+        ]);
+        let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+            .build()
+            .unwrap();
+        let events = client
+            .stream_operation(
+                "request.operation",
+                StreamOptions {
+                    resume: None,
+                    max_reconnects: 2,
+                },
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| event.id.as_deref())
+                .collect::<Vec<_>>(),
+            ["0", "1", "2"]
+        );
+        let requests = server.join().unwrap();
+        let cursor = if delivered_first { 1 } else { 0 };
+        for request in &requests[1..] {
+            assert!(
+                request
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .contains(&format!("next_sequence={cursor}"))
+            );
+        }
+    }
+}
+
+#[test]
+fn resume_gap_advances_past_all_missing_events_and_refreshes_its_token() {
+    let open = cursor_open_frame(8, 5, "resume.initial");
+    let first = format!("{open}{}", cursor_gap_frame(0, 0, 4, 8, 5));
+    let last = format!(
+        "{open}{}{}{}",
+        cursor_item_frame(5),
+        cursor_item_frame(6),
+        terminal_frame_at("completed", "completed", 7)
+    );
+    let (base_url, server) = serve(vec![
+        event_response(&first),
+        event_response(&open),
+        event_response(&last),
+    ]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let events = client
+        .stream_operation(
+            "request.operation",
+            StreamOptions {
+                resume: None,
+                max_reconnects: 2,
+            },
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| event.id.as_deref())
+            .collect::<Vec<_>>(),
+        ["0", "5", "6", "7"]
+    );
+    let requests = server.join().unwrap();
+    assert!(
+        requests[1]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("next_sequence=5&resume_token=resume.gap")
+    );
+    assert!(
+        requests[2]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("next_sequence=5&resume_token=resume.initial")
+    );
+}
+
+#[test]
+fn terminal_replay_is_only_accepted_exactly_one_past_completion() {
+    for terminal_sequence in [1, 2] {
+        let body = format!(
+            "{}{}",
+            cursor_open_frame(3, 0, "resume.initial"),
+            terminal_frame_at("completed", "completed", terminal_sequence)
+        );
+        let (base_url, server) = serve(vec![event_response(&body)]);
+        let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+            .build()
+            .unwrap();
+        let mut stream = client
+            .stream_operation(
+                "request.operation",
+                StreamOptions {
+                    resume: Some(StreamResume {
+                        token: "resume.caller".into(),
+                        next_sequence: 3,
+                    }),
+                    max_reconnects: 2,
+                },
+            )
+            .unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().event, "open");
+        let terminal = stream.next().unwrap();
+        if terminal_sequence == 2 {
+            assert_eq!(terminal.unwrap().id.as_deref(), Some("2"));
+        } else {
+            assert!(matches!(terminal, Err(ClientError::Protocol { .. })));
+        }
+        assert!(stream.next().is_none());
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn an_explicit_delivery_cursor_survives_an_open_only_connection() {
+    let open = cursor_open_frame(4, 0, "resume.initial");
+    let body = format!(
+        "{open}{}{}",
+        cursor_item_frame(2),
+        terminal_frame_at("completed", "completed", 3)
+    );
+    let (base_url, server) = serve(vec![event_response(&open), event_response(&body)]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let events = client
+        .stream_operation(
+            "request.operation",
+            StreamOptions {
+                resume: Some(StreamResume {
+                    token: "resume.caller".into(),
+                    next_sequence: 2,
+                }),
+                max_reconnects: 1,
+            },
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| event.id.as_deref())
+            .collect::<Vec<_>>(),
+        ["2", "3"]
+    );
+    for request in server.join().unwrap() {
+        assert!(request.lines().next().unwrap().contains("next_sequence=2"));
+    }
+}
+
+#[test]
+fn an_event_cannot_skip_undelivered_history_without_a_gap() {
+    let body = format!(
+        "{}{}",
+        cursor_open_frame(3, 0, "resume.initial"),
+        cursor_item_frame(1)
+    );
+    let (base_url, server) = serve(vec![event_response(&body)]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let mut stream = client
+        .stream_operation(
+            "request.operation",
+            StreamOptions {
+                resume: None,
+                max_reconnects: 2,
+            },
+        )
+        .unwrap();
+    assert_eq!(stream.next().unwrap().unwrap().event, "open");
+    assert!(matches!(
+        stream.next().unwrap(),
+        Err(ClientError::Protocol { .. })
+    ));
+    assert!(stream.next().is_none());
+    assert_eq!(server.join().unwrap().len(), 1);
+}
+
+#[test]
+fn invalid_resume_gap_ranges_fail_closed_without_reconnecting() {
+    for (sequence, first, last, next, retained) in [
+        (0, 1, 4, 8, 5),
+        (0, 0, 8, 8, 5),
+        (0, 0, 4, 8, 9),
+        (4, 4, 3, 8, 5),
+    ] {
+        let body = format!(
+            "{}{}",
+            cursor_open_frame(8, 0, "resume.initial"),
+            cursor_gap_frame(sequence, first, last, next, retained)
+        );
+        let (base_url, server) = serve(vec![event_response(&body)]);
+        let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+            .build()
+            .unwrap();
+        let mut stream = client
+            .stream_operation(
+                "request.operation",
+                StreamOptions {
+                    resume: None,
+                    max_reconnects: 2,
+                },
+            )
+            .unwrap();
+        assert_eq!(stream.next().unwrap().unwrap().event, "open");
+        assert!(matches!(
+            stream.next().unwrap(),
+            Err(ClientError::Protocol { .. })
+        ));
+        assert!(stream.next().is_none());
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn a_sequence_overflow_is_a_protocol_failure() {
+    let body = format!(
+        "{}{}",
+        cursor_open_frame(u64::MAX, 0, "resume.initial"),
+        terminal_frame_at("completed", "completed", u64::MAX)
+    );
+    let (base_url, server) = serve(vec![event_response(&body)]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let mut stream = client
+        .stream_operation(
+            "request.operation",
+            StreamOptions {
+                resume: Some(StreamResume {
+                    token: "resume.caller".into(),
+                    next_sequence: u64::MAX,
+                }),
+                max_reconnects: 2,
+            },
+        )
+        .unwrap();
+    assert_eq!(stream.next().unwrap().unwrap().event, "open");
+    assert!(matches!(
+        stream.next().unwrap(),
+        Err(ClientError::Protocol { .. })
+    ));
+    assert!(stream.next().is_none());
+    assert_eq!(server.join().unwrap().len(), 1);
 }
 
 #[test]

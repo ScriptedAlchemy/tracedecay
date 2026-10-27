@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::db::engine::{
     Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
 };
+use tracedecay_runtime_core::path_safety::plain_git_args;
 
 use crate::RegisteredGlobalDb;
 use crate::tests::harness::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime};
@@ -657,7 +658,7 @@ async fn dashboard_membership_returns_only_requested_registered_projects() {
 
 fn git(dir: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
-        .args(args)
+        .args(plain_git_args(args))
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -770,7 +771,11 @@ async fn full_clone_adopts_a_shallow_first_project_and_enriches_its_history() {
     let (original, full) = cloned_repository(&harness, "shallow-first");
     std::fs::write(original.join("lib.rs"), "pub fn next() {}\n").unwrap();
     git(&original, &["commit", "-q", "-am", "advance history"]);
-    let url = format!("file://{}/", original.display());
+    let origin = tracedecay_runtime_core::path_safety::plain_host_path(&original);
+    let url = format!(
+        "file:///{}/",
+        tracedecay_domain::forward_slash_path(&origin).trim_start_matches('/')
+    );
     git(&full, &["remote", "set-url", "origin", &url]);
     let shallow = original.with_file_name("shallow-first-shallow");
     git(

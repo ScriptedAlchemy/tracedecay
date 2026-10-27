@@ -503,6 +503,8 @@ mod tests {
             !meta.permissions().readonly(),
             "appended data file must stay writable"
         );
+        #[cfg(windows)]
+        tracedecay_private_fs::validate_private_file(&path).unwrap();
 
         #[cfg(unix)]
         {
@@ -517,5 +519,20 @@ mod tests {
         // The file must still be openable for a further append after the cycle.
         PrivateStoreIo::append_line(&path, "{\"a\":3}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn append_line_hardens_an_existing_windows_file_and_preserves_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap().join("legacy.jsonl");
+        std::fs::write(&path, "{\"before\":true}\n").unwrap();
+        assert!(tracedecay_private_fs::validate_private_file(&path).is_err());
+        PrivateStoreIo::append_line(&path, "{\"after\":true}").unwrap();
+        tracedecay_private_fs::validate_private_file(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"before\":true}\n{\"after\":true}\n"
+        );
     }
 }

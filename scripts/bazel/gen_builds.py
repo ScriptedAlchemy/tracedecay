@@ -1089,6 +1089,9 @@ def main():
             # PowerShell executes the generated command as a script. Invoke
             # the formatter per file there to stay below Windows' argv limit.
             powershell = (
+                # Bazel strips PATHEXT. PowerShell otherwise treats .exe paths
+                # as documents and leaves LASTEXITCODE unset instead of waiting.
+                "$$env:PATHEXT += ';.EXE'; "
                 f"foreach ($$source in ('$(locations :{sources})' -split ' ')) {{ "
                 f'& "$(RUSTFMT)" {args} $$source; '
                 'if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE } }; '
