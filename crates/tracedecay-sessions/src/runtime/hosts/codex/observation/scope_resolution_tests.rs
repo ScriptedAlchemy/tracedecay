@@ -9,6 +9,7 @@ use tempfile::TempDir;
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
 };
+use tracedecay_runtime_core::path_safety::plain_git_args;
 
 use super::*;
 use crate::admission::test_support::MemoryHostAdmission;
@@ -181,7 +182,7 @@ async fn scope_cache_retains_captured_absence_across_nested_profile_scopes() {
 fn git_fixture(project: &Path, args: &[&str]) {
     let output =
         std::process::Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())
-            .args(args)
+            .args(plain_git_args(args))
             .current_dir(project)
             .output()
             .unwrap();

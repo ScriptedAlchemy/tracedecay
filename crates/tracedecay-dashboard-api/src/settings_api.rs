@@ -34,7 +34,6 @@ use crate::application::settings_control::{
     preview_project_settings,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
 use tracedecay_configuration::{
     UserSettingsMutationV1, UserSettingsSnapshotV1, parse_duration_millis,
     plan_user_settings_mutation,
@@ -693,37 +692,18 @@ fn user_settings_payload(
 fn automation_settings_payload(
     project_configuration: &crate::config::PinnedRuntimeConfiguration,
 ) -> AutomationSettingsPayloadV1 {
-    match from_configuration_snapshot(project_configuration.snapshot()) {
-        Ok(automation) => AutomationSettingsPayloadV1 {
-            config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
-            availability: SettingsAvailabilityV1 {
-                available: true,
-                reason: None,
-                required_authority: None,
-            },
-            configuration_revision_id: Some(
-                project_configuration.revision_id().as_str().to_owned(),
-            ),
-            enabled: Some(automation.enabled),
-            backend: Some(automation.backend.as_str().to_owned()),
-            host_mode: Some(automation.host_mode.as_str().to_owned()),
+    let automation = &project_configuration.config().automation;
+    AutomationSettingsPayloadV1 {
+        config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
+        availability: SettingsAvailabilityV1 {
+            available: true,
+            reason: None,
+            required_authority: None,
         },
-        Err(err) => AutomationSettingsPayloadV1 {
-            config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
-            availability: SettingsAvailabilityV1 {
-                available: false,
-                reason: Some(format!(
-                    "pinned automation configuration could not be resolved: {err}"
-                )),
-                required_authority: Some("pinned automation configuration".to_owned()),
-            },
-            configuration_revision_id: Some(
-                project_configuration.revision_id().as_str().to_owned(),
-            ),
-            enabled: None,
-            backend: None,
-            host_mode: None,
-        },
+        configuration_revision_id: Some(project_configuration.revision_id().as_str().to_owned()),
+        enabled: Some(automation.enabled),
+        backend: Some(automation.backend.as_str().to_owned()),
+        host_mode: Some(automation.host_mode.as_str().to_owned()),
     }
 }
 

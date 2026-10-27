@@ -1015,10 +1015,12 @@ pub enum CancellationStatus {
     AlreadyTerminal,
 }
 
-/// Resume frontier supplied by an earlier stream.
+/// Resume authority and the subscriber's next undelivered sequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamResume {
     pub token: String,
+    /// One past the last consumed event or explicit gap, not the publication
+    /// watermark in an open frame. Zero if only open has been consumed.
     pub next_sequence: u64,
 }
 
@@ -1219,7 +1221,9 @@ impl OperationStream {
                             "SSE open frontier sequence range is inconsistent",
                         ));
                     }
-                    self.next_sequence = Some(next_sequence);
+                    // The frontier is a publication watermark. Receiving open
+                    // does not consume any event in that published history.
+                    self.next_sequence.get_or_insert(0);
                     self.resume_token = match frontier.get("resume_token") {
                         Some(Value::Null) => None,
                         Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
@@ -1250,14 +1254,7 @@ impl OperationStream {
                             "SSE ID disagrees with its canonical sequence",
                         ));
                     }
-                    if self
-                        .next_sequence
-                        .is_some_and(|expected| expected != sequence)
-                    {
-                        return Err(statusless_protocol(
-                            "SSE event sequence disagrees with the stream frontier",
-                        ));
-                    }
+                    let mut last_sequence = sequence;
                     match event_name.as_str() {
                         "item" if !event_data.contains_key("item") => {
                             return Err(statusless_protocol("SSE item payload is missing"));
@@ -1275,17 +1272,30 @@ impl OperationStream {
                         {
                             return Err(statusless_protocol("SSE progress payload is malformed"));
                         }
-                        "resume_gap" => validate_resume_gap(event_data)?,
+                        "resume_gap" => {
+                            let (last, resume_token) = validate_resume_gap(event_data, sequence)?;
+                            last_sequence = last;
+                            self.resume_token = resume_token;
+                        }
                         event if is_terminal_event(event) => {
                             validate_terminal(event_data, event)?;
                         }
                         _ => {}
                     }
-                    self.next_sequence = Some(
-                        sequence
-                            .checked_add(1)
-                            .ok_or_else(|| statusless_protocol("SSE sequence overflowed"))?,
-                    );
+                    let next_sequence = last_sequence
+                        .checked_add(1)
+                        .ok_or_else(|| statusless_protocol("SSE sequence overflowed"))?;
+                    let expected = self.next_sequence.unwrap_or(0);
+                    // A completed operation repeats its terminal receipt when
+                    // the requested cursor is exactly one past that receipt.
+                    let terminal_replay =
+                        is_terminal_event(&event_name) && next_sequence == expected;
+                    if sequence != expected && !terminal_replay {
+                        return Err(statusless_protocol(
+                            "SSE event sequence disagrees with the delivered cursor",
+                        ));
+                    }
+                    self.next_sequence = Some(next_sequence);
                 }
                 let event = StreamEvent {
                     event: event_name,
@@ -1323,7 +1333,10 @@ impl OperationStream {
     }
 }
 
-fn validate_resume_gap(event_data: &serde_json::Map<String, Value>) -> Result<(), ClientError> {
+fn validate_resume_gap(
+    event_data: &serde_json::Map<String, Value>,
+    sequence: u64,
+) -> Result<(u64, Option<String>), ClientError> {
     let gap = event_data
         .get("gap")
         .and_then(Value::as_object)
@@ -1348,16 +1361,21 @@ fn validate_resume_gap(event_data: &serde_json::Map<String, Value>) -> Result<()
         .get("retained_from_sequence")
         .and_then(Value::as_u64)
         .ok_or_else(|| statusless_protocol("SSE resume gap frontier has no retained sequence"))?;
-    let token_valid = matches!(
-        frontier.get("resume_token"),
-        Some(Value::Null | Value::String(_))
-    );
-    if first > last || retained > next || !token_valid {
+    if first != sequence || first > last || retained > next || last >= next {
         return Err(statusless_protocol(
             "SSE resume gap range or frontier is malformed",
         ));
     }
-    Ok(())
+    let resume_token = match frontier.get("resume_token") {
+        Some(Value::Null) => None,
+        Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
+        _ => {
+            return Err(statusless_protocol(
+                "SSE resume gap resume token is malformed",
+            ));
+        }
+    };
+    Ok((last, resume_token))
 }
 
 fn validate_terminal(

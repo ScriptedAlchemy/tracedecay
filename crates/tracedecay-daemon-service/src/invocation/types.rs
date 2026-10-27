@@ -984,6 +984,21 @@ pub struct RegisteredWorkRuntime {
 }
 
 impl RegisteredWorkRuntime {
+    pub(super) fn configuration_matches(
+        &self,
+        policy_digest: &ManifestDigest,
+        configuration_digest: &ManifestDigest,
+        work_topology_policy: &tracedecay_domain::configuration::WorkTopologyPolicyV1,
+        proposal_routing: &super::work_routing::DaemonWorkProposalRoutingAuthorityV1,
+    ) -> bool {
+        &self.policy_digest == policy_digest
+            && &self.configuration_digest == configuration_digest
+            && &self.work_topology_policy == work_topology_policy
+            && self
+                .proposal_routing
+                .same_configuration_as(proposal_routing)
+    }
+
     /// The registered grant, bounded to one request observed at `observed_at`.
     pub(crate) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
         mounted_grant_at(&self.grant, observed_at)

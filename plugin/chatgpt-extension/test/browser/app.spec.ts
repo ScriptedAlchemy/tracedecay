@@ -21,6 +21,7 @@ let client: Client;
 let assets: ServerAssets;
 let staticServer: Server;
 let baseUrl: string;
+let emptyRegistryResult: CallToolResult;
 
 test.beforeAll(async () => {
   assets = {
@@ -29,15 +30,16 @@ test.beforeAll(async () => {
   };
   fixture = await DaemonFixture.create();
   await fixture.startDaemon();
+  bridge = new DaemonBridge({ binary: fixture.binary, profileRoot: fixture.profileRoot, env: fixture.env, cwd: fixture.home });
+  client = await connectClient(bridge);
+  emptyRegistryResult = await callTool("tracedecay_workspace", {});
   billing = await fixture.createRepo("billing", {
     "src/billing.ts": BILLING_SOURCE,
     "src/report.ts": REPORT_SOURCE,
     "src/index.ts": INDEX_SOURCE,
   });
   fixture.initProject(billing.root);
-  bridge = new DaemonBridge({ binary: fixture.binary, profileRoot: fixture.profileRoot, env: fixture.env, cwd: fixture.home });
-  client = await connectClient(bridge);
-  const project = (await bridge.listProjects()).find((candidate) => candidate.project_root === billing.root);
+  const project = (await bridge.listProjects()).projects.find((candidate) => candidate.project_root === billing.root);
   if (project === undefined) throw new Error("billing project was not registered");
   billingProjectId = project.project_id;
 
@@ -91,8 +93,8 @@ async function connectClient(viaBridge: DaemonBridge): Promise<Client> {
   return mcp;
 }
 
-async function callTool(name: string, args: Record<string, unknown>, via: Client = client): Promise<CallToolResult> {
-  return (await via.callTool({ name, arguments: args })) as CallToolResult;
+async function callTool(name: string, args: Record<string, unknown>, via: Client = client, signal?: AbortSignal): Promise<CallToolResult> {
+  return (await via.callTool({ name, arguments: args }, { signal })) as CallToolResult;
 }
 
 async function openHost(page: Page): Promise<void> {
@@ -100,7 +102,20 @@ async function openHost(page: Page): Promise<void> {
   page.on("console", (message) => {
     if (message.type() === "error" || message.type() === "warning") console.error(`[console ${message.type()}]`, message.text());
   });
-  await page.exposeFunction("__mcpCall", (name: string, args: Record<string, unknown>) => callTool(name, args));
+  const pending = new Map<number, AbortController>();
+  await page.exposeFunction("__mcpCall", async (requestId: number, name: string, args: Record<string, unknown>) => {
+    const controller = new AbortController();
+    pending.set(requestId, controller);
+    try {
+      return await callTool(name, args, client, controller.signal);
+    } finally {
+      pending.delete(requestId);
+    }
+  });
+  await page.exposeFunction("__mcpCancel", (requestId: number) => pending.get(requestId)?.abort());
+  page.once("close", () => {
+    for (const controller of pending.values()) controller.abort();
+  });
   await page.goto(`${baseUrl}/harness.html`);
   await page.evaluate(() => window.__host.ready);
 }
@@ -184,6 +199,9 @@ test("denied, not-found, and disconnected states render truthfully", async ({ pa
   await openHost(page);
   const ui = app(page);
 
+  await pushToolResult(page, emptyRegistryResult);
+  await expect(ui.getByTestId("projects-empty")).toContainText("No projects are registered");
+  await expect(ui.getByTestId("project-search-input")).toBeVisible();
   await pushToolResult(page, await callTool("tracedecay_thread_panel", {}));
   await expect(ui.getByTestId("daemon-badge")).toHaveText("connected");
   await expect(ui.getByTestId("project-row").filter({ hasText: billing.root })).toHaveCount(1);
@@ -208,4 +226,56 @@ test("denied, not-found, and disconnected states render truthfully", async ({ pa
     await offlineClient.close();
     await offline.close();
   }
+});
+
+test("finds a registered project outside the recent ten and selects its exact identity", async ({ page }) => {
+  const roots: string[] = [];
+  for (let index = 0; index < 11; index += 1) {
+    const project = await fixture.createRepo(`discovery-${String(index).padStart(2, "0")}`, { "src/index.ts": "export const registered = true;\n" });
+    fixture.initProject(project.root);
+    roots.push(project.root);
+  }
+  const recentResult = await callTool("tracedecay_workspace", {});
+  const recent = recentResult.structuredContent as Extract<ViewState, { page: "projects" }>;
+  expect(recent.projects.state).toBe("ready");
+  if (recent.projects.state !== "ready") throw new Error(JSON.stringify(recent));
+  expect(recent.projects.data.limit).toBe(10);
+  expect(recent.projects.data.truncated).toBe(true);
+  expect(recent.projects.data.projects).toHaveLength(10);
+  const shownRoots = new Set(recent.projects.data.projects.map((project) => project.project_root));
+  const hiddenRoot = roots.find((root) => !shownRoots.has(root));
+  if (hiddenRoot === undefined) throw new Error("fixture did not place a registered project outside the recent list");
+
+  await openHost(page);
+  const ui = app(page);
+  await pushToolResult(page, recentResult);
+  await expect(ui.getByTestId("projects-completeness")).toContainText("More registered projects are available");
+  await expect(ui.getByTestId("project-row").filter({ hasText: hiddenRoot })).toHaveCount(0);
+  await ui.getByTestId("project-search-input").fill(hiddenRoot);
+  await ui.getByTestId("project-search-input").press("Enter");
+  const found = ui.getByTestId("project-row").filter({ hasText: hiddenRoot });
+  await expect(found).toHaveCount(1);
+  await expect(ui.getByTestId("projects-completeness")).toContainText("All matching projects are shown");
+  const projectId = await found.getByTestId("project-open").getAttribute("data-project-id");
+  expect(projectId).toBeTruthy();
+  await found.getByTestId("project-open").click();
+  await expect(ui.getByTestId("results-empty")).toContainText("Type a symbol name");
+  await expect.poll(async () => page.evaluate(() => window.__host.record.modelContext.at(-1))).toMatchObject({
+    structuredContent: { project_id: projectId },
+  });
+
+  await ui.getByTestId("crumb-projects").click();
+  await expect(ui.getByTestId("project-search-input")).toBeVisible();
+  await ui.getByTestId("project-search-input").fill("discovery-");
+  await ui.getByTestId("project-search-submit").click();
+  await expect(ui.getByTestId("projects-completeness")).toContainText("More matches are available");
+  await expect(ui.getByTestId("project-row")).toHaveCount(10);
+
+  await ui.getByTestId("project-search-input").fill("no-such-registered-project");
+  await ui.getByTestId("project-search-submit").click();
+  await expect(ui.getByTestId("projects-empty")).toContainText("No registered projects match");
+  await expect(ui.getByTestId("projects-failed")).toHaveCount(0);
+  await ui.getByTestId("project-search-recent").click();
+  await expect(ui.getByTestId("project-search-input")).toHaveValue("");
+  await expect(ui.getByTestId("projects-panel")).toContainText("Recent registered projects");
 });

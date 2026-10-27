@@ -1119,12 +1119,10 @@ mod tests {
         let certificate_chain = directory.join("chain.pem");
         let private_key = directory.join("key.pem");
         std::fs::write(&certificate_chain, CERTIFICATE_CHAIN).unwrap();
-        std::fs::write(&private_key, PRIVATE_KEY).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
+        tracedecay_private_fs::create_private_file(&private_key)
+            .unwrap()
+            .write_all(PRIVATE_KEY)
+            .unwrap();
         let config = RemoteBrainTlsConfig::from_optional_parts(
             Some(SocketAddr::from(([127, 0, 0, 1], 0))),
             Some(certificate_chain),

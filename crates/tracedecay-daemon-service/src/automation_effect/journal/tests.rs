@@ -1021,6 +1021,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         enabled: true,
         backend: AutomationBackend::Disabled,
         host_mode: AutomationHostMode::Standalone,
+        model_id: None,
         ..AutomationConfig::default()
     };
     let configuration_revision =
