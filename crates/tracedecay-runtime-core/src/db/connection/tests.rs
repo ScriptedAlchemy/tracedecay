@@ -537,6 +537,75 @@ async fn cancelled_write_transaction_rolls_back_before_releasing_lane() {
 }
 
 #[asupersync::test]
+async fn panicked_write_transaction_rolls_back_and_releases_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("graph.db");
+    let authority = DatabaseAuthority::acquire_test(&path, "panicked writer").unwrap();
+    let (db, _) = Database::publish_fixture_runtime(
+        &path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+        TestRuntimeShardFamilyV1::Code,
+        None,
+    )
+    .await
+    .unwrap();
+    db.writer_connection("seed panicked writer")
+        .await
+        .unwrap()
+        .execute_batch("CREATE TABLE panicked_writer (value INTEGER NOT NULL); INSERT INTO panicked_writer VALUES (0);")
+        .await
+        .unwrap();
+    let caller_database = db.clone();
+    let caller: crate::native_runtime::NativeTask<()> =
+        crate::native_runtime::NativeTask::spawn(async move {
+            let transaction = caller_database
+                .begin_write_transaction("panicked update")
+                .await
+                .unwrap();
+            transaction
+                .execute("UPDATE panicked_writer SET value = 1", ())
+                .await
+                .unwrap();
+            panic!("injected writer caller panic");
+        })
+        .unwrap();
+    assert!(matches!(
+        caller.wait().await,
+        crate::native_runtime::NativeTaskOutcome::Panicked(_)
+    ));
+
+    let transaction = asupersync::time::timeout(
+        Cx::current().unwrap().now(),
+        std::time::Duration::from_secs(2),
+        db.begin_write_transaction("writer after panic"),
+    )
+    .await
+    .expect("writer admission must recover after caller panic")
+    .unwrap();
+    let mut rows = transaction
+        .query("SELECT value FROM panicked_writer", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    drop(rows);
+    transaction
+        .execute("UPDATE panicked_writer SET value = 2", ())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        db.query_scalar_i64("read recovered writer", "SELECT value FROM panicked_writer")
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[asupersync::test]
 async fn checkpoint_waits_for_shared_writer_lane() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");

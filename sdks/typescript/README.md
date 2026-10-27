@@ -62,6 +62,20 @@ Unary HTTP operations are not automatically retried. A disconnected or aborted
 response does not prove that an effect was rolled back or never committed.
 Use `cancelOperation` to explicitly request cancellation of a running operation.
 
+## Resuming an operation stream
+
+An `open` event's `frontier.next_sequence` is the server's publication watermark.
+It does not mean that the subscriber has consumed those events. The client keeps
+its delivered cursor unchanged on `open` and uses the frontier's `resume_token`
+for reconnection. A delivered event advances the cursor to its sequence plus one;
+a `resume_gap` advances it to `gap.last_missing_sequence + 1` and explicitly
+reports the lost range.
+
+For manual resume, supply the next sequence after the last event or gap your
+application consumed. Use zero if you consumed only `open`. Resuming exactly one
+past a completed operation delivers its retained terminal receipt once and ends.
+Automatic reconnect remains opt-in through `maxReconnects`.
+
 ## Publishing
 
 `pnpm test` runs the fast, mock-server unit suite only; it does not by itself

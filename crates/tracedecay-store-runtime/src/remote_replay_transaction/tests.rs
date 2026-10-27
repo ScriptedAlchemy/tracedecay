@@ -183,6 +183,7 @@ fn admitted(
     matches!(outcome, Ok(RemoteReplayTransactionOutcomeV1::Admitted(_)))
 }
 
+#[cfg(target_os = "linux")]
 fn remote_replay_threads() -> usize {
     std::fs::read_dir("/proc/self/task")
         .expect("thread listing")
@@ -242,6 +243,7 @@ async fn replay_and_fence_read_awaited_on_a_native_worker_never_park_it() {
         reader_waits,
         "no reader wait parked a native worker"
     );
+    #[cfg(target_os = "linux")]
     assert_eq!(
         remote_replay_threads(),
         0,

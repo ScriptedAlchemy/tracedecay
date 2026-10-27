@@ -39,41 +39,50 @@ bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
 zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
 use_repo(zig, "zig_sdk")
 
+RUST_VERSION = "1.99.0"
+
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
-    # Cargo's dev profile compiles every crate at opt-level 1 and release at
-    # 3; generated targets and the .bazelrc block refine per crate from the
-    # perf profile.
+    # Bazel's default fastbuild mirrors the assertion-enabled Cargo perf
+    # profile. Generated targets and the .bazelrc block refine its opt-level
+    # per crate; releases use opt-level 3.
     opt_level = {
         "dbg": "0",
         "fastbuild": "1",
         "opt": "3",
     },
-    # fastbuild emits no Rust debug information. Avoid declaring redundant
-    # Windows PDB outputs and caching a second copy for every executable.
+    # fastbuild already emits no Rust debug information. Tell rules_rust not
+    # to declare a Windows PDB for each binary or copy it into the action cache.
+    # Explicit debug builds retain their symbols.
     strip_level = {
         "dbg": "none",
         "fastbuild": "debuginfo",
         "opt": "debuginfo",
     },
-    versions = ["nightly/2026-10-25"],
-    rustfmt_version = "nightly/2026-10-25",
-    rust_analyzer_version = "nightly/2026-10-25",
+    versions = [RUST_VERSION],
+    rustfmt_version = RUST_VERSION,
+    rust_analyzer_version = RUST_VERSION,
 )
 use_repo(
     rust,
     "rust_toolchains",
-    rust_analyzer_tools = "rust_analyzer_nightly-2026-10-25_tools",
+    rust_analyzer_tools = "rust_analyzer_" + RUST_VERSION + "_tools",
 )
 register_toolchains("@rust_toolchains//:all")
+
+host = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
+host.host_tools(name = "cargo_host_tools", version = RUST_VERSION)
+use_repo(host, "cargo_host_tools")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     # One letter: Windows build-script paths repeat the hub's repository
     # name, and MSVC cannot open headers past MAX_PATH (gen_builds.py).
     name = "c",
+    cargo_config = "//:.cargo/acquisition.toml",
     cargo_lockfile = "//:Cargo.lock",
+    host_tools = "@cargo_host_tools",
     manifests = ["//:Cargo.toml"],
 )
 

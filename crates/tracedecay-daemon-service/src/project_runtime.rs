@@ -689,7 +689,11 @@ impl Drop for FeedbackRegistrationLease {
 }
 
 impl ProjectRuntimeBuildReservationLeaseV1 {
-    fn commit<C>(mut self, component: C) -> Result<(), ProjectRuntimeRegistryError>
+    fn commit<C, T>(
+        mut self,
+        component: C,
+        project: impl FnOnce(&C) -> T,
+    ) -> Result<T, ProjectRuntimeRegistryError>
     where
         C: ProjectRuntimeComponent,
     {
@@ -707,8 +711,9 @@ impl ProjectRuntimeBuildReservationLeaseV1 {
                             |reservation| Arc::ptr_eq(reservation, &self.reservation),
                         ) && C::peek(runtime).is_none() =>
                     {
+                        let result = project(&component);
                         *C::slot(runtime) = Some(component);
-                        Ok(())
+                        Ok(result)
                     }
                     _ => Err(ProjectRuntimeRegistryError::AlreadyRegistered),
                 }
@@ -723,7 +728,7 @@ impl ProjectRuntimeBuildReservationLeaseV1 {
         drop(root_fences);
         self.active = false;
         let outcome = match &result {
-            Ok(()) => ProjectRuntimeBuildOutcomeV1::Succeeded,
+            Ok(_) => ProjectRuntimeBuildOutcomeV1::Succeeded,
             Err(error) => ProjectRuntimeBuildOutcomeV1::Failed {
                 detail: error.to_string(),
             },
@@ -845,44 +850,6 @@ impl ProjectRuntimeRegistryV1 {
             project_root,
             active: true,
         })
-    }
-
-    /// Publish a component, refusing if this project already has a live one.
-    #[tracing::instrument(
-        name = "daemon.service.project_runtime.register",
-        level = "trace",
-        skip_all
-    )]
-    pub(crate) async fn register<C>(
-        &self,
-        project_root: PathBuf,
-        component: C,
-    ) -> Result<(), ProjectRuntimeRegistryError>
-    where
-        C: ProjectRuntimeComponent,
-    {
-        loop {
-            let mut reservation_changed = self.reservation_changed.subscribe();
-            {
-                let root_fences = self.lock_root_fences();
-                let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) || root_fences.contains(&project_root) {
-                    return Err(ProjectRuntimeRegistryError::Closed);
-                }
-                let runtime = runtimes.entry(project_root.clone()).or_default();
-                if !runtime.reservations.contains(&TypeId::of::<C>()) {
-                    let slot = C::slot(runtime);
-                    if slot.is_some() {
-                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered);
-                    }
-                    *slot = Some(component);
-                    return Ok(());
-                }
-            }
-            if reservation_changed.changed().await.is_err() {
-                return Err(ProjectRuntimeRegistryError::Closed);
-            }
-        }
     }
 
     /// Publish a component over whatever was there.
@@ -1225,6 +1192,39 @@ impl ProjectRuntimeRegistryV1 {
             .then_some(result)
     }
 
+    /// Reconcile an existing component without waiting for a reservation or
+    /// constructing a new owner. Callers can hold an external authority fence
+    /// through this synchronous transition without awaiting another writer.
+    pub(crate) fn reconcile_registered<C, E, R, T>(
+        &self,
+        project_root: &Path,
+        reconcile: R,
+    ) -> Result<Option<T>, E>
+    where
+        C: ProjectRuntimeComponent,
+        E: From<ProjectRuntimeRegistryError>,
+        R: FnOnce(&mut C) -> Result<T, E>,
+    {
+        let root_fences = self.lock_root_fences();
+        let mut runtimes = self.lock_runtimes();
+        if self.closed.load(Ordering::Acquire) || root_fences.contains(project_root) {
+            return Err(ProjectRuntimeRegistryError::Closed.into());
+        }
+        let Some(runtime) = runtimes.get_mut(project_root) else {
+            return Ok(None);
+        };
+        let type_id = TypeId::of::<C>();
+        if runtime.reservations.contains(&type_id)
+            || runtime.registration_builds.contains_key(&type_id)
+        {
+            return Ok(None);
+        }
+        let Some(incumbent) = C::slot(runtime).as_mut() else {
+            return Ok(None);
+        };
+        reconcile(incumbent).map(Some)
+    }
+
     /// Register a component, or accept an incumbent the caller recognizes as
     /// the same authority.
     ///
@@ -1233,11 +1233,6 @@ impl ProjectRuntimeRegistryV1 {
     /// is reserved under the registry locks, then `build` runs after both
     /// locks are released. Registrations for the same typed slot join that
     /// reservation and receive its exact terminal outcome.
-    #[tracing::instrument(
-        name = "daemon.service.project_runtime.register_or_reconcile",
-        level = "trace",
-        skip_all
-    )]
     pub(crate) async fn register_or_reconcile<C, E, R, B, Fut>(
         &self,
         project_root: PathBuf,
@@ -1250,6 +1245,33 @@ impl ProjectRuntimeRegistryV1 {
         R: FnOnce(&mut C) -> Result<(), E>,
         B: FnOnce() -> Fut,
         Fut: Future<Output = Result<C, E>>,
+    {
+        self.register_or_reconcile_with(project_root, reconcile, build, |_| ())
+            .await
+    }
+
+    /// Project the installed component under the same locks that admit its
+    /// registration or reconcile its incumbent. A rejected build never returns
+    /// a projection of the discarded candidate.
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.register_or_reconcile",
+        level = "trace",
+        skip_all
+    )]
+    pub(crate) async fn register_or_reconcile_with<C, E, R, B, Fut, T, P>(
+        &self,
+        project_root: PathBuf,
+        reconcile: R,
+        build: B,
+        project: P,
+    ) -> Result<T, E>
+    where
+        C: ProjectRuntimeComponent,
+        E: From<ProjectRuntimeRegistryError> + fmt::Display,
+        R: FnOnce(&mut C) -> Result<(), E>,
+        B: FnOnce() -> Fut,
+        Fut: Future<Output = Result<C, E>>,
+        P: FnOnce(&C) -> T,
     {
         loop {
             let mut reservation_changed = self.reservation_changed.subscribe();
@@ -1271,7 +1293,8 @@ impl ProjectRuntimeRegistryV1 {
                 } else {
                     let slot = C::slot(runtime);
                     if let Some(incumbent) = slot.as_mut() {
-                        return reconcile(incumbent);
+                        reconcile(incumbent)?;
+                        return Ok(project(incumbent));
                     }
                     let reservation = ProjectRuntimeBuildReservationV1::new();
                     runtime.reservations.push(type_id);
@@ -1311,7 +1334,7 @@ impl ProjectRuntimeRegistryV1 {
             }
             if let Some(lease) = build_lease {
                 return match build().await {
-                    Ok(component) => lease.commit::<C>(component).map_err(Into::into),
+                    Ok(component) => lease.commit(component, project).map_err(Into::into),
                     Err(error) => {
                         lease.fail(error.to_string());
                         Err(error)

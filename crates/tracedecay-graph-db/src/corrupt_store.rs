@@ -365,6 +365,25 @@ mod tests {
             1,
             "the drifting-fault refusal must log its operator event exactly once"
         );
+        let event = logs
+            .lines()
+            .find(|line| line.contains("store_corrupt_not_deterministic"))
+            .expect("the drifting-fault operator event");
+        assert_eq!(
+            event.split_whitespace().next(),
+            Some("ERROR"),
+            "a terminal corruption verdict must remain visible at the default log level: {event}"
+        );
+        for field in [
+            format!("container={}", container.display()),
+            "first_fault=block 18 CRC mismatch".to_owned(),
+            "second_fault=block 7 CRC mismatch".to_owned(),
+        ] {
+            assert!(
+                event.contains(&field),
+                "the operator event must identify {field:?}: {event}"
+            );
+        }
 
         assert!(
             matches!(&error, GraphDbError::Corrupt { message }

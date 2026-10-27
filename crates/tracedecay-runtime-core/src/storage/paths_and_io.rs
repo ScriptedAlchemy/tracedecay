@@ -1,10 +1,14 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
+#[cfg(windows)]
+use std::io::{Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, set_owner_private_file_mode};
+#[cfg(windows)]
+use tracedecay_private_fs::{create_private_file, make_private_file, open_private_file};
 
 use crate::config;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -212,14 +216,37 @@ impl PrivateStoreIo {
     /// (see [`append_line_locked`]).
     fn append_line_data(path: &Path, line: &str) -> io::Result<()> {
         reject_symlink_components(path, "private store file")?;
-        let mut options = fs::OpenOptions::new();
-        options.append(true);
-        // One canonical handle: the append file itself, no buffer wrapper.
-        let mut file = Self::open_private(path, &mut options)?;
+        #[cfg(windows)]
+        let mut file = {
+            // Harden before writing and retain that exact handle. Reopening a
+            // just-modified file for WRITE_OWNER/WRITE_DAC stalls native hooks.
+            let mut file = match open_private_file(path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => create_private_file(path)?,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    make_private_file(path)?
+                }
+                Err(error) => return Err(error),
+            };
+            // The shared sidecar lease serializes this seek and append.
+            file.seek(SeekFrom::End(0))?;
+            file
+        };
+        #[cfg(not(windows))]
+        let mut file = {
+            let mut options = fs::OpenOptions::new();
+            options.append(true);
+            Self::open_private(path, &mut options)?
+        };
         file.write_all(format!("{line}\n").as_bytes())?;
         file.flush()?;
-        drop(file);
-        set_owner_private_file_mode(path)
+        #[cfg(not(windows))]
+        {
+            drop(file);
+            set_owner_private_file_mode(path)
+        }
+        #[cfg(windows)]
+        Ok(())
     }
 
     /// Opens `path` for writing, creating it if missing with owner-only

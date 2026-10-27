@@ -265,6 +265,11 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
             let _registration = registration;
+            // The native timer is scheduled asynchronously. An expired
+            // operation must not race that timer for a ready retained client.
+            if Instant::now() >= deadline {
+                return analyzer_event_outcome(AnalyzerEvent::TimedOut);
+            }
             let document_snapshot = document_snapshot;
             let document = document;
             let outcome = tokio::select! {
@@ -291,6 +296,11 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                         Ok(slot) => slot,
                         Err(error) => return analyzer_start_failure(&error),
                     };
+                    // Lock acquisition can finish after the deadline. Refuse
+                    // before taking ownership, leaving a healthy client intact.
+                    if Instant::now() >= deadline {
+                        return analyzer_event_outcome(AnalyzerEvent::TimedOut);
+                    }
                     if slot.as_ref().is_none()
                         && let Some(outcome) = inner
                             .shared
@@ -835,6 +845,30 @@ mod tests {
             "file:///project",
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
         )
+    }
+
+    #[test]
+    fn expired_semantics_settle_before_claiming_the_analyzer() {
+        let authority = unspawnable_authority();
+        let before = authority.analyzer_readiness();
+        let request = document_symbol_request().with_deadline(Instant::now());
+        let operation = authority.start(
+            AdmittedRoot::new("file:///project"),
+            LspRequestId::Number(1),
+            request,
+        );
+        let outcome = futures_util::FutureExt::now_or_never(operation);
+        assert_eq!(
+            outcome,
+            Some(analyzer_event_outcome(AnalyzerEvent::TimedOut)),
+            "an expired request needs no timer or analyzer startup to settle",
+        );
+        assert!(authority.inner.operations().is_empty());
+        let after = authority.analyzer_readiness();
+        assert_eq!(after.state(), before.state());
+        assert_eq!(after.attempt(), before.attempt());
+        assert_eq!(after.restart_attempts(), before.restart_attempts());
+        assert_eq!(after.last_failure(), before.last_failure());
     }
 
     #[test]

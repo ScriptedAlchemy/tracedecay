@@ -7,6 +7,7 @@ use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutMutationResultV1, ContextScoutMutationSettlementOutcomeV1,
     ContextScoutPublicMutationV1, ContextScoutRecentStateV1,
 };
+use tracedecay_application::diagnostics_producer::TypeScriptProducerStatusHandleV1;
 use tracedecay_application::primitives::{
     ProductionPrimitiveOpenRequestV1, open_production_primitive_runtime,
 };
@@ -1375,41 +1376,63 @@ impl DaemonPrimitiveRuntimeRegistrar {
         }
     }
 
-    /// Retains the already-opened project runtime as its teardown owner.
-    /// Scope/access were bound by the concrete project-open factory.
-    pub async fn register(
-        &self,
-        project_root: PathBuf,
-        project_runtime: PrimitiveProjectRuntime,
-    ) -> Result<Arc<dyn PrimitiveDispatch>, DaemonPrimitiveRuntimeRegistrationError> {
-        let dispatch = project_runtime.dispatch();
-        self.service
-            .project_runtimes
-            .register(project_root, project_runtime)
-            .await
-            .map_err(|error| match error {
-                ProjectRuntimeRegistryError::AlreadyRegistered => {
-                    DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered
-                }
-                ProjectRuntimeRegistryError::Closed => {
-                    DaemonPrimitiveRuntimeRegistrationError::RegistryClosed
-                }
-                ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
-                    DaemonPrimitiveRuntimeRegistrationError::ConcurrentBuildFailed { detail }
-                }
-            })?;
-        Ok(dispatch)
-    }
-
     pub async fn open_and_register(
         &self,
         project_root: PathBuf,
         request: ProductionPrimitiveOpenRequestV1,
-    ) -> Result<(), DaemonPrimitiveRuntimeRegistrationError> {
-        let runtime = open_production_primitive_runtime(request).await?;
-        match self.register(project_root, runtime).await {
-            Ok(_) | Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered) => Ok(()),
-            Err(error) => Err(error),
+    ) -> Result<TypeScriptProducerStatusHandleV1, DaemonPrimitiveRuntimeRegistrationError> {
+        request.validate_registration_root(&project_root)?;
+        let retained = self
+            .service
+            .project_runtimes
+            .register_or_reconcile_with(
+                project_root.clone(),
+                |runtime: &mut PrimitiveProjectRuntime| {
+                    request
+                        .validate_retained(runtime)
+                        .map(|_| ())
+                        .map_err(DaemonPrimitiveRuntimeRegistrationError::from)
+                },
+                || async {
+                    open_production_primitive_runtime(request.clone())
+                        .await
+                        .map_err(DaemonPrimitiveRuntimeRegistrationError::from)
+                },
+                PrimitiveProjectRuntime::clone,
+            )
+            .await?;
+        if request.validate_retained(&retained)? {
+            return Ok(retained.compiler_status());
+        }
+
+        // A sibling can retain this root's store owner after route eviction.
+        // Rebuild every configuration-bound port together rather than merely
+        // updating the access snapshot while leaving old cursor authorities.
+        let replacement = open_production_primitive_runtime(request).await?;
+        self.service
+            .project_runtimes
+            .register_or_reconcile_with(
+                project_root,
+                |runtime: &mut PrimitiveProjectRuntime| {
+                    runtime
+                        .reconcile_reopen(&retained, &replacement)
+                        .map_err(Into::into)
+                },
+                || async { Ok(replacement.clone()) },
+                PrimitiveProjectRuntime::compiler_status,
+            )
+            .await
+    }
+}
+
+impl From<ProjectRuntimeRegistryError> for DaemonPrimitiveRuntimeRegistrationError {
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        match error {
+            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
+            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
+            ProjectRuntimeRegistryError::ConcurrentBuildFailed { detail } => {
+                Self::ConcurrentBuildFailed { detail }
+            }
         }
     }
 }

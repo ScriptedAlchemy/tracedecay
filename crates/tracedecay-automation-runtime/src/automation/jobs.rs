@@ -12,7 +12,9 @@ use super::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
 };
-use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+use super::config::{
+    AutomationBackend, AutomationConfig, AutomationHostMode, ScheduleResolutionError,
+};
 use super::job_error;
 use super::job_webhook;
 use super::lifecycle::{
@@ -26,7 +28,7 @@ use super::run_ledger::{
     load_run_ledger_task_summary,
 };
 use super::scheduler::{
-    AutomationSchedule, AutomationTaskLock, cron_is_due, elapsed_secs, parse_schedule,
+    AutomationSchedule, AutomationTaskLock, cron_is_due, elapsed_secs, resolve_schedule,
 };
 use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -69,7 +71,7 @@ pub struct AutomationJob {
     pub id: String,
     pub name: String,
     pub prompt: String,
-    /// Parsed with [`parse_schedule`]: `manual`, `interval`, `hourly`,
+    /// Parsed with [`resolve_schedule`]: `manual`, `interval`, `hourly`,
     /// `daily`, `weekly`, `every <duration>`, or a 5-field cron expression
     /// evaluated against the wall clock (UTC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +99,26 @@ pub struct AutomationJob {
     pub updated_at: i64,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedAutomationJob {
+    job: AutomationJob,
+    schedule: AutomationSchedule,
+}
+
+impl std::ops::Deref for AdmittedAutomationJob {
+    type Target = AutomationJob;
+
+    fn deref(&self) -> &Self::Target {
+        &self.job
+    }
+}
+
+impl AdmittedAutomationJob {
+    pub fn schedule(&self) -> AutomationSchedule {
+        self.schedule
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -283,6 +305,10 @@ pub async fn find_job(dashboard_root: &Path, job_id: &str) -> Result<Option<Auto
 }
 
 pub fn validate_job(job: &AutomationJob) -> Result<()> {
+    admit_job(job).map(|_| ())
+}
+
+pub fn admit_job(job: &AutomationJob) -> Result<AdmittedAutomationJob> {
     validate_job_id(&job.id)?;
     if job.name.trim().is_empty() {
         return job_error("job name must not be empty");
@@ -290,16 +316,20 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
     if job.prompt.trim().is_empty() {
         return job_error("job prompt must not be empty");
     }
-    let schedule =
-        parse_schedule(job.schedule.as_deref()).map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-    if schedule == AutomationSchedule::ConfiguredInterval && job.interval_secs.is_none() {
-        return job_error("job interval_secs is required when schedule is interval");
-    }
     if matches!(job.interval_secs, Some(0)) {
         return job_error("job interval_secs must be greater than zero");
     }
+    let schedule = match resolve_schedule(job.schedule.as_deref(), job.interval_secs) {
+        Ok(schedule) => schedule,
+        Err(ScheduleResolutionError::IntervalRequired) => {
+            return job_error("job interval_secs is required when schedule is interval");
+        }
+        Err(ScheduleResolutionError::Invalid(error)) => {
+            return Err(TraceDecayError::Config {
+                message: error.to_string(),
+            });
+        }
+    };
     if matches!(job.cooldown_secs, Some(0)) {
         return job_error("job cooldown_secs must be greater than zero");
     }
@@ -322,7 +352,10 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
             job_webhook::validate_url(url)?;
         }
     }
-    Ok(())
+    Ok(AdmittedAutomationJob {
+        job: job.clone(),
+        schedule,
+    })
 }
 
 pub fn validate_job_id(job_id: &str) -> Result<()> {
@@ -370,15 +403,30 @@ fn validate_relative_output_path(path: &str) -> Result<()> {
 }
 
 /// True when the job would ever be picked up by the scheduler loop.
-pub fn job_is_schedulable(job: &AutomationJob) -> bool {
+pub fn job_is_schedulable(job: &AdmittedAutomationJob) -> bool {
     if !job.enabled {
         return false;
     }
-    match parse_schedule(job.schedule.as_deref()) {
-        Ok(AutomationSchedule::Manual) | Err(_) => false,
-        Ok(AutomationSchedule::ConfiguredInterval) => job.interval_secs.is_some(),
-        Ok(AutomationSchedule::Interval { .. } | AutomationSchedule::Cron(_)) => true,
+    matches!(
+        job.schedule,
+        AutomationSchedule::Interval { .. } | AutomationSchedule::Cron(_)
+    )
+}
+
+/// True when scheduler selection must admit this persisted job.
+///
+/// Disabled and manual entries are skipped so an unrelated inactive sibling
+/// cannot fail-close valid scheduled work. Enabled jobs whose schedule is
+/// interval, cron, or unresolvable still go through [`admit_job`] so a
+/// malformed scheduled definition stays fail-closed.
+fn job_requires_scheduler_admission(job: &AutomationJob) -> bool {
+    if !job.enabled {
+        return false;
     }
+    !matches!(
+        resolve_schedule(job.schedule.as_deref(), job.interval_secs),
+        Ok(AutomationSchedule::Manual)
+    )
 }
 
 /// True when any persisted job needs the scheduler loop running.
@@ -387,9 +435,22 @@ pub fn job_is_schedulable(job: &AutomationJob) -> bool {
 /// as an error rather than collapsed to `false`: reporting "no work" for a
 /// corrupt file would silently and permanently disable the scheduler loop.
 /// The caller retries next tick so a transiently bad file recovers.
+/// Inactive or manual siblings are not admitted; a malformed enabled
+/// schedule still fails closed.
 pub async fn jobs_configured_for_scheduler(dashboard_root: &Path) -> Result<bool> {
-    let jobs = load_jobs(dashboard_root).await?;
+    let jobs = load_admitted_jobs(dashboard_root).await?;
     Ok(jobs.iter().any(job_is_schedulable))
+}
+
+pub async fn load_admitted_jobs(dashboard_root: &Path) -> Result<Vec<AdmittedAutomationJob>> {
+    let mut admitted = Vec::new();
+    for job in load_jobs(dashboard_root).await? {
+        if !job_requires_scheduler_admission(&job) {
+            continue;
+        }
+        admitted.push(admit_job(&job)?);
+    }
+    Ok(admitted)
 }
 
 /// Scheduler due-decision for one job, mirroring the fixed-task
@@ -397,7 +458,7 @@ pub async fn jobs_configured_for_scheduler(dashboard_root: &Path) -> Result<bool
 /// cooldown, and require the interval to elapse or a cron occurrence to
 /// pass since the last scheduler-triggered run.
 pub fn job_schedule_decision(
-    job: &AutomationJob,
+    job: &AdmittedAutomationJob,
     records: &[AutomationRunLedgerRecord],
     now_secs: i64,
 ) -> Option<AutomationSkipReasonV1> {
@@ -408,26 +469,18 @@ pub fn job_schedule_decision(
 }
 
 fn checked_job_schedule_decision(
-    job: &AutomationJob,
+    job: &AdmittedAutomationJob,
     records: &[AutomationRunLedgerRecord],
     now_secs: i64,
 ) -> Result<Option<AutomationSkipReasonV1>> {
     if !job.enabled {
         return Ok(Some(AutomationSkipReasonV1::UserJobDisabled));
     }
-    let Ok(schedule) = parse_schedule(job.schedule.as_deref()) else {
-        return Ok(Some(AutomationSkipReasonV1::SchedulerScheduleInvalid));
-    };
-    let (interval_secs, cron) = match schedule {
+    match job.schedule {
         AutomationSchedule::Manual => {
             return Ok(Some(AutomationSkipReasonV1::SchedulerScheduleManual));
         }
-        AutomationSchedule::ConfiguredInterval => (job.interval_secs, None),
-        AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
-        AutomationSchedule::Cron(cron) => (None, Some(cron)),
-    };
-    if interval_secs.is_none() && cron.is_none() {
-        return Ok(Some(AutomationSkipReasonV1::SchedulerScheduleManual));
+        AutomationSchedule::Interval { .. } | AutomationSchedule::Cron(_) => {}
     }
 
     let task_key = job_task_key(&job.id);
@@ -449,17 +502,18 @@ fn checked_job_schedule_decision(
             }
             return Ok(None);
         }
-        if let Some(interval_secs) = interval_secs
-            && elapsed_secs(completed_at, now_secs) < interval_secs
-        {
-            return Ok(Some(AutomationSkipReasonV1::SchedulerIntervalNotElapsed));
+        match job.schedule {
+            AutomationSchedule::Interval { every_secs }
+                if elapsed_secs(completed_at, now_secs) < every_secs =>
+            {
+                return Ok(Some(AutomationSkipReasonV1::SchedulerIntervalNotElapsed));
+            }
+            AutomationSchedule::Cron(cron) if !cron_is_due(&cron, Some(completed_at), now_secs) => {
+                return Ok(Some(AutomationSkipReasonV1::SchedulerCronNotDue));
+            }
+            _ => {}
         }
-        if let Some(cron) = cron
-            && !cron_is_due(&cron, Some(completed_at), now_secs)
-        {
-            return Ok(Some(AutomationSkipReasonV1::SchedulerCronNotDue));
-        }
-    } else if let Some(cron) = cron
+    } else if let AutomationSchedule::Cron(cron) = job.schedule
         && !cron_is_due(&cron, None, now_secs)
     {
         return Ok(Some(AutomationSkipReasonV1::SchedulerCronNotDue));
@@ -513,7 +567,7 @@ async fn run_retained_user_job(
     options: UserJobRunOptions,
     settlement_guard: &AutomationRunSettlementGuard,
 ) -> super::AutomationRunResult<UserJobAutomationRun> {
-    validate_job(job)?;
+    let admitted_job = admit_job(job)?;
     let UserJobRunOptions {
         trigger,
         run_id,
@@ -580,7 +634,7 @@ async fn run_retained_user_job(
     };
     if let Some(scheduler_summary) = scheduler_summary.as_ref() {
         let now_secs = current_timestamp();
-        let decision = job_schedule_decision(job, scheduler_summary.records(), now_secs);
+        let decision = job_schedule_decision(&admitted_job, scheduler_summary.records(), now_secs);
         if let Some(reason) = decision {
             return ctx.skipped(reason).await.map_err(Into::into);
         }

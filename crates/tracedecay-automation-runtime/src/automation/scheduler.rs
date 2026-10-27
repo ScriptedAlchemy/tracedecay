@@ -8,7 +8,7 @@ use cap_std::fs::Dir;
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt;
 use serde::{Deserialize, Serialize};
-pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
+pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, resolve_schedule};
 use tracedecay_automation::evidence_budget::{
     SessionEvidenceBudgetBackoff, SessionEvidenceBudgetExceeded, SessionEvidenceBudgetGate,
 };
@@ -18,7 +18,8 @@ use super::backend::{
 };
 use super::backend_identity::{backend_identity, is_deterministic_failure_class};
 use super::config::{
-    AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
+    AdmittedAutomationConfig, AutomationBackend, AutomationConfig, AutomationHostMode,
+    AutomationTaskConfig,
 };
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
@@ -271,7 +272,7 @@ impl AutomationTaskLock {
 /// (`AgentTaskBackend::executable`); the latter is part of the backend
 /// identity a settled deterministic failure is judged against.
 pub fn schedule_decision(
-    config: &AutomationConfig,
+    config: &AdmittedAutomationConfig,
     executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
@@ -282,7 +283,7 @@ pub fn schedule_decision(
 }
 
 pub fn host_receipt_decision(
-    config: &AutomationConfig,
+    config: &AdmittedAutomationConfig,
     executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
@@ -295,7 +296,7 @@ pub fn host_receipt_decision(
 }
 
 fn schedule_decision_or_history_denial(
-    config: &AutomationConfig,
+    config: &AdmittedAutomationConfig,
     executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
@@ -320,7 +321,7 @@ fn schedule_decision_or_history_denial(
 }
 
 fn schedule_decision_for_trigger(
-    config: &AutomationConfig,
+    config: &AdmittedAutomationConfig,
     executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
@@ -354,30 +355,22 @@ fn schedule_decision_for_trigger(
         )));
     }
 
-    let (interval_secs, cron) = if enforce_schedule {
-        let Ok(schedule) = parse_schedule(task_config.schedule.as_deref()) else {
-            return Ok(AutomationScheduleDecision::skipped(
-                AutomationSkipReasonV1::SchedulerScheduleInvalid,
-            ));
-        };
-        let timing = match schedule {
-            AutomationSchedule::Manual => {
+    let schedule = if enforce_schedule {
+        match config.schedule(task) {
+            Some(AutomationSchedule::Manual) => {
                 return Ok(AutomationScheduleDecision::skipped(
                     AutomationSkipReasonV1::SchedulerScheduleManual,
                 ));
             }
-            AutomationSchedule::ConfiguredInterval => (task_config.interval_secs, None),
-            AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
-            AutomationSchedule::Cron(cron) => (None, Some(cron)),
-        };
-        if timing.0.is_none() && timing.1.is_none() {
-            return Ok(AutomationScheduleDecision::skipped(
-                AutomationSkipReasonV1::SchedulerScheduleManual,
-            ));
+            Some(schedule) => Some(schedule),
+            None => {
+                return Ok(AutomationScheduleDecision::skipped(
+                    AutomationSkipReasonV1::TaskNotSchedulable,
+                ));
+            }
         }
-        timing
     } else {
-        (None, None)
+        None
     };
 
     // `min_idle_secs` is a true idle window: the project must have been quiet
@@ -496,23 +489,26 @@ fn schedule_decision_for_trigger(
     if let Some((_, completed_at)) = latest_cadence {
         // A retryable terminal that has cleared its policy and cooldown gates
         // is due now; it does not wait for the ordinary interval.
-        if !retryable_cadence_terminal {
-            if let Some(interval_secs) = interval_secs.filter(|_| !fresh_session_activity)
-                && elapsed_secs(completed_at, now_secs) < interval_secs
-            {
-                return Ok(AutomationScheduleDecision::skipped(
-                    AutomationSkipReasonV1::SchedulerIntervalNotElapsed,
-                ));
-            }
-            if let Some(cron) = cron.filter(|_| !fresh_session_activity)
-                && !cron_is_due(&cron, Some(completed_at), now_secs)
-            {
-                return Ok(AutomationScheduleDecision::skipped(
-                    AutomationSkipReasonV1::SchedulerCronNotDue,
-                ));
+        if !retryable_cadence_terminal && !fresh_session_activity {
+            match schedule {
+                Some(AutomationSchedule::Interval { every_secs })
+                    if elapsed_secs(completed_at, now_secs) < every_secs =>
+                {
+                    return Ok(AutomationScheduleDecision::skipped(
+                        AutomationSkipReasonV1::SchedulerIntervalNotElapsed,
+                    ));
+                }
+                Some(AutomationSchedule::Cron(cron))
+                    if !cron_is_due(&cron, Some(completed_at), now_secs) =>
+                {
+                    return Ok(AutomationScheduleDecision::skipped(
+                        AutomationSkipReasonV1::SchedulerCronNotDue,
+                    ));
+                }
+                _ => {}
             }
         }
-    } else if let Some(cron) = cron
+    } else if let Some(AutomationSchedule::Cron(cron)) = schedule
         && !cron_is_due(&cron, None, now_secs)
     {
         return Ok(AutomationScheduleDecision::skipped(
@@ -689,7 +685,7 @@ const USER_JOB_TASK_CONFIG: AutomationTaskConfig = AutomationTaskConfig {
     interval_secs: None,
     cooldown_secs: None,
     min_idle_secs: None,
-    stale_lock_secs: None,
+    legacy_stale_lock_secs: None,
     session_evidence_budget_backoff_secs: None,
 };
 
@@ -1020,6 +1016,7 @@ mod tests {
         SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED,
     };
     use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
+    use tracedecay_private_fs::{create_private_file, open_private_file};
     #[cfg(unix)]
     use tracedecay_runtime_core::storage::with_durable_namespace_sync_fault_for_test;
 
@@ -1870,11 +1867,30 @@ evidence about it",
 
     #[test]
     fn cron_admission_uses_the_leaf_schedule_type() {
-        let AutomationSchedule::Cron(cron) = parse_schedule(Some("*/15 * * * *")).unwrap() else {
+        let AutomationSchedule::Cron(cron) = resolve_schedule(Some("*/15 * * * *"), None).unwrap()
+        else {
             panic!("expected cron schedule");
         };
         assert!(cron_is_due(&cron, Some(3_599), 3_600));
         assert!(!cron_is_due(&cron, Some(3_600), 3_600));
+    }
+
+    fn schedule_decision(
+        config: &AutomationConfig,
+        executable: Option<&Path>,
+        task: AgentTaskKind,
+        records: &[AutomationRunLedgerRecord],
+        activity: SessionActivity,
+        now_secs: i64,
+    ) -> AutomationScheduleDecision {
+        super::schedule_decision(
+            &super::super::config::admit_config(config).unwrap(),
+            executable,
+            task,
+            records,
+            activity,
+            now_secs,
+        )
     }
 
     async fn acquire(root: &Path, key: &str) -> Option<AutomationTaskLock> {
@@ -1899,13 +1915,13 @@ evidence about it",
         for command in std::io::stdin().lock().lines() {
             let answer = match command.unwrap().as_str() {
                 "prepare" if old => {
-                    let file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(&coordination_path)
-                        .unwrap();
+                    let file = match create_private_file(&coordination_path) {
+                        Ok(file) => file,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            open_private_file(&coordination_path).unwrap()
+                        }
+                        Err(error) => panic!("create old coordination: {error}"),
+                    };
                     match file.try_lock() {
                         Ok(()) => {
                             coordination = Some(FileLease::held(file, "test.old-task"));
@@ -1921,11 +1937,7 @@ evidence about it",
                     // The production publisher hard-linked a synced staging
                     // file under this lock. Keep that publication ordering.
                     let staging = lock_dir.join("old-owner-staging");
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&staging)
-                        .unwrap();
+                    let mut file = create_private_file(&staging).unwrap();
                     writeln!(file, "pid={}\ncreated_at=0", std::process::id()).unwrap();
                     file.sync_all().unwrap();
                     std::fs::hard_link(&staging, &lock_path).unwrap();
@@ -2244,12 +2256,16 @@ evidence about it",
     fn write_pre_lease_lock(lock_dir: &Path, key: &str, payload: &[u8]) -> PathBuf {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(lock_dir).unwrap();
         let lock_path = lock_dir.join(format!("{key}.lock"));
-        std::fs::write(&lock_path, payload).unwrap();
-        std::fs::write(
-            tracedecay_runtime_core::storage::append_lock_path(&lock_path),
-            b"",
-        )
-        .unwrap();
+        create_private_file(&lock_path)
+            .unwrap()
+            .write_all(payload)
+            .unwrap();
+        drop(
+            create_private_file(&tracedecay_runtime_core::storage::append_lock_path(
+                &lock_path,
+            ))
+            .unwrap(),
+        );
         lock_path
     }
 

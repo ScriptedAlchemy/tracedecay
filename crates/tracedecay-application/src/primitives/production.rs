@@ -30,6 +30,7 @@ use super::runtime::{
 };
 use super::symbol_graph::SymbolGraphCursorPort;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
+use crate::diagnostics_producer::TypeScriptProducerStatusHandleV1;
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::DiagnosticQueryCursor;
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
@@ -857,6 +858,7 @@ pub struct ProductionPrimitiveCodeAuthoritiesV1 {
     pub convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
 }
 
+#[derive(Clone)]
 pub struct ProductionPrimitiveOpenRequestV1 {
     source_runtime: Arc<SourceReadContext>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
@@ -891,6 +893,32 @@ impl ProductionPrimitiveOpenRequestV1 {
             access,
             admitted_root_uri,
         }
+    }
+
+    pub fn validate_registration_root(
+        &self,
+        project_root: &Path,
+    ) -> Result<(), ApplicationContractError> {
+        if self.source_runtime.project_root() != project_root {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "application primitive registration root",
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate the stable store/source authority and report whether the
+    /// retained facade already has this configuration and capability set.
+    pub fn validate_retained(
+        &self,
+        runtime: &PrimitiveProjectRuntime,
+    ) -> Result<bool, ApplicationContractError> {
+        runtime.validate_reopen(
+            self.source_runtime.db(),
+            &self.session_db,
+            &self.access,
+            &self.admitted_root_uri,
+        )
     }
 }
 
@@ -987,6 +1015,7 @@ pub async fn open_production_primitive_runtime(
         test_runs,
         test_run_scope,
         convergence_park,
+        TypeScriptProducerStatusHandleV1::default(),
     )
 }
 
