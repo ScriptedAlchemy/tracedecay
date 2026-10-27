@@ -309,14 +309,7 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
             };
         }
         let project = admitted_project_authorities(cg, &options)?;
-        let snapshots = AdmittedRequestSnapshotsV1 {
-            pr_context_delivery: if operation == ApplicationSurfaceOperation::PrContext {
-                pr_context_delivery_reader(&options, &project)
-            } else {
-                None
-            },
-            ..AdmittedRequestSnapshotsV1::default()
-        };
+        let snapshots = AdmittedRequestSnapshotsV1::for_operation(operation, &options, &project);
         let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
         let open = verified_graph_open(&options);
         let computed = async {
@@ -504,6 +497,24 @@ struct AdmittedRequestSnapshotsV1 {
     generation_census: Option<GenerationCensusSnapshot>,
     doctor_report: DoctorReportSnapshotV1,
     pr_context_delivery: Option<tracedecay_mcp::PrContextDeliveryReader>,
+}
+
+impl AdmittedRequestSnapshotsV1 {
+    /// Only `pr_context` reads delivery evidence, so only it carries a reader.
+    fn for_operation(
+        operation: ApplicationSurfaceOperation,
+        options: &ToolCallRegistryOptions<'_>,
+        project: &McpAdmittedProjectV1,
+    ) -> Self {
+        Self {
+            pr_context_delivery: if operation == ApplicationSurfaceOperation::PrContext {
+                pr_context_delivery_reader(options, project)
+            } else {
+                None
+            },
+            ..Self::default()
+        }
+    }
 }
 
 fn pr_context_delivery_reader(

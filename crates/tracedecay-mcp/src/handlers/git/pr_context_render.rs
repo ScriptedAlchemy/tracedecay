@@ -280,11 +280,10 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
                         && excerpt.location.end_line >= entry.location.end_line
                 });
             if !complete_excerpt {
-                let selector = entry
-                    .node_id
-                    .as_deref()
-                    .map(source_read)
-                    .unwrap_or_else(|| revision_source_read(&entry.revision, &entry.location));
+                let selector = entry.node_id.as_deref().map_or_else(
+                    || revision_source_read(&entry.revision, &entry.location),
+                    source_read,
+                );
                 lines.push(format!("{indent}Read: {selector}."));
             }
             if let Some(value) = &entry.before_excerpt {

@@ -950,12 +950,12 @@ mod tests {
             let before = project_hosted(Some(&retained), Some(42), "commit.head").unwrap();
             assert!(before.pull_request.unwrap().description.is_some());
             assert_eq!(before.discussions.len(), 1);
-            let evidence = with_github_refresh_outcome(retained, refresh.clone());
+            let evidence = with_github_refresh_outcome(retained, &refresh);
             let brief = project_hosted(Some(&evidence), Some(42), "commit.head").unwrap();
             assert_eq!(brief.source.state, expected_state);
             if refresh == GitHubReviewRefreshOutcomeV1::Denied {
                 assert!(brief.pull_request.is_none());
-                assert!(brief.discussions.is_empty());
+                assert_eq!(brief.discussions, Vec::new());
                 assert_eq!(
                     selected_base(Some(&evidence), Some(42), "commit.head"),
                     None
@@ -986,24 +986,24 @@ mod tests {
                 unreachable!();
             };
             snapshot.github_reviews = ProjectDeliveryGitHubSourceV1::NotPublished;
-            let first_use = with_github_refresh_outcome(no_retained_evidence, refresh);
+            let first_use = with_github_refresh_outcome(no_retained_evidence, &refresh);
             let brief = project_hosted(Some(&first_use), None, "commit.head").unwrap();
             assert_eq!(brief.source.state, expected_state);
             assert!(brief.pull_request.is_none());
-            assert!(brief.discussions.is_empty());
+            assert_eq!(brief.discussions, Vec::new());
         }
 
         for (state, expected, detail) in [
             (
                 ProjectDeliveryGitHubSourceV1::Denied {
-                    timeline: Default::default(),
+                    timeline: ProjectDeliveryGitHubTimelineV1::default(),
                 },
                 PrContextSourceStateV1::Denied,
                 "denied",
             ),
             (
                 ProjectDeliveryGitHubSourceV1::RateLimited {
-                    timeline: Default::default(),
+                    timeline: ProjectDeliveryGitHubTimelineV1::default(),
                     checkpoint: None,
                 },
                 PrContextSourceStateV1::Partial,
@@ -1011,7 +1011,7 @@ mod tests {
             ),
             (
                 ProjectDeliveryGitHubSourceV1::Failed {
-                    timeline: Default::default(),
+                    timeline: ProjectDeliveryGitHubTimelineV1::default(),
                 },
                 PrContextSourceStateV1::Unavailable,
                 "failed",
@@ -1023,7 +1023,7 @@ mod tests {
             };
             snapshot.github_reviews = state;
             let evidence =
-                with_github_refresh_outcome(retained, GitHubReviewRefreshOutcomeV1::Unavailable);
+                with_github_refresh_outcome(retained, &GitHubReviewRefreshOutcomeV1::Unavailable);
             let brief = project_hosted(Some(&evidence), None, "commit.head").unwrap();
             assert_eq!(brief.source.state, expected);
             assert!(brief.source.detail.contains(detail));
@@ -1500,7 +1500,7 @@ mod tests {
         let denied = project_hosted(Some(&retained), Some(42), "commit.head").unwrap();
         assert_eq!(denied.source.state, PrContextSourceStateV1::Denied);
         assert!(denied.pull_request.is_none());
-        assert!(denied.discussions.is_empty());
+        assert_eq!(denied.discussions, Vec::new());
         assert_eq!(denied.ci_source.state, PrContextSourceStateV1::Ready);
         assert_eq!(denied.checks.len(), 1);
         assert_eq!(

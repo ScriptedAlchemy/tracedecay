@@ -155,14 +155,14 @@ where
         },
     };
     match refresh {
-        Some(refresh) => with_github_refresh_outcome(outcome, refresh),
+        Some(refresh) => with_github_refresh_outcome(outcome, &refresh),
         None => outcome,
     }
 }
 
 pub(super) fn with_github_refresh_outcome(
     mut outcome: ProjectDeliveryReadOutcomeV1,
-    refresh: GitHubReviewRefreshOutcomeV1,
+    refresh: &GitHubReviewRefreshOutcomeV1,
 ) -> ProjectDeliveryReadOutcomeV1 {
     if matches!(refresh, GitHubReviewRefreshOutcomeV1::Stored(_)) {
         return outcome;
@@ -170,12 +170,12 @@ pub(super) fn with_github_refresh_outcome(
     let ProjectDeliveryReadOutcomeV1::Ready { snapshot } = &mut outcome else {
         return outcome;
     };
-    if refresh == GitHubReviewRefreshOutcomeV1::Denied {
+    if *refresh == GitHubReviewRefreshOutcomeV1::Denied {
         // This adapter treats an explicit refresh denial as withholding this
         // GitHub lane, independently of the canonical retained-read policy.
         // Other evidence, including independently authorized CI, is unchanged.
         snapshot.github_reviews = ProjectDeliveryGitHubSourceV1::Denied {
-            timeline: Default::default(),
+            timeline: tracedecay_application::delivery::ProjectDeliveryGitHubTimelineV1::default(),
         };
         return outcome;
     }
@@ -189,7 +189,9 @@ pub(super) fn with_github_refresh_outcome(
         ProjectDeliveryGitHubSourceV1::Ready { timeline }
         | ProjectDeliveryGitHubSourceV1::Partial { timeline }
         | ProjectDeliveryGitHubSourceV1::Stale { timeline } => timeline,
-        ProjectDeliveryGitHubSourceV1::NotPublished => Default::default(),
+        ProjectDeliveryGitHubSourceV1::NotPublished => {
+            tracedecay_application::delivery::ProjectDeliveryGitHubTimelineV1::default()
+        }
         previous => {
             snapshot.github_reviews = previous;
             return outcome;
@@ -712,8 +714,8 @@ mod tests {
         let ProjectDeliveryGitHubSourceV1::Denied { timeline } = snapshot.github_reviews else {
             panic!("explicit denial")
         };
-        assert!(timeline.pull_requests.is_empty());
-        assert!(timeline.review_items.is_empty());
+        assert_eq!(timeline.pull_requests, Vec::new());
+        assert_eq!(timeline.review_items, Vec::new());
         assert!(matches!(
             snapshot.ci_checks,
             ProjectDeliveryCiSourceV1::Ready { .. }

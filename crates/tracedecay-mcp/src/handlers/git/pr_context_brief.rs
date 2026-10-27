@@ -234,12 +234,12 @@ where
                     Ok(false) => {
                         brief.graph_analysis = unavailable(
                             "The graph generation does not match the exact head snapshot.",
-                        )
+                        );
                     }
                     Err(reason) => {
                         brief.graph_analysis = unavailable(&format!(
                             "Exact head graph provenance is unavailable: {reason}."
-                        ))
+                        ));
                     }
                 }
             }
@@ -260,7 +260,7 @@ where
                     Some(("code-graph-parked", _, _))
                 ) =>
         {
-            brief.graph_analysis = unavailable(&error.to_string())
+            brief.graph_analysis = unavailable(&error.to_string());
         }
         Err(error) => return Err(error),
     }
@@ -724,9 +724,9 @@ mod tests {
                     .contains("No GitHub refresh was requested"),
                 !refresh
             );
-            assert!(brief.hosted.discussions.is_empty());
+            assert_eq!(brief.hosted.discussions, Vec::new());
             assert_eq!(brief.source_analysis.state, PrContextSourceStateV1::Ready);
-            assert!(!brief.entry_points.is_empty());
+            assert_ne!(brief.entry_points, Vec::new());
         }
         assert_eq!(
             *calls.lock().unwrap(),
@@ -787,7 +787,7 @@ mod tests {
             brief.graph_analysis.state,
             PrContextSourceStateV1::Unavailable
         );
-        assert!(!brief.entry_points.is_empty());
+        assert_ne!(brief.entry_points, Vec::new());
     }
 
     #[tokio::test]
@@ -819,9 +819,11 @@ mod tests {
     async fn signatures_deletions_and_same_line_neighbors_are_compared_independently() {
         let repo = branched_repository();
         test_git(repo.path(), &["switch", "main"]);
-        let unchanged = (0..40)
-            .map(|index| format!("fn unchanged_{index}() {{}}\n"))
-            .collect::<String>();
+        let unchanged = (0..40).fold(String::new(), |mut unchanged, index| {
+            use std::fmt::Write as _;
+            writeln!(unchanged, "fn unchanged_{index}() {{}}").unwrap();
+            unchanged
+        });
         std::fs::write(repo.path().join("lib.rs"), format!("{unchanged}pub fn changed(x: u32) -> u32 {{ x }} fn neighbor() {{}}\npub fn removed() {{}}\n")).unwrap();
         test_git(repo.path(), &["add", "."]);
         test_git(repo.path(), &["commit", "-m", "base declarations"]);
@@ -995,12 +997,12 @@ mod tests {
                 brief
                     .entry_points
                     .iter()
-                    .any(|entry| entry.symbol.ends_with("f") && entry.change == "modified"),
+                    .any(|entry| entry.symbol.ends_with('f') && entry.change == "modified"),
                 body_entry,
                 "{before:?} -> {after:?}: {:?}",
                 brief.entry_points
             );
-            assert!(!brief.entry_points.is_empty());
+            assert_ne!(brief.entry_points, Vec::new());
             assert!(
                 brief
                     .entry_points

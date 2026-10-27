@@ -201,8 +201,8 @@ fn project_declaration(
         (None, None) => return,
     };
     if changed.change == GitDeclarationChangeKindV1::AmbiguousOverload {
-        point.change = name.to_owned();
-        point.reason = "Overload group changed; before/after pairing is ambiguous. Inspect this declaration and the file diff.".to_owned();
+        name.clone_into(&mut point.change);
+        "Overload group changed; before/after pairing is ambiguous. Inspect this declaration and the file diff.".clone_into(&mut point.reason);
     }
     if let (Some(old), Some(new)) = (&changed.before, &changed.after) {
         if changed.change == GitDeclarationChangeKindV1::VisibilityChanged {

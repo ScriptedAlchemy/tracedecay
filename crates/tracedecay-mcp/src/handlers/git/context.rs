@@ -1056,8 +1056,8 @@ fn commit_source_summary(
                 {
                     continue;
                 }
-                provenance.before_blob = source.before_blob.clone();
-                provenance.after_blob = source.after_blob.clone();
+                provenance.before_blob.clone_from(&source.before_blob);
+                provenance.after_blob.clone_from(&source.after_blob);
                 match analyze_source_changes(&registry, file, &source) {
                     Ok(analysis) => {
                         count = analysis.declarations.len();
@@ -2409,7 +2409,7 @@ mod commit_source_tests {
                 .iter()
                 .any(|gap| gap.file == "opaque.bin" && gap.reason.contains("binary"))
         );
-        assert!(summary.recent_commits.is_empty());
+        assert_eq!(summary.recent_commits, Vec::<String>::new());
     }
 
     #[test]
@@ -2426,7 +2426,7 @@ mod commit_source_tests {
         std::fs::write(root.join("lib.rs"), original).unwrap();
         let adapter = adapter(root);
         let default = commit_source_summary(&adapter, false, &policy(), &|| false).unwrap();
-        assert!(default.changed_files.is_empty());
+        assert_eq!(default.changed_files, Vec::new());
         assert_eq!(default.summary, "No HEAD-to-working-tree changes.");
         let staged = commit_source_summary(&adapter, true, &policy(), &|| false).unwrap();
         assert_eq!(staged.changed_files.len(), 1);
@@ -2439,7 +2439,7 @@ mod commit_source_tests {
         test_git(root, &["rm", "--cached", "-f", "lib.rs"]);
         let unchanged_replacement =
             commit_source_summary(&adapter, false, &policy(), &|| false).unwrap();
-        assert!(unchanged_replacement.changed_files.is_empty());
+        assert_eq!(unchanged_replacement.changed_files, Vec::new());
         assert_eq!(
             unchanged_replacement.summary,
             "No HEAD-to-working-tree changes."
@@ -2493,7 +2493,10 @@ mod commit_source_tests {
                 .as_deref(),
             Some("private/api.rs")
         );
-        assert!(symbols(&summary).is_empty());
+        assert_eq!(
+            symbols(&summary),
+            Vec::<&tracedecay_contracts::retrieval::CommitSymbolV1>::new()
+        );
         assert!(
             summary.source_coverage.as_ref().unwrap().gaps[0]
                 .reason
@@ -2510,7 +2513,7 @@ mod commit_source_tests {
         )
         .unwrap();
         assert_eq!(brief.changes.len(), 1);
-        assert!(brief.entries.is_empty());
+        assert_eq!(brief.entries, Vec::new());
         assert_eq!(
             brief.source.state,
             tracedecay_contracts::retrieval::PrContextSourceStateV1::Partial
