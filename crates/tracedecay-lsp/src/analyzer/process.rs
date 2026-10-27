@@ -480,7 +480,9 @@ mod tests {
                         assert_eq!(queued.len(), 1);
                         continue;
                     }
-                    other => panic!("occupied writer did not retain the request: {other:?}"),
+                    other @ Poll::Ready(_) => {
+                        panic!("occupied writer did not retain the request: {other:?}")
+                    }
                 }
                 native_runtime::sleep_until(deadline).await.unwrap();
                 assert_eq!(queued.try_recv().unwrap().0, occupied);
