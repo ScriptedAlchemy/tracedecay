@@ -50,12 +50,14 @@ diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
  
  def _will_emit_object_file(emit):
      for e in emit:
-@@ -984,7 +1008,8 @@
+@@ -984,8 +1008,9 @@
          require_explicit_unstable_features = False,
          error_format = None,
          allowed_unstable_rust_features = None,
--        link_std_dylib = False):
+-        link_std_dylib = False,
+-        bin_link_flags = None):
 +        link_std_dylib = False,
++        bin_link_flags = None,
 +        dependency_search_artifacts = None):
      """Builds an Args object containing common rustc flags
  

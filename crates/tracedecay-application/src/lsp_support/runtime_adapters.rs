@@ -4,11 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
+use tracedecay_domain::ManifestDigest;
+#[cfg(test)]
+use tracedecay_lsp::analyzer::broker::DiagnosticsSnapshot;
 use tracedecay_lsp::analyzer::broker::{
-    CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
-    RefreshCommitOutcome,
+    BrokerDocumentEvidence, CodeDiagnostic, DiagnosticBroker,
+    DiagnosticSeverity as BrokerDiagnosticSeverity, RefreshCommitOutcome,
 };
-use tracedecay_lsp::analyzer::client::{DiagnosticDocumentCoverage, LspDocument};
+use tracedecay_lsp::analyzer::client::LspDocument;
 use tracedecay_lsp::{
     AdmittedRoot, CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
     CanonicalWorkspaceDiagnosticRefreshRequest, DiagnosticSource, GatewayDiagnostic,
@@ -166,6 +169,30 @@ where
         })
     }
 
+    fn current_authority(
+        &self,
+        mut request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+        let broker = Arc::clone(&self.broker);
+        let documents = Arc::clone(&self.documents);
+        let managed = Arc::clone(&self.managed);
+        Box::pin(async move {
+            let document = documents.load_document(request.clone()).await?;
+            request.expected_content_digest = Some(tracedecay_domain::ContentDigest::of_bytes(
+                document.text.as_bytes(),
+            ));
+            let document_uri = request.document_uri.clone();
+            let managed = managed.current_authority(request).await?;
+            let evidence = broker
+                .lock()
+                .await
+                .document_diagnostic_evidence(&document)
+                .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-unavailable"))?;
+            let (upstream, _) = project_upstream_evidence(evidence, document_uri.as_str())?;
+            merged_diagnostic_authority_digest(&upstream, &managed)
+        })
+    }
+
     fn supports_workspace_diagnostics(&self) -> bool {
         self.documents.is_mounted()
     }
@@ -283,26 +310,33 @@ where
         document.text.as_bytes(),
     ));
     let language = document.language.clone();
-    let relative_path = document.relative_path.clone();
-    let (prepared, immediate_snapshot) = {
+    let (prepared, immediate_evidence) = {
         let mut broker = broker.lock().await;
         let prepared = broker
-            .prepare_refresh(&language, vec![document])
+            .prepare_refresh(&language, vec![document.clone()])
             .await
             .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-preparation-failed"))?;
-        let immediate_snapshot = prepared.is_none().then(|| broker.snapshot());
-        (prepared, immediate_snapshot)
+        let immediate_evidence = if prepared.is_none() {
+            Some(
+                broker
+                    .document_diagnostic_evidence(&document)
+                    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-coverage-incomplete"))?,
+            )
+        } else {
+            None
+        };
+        (prepared, immediate_evidence)
     };
-    let requires_publication = prepared.is_some();
-    let snapshot = if let Some(prepared) = prepared {
+    let evidence = if let Some(prepared) = prepared {
         let completed = prepared.collect_diagnostics(diagnostics_quiet_window).await;
+        let mut broker = broker.lock().await;
         match broker
-            .lock()
-            .await
             .finish_refresh_snapshot(completed)
             .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-refresh-failed"))?
         {
-            RefreshCommitOutcome::Applied(snapshot) => *snapshot,
+            RefreshCommitOutcome::Applied(_) => broker
+                .document_diagnostic_evidence(&document)
+                .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-coverage-incomplete"))?,
             RefreshCommitOutcome::Superseded => {
                 return Err(LspRuntimeFailure::new(
                     "diagnostic-broker-refresh-superseded",
@@ -310,37 +344,11 @@ where
             }
         }
     } else {
-        immediate_snapshot
+        immediate_evidence
             .ok_or_else(|| LspRuntimeFailure::new("diagnostic-broker-snapshot-unavailable"))?
     };
-    let document_coverage = snapshot
-        .coverage
-        .get(&language)
-        .and_then(|coverage| coverage.documents.get(&relative_path));
-    if requires_publication
-        && !matches!(
-            document_coverage,
-            Some(DiagnosticDocumentCoverage::Published { content_digest, .. })
-                if Some(content_digest) == request.expected_content_digest.as_ref()
-        )
-    {
-        return Err(LspRuntimeFailure::new(
-            "diagnostic-broker-coverage-incomplete",
-        ));
-    }
-    let upstream_authority_digest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.lsp.upstream-diagnostic-authority.v1",
-        &snapshot.settings,
-        &snapshot.settings_unavailable,
-        document_coverage,
-    ))
-    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))?;
-    let upstream = snapshot
-        .diagnostics
-        .into_iter()
-        .filter(|diagnostic| diagnostic.language == language && diagnostic.file == relative_path)
-        .map(|diagnostic| broker_diagnostic(request.document_uri.as_str(), diagnostic))
-        .collect();
+    let (upstream_authority_digest, upstream) =
+        project_upstream_evidence(evidence, request.document_uri.as_str())?;
     let expected_code_generation_id = request.expected_code_generation_id.clone();
     let expected_snapshot_digest = request.expected_snapshot_digest.clone();
     let managed = managed.snapshot(request).await?;
@@ -355,18 +363,74 @@ where
             "managed-diagnostic-generation-stale",
         ));
     }
-    let authority_digest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.lsp.merged-diagnostic-authority.v1",
-        upstream_authority_digest,
-        &managed.authority_digest,
-    ))
-    .map_err(|_| LspRuntimeFailure::new("diagnostic-authority-identity-unavailable"))?;
+    let authority_digest =
+        merged_diagnostic_authority_digest(&upstream_authority_digest, &managed.authority_digest)?;
     Ok(GenerationDiagnostics {
         generation: managed.generation,
         authority_digest,
         upstream,
         tracedecay: managed.diagnostics,
     })
+}
+
+fn project_upstream_evidence(
+    evidence: BrokerDocumentEvidence,
+    document_uri: &str,
+) -> Result<(ManifestDigest, Vec<GatewayDiagnostic>), LspRuntimeFailure> {
+    let (settings, settings_unavailable, coverage, nonparticipation, diagnostics) = match evidence {
+        BrokerDocumentEvidence::Published {
+            settings,
+            settings_unavailable,
+            coverage,
+            diagnostics,
+        } => (
+            settings,
+            settings_unavailable,
+            Some(coverage),
+            None,
+            diagnostics,
+        ),
+        BrokerDocumentEvidence::NotParticipating {
+            settings,
+            settings_unavailable,
+            reason,
+        } => (
+            settings,
+            settings_unavailable,
+            None,
+            Some(reason),
+            Vec::new(),
+        ),
+    };
+    let (upstream, identity) = tracedecay_lsp::project_upstream_diagnostics(
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| broker_diagnostic(document_uri, diagnostic))
+            .collect(),
+    )
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))?;
+    let digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.lsp.upstream-diagnostic-authority.v1",
+        settings,
+        settings_unavailable,
+        coverage,
+        nonparticipation,
+        identity,
+    ))
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))?;
+    Ok((digest, upstream))
+}
+
+fn merged_diagnostic_authority_digest(
+    upstream: &ManifestDigest,
+    managed: &ManifestDigest,
+) -> Result<ManifestDigest, LspRuntimeFailure> {
+    tracedecay_domain::canonical_sha256(&(
+        "tracedecay.lsp.merged-diagnostic-authority.v1",
+        upstream,
+        managed,
+    ))
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-authority-identity-unavailable"))
 }
 
 fn broker_diagnostic(document_uri: &str, diagnostic: CodeDiagnostic) -> GatewayDiagnostic {
@@ -412,13 +476,22 @@ fn broker_diagnostic(document_uri: &str, diagnostic: CodeDiagnostic) -> GatewayD
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, VecDeque};
+    use std::path::Path;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use serde_json::{Value, json};
     use tracedecay_domain::{CodeGenerationId, ContentDigest};
+    use tracedecay_lsp::analyzer::adapters::{DiagnosticMode, LspAdapterDefinition};
     use tracedecay_lsp::{
-        AuthorizedLspWorkspace, CanonicalWorkspaceDiagnosticRefreshRequest,
-        IndexedWorkspaceDocument, ManagedDiagnosticSnapshot,
+        AuthorizedLspWorkspace, CanonicalWorkspaceDiagnosticRefreshRequest, ClientCapabilities,
+        DaemonLspProtocolSession, DiagnosticSnapshotAdapter, FeedbackCyclePort,
+        FeedbackCycleRequest, FeedbackCycleResponse, GatewayCapabilities, IndexedWorkspaceDocument,
+        ManagedDiagnosticSnapshot, UnavailableSemanticProvider, UpstreamCapabilities,
+        negotiate_capabilities,
     };
+    use url::Url;
 
     use super::*;
 
@@ -427,6 +500,26 @@ mod tests {
     struct PublishingWorkspaceIndex {
         reads: AtomicUsize,
         drift: WorkspaceIndexDrift,
+        documents: BTreeMap<String, LspDocument>,
+    }
+
+    impl PublishingWorkspaceIndex {
+        fn new(drift: WorkspaceIndexDrift) -> Self {
+            Self {
+                reads: AtomicUsize::new(0),
+                drift,
+                documents: BTreeMap::from([(
+                    "file:///workspace/src/lib.rs".to_owned(),
+                    LspDocument {
+                        language: "unknown".to_owned(),
+                        language_id: "unknown".to_owned(),
+                        relative_path: "src/lib.rs".to_owned(),
+                        text: "fn main() {}".to_owned(),
+                        snapshot: None,
+                    },
+                )]),
+            }
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -438,16 +531,11 @@ mod tests {
     impl LspDiagnosticDocumentPort for PublishingWorkspaceIndex {
         fn load_document(
             &self,
-            _request: CanonicalDiagnosticRefreshRequest,
+            request: CanonicalDiagnosticRefreshRequest,
         ) -> LspRuntimeFuture<Result<LspDocument, LspRuntimeFailure>> {
-            Box::pin(async {
-                Ok(LspDocument {
-                    language: "unknown".to_owned(),
-                    language_id: "unknown".to_owned(),
-                    relative_path: "src/lib.rs".to_owned(),
-                    text: "fn main() {}".to_owned(),
-                    snapshot: None,
-                })
+            let document = self.documents.get(&request.document_uri).cloned();
+            Box::pin(async move {
+                document.ok_or_else(|| LspRuntimeFailure::new("fixture-document-not-found"))
             })
         }
     }
@@ -484,13 +572,24 @@ mod tests {
         }
     }
 
-    struct FixedManagedDiagnostics;
+    #[derive(Default)]
+    struct FixedManagedDiagnostics {
+        snapshots: AtomicUsize,
+    }
 
     impl ManagedDiagnosticSnapshotPort for FixedManagedDiagnostics {
+        fn current_authority(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+            Box::pin(async { Ok(digest('c')) })
+        }
+
         fn snapshot(
             &self,
             _request: CanonicalDiagnosticRefreshRequest,
         ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>> {
+            self.snapshots.fetch_add(1, Ordering::SeqCst);
             Box::pin(async {
                 Ok(ManagedDiagnosticSnapshot {
                     generation: 1,
@@ -503,6 +602,406 @@ mod tests {
         }
     }
 
+    struct DiagnosticTask(Mutex<Option<LspRuntimeFuture<()>>>);
+
+    struct DiagnosticTaskHandle(Arc<DiagnosticTask>);
+
+    impl LspRuntimeTask for DiagnosticTaskHandle {
+        fn abort(&self) {
+            self.0.0.lock().unwrap().take();
+        }
+    }
+
+    #[derive(Default)]
+    struct DiagnosticRuntime {
+        tasks: Mutex<VecDeque<Arc<DiagnosticTask>>>,
+        started: AtomicUsize,
+    }
+
+    impl LspRuntimeSpawner for DiagnosticRuntime {
+        fn spawn(&self, future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
+            let task = Arc::new(DiagnosticTask(Mutex::new(Some(future))));
+            self.tasks.lock().unwrap().push_back(Arc::clone(&task));
+            self.started.fetch_add(1, Ordering::SeqCst);
+            Box::new(DiagnosticTaskHandle(task))
+        }
+    }
+
+    impl DiagnosticRuntime {
+        async fn complete_next(&self) {
+            let task = self.tasks.lock().unwrap().pop_front().unwrap();
+            let future = task.0.lock().unwrap().take().unwrap();
+            future.await;
+        }
+    }
+
+    struct Feedback;
+
+    impl FeedbackCyclePort for Feedback {
+        fn request_feedback_cycle(&self, _request: FeedbackCycleRequest) -> FeedbackCycleResponse {
+            FeedbackCycleResponse::Accepted
+        }
+    }
+
+    fn file_uri(path: &Path) -> String {
+        Url::from_file_path(path).unwrap().to_string()
+    }
+
+    const PUBLISHING_ANALYZER: &str = r#"
+import json
+import sys
+from urllib.parse import urlparse
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        headers[name.lower()] = value.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {"textDocumentSync": 1}}})
+    elif method in ("textDocument/didOpen", "textDocument/didChange"):
+        uri = message["params"]["textDocument"]["uri"]
+        with open(sys.argv[1], encoding="utf-8") as findings:
+            diagnostics = json.load(findings)[urlparse(uri).path.rsplit("/", 1)[-1]]
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
+            "uri": uri, "diagnostics": diagnostics,
+        }})
+"#;
+
+    struct BrokerDiagnosticHarness {
+        session: DaemonLspProtocolSession<
+            Feedback,
+            UnavailableSemanticProvider,
+            DiagnosticSnapshotAdapter,
+        >,
+        runtime: Arc<DiagnosticRuntime>,
+        broker: Arc<AsyncMutex<DiagnosticBroker>>,
+        documents: Arc<PublishingWorkspaceIndex>,
+        managed: Arc<FixedManagedDiagnostics>,
+        project: tempfile::TempDir,
+        next_request: u64,
+    }
+
+    impl BrokerDiagnosticHarness {
+        fn new(findings: Value) -> Self {
+            let project = tempfile::tempdir().unwrap();
+            let script = project.path().join("analyzer.py");
+            let publications = project.path().join("findings.json");
+            std::fs::write(&script, PUBLISHING_ANALYZER).unwrap();
+            std::fs::write(&publications, serde_json::to_vec(&findings).unwrap()).unwrap();
+            let python = if cfg!(windows) {
+                "python"
+            } else if std::path::Path::new("/usr/bin/python3").is_file() {
+                "/usr/bin/python3"
+            } else {
+                "python3"
+            };
+            let broker = Arc::new(AsyncMutex::new(DiagnosticBroker::new_for_test(
+                project.path(),
+                vec![LspAdapterDefinition {
+                    language: "fake".to_owned(),
+                    language_id: "fake".to_owned(),
+                    command: python.to_owned(),
+                    args: vec![
+                        script.display().to_string(),
+                        publications.display().to_string(),
+                    ],
+                    extensions: vec!["fake".to_owned()],
+                    root_markers: Vec::new(),
+                    install_options: Vec::new(),
+                    diagnostics: DiagnosticMode::Push,
+                }],
+            )));
+            let documents = Arc::new(PublishingWorkspaceIndex {
+                reads: AtomicUsize::new(0),
+                drift: WorkspaceIndexDrift::None,
+                documents: ["a.fake", "b.fake"]
+                    .into_iter()
+                    .map(|path| {
+                        let document = LspDocument {
+                            language: "fake".to_owned(),
+                            language_id: "fake".to_owned(),
+                            relative_path: path.to_owned(),
+                            text: "fn main() {}".to_owned(),
+                            snapshot: None,
+                        };
+                        std::fs::write(project.path().join(path), &document.text).unwrap();
+                        (file_uri(&project.path().join(path)), document)
+                    })
+                    .collect(),
+            });
+            let managed = Arc::new(FixedManagedDiagnostics::default());
+            let runtime = Arc::new(DiagnosticRuntime::default());
+            let authority = Arc::new(BrokerDiagnosticSnapshotAuthority::new(
+                Arc::clone(&broker),
+                Arc::clone(&documents),
+                Arc::clone(&managed),
+                Duration::from_millis(150),
+            ));
+            let root = AdmittedRoot::authorized(file_uri(project.path()), digest('d'));
+            let workspace = AuthorizedLspWorkspace::new(Some(digest('e')), vec![root]).unwrap();
+            let gateway = GatewayCapabilities::default();
+            let upstream = UpstreamCapabilities {
+                supports_diagnostics: true,
+                ..UpstreamCapabilities::default()
+            };
+            let session = DaemonLspProtocolSession::from_workspace_ports(
+                workspace,
+                negotiate_capabilities(&ClientCapabilities::default(), &gateway, &upstream),
+                gateway,
+                upstream,
+                Feedback,
+                UnavailableSemanticProvider,
+                DiagnosticSnapshotAdapter::new(runtime.clone(), authority),
+            );
+            let mut harness = Self {
+                session,
+                runtime,
+                broker,
+                documents,
+                managed,
+                project,
+                next_request: 1,
+            };
+            let initialized = harness.request(
+                "initialize",
+                json!({
+                    "rootUri": file_uri(harness.project.path()),
+                    "capabilities": {
+                        "general": { "positionEncodings": ["utf-16"] },
+                        "textDocument": { "diagnostic": {} },
+                    },
+                }),
+            );
+            assert!(initialized.get("error").is_none(), "{initialized}");
+            harness.session.handle_payload(
+                &serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0", "method": "initialized", "params": {},
+                }))
+                .unwrap(),
+                1,
+            );
+            assert!(harness.session.drain_outbound().is_empty());
+            harness
+        }
+
+        fn uri(&self, path: &str) -> String {
+            file_uri(&self.project.path().join(path))
+        }
+
+        fn request(&mut self, method: &str, params: Value) -> Value {
+            let id = self.next_request;
+            self.next_request += 1;
+            self.session.handle_payload(
+                &serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+                }))
+                .unwrap(),
+                id,
+            );
+            self.session
+                .drain_outbound()
+                .iter()
+                .map(|message| serde_json::from_slice::<Value>(message).unwrap())
+                .find(|message| message["id"] == id)
+                .expect("diagnostic protocol response")
+        }
+
+        fn pull(&mut self, uri: &str, previous: Option<&str>) -> Value {
+            let mut params = json!({ "textDocument": { "uri": uri } });
+            if let Some(previous) = previous {
+                params["previousResultId"] = json!(previous);
+            }
+            self.request("textDocument/diagnostic", params)
+        }
+
+        async fn warm(&mut self, uri: &str) -> Value {
+            let pending = self.pull(uri, None);
+            assert_eq!(pending["error"]["code"], -32802, "{pending}");
+            assert_eq!(pending["error"]["data"]["coverage"], "refresh-required");
+            self.runtime.complete_next().await;
+            let full = self.pull(uri, None);
+            assert_eq!(full["result"]["kind"], "full", "{full}");
+            full["result"].clone()
+        }
+
+        async fn restart_analyzer_and_republish(&self, uri: &str) -> DiagnosticsSnapshot {
+            let document = self.documents.documents.get(uri).unwrap().clone();
+            let mut broker = self.broker.lock().await;
+            let settings = broker.settings().clone();
+            broker.update_settings(settings);
+            broker
+                .refresh_documents("fake", vec![document], Duration::from_millis(150))
+                .await
+                .unwrap();
+            broker.snapshot()
+        }
+    }
+
+    fn analyzer_finding(message: &str, start: u32, end: u32) -> Value {
+        json!({
+            "range": { "start": { "line": 0, "character": start }, "end": { "line": 0, "character": end } },
+            "severity": 1,
+            "source": "fake-ls",
+            "message": message,
+        })
+    }
+
+    #[tokio::test]
+    async fn retained_report_rejects_changed_broker_findings_with_identical_coverage() {
+        let original_finding = analyzer_finding("first finding", 0, 1);
+        let mut harness = BrokerDiagnosticHarness::new(json!({
+            "a.fake": [original_finding], "b.fake": [],
+        }));
+        let uri = harness.uri("a.fake");
+        let original = harness.warm(&uri).await;
+        let result_id = original["resultId"].as_str().unwrap();
+        assert_eq!(original["items"][0]["message"], "first finding");
+        let before = harness.broker.lock().await.snapshot();
+
+        let identical = harness.restart_analyzer_and_republish(&uri).await;
+        assert_eq!(identical.coverage, before.coverage);
+        assert_eq!(identical.settings, before.settings);
+        assert_eq!(identical.diagnostics.len(), 1);
+        assert_eq!(identical.diagnostics[0].message, "first finding");
+        assert_eq!(identical.diagnostics[0].character_start, Some(0));
+        assert_eq!(identical.diagnostics[0].character_end, Some(1));
+        assert_eq!(
+            harness.pull(&uri, Some(result_id))["result"],
+            json!({ "kind": "unchanged", "resultId": result_id })
+        );
+        assert_eq!(harness.managed.snapshots.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.runtime.started.load(Ordering::SeqCst), 1);
+
+        let changed_finding = analyzer_finding("replacement finding", 3, 7);
+        std::fs::write(
+            harness.project.path().join("findings.json"),
+            serde_json::to_vec(&json!({ "a.fake": [changed_finding], "b.fake": [] })).unwrap(),
+        )
+        .unwrap();
+        let changed = harness.restart_analyzer_and_republish(&uri).await;
+        assert_eq!(changed.coverage, before.coverage);
+        assert_eq!(changed.settings, before.settings);
+        assert_eq!(changed.settings_unavailable, before.settings_unavailable);
+        assert_eq!(changed.diagnostics.len(), 1);
+        assert_eq!(changed.diagnostics[0].message, "replacement finding");
+        assert_eq!(changed.diagnostics[0].character_start, Some(3));
+        assert_eq!(changed.diagnostics[0].character_end, Some(7));
+
+        let stale = harness.pull(&uri, Some(result_id));
+        assert_eq!(stale["error"]["code"], -32802, "{stale}");
+        assert!(
+            stale.get("result").is_none(),
+            "changed findings must reject retained reuse"
+        );
+        harness.runtime.complete_next().await;
+        let replacement = harness.pull(&uri, Some(result_id));
+        assert_eq!(replacement["result"]["kind"], "full", "{replacement}");
+        assert_ne!(replacement["result"]["resultId"], original["resultId"]);
+        assert_eq!(
+            replacement["result"]["items"],
+            json!([{
+                "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
+                "severity": 1, "code": null, "source": "upstream", "message": "replacement finding",
+            }])
+        );
+        assert_eq!(harness.managed.snapshots.load(Ordering::SeqCst), 2);
+        assert_eq!(harness.runtime.started.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retained_reports_survive_other_document_refreshes_in_the_same_language() {
+        let mut harness = BrokerDiagnosticHarness::new(json!({
+            "a.fake": [analyzer_finding("retained finding", 0, 1)], "b.fake": [],
+        }));
+        let a = harness.uri("a.fake");
+        let b = harness.uri("b.fake");
+        let report_a = harness.warm(&a).await;
+        let report_b = harness.warm(&b).await;
+        assert_eq!(report_a["items"][0]["message"], "retained finding");
+        assert_eq!(report_b["items"], json!([]));
+        let latest = harness.broker.lock().await.snapshot();
+        assert_eq!(latest.diagnostics.len(), 1);
+        assert_eq!(latest.diagnostics[0].file, "a.fake");
+        assert_eq!(
+            latest.coverage["fake"]
+                .documents
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["b.fake"],
+            "dashboard coverage must still describe only the latest refresh"
+        );
+        assert_eq!(harness.managed.snapshots.load(Ordering::SeqCst), 2);
+        assert_eq!(harness.runtime.started.load(Ordering::SeqCst), 2);
+
+        for (uri, report) in [
+            (&a, &report_a),
+            (&b, &report_b),
+            (&a, &report_a),
+            (&b, &report_b),
+        ] {
+            let result_id = report["resultId"].as_str().unwrap();
+            let reused = harness.pull(uri, Some(result_id));
+            assert_eq!(
+                reused["result"],
+                json!({ "kind": "unchanged", "resultId": result_id }),
+                "unchanged document must survive another document's refresh: {reused}"
+            );
+            assert_eq!(harness.runtime.started.load(Ordering::SeqCst), 2);
+            assert_eq!(harness.managed.snapshots.load(Ordering::SeqCst), 2);
+        }
+
+        let document_a = harness.documents.documents[&a].clone();
+        harness
+            .broker
+            .lock()
+            .await
+            .refresh_documents("fake", vec![document_a], Duration::from_millis(150))
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.pull(&b, report_b["resultId"].as_str())["result"],
+            json!({ "kind": "unchanged", "resultId": report_b["resultId"] }),
+            "a clean publication must also survive a later refresh of another document"
+        );
+        assert_eq!(harness.managed.snapshots.load(Ordering::SeqCst), 2);
+        assert_eq!(harness.runtime.started.load(Ordering::SeqCst), 2);
+
+        harness
+            .broker
+            .lock()
+            .await
+            .set_language_enabled("fake", false);
+        let stale = harness.pull(&a, report_a["resultId"].as_str());
+        assert_eq!(stale["error"]["code"], -32802, "{stale}");
+        assert!(stale.get("result").is_none());
+        harness.runtime.complete_next().await;
+        let disabled = harness.pull(&a, report_a["resultId"].as_str());
+        assert_eq!(disabled["result"]["kind"], "full", "{disabled}");
+        assert_eq!(disabled["result"]["items"], json!([]));
+        assert_ne!(disabled["result"]["resultId"], report_a["resultId"]);
+        assert_eq!(harness.managed.snapshots.load(Ordering::SeqCst), 3);
+        assert_eq!(harness.runtime.started.load(Ordering::SeqCst), 3);
+    }
+
     #[tokio::test]
     async fn workspace_sweep_rejects_a_generation_published_before_completion() {
         let root = AdmittedRoot::authorized("file:///workspace", digest('d'));
@@ -512,11 +1011,8 @@ mod tests {
                 "/workspace",
                 Vec::new(),
             ))),
-            Arc::new(PublishingWorkspaceIndex {
-                reads: AtomicUsize::new(0),
-                drift: WorkspaceIndexDrift::Publish,
-            }),
-            Arc::new(FixedManagedDiagnostics),
+            Arc::new(PublishingWorkspaceIndex::new(WorkspaceIndexDrift::Publish)),
+            Arc::new(FixedManagedDiagnostics::default()),
             Duration::from_millis(1),
         );
 
@@ -535,6 +1031,13 @@ mod tests {
     struct MismatchedManagedDiagnostics;
 
     impl ManagedDiagnosticSnapshotPort for MismatchedManagedDiagnostics {
+        fn current_authority(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+            Box::pin(async { Ok(digest('c')) })
+        }
+
         fn snapshot(
             &self,
             _request: CanonicalDiagnosticRefreshRequest,
@@ -560,10 +1063,7 @@ mod tests {
                 "/workspace",
                 Vec::new(),
             ))),
-            Arc::new(PublishingWorkspaceIndex {
-                reads: AtomicUsize::new(0),
-                drift: WorkspaceIndexDrift::None,
-            }),
+            Arc::new(PublishingWorkspaceIndex::new(WorkspaceIndexDrift::None)),
             Arc::new(MismatchedManagedDiagnostics),
             Duration::from_millis(1),
         );

@@ -8,21 +8,12 @@ common --show_progress_rate_limit=15
 # The shared fleet CAS uses size-based eviction, so it cannot guarantee
 # Bazel's default three-hour retention. Revalidate remote outputs before reuse.
 build --experimental_remote_cache_ttl=0s
-# crate_universe re-fetches git dependencies into an empty CARGO_HOME on every
-# splice. libgit2 indexes asupersync's ~1 GB history on one thread for over 25
-# minutes; the git CLI indexes it in about 2.
-common --repo_env=CARGO_NET_GIT_FETCH_WITH_CLI=true
-# Fetch only the pinned commit of each git dependency: 76 MB instead of 1.3 GB,
-# and a cold splice drops from about 6 minutes to 1. The splice runs rules_rust's
-# stable host cargo, which reads -Z options only under RUSTC_BOOTSTRAP. A nightly
-# host cargo would download another 418 MB toolchain on every CI job.
-common --repo_env=CARGO_UNSTABLE_GIT=shallow-deps
+# Cargo reads the unstable acquisition policy during repository evaluation.
 common --repo_env=RUSTC_BOOTSTRAP=1
-# MODULE.bazel registers only nightly/2026-10-25. Without this, rules_rust
-# resolves the stable channel and the build fails closed.
+# MODULE.bazel registers the pinned stable compiler.
 # Hosts can extend this repository profile with their private fleet settings.
 build --config=tracedecay
-build:tracedecay --@rules_rust//rust/toolchain/channel=nightly
+build:tracedecay --@rules_rust//rust/toolchain/channel=stable
 build --incompatible_enable_cc_toolchain_resolution
 build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 build --workspace_status_command=scripts/bazel/workspace_status.sh
@@ -72,11 +63,17 @@ build:clippy --@rules_rust//rust/settings:pipelined_compilation=true
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 build:clippy --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
 
+# Default tests and their build-time tools use the assertion-enabled perf levels.
+build --compilation_mode=fastbuild
+build --host_compilation_mode=fastbuild
+
 # Externals return to opt-level 3 over the perf overrides below.
 build:release --compilation_mode=opt
+build:release --host_compilation_mode=opt
 build:release --@rules_rust//rust/settings:per_crate_rustc_flag=external/@-Copt-level=3
 
 build:dist --compilation_mode=opt
+build:dist --host_compilation_mode=opt
 build:dist --@rules_rust//rust/settings:per_crate_rustc_flag=external/@-Copt-level=3
 build:dist --@rules_rust//rust/settings:lto=thin
 build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Ccodegen-units=1

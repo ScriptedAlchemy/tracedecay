@@ -9,7 +9,8 @@ inputs:
       Bazel config. `dist` is the shipping-tuned compile (thin LTO, strip,
       codegen-units=1). `release` is opt-level 3 without LTO, the CI / cargo
       `--release` equivalent; tracedecay-cli's default features are
-      `production`, the release source profile. `ci` is a dev-profile build.
+      `production`, the release source profile. `ci` uses the assertion-enabled
+      per-crate optimization levels from Cargo's `perf` profile.
     required: true
   dest:
     description: Directory the binary is copied into, as tracedecay[.exe].
@@ -17,6 +18,9 @@ inputs:
   cache-key:
     description: Disk-cache name (see the setup-bazel action).
     required: true
+  prepared-build:
+    description: Whether the caller already configured Bazel for this build.
+    default: "false"
   tailscale-client-id:
     description: Restricted OIDC client for compatible trusted CI builds.
     default: ""
@@ -31,6 +35,7 @@ runs:
   steps:
     - uses: ./.github/actions/setup-bazel
       id: bazel
+      if: inputs.prepared-build != 'true'
       with:
         cache-key: ${{ inputs.cache-key }}
         tailscale-client-id: ${{ inputs.tailscale-client-id }}

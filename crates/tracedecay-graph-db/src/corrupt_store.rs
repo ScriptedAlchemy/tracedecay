@@ -82,6 +82,20 @@ pub(crate) fn recover_deterministically_corrupt_container_with<T>(
         Err(other) => return Err(other),
     };
     if second_fault != first_fault {
+        // A drifting fault is terminal for this container and invisible by
+        // design: nothing is deleted and nothing is rebuilt, and every
+        // later open repeats the verdict. Say so once per decision, at
+        // error level, with the operator action, so a permanently corrupt
+        // container is not indistinguishable from a healthy one.
+        tracing::error!(
+            event = "store_corrupt_not_deterministic",
+            container = %container.display(),
+            first_fault = %first_fault,
+            second_fault = %second_fault,
+            "graph container corruption is not deterministic; deletion refused. \
+             This store stays corrupt until an operator acts: move the medium, \
+             or rebuild the project store from its canonical replay authorities."
+        );
         return Err(GraphDbError::Corrupt {
             message: format!(
                 "graph container corruption is not deterministic; refusing deletion: \
@@ -338,12 +352,38 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let container = seeded_family(temp.path());
 
-        let error = recover_deterministically_corrupt_container(
-            &container,
-            "block 18 CRC mismatch",
-            &|| Err(corrupt("block 7 CRC mismatch")),
-        )
-        .unwrap_err();
+        let (error, logs) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
+            recover_deterministically_corrupt_container(
+                &container,
+                "block 18 CRC mismatch",
+                &|| Err(corrupt("block 7 CRC mismatch")),
+            )
+            .unwrap_err()
+        });
+        assert_eq!(
+            logs.matches("store_corrupt_not_deterministic").count(),
+            1,
+            "the drifting-fault refusal must log its operator event exactly once"
+        );
+        let event = logs
+            .lines()
+            .find(|line| line.contains("store_corrupt_not_deterministic"))
+            .expect("the drifting-fault operator event");
+        assert_eq!(
+            event.split_whitespace().next(),
+            Some("ERROR"),
+            "a terminal corruption verdict must remain visible at the default log level: {event}"
+        );
+        for field in [
+            format!("container={}", container.display()),
+            "first_fault=block 18 CRC mismatch".to_owned(),
+            "second_fault=block 7 CRC mismatch".to_owned(),
+        ] {
+            assert!(
+                event.contains(&field),
+                "the operator event must identify {field:?}: {event}"
+            );
+        }
 
         assert!(
             matches!(&error, GraphDbError::Corrupt { message }

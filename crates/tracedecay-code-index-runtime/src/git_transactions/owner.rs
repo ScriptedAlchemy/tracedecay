@@ -556,14 +556,14 @@ impl DaemonGitIndexTransactionServiceRegistry {
             let native = FixedDaemonGitIndexExecutor::new(
                 DaemonProjectGitIndexPreviewAssembler::new(native_root, project_id.clone()),
             );
-            DaemonGitIndexTransactionService::start(
+            Box::pin(DaemonGitIndexTransactionService::start(
                 store,
                 native,
                 GitEffectClassifierV1::default(),
                 DaemonGitIndexPolicyRecheck::new(service_authority),
                 mutation_queue,
                 observed_at,
-            )
+            ))
             .await
             .map(|service| (project_id, service))
         })

@@ -27,9 +27,9 @@ use tracedecay_daemon_protocol::{ConnectionLocalRequestSequence, FramePoll};
 use tracedecay_domain::ContentDigest;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
-use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, plain_host_path};
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
-use super::broker::{CodeDiagnostic, DiagnosticSeverity};
+use super::broker::{CodeDiagnostic, DiagnosticEvidenceUnavailable, DiagnosticSeverity};
 use super::error::{
     AnalyzerCancellation as CancellationToken, AnalyzerResult as Result,
     AnalyzerRuntimeError as TraceDecayError,
@@ -38,6 +38,12 @@ use super::launch::{AnalyzerLaunch, resolve_analyzer_launch};
 use super::process::AnalyzerProcess;
 
 use crate::{AnalyzerEvent, AsyncContentLengthError, UpstreamCapabilities};
+
+mod documents;
+use documents::{AcceptedDiagnosticPublication, PublicationEligibility, SynchronizedDocument};
+pub(crate) use documents::{
+    AnalyzerDocuments, CollectedDocumentPublication, DocumentRefreshClaim, document_identity,
+};
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -383,19 +389,12 @@ pub async fn collect_document_diagnostics_with_timeouts(
         .map_err(TraceDecayError::from)
 }
 
-struct SynchronizedDocument {
-    uri: String,
-    wire_version: i32,
-    text: String,
-    snapshot: Option<crate::LspSemanticDocumentSnapshot>,
-    diagnostics: Option<(Vec<CodeDiagnostic>, DiagnosticDocumentCoverage)>,
-}
-
 pub struct StdioLspClient {
     command: String,
     workspace_root: PathBuf,
     upstream_capabilities: UpstreamCapabilities,
-    documents: BTreeMap<PathBuf, SynchronizedDocument>,
+    documents: Arc<AnalyzerDocuments>,
+    attempt: u32,
     next_request_id: ConnectionLocalRequestSequence,
     /// Killed and reaped when the client drops.
     process: AnalyzerProcess,
@@ -426,7 +425,12 @@ impl StdioLspClientStartup {
         args: Vec<String>,
         project_root: PathBuf,
         timeouts: LspRefreshTimeouts,
+        documents: Arc<AnalyzerDocuments>,
+        attempt: u32,
     ) -> Result<Self> {
+        documents
+            .activate(attempt)
+            .map_err(|error| TraceDecayError::new(error.to_string()))?;
         let cancellation = CancellationToken::new();
         let startup_cancellation = cancellation.clone();
         let result = Arc::new(Mutex::new(None));
@@ -438,6 +442,8 @@ impl StdioLspClientStartup {
                 &project_root,
                 timeouts,
                 &startup_cancellation,
+                documents,
+                attempt,
             )
             .await;
             {
@@ -567,12 +573,18 @@ impl StdioLspClient {
         timeouts: LspRefreshTimeouts,
     ) -> Result<Self> {
         let cancellation = CancellationToken::new();
+        let documents = AnalyzerDocuments::new();
+        documents
+            .activate(0)
+            .map_err(|error| TraceDecayError::new(error.to_string()))?;
         match Self::start_with_launch_until_cancelled(
             launch,
             args,
             project_root,
             timeouts,
             &cancellation,
+            documents,
+            0,
         )
         .await
         {
@@ -591,6 +603,8 @@ impl StdioLspClient {
         project_root: &Path,
         timeouts: LspRefreshTimeouts,
         cancellation: &CancellationToken,
+        documents: Arc<AnalyzerDocuments>,
+        attempt: u32,
     ) -> StdioLspClientStartupSettlement {
         let timeouts = timeouts.with_deadline(timeouts.operation_deadline());
         let deadline = timeouts.operation_deadline();
@@ -721,7 +735,8 @@ impl StdioLspClient {
             upstream_capabilities: UpstreamCapabilities::from_initialize_response(
                 &initialize_response,
             ),
-            documents: BTreeMap::new(),
+            documents,
+            attempt,
             next_request_id: ConnectionLocalRequestSequence::starting_at(2),
             process,
         })
@@ -795,7 +810,12 @@ impl StdioLspClient {
                 class: "admitted semantic document snapshot is invalid".to_owned(),
             });
         }
-        if self.snapshot_is_stale(&identity, snapshot) {
+        if self
+            .snapshot_is_stale(&identity, snapshot)
+            .map_err(|error| LspSemanticRequestError::InvalidResponse {
+                class: error.to_string(),
+            })?
+        {
             return Err(LspSemanticRequestError::InvalidResponse {
                 class: "admitted semantic document snapshot is stale".to_owned(),
             });
@@ -820,16 +840,17 @@ impl StdioLspClient {
         &self,
         identity: &Path,
         snapshot: &crate::LspSemanticDocumentSnapshot,
-    ) -> bool {
-        !snapshot.lifetime.is_open()
-            || self.documents.get(identity).is_some_and(|current| {
+    ) -> std::result::Result<bool, DiagnosticEvidenceUnavailable> {
+        let state = self.documents.lock()?;
+        Ok(!snapshot.lifetime.is_open()
+            || state.documents.get(identity).is_some_and(|current| {
                 current.snapshot.as_ref().is_some_and(|admitted| {
                     admitted.lifetime == snapshot.lifetime
                         && (admitted.version > snapshot.version
                             || (admitted.version == snapshot.version
                                 && current.text != snapshot.text.as_ref()))
                 })
-            })
+            }))
     }
 
     async fn synchronize_document(
@@ -841,26 +862,37 @@ impl StdioLspClient {
         snapshot: Option<&crate::LspSemanticDocumentSnapshot>,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<i32, LspMessageWriteError> {
-        if let Some(current) = self.documents.get_mut(identity)
-            && current.uri == uri
-            && current.text == text
-        {
-            current.snapshot = snapshot.cloned();
-            return Ok(current.wire_version);
-        }
-        let current_version = self
-            .documents
-            .get(identity)
-            .map_or(0, |current| current.wire_version);
+        let (current_version, previous_uri) = {
+            let mut state = self.documents.lock().map_err(|error| {
+                LspMessageWriteError::Failed(TraceDecayError::new(error.to_string()))
+            })?;
+            if state.attempt != Some(self.attempt) {
+                return Err(LspMessageWriteError::Failed(TraceDecayError::Unavailable));
+            }
+            if let Some(current) = state.documents.get_mut(identity) {
+                if current.uri == uri && current.text == text {
+                    if current.snapshot.as_ref() != snapshot
+                        && !matches!(current.eligibility, PublicationEligibility::Refreshing(_))
+                    {
+                        current.eligibility = PublicationEligibility::Unverified;
+                    }
+                    current.snapshot = snapshot.cloned();
+                    return Ok(current.wire_version);
+                }
+                current.accepted = None;
+                if !matches!(current.eligibility, PublicationEligibility::Refreshing(_)) {
+                    current.eligibility = PublicationEligibility::Unverified;
+                }
+                (current.wire_version, Some(current.uri.clone()))
+            } else {
+                (0, None)
+            }
+        };
         let version = current_version.checked_add(1).ok_or_else(|| {
             LspMessageWriteError::Failed(TraceDecayError::Config {
                 message: "analyzer document version is exhausted".to_owned(),
             })
         })?;
-        let previous_uri = self
-            .documents
-            .get(identity)
-            .map(|current| current.uri.clone());
         let notification = if previous_uri.as_deref() == Some(uri) {
             json!({
                 "jsonrpc": "2.0",
@@ -906,16 +938,32 @@ impl StdioLspClient {
             .request_deadline()
             .min(Instant::now() + timeouts.refresh);
         write_message_until(&self.process, notification, deadline, timeouts.message_io).await?;
-        self.documents.insert(
-            identity.to_path_buf(),
-            SynchronizedDocument {
-                uri: uri.to_owned(),
-                wire_version: version,
-                text: text.to_owned(),
-                snapshot: snapshot.cloned(),
-                diagnostics: None,
-            },
-        );
+        let mut state = self.documents.lock().map_err(|error| {
+            LspMessageWriteError::Failed(TraceDecayError::new(error.to_string()))
+        })?;
+        if state.attempt != Some(self.attempt) {
+            return Err(LspMessageWriteError::Failed(TraceDecayError::Unavailable));
+        }
+        if let Some(current) = state.documents.get_mut(identity) {
+            uri.clone_into(&mut current.uri);
+            current.wire_version = version;
+            text.clone_into(&mut current.text);
+            current.snapshot = snapshot.cloned();
+            current.accepted = None;
+        } else {
+            state.documents.insert(
+                identity.to_path_buf(),
+                SynchronizedDocument {
+                    uri: uri.to_owned(),
+                    wire_version: version,
+                    text: text.to_owned(),
+                    snapshot: snapshot.cloned(),
+                    accepted: None,
+                    epoch: 0,
+                    eligibility: PublicationEligibility::Unverified,
+                },
+            );
+        }
         Ok(version)
     }
 
@@ -1302,6 +1350,25 @@ impl StdioLspClient {
         documents: Vec<LspDocument>,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<DiagnosticRefreshResult, LspRefreshError> {
+        self.collect_claimed_diagnostics(project_root, documents, timeouts, Vec::new())
+            .await
+            .map(|(result, _)| result)
+    }
+
+    pub(crate) async fn collect_claimed_diagnostics(
+        &mut self,
+        project_root: &Path,
+        documents: Vec<LspDocument>,
+        timeouts: LspRefreshTimeouts,
+        claims: Vec<DocumentRefreshClaim>,
+    ) -> std::result::Result<
+        (DiagnosticRefreshResult, Vec<CollectedDocumentPublication>),
+        LspRefreshError,
+    > {
+        let mut claims = claims
+            .into_iter()
+            .map(|claim| (claim.path().to_path_buf(), claim))
+            .collect::<BTreeMap<_, _>>();
         let deadline = timeouts.request_deadline();
         let mut uri_to_document = BTreeMap::new();
         let mut expected_versions = BTreeMap::new();
@@ -1316,6 +1383,15 @@ impl StdioLspClient {
                 document_identity(&path, &uri).ok_or_else(|| LspRefreshError::InvalidResponse {
                     message: "admitted diagnostic document URI is invalid".to_owned(),
                 })?;
+            if let Some(claim) = claims.get(&identity)
+                && !claim.is_current().map_err(document_refresh_error)?
+            {
+                result.coverage.documents.insert(
+                    document.relative_path.clone(),
+                    DiagnosticDocumentCoverage::StalePublication,
+                );
+                continue;
+            }
             if let Some(snapshot) = document.snapshot.as_ref() {
                 if snapshot.text.as_ref() != document.text
                     || ContentDigest::of_bytes(document.text.as_bytes()) != snapshot.content_digest
@@ -1324,7 +1400,10 @@ impl StdioLspClient {
                         message: "admitted diagnostic document snapshot is invalid".to_owned(),
                     });
                 }
-                if self.snapshot_is_stale(&identity, snapshot) {
+                if self
+                    .snapshot_is_stale(&identity, snapshot)
+                    .map_err(document_refresh_error)?
+                {
                     // A queued editor admission may expire before this client
                     // is acquired. It is stale caller work, not an analyzer
                     // protocol failure; do not send its text or retire the
@@ -1335,17 +1414,18 @@ impl StdioLspClient {
                     );
                     continue;
                 }
-            } else if let Some(current) = self.documents.get(&identity)
-                && current
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.lifetime.is_open())
-            {
-                // Only the overlay store can keep this admission alive. Closing
-                // or dropping its session returns a later sweep to disk text.
-                document.text.clone_from(&current.text);
-                document.snapshot = current.snapshot.clone();
-                uri.clone_from(&current.uri);
+            } else {
+                let state = self.documents.lock().map_err(document_refresh_error)?;
+                if let Some(current) = state.documents.get(&identity)
+                    && current
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.lifetime.is_open())
+                {
+                    document.text.clone_from(&current.text);
+                    document.snapshot = current.snapshot.clone();
+                    uri.clone_from(&current.uri);
+                }
             }
             let version = self
                 .synchronize_document(
@@ -1358,32 +1438,45 @@ impl StdioLspClient {
                 )
                 .await
                 .map_err(refresh_write_error)?;
+            if let Some(claim) = claims.get(&identity) {
+                match claim.bind() {
+                    Ok(()) => {}
+                    Err(DiagnosticEvidenceUnavailable::PublicationUncommitted) => {
+                        result.coverage.documents.insert(
+                            document.relative_path.clone(),
+                            DiagnosticDocumentCoverage::StalePublication,
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(document_refresh_error(error)),
+                }
+            }
             expected_versions.insert(uri.clone(), version);
             uri_to_document.insert(uri, (identity, document));
         }
 
         if uri_to_document.is_empty() {
-            return Ok(result);
+            return Ok((result, Vec::new()));
         }
-        let mut diagnostics_by_uri: BTreeMap<String, Vec<CodeDiagnostic>> = BTreeMap::new();
+        let mut publications_by_uri: BTreeMap<String, Arc<AcceptedDiagnosticPublication>> =
+            BTreeMap::new();
         let mut coverage_by_uri = BTreeMap::new();
         let mut current_publications = BTreeSet::new();
-        // An unchanged document sends no notification, so the server need not
-        // publish again. Its last accepted publication remains authoritative
-        // for this wire version. Synchronizing changed text replaces the
-        // document record and discards that publication.
-        for (uri, (identity, _)) in &uri_to_document {
-            if let Some((diagnostics, coverage)) = self
-                .documents
-                .get(identity)
-                .and_then(|document| document.diagnostics.as_ref())
-            {
-                diagnostics_by_uri.insert(uri.clone(), diagnostics.clone());
-                coverage_by_uri.insert(uri.clone(), coverage.clone());
+        {
+            let state = self.documents.lock().map_err(document_refresh_error)?;
+            for (uri, (identity, _)) in &uri_to_document {
+                if let Some(accepted) = state
+                    .documents
+                    .get(identity)
+                    .and_then(|document| document.accepted.as_ref())
+                {
+                    publications_by_uri.insert(uri.clone(), Arc::clone(accepted));
+                    coverage_by_uri.insert(uri.clone(), accepted.coverage.clone());
+                }
             }
         }
         let refresh_deadline = deadline.min(Instant::now() + timeouts.refresh);
-        let mut quiet_deadline = (diagnostics_by_uri.len() == uri_to_document.len())
+        let mut quiet_deadline = (publications_by_uri.len() == uri_to_document.len())
             .then(|| refresh_deadline.min(Instant::now() + timeouts.diagnostics_quiet));
         loop {
             let now = Instant::now();
@@ -1441,8 +1534,12 @@ impl StdioLspClient {
                         published.uri.as_str().to_owned(),
                         DiagnosticDocumentCoverage::StalePublication,
                     );
-                    if let Some(current) = self.documents.get_mut(identity) {
-                        current.diagnostics = None;
+                    let mut state = self.documents.lock().map_err(document_refresh_error)?;
+                    if let Some(current) = state.documents.get_mut(identity) {
+                        current.accepted = None;
+                        if !matches!(current.eligibility, PublicationEligibility::Refreshing(_)) {
+                            current.eligibility = PublicationEligibility::Unverified;
+                        }
                     }
                 }
                 continue;
@@ -1456,12 +1553,27 @@ impl StdioLspClient {
                 .into_iter()
                 .map(|diagnostic| code_diagnostic(diagnostic, document, &self.command))
                 .collect::<Vec<_>>();
-            if let Some(current) = self.documents.get_mut(identity) {
-                current.diagnostics = Some((diagnostics.clone(), coverage.clone()));
+            let accepted = Arc::new(AcceptedDiagnosticPublication {
+                diagnostics,
+                coverage: coverage.clone(),
+            });
+            {
+                let mut state = self.documents.lock().map_err(document_refresh_error)?;
+                if state.attempt != Some(self.attempt) {
+                    return Err(document_refresh_error(
+                        DiagnosticEvidenceUnavailable::IncarnationRetired,
+                    ));
+                }
+                if let Some(current) = state.documents.get_mut(identity) {
+                    current.accepted = Some(Arc::clone(&accepted));
+                    if !matches!(current.eligibility, PublicationEligibility::Refreshing(_)) {
+                        current.eligibility = PublicationEligibility::Unverified;
+                    }
+                }
             }
             current_publications.insert(published.uri.as_str().to_owned());
             coverage_by_uri.insert(published.uri.as_str().to_owned(), coverage);
-            diagnostics_by_uri.insert(published.uri.as_str().to_owned(), diagnostics);
+            publications_by_uri.insert(published.uri.as_str().to_owned(), accepted);
             quiet_deadline =
                 Some(refresh_deadline.min(Instant::now() + timeouts.diagnostics_quiet));
         }
@@ -1470,7 +1582,7 @@ impl StdioLspClient {
         // looks partial here. Requiring every requested URI throws away the real
         // diagnostics of the one file that did report. Only treat the batch as a
         // genuine timeout when nothing arrived at all.
-        if diagnostics_by_uri.is_empty() && !uri_to_document.is_empty() {
+        if publications_by_uri.is_empty() && !uri_to_document.is_empty() {
             return Err(LspRefreshError::NoPublication {
                 message: format!(
                     "LSP diagnostics collection timed out after {} ms without a publication",
@@ -1478,6 +1590,7 @@ impl StdioLspClient {
                 ),
             });
         }
+        let mut collected = Vec::new();
         for (uri, (identity, document)) in &uri_to_document {
             if document
                 .snapshot
@@ -1485,8 +1598,12 @@ impl StdioLspClient {
                 .is_some_and(|snapshot| !snapshot.lifetime.is_open())
             {
                 coverage_by_uri.insert(uri.clone(), DiagnosticDocumentCoverage::StalePublication);
-                if let Some(current) = self.documents.get_mut(identity) {
-                    current.diagnostics = None;
+                let mut state = self.documents.lock().map_err(document_refresh_error)?;
+                if let Some(current) = state.documents.get_mut(identity) {
+                    current.accepted = None;
+                    if !matches!(current.eligibility, PublicationEligibility::Refreshing(_)) {
+                        current.eligibility = PublicationEligibility::Unverified;
+                    }
                 }
             }
             let coverage = coverage_by_uri
@@ -1497,16 +1614,29 @@ impl StdioLspClient {
             // a newly received publication for a closed overlay must likewise
             // not replace or append to that retained evidence.
             if matches!(coverage, DiagnosticDocumentCoverage::Published { .. })
-                && let Some(diagnostics) = diagnostics_by_uri.remove(uri)
+                && let Some(accepted) = publications_by_uri.remove(uri)
             {
-                result.diagnostics.extend(diagnostics);
+                result
+                    .diagnostics
+                    .extend(accepted.diagnostics.iter().cloned());
+                if let Some(claim) = claims.remove(identity)
+                    && let Some(version) = expected_versions.get(uri)
+                {
+                    collected.push(claim.collected(
+                        accepted,
+                        document.clone(),
+                        uri.clone(),
+                        *version,
+                        self.attempt,
+                    ));
+                }
             }
             result
                 .coverage
                 .documents
                 .insert(document.relative_path.clone(), coverage);
         }
-        Ok(result)
+        Ok((result, collected))
     }
 
     async fn closed_refresh_error(&self, deadline: Instant) -> LspRefreshError {
@@ -1556,6 +1686,7 @@ impl StdioLspClient {
     /// stores this future when an in-flight owner is dropped, and no successor
     /// may acquire that slot until the future completes.
     pub(crate) fn reap(mut self) -> impl Future<Output = Result<()>> + Send {
+        self.documents.retire(Some(self.attempt));
         // The slot retains this future so no successor can overlap the old
         // process. Start termination before returning it: cancellation may
         // have no successor to poll the retained settlement future.
@@ -1569,6 +1700,12 @@ impl StdioLspClient {
                     message: format!("failed to reap LSP server '{}': {error}", self.command),
                 })
         }
+    }
+}
+
+impl Drop for StdioLspClient {
+    fn drop(&mut self) {
+        self.documents.retire(Some(self.attempt));
     }
 }
 
@@ -1701,6 +1838,12 @@ fn semantic_write_error(error: LspMessageWriteError) -> LspSemanticRequestError 
     match error {
         LspMessageWriteError::DeadlineElapsed => LspSemanticRequestError::TimedOut,
         LspMessageWriteError::Failed(error) => semantic_transport_error(error),
+    }
+}
+
+fn document_refresh_error(error: DiagnosticEvidenceUnavailable) -> LspRefreshError {
+    LspRefreshError::InvalidResponse {
+        message: error.to_string(),
     }
 }
 
@@ -1965,16 +2108,6 @@ pub(crate) fn file_uri(path: &Path) -> String {
     file_uri_from_path_text(&absolute.to_string_lossy())
 }
 
-/// Key the shared ledger by filesystem identity while keeping the admitted
-/// presentation URI on the wire. A disk sweep through the registered root
-/// and an editor request through a root alias must reach the same record.
-fn document_identity(path: &Path, uri: &str) -> Option<PathBuf> {
-    let (_, uri_path) = crate::gateway::strict_file_uri_path(uri)?;
-    let path = canonicalize_existing_prefix(path)?;
-    let uri_path = canonicalize_existing_prefix(&uri_path)?;
-    (path == uri_path).then_some(path)
-}
-
 fn read_semantic_document(path: &Path) -> std::result::Result<String, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("failed to read semantic document: {error}"))?;
@@ -2117,10 +2250,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AnalyzerLaunch, JsonRpcMessage, LspRefreshTimeouts, LspSemanticRequestError,
-        NativeTaskOutcome, StdioLspClientStartup, StdioLspClientStartupSettlement,
-        cancel_request_message, decode_message, decode_semantic_request, encode_semantic_request,
-        file_uri_from_path_text, is_current_diagnostic_publication,
+        AnalyzerDocuments, AnalyzerLaunch, JsonRpcMessage, LspRefreshTimeouts,
+        LspSemanticRequestError, NativeTaskOutcome, StdioLspClientStartup,
+        StdioLspClientStartupSettlement, cancel_request_message, decode_message,
+        decode_semantic_request, encode_semantic_request, file_uri_from_path_text,
+        is_current_diagnostic_publication,
     };
 
     #[cfg(unix)]
@@ -2175,6 +2309,8 @@ while True:
                 Duration::from_secs(10),
                 Duration::from_millis(50),
             ),
+            AnalyzerDocuments::new(),
+            0,
         )
         .unwrap();
         assert!(matches!(
@@ -2229,6 +2365,8 @@ while True:
             Vec::new(),
             temp.path().to_path_buf(),
             LspRefreshTimeouts::from_diagnostics_quiet_window(Duration::from_secs(1)),
+            AnalyzerDocuments::new(),
+            0,
         )
         .unwrap();
         assert!(matches!(

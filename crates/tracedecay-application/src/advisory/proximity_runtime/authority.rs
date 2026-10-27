@@ -16,16 +16,14 @@ use tracedecay_contracts::feedback::{
     ProximityEvaluationRequestV1,
 };
 use tracedecay_domain::feedback::{
-    FeedbackScopeV1, ProximityAddressV1, ProximityBranchWorktreeIncompatibilityV1,
-    ProximityCoverageV1, ProximityRelationPathKindV1, ProximityRelationPathV1,
-    ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityWarningClassV1,
+    FeedbackScopeV1, ProximityAddressV1, ProximityCoverageV1, ProximityRelationPathKindV1,
+    ProximityRelationPathV1, ProximityWarningClassV1,
 };
 use tracedecay_domain::{
     AgentInstanceId, CanonicalObservationEnvelopeV1, CommitId, ContentDigest, FileOccurrenceId,
     ObservationScopeV1, ObservationSourceIdentityV1, RefId, RelationEdgeKindV1, SourceSpan,
     SymbolOccurrenceId, UtcMicros, canonical_sha256,
 };
-use tracedecay_graph_db::GraphCancellation;
 use tracedecay_store::{ObservationProjectionStore, ObservationReplayRequest, ObservationStore};
 
 use super::{
@@ -64,13 +62,12 @@ struct ProximityCandidate {
     session_paths: BTreeMap<SessionKey, String>,
     warning_class: ProximityWarningClassV1,
     relation_kinds: Vec<ProximityRelationPathKindV1>,
-    relation_strength: ProximityRelationStrengthV1,
 }
 
 type VerifiedGraphPaths = BTreeMap<String, (FileOccurrenceId, ContentDigest)>;
 
 struct ProximityAssembly<'a> {
-    owner: &'a ProductionProximityEvidenceAuthorityV1,
+    normalized_worktree: &'a str,
     request: &'a ProximityEvaluationRequestV1,
     code_index_identity: Option<&'a crate::diagnostics_publication::CodeIndexPublicationIdentityV1>,
     verified_graph_paths: &'a VerifiedGraphPaths,
@@ -78,10 +75,6 @@ struct ProximityAssembly<'a> {
     graph_nodes: &'a BTreeMap<String, Vec<CodeGraphSymbolSummaryV1>>,
     session_edit_spans: &'a BTreeMap<(SessionKey, String), Vec<SourceSpan>>,
     active: &'a BTreeMap<SessionKey, SessionGitCorrelationHit>,
-    reader: &'a CodeGraphInteractiveReader,
-    cancellation: Arc<dyn GraphCancellation>,
-    observed_seconds: i64,
-    since: i64,
     expires_at: UtcMicros,
 }
 
@@ -134,44 +127,9 @@ impl ProximityAssembly<'_> {
             .graph_nodes
             .get(&candidate.path)
             .map_or(&[][..], Vec::as_slice);
-        let blast_radius_size = if path_nodes.is_empty() {
+        if path_nodes.is_empty() {
             omissions.insert(FeedbackProximityOmissionV1::MissingCodeAddress);
-            1
-        } else {
-            let seeds = path_nodes
-                .iter()
-                .map(|node| node.occurrence.clone())
-                .collect::<Vec<_>>();
-            if let Ok(nodes) = self.reader.impact(
-                &seeds,
-                &[],
-                1,
-                100_000,
-                100_000,
-                Arc::clone(&self.cancellation),
-            ) {
-                u32::try_from(nodes.impacted.len().max(1)).unwrap_or(u32::MAX)
-            } else {
-                omissions.insert(FeedbackProximityOmissionV1::CloneCoveragePartial);
-                u32::try_from(path_nodes.len()).unwrap_or(u32::MAX)
-            }
-        };
-        let latest_activity = candidate
-            .session_keys
-            .iter()
-            .filter_map(|key| self.active.get(key))
-            .filter_map(|hit| hit.last_ts.or(hit.committed_at).or(hit.first_ts))
-            .max()
-            .unwrap_or(self.since);
-        let age = self.observed_seconds.saturating_sub(latest_activity).max(0);
-        let freshness = 10_000_u16.saturating_sub(
-            u16::try_from(
-                age.saturating_mul(10_000)
-                    .div_euclid(ACTIVITY_HORIZON_SECONDS_V1)
-                    .min(10_000),
-            )
-            .unwrap_or(10_000),
-        );
+        }
         let exact_address = self
             .verified_graph_paths
             .contains_key(&candidate.path)
@@ -246,7 +204,7 @@ impl ProximityAssembly<'_> {
             .ok()?;
             let activity = activity_interval(hit)?;
             let normalized = normalize_worktree(&worktree_root);
-            let head_revision = if normalized == self.owner.normalized_worktree {
+            let head_revision = if normalized == self.normalized_worktree {
                 Some(self.request.scope.head_commit_id.clone())
             } else {
                 hit.commit_sha
@@ -259,7 +217,7 @@ impl ProximityAssembly<'_> {
             participants.push(FeedbackProximityParticipantV1 {
                 source,
                 agent_id,
-                worktree_id: (normalized == self.owner.normalized_worktree)
+                worktree_id: (normalized == self.normalized_worktree)
                     .then(|| self.request.scope.worktree_id.clone()),
                 worktree_root,
                 branch_ref: hit.branch.as_deref().and_then(branch_ref),
@@ -344,25 +302,7 @@ impl ProximityAssembly<'_> {
                     retrieval_anchor_id: relation_anchor.clone(),
                 })
                 .collect(),
-            risk_inputs: ProximityRiskInputsV1 {
-                overlap_size: u32::try_from(selected.len()).unwrap_or(u32::MAX),
-                blast_radius_size,
-                relation_strength: candidate.relation_strength,
-                branch_worktree_incompatibility:
-                    ProximityBranchWorktreeIncompatibilityV1::Compatible,
-                freshness_decay_basis_points: freshness,
-            },
             warning_class,
-            raw_risk_basis_points: if matches!(
-                warning_class,
-                ProximityWarningClassV1::SameFile
-                    | ProximityWarningClassV1::OverlappingRange
-                    | ProximityWarningClassV1::SameSymbol
-            ) {
-                10_000
-            } else {
-                7_500
-            },
             observed_at: self.request.observed_at,
             expires_at: self.expires_at,
             coverage: ProximityCoverageV1::Complete,
@@ -674,7 +614,6 @@ impl ProductionProximityEvidenceAuthorityV1 {
                             ]),
                             warning_class: ProximityWarningClassV1::SameFile,
                             relation_kinds: Vec::new(),
-                            relation_strength: ProximityRelationStrengthV1::Direct,
                         }
                     })
                 })
@@ -740,7 +679,6 @@ impl ProductionProximityEvidenceAuthorityV1 {
                             ]),
                             warning_class: relation.warning_class,
                             relation_kinds: relation.kinds,
-                            relation_strength: relation.strength,
                         });
                     }
                 }
@@ -760,7 +698,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
         }
         candidates.truncate(MAX_PROXIMITY_EVIDENCE_V1);
         let assembly = ProximityAssembly {
-            owner: self,
+            normalized_worktree: &self.normalized_worktree,
             request,
             code_index_identity: code_index_identity.as_ref(),
             verified_graph_paths: &verified_graph_paths,
@@ -768,10 +706,6 @@ impl ProductionProximityEvidenceAuthorityV1 {
             graph_nodes: &graph_nodes,
             session_edit_spans: &session_edit_spans,
             active: &active,
-            reader: &reader,
-            cancellation: Arc::clone(&cancellation),
-            observed_seconds,
-            since,
             expires_at,
         };
         let mut evidence = Vec::with_capacity(candidates.len());
@@ -904,7 +838,6 @@ fn participant_graph_address(
 struct GraphRelation {
     warning_class: ProximityWarningClassV1,
     kinds: Vec<ProximityRelationPathKindV1>,
-    strength: ProximityRelationStrengthV1,
 }
 
 fn graph_relation(
@@ -926,7 +859,6 @@ fn graph_relation(
             Some(GraphRelation {
                 warning_class: ProximityWarningClassV1::SameSymbol,
                 kinds: Vec::new(),
-                strength: ProximityRelationStrengthV1::Direct,
             }),
             false,
         );
@@ -951,7 +883,6 @@ fn graph_relation(
                 Some(GraphRelation {
                     warning_class: ProximityWarningClassV1::Neighborhood,
                     kinds: vec![ProximityRelationPathKindV1::DirectDependency],
-                    strength: ProximityRelationStrengthV1::Direct,
                 }),
                 false,
             );
@@ -974,7 +905,6 @@ fn graph_relation(
                 Some(GraphRelation {
                     warning_class: ProximityWarningClassV1::Neighborhood,
                     kinds: vec![ProximityRelationPathKindV1::DirectCaller],
-                    strength: ProximityRelationStrengthV1::Direct,
                 }),
                 false,
             );
@@ -996,7 +926,6 @@ fn graph_relation(
             Some(GraphRelation {
                 warning_class: ProximityWarningClassV1::SharedCaller,
                 kinds: vec![ProximityRelationPathKindV1::TransitiveCaller],
-                strength: ProximityRelationStrengthV1::Transitive,
             }),
             false,
         );
@@ -1006,7 +935,6 @@ fn graph_relation(
             Some(GraphRelation {
                 warning_class: ProximityWarningClassV1::SharedDependency,
                 kinds: vec![ProximityRelationPathKindV1::TransitiveDependency],
-                strength: ProximityRelationStrengthV1::Transitive,
             }),
             false,
         );
@@ -1016,7 +944,6 @@ fn graph_relation(
             Some(GraphRelation {
                 warning_class: ProximityWarningClassV1::SharedTest,
                 kinds: vec![ProximityRelationPathKindV1::AffectedTest],
-                strength: ProximityRelationStrengthV1::Transitive,
             }),
             false,
         );
@@ -1172,7 +1099,6 @@ const fn proximity_warning_rank(warning: ProximityWarningClassV1) -> u8 {
         ProximityWarningClassV1::SamePackage => 6,
         ProximityWarningClassV1::SameCrate => 7,
         ProximityWarningClassV1::Neighborhood => 8,
-        ProximityWarningClassV1::IncompatibleBranchWorktree => 9,
     }
 }
 

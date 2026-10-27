@@ -48,6 +48,7 @@ tempfile.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 
 [[bench]]
 name = "native_state_100k"

@@ -6792,6 +6792,7 @@ dependencies = [
  "thiserror",
  "tracedecay-domain",
  "tracedecay-private-fs",
+ "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracing",

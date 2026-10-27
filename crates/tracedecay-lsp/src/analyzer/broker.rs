@@ -10,7 +10,7 @@ use super::activity::{adapter_workspace_root_from_canonical_root, canonicalize_p
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
 use super::client::{
     DiagnosticCoverage, DiagnosticDocumentCoverage, DiagnosticRootCoverage, LspDocument,
-    LspRefreshTimeouts, file_uri,
+    LspRefreshTimeouts, document_identity, file_uri,
 };
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
 pub use super::launch::command_available;
@@ -201,6 +201,44 @@ pub enum RefreshCommitOutcome {
     Superseded,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DiagnosticEvidenceUnavailable {
+    #[error("diagnostic document identity is invalid")]
+    DocumentIdentityInvalid,
+    #[error("diagnostic source is unavailable")]
+    SourceUnavailable,
+    #[error("diagnostic publication is not committed")]
+    PublicationUncommitted,
+    #[error("diagnostic document content changed")]
+    ContentChanged,
+    #[error("diagnostic overlay admission is stale")]
+    OverlayStale,
+    #[error("diagnostic analyzer incarnation is retired")]
+    IncarnationRetired,
+    #[error("diagnostic document metadata is unavailable")]
+    MetadataUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DiagnosticNonparticipation {
+    Disabled,
+    Inactive,
+}
+
+pub enum BrokerDocumentEvidence {
+    Published {
+        settings: CodeDiagnosticsSettings,
+        settings_unavailable: Option<SettingsUnavailable>,
+        coverage: DiagnosticDocumentCoverage,
+        diagnostics: Vec<CodeDiagnostic>,
+    },
+    NotParticipating {
+        settings: CodeDiagnosticsSettings,
+        settings_unavailable: Option<SettingsUnavailable>,
+        reason: DiagnosticNonparticipation,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct LspSessionKey {
     language: String,
@@ -378,7 +416,7 @@ impl DiagnosticBroker {
 
     pub fn update_adapters(&mut self, adapters: Vec<LspAdapterDefinition>) {
         self.adapters = adapters;
-        self.clients.clear();
+        self.remove_all_clients();
         self.clear_launches();
     }
 
@@ -482,9 +520,43 @@ impl DiagnosticBroker {
         language: &str,
         documents: Vec<LspDocument>,
     ) -> Result<Option<PreparedRefresh>> {
-        // A new attempt supersedes the previous scope's publication evidence,
-        // including when preparation fails before any analyzer can run.
+        let epoch = self.next_refresh_epoch(language);
         self.coverage.remove(language);
+        let paths = documents
+            .iter()
+            .map(|document| {
+                let path = self.project_root.join(&document.relative_path);
+                let uri = document
+                    .snapshot
+                    .as_ref()
+                    .map_or_else(|| file_uri(&path), |snapshot| snapshot.uri.clone());
+                document_identity(&path, &uri)
+            })
+            .collect::<Option<Vec<_>>>();
+        let mut invalidation_failure = None;
+        for (key, client) in &self.clients {
+            if key.language == language
+                && let Err(error) = client.documents.invalidate(paths.as_deref(), epoch)
+            {
+                invalidation_failure = Some(error);
+            }
+        }
+        if let Some(error) = invalidation_failure {
+            return Err(TraceDecayError::new(error.to_string()));
+        }
+        if paths.is_none() {
+            return Err(TraceDecayError::new(
+                DiagnosticEvidenceUnavailable::DocumentIdentityInvalid.to_string(),
+            ));
+        }
+        if documents
+            .iter()
+            .any(|document| document.language != language)
+        {
+            return Err(TraceDecayError::new(
+                "diagnostic document language does not match the refresh scope",
+            ));
+        }
         if !self.settings.language_enabled(language) {
             self.engine_overrides
                 .insert(language.to_string(), EngineState::Disabled);
@@ -560,7 +632,6 @@ impl DiagnosticBroker {
         }
         self.engine_overrides
             .insert(language.to_string(), EngineState::Refreshing);
-        let epoch = self.next_refresh_epoch(language);
         let reservation = self
             .refresh_capacity
             .reserve(resolved_roots.len())
@@ -589,14 +660,34 @@ impl DiagnosticBroker {
                         SharedAnalyzerClient::new(AdmittedRoot::new(file_uri(&workspace_root)))
                     })
                     .clone();
-                RefreshBatch {
+                let claims = documents
+                    .iter()
+                    .map(|document| {
+                        let path = canonical_project_root.join(&document.relative_path);
+                        let uri = document
+                            .snapshot
+                            .as_ref()
+                            .map_or_else(|| file_uri(&path), |snapshot| snapshot.uri.clone());
+                        let identity = document_identity(&path, &uri).ok_or_else(|| {
+                            TraceDecayError::new(
+                                DiagnosticEvidenceUnavailable::DocumentIdentityInvalid.to_string(),
+                            )
+                        })?;
+                        client
+                            .documents
+                            .claim(identity, epoch)
+                            .map_err(|error| TraceDecayError::new(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(RefreshBatch {
                     workspace_root,
                     launch,
                     documents,
                     client,
-                }
+                    claims,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok(Some(PreparedRefresh::new(
             language.to_string(),
             canonical_project_root,
@@ -717,19 +808,49 @@ impl DiagnosticBroker {
             self.clear_language(&language);
             return Ok(RefreshCommitOutcome::Superseded);
         }
-        if !self.command_matches_current_settings(&language, &completed.command) {
+        if !self.project_languages.contains(&language)
+            || !self.command_matches_current_settings(&language, &completed.command)
+            || completed.sources.iter().any(|(key, source)| {
+                !self
+                    .clients
+                    .get(key)
+                    .is_some_and(|current| Arc::ptr_eq(current, source))
+            })
+        {
             return Ok(RefreshCommitOutcome::Superseded);
         }
         match completed.result {
             Ok(mut refresh) => {
+                let mut committed = BTreeSet::new();
+                let mut findings = Vec::new();
+                for publication in &completed.publications {
+                    let file = publication.relative_path();
+                    match publication.commit(|accepted| {
+                        findings.extend(accepted.diagnostics.iter().cloned());
+                    }) {
+                        Ok(()) => {
+                            committed.insert(file.to_owned());
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, file, "diagnostic publication lost commit eligibility");
+                            refresh.coverage.documents.insert(
+                                file.to_owned(),
+                                DiagnosticDocumentCoverage::StalePublication,
+                            );
+                        }
+                    }
+                }
+                for (file, coverage) in &mut refresh.coverage.documents {
+                    if matches!(coverage, DiagnosticDocumentCoverage::Published { .. })
+                        && !committed.contains(file)
+                    {
+                        *coverage = DiagnosticDocumentCoverage::StalePublication;
+                    }
+                }
                 self.diagnostics.retain(|diagnostic| {
-                    diagnostic.language != language
-                        || !matches!(
-                            refresh.coverage.documents.get(&diagnostic.file),
-                            Some(DiagnosticDocumentCoverage::Published { .. })
-                        )
+                    diagnostic.language != language || !committed.contains(&diagnostic.file)
                 });
-                self.diagnostics.append(&mut refresh.diagnostics);
+                self.diagnostics.append(&mut findings);
                 // Replace the scope instead of accumulating a historical document
                 // map. Unrequested retained findings must not inherit fresh coverage.
                 self.coverage
@@ -813,7 +934,7 @@ impl DiagnosticBroker {
         // These settings were just persisted, so whatever the broker could not
         // read at mount time is no longer what it is serving.
         self.settings_unavailable = None;
-        self.clients.clear();
+        self.remove_all_clients();
         self.coverage.clear();
         self.clear_launches();
         self.launch_refusals.clear();
@@ -830,6 +951,77 @@ impl DiagnosticBroker {
                 .insert(language.clone(), EngineState::Disabled);
             self.clear_language(&language);
         }
+    }
+
+    pub fn document_diagnostic_evidence(
+        &self,
+        document: &LspDocument,
+    ) -> std::result::Result<BrokerDocumentEvidence, DiagnosticEvidenceUnavailable> {
+        let reason = if !self.settings.language_enabled(&document.language) {
+            Some(DiagnosticNonparticipation::Disabled)
+        } else if !self.project_languages.contains(&document.language) {
+            Some(DiagnosticNonparticipation::Inactive)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Ok(BrokerDocumentEvidence::NotParticipating {
+                settings: self.settings.clone(),
+                settings_unavailable: self.settings_unavailable.clone(),
+                reason,
+            });
+        }
+        let adapter = self
+            .adapters
+            .iter()
+            .find(|adapter| adapter.language == document.language)
+            .ok_or(DiagnosticEvidenceUnavailable::SourceUnavailable)?;
+        let root = canonicalize_project_root(&self.project_root)
+            .map_err(|_| DiagnosticEvidenceUnavailable::DocumentIdentityInvalid)?;
+        let path = root.join(&document.relative_path);
+        let uri = document
+            .snapshot
+            .as_ref()
+            .map_or_else(|| file_uri(&path), |snapshot| snapshot.uri.clone());
+        let identity = document_identity(&path, &uri)
+            .ok_or(DiagnosticEvidenceUnavailable::DocumentIdentityInvalid)?;
+        let workspace_root = match adapter_workspace_root_from_canonical_root(
+            &root,
+            adapter,
+            &document.relative_path,
+        ) {
+            Some(workspace_root) => workspace_root,
+            None => root,
+        };
+        let key = LspSessionKey {
+            language: document.language.clone(),
+            command: self
+                .settings
+                .command_for(&document.language, &adapter.command),
+            workspace_root,
+        };
+        let client = self
+            .clients
+            .get(&key)
+            .ok_or(DiagnosticEvidenceUnavailable::SourceUnavailable)?;
+        client
+            .documents
+            .read_committed(&identity, &uri, document, |coverage| {
+                BrokerDocumentEvidence::Published {
+                    settings: self.settings.clone(),
+                    settings_unavailable: self.settings_unavailable.clone(),
+                    coverage: coverage.clone(),
+                    diagnostics: self
+                        .diagnostics
+                        .iter()
+                        .filter(|finding| {
+                            finding.language == document.language
+                                && finding.file == document.relative_path
+                        })
+                        .cloned()
+                        .collect(),
+                }
+            })
     }
 
     pub fn cache_diagnostic(&mut self, diagnostic: CodeDiagnostic) {
@@ -918,9 +1110,25 @@ impl DiagnosticBroker {
         self.coverage.remove(language);
     }
 
+    fn remove_all_clients(&mut self) {
+        for epoch in self.refresh_epochs.values_mut() {
+            *epoch = epoch.saturating_add(1);
+        }
+        for client in self.clients.values() {
+            client.documents.retire(None);
+        }
+        self.clients.clear();
+    }
+
     fn remove_language_clients(&mut self, language: &str) {
-        self.clients
-            .retain(|key, _| key.language.as_str() != language);
+        self.clients.retain(|key, client| {
+            if key.language == language {
+                client.documents.retire(None);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     fn next_refresh_epoch(&mut self, language: &str) -> u64 {

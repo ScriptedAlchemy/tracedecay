@@ -18,7 +18,7 @@ use tracedecay_domain::feedback::{
     GitHubReviewAuthorClassV1, GitHubReviewCommentIdV1, GitHubReviewIdV1,
     GitHubReviewImmutableAnchorV1, GitHubReviewLifecycleV1, GitHubReviewStateV1,
     GitHubReviewThreadIdV1, ProximityAddressV1, ProximityCoverageV1, ProximityRelationPathV1,
-    ProximityRiskInputsV1, ProximityWarningClassV1,
+    ProximityWarningClassV1,
 };
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CommitId, ManifestDigest, RetrievalAnchorId, SessionId,
@@ -136,9 +136,7 @@ pub struct AdvisoryProximityFixtureEvidenceV1 {
     pub encounter: FeedbackProximityEncounterV1,
     pub address: ProximityAddressV1,
     pub relation_paths: Vec<ProximityRelationPathV1>,
-    pub risk_inputs: ProximityRiskInputsV1,
     pub warning_class: ProximityWarningClassV1,
-    pub raw_risk_basis_points: u16,
     pub observed_at: UtcMicros,
     pub expires_at: UtcMicros,
     pub coverage: ProximityCoverageV1,
@@ -177,9 +175,7 @@ impl AdvisorySourceBackedCompositeFixtureV1 {
             encounter: evidence.encounter,
             address: evidence.address,
             relation_paths: evidence.relation_paths,
-            risk_inputs: evidence.risk_inputs,
             warning_class: evidence.warning_class,
-            raw_risk_basis_points: evidence.raw_risk_basis_points,
             observed_at: evidence.observed_at,
             expires_at: evidence.expires_at,
             coverage: evidence.coverage,

@@ -643,10 +643,21 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         |(emitted, suppressed)| emitted == 1 && suppressed >= 1,
     );
     let after_mount = intent_outcomes(&log, ENABLED_SESSION)[before + 1..].to_vec();
+    // Retained stop attempts may truthfully finish unavailable before their
+    // replay succeeds. The retry loop above already requires an explicit
+    // retryable receipt for every repeated stop; the settled pass must still
+    // suppress the delivered suggestion.
+    assert_eq!(
+        after_mount.last().map(String::as_str),
+        Some("suppressed"),
+        "the settled stop intent pass must suppress its delivered suggestion: {after_mount:?}"
+    );
     assert!(
-        !after_mount.is_empty() && after_mount.iter().all(|outcome| outcome == "suppressed"),
-        "the stop boundary's own intent pass withholds the suggestion it just delivered: \
-         {after_mount:?}"
+        after_mount.iter().all(|outcome| {
+            outcome == "suppressed" || (outcome == "unavailable" && stop_outputs.len() > 1)
+        }),
+        "only a stop with verified retryable admission may recover from unavailable before \
+         suppressing the delivered suggestion: {after_mount:?}"
     );
     assert_eq!(
         hint_counts(home, &project, YES_INTENT).0,
