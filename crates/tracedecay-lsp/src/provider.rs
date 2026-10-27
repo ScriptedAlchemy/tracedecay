@@ -401,8 +401,17 @@ pub enum DiagnosticSnapshotOutcome {
     },
 }
 
+/// Currentness of a retained report, checked against its canonical authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiagnosticSnapshotValidation {
+    Current,
+    Changed,
+    Pending(DiagnosticRefreshIdentity),
+    Failed { failure_class: String },
+}
+
 /// Port implemented by a daemon/application adapter. It is a read projection;
-/// no diagnostic record is owned or persisted by the gateway. Refresh methods
+/// the session retains admitted reports only for its ephemeral lifetime. Refresh methods
 /// are non-blocking: the provider starts canonical upstream/compiler work and
 /// later reports `Ready` with the matching completed operation identity.
 /// Unsaved overlays are ephemeral inputs and must never be persisted by the
@@ -425,6 +434,27 @@ pub trait DiagnosticSnapshotPort {
         DiagnosticRefreshAdmission::Rejected {
             failure_class: "refresh-unsupported".to_owned(),
         }
+    }
+
+    fn validate_document_snapshot(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _overlay: Option<&OverlaySnapshot>,
+        _snapshot: &GenerationDiagnostics,
+    ) -> DiagnosticSnapshotValidation {
+        DiagnosticSnapshotValidation::Changed
+    }
+
+    /// Releases one refresh's result ownership and requests task cancellation.
+    /// A successful retirement does not prove accepted analyzer work has stopped.
+    fn retire_document_refresh(
+        &self,
+        _root: &AdmittedRoot,
+        _document_uri: &str,
+        _operation_id: &str,
+    ) -> bool {
+        false
     }
 
     fn supports_workspace_diagnostics(&self) -> bool {
@@ -476,6 +506,25 @@ where
         source_generation: Option<u64>,
     ) -> DiagnosticRefreshAdmission {
         (**self).request_document_refresh(root, document_uri, overlay, source_generation)
+    }
+
+    fn validate_document_snapshot(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+        snapshot: &GenerationDiagnostics,
+    ) -> DiagnosticSnapshotValidation {
+        (**self).validate_document_snapshot(root, document_uri, overlay, snapshot)
+    }
+
+    fn retire_document_refresh(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        operation_id: &str,
+    ) -> bool {
+        (**self).retire_document_refresh(root, document_uri, operation_id)
     }
 
     fn supports_workspace_diagnostics(&self) -> bool {

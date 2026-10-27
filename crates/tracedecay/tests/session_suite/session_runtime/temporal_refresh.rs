@@ -17,7 +17,7 @@ use tracedecay_session_temporal_store::{
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::PoisonError;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -1178,9 +1178,9 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
 }
 
 struct PanicOnceProjector {
-    calls: std::sync::atomic::AtomicUsize,
-    retry_started: Arc<tokio::sync::Notify>,
-    resume_retry: Arc<tokio::sync::Notify>,
+    panicked: AtomicBool,
+    retry_started: tokio::sync::Notify,
+    release_retry: tokio::sync::Notify,
 }
 
 impl SessionTemporalRefreshProjector for PanicOnceProjector {
@@ -1189,15 +1189,11 @@ impl SessionTemporalRefreshProjector for PanicOnceProjector {
         _database: &'a RegisteredGlobalDbLeaseV1,
         recovery: SessionRefreshRecoveryV1,
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        let should_panic = !self.panicked.swap(true, Ordering::AcqRel);
         Box::pin(async move {
-            let call = self.calls.fetch_add(1, Ordering::AcqRel);
-            assert_ne!(call, 0, "injected refresh worker panic");
-            // Hold the first recovery invocation for observation; subsequent
-            // storage retries must not wait for a second test-owned release.
-            if call == 1 {
-                self.retry_started.notify_one();
-                self.resume_retry.notified().await;
-            }
+            assert!(!should_panic, "injected refresh worker panic");
+            self.retry_started.notify_one();
+            self.release_retry.notified().await;
             Ok(empty_projection_effect(&recovery))
         })
     }
@@ -1209,16 +1205,15 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
     let authority =
         registered_test_database(&temp, "worker-recovery", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    let retry_started = Arc::new(tokio::sync::Notify::new());
-    let resume_retry = Arc::new(tokio::sync::Notify::new());
     let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let projector = Arc::new(PanicOnceProjector {
+        panicked: AtomicBool::new(false),
+        retry_started: tokio::sync::Notify::new(),
+        release_retry: tokio::sync::Notify::new(),
+    });
     configure_scheduler(
         &mut registry,
-        Arc::new(PanicOnceProjector {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            retry_started: Arc::clone(&retry_started),
-            resume_retry: Arc::clone(&resume_retry),
-        }),
+        projector.clone(),
         SessionTemporalRefreshPolicy::default(),
     );
     let wake = authority.ensure_profile(&registry).await;
@@ -1227,18 +1222,30 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         .await
         .unwrap();
     assert!(wake.wake());
-    let restarted = tokio::time::timeout(Duration::from_secs(1), retry_started.notified()).await;
-    // Inspect a held recovery pass, not the short backoff before it starts.
-    // Replacing a task has not recovered its durable backlog yet.
+    // Hold the replacement in its first projection. Observing recovery must
+    // not depend on polling within the supervisor's 25 ms backoff window.
+    let restarted =
+        tokio::time::timeout(Duration::from_secs(1), projector.retry_started.notified()).await;
     let recovering = registry.profile_worker_status(db.db_path()).await;
-    resume_retry.notify_one();
-    restarted.expect("the supervisor should restart the panicked worker");
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        registry.wait_profile_idle(db.db_path()),
+    projector.release_retry.notify_one();
+    let drained = tokio::time::timeout(Duration::from_secs(1), async {
+        registry.wait_profile_idle(db.db_path()).await;
+        let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
+        let running = store.running_session_refreshes().await;
+        let recovered = registry.profile_worker_status(db.db_path()).await;
+        (running, recovered)
+    })
+    .await;
+    let before_shutdown = registry.profile_worker_status(db.db_path()).await;
+    // Shut down lease-owning workers before evaluating the recovery assertions.
+    let stopped = tokio::time::timeout(
+        tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE + Duration::from_secs(1),
+        registry.shutdown(),
     )
-    .await
-    .expect("the restarted worker should drain its recovered backlog");
+    .await;
+
+    stopped.expect("worker shutdown should settle before releasing its database fixture");
+    restarted.expect("the supervisor should restart the panicked worker");
     assert_eq!(
         recovering.unavailable_reason,
         Some(SessionTemporalRefreshUnavailableReason::Stalled)
@@ -1252,15 +1259,15 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         recovering.retry_class,
         Some(SessionTemporalRefreshRetryClass::Projector)
     );
-    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
-    assert!(store.running_session_refreshes().await.unwrap().is_empty());
-    let recovered = registry.profile_worker_status(db.db_path()).await;
+    let (running, recovered) = drained.unwrap_or_else(|error| {
+        panic!("restarted worker did not drain its backlog: {error}; {before_shutdown:?}");
+    });
+    assert!(running.unwrap().is_empty());
     assert!(recovered.is_available());
     assert_eq!(recovered.backlog, 0);
     assert_eq!(recovered.blocker, None);
     assert_eq!(recovered.retry_class, None);
     assert!(recovered.last_progress_at_unix_micros.is_some());
-    registry.shutdown().await;
 }
 
 struct PendingProjector;

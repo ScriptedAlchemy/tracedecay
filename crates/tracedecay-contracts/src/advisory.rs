@@ -26,10 +26,9 @@ pub use tracedecay_domain::feedback::{
     GitHubReviewReadOperationV1, GitHubReviewRemapStateV1, GitHubReviewStateV1,
     GitHubReviewThreadIdV1, MAX_CI_FAILURE_CALLER_EVIDENCE_V1, MAX_CI_FAILURE_RERUN_HINTS_V1,
     MAX_CI_FAILURE_TEST_EVIDENCE_V1, PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1, ProximityAddressV1,
-    ProximityBranchWorktreeIncompatibilityV1, ProximityContributionIdV1, ProximityContributionV1,
-    ProximityCoverageV1, ProximityInclusionV1, ProximityObservationIdV1,
-    ProximityRelationPathKindV1, ProximityRelationPathV1, ProximityRelationStrengthV1,
-    ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1,
+    ProximityContributionIdV1, ProximityContributionV1, ProximityCoverageV1, ProximityInclusionV1,
+    ProximityObservationIdV1, ProximityRelationPathKindV1, ProximityRelationPathV1,
+    ProximityWarningClassV1,
 };
 
 /// The window of one advisory cycle. It opens when the cycle starts and
@@ -232,8 +231,12 @@ impl AdvisoryFindingContributorV1 for ProximityContributionV1 {
                         symbol: address.symbol.clone(),
                         code: "agent-proximity".to_owned(),
                         severity: DiagnosticSeverityV1::Warning,
-                        safe_bounded_message: "Concurrent agent activity overlaps this code"
-                            .to_owned(),
+                        safe_bounded_message: if self.warning_class.is_exact_overlap() {
+                            "Concurrent agent activity overlaps this code"
+                        } else {
+                            "Concurrent agent activity is related to this code"
+                        }
+                        .to_owned(),
                         producer: FeedbackDiagnosticProducerV1::Proximity,
                         code_description_uri: None,
                     })

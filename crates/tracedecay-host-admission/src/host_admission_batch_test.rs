@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::num::NonZeroUsize;
 use std::process::Command;
 use std::sync::Arc;
@@ -18,9 +19,18 @@ use tracedecay_domain::{
 use tracedecay_global_db::tests::harness::{HostAdmissionTestRuntimeV1, writer_telemetry};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::resident_memory::{
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
+};
 use tracedecay_sessions::admission::{HostAdmission, HostAdmissionScope};
+use tracedecay_sessions::runtime::hosts::codex::{
+    CodexDiscoveryHub, codex_observation_source_v2,
+    try_admit_codex_jsonl_observations_for_profile_with_admission,
+};
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationPersistOutcome, ObservationWrite,
+    AnchoredObservationWrite, ObservationCoverageReason, ObservationCursorAdvance,
+    ObservationPersistOutcome, ObservationReplayRequest, ObservationWrite,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
     runtime::DEFAULT_MAX_READERS_PER_HOT_SHARD,
 };
@@ -181,6 +191,408 @@ async fn empty_capture_batch_opens_no_writer_transaction() {
         .unwrap();
     assert!(outcomes.is_empty());
     assert_eq!(committed_transactions(database), before);
+}
+
+#[asupersync::test]
+async fn exact_parse_offset_replacement_keeps_an_unordered_fingerprint_and_foreign_winner() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, _) = profile_facade(&runtime);
+    let scope = ObservationScopeV1::Profile;
+    let key = "host-frontier://claude/refused";
+    let first = ParseOffset {
+        byte_offset: 100,
+        mtime: 900,
+        file_id: 7,
+    };
+    let later = ParseOffset {
+        byte_offset: 200,
+        mtime: 100,
+        file_id: 7,
+    };
+    HostAdmission::replace_parse_offset(&facade, &scope, key, ParseOffset::default(), first)
+        .await
+        .unwrap();
+    HostAdmission::replace_parse_offset(&facade, &scope, key, first, later)
+        .await
+        .unwrap();
+    assert_eq!(
+        HostAdmission::get_parse_offset(&facade, &scope, key)
+            .await
+            .unwrap(),
+        Some(later)
+    );
+    let stale = HostAdmission::replace_parse_offset(&facade, &scope, key, first, first)
+        .await
+        .unwrap_err();
+    assert_eq!(stale.reason_code, Some("parse_offset_conflict"));
+    assert_eq!(
+        HostAdmission::get_parse_offset(&facade, &scope, key)
+            .await
+            .unwrap(),
+        Some(later)
+    );
+    let foreign = ParseOffset {
+        byte_offset: 50,
+        mtime: u64::MAX,
+        file_id: 8,
+    };
+    HostAdmission::replace_parse_offset(&facade, &scope, key, later, foreign)
+        .await
+        .unwrap();
+    assert_eq!(
+        HostAdmission::replace_parse_offset(&facade, &scope, key, later, first)
+            .await
+            .unwrap_err()
+            .reason_code,
+        Some("parse_offset_conflict")
+    );
+    assert_eq!(
+        HostAdmission::get_parse_offset(&facade, &scope, key)
+            .await
+            .unwrap(),
+        Some(foreign)
+    );
+}
+
+#[asupersync::test]
+async fn jsonl_capture_resumes_after_durable_scope_coverage_through_a_fresh_facade() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path().join("workspace");
+    let registered = tmp.path().join("registered");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&registered).unwrap();
+    let path = tmp.path().join("rollout.jsonl");
+    let session = "session.host-admission.jsonl-coverage";
+    let lines = [
+        json!({"timestamp": "2026-01-01T00:00:00Z", "type": "session_meta",
+            "payload": {"id": session, "cwd": workspace}}),
+        json!({"timestamp": "2026-01-01T00:00:01Z", "type": "turn_context",
+            "payload": {"cwd": registered}}),
+        json!({"timestamp": "2026-01-01T00:00:02Z", "type": "event_msg",
+            "payload": {"type": "user_message", "message": "project-owned message"}}),
+    ];
+    let contents = lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&path, &contents).unwrap();
+    CodexDiscoveryHub::default()
+        .configure_preparation_resources(
+            Arc::new(ProcessResidentMemoryV1::new(
+                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            )),
+            background_cpu_for_host_admission_test(),
+        )
+        .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
+        .await
+        .unwrap();
+    let (facade, database) = profile_facade(&runtime);
+    let roots = [registered];
+    let first = try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &path, None, &roots, &facade, None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.frames_persisted, 1);
+    assert_eq!(first.frames_skipped, 2);
+    let source = codex_observation_source_v2(session).unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let covered = HostAdmission::get_source_cursor(&facade, &source, &scope)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(covered.position(), contents.len() as u64);
+    assert!(covered.resume_fingerprint().is_some());
+    let store = database.observation_store();
+    assert_eq!(
+        store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(facade);
+    let (fresh, _) = profile_facade(&runtime);
+    let settled = try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &path, None, &roots, &fresh, None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(settled.bytes_consumed, 0);
+    assert_eq!(
+        HostAdmission::get_source_cursor(&fresh, &source, &scope)
+            .await
+            .unwrap(),
+        Some(covered)
+    );
+    let appended = [
+        json!({"timestamp": "2026-01-01T00:00:03Z", "type": "turn_context",
+            "payload": {"cwd": workspace}}),
+        json!({"timestamp": "2026-01-01T00:00:04Z", "type": "event_msg",
+            "payload": {"type": "user_message", "message": "profile-owned later message"}}),
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join("\n")
+        + "\n";
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    let resumed = try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &path, None, &roots, &fresh, None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.frames_persisted, 2);
+    assert_eq!(resumed.bytes_consumed, appended.len() as u64);
+    assert_eq!(
+        HostAdmission::get_source_cursor(&fresh, &source, &scope)
+            .await
+            .unwrap()
+            .unwrap()
+            .position(),
+        (contents.len() + appended.len()) as u64
+    );
+    assert_eq!(
+        store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    let mut previous = HostAdmission::get_source_cursor(&fresh, &source, &scope)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut saw_lower_fingerprint = false;
+    for ordinal in 0..16 {
+        let line = format!(
+            "{}\n",
+            json!({"timestamp": "2026-01-01T00:00:05Z", "type": "event_msg",
+                "payload": {"type": "user_message", "message": format!("append {ordinal}")}})
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+        let pass = try_admit_codex_jsonl_observations_for_profile_with_admission(
+            &path, None, &roots, &fresh, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pass.frames_persisted, 1);
+        let current = HostAdmission::get_source_cursor(&fresh, &source, &scope)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.position(), previous.position() + line.len() as u64);
+        assert_eq!(current.generation(), previous.generation());
+        if current.resume_fingerprint().unwrap() < previous.resume_fingerprint().unwrap() {
+            saw_lower_fingerprint = true;
+            break;
+        }
+        previous = current;
+    }
+    assert!(
+        saw_lower_fingerprint,
+        "the actual byte-frontier must commit even when its prefix fingerprint decreases"
+    );
+}
+
+#[asupersync::test]
+async fn refused_record_coverage_conflict_cannot_authorize_a_later_capture() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, database) = profile_facade(&runtime);
+    let session = SessionId::new("session.host-admission.coverage-conflict").unwrap();
+    let mut requests = sequential_capture_requests(&session, 3);
+    let first = requests.remove(0);
+    let source = first.identity().source().clone();
+    let scope = first.scope().clone();
+    let generation = first.identity().generation();
+    let original = HostAdmission::capture_observation(&facade, first)
+        .await
+        .unwrap();
+    let original_id = match original {
+        CaptureObservationOutcome::Persisted { outcome, .. }
+        | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
+            outcome.receipt().observation().observation_id().clone()
+        }
+        other => panic!("first record must persist: {other:?}"),
+    };
+    let before = HostAdmission::get_source_cursor(&facade, &source, &scope)
+        .await
+        .unwrap();
+    let refused_range = requests.remove(0).identity().position();
+    let later = requests.remove(0);
+    let advance = ObservationCursorAdvance::for_ordering(
+        source.clone(),
+        scope.clone(),
+        generation,
+        ObservationOrderingDomainV1::FileBytes,
+        before.clone(),
+        refused_range,
+        ObservationCoverageReason::AdmissionRefused,
+    )
+    .unwrap();
+    let source_json = serde_json::to_string(&source).unwrap();
+    let scope_json = serde_json::to_string(&scope).unwrap();
+    let coverage_json = serde_json::to_string(&advance.coverage()).unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "INSERT INTO source_cursor_advances
+         (source_json, scope_json, coverage_json, reason, receipt_id)
+         VALUES (?1, ?2, ?3, 'blank_frame', NULL)",
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                coverage_json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let failed = facade
+        .advance_non_durable_source_cursor(advance.clone(), ObservationCancellation::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failed.reason_code,
+        Some("observation_cursor_advance_ledger_disagreement")
+    );
+    assert!(!failed.retryable);
+    assert_eq!(
+        HostAdmission::get_source_cursor(&facade, &source, &scope)
+            .await
+            .unwrap(),
+        before
+    );
+    let later_error = HostAdmission::capture_observation(&facade, later)
+        .await
+        .unwrap_err();
+    assert_eq!(later_error.reason_code, Some("cursor_conflict"));
+    let store = database.observation_store();
+    let retained = store.get_observation(&original_id).await.unwrap().unwrap();
+    assert_eq!(
+        store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT reason FROM source_cursor_advances
+         WHERE source_json = ?1 AND scope_json = ?2 AND coverage_json = ?3",
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                coverage_json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "blank_frame"
+    );
+    drop(rows);
+    drop(snapshot);
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    let mut rows = transaction
+        .query(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'source_cursor_advances_immutable_delete_v1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let delete_guard = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    drop(rows);
+    transaction
+        .execute_batch("DROP TRIGGER source_cursor_advances_immutable_delete_v1")
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "DELETE FROM source_cursor_advances
+         WHERE source_json = ?1 AND scope_json = ?2 AND coverage_json = ?3",
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                coverage_json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.execute_batch(&delete_guard).await.unwrap();
+    transaction.commit().await.unwrap();
+    facade
+        .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
+        .await
+        .unwrap();
+    let last = sequential_capture_requests(&session, 3).remove(2);
+    let end = last.identity().position().end();
+    let captured = HostAdmission::capture_observation(&facade, last)
+        .await
+        .unwrap();
+    assert!(matches!(
+        captured,
+        CaptureObservationOutcome::Persisted { .. }
+            | CaptureObservationOutcome::AcceptedForReplay { .. }
+    ));
+    assert_eq!(
+        HostAdmission::get_source_cursor(&facade, &source, &scope)
+            .await
+            .unwrap()
+            .unwrap()
+            .position(),
+        end
+    );
+    assert_eq!(
+        store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        store.get_observation(&original_id).await.unwrap().unwrap(),
+        retained
+    );
 }
 
 #[asupersync::test]

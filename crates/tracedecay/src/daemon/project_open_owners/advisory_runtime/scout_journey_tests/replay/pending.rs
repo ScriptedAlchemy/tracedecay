@@ -29,22 +29,22 @@ use super::{mount_intent, registered_fixture};
 
 #[tokio::test]
 async fn pending_stop_replay_claims_its_mounted_intent_before_feedback_settles() {
-    pending_stop_delivers_once(false, None).await;
+    Box::pin(pending_stop_delivers_once(false, None)).await;
 }
 
 #[tokio::test]
 async fn pending_stop_retry_reuses_its_retained_claim_before_feedback_settles() {
-    pending_stop_delivers_once(true, None).await;
+    Box::pin(pending_stop_delivers_once(true, None)).await;
 }
 
 #[tokio::test]
 async fn pending_stop_rejects_a_retained_claim_after_configuration_advances() {
-    pending_stop_delivers_once(true, Some(false)).await;
+    Box::pin(pending_stop_delivers_once(true, Some(false))).await;
 }
 
 #[tokio::test]
 async fn completed_stop_rejects_a_retained_claim_after_configuration_advances() {
-    pending_stop_delivers_once(true, Some(true)).await;
+    Box::pin(pending_stop_delivers_once(true, Some(true))).await;
 }
 
 async fn pending_stop_delivers_once(

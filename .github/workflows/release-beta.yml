@@ -139,7 +139,7 @@ jobs:
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.15.1"
+          python-version: "3.15.2"
 
       - name: Install the locked-inventory YAML reader
         run: python3 -m pip install pyyaml==6.0.2
@@ -154,13 +154,13 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/actions/package-release
+            .github/actions/build-cli
             .github/actions/setup-bazel
             scripts/generate-release-inventory.py
           sparse-checkout-cone-mode: false
 
-      # Fleet setup comes from this workflow revision even when rebuilding an
-      # older tag whose build-cli action predates macOS remote execution.
       - name: Set up Bazel for release builds
+        id: bazel
         uses: ./.release-automation/.github/actions/setup-bazel
         with:
           cache-key: release-${{ matrix.target }}
@@ -178,11 +178,12 @@ jobs:
       - name: Build release binary for packaging
         if: matrix.inventory_only != true
         id: cli
-        uses: ./.github/actions/build-cli
+        uses: ./.release-automation/.github/actions/build-cli
         with:
           config: dist
           dest: target/${{ matrix.target }}/release
           cache-key: release-${{ matrix.target }}
+          prepared-build: 'true'
 
       - name: Package and verify native archive and MCPB
         if: matrix.inventory_only != true
@@ -231,6 +232,13 @@ jobs:
           name: beta-${{ matrix.name }}
           path: tracedecay-beta-${{ env.RELEASE_TAG }}-${{ matrix.name }}.${{ matrix.archive }}
           if-no-files-found: error
+
+      - name: Save compiled Bazel actions
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.inventory_only != true && steps.bazel.outputs.disk-cache-key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
 
   publish:
     needs: [validate, build]
@@ -292,7 +300,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: needs.validate.outputs.build_required == 'true'
         with:
-          python-version: "3.15.1"
+          python-version: "3.15.2"
 
       - name: Install the locked-inventory YAML reader
         if: needs.validate.outputs.build_required == 'true'

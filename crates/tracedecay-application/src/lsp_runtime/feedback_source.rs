@@ -14,7 +14,7 @@ use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackDiagnosticProducerV1, FeedbackFindingLifecycleV1,
     FeedbackFindingV1,
 };
-use tracedecay_domain::{ContentDigest, UtcMicros};
+use tracedecay_domain::{ContentDigest, ManifestDigest, UtcMicros};
 use tracedecay_lsp::{
     AdmittedRoot, CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
     ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
@@ -505,6 +505,21 @@ impl FeedbackCycleRuntimePort for ConcreteFeedbackLspSource {
 }
 
 impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
+    fn current_authority(
+        &self,
+        request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+        let source = self.clone();
+        Box::pin(async move {
+            let scope = source
+                .scope
+                .resolve(request.root.clone(), Some(request.document_uri.clone()))
+                .await?;
+            crate::lsp_support::validate_managed_diagnostic_scope(&request, &scope)?;
+            crate::lsp_support::managed_diagnostic_authority_digest(&scope)
+        })
+    }
+
     fn snapshot(
         &self,
         request: CanonicalDiagnosticRefreshRequest,

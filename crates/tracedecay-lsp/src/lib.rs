@@ -78,14 +78,14 @@ pub use context::{
     TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_CONTEXT_REVISION, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 pub use diagnostics::{
-    DiagnosticMerge, DiagnosticSource, DocumentDiagnosticReport, GatewayDiagnostic,
-    GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
+    DiagnosticMerge, DiagnosticProjectionError, DiagnosticSource, DocumentDiagnosticReport,
+    GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
     GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
     GatewayDiagnosticRelatedInformation, LspPosition, LspRange, MAX_DIAGNOSTIC_MESSAGE_BYTES,
     MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,
     MAX_DIAGNOSTIC_URI_BYTES, MAX_DOCUMENT_DIAGNOSTICS, PositionError,
     TRACEDECAY_DIAGNOSTIC_DATA_REVISION, byte_offset_to_utf16_position, merge_diagnostics,
-    utf16_position_to_byte_offset,
+    project_upstream_diagnostics, utf16_position_to_byte_offset,
 };
 pub use framing::{
     AsyncContentLengthError, ContentLengthCodec, ContentLengthCodecError, MAX_LSP_HEADER_BYTES,
@@ -126,8 +126,8 @@ pub use provider::{
     AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,
     AnalyzerSupervisor, AnalyzerTransitionError, DiagnosticRefreshAdmission,
     DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort,
-    GenerationDiagnostics, MAX_ANALYZER_RESTARTS, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
-    UnavailableDiagnosticSnapshotProvider,
+    DiagnosticSnapshotValidation, GenerationDiagnostics, MAX_ANALYZER_RESTARTS,
+    MAX_DIAGNOSTIC_OPERATION_ID_BYTES, UnavailableDiagnosticSnapshotProvider,
 };
 pub use session::{
     AuthorizedLspSession, AuthorizedLspWorkspace, CancellationOutcome, CompletionDisposition,

@@ -448,19 +448,19 @@ async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
     );
 }
 
-async fn request_lsp_with_retrigger(
+async fn request_lsp_navigation(
     session: &mut DaemonLspSessionClient,
     request_id: u64,
     method: &str,
     params: Value,
 ) -> Value {
-    // A warming analyzer replies with ServerCancelled and retriggerRequest.
-    // Respect that client-facing signal after reconnect as well as initial
-    // startup, while keeping every attempt inside one 90-second budget.
+    // Initial and reconnected clients must follow the analyzer's explicit
+    // retrigger signal. Bound the whole exchange, including frame polling,
+    // so repeated cancellation cannot turn into an unbounded readiness wait.
     tokio::time::timeout(std::time::Duration::from_secs(90), async {
         let mut attempt = 0_u64;
         loop {
-            // The gateway rejects duplicate request ids, including retriggers.
+            // The gateway rejects duplicate request IDs within a session.
             let attempt_id = request_id + attempt * 10_000;
             send_lsp(
                 session,
@@ -473,9 +473,8 @@ async fn request_lsp_with_retrigger(
             )
             .await;
             let response = poll_lsp_response(session, attempt_id).await;
-            if !response["error"]["data"]["retriggerRequest"]
-                .as_bool()
-                .unwrap_or(false)
+            if response["error"]["code"].as_i64() != Some(-32802)
+                || response["error"]["data"]["retriggerRequest"].as_bool() != Some(true)
             {
                 return response;
             }
@@ -484,7 +483,7 @@ async fn request_lsp_with_retrigger(
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("daemon LSP {method} request {request_id} timed out after 90s"))
+    .unwrap_or_else(|_| panic!("{method} did not return a terminal navigation response within 90s"))
 }
 
 async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
@@ -2662,7 +2661,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             }),
         ),
     ] {
-        let navigation = request_lsp_with_retrigger(&mut session, request_id, method, params).await;
+        let navigation = request_lsp_navigation(&mut session, request_id, method, params).await;
         assert!(
             navigation.get("result").is_some(),
             "{method} must return a standard LSP result: {navigation}"
@@ -3233,7 +3232,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         .reconnect(deadline, cancellation)
         .await
         .expect("reconnect production LSP session");
-    let after_reconnect = request_lsp_with_retrigger(
+    let after_reconnect = request_lsp_navigation(
         &mut session,
         701,
         "textDocument/documentSymbol",

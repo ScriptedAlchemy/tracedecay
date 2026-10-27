@@ -23,6 +23,12 @@ pub(super) struct PublicationTag {
     pub(super) generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PublicationRejection {
+    Discarded,
+    Backpressured,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct QueuedFrame {
     pub(super) payload: LspFrame,
@@ -181,16 +187,18 @@ where
         true
     }
 
-    pub(super) fn enqueue_publication(&mut self, value: Value, tag: PublicationTag) -> bool {
+    pub(super) fn enqueue_publication(
+        &mut self,
+        value: Value,
+        tag: PublicationTag,
+    ) -> Result<(), PublicationRejection> {
         let Ok(payload) = serde_json::to_vec(&value) else {
-            return false;
+            return Err(PublicationRejection::Discarded);
         };
         if payload.len() > MAX_PUBLICATION_BYTES {
-            return false;
+            return Err(PublicationRejection::Discarded);
         }
-        if self.publication_replacement(&payload, &tag).is_err() {
-            return false;
-        }
+        self.publication_replacement(&payload, &tag)?;
         match self.lifecycle.control.admit_payload_publication(
             tag.uri.clone(),
             tag.version,
@@ -198,12 +206,18 @@ where
             &payload,
         ) {
             PublicationAdmission::Accepted => {}
-            PublicationAdmission::Duplicate | PublicationAdmission::Stale => return false,
-            PublicationAdmission::TooLarge { .. } | PublicationAdmission::SessionUnavailable => {
-                return false;
+            PublicationAdmission::Duplicate
+            | PublicationAdmission::Stale
+            | PublicationAdmission::TooLarge { .. }
+            | PublicationAdmission::SessionUnavailable => {
+                return Err(PublicationRejection::Discarded);
             }
         }
-        self.enqueue_frame(payload, Some(tag), None)
+        if self.enqueue_frame(payload, Some(tag), None) {
+            Ok(())
+        } else {
+            Err(PublicationRejection::Backpressured)
+        }
     }
 
     pub(super) fn enqueue_frame(
@@ -258,7 +272,7 @@ where
         &self,
         payload: &[u8],
         tag: &PublicationTag,
-    ) -> Result<Option<usize>, ()> {
+    ) -> Result<Option<usize>, PublicationRejection> {
         let replacement = self
             .outbound
             .queue
@@ -276,12 +290,15 @@ where
             .and_then(|index| self.outbound.queue.get(index))
             .map_or(0, |frame| frame.payload.len());
         if let Some(index) = replacement {
-            let existing = self.outbound.queue[index].publication.as_ref().ok_or(())?;
+            let existing = self.outbound.queue[index]
+                .publication
+                .as_ref()
+                .ok_or(PublicationRejection::Discarded)?;
             if (tag.version, tag.generation) < (existing.version, existing.generation)
                 || ((tag.version, tag.generation) == (existing.version, existing.generation)
                     && self.outbound.queue[index].payload == payload)
             {
-                return Err(());
+                return Err(PublicationRejection::Discarded);
             }
         }
         let projected_messages = self.outbound.queue.len() + usize::from(replacement.is_none());
@@ -293,14 +310,21 @@ where
         if projected_messages > MAX_ORDINARY_OUTBOUND_MESSAGES
             || projected_bytes > MAX_ORDINARY_OUTBOUND_BYTES
         {
-            return Err(());
+            return Err(PublicationRejection::Backpressured);
         }
         Ok(replacement)
     }
 
     pub(super) fn discard_document_publications(&mut self, uri: &str) {
         self.discard_document_context(uri);
-        self.diagnostics.active_refreshes.remove(uri);
+        self.invalidate_document_diagnostics(uri);
+        self.discard_queued_document_publications(uri);
+        self.lifecycle.control.remove_publication(uri);
+        self.diagnostics.published.remove(uri);
+    }
+
+    pub(super) fn discard_queued_document_publications(&mut self, uri: &str) {
+        let mut discarded = false;
         let mut retained = VecDeque::with_capacity(self.outbound.queue.len());
         let mut index = 0_usize;
         while let Some(frame) = self.outbound.queue.pop_front() {
@@ -312,6 +336,7 @@ where
                     .as_ref()
                     .is_some_and(|publication| publication.uri == uri)
             {
+                discarded = true;
                 self.outbound.queued_bytes = self
                     .outbound
                     .queued_bytes
@@ -321,8 +346,11 @@ where
             }
         }
         self.outbound.queue = retained;
-        self.lifecycle.control.remove_publication(uri);
-        self.diagnostics.published.remove(uri);
+        if discarded {
+            // A dropped queue entry was never acknowledged; a fresh identical
+            // report still needs delivery. Preserve already acknowledged dedupe.
+            self.lifecycle.control.remove_publication(uri);
+        }
     }
 
     pub(super) fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {

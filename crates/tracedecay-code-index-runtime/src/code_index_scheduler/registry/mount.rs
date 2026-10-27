@@ -3671,7 +3671,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ReconcilePanicDecisionV1::RetryAfter(delay) => {
                                     tracing::warn!(
                                         event = "code_index_reconcile_panicked",
-                                        path = "background_worker",
+                                        path = %worker_project_root.display(),
                                         consecutive_panics = panic_guard.consecutive_panics(),
                                         error = %error,
                                         "code-index background reconcile panicked; retrying the same input with backoff"
@@ -3680,10 +3680,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                 }
                                 ReconcilePanicDecisionV1::Quarantine => tracing::warn!(
                                     event = "code_index_reconcile_quarantined",
-                                    path = "background_worker",
+                                    path = %worker_project_root.display(),
                                     consecutive_panics = panic_guard.consecutive_panics(),
                                     error = %error,
-                                    "code-index background reconcile is quarantined after repeated panics; changed input or a progressing pass resumes it"
+                                    "code-index background reconcile is quarantined after repeated panics; only changed input resumes it"
                                 ),
                             }
                         }
