@@ -233,6 +233,15 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     history_admission: Arc<tokio::sync::Semaphore>,
     policy: SessionTemporalRefreshPolicy,
 ) {
+    // A Blocked outcome is terminal per host (for example
+    // `projection_store_corrupt`, retryable=false upstream): the same pass
+    // over the same broken store re-fails identically on every wake. Back
+    // the history pass off exponentially instead of re-reading the store at
+    // full cadence; any progressing pass clears it.
+    const BLOCKED_HISTORY_BACKOFF_FLOOR: Duration = Duration::from_secs(60);
+    const BLOCKED_HISTORY_BACKOFF_CAP: Duration = Duration::from_secs(60 * 60);
+    let mut blocked_history_attempts = 0u32;
+    let mut blocked_history_until: Option<Instant> = None;
     let mut retry_attempt = 0u32;
     let mut summary_retry_attempt = 0u32;
     let mut summary_recheck = false;
@@ -276,10 +285,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
             // A granted turn this iteration does not spend on history is
             // returned before the summary page queues for a permit of its own.
+            let history_suppressed = history_requested
+                && blocked_history_until.is_some_and(|until| Instant::now() < until);
             let granted = granted_history_admission
                 .take()
-                .filter(|_| history_requested);
-            let history_outcome = if history_requested {
+                .filter(|_| history_requested && !history_suppressed);
+            let history_outcome = if history_requested && !history_suppressed {
                 let history_pass: Pin<Box<dyn Future<Output = HistoryPassReport> + Send + '_>> =
                     Box::pin(session_history_refresh(
                         &history,
@@ -321,7 +332,25 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     );
                 }
                 Some(SessionHistoricalIngestOutcome::Blocked { reason_code, .. }) => {
-                    tracing::warn!(reason_code, "retained historical session ingest is blocked");
+                    blocked_history_attempts = blocked_history_attempts.saturating_add(1);
+                    let backoff = BLOCKED_HISTORY_BACKOFF_FLOOR
+                        .saturating_mul(1_u32 << blocked_history_attempts.saturating_sub(1).min(6))
+                        .min(BLOCKED_HISTORY_BACKOFF_CAP);
+                    blocked_history_until = Some(Instant::now() + backoff);
+                    if blocked_history_attempts == 1 {
+                        tracing::error!(
+                            reason_code,
+                            retry_after_secs = backoff.as_secs(),
+                            "retained historical session ingest is blocked; backing off and retrying hourly at most until the store heals or is rebuilt"
+                        );
+                    } else {
+                        tracing::warn!(
+                            reason_code,
+                            attempt = blocked_history_attempts,
+                            retry_after_secs = backoff.as_secs(),
+                            "retained historical session ingest is blocked; history passes back off"
+                        );
+                    }
                 }
                 Some(
                     SessionHistoricalIngestOutcome::Complete
@@ -336,6 +365,20 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             ) || history_outcome
                 .as_ref()
                 .is_some_and(SessionHistoricalIngestOutcome::made_progress);
+            // A pass that made progress does NOT prove the blocked cause
+            // healed: one healthy provider advancing while another stays
+            // blocked reports Blocked { made_progress: true }, and the
+            // blocked provider would be re-read at full cadence again. The
+            // backoff resets only on an outcome with no blocker at all.
+            if history_requires_projection
+                && !matches!(
+                    history_outcome,
+                    Some(SessionHistoricalIngestOutcome::Blocked { .. })
+                )
+            {
+                blocked_history_attempts = 0;
+                blocked_history_until = None;
+            }
             let mut report = if projection_requested
                 || state.has_requests()
                 || history_requires_projection
