@@ -374,15 +374,21 @@ mod runtime_configuration_cutover {
                 .await
                 .unwrap();
 
-            let (_, opened) = crate::config::open_runtime_configuration_for_registered_database(
-                root.path(),
-                &layout,
-                database.clone(),
-            )
-            .await
-            .expect("invalid automation grammar must not refuse ordinary project open")
-            .into_parts();
-            let (runtime, pinned) = ProjectConfigurationRuntime::open(opened).unwrap();
+            let options =
+                crate::project::TraceDecayOpenOptions::for_profile(host_runtime.profile());
+            let initialized = host_runtime
+                .initialize_project_graph_for_test(root.path(), options.clone())
+                .await
+                .expect("invalid automation grammar must not refuse project initialization");
+            initialized.set_tokens_saved(17).await.unwrap();
+            initialized.close();
+            let graph = host_runtime
+                .open_project_graph_for_test(root.path(), options.clone())
+                .await
+                .expect("invalid automation grammar must not refuse ordinary project open");
+            assert_eq!(graph.get_tokens_saved().await.unwrap(), 17);
+            let runtime = graph.configuration_runtime();
+            let pinned = runtime.client().current().await.unwrap();
             assert_eq!(pinned.revision_id(), &revision);
             assert!(matches!(
                 pinned.admitted_automation(),
@@ -478,6 +484,21 @@ mod runtime_configuration_cutover {
                     .len(),
                 1
             );
+            graph.close();
+            let reopened = host_runtime
+                .open_project_graph_read_only_for_test(root.path(), options)
+                .await
+                .expect("read-only project open must observe the repaired configuration");
+            let reopened_pin = reopened
+                .configuration_runtime()
+                .client()
+                .current()
+                .await
+                .unwrap();
+            assert_eq!(reopened_pin.revision_id(), &receipt.result_revision_id);
+            assert!(reopened_pin.admitted_automation().is_ok());
+            assert_eq!(reopened.get_tokens_saved().await.unwrap(), 17);
+            reopened.close();
 
             let sibling_root = TempDir::new().unwrap();
             let sibling_id = ProjectId::new(if enabled {
