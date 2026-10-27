@@ -58,20 +58,26 @@ pub struct CommitContextSurfaceRequestV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrContextSurfaceRequestV1 {
-    /// Base branch or ref to compare against (default: detected repository
-    /// default branch). A short branch name selects the descendant of its
+    /// Compact PR briefing by default; `symbols` requests exact symbol pages.
+    #[serde(default)]
+    pub view: super::PrContextViewV1,
+    /// Select a retained PR number for this checkout when several are known.
+    pub pull_request: Option<u64>,
+    /// Base branch or ref (default: the matching retained PR base, otherwise
+    /// the detected repository default branch). A short branch name selects the descendant of its
     /// local and origin tracking tips; use an explicit ref when they diverge.
     pub base_ref: Option<String>,
     /// Head branch or ref (default: 'HEAD'). Accepts local branches,
     /// remote-tracking refs such as origin/topic, full refs, and Git revision
     /// expressions.
     pub head_ref: Option<String>,
-    /// Cap the symbol, test, and module sections at about this many tokens.
+    /// Approximate whole-result JSON token budget for the brief (default: 4000).
+    /// In symbols view, budgets the existing symbol, test, and module sections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<u32>,
-    /// Maximum symbols returned on this page (default: 200, clamped to 1-500).
+    /// Maximum symbols returned on a symbols-view page (default: 200, clamped to 1-500).
     pub maximum_symbols: Option<u32>,
-    /// Authenticated continuation cursor returned by a previous page.
+    /// Authenticated continuation cursor; accepted only with view `symbols`.
     pub cursor: Option<String>,
 }
 
@@ -714,6 +720,7 @@ pub struct PrContextGraphPendingV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum PrContextResultV1 {
+    Brief(Box<super::PrContextBriefV1>),
     Complete(Box<PrContextCompleteV1>),
     SymbolsUnavailable(Box<PrContextSymbolsUnavailableV1>),
     GraphPending(Box<PrContextGraphPendingV1>),

@@ -767,7 +767,7 @@ async fn pr_context_no_git_returns_structured_git_error() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_pr_context",
-        json!({"base_ref": "HEAD~1", "head_ref": "HEAD"}),
+        json!({"base_ref": "HEAD~1", "head_ref": "HEAD", "view": "symbols"}),
         None,
     )
     .await
@@ -3462,7 +3462,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_pr_context",
-        json!({"base_ref": "base", "head_ref": "HEAD"}),
+        json!({"base_ref": "base", "head_ref": "HEAD", "view": "symbols"}),
         None,
     )
     .await
@@ -3517,7 +3517,8 @@ fn git_with_pinned_dates(dir: &Path, args: &[&str], date: Option<&str>) {
     );
 }
 
-async fn pr_context_json(host: &impl AnalysisToolHost, arguments: Value) -> Value {
+async fn pr_context_json(host: &impl AnalysisToolHost, mut arguments: Value) -> Value {
+    arguments["view"] = json!("symbols");
     let result = handle_tool_call(host, "tracedecay_pr_context", arguments, None)
         .await
         .unwrap_or_else(|error| {
@@ -3736,7 +3737,7 @@ async fn pr_context_reports_the_pinned_feature_summary() {
     let cursor = handle_tool_call(
         &host,
         "tracedecay_pr_context",
-        json!({"format": "json", "base_ref": "master", "head_ref": "feature", "cursor": 1}),
+        json!({"format": "json", "base_ref": "master", "head_ref": "feature", "cursor": 1, "view": "symbols"}),
         None,
     )
     .await;

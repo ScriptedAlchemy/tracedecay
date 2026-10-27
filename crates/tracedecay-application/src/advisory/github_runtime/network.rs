@@ -17,8 +17,8 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use super::dto::{
-    GraphQlCommentPageNodeV1, GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1,
-    RestReviewV1, valid_full_git_oid,
+    GraphQlCommentPageNodeV1, GraphQlResponseV1, RestConversationCommentV1, RestPullRequestV1,
+    RestReviewCommentV1, RestReviewV1, valid_full_git_oid,
 };
 use super::protocol::{
     GitHubLinkPageScopeV1, InvalidGitHubLinkContinuationV1, header, link_next_page,
@@ -868,13 +868,20 @@ impl GitHubReadOnlyClientV1 {
         let Some(page) = page_from_cursor(request.resume.cursor.as_ref()) else {
             return GitHubReadNetworkOutcomeV1::Unavailable;
         };
-        let (suffix, link_page) = match request.descriptor.operation {
-            GitHubReviewReadOperationV1::RestGetPullRequest => (String::new(), None),
+        let (collection, suffix, link_page) = match request.descriptor.operation {
+            GitHubReviewReadOperationV1::RestGetPullRequest => ("pulls", String::new(), None),
             GitHubReviewReadOperationV1::RestListPullRequestReviews => (
+                "pulls",
                 format!("/reviews?per_page={GITHUB_REVIEW_REST_PAGE_SIZE_V1}&page={page}"),
                 Some(page),
             ),
             GitHubReviewReadOperationV1::RestListPullRequestReviewComments => (
+                "pulls",
+                format!("/comments?per_page={GITHUB_REVIEW_REST_PAGE_SIZE_V1}&page={page}"),
+                Some(page),
+            ),
+            GitHubReviewReadOperationV1::RestListPullRequestConversationComments => (
+                "issues",
                 format!("/comments?per_page={GITHUB_REVIEW_REST_PAGE_SIZE_V1}&page={page}"),
                 Some(page),
             ),
@@ -883,10 +890,11 @@ impl GitHubReadOnlyClientV1 {
             }
         };
         let url = format!(
-            "{}/repos/{}/{}/pulls/{}{}",
+            "{}/repos/{}/{}/{}/{}{}",
             self.config.rest_base_uri.trim_end_matches('/'),
             self.target.owner,
             self.target.repository,
+            collection,
             self.target.pull_request_number,
             suffix
         );
@@ -1151,6 +1159,12 @@ impl GitHubReadOnlyClientV1 {
                     }
                     GitHubReviewReadOperationV1::RestListPullRequestReviewComments => {
                         match parse_bounded::<Vec<RestReviewCommentV1>>(&body) {
+                            Some(items) if items.len() <= 100 => (true, Some(items.len())),
+                            _ => (false, None),
+                        }
+                    }
+                    GitHubReviewReadOperationV1::RestListPullRequestConversationComments => {
+                        match parse_bounded::<Vec<RestConversationCommentV1>>(&body) {
                             Some(items) if items.len() <= 100 => (true, Some(items.len())),
                             _ => (false, None),
                         }
@@ -1983,6 +1997,10 @@ mod pagination_contract_tests {
                     node_id: None,
                     state: None,
                     commit_id: None,
+                    user: None,
+                    body: None,
+                    submitted_at: None,
+                    html_url: None,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -2767,6 +2785,8 @@ mod tests {
                 coverage: GitHubReviewCoverageV1::Complete,
                 items: Vec::new(),
                 quarantined: Vec::new(),
+                conversation: Vec::new(),
+                reviews: Vec::new(),
                 pull_request: None,
                 fetched_at: UtcMicros(10),
             },

@@ -343,6 +343,8 @@ where
             resume.etag = None;
         }
         let mut items = BTreeMap::new();
+        let mut conversation = BTreeMap::new();
+        let mut reviews = BTreeMap::new();
         let mut quarantined = BTreeMap::new();
         let mut visited_cursors = std::collections::BTreeSet::new();
         for _ in 0..MAX_GITHUB_REFRESH_SCAN_PAGES_V1 {
@@ -404,8 +406,26 @@ where
                     return GitHubReviewReadPortOutcomeV1::Unavailable;
                 }
             }
+            for comment in response.ingress.conversation.drain(..) {
+                if quarantined.contains_key(comment.comment_id.as_str())
+                    || conversation
+                        .insert(comment.comment_id.as_str().to_owned(), comment)
+                        .is_some()
+                {
+                    return GitHubReviewReadPortOutcomeV1::Unavailable;
+                }
+            }
+            for review in response.ingress.reviews.drain(..) {
+                if reviews
+                    .insert(review.review_id.as_str().to_owned(), review)
+                    .is_some()
+                {
+                    return GitHubReviewReadPortOutcomeV1::Unavailable;
+                }
+            }
             for item in response.ingress.quarantined.drain(..) {
                 if items.contains_key(item.comment_id.as_str())
+                    || conversation.contains_key(item.comment_id.as_str())
                     || quarantined
                         .insert(item.comment_id.as_str().to_owned(), item)
                         .is_some()
@@ -426,17 +446,27 @@ where
                 };
                 continue;
             }
-            if !(items.is_empty() && quarantined.is_empty())
+            if !(items.is_empty()
+                && conversation.is_empty()
+                && reviews.is_empty()
+                && quarantined.is_empty())
                 && response.ingress.outcome != GitHubReviewIngressProviderOutcomeV1::Complete
             {
                 return GitHubReviewReadPortOutcomeV1::Unavailable;
             }
             response.ingress.items = items.into_values().collect();
+            response.ingress.conversation = conversation.into_values().collect();
+            response.ingress.reviews = reviews.into_values().collect();
             response.ingress.quarantined = quarantined.into_values().collect();
             for item in &mut response.ingress.items {
                 item.provider_outcome = response.ingress.outcome;
             }
             response.checkpoint.next_cursor = None;
+            if !visited_cursors.is_empty() {
+                // A page-specific validator cannot revalidate this aggregate
+                // when the next collection scan starts at page one.
+                response.checkpoint.etag = None;
+            }
             return if response.validate_for(request).is_ok() {
                 GitHubReviewReadPortOutcomeV1::Read(Box::new(response))
             } else {
@@ -767,6 +797,8 @@ fn normalize_refresh_attempt(
         }
     }
     let mut items = BTreeMap::new();
+    let mut conversation = BTreeMap::new();
+    let mut reviews = BTreeMap::new();
     let mut quarantined = BTreeMap::new();
     let previous_partial = previous
         .map(|state| &state.latest_attempt)
@@ -779,6 +811,17 @@ fn normalize_refresh_attempt(
             item.provider_outcome = latest.ingress.outcome;
             items.insert(item.comment_id.as_str().to_owned(), item);
         }
+        // A complete scan restarts at page one and owns its entire collection.
+        // Retaining a prior partial row would resurrect removed comments or
+        // reviews and attribute them to the newer complete observation.
+        if latest.ingress.outcome != GitHubReviewIngressProviderOutcomeV1::Complete {
+            for comment in previous_partial.ingress.conversation.clone() {
+                conversation.insert(comment.comment_id.as_str().to_owned(), comment);
+            }
+            for review in previous_partial.ingress.reviews.clone() {
+                reviews.insert(review.review_id.as_str().to_owned(), review);
+            }
+        }
         for item in previous_partial.ingress.quarantined.clone() {
             quarantined.insert(item.comment_id.as_str().to_owned(), item);
         }
@@ -787,7 +830,15 @@ fn normalize_refresh_attempt(
         quarantined.remove(item.comment_id.as_str());
         items.insert(item.comment_id.as_str().to_owned(), item);
     }
+    for comment in latest.ingress.conversation.drain(..) {
+        quarantined.remove(comment.comment_id.as_str());
+        conversation.insert(comment.comment_id.as_str().to_owned(), comment);
+    }
+    for review in latest.ingress.reviews.drain(..) {
+        reviews.insert(review.review_id.as_str().to_owned(), review);
+    }
     for item in latest.ingress.quarantined.drain(..) {
+        conversation.remove(item.comment_id.as_str());
         items.remove(item.comment_id.as_str());
         quarantined.insert(item.comment_id.as_str().to_owned(), item);
     }
@@ -822,6 +873,8 @@ fn normalize_refresh_attempt(
         }
     }
     latest.ingress.items = items.into_values().collect();
+    latest.ingress.conversation = conversation.into_values().collect();
+    latest.ingress.reviews = reviews.into_values().collect();
     latest.ingress.quarantined = quarantined.into_values().collect();
     if previous_partial.is_some() {
         // A collection ETag is specific to the page URL that emitted it.
@@ -926,6 +979,17 @@ pub enum GitHubReviewRefreshOutcomeV1 {
     Denied,
     Stale,
     Unavailable,
+}
+
+impl GitHubReviewRefreshOutcomeV1 {
+    /// A retained refusal is useful status evidence, but must not trigger
+    /// additional provider reads as if the collection refresh succeeded.
+    pub fn has_usable_observation(&self) -> bool {
+        matches!(self, Self::Stored(receipt) if matches!(
+            receipt.state.latest_attempt.ingress.outcome,
+            GitHubReviewIngressProviderOutcomeV1::Complete | GitHubReviewIngressProviderOutcomeV1::Partial
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1268,11 +1332,13 @@ mod tests {
         RequestId, ResolvedScope,
     };
     use tracedecay_domain::feedback::{
-        FeedbackScopeV1, GitHubReviewCoverageV1, GitHubReviewReadOperationV1,
+        FeedbackScopeV1, GitHubConversationCommentV1, GitHubPullRequestReviewV1,
+        GitHubReviewAuthorClassV1, GitHubReviewCoverageV1, GitHubReviewReadOperationV1,
+        GitHubReviewStateV1,
     };
     use tracedecay_domain::{
-        ActorId, CommitId, GitHubPullRequestIdV1, ManifestDigest, ProjectId, ProviderId, RefId,
-        RepositoryId, UtcMicros, WorktreeId,
+        ActorId, CommitId, GitHubPullRequestIdV1, GitHubReviewCommentIdV1, GitHubReviewIdV1,
+        ManifestDigest, ProjectId, ProviderId, RefId, RepositoryId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -1413,6 +1479,8 @@ mod tests {
                     coverage,
                     items: Vec::new(),
                     quarantined: Vec::new(),
+                    conversation: Vec::new(),
+                    reviews: Vec::new(),
                     pull_request: None,
                     fetched_at: UtcMicros(10),
                 })
@@ -1628,6 +1696,8 @@ mod tests {
                 coverage: GitHubReviewCoverageV1::Complete,
                 items: Vec::new(),
                 quarantined: Vec::new(),
+                conversation: Vec::new(),
+                reviews: Vec::new(),
                 pull_request: None,
                 fetched_at: UtcMicros(11),
             },
@@ -1770,6 +1840,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn complete_pr_detail_scans_replace_partial_conversation_and_reviews() {
+        for operation in [
+            GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+            GitHubReviewReadOperationV1::RestListPullRequestReviews,
+        ] {
+            let (_, request) = context_and_request(operation);
+            let complete =
+                GitHubReviewRefreshStateV1::transition(&request, None, complete_response(&request))
+                    .unwrap();
+            let mut observed = complete_response(&request);
+            if operation == GitHubReviewReadOperationV1::RestListPullRequestConversationComments {
+                observed
+                    .ingress
+                    .conversation
+                    .push(GitHubConversationCommentV1 {
+                        comment_id: GitHubReviewCommentIdV1::new("1").unwrap(),
+                        author: None,
+                        author_class: GitHubReviewAuthorClassV1::OtherObservedRole,
+                        body: "A comment removed before the complete scan".to_owned(),
+                        url: "https://github.com/owner/repository/pull/1#issuecomment-1".to_owned(),
+                        created_at: "2026-10-26T12:00:00Z".to_owned(),
+                        updated_at: "2026-10-26T12:00:00Z".to_owned(),
+                    });
+            } else {
+                observed.ingress.reviews.push(GitHubPullRequestReviewV1 {
+                    review_id: GitHubReviewIdV1::new("1").unwrap(),
+                    state: GitHubReviewStateV1::Approved,
+                    author: None,
+                    body: None,
+                    commit_id: Some(request.scope.head_commit_id.clone()),
+                    submitted_at: None,
+                    url: None,
+                });
+            }
+            let partial = GitHubReviewRefreshStateV1::transition(
+                &request,
+                Some(&complete),
+                quarantined_refresh_attempt(&request, observed).unwrap(),
+            )
+            .unwrap();
+            let partial = GitHubReviewRefreshStateV1::transition(
+                &request,
+                Some(&partial),
+                quarantined_refresh_attempt(&request, complete_response(&request)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                partial.latest_attempt.ingress.conversation.len()
+                    + partial.latest_attempt.ingress.reviews.len(),
+                1,
+                "an incomplete observation cannot establish deletion"
+            );
+
+            for outcome in [
+                GitHubReviewIngressProviderOutcomeV1::Complete,
+                GitHubReviewIngressProviderOutcomeV1::Stale,
+            ] {
+                let mut response = complete_response(&request);
+                response.ingress.outcome = outcome;
+                if outcome == GitHubReviewIngressProviderOutcomeV1::Stale {
+                    response.ingress.coverage = GitHubReviewCoverageV1::Stale;
+                }
+                response.ingress.fetched_at = UtcMicros(12);
+                let refreshed =
+                    GitHubReviewRefreshStateV1::transition(&request, Some(&partial), response)
+                        .unwrap();
+                let latest = &refreshed.latest_attempt.ingress;
+                assert_eq!(
+                    latest.outcome,
+                    GitHubReviewIngressProviderOutcomeV1::Complete
+                );
+                assert_eq!(latest.fetched_at, UtcMicros(12));
+                assert!(latest.conversation.is_empty());
+                assert!(latest.reviews.is_empty());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn rest_get_restarts_at_page_one_and_forwards_rate_limit_without_any_write_operation() {
         let (context, request) =
@@ -1862,6 +2011,103 @@ mod tests {
             *transport.network.cursors.lock().unwrap(),
             vec![None, Some("rest-page:2".to_owned())]
         );
+    }
+
+    struct NoReviewAnchors;
+
+    impl GitHubCanonicalReviewAnchorAuthorityV1 for NoReviewAnchors {
+        fn resolve<'a>(
+            &'a self,
+            _request: &'a GitHubReviewReadRequestV1,
+            _seed: &'a GitHubReviewAnchorSeedV1,
+        ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
+            Box::pin(async { None })
+        }
+    }
+
+    #[tokio::test]
+    async fn pr_conversation_and_review_vote_scans_retain_every_page() {
+        for operation in [
+            GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+            GitHubReviewReadOperationV1::RestListPullRequestReviews,
+        ] {
+            let (context, request) = context_and_request(operation);
+            let page = |id: u64, next_cursor: Option<&str>| {
+                let item = match operation {
+                    GitHubReviewReadOperationV1::RestListPullRequestConversationComments => {
+                        serde_json::json!({
+                            "id": id, "body": format!("Discussion item {id}"),
+                            "html_url": format!("https://github.com/ScriptedAlchemy/tracedecay/pull/421#issuecomment-{id}"),
+                            "user": {"login": "reviewer", "type": "User"},
+                            "created_at": "2026-10-26T12:00:00Z", "updated_at": "2026-10-26T12:00:00Z"
+                        })
+                    }
+                    _ => serde_json::json!({
+                        "id": id, "state": "APPROVED", "body": "Reviewed.",
+                        "commit_id": request.scope.head_commit_id.as_str()
+                    }),
+                };
+                GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
+                    metadata: GitHubReadNetworkMetadataV1 {
+                        status: GitHubReadNetworkStatusV1::Ok,
+                        etag: Some(GitHubReviewEtagV1::new(format!("W/\"page-{id}\"")).unwrap()),
+                        next_cursor: next_cursor
+                            .map(|cursor| GitHubReviewCursorV1::new(cursor).unwrap()),
+                        rate_limit: None,
+                        retry_at: None,
+                    },
+                    body: serde_json::to_vec(&vec![item]).unwrap(),
+                })
+            };
+            let decoder = GitHubOfficialResponseDecoderV1::new(
+                GitHubReviewProviderIdentityV1 {
+                    provider: ProviderId::new("github").unwrap(),
+                    repository_owner: "ScriptedAlchemy".to_owned(),
+                    repository_name: "tracedecay".to_owned(),
+                    pull_request_number: 421,
+                    base_commit_id: CommitId::new("commit.github.base").unwrap(),
+                    head_commit_id: request.scope.head_commit_id.clone(),
+                    merge_base_commit_id: CommitId::new("commit.github.base").unwrap(),
+                },
+                NoReviewAnchors,
+            )
+            .unwrap();
+            let network = PageNetwork {
+                outcomes: Mutex::new(VecDeque::from([
+                    page(1, Some("rest-page:2")),
+                    page(2, None),
+                ])),
+                cursors: Mutex::new(Vec::new()),
+                calls: AtomicUsize::new(0),
+            };
+            let transport =
+                GitHubReadOnlyRuntimeTransportV1::new(Checkpoints(None), network, decoder);
+            let outcome = transport
+                .rest_get(&context, GitHubRestDescriptorV1 { operation }, &request)
+                .await;
+            let GitHubReviewReadPortOutcomeV1::Read(response) = outcome else {
+                panic!("whole PR detail scan must retain both pages");
+            };
+            assert_eq!(
+                response.ingress.outcome,
+                GitHubReviewIngressProviderOutcomeV1::Complete
+            );
+            assert!(response.ingress.items.is_empty());
+            if operation == GitHubReviewReadOperationV1::RestListPullRequestConversationComments {
+                assert_eq!(response.ingress.conversation.len(), 2);
+                assert_eq!(response.ingress.conversation[0].comment_id.as_str(), "1");
+                assert_eq!(response.ingress.conversation[1].comment_id.as_str(), "2");
+            } else {
+                assert_eq!(response.ingress.reviews.len(), 2);
+                assert_eq!(response.ingress.reviews[0].review_id.as_str(), "1");
+                assert_eq!(response.ingress.reviews[1].review_id.as_str(), "2");
+            }
+            assert_eq!(transport.network.calls.load(Ordering::SeqCst), 2);
+            assert!(
+                response.checkpoint.etag.is_none(),
+                "a continuation-page ETag cannot revalidate the entire collection"
+            );
+        }
     }
 
     #[tokio::test]

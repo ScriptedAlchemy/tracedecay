@@ -317,7 +317,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_pr_context",
         "PR Context",
-        "Semantic summary of changes between two git refs for drafting a pull request description.",
+        "Orient on a PR before reading its full diff: description, status, discussion, retained CI, changed areas, prioritized code entry points, nearby consumers, and quality evidence with exact commit and source coverage. Refreshes the configured matching GitHub PR when its owner is available, with explicit retained fallback for limited or unavailable reads; does not fetch arbitrary PRs or establish merge readiness. Defaults to a compact briefing; view: symbols returns the paginated changed-symbol inventory.",
     ),
     read(
         "tracedecay_test_map",

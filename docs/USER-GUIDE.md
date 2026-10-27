@@ -1037,8 +1037,46 @@ Marked functions are excluded from `tracedecay_test_risk` attribution calculatio
 | `tracedecay_diff_context` | Semantic context for changed files: modified symbols, dependencies, and affected tests. |
 | `tracedecay_changelog` | Semantic diff between two git refs, which symbols were added, removed, or modified. |
 | `tracedecay_commit_context` | Semantic summary of uncommitted changes, useful for drafting commit messages. |
-| `tracedecay_pr_context` | Semantic diff between git refs for pull request descriptions. |
+| `tracedecay_pr_context` | Compact PR briefing: description, status, discussion, retained CI, changed areas, code entry points, nearby consumers, and quality evidence. Refreshes a configured matching GitHub PR when available. `view: "symbols"` returns the paginated symbol report. |
 | `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. Finds test callers up to depth 3, so a listed test may be a direct caller or a transitive one, see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for the direct-vs-closure distinction. |
+
+#### Orienting on a pull request
+
+Call `pr_context` before loading a large diff. The default `view: "brief"`
+answers what the PR is about, what its discussion and observed checks say,
+which areas changed, and where to begin reading the source:
+
+```sh
+tracedecay tool pr_context --args '{"base_ref":"origin/master","head_ref":"HEAD","budget_tokens":4000}'
+```
+
+When a GitHub refresh owner is available for a configured PR whose head matches
+the comparison, the briefing first refreshes its description, review votes,
+conversation, and inline discussion. Limited or unavailable provider reads
+leave an explicitly marked retained fallback. CI uses retained observations;
+this call does not refresh or enumerate all required checks.
+
+The comparison uses the merge base and immutable Git revisions. For a stacked
+PR, pass its parent branch as `base_ref`. When `base_ref` is absent, a uniquely
+selected hosted PR's observed base is preferred; otherwise the repository
+default branch is used. Set `pull_request` to a PR number when multiple retained
+PRs match the head. This selects from the checkout's PR evidence after any
+configured refresh; it does not fetch an arbitrary PR by number.
+
+Read the `entry_points` in order, using each entry's revision and source span.
+Discussion locations and CI annotations can prioritize those entries. Expand
+only the comments, checks, or consumers relevant to the task. Inline comments
+may include a retained `body_anchor`; conversation and review observations can
+instead provide their provider URL. Use `view: "symbols"` with
+`maximum_symbols` and the returned `cursor` for exact symbol enumeration.
+
+Hosted sources report their own state and observation time. A matching commit
+does not make a retained observation live; an old-head check or resolved thread
+remains historical context. Empty or unexpanded discussion does not mean there
+are no comments, and the retained check inventory does not enumerate required
+checks. Source and graph gaps are explicit, while local change analysis still
+works without a mounted GitHub source. `budget_tokens` sizes the briefing and
+reports omitted sections; it is an approximate serialized-output budget.
 
 ### Porting tools
 

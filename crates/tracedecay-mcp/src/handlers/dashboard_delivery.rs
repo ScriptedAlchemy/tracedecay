@@ -3,10 +3,11 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use tracedecay_application::advisory::GitHubReleaseReadControlV1;
+use tracedecay_application::advisory::{GitHubReleaseReadControlV1, GitHubReviewRefreshOutcomeV1};
 use tracedecay_application::delivery::{
-    ProjectDeliveryProximityAttentionSourceV1, ProjectDeliveryReadOutcomeV1,
-    ProjectDeliveryReadRequestV1, project_delivery_proximity_attention_source_from_read_v1,
+    ProjectDeliveryGitHubSourceV1, ProjectDeliveryProximityAttentionSourceV1,
+    ProjectDeliveryReadOutcomeV1, ProjectDeliveryReadRequestV1,
+    project_delivery_proximity_attention_source_from_read_v1,
 };
 use tracedecay_application::git_query::GitQueryBounds;
 use tracedecay_application::git_reads::{GitReadAuthorityV1, GitReadOutcomeV1, GitReadResultV1};
@@ -34,6 +35,128 @@ use tracedecay_dashboard_api::{
 
 pub struct DashboardDeliveryReadAdapter {
     service: DaemonInvocationService,
+}
+
+/// Refreshes the configured matching PR through its existing read-only owner,
+/// then reads discussion and retained CI through the registered delivery owner.
+/// The compared commit is explicit: a ref-to-ref PR read must never relabel
+/// observations for the live checkout as observations for a different head.
+#[allow(clippy::too_many_arguments)]
+pub async fn read_pr_context_delivery(
+    service: &DaemonInvocationService,
+    project_root: &std::path::Path,
+    scope: &tracedecay_contracts::ResolvedScope,
+    request_id: tracedecay_contracts::RequestId,
+    deadline: &Deadline,
+    cancellation: &tracedecay_contracts::CancellationSignal,
+    expected_head_commit_id: CommitId,
+) -> ProjectDeliveryReadOutcomeV1 {
+    let now = tracedecay_contracts::now_micros();
+    if deadline.is_elapsed_at(now) || cancellation.is_cancelled() {
+        return ProjectDeliveryReadOutcomeV1::Unavailable;
+    }
+    let Some(authority) = service.delivery_read_authority(Some(project_root)).await else {
+        return ProjectDeliveryReadOutcomeV1::Unavailable;
+    };
+    if authority.scope() != scope {
+        return ProjectDeliveryReadOutcomeV1::Denied;
+    }
+    let Some(access) = authority.source_access_at(now).await else {
+        return ProjectDeliveryReadOutcomeV1::Unavailable;
+    };
+    if !has_delivery_source_capability(&access) {
+        return ProjectDeliveryReadOutcomeV1::Denied;
+    }
+    // Authority/source reads can await I/O. Bind the remaining lifetime at
+    // admission rather than extending it by the time those reads consumed.
+    let observed_at = tracedecay_contracts::now_micros();
+    let expires_at = std::cmp::min(deadline.expires_at, access.grant_expires_at);
+    let Some(request_deadline) = monotonic_deadline(Instant::now(), observed_at, expires_at) else {
+        return ProjectDeliveryReadOutcomeV1::Unavailable;
+    };
+    let Some((context, control)) = request_context_from_parts_with_deadline(
+        request_id,
+        cancellation,
+        observed_at,
+        access,
+        expires_at,
+        request_deadline,
+    ) else {
+        return ProjectDeliveryReadOutcomeV1::Unavailable;
+    };
+    let refresh_read = async {
+        match service
+            .answering_advisory_cycle_owner(Some(project_root), deadline)
+            .await
+        {
+            Some(owner) => {
+                owner
+                    .refresh_github(&context, &expected_head_commit_id)
+                    .await
+            }
+            None => GitHubReviewRefreshOutcomeV1::Unavailable,
+        }
+    };
+    let refresh = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return ProjectDeliveryReadOutcomeV1::Unavailable,
+        outcome = tracedecay_runtime_core::native_runtime::timeout_at(request_deadline, refresh_read) => match outcome {
+            Ok(outcome) => outcome,
+            Err(_) => return ProjectDeliveryReadOutcomeV1::Unavailable,
+        },
+    };
+    let request = ProjectDeliveryReadRequestV1 {
+        kind: tracedecay_application::delivery::ProjectDeliveryReadKindV1::Inbox,
+        expected_head_commit_id,
+        max_pull_requests: tracedecay_application::delivery::MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1,
+        max_review_items: tracedecay_application::delivery::MAX_PROJECT_DELIVERY_REVIEW_ITEMS_V1,
+        max_ci_checks: tracedecay_application::delivery::MAX_PROJECT_DELIVERY_CI_CHECKS_V1,
+        max_releases: 1,
+    };
+    let handle = authority.handle();
+    let outcome = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => ProjectDeliveryReadOutcomeV1::Unavailable,
+        outcome = tracedecay_runtime_core::native_runtime::timeout_at(request_deadline, handle.read(&context, &request, &control)) => match outcome {
+            Ok(outcome) => outcome,
+            Err(_) => ProjectDeliveryReadOutcomeV1::Unavailable,
+        },
+    };
+    with_github_refresh_outcome(outcome, refresh)
+}
+
+pub(super) fn with_github_refresh_outcome(
+    mut outcome: ProjectDeliveryReadOutcomeV1,
+    refresh: GitHubReviewRefreshOutcomeV1,
+) -> ProjectDeliveryReadOutcomeV1 {
+    if matches!(refresh, GitHubReviewRefreshOutcomeV1::Stored(_)) {
+        return outcome;
+    }
+    let ProjectDeliveryReadOutcomeV1::Ready { snapshot } = &mut outcome else {
+        return outcome;
+    };
+    let previous = std::mem::replace(
+        &mut snapshot.github_reviews,
+        ProjectDeliveryGitHubSourceV1::NotPublished,
+    );
+    // A failed refresh must not make an older retained snapshot look like a
+    // successfully refreshed source. Preserve richer canonical refusal states.
+    let timeline = match previous {
+        ProjectDeliveryGitHubSourceV1::Ready { timeline }
+        | ProjectDeliveryGitHubSourceV1::Partial { timeline }
+        | ProjectDeliveryGitHubSourceV1::Stale { timeline } => timeline,
+        ProjectDeliveryGitHubSourceV1::NotPublished => Default::default(),
+        previous => {
+            snapshot.github_reviews = previous;
+            return outcome;
+        }
+    };
+    snapshot.github_reviews = match refresh {
+        GitHubReviewRefreshOutcomeV1::Denied => ProjectDeliveryGitHubSourceV1::Denied { timeline },
+        GitHubReviewRefreshOutcomeV1::Stale => ProjectDeliveryGitHubSourceV1::Stale { timeline },
+        _ => ProjectDeliveryGitHubSourceV1::Unavailable { timeline },
+    };
+    outcome
 }
 
 impl DashboardDeliveryReadAdapter {

@@ -9,11 +9,14 @@ metadata:
 
 Follow these steps in order. Report a step you skip as `skip: <reason>`.
 
-1. Read the actual diff.
-2. Load its semantic context: `tracedecay_diff_context` for working-tree
-   changes, `tracedecay_pr_context` for a ref-to-ref range. Changed symbols,
-   dependents, and test links supplement the diff; they cannot prove unindexed
-   or external consumers safe.
+1. For a PR or ref range, call `tracedecay_pr_context` for its compact briefing:
+   description, retained discussion and checks, change map, and reading order.
+   For working-tree changes, read the diff and call `tracedecay_diff_context`.
+2. Read the actual changed code at the briefing's entry points, then expand
+   relevant discussion, consumers, and tests. Check revision and source coverage:
+   retained checks are not a live required-check inventory, and graph links
+   cannot prove unindexed or external consumers safe. Use `view: symbols` only
+   when exact symbol enumeration helps the task.
 3. Deepen on the riskiest changed symbols with callers, impact, and test links
    rather than repeating every analysis across every file. skip: the diff is
    small enough to read whole.

@@ -153,6 +153,15 @@ The MCP server exposes tools grouped around normal coding workflows:
 
 Most read tools are safe to call in parallel. Edit tools are single-file, anchored, and re-index after writing.
 
+Start a PR task with `tracedecay_pr_context`. Its compact briefing joins PR
+description and discussion, retained CI observations, a change map, and
+prioritized source entry points. It refreshes the configured GitHub PR when its
+head matches and the refresh owner is available; limited or unavailable reads
+show an explicit retained fallback. It does not fetch arbitrary PRs by number.
+Read the entry points next; use `view: "symbols"` for the full changed-symbol
+inventory. Source coverage and commit identity remain explicit, and retained CI
+does not establish merge readiness.
+
 ## Index Freshness
 
 The daemon owns freshness and background convergence. Hooks, MCP, LSP, and

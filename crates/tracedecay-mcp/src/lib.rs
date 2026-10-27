@@ -84,7 +84,7 @@ pub use tool_call_deadline::{
 pub use tool_call_invoker::ToolCallInvoker;
 pub use tool_context::{
     AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
-    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls,
+    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, PrContextDeliveryReader, RequestControls,
 };
 #[cfg(test)]
 pub(crate) use tool_errors::structured_hook_error_data;

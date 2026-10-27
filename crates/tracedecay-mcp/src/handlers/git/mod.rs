@@ -15,7 +15,11 @@
 mod affected;
 mod branch;
 mod context;
+mod pr_context_brief;
 mod pr_context_cursor;
+mod pr_context_hosted;
+mod pr_context_source;
+mod pr_context_render;
 mod shell;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -24,8 +28,10 @@ mod test_support;
 pub use affected::compute_affected;
 pub use branch::{compute_branch_diff, compute_branch_list, compute_branch_search};
 pub use context::{
-    compute_changelog, compute_commit_context, compute_diff_context, compute_pr_context,
+    compute_changelog, compute_commit_context, compute_diff_context,
 };
+pub use pr_context_brief::compute_pr_context;
+pub(crate) use pr_context_render::render_pr_context_brief;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -50,6 +56,14 @@ struct GitPrComparison {
     head_oid: String,
     merge_base: String,
     changes: Vec<GitFileChangeV1>,
+    commits: Vec<GitCommitSubjectV1>,
+}
+
+/// Immutable comparison identity and commit intent, shared by both views.
+struct GitPrSpan {
+    base_oid: String,
+    head_oid: String,
+    merge_base: String,
     commits: Vec<GitCommitSubjectV1>,
 }
 

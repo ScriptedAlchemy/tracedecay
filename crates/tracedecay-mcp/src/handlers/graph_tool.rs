@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    AdminCliSurfaceRequestV1, DerivesResultV1, ImpactResultV1, NodeResultV1,
+    AdminCliSurfaceRequestV1, DerivesResultV1, ImpactResultV1, NodeResultV1, PrContextResultV1,
     PrimitiveSearchFreshnessV1, RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, StatusResultV1,
 };
 use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
@@ -25,7 +25,7 @@ use crate::handlers::ast_grep::{compute_ast_grep_search, render_ast_grep_search}
 use crate::handlers::git::{
     compute_affected, compute_branch_diff, compute_branch_list, compute_branch_search,
     compute_changelog, compute_commit_context, compute_diff_context, compute_pr_context,
-    git_tool_failure_message,
+    git_tool_failure_message, render_pr_context_brief,
 };
 use crate::handlers::graph::{
     compute_by_qualified_name, compute_context, compute_derives, compute_find_exact_symbol,
@@ -340,6 +340,11 @@ pub fn render_graph_tool(
     };
     let mut rendered = match &result {
         GraphToolResultV1::Context(context) => render_context(response_handle_root, args, context)?,
+        GraphToolResultV1::PrContext(PrContextResultV1::Brief(brief)) => {
+            rendered_tool_result(response_handle_root, args, &body()?, Vec::new(), || {
+                render_pr_context_brief(brief)
+            })
+        }
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
         }

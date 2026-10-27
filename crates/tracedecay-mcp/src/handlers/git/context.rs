@@ -266,6 +266,21 @@ async fn exact_semantic_symbol_diff(
     })
 }
 
+/// Resolve the immutable branch snapshot for the exact compared head. A
+/// scheduler's revision label alone cannot prove that a dirty-worktree graph
+/// contains the committed source.
+pub(super) async fn pr_context_graph_matches_head(
+    ctx: &McpToolContext<'_>,
+    head_ref: &str,
+    head_oid: &str,
+    generation: &str,
+) -> std::result::Result<bool, String> {
+    exact_semantic_symbol_diff(ctx, head_ref, head_ref, Some(head_oid), Some(head_oid))
+        .await
+        .map(|diff| diff.head_generation == generation)
+        .map_err(|unavailable| unavailable.reason.to_owned())
+}
+
 fn symbol_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&str> {
     symbol
         .binding
@@ -314,7 +329,7 @@ struct CoChangeEvidence {
     unavailable: Option<CoChangeUnavailableV1>,
 }
 
-struct CancelGitReadOnDrop(tracedecay_runtime_core::cancellation::CancellationToken);
+pub(super) struct CancelGitReadOnDrop(pub(super) tracedecay_runtime_core::cancellation::CancellationToken);
 
 impl Drop for CancelGitReadOnDrop {
     fn drop(&mut self) {
@@ -522,7 +537,7 @@ impl BlockingGitWorkerState {
     }
 }
 
-async fn blocking_git_span_controlled<T, F>(
+pub(super) async fn blocking_git_span_controlled<T, F>(
     label: &str,
     request_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     request_deadline: Option<tracedecay_contracts::Deadline>,
@@ -1082,13 +1097,13 @@ const PR_CONTEXT_MAX_IMPACT_EDGES: usize = 2_000;
 const PR_CONTEXT_MAX_IMPACT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
-struct PrContextControls {
-    deadline: Option<tracedecay_contracts::Deadline>,
-    cancellation: Option<tracedecay_contracts::CancellationSignal>,
+pub(super) struct PrContextControls {
+    pub(super) deadline: Option<tracedecay_contracts::Deadline>,
+    pub(super) cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
 impl PrContextControls {
-    fn checkpoint(&self) -> Result<()> {
+    pub(super) fn checkpoint(&self) -> Result<()> {
         if self
             .cancellation
             .as_ref()
@@ -1244,7 +1259,7 @@ fn pr_context_edge_bytes(
         .saturating_add("calls".len())
 }
 
-fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
+pub(super) fn graph_enrichment_is_transient(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
         Some(("code-graph-unavailable" | "code-graph-stale", true, _))
@@ -1631,50 +1646,37 @@ where
     test_files_changed.dedup();
 
     let stage_started = std::time::Instant::now();
-    let symbol_page = {
-        let _span = tracing::trace_span!("mcp.pr_context.symbol_page").entered();
-        graph.symbols_in_logical_files_page(
-            &changed_paths,
-            cursor_position.as_ref().map(|position| &position.after),
-            maximum_symbols,
-            VERIFIED_GRAPH_MAX_SYMBOLS,
-        )?
-    };
-    controls.checkpoint()?;
-    timings.symbol_page = Some(elapsed_micros(stage_started));
-    // Removed occurrences share the signed cursor's ordering with head occurrences.
-    // The graph query accepts an exclusive key even when it exists only at base.
+    // Page the exact changed occurrences, then hydrate only the selected head
+    // symbols. Paging every symbol in a changed file spends the page allowance
+    // on unchanged code and can return empty pages before the actual changes.
     enum Candidate<'a> {
-        Head(&'a CodeGraphSymbolSummaryV1),
+        Head(&'a tracedecay_query::code_search::CodeIndexBranchSymbolV1),
         Removed(&'a tracedecay_query::code_search::CodeIndexBranchSymbolV1),
     }
     impl Candidate<'_> {
         fn occurrence(&self) -> &SymbolOccurrenceId {
             match self {
-                Self::Head(symbol) => &symbol.occurrence,
-                Self::Removed(symbol) => &symbol.symbol_occurrence_id,
+                Self::Head(symbol) | Self::Removed(symbol) => &symbol.symbol_occurrence_id,
             }
         }
     }
-    let mut candidates = symbol_page
-        .symbols
+    let mut candidates = symbol_diff
+        .added
         .iter()
+        .chain(&symbol_diff.modified)
         .map(Candidate::Head)
-        .chain(
-            symbol_diff
-                .removed
-                .iter()
-                .filter(|symbol| {
-                    cursor_position
-                        .as_ref()
-                        .is_none_or(|position| symbol.symbol_occurrence_id > position.after)
-                })
-                .map(Candidate::Removed),
-        )
+        .chain(symbol_diff.removed.iter().map(Candidate::Removed))
+        .filter(|candidate| {
+            cursor_position
+                .as_ref()
+                .is_none_or(|position| candidate.occurrence() > &position.after)
+        })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.occurrence().cmp(right.occurrence()));
-    let mut symbol_has_more = symbol_page.has_more || candidates.len() > maximum_symbols;
+    let mut symbol_has_more = candidates.len() > maximum_symbols;
     candidates.truncate(maximum_symbols);
+    controls.checkpoint()?;
+    timings.symbol_page = Some(elapsed_micros(stage_started));
     let shares = request
         .budget_tokens
         .map(|budget| crate::handlers::token_budget::quotas(budget, &[22, 13, 22, 13, 18, 12]));
@@ -1686,14 +1688,14 @@ where
         match candidate {
             Candidate::Removed(_) => symbol_totals[1] += 1,
             Candidate::Head(symbol) => {
-                let section = if added_ids.contains(symbol.occurrence.as_str()) {
+                let section = if added_ids.contains(symbol.symbol_occurrence_id.as_str()) {
                     0
-                } else if modified_ids.contains(symbol.occurrence.as_str()) {
+                } else if modified_ids.contains(symbol.symbol_occurrence_id.as_str()) {
                     2
                 } else {
                     continue;
                 };
-                let path = symbol_path(symbol)?;
+                let path = symbol.file.as_str();
                 if classify_file_role(path, &files_with_inline_tests) != GitFileRoleV1::Config
                     || available_config_summaries.insert((section, path))
                 {
@@ -1729,8 +1731,20 @@ where
                 symbol_shown[1] += 1;
                 removed.push(entry);
             }
-            Candidate::Head(symbol) => {
-                let path = symbol_path(symbol)?;
+            Candidate::Head(changed_symbol) => {
+                let symbol = graph
+                    .symbol_summary(&changed_symbol.symbol_occurrence_id)?
+                    .ok_or_else(|| {
+                        TraceDecayError::project_route(
+                            "pr-context-changed-symbol-unavailable",
+                            false,
+                            format!(
+                                "changed symbol {} is missing from the compared head graph",
+                                changed_symbol.symbol_occurrence_id.as_str(),
+                            ),
+                        )
+                    })?;
+                let path = symbol_path(&symbol)?;
                 let is_added = added_ids.contains(symbol.occurrence.as_str());
                 let is_modified = modified_ids.contains(symbol.occurrence.as_str());
                 if !is_added && !is_modified {
@@ -1749,7 +1763,7 @@ where
                         config_keys: config_count + 1,
                     })
                 } else {
-                    PrSymbolEntryV1::Symbol(context_symbol(symbol)?)
+                    PrSymbolEntryV1::Symbol(context_symbol(&symbol)?)
                 };
                 let replacing_summary = is_config && config_count > 0;
                 let prior_cost = if replacing_summary && shares.is_some() {
@@ -1790,7 +1804,7 @@ where
                     } else {
                         modified.push(entry);
                     }
-                    nodes.push(symbol.clone());
+                    nodes.push(symbol);
                 }
             }
         }
@@ -1818,10 +1832,14 @@ where
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
-    let impact = {
+    let mut impact = {
         let _span = tracing::trace_span!("mcp.pr_context.impact").entered();
         pr_context_impact_snapshot(&graph, &nodes, 2, prior_impact_budget, &controls)?
     };
+    // Removed symbols no longer have caller edges in the head graph. Until
+    // base-side consumers are analyzed, an empty impact result cannot claim
+    // complete coverage, including on later pages of the same comparison.
+    impact.partial |= !symbol_diff.removed.is_empty();
     controls.checkpoint()?;
     let impact_paths: Vec<String> = impact
         .nodes

@@ -307,7 +307,14 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
             };
         }
         let project = admitted_project_authorities(cg, &options)?;
-        let snapshots = AdmittedRequestSnapshotsV1::default();
+        let snapshots = AdmittedRequestSnapshotsV1 {
+            pr_context_delivery: if operation == ApplicationSurfaceOperation::PrContext {
+                pr_context_delivery_reader(&options, &project)
+            } else {
+                None
+            },
+            ..AdmittedRequestSnapshotsV1::default()
+        };
         let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
         let open = verified_graph_open(&options);
         let computed = async {
@@ -494,6 +501,39 @@ enum DoctorReportSnapshotV1 {
 struct AdmittedRequestSnapshotsV1 {
     generation_census: Option<GenerationCensusSnapshot>,
     doctor_report: DoctorReportSnapshotV1,
+    pr_context_delivery: Option<tracedecay_mcp::PrContextDeliveryReader>,
+}
+
+fn pr_context_delivery_reader(
+    options: &ToolCallRegistryOptions<'_>,
+    project: &McpAdmittedProjectV1,
+) -> Option<tracedecay_mcp::PrContextDeliveryReader> {
+    let service = options.daemon_invocation_service?.clone();
+    let request_id = options.application_request_id.clone()?;
+    let deadline = options.application_deadline.clone()?;
+    let cancellation = options.application_cancellation.clone()?;
+    let root = project.identity().project_root.clone();
+    let scope = project.identity().scope.clone();
+    Some(std::sync::Arc::new(move |head| {
+        let service = service.clone();
+        let request_id = request_id.clone();
+        let deadline = deadline.clone();
+        let cancellation = cancellation.clone();
+        let root = root.clone();
+        let scope = scope.clone();
+        Box::pin(async move {
+            tracedecay_mcp::handlers::dashboard_delivery::read_pr_context_delivery(
+                &service,
+                &root,
+                &scope,
+                request_id,
+                &deadline,
+                &cancellation,
+                head,
+            )
+            .await
+        })
+    }))
 }
 
 async fn admitted_generation_census(
@@ -555,6 +595,7 @@ async fn admitted_runtime_snapshots(
         } else {
             DoctorReportSnapshotV1::NotAttached
         },
+        pr_context_delivery: None,
     }
 }
 
@@ -695,6 +736,7 @@ fn admitted_tool_context<'a>(
             DoctorReportSnapshotV1::ReadFailed => McpDoctorReportV1::ReadFailed,
             DoctorReportSnapshotV1::NotAttached => McpDoctorReportV1::NotAttached,
         },
+        pr_context_delivery: snapshots.pr_context_delivery.as_ref(),
     };
     Ok(McpToolContext::bind(McpToolBinding { project, request })?)
 }

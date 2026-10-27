@@ -222,23 +222,25 @@ def validate_pr_context(
         impact_partial = coverage.get("impact_partial")
         if not isinstance(symbols_complete, bool) or not isinstance(impact_partial, bool):
             raise ValueError("strict pr_context requires typed bounded analysis coverage")
-        # Every returned entry is either an analyzed seed symbol or a per-file
-        # `config_summary` that folds that file's config keys (never seeds).
-        entries = [
+        # Head entries are analyzed seeds or per-file config summaries. Removed
+        # entries count toward the page but have no seed in the head graph.
+        head_entries = [
             *require_list(value, "added", "pr_context"),
             *require_list(value, "modified", "pr_context"),
         ]
+        removed = require_list(value, "removed", "pr_context")
         config_summaries = sum(
             1
-            for entry in entries
+            for entry in head_entries
             if isinstance(entry, dict) and entry.get("kind") == "config_summary"
         )
         if (
-            len(entries) != returned
-            or coverage_counts["seed_symbols_analyzed"] + config_summaries != returned
+            len(head_entries) + len(removed) != returned
+            or coverage_counts["seed_symbols_analyzed"] + config_summaries != len(head_entries)
             or coverage_counts["symbols_returned"] != returned
             or symbols_complete != page_complete
             or coverage["complete"] != (symbols_complete and not impact_partial)
+            or (bool(removed) and not impact_partial)
         ):
             raise ValueError("strict pr_context bounded analysis coverage is inconsistent")
     if graph is None:

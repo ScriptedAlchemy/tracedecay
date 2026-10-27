@@ -41,6 +41,7 @@ pub enum GitHubReviewReadOperationV1 {
     RestGetPullRequest,
     RestListPullRequestReviews,
     RestListPullRequestReviewComments,
+    RestListPullRequestConversationComments,
     GraphQlQueryPullRequestReviewThreads,
 }
 
@@ -56,6 +57,7 @@ impl GitHubReviewReadOperationV1 {
             Self::RestGetPullRequest
                 | Self::RestListPullRequestReviews
                 | Self::RestListPullRequestReviewComments
+                | Self::RestListPullRequestConversationComments
         )
     }
 
@@ -74,16 +76,19 @@ pub enum GitHubPullRequestStateV1 {
 }
 
 pub const MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1: usize = 400;
+pub const MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1: usize = 256 * 1024;
 
 /// Observed pull-request identity and diff shape from one allowlisted
-/// `RestGetPullRequest` read. It carries no branch names, labels, or prose
-/// beyond the sanitized title.
+/// `RestGetPullRequest` read. Provider prose is sanitized before retention.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubPullRequestSnapshotV1 {
     /// The pull request's number in its repository, as discovery admitted it.
     pub number: u64,
     pub title: String,
+    /// Absent in older retained snapshots or when the PR has no description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub state: GitHubPullRequestStateV1,
     pub draft: bool,
     pub additions: u64,
@@ -104,6 +109,92 @@ impl GitHubPullRequestSnapshotV1 {
         {
             return Err(DomainError::NonCanonical {
                 field: "github pull request title",
+            });
+        }
+        if self.description.as_ref().is_some_and(|body| {
+            body.len() > MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1 || body.contains('\0')
+        }) {
+            return Err(DomainError::NonCanonical {
+                field: "github pull request description",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Sanitized top-level PR conversation. It has no code anchor or review
+/// verdict: discussion comments are not inline review findings.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubConversationCommentV1 {
+    pub comment_id: GitHubReviewCommentIdV1,
+    pub author: Option<String>,
+    pub author_class: GitHubReviewAuthorClassV1,
+    pub body: String,
+    pub url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Review submissions include votes with no inline comments. Their commit
+/// identifies what was reviewed; they are never an approval of a newer head.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubPullRequestReviewV1 {
+    pub review_id: GitHubReviewIdV1,
+    pub state: GitHubReviewStateV1,
+    pub author: Option<String>,
+    pub body: Option<String>,
+    pub commit_id: Option<CommitId>,
+    pub submitted_at: Option<String>,
+    pub url: Option<String>,
+}
+
+impl GitHubPullRequestReviewV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.review_id.validate()?;
+        if let Some(commit) = &self.commit_id {
+            commit.validate()?;
+        }
+        if self.body.as_ref().is_some_and(|body| {
+            body.len() > MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1 || body.contains('\0')
+        }) || self.author.as_ref().is_some_and(|author| {
+            author.is_empty() || author.len() > 100 || author.chars().any(char::is_control)
+        }) || self.submitted_at.as_ref().is_some_and(|timestamp| {
+            timestamp.is_empty() || timestamp.len() > 64 || timestamp.chars().any(char::is_control)
+        }) || self.url.as_ref().is_some_and(|url| {
+            url.is_empty() || url.len() > 2_048 || url.chars().any(char::is_control)
+        }) {
+            return Err(DomainError::NonCanonical {
+                field: "github pull request review submission",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl GitHubConversationCommentV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.comment_id.validate()?;
+        if self.body.is_empty()
+            || self.body.len() > MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1
+            || self.body.contains('\0')
+            || self.author.as_ref().is_some_and(|author| {
+                author.is_empty() || author.len() > 100 || author.chars().any(char::is_control)
+            })
+            || self.url.is_empty()
+            || self.url.len() > 2_048
+            || self.url.chars().any(char::is_control)
+            || [&self.created_at, &self.updated_at]
+                .iter()
+                .any(|timestamp| {
+                    timestamp.is_empty()
+                        || timestamp.len() > 64
+                        || timestamp.chars().any(char::is_control)
+                })
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github pull request conversation",
             });
         }
         Ok(())
@@ -495,6 +586,10 @@ pub struct GitHubReviewIngressResultV1 {
     /// other operation observes review items only and never a PR identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<GitHubPullRequestSnapshotV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation: Vec<GitHubConversationCommentV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<GitHubPullRequestReviewV1>,
     pub fetched_at: UtcMicros,
 }
 
@@ -574,6 +669,45 @@ impl GitHubReviewIngressResultV1 {
                 });
             }
         }
+        if !self.conversation.is_empty()
+            && self.operation
+                != GitHubReviewReadOperationV1::RestListPullRequestConversationComments
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github conversation read operation",
+            });
+        }
+        for comment in &self.conversation {
+            comment.validate()?;
+        }
+        if !self.reviews.is_empty()
+            && self.operation != GitHubReviewReadOperationV1::RestListPullRequestReviews
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github review submission read operation",
+            });
+        }
+        for review in &self.reviews {
+            review.validate()?;
+        }
+        if self
+            .reviews
+            .windows(2)
+            .any(|pair| pair[0].review_id.as_str() >= pair[1].review_id.as_str())
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github review submission order",
+            });
+        }
+        if self
+            .conversation
+            .windows(2)
+            .any(|pair| pair[0].comment_id.as_str() >= pair[1].comment_id.as_str())
+        {
+            return Err(DomainError::NonCanonical {
+                field: "github conversation comment order",
+            });
+        }
         for quarantined in &self.quarantined {
             quarantined.comment_id.validate()?;
         }
@@ -585,6 +719,10 @@ impl GitHubReviewIngressResultV1 {
                 self.items
                     .iter()
                     .any(|item| item.comment_id == quarantined.comment_id)
+                    || self
+                        .conversation
+                        .iter()
+                        .any(|item| item.comment_id == quarantined.comment_id)
             })
         {
             return Err(DomainError::NonCanonical {

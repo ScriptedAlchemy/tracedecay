@@ -81,6 +81,14 @@ fn resolve_pr_comparison_commit(
     }
 }
 
+pub(super) fn git_pr_head(
+    project_root: &std::path::Path,
+    reference: &str,
+) -> std::result::Result<String, String> {
+    resolve_pr_comparison_commit(&open_project_repository(project_root)?, reference)
+        .map(|oid| oid.to_string())
+}
+
 fn exact_reference_commit(
     repo: &gix::Repository,
     full_name: &str,
@@ -131,6 +139,30 @@ pub(super) fn git_pr_comparison_controlled(
     head_ref: &str,
     cancelled: &(impl Fn() -> bool + ?Sized),
 ) -> std::result::Result<GitPrComparison, String> {
+    let span = git_pr_span_controlled(project_root, base_ref, head_ref, cancelled)?;
+    Ok(GitPrComparison {
+        changes: git_diff_file_changes_controlled(
+            project_root,
+            &span.merge_base,
+            &span.head_oid,
+            cancelled,
+        )?,
+        base_oid: span.base_oid,
+        head_oid: span.head_oid,
+        merge_base: span.merge_base,
+        commits: span.commits,
+    })
+}
+
+/// The brief reads canonical typed hunks separately; it does not need a
+/// second tree walk just to enumerate the same changed file names.
+#[tracing::instrument(name = "mcp.git.shell.pr_span", level = "trace", skip_all)]
+pub(super) fn git_pr_span_controlled(
+    project_root: &std::path::Path,
+    base_ref: &str,
+    head_ref: &str,
+    cancelled: &(impl Fn() -> bool + ?Sized),
+) -> std::result::Result<GitPrSpan, String> {
     check_git_pr_cancelled(cancelled)?;
     let repo = open_project_repository(project_root)?;
     check_git_pr_cancelled(cancelled)?;
@@ -158,8 +190,7 @@ pub(super) fn git_pr_comparison_controlled(
     let merge_base = merge_base.to_string();
     check_git_pr_cancelled(cancelled)?;
 
-    Ok(GitPrComparison {
-        changes: git_diff_file_changes_controlled(project_root, &merge_base, &head_oid, cancelled)?,
+    Ok(GitPrSpan {
         commits: git_commit_log_controlled(project_root, &merge_base, &head_oid, cancelled)?,
         base_oid,
         head_oid,

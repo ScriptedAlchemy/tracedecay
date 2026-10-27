@@ -686,6 +686,8 @@ mod tests {
                 coverage: GitHubReviewCoverageV1::Complete,
                 items: Vec::new(),
                 quarantined: Vec::new(),
+                conversation: Vec::new(),
+                reviews: Vec::new(),
                 pull_request: None,
                 fetched_at: UtcMicros(11),
             },
@@ -874,6 +876,7 @@ mod tests {
         response.ingress.pull_request = Some(GitHubPullRequestSnapshotV1 {
             number: 741,
             title: "Split MSRV used to build from MSRV used to test".to_owned(),
+            description: None,
             state: GitHubPullRequestStateV1::Open,
             draft: false,
             additions: 17,

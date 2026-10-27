@@ -15,6 +15,7 @@ pub mod grep_analysis;
 mod hook_runtime_surface;
 mod owner_effect_surface;
 mod ports;
+mod pr_context_brief;
 mod primitive_surface;
 mod project_file_surface;
 mod project_info_surface;
@@ -27,6 +28,13 @@ mod symbol_graph;
 mod test_attribution;
 
 use crate::error::ApplicationContractError;
+
+pub use pr_context_brief::{
+    PrContextAreaV1, PrContextBriefBudgetV1, PrContextBriefV1, PrContextCheckV1,
+    PrContextDiscussionV1, PrContextEntryPointV1, PrContextExcerptV1, PrContextFileV1,
+    PrContextHostedV1, PrContextImpactV1, PrContextLocationV1, PrContextPullRequestV1,
+    PrContextQualityV1, PrContextSourceStateV1, PrContextSourceV1, PrContextViewV1,
+};
 
 /// Shared bounded-string validator for the retrieval leaf modules.
 /// Delegates to [`crate::identity::validate_identifier`] so a single

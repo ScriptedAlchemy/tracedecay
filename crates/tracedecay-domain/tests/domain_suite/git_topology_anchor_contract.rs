@@ -410,9 +410,12 @@ fn github_stack_layer(
         coverage: GitHubReviewCoverageV1::Complete,
         items: vec![],
         quarantined: Vec::new(),
+        conversation: Vec::new(),
+        reviews: Vec::new(),
         pull_request: Some(GitHubPullRequestSnapshotV1 {
             number: 1,
             title: "stack layer fixture".to_owned(),
+            description: None,
             state: GitHubPullRequestStateV1::Open,
             draft: false,
             additions: 1,
