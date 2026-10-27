@@ -16,10 +16,13 @@ pub use tracedecay_global_db::configuration::{registry, resolver};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use tracedecay_automation::Result as AutomationResult;
+use tracedecay_automation::config::{AdmittedAutomationConfig, admit_config};
 use tracedecay_contracts::{ConfigurationSettingActionV1, ConfigurationSettingFindingV1};
 use tracedecay_domain::configuration::{
-    ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    AUTOMATION_SETTINGS_SETTING_KEY, AutomationSettingsV1, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
@@ -32,7 +35,7 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{AutomationErrorMessage, Result, TraceDecayError};
 use tracedecay_domain::{IndexPathPolicyV1, ProjectId, validate_index_path_patterns};
 use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
@@ -42,6 +45,7 @@ use model::{RetentionConfig, SyncConfig, TelemetryConfig};
 /// Settings decoded from one resolved configuration snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTraceDecayConfig {
+    pub automation: Arc<AutomationSettingsV1>,
     /// `index.exclude.v1` and `index.include.v1`, compiled once: the path
     /// policy the code index, its freshness proof, and source walks share.
     pub index_paths: IndexPathPolicyV1,
@@ -114,6 +118,7 @@ pub struct PinnedRuntimeConfiguration {
     revision_id: ConfigurationRevisionId,
     snapshot: Arc<ConfigurationSnapshotV1>,
     config: RuntimeTraceDecayConfig,
+    automation_admission: Arc<AutomationResult<Arc<AdmittedAutomationConfig>>>,
 }
 
 impl PinnedRuntimeConfiguration {
@@ -125,11 +130,13 @@ impl PinnedRuntimeConfiguration {
         snapshot: ConfigurationSnapshotV1,
     ) -> Result<Self> {
         let config = runtime_config_from_snapshot(&snapshot)?;
+        let automation_admission = Arc::new(admit_config(&config.automation).map(Arc::new));
         Ok(Self {
             target,
             revision_id,
             snapshot: Arc::new(snapshot),
             config,
+            automation_admission,
         })
     }
 
@@ -147,6 +154,17 @@ impl PinnedRuntimeConfiguration {
 
     pub fn config(&self) -> &RuntimeTraceDecayConfig {
         &self.config
+    }
+
+    /// Schedule admission belongs to automation, not project availability.
+    /// Raw settings remain readable and repairable when persisted timing is
+    /// invalid. Both the admission and its refusal are retained across clones.
+    pub fn admitted_automation(&self) -> Result<Arc<AdmittedAutomationConfig>> {
+        self.automation_admission
+            .as_ref()
+            .as_ref()
+            .map(Arc::clone)
+            .map_err(|error| AutomationErrorMessage::new(error.to_string()).into())
     }
 
     /// The same revision and settings routed under another root of the same
@@ -251,6 +269,17 @@ fn runtime_config_from_snapshot(
         config_error(format!("invalid resolved configuration snapshot: {error}"))
     })?;
     Ok(RuntimeTraceDecayConfig {
+        automation: match required_setting(snapshot, AUTOMATION_SETTINGS_SETTING_KEY)? {
+            ConfigurationValueV1::AutomationSettings(settings) => {
+                // Read-only pins can precede registry convergence. Project
+                // current settings without changing the historical snapshot
+                // or admitting schedules that reports still need to expose.
+                let mut current = settings.as_ref().clone();
+                current.retire_lock_timeout();
+                Arc::new(current)
+            }
+            _ => return Err(config_error("expected automation settings")),
+        },
         index_paths: IndexPathPolicyV1::new(
             applied_index_patterns(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
             applied_index_patterns(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
@@ -453,12 +482,13 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use tracedecay_domain::ProjectId;
     use tracedecay_domain::configuration::{
-        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
-        ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-        SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SettingKey,
+        AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationLayerIdV1, ConfigurationRevisionId,
+        ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY,
+        INDEX_MAX_FILE_SIZE_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::errors::TraceDecayError;
 
@@ -564,6 +594,37 @@ mod tests {
     }
 
     #[test]
+    fn pin_rejects_missing_mistyped_and_noncanonical_automation_settings() {
+        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
+        let mut missing = resolved(BTreeMap::new());
+        missing.effective_values.remove(&key);
+        missing.provenance.remove(&key);
+        assert!(matches!(
+            PinnedRuntimeConfiguration::new(target(), revision(), missing),
+            Err(TraceDecayError::Config { .. })
+        ));
+        let mut mistyped = resolved(BTreeMap::new());
+        mistyped
+            .effective_values
+            .insert(key.clone(), ConfigurationValueV1::Boolean(false));
+        assert!(matches!(
+            PinnedRuntimeConfiguration::new(target(), revision(), mistyped),
+            Err(TraceDecayError::Config { .. })
+        ));
+        let mut noncanonical = resolved(BTreeMap::new());
+        let mut settings = tracedecay_automation::config::AutomationConfig::default();
+        settings.tasks.memory_curator.schedule = Some(" hourly ".to_owned());
+        noncanonical.effective_values.insert(
+            key,
+            ConfigurationValueV1::AutomationSettings(Box::new(settings)),
+        );
+        assert!(matches!(
+            PinnedRuntimeConfiguration::new(target(), revision(), noncanonical),
+            Err(TraceDecayError::Config { .. })
+        ));
+    }
+
+    #[test]
     fn pin_skips_a_stored_index_pattern_that_no_longer_compiles() {
         // An earlier release accepted patterns it never compiled; loading
         // one must not take every tool down with the configuration.
@@ -600,5 +661,111 @@ mod tests {
             "a retargeted pin must share, not copy, its snapshot"
         );
         assert_eq!(moved.config(), pinned.config());
+    }
+
+    #[test]
+    fn pin_projects_retired_automation_settings_without_rewriting_history() {
+        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
+        let task = tracedecay_automation::backend::AgentTaskKind::MemoryCurator;
+        for schedule in ["every 10m", "after lunch"] {
+            let mut settings = tracedecay_automation::config::AutomationConfig::default();
+            settings.tasks.memory_curator.schedule = Some(schedule.to_owned());
+            settings.tasks.memory_curator.interval_secs = Some(5);
+            let mut snapshot = resolved(BTreeMap::from([(
+                key.clone(),
+                ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
+            )]));
+            let mut historical_settings = serde_json::to_value(&settings).unwrap();
+            historical_settings["tasks"]["memory_curator"]["stale_lock_secs"] =
+                serde_json::json!(3600);
+            historical_settings["tasks"]["session_reflector"]["stale_lock_secs"] =
+                serde_json::Value::Null;
+            // The third task keeps the absent historical representation.
+            snapshot.effective_values.insert(
+                key.clone(),
+                ConfigurationValueV1::AutomationSettings(Box::new(
+                    serde_json::from_value(historical_settings).unwrap(),
+                )),
+            );
+            let historical =
+                ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance)
+                    .unwrap();
+            let stored_bytes = serde_json::to_vec(&historical).unwrap();
+
+            let pin = PinnedRuntimeConfiguration::new(
+                target(),
+                revision(),
+                serde_json::from_slice(&stored_bytes).unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(pin.config().automation.as_ref(), &settings);
+            let effective = serde_json::to_value(pin.config().automation.as_ref()).unwrap();
+            for task in ["memory_curator", "session_reflector", "skill_writer"] {
+                assert!(effective["tasks"][task].get("stale_lock_secs").is_none());
+            }
+            assert_eq!(serde_json::to_vec(pin.snapshot()).unwrap(), stored_bytes);
+            pin.snapshot().validate().unwrap();
+            if schedule == "every 10m" {
+                assert_eq!(
+                    pin.admitted_automation().unwrap().schedule(task),
+                    Some(
+                        tracedecay_automation::config::AutomationSchedule::Interval {
+                            every_secs: 600,
+                        }
+                    ),
+                );
+            } else {
+                assert!(matches!(
+                    pin.admitted_automation(),
+                    Err(TraceDecayError::Automation(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn pin_retains_schedule_admission_without_refusing_raw_settings() {
+        let key =
+            SettingKey::new(tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY)
+                .unwrap();
+        let mut settings = tracedecay_automation::config::AutomationConfig::default();
+        settings.tasks.memory_curator.schedule = Some("every 10m".to_owned());
+        settings.tasks.memory_curator.interval_secs = Some(5);
+        let snapshot = resolved(BTreeMap::from([(
+            key.clone(),
+            ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
+        )]));
+        let pin = PinnedRuntimeConfiguration::new(target(), revision(), snapshot).unwrap();
+        let task = tracedecay_automation::backend::AgentTaskKind::MemoryCurator;
+        assert_eq!(
+            pin.admitted_automation().unwrap().schedule(task),
+            Some(tracedecay_automation::config::AutomationSchedule::Interval { every_secs: 600 })
+        );
+        for _ in 0..4 {
+            assert_eq!(pin.clone().config().automation, pin.config().automation);
+            assert!(Arc::ptr_eq(
+                &pin.clone().admitted_automation().unwrap(),
+                &pin.admitted_automation().unwrap(),
+            ));
+        }
+        for schedule in ["interval", "after lunch"] {
+            settings.tasks.memory_curator.schedule = Some(schedule.to_owned());
+            settings.tasks.memory_curator.interval_secs = None;
+            let snapshot = resolved(BTreeMap::from([(
+                key.clone(),
+                ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
+            )]));
+            let pin = PinnedRuntimeConfiguration::new(target(), revision(), snapshot).unwrap();
+            assert_eq!(pin.config().automation.as_ref(), &settings);
+            assert!(matches!(
+                pin.admitted_automation(),
+                Err(TraceDecayError::Automation(_))
+            ));
+            assert!(matches!(
+                pin.clone().admitted_automation(),
+                Err(TraceDecayError::Automation(_))
+            ));
+        }
     }
 }

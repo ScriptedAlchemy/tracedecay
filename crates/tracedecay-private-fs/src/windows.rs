@@ -600,6 +600,11 @@ fn open_with_private_creation_acl(
 fn protect_existing(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
     let current_user = current_user_sid()
         .map_err(|error| wrap_error("resolve current Windows user SID", path, error))?;
+    // Rewriting an already exact DACL performs filesystem metadata writes on
+    // every hook callback. Inspect the opened object before hardening it.
+    if private_security_is_exact(&security_snapshot(file, path, &current_user)?, kind) {
+        return Ok(());
+    }
     let acl = private_acl(&current_user, kind.inheritance())
         .map_err(|error| wrap_error("build private Windows DACL", path, error))?;
     // SAFETY: the file handle, SID, and ACL are valid and remain live for the call.
@@ -1080,6 +1085,16 @@ fn validate_private_security(
     current_user: &OwnedSid,
 ) -> io::Result<()> {
     let snapshot = security_snapshot(file, path, current_user)?;
+    if !private_security_is_exact(&snapshot, kind) {
+        return Err(rejected(
+            path,
+            &format!("private Windows DACL validation failed: {snapshot:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn private_security_is_exact(snapshot: &SecuritySnapshot, kind: PathKind) -> bool {
     let acl = AclSnapshot {
         ace_count: snapshot.ace_count,
         ace_is_allowed: snapshot.ace_is_allowed,
@@ -1087,16 +1102,9 @@ fn validate_private_security(
         ace_inheritance: snapshot.ace_inheritance,
         trustee_is_current_user: snapshot.trustee_is_current_user,
     };
-    let valid = snapshot.owner_is_current_user
+    snapshot.owner_is_current_user
         && snapshot.dacl_is_protected
-        && acl_is_exact(&acl, kind.inheritance());
-    if !valid {
-        return Err(rejected(
-            path,
-            &format!("private Windows DACL validation failed: {snapshot:?}"),
-        ));
-    }
-    Ok(())
+        && acl_is_exact(&acl, kind.inheritance())
 }
 
 fn security_snapshot(
@@ -1478,6 +1486,50 @@ mod tests {
         );
         assert!(snapshot.trustee_is_current_user);
         drop(open_private_directory(&path).unwrap());
+    }
+
+    #[test]
+    fn exact_private_security_needs_no_metadata_write_access() {
+        let temp = tempfile::tempdir().unwrap();
+        for kind in [PathKind::Directory, PathKind::File] {
+            let path = temp.path().join(kind.description());
+            match kind {
+                PathKind::Directory => create_private_directory(&path).unwrap(),
+                PathKind::File => drop(create_private_file(&path).unwrap()),
+            }
+            let before = snapshot(&path, kind);
+            let read_only = open_handle_with_share(
+                &path,
+                OPEN_EXISTING,
+                SECURITY_ACCESS,
+                null(),
+                SHARE_READ_WRITE_DELETE,
+            )
+            .unwrap();
+            // This handle cannot set ownership or the DACL. A redundant
+            // SetSecurityInfo would fail even though the object is private.
+            protect_existing(&read_only, &path, kind).unwrap();
+            assert_eq!(snapshot(&path, kind), before);
+        }
+    }
+
+    #[test]
+    fn nonprivate_security_still_requires_metadata_write_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ordinary");
+        std::fs::write(&path, b"secret").unwrap();
+        let before = snapshot(&path, PathKind::File);
+        let read_only = open_handle_with_share(
+            &path,
+            OPEN_EXISTING,
+            SECURITY_ACCESS,
+            null(),
+            SHARE_READ_WRITE_DELETE,
+        )
+        .unwrap();
+        assert!(protect_existing(&read_only, &path, PathKind::File).is_err());
+        assert_eq!(snapshot(&path, PathKind::File), before);
+        assert!(validate_private_file(&path).is_err());
     }
 
     #[test]

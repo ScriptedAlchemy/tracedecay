@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use tracedecay_application::diagnostics_producer::TypeScriptProducerStatusHandleV1;
 use tracedecay_application::primitives::{
     ProductionPrimitiveCodeAuthoritiesV1, ProductionPrimitiveOpenRequestV1,
     admitted_root_uri_for_project,
@@ -42,7 +43,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     access: ProjectSourceAccessSnapshot,
-) -> Result<String> {
+) -> Result<(String, TypeScriptProducerStatusHandleV1)> {
     let admitted_root_uri =
         admitted_root_uri_for_project(project_root).map_err(|error| TraceDecayError::Config {
             message: format!("project-open admitted root URI denied: {error}"),
@@ -59,7 +60,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
             message: "project-open primitive runtime requires the mounted ignored-dependency admission authority"
                 .to_owned(),
         })?;
-    invocation
+    let compiler_status = invocation
         .primitive_runtime_registrar()
         .open_and_register(
             project_root.to_path_buf(),
@@ -80,7 +81,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
         )
         .await
         .map_err(primitive_runtime_registration_error)?;
-    Ok(admitted_root_uri)
+    Ok((admitted_root_uri, compiler_status))
 }
 
 fn primitive_runtime_registration_error(

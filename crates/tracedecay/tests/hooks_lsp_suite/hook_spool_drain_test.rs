@@ -17,7 +17,7 @@ use tracedecay_hooks::{
     HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
 };
 use tracedecay_runtime_core::logging::format_daemon_log_line;
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+use tracedecay_runtime_core::path_safety::{canonical_existing_identity, plain_host_path};
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 
 use crate::common::{
@@ -518,7 +518,7 @@ fn admitted_edit_sequence(log: &str, root: &Path) -> Option<u64> {
             ("project", root.display().to_string()),
             (
                 "paths_digest",
-                sha256_hex(format!("{:?}", ["src/lib.rs"]).as_bytes()),
+                sha256_hex(format!("{:?}", [Path::new("src").join("lib.rs")]).as_bytes()),
             ),
         ],
     );
@@ -544,7 +544,7 @@ fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
         assert!(
             Command::new(git_program())
                 .args(["worktree", "add", "-q", "-b", branch])
-                .arg(root)
+                .arg(plain_host_path(root))
                 .current_dir(&project)
                 .status()
                 .unwrap()

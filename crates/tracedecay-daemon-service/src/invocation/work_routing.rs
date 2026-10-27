@@ -125,6 +125,16 @@ impl DaemonWorkProposalRoutingAuthorityV1 {
             && self.executable_bindings == other.executable_bindings
     }
 
+    pub(super) fn matches_current_configuration(
+        &self,
+        current: &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
+    ) -> bool {
+        self.configuration_revision == current.revision_id
+            && self.configuration_snapshot == current.snapshot.snapshot_id
+            && self.configuration_digest == current.snapshot.effective_behavior_digest
+            && self.resolution_provenance_digest == current.snapshot.resolution_provenance_digest
+    }
+
     pub(super) fn matches_scope(&self, scope: &ResolvedScope) -> bool {
         &self.scope == scope
     }

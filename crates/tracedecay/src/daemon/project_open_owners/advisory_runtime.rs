@@ -1154,19 +1154,11 @@ async fn run_production_hook_cycle(
         log_scout_producer_outcome(&producer.project_root, "observation_time_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
-    let Ok(model_config) =
-        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-            pinned_configuration.snapshot(),
-        )
-    else {
-        log_scout_producer_outcome(&producer.project_root, "model_configuration_unavailable");
-        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
-    };
     if install_project_open_context_scout_configuration(
         producer.scout_owner.as_ref(),
         scout_configuration.clone(),
         tracedecay_agent_hosts::agents::context_scout::model::ContextScoutModelConfig {
-            automation: &model_config,
+            automation: &pinned_configuration.config().automation,
             codex: &pinned_configuration.config().lcm_summarizers.codex,
         },
     )
@@ -1463,21 +1455,13 @@ async fn run_production_intent_cycle(
         );
         return HookOrchestrationWorkOutcomeV1::Completed;
     }
-    let Ok(model_config) =
-        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-            pinned_configuration.snapshot(),
-        )
-    else {
-        log_scout_intent_outcome(project_root, &request, "model_configuration_unavailable");
-        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
-    };
     // Installing the pinned configuration also builds the decision engine
     // when its settings digest changed since the last install.
     if install_project_open_context_scout_configuration(
         producer.scout_owner.as_ref(),
         scout_configuration.clone(),
         tracedecay_agent_hosts::agents::context_scout::model::ContextScoutModelConfig {
-            automation: &model_config,
+            automation: &pinned_configuration.config().automation,
             codex: &pinned_configuration.config().lcm_summarizers.codex,
         },
     )
@@ -2153,15 +2137,11 @@ async fn register_production_advisory_owner(
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
         })?;
-    let model_config =
-        tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-            configuration.snapshot(),
-        )?;
     install_project_open_context_scout_configuration(
         scout_owner.as_ref(),
         scout_configuration,
         tracedecay_agent_hosts::agents::context_scout::model::ContextScoutModelConfig {
-            automation: &model_config,
+            automation: &configuration.config().automation,
             codex: &configuration.config().lcm_summarizers.codex,
         },
     )

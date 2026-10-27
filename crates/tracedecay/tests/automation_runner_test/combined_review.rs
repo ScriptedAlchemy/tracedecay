@@ -235,8 +235,14 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(records.len(), 2);
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
         let now = current_timestamp();
-        let decision =
-            schedule_decision(&config, None, task, &records, SessionActivity::none(), now);
+        let decision = schedule_decision(
+            &tracedecay_automation::config::admit_config(&config).unwrap(),
+            None,
+            task,
+            &records,
+            SessionActivity::none(),
+            now,
+        );
         assert_eq!(
             decision.skip_reason().map(AutomationSkipReasonV1::as_str),
             Some("scheduler_interval_not_elapsed"),
@@ -1027,7 +1033,7 @@ async fn combined_review_falls_back_when_skill_deployment_is_pending() {
             "reason": "Session evidence repeats combined review."
         }]
     }));
-    let config = scheduler_config(Some(3600), Some(0));
+    let config = scheduler_config(Some(3600), Some(1));
     let scheduled_skill_options = || SkillWriterAutomationOptions {
         trigger: AutomationTrigger::Scheduler,
         provider: "cursor".to_string(),
@@ -1060,6 +1066,7 @@ async fn combined_review_falls_back_when_skill_deployment_is_pending() {
         json!(true)
     );
 
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let dispatch = settle_combined_review(
         &automation_project_context(&cg),

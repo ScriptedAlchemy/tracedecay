@@ -13,15 +13,48 @@ use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 use tracedecay_automation_runtime::automation::jobs::{
-    AutomationJob, JobDelivery, UserJobRunOptions, evaluate_and_record_scheduler_skip,
-    job_schedule_decision, job_task_key, load_jobs,
+    AutomationJob, JobDelivery, UserJobRunOptions,
+    job_schedule_decision as admitted_job_schedule_decision, job_task_key, load_jobs,
     run_user_job_with_backend_for_retained_settlement, save_jobs, validate_job,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
-    AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule,
+    AutomationSchedule, AutomationTaskLock, cron_is_due, resolve_schedule,
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::errors::TraceDecayError;
+
+fn job_schedule_decision(
+    job: &AutomationJob,
+    records: &[AutomationRunLedgerRecord],
+    now_secs: i64,
+) -> Option<AutomationSkipReasonV1> {
+    admitted_job_schedule_decision(
+        &tracedecay_automation_runtime::automation::jobs::admit_job(job).unwrap(),
+        records,
+        now_secs,
+    )
+}
+
+async fn evaluate_and_record_scheduler_skip(
+    dashboard_root: &Path,
+    config: &AutomationConfig,
+    executable: Option<&Path>,
+    job: &AutomationJob,
+    run_id: &str,
+    anchor: Option<&str>,
+) -> tracedecay_domain::errors::Result<
+    Option<tracedecay_automation_runtime::automation::jobs::UserJobAutomationRun>,
+> {
+    tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
+        dashboard_root,
+        config,
+        executable,
+        &tracedecay_automation_runtime::automation::jobs::admit_job(job)?,
+        run_id,
+        anchor,
+    )
+    .await
+}
 
 fn sample_job(id: &str) -> AutomationJob {
     AutomationJob {
@@ -273,7 +306,8 @@ fn job_validation_rejects_webhook_ssrf_targets() {
 
 #[test]
 fn parse_schedule_accepts_five_field_cron_expressions() {
-    let AutomationSchedule::Cron(cron) = parse_schedule(Some("*/15 9-17 * * 1-5")).unwrap() else {
+    let AutomationSchedule::Cron(cron) = resolve_schedule(Some("*/15 9-17 * * 1-5"), None).unwrap()
+    else {
         panic!("expected cron schedule");
     };
     // 2026-07-01 was a Wednesday. 09:15 UTC matches, 08:15 and weekend do not.
@@ -285,20 +319,22 @@ fn parse_schedule_accepts_five_field_cron_expressions() {
 
     // Legacy shorthands keep working.
     assert_eq!(
-        parse_schedule(Some("hourly")).unwrap(),
+        resolve_schedule(Some("hourly"), None).unwrap(),
         AutomationSchedule::Interval {
             every_secs: 60 * 60
         }
     );
 
     // Day-of-week 7 folds onto Sunday (0).
-    let AutomationSchedule::Cron(sunday) = parse_schedule(Some("0 0 * * 7")).unwrap() else {
+    let AutomationSchedule::Cron(sunday) = resolve_schedule(Some("0 0 * * 7"), None).unwrap()
+    else {
         panic!("expected cron schedule");
     };
     // 2026-07-05 00:00 UTC was a Sunday = 1783209600.
     assert!(sunday.matches(1_783_209_600));
 
-    let AutomationSchedule::Cron(weekday_only) = parse_schedule(Some("0 0 */1 * 1")).unwrap()
+    let AutomationSchedule::Cron(weekday_only) =
+        resolve_schedule(Some("0 0 */1 * 1"), None).unwrap()
     else {
         panic!("expected cron schedule");
     };
@@ -307,15 +343,16 @@ fn parse_schedule_accepts_five_field_cron_expressions() {
     assert!(weekday_only.matches(1_783_296_000)); // 2026-07-06 00:00 UTC.
     assert!(!weekday_only.matches(1_783_382_400)); // 2026-07-07 00:00 UTC.
 
-    assert!(parse_schedule(Some("60 * * * *")).is_err());
-    assert!(parse_schedule(Some("* * * * * *")).is_err());
-    assert!(parse_schedule(Some("*/0 * * * *")).is_err());
-    assert!(parse_schedule(Some("5-1 * * * *")).is_err());
+    assert!(resolve_schedule(Some("60 * * * *"), None).is_err());
+    assert!(resolve_schedule(Some("* * * * * *"), None).is_err());
+    assert!(resolve_schedule(Some("*/0 * * * *"), None).is_err());
+    assert!(resolve_schedule(Some("5-1 * * * *"), None).is_err());
 }
 
 #[test]
 fn cron_previous_occurrence_drives_due_decision() {
-    let AutomationSchedule::Cron(daily_noon) = parse_schedule(Some("0 12 * * *")).unwrap() else {
+    let AutomationSchedule::Cron(daily_noon) = resolve_schedule(Some("0 12 * * *"), None).unwrap()
+    else {
         panic!("expected cron schedule");
     };
     // 2026-07-01 13:00 UTC = 1782910800; the last occurrence was 12:00
@@ -624,7 +661,14 @@ async fn user_job_pre_run_command_runs_from_project_root() {
     fs::write(project_root.join("marker.txt"), "project-marker").unwrap();
 
     let mut job = sample_job("cmd-cwd");
-    job.pre_run_command = Some("cat marker.txt".to_string());
+    job.pre_run_command = Some(
+        if cfg!(windows) {
+            "type marker.txt"
+        } else {
+            "cat marker.txt"
+        }
+        .to_string(),
+    );
 
     struct AssertProjectCommandOutputBackend;
     impl AgentTaskBackend for AssertProjectCommandOutputBackend {

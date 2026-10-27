@@ -38,6 +38,13 @@ vitest_bin.vitest_test(
     tags = ["cpu:4"],
 )
 
+tsc_bin.tsc_binary(
+    name = "typescript_compiler",
+    testonly = True,
+    # The daemon invokes this compiler from each isolated project's directory.
+    env = {"BAZEL_BINDIR": "."},
+)
+
 tsc_bin.tsc_test(
     name = "typecheck",
     include_types = True,

@@ -803,7 +803,7 @@ async fn skill_writer_host_deployment_failure_is_retried_after_cooldown() {
     let completed_at = record.completed_at.parse::<i64>().unwrap();
     assert!(
         tracedecay_automation_runtime::automation::scheduler::schedule_decision(
-            &config,
+            &tracedecay_automation::config::admit_config(&config).unwrap(),
             None,
             AgentTaskKind::SkillWriter,
             &[record],
@@ -841,7 +841,7 @@ async fn skill_writer_scheduled_retry_deploys_previously_committed_skill() {
     let mut config = enabled_skill_writer_config();
     config.tasks.skill_writer.schedule = Some("interval".to_string());
     config.tasks.skill_writer.interval_secs = Some(1);
-    config.tasks.skill_writer.cooldown_secs = Some(0);
+    config.tasks.skill_writer.cooldown_secs = Some(1);
     let scheduled_options = || SkillWriterAutomationOptions {
         trigger: AutomationTrigger::Scheduler,
         provider: "cursor".to_string(),
@@ -878,6 +878,7 @@ async fn skill_writer_scheduled_retry_deploys_previously_committed_skill() {
     let deployed_skill = host_home.join(".claude/skills/scheduler-review/SKILL.md");
     assert!(!deployed_skill.exists());
 
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     let retry = settle_skill_writer(
         &automation_project_context(&cg),
         &config,
@@ -1052,7 +1053,7 @@ async fn skill_writer_retry_preserves_apply_time_rejected_proposals() {
     let mut config = enabled_skill_writer_config();
     config.tasks.skill_writer.schedule = Some("interval".to_string());
     config.tasks.skill_writer.interval_secs = Some(1);
-    config.tasks.skill_writer.cooldown_secs = Some(0);
+    config.tasks.skill_writer.cooldown_secs = Some(1);
     let scheduled_options = || SkillWriterAutomationOptions {
         trigger: AutomationTrigger::Scheduler,
         provider: "cursor".to_string(),
@@ -1095,6 +1096,7 @@ async fn skill_writer_retry_preserves_apply_time_rejected_proposals() {
 
     // The retry deploys the committed skills, but the earlier apply-time
     // rejection must survive as a failed terminal rather than a clean success.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     let retry = settle_skill_writer(
         &automation_project_context(&cg),
         &config,

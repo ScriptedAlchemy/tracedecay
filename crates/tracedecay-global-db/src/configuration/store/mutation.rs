@@ -741,6 +741,20 @@ pub(super) fn rollback_redacted_changes(
         .collect()
 }
 
+pub(super) fn project_rollback_snapshot(
+    mut historical: ConfigurationSnapshotV1,
+) -> Result<ConfigurationSnapshotV1, ConfigurationError> {
+    // Rollback creates a current revision from historical intent. Preserve the
+    // historical record and provenance, but never restore a retired setting.
+    for value in historical.effective_values.values_mut() {
+        if let ConfigurationValueV1::AutomationSettings(settings) = value {
+            settings.retire_lock_timeout();
+        }
+    }
+    ConfigurationSnapshotV1::new(historical.effective_values, historical.provenance)
+        .map_err(ConfigurationError::validation)
+}
+
 pub(super) async fn current_state_from_transaction(
     transaction: &impl QueryExecutor,
 ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
