@@ -1382,18 +1382,43 @@ impl DaemonPrimitiveRuntimeRegistrar {
         request: ProductionPrimitiveOpenRequestV1,
     ) -> Result<TypeScriptProducerStatusHandleV1, DaemonPrimitiveRuntimeRegistrationError> {
         request.validate_registration_root(&project_root)?;
+        let retained = self
+            .service
+            .project_runtimes
+            .register_or_reconcile_with(
+                project_root.clone(),
+                |runtime: &mut PrimitiveProjectRuntime| {
+                    request
+                        .validate_retained(runtime)
+                        .map(|_| ())
+                        .map_err(DaemonPrimitiveRuntimeRegistrationError::from)
+                },
+                || async {
+                    open_production_primitive_runtime(request.clone())
+                        .await
+                        .map_err(DaemonPrimitiveRuntimeRegistrationError::from)
+                },
+                PrimitiveProjectRuntime::clone,
+            )
+            .await?;
+        if request.validate_retained(&retained)? {
+            return Ok(retained.compiler_status());
+        }
+
+        // A sibling can retain this root's store owner after route eviction.
+        // Rebuild every configuration-bound port together rather than merely
+        // updating the access snapshot while leaving old cursor authorities.
+        let replacement = open_production_primitive_runtime(request).await?;
         self.service
             .project_runtimes
             .register_or_reconcile_with(
                 project_root,
                 |runtime: &mut PrimitiveProjectRuntime| {
-                    request.validate_retained(runtime).map_err(Into::into)
-                },
-                || async {
-                    open_production_primitive_runtime(request.clone())
-                        .await
+                    runtime
+                        .reconcile_reopen(&retained, &replacement)
                         .map_err(Into::into)
                 },
+                || async { Ok(replacement.clone()) },
                 PrimitiveProjectRuntime::compiler_status,
             )
             .await

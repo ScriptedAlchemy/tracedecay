@@ -375,6 +375,7 @@ impl PrimitiveCapacity {
 /// Dropping this value releases the dispatch facade and every Arc-backed
 /// project primitive authority together. The database and Arc-backed ports
 /// keep the exact project-open owners alive for the same lifetime as dispatch.
+#[derive(Clone)]
 pub struct PrimitiveProjectRuntime {
     database: Database,
     dispatch: Arc<OwnedPrimitiveRuntime>,
@@ -418,7 +419,7 @@ impl PrimitiveProjectRuntime {
         session_db: &RegisteredGlobalDbLeaseV1,
         access: &ProjectSourceAccessSnapshot,
         admitted_root_uri: &str,
-    ) -> Result<(), ApplicationContractError> {
+    ) -> Result<bool, ApplicationContractError> {
         // Request admission checks each renewed grant; its expiry is not
         // part of the retained source/configuration authority.
         let retained = &self.dispatch.access;
@@ -431,15 +432,48 @@ impl PrimitiveProjectRuntime {
             || retained.scope != access.scope
             || retained.requester != access.requester
             || retained.binding != access.binding
-            || retained.configuration_revision != access.configuration_revision
-            || retained.configuration_digest != access.configuration_digest
-            || retained.configuration_provenance_digest != access.configuration_provenance_digest
-            || retained.effective_capabilities != access.effective_capabilities
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "retained application primitive authority",
             });
         }
+        Ok(
+            retained.configuration_revision == access.configuration_revision
+                && retained.configuration_digest == access.configuration_digest
+                && retained.configuration_provenance_digest
+                    == access.configuration_provenance_digest
+                && retained.effective_capabilities == access.effective_capabilities,
+        )
+    }
+
+    /// Install one complete configuration-bound facade after preparing it
+    /// outside the registry lock. The captured dispatch fences a concurrent
+    /// reopen, so a delayed preparation cannot restore older authority.
+    pub fn reconcile_reopen(
+        &mut self,
+        captured: &Self,
+        replacement: &Self,
+    ) -> Result<(), ApplicationContractError> {
+        if self.validate_reopen(
+            &replacement.database,
+            &replacement.dispatch.test_runs.store,
+            &replacement.dispatch.access,
+            &replacement.dispatch.admitted_root_uri,
+        )? {
+            return Ok(());
+        }
+        if !Arc::ptr_eq(&self.dispatch, &captured.dispatch) {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "application primitive authority changed during reopen",
+            });
+        }
+        let mut dispatch = (*replacement.dispatch).clone();
+        // The store owner survives route eviction. Its producer publication
+        // fence and in-flight operation capacity survive this facade refresh
+        // too; only the configuration-bound ports and access are replaced.
+        dispatch.compiler_status = self.dispatch.compiler_status.clone();
+        dispatch.capacity = self.dispatch.capacity.clone();
+        self.dispatch = Arc::new(dispatch);
         Ok(())
     }
 }
