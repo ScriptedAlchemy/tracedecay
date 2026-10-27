@@ -17,7 +17,7 @@ use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::{LcmError, LcmStorageKind};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Row, params};
-use tracedecay_sessions::runtime::shared::{durable_project_path_key, path_identity_key};
+use tracedecay_sessions::runtime::shared::durable_project_path_key;
 use tracedecay_sessions::runtime::store_access::{
     message_record_from_row, session_record_from_row,
 };
@@ -1237,20 +1237,12 @@ pub(super) fn reconcile_session_rows_detailed(
             .chain(expected.started_at)
             .min(),
         ended_at: actual.ended_at.into_iter().chain(expected.ended_at).max(),
-        transcript_path: match (&actual.transcript_path, &expected.transcript_path) {
-            // Compare Windows display aliases through the durable key authority,
-            // retaining the first stored spelling as for the other annotations.
-            (Some(actual), Some(expected))
-                if path_identity_key(actual) == path_identity_key(expected) =>
-            {
-                Some(actual.clone())
-            }
-            _ => reconcile_optional(
-                "transcript_path",
-                actual.transcript_path.as_ref(),
-                expected.transcript_path.as_ref(),
-            )?,
-        },
+        // A lexical path key cannot establish transcript identity.
+        transcript_path: reconcile_optional(
+            "transcript_path",
+            actual.transcript_path.as_ref(),
+            expected.transcript_path.as_ref(),
+        )?,
         metadata_json: reconcile_metadata(
             actual.metadata_json.as_ref(),
             expected.metadata_json.as_ref(),
@@ -1481,6 +1473,7 @@ mod reconcile_tests {
     };
     #[cfg(unix)]
     use tracedecay_runtime_core::db::engine::params;
+    use tracedecay_sessions::runtime::shared::path_identity_key;
     use tracedecay_store::{
         ObservationProjection, ProjectionStoreError, SessionMessageRecord, SessionRecord,
         session_project_fields,
@@ -1711,20 +1704,22 @@ mod reconcile_tests {
     }
 
     #[test]
-    fn transcript_display_spellings_reconcile_without_hiding_collisions() {
-        let mut actual = record("user");
+    fn transcript_paths_require_exact_stored_evidence() {
+        let sparse = record("user");
+        let mut actual = sparse.clone();
         actual.transcript_path = Some(r"C:\sessions\rollout.jsonl".to_owned());
-        let mut expected = actual.clone();
-        expected.transcript_path = Some(r"\\?\C:\sessions\rollout.jsonl".to_owned());
-        let actual = canonicalize_session_project_paths(&actual);
-        let expected = canonicalize_session_project_paths(&expected);
         assert_eq!(
-            reconcile_session_rows_detailed(&actual, &expected)
-                .unwrap()
-                .transcript_path,
-            Some(r"C:\sessions\rollout.jsonl".to_owned())
+            reconcile_session_rows_detailed(&actual, &actual).unwrap(),
+            actual
         );
-        let mut conflicting = expected;
+        for (stored, expected) in [(&sparse, &actual), (&actual, &sparse)] {
+            assert_eq!(
+                reconcile_session_rows_detailed(stored, expected).unwrap(),
+                actual
+            );
+        }
+
+        let mut conflicting = actual.clone();
         conflicting.transcript_path = Some("c:/sessions/other.jsonl".to_owned());
         assert_eq!(
             reconcile_session_rows_detailed(&actual, &conflicting)
@@ -1732,6 +1727,103 @@ mod reconcile_tests {
                 .field(),
             "transcript_path"
         );
+    }
+
+    #[test]
+    fn distinct_transcript_spellings_with_the_same_path_key_collide() {
+        for (actual_path, expected_path) in [
+            (
+                r"C:\sessions\rollout.jsonl",
+                r"\\?\C:\sessions\rollout.jsonl",
+            ),
+            (
+                r"C:\sessions\rollout.jsonl.",
+                r"\\?\C:\sessions\rollout.jsonl.",
+            ),
+            (
+                r"C:\sessions\rollout.jsonl ",
+                r"\\?\C:\sessions\rollout.jsonl ",
+            ),
+            (
+                r"//sessions/archive\rollout.jsonl",
+                "//sessions/archive/rollout.jsonl",
+            ),
+        ] {
+            assert_ne!(actual_path, expected_path);
+            assert_eq!(
+                path_identity_key(actual_path),
+                path_identity_key(expected_path),
+                "the lexical key is not evidence of native transcript identity"
+            );
+            let actual = SessionRecord {
+                transcript_path: Some(actual_path.to_owned()),
+                ..record("user")
+            };
+            let expected = SessionRecord {
+                transcript_path: Some(expected_path.to_owned()),
+                ..actual.clone()
+            };
+            for (stored, incoming) in [(&actual, &expected), (&expected, &actual)] {
+                assert_eq!(
+                    reconcile_session_rows_detailed(stored, incoming)
+                        .unwrap_err()
+                        .field(),
+                    "transcript_path"
+                );
+            }
+        }
+    }
+
+    #[asupersync::test]
+    async fn applying_transcript_key_collision_preserves_the_stored_session() {
+        let harness = RegisteredGlobalDbHarness::open("transcript-key-collision").await;
+        let original = SessionRecord {
+            transcript_path: Some(r"C:\sessions\rollout.jsonl.".to_owned()),
+            ..record("user")
+        };
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        super::super::apply::apply_session(&transaction, &original)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let persisted = harness
+            .registered
+            .get_session(&original.provider, &original.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted, original);
+
+        let incoming = SessionRecord {
+            transcript_path: Some(r"\\?\C:\sessions\rollout.jsonl.".to_owned()),
+            title: Some("Rejected transcript annotation".to_owned()),
+            ended_at: Some(3),
+            ..original.clone()
+        };
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        let error = super::super::apply::apply_session(&transaction, &incoming)
+            .await
+            .expect_err("distinct transcript evidence must not enrich the stored session");
+        assert!(matches!(
+            error,
+            ProjectionStoreError::SessionOutputCollision {
+                provider,
+                session_id,
+                field,
+            } if provider == original.provider
+                && session_id == original.session_id
+                && field == "transcript_path"
+        ));
+        // Commit so rollback cannot hide a partial update before the refusal.
+        transaction.commit().await.unwrap();
+
+        let after = harness
+            .registered
+            .get_session(&original.provider, &original.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, persisted);
     }
 
     #[test]
