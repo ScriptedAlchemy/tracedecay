@@ -812,8 +812,13 @@ fn native_activation_diagnostics(
     };
     let source = codex_plugin_install_dir(home);
     let cache = codex_plugin_current_cached_install_dir(home);
-    let fingerprint =
-        |bytes: &[u8]| format!("len={} sha256={:x}", bytes.len(), Sha256::digest(bytes));
+    let fingerprint = |bytes: &[u8]| {
+        format!(
+            "len={} sha256={}",
+            bytes.len(),
+            hex::encode(Sha256::digest(bytes))
+        )
+    };
     let mut differences = Vec::new();
     let mut difference_count = 0;
     for (relative, expected) in &rendered {
