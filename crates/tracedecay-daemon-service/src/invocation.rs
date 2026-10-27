@@ -134,7 +134,7 @@ use tracedecay_application::lsp_runtime::{
 use tracedecay_application::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
 };
-use tracedecay_application::primitives::{PrimitiveDispatch, PrimitiveProjectRuntime};
+use tracedecay_application::primitives::PrimitiveProjectRuntime;
 use tracedecay_contracts::feedback::observations::{
     FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
     FeedbackOperationV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1,

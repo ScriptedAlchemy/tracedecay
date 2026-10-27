@@ -173,6 +173,11 @@ BUILD_SCRIPT_ENV = {
 # their `__test` build, which carries the test run's features as Cargo's would.
 RUNTIME_BINARIES = (
     (
+        "TRACEDECAY_TEST_TYPESCRIPT_COMPILER",
+        "//dashboard:typescript_compiler",
+        r'var_os\("TRACEDECAY_TEST_TYPESCRIPT_COMPILER"\)',
+    ),
+    (
         "TRACEDECAY_TYPESCRIPT_SDK_DIST",
         "//sdks/typescript:dist",
         r'var_os\("TRACEDECAY_TYPESCRIPT_SDK_DIST"\)',

@@ -168,12 +168,8 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 
 /// Registers the owners that serve code reads on an admitted route: the
 /// callable-code authorization and the primitive runtime. Returns the
-/// admitted root URI they were bound to.
+/// admitted root URI and the compiler status retained by their runtime.
 #[tracing::instrument(name = "daemon.project.owners.code_reads", level = "trace", skip_all)]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Project-open wiring hands each owner its admitted authorities explicitly."
-)]
 async fn register_project_code_read_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -182,8 +178,7 @@ async fn register_project_code_read_owners(
     access: &ProjectSourceAccessSnapshot,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
-    compiler_status: TypeScriptProducerStatusHandleV1,
-) -> Result<String> {
+) -> Result<(String, TypeScriptProducerStatusHandleV1)> {
     // Primitive reads are part of the admitted core route. Publish their
     // runtime and callable-code authorization before the slower mutation,
     // delivery, native-integration, and Work owners finish mounting.
@@ -225,7 +220,6 @@ async fn register_project_code_read_owners(
         session_db,
         temporal,
         access.clone(),
-        compiler_status,
     )
     .await
 }
@@ -278,7 +272,6 @@ pub(super) async fn register_reset_required_route_code_read_owners(
         &access,
         session_store,
         Arc::new(primitive_runtime::ResetRequiredSessionLookupV1),
-        TypeScriptProducerStatusHandleV1::default(),
     ))
     .await
     .map(drop)
@@ -388,10 +381,7 @@ pub(super) async fn register_project_open_production_owners(
     let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
         server.project_session_application_retrieval_service(&access.scope)?,
     ));
-    // One status handle per project owner: the producer publishes into it and
-    // this owner's diagnostics reads describe it.
-    let compiler_status = TypeScriptProducerStatusHandleV1::default();
-    let admitted_root_uri = Box::pin(register_project_code_read_owners(
+    let (admitted_root_uri, compiler_status) = Box::pin(register_project_code_read_owners(
         invocation,
         project_root,
         server,
@@ -399,7 +389,6 @@ pub(super) async fn register_project_open_production_owners(
         &access,
         session_db.clone(),
         temporal,
-        compiler_status.clone(),
     ))
     .await?;
     owner_phase("code_read_owners_registered");

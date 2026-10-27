@@ -53,6 +53,10 @@ pub(super) fn spawn_typescript_diagnostics_producer(
         log_producer_event(&project_root, "compiler_admission_unavailable");
         return false;
     };
+    // Reopen can retain the primitive runtime while the prior server's
+    // compiler task is still retiring. Fence it before this task can yield
+    // in discovery; scheduling order must not choose the current producer.
+    let mut state = TypeScriptProducerStateV1::new(status, admission);
     owner.spawn_background_task(tracing::Instrument::instrument(
         async move {
             let Some(projects) = discover_projects(&project_root).await else {
@@ -78,7 +82,6 @@ pub(super) fn spawn_typescript_diagnostics_producer(
             let schedulers = invocation.code_index_schedulers.clone();
             let mut signals = CodeIndexOwnerSignalsV1::subscribe(&schedulers, &project_root).await;
             let build_info_dir = graph.store_layout().data_root.join(BUILD_INFO_DIR);
-            let mut state = TypeScriptProducerStateV1::new(status, admission);
             // One producer run per generation, whatever its outcome: the root's
             // signals also wake on serving and pass changes, and a project
             // whose compiler keeps failing must not re-run it on each of them.
@@ -195,6 +198,7 @@ fn log_producer_run(project_root: &Path, run: &CompilerProducerRunV1) {
         CompilerProducerRunV1::PublicationFailed { reason } => {
             ("publication_failed", reason.clone())
         }
+        CompilerProducerRunV1::Superseded => ("superseded", String::new()),
     };
     log_daemon_event(
         "typescript_diagnostics_producer",

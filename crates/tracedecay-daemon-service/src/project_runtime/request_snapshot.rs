@@ -282,7 +282,7 @@ mod tests {
             Arc::new(UnavailableAdvisoryCycle),
         );
         registry
-            .register(canonical.clone(), owner)
+            .publish(canonical.clone(), owner)
             .await
             .expect("canonical owner registration");
 
@@ -356,7 +356,7 @@ mod tests {
         let admitted_project = ProjectId::new("project.admitted-owner").expect("project id");
         let replacement_project = ProjectId::new("project.replacement-owner").expect("project id");
         registry
-            .register(
+            .publish(
                 project_root.clone(),
                 DaemonAdvisoryCycleInvocationOwner::new(
                     admitted_project.clone(),
@@ -417,7 +417,7 @@ mod tests {
         let foreign = PathBuf::from("/projects/foreign-root");
         let admitted_project = ProjectId::new("project.admitted-root").expect("project id");
         registry
-            .register(
+            .publish(
                 admitted.clone(),
                 DaemonAdvisoryCycleInvocationOwner::new(
                     admitted_project.clone(),
@@ -427,7 +427,7 @@ mod tests {
             .await
             .expect("admitted owner registration");
         registry
-            .register(
+            .publish(
                 foreign.clone(),
                 DaemonAdvisoryCycleInvocationOwner::new(
                     ProjectId::new("project.foreign-root").expect("project id"),
@@ -482,7 +482,7 @@ mod tests {
         let original_project = ProjectId::new("project.original-target").expect("project id");
         let replacement_project = ProjectId::new("project.replacement-target").expect("project id");
         registry
-            .register(
+            .publish(
                 original.clone(),
                 DaemonAdvisoryCycleInvocationOwner::new(
                     original_project.clone(),
@@ -492,7 +492,7 @@ mod tests {
             .await
             .expect("original owner registration");
         registry
-            .register(
+            .publish(
                 replacement.clone(),
                 DaemonAdvisoryCycleInvocationOwner::new(
                     replacement_project,

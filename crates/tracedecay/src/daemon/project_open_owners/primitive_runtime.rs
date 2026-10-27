@@ -35,10 +35,6 @@ impl TemporalRetrievalPort for ResetRequiredSessionLookupV1 {
 }
 
 #[tracing::instrument(name = "daemon.project.owners.primitive", level = "trace", skip_all)]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Project-open wiring hands each owner its admitted authorities explicitly."
-)]
 pub(super) async fn open_and_register_project_primitive_runtime(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -47,8 +43,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     access: ProjectSourceAccessSnapshot,
-    compiler_status: TypeScriptProducerStatusHandleV1,
-) -> Result<String> {
+) -> Result<(String, TypeScriptProducerStatusHandleV1)> {
     let admitted_root_uri =
         admitted_root_uri_for_project(project_root).map_err(|error| TraceDecayError::Config {
             message: format!("project-open admitted root URI denied: {error}"),
@@ -65,7 +60,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
             message: "project-open primitive runtime requires the mounted ignored-dependency admission authority"
                 .to_owned(),
         })?;
-    invocation
+    let compiler_status = invocation
         .primitive_runtime_registrar()
         .open_and_register(
             project_root.to_path_buf(),
@@ -82,12 +77,11 @@ pub(super) async fn open_and_register_project_primitive_runtime(
                 temporal,
                 access,
                 admitted_root_uri.clone(),
-                compiler_status,
             ),
         )
         .await
         .map_err(primitive_runtime_registration_error)?;
-    Ok(admitted_root_uri)
+    Ok((admitted_root_uri, compiler_status))
 }
 
 fn primitive_runtime_registration_error(

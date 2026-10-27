@@ -377,7 +377,7 @@ impl PrimitiveCapacity {
 /// keep the exact project-open owners alive for the same lifetime as dispatch.
 pub struct PrimitiveProjectRuntime {
     database: Database,
-    dispatch: Arc<dyn PrimitiveDispatch>,
+    dispatch: Arc<OwnedPrimitiveRuntime>,
 }
 
 /// Replace the mount-time authority carried by an owned primitive result with
@@ -401,11 +401,46 @@ pub fn reauthorize_primitive_evidence(
 
 impl PrimitiveProjectRuntime {
     pub fn dispatch(&self) -> Arc<dyn PrimitiveDispatch> {
-        Arc::clone(&self.dispatch)
+        self.dispatch.clone()
     }
 
     pub fn database(&self) -> &Database {
         &self.database
+    }
+
+    pub fn compiler_status(&self) -> TypeScriptProducerStatusHandleV1 {
+        self.dispatch.compiler_status.clone()
+    }
+
+    pub(super) fn validate_reopen(
+        &self,
+        database: &Database,
+        session_db: &RegisteredGlobalDbLeaseV1,
+        access: &ProjectSourceAccessSnapshot,
+        admitted_root_uri: &str,
+    ) -> Result<(), ApplicationContractError> {
+        // Request admission checks each renewed grant; its expiry is not
+        // part of the retained source/configuration authority.
+        let retained = &self.dispatch.access;
+        let sessions = &self.dispatch.test_runs.store;
+        if self.database.canonical_database_path() != database.canonical_database_path()
+            || self.database.opened_file_identity() != database.opened_file_identity()
+            || sessions.binding() != session_db.binding()
+            || sessions.verified_locator() != session_db.verified_locator()
+            || self.dispatch.admitted_root_uri != admitted_root_uri
+            || retained.scope != access.scope
+            || retained.requester != access.requester
+            || retained.binding != access.binding
+            || retained.configuration_revision != access.configuration_revision
+            || retained.configuration_digest != access.configuration_digest
+            || retained.configuration_provenance_digest != access.configuration_provenance_digest
+            || retained.effective_capabilities != access.effective_capabilities
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "retained application primitive authority",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -573,7 +608,7 @@ pub fn open_primitive_project_runtime(
         health,
         extended,
     };
-    let dispatch: Arc<dyn PrimitiveDispatch> = Arc::new(OwnedPrimitiveRuntime {
+    let dispatch = Arc::new(OwnedPrimitiveRuntime {
         project_runtime: services,
         scope,
         access,
@@ -1936,14 +1971,16 @@ fn unpublished_diagnostics_problem(
                 // is the same pending state: the producer publishes exactly once
                 // per generation, so the current generation's run is what the
                 // caller is waiting on.
-                None | Some(CompilerProducerRunV1::CodeIndexGenerationUnavailable) => {
-                    ApplicationProblem::from_detail(
-                        ApplicationProblemDetailV1::DiagnosticsPending {
-                            producer: compiler,
-                            generation: None,
-                        },
-                    )
-                }
+                None
+                | Some(
+                    CompilerProducerRunV1::CodeIndexGenerationUnavailable
+                    | CompilerProducerRunV1::Superseded,
+                ) => ApplicationProblem::from_detail(
+                    ApplicationProblemDetailV1::DiagnosticsPending {
+                        producer: compiler,
+                        generation: None,
+                    },
+                ),
                 Some(CompilerProducerRunV1::Published { generation, .. }) => {
                     ApplicationProblem::from_detail(
                         ApplicationProblemDetailV1::DiagnosticsPending {
