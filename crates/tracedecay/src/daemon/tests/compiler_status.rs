@@ -8,11 +8,17 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tracedecay_application::primitives::PrimitiveProjectRuntime;
+use tracedecay_application::project_open_authorization::project_open_work_grant;
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 use tracedecay_contracts::retrieval::{
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveScope, PrimitiveRequest,
 };
 use tracedecay_contracts::{CancellationContext, Deadline};
-use tracedecay_domain::UtcMicros;
+use tracedecay_daemon_service::{
+    DaemonWorkProposalRoutingAuthorityV1, daemon_owned_project_source_access_at,
+};
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAuthority, canonical_sha256};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
@@ -115,6 +121,95 @@ fn compiler_failure(outcome: &DaemonInvocationOutcome) -> String {
     let diagnostic = problem.diagnostic().expect("compiler failure diagnostic");
     assert_eq!(diagnostic.code, "application.diagnostics.producer-failed");
     diagnostic.message.clone()
+}
+
+async fn register_work_for_configuration(
+    engine: &DaemonEngine,
+    target_root: &Path,
+    server: &crate::mcp::McpServer,
+    configuration: &PinnedRuntimeConfiguration,
+) -> (ManifestDigest, bool, Result<(), TraceDecayError>) {
+    let graph = server.cg().await;
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        graph.project_root(),
+        &graph
+            .configuration_runtime()
+            .configuration_target()
+            .project_id,
+    )
+    .unwrap();
+    let access = daemon_owned_project_source_access_at(
+        &scope,
+        graph.project_root(),
+        configuration,
+        tracedecay_contracts::now_micros(),
+    )
+    .unwrap();
+    let database = graph
+        .store_runtime_registry()
+        .mount_registered_project_sessions(scope.project_id.clone())
+        .await
+        .unwrap();
+    let grant = project_open_work_grant(&access, tracedecay_contracts::now_micros())
+        .unwrap()
+        .unwrap();
+    let authority = WorkAuthority::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        access.requester.clone(),
+        grant.digest.clone(),
+    )
+    .unwrap();
+    let policy_digest = canonical_sha256(&(
+        "tracedecay.daemon.configuration-policy.v1",
+        &scope.scope_digest,
+        &access.configuration_digest,
+        &access.configuration_provenance_digest,
+    ))
+    .unwrap();
+    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(
+        scope.clone(),
+        configuration,
+        &access.configuration_digest,
+        &grant,
+    )
+    .unwrap();
+    let topology = tracedecay_configuration::config::topology::resolved_work_topology_policy(
+        configuration.snapshot(),
+    )
+    .unwrap()
+    .clone();
+    drop(graph);
+    let registrar = engine.invocation.work_runtime_registrar();
+    let matches = registrar
+        .authority_matches(
+            target_root,
+            &authority,
+            &access.requester,
+            &grant,
+            &policy_digest,
+            &access.configuration_digest,
+        )
+        .await;
+    let grant_digest = grant.digest.clone();
+    let result = registrar
+        .register(
+            target_root.to_path_buf(),
+            database,
+            authority,
+            access.requester,
+            grant,
+            policy_digest,
+            access.configuration_digest,
+            topology,
+            routing,
+            server
+                .work_evidence_retrieval(&scope, engine.invocation.work_federated_query_authority())
+                .unwrap(),
+        )
+        .await;
+    (grant_digest, matches, result)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -341,6 +436,10 @@ async fn route_eviction_reopen_reads_retained_compiler_status_with_leased_siblin
         .current()
         .await
         .unwrap();
+    let (old_work_grant, old_work_matches, old_work_registration) =
+        register_work_for_configuration(&engine, &primary, &reopened, &old_configuration).await;
+    assert!(old_work_matches);
+    old_work_registration.expect("same-configuration Work registration remains admitted");
     drop(reopened);
 
     // Reopen the sibling displaced by the primary. Every other route is
@@ -418,6 +517,39 @@ async fn route_eviction_reopen_reads_retained_compiler_status_with_leased_siblin
     )
     .await;
     assert!(compiler_failure(&after_configuration).contains("configured-missing.json"));
+    let (current_work_grant, current_work_matches, current_work_registration) =
+        register_work_for_configuration(&engine, &primary, &configured, &current_configuration)
+            .await;
+    assert_eq!(
+        old_work_grant, current_work_grant,
+        "telemetry changes preserve durable Work grant identity"
+    );
+    assert!(
+        current_work_matches,
+        "reopen must already have refreshed the Work configuration authority"
+    );
+    current_work_registration.expect("current Work configuration remains admitted");
+    let (_, stale_work_matches, stale_work_registration) =
+        register_work_for_configuration(&engine, &primary, &configured, &old_configuration).await;
+    assert!(!stale_work_matches);
+    assert!(
+        stale_work_registration.is_err(),
+        "a delayed old configuration cannot replace current Work authority"
+    );
+    let sibling_server = leased_siblings.first().unwrap();
+    let (_, foreign_work_matches, foreign_work_registration) =
+        register_work_for_configuration(&engine, &primary, sibling_server, &current_configuration)
+            .await;
+    assert!(!foreign_work_matches);
+    assert!(
+        foreign_work_registration.is_err(),
+        "a linked sibling cannot replace the primary's Work authority"
+    );
+    let (_, preserved_work_matches, preserved_work_registration) =
+        register_work_for_configuration(&engine, &primary, &configured, &current_configuration)
+            .await;
+    assert!(preserved_work_matches);
+    preserved_work_registration.expect("rejected candidates leave current Work authority intact");
     assert!(Arc::ptr_eq(
         &retained_runtime.compiler_status().current().unwrap(),
         &refreshed.compiler_status().current().unwrap(),
