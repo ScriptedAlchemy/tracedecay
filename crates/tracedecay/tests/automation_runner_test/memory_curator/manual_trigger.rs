@@ -54,6 +54,7 @@ async fn manual_memory_curator_skips_when_backend_is_disabled() {
         enabled: false,
         backend: AutomationBackend::Disabled,
         host_mode: AutomationHostMode::Standalone,
+        model_id: None,
         ..AutomationConfig::default()
     };
 

@@ -46,16 +46,22 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
         ..AutomationTaskConfig::default()
     };
 
-    assert!(super::super::automation_scheduler_configured(&config));
+    assert!(super::super::automation_scheduler_configured(
+        &tracedecay_automation::config::admit_config(&config).unwrap()
+    ));
 
     config.tasks.memory_curator.schedule = Some("manual".to_string());
-    assert!(!super::super::automation_scheduler_configured(&config));
+    assert!(!super::super::automation_scheduler_configured(
+        &tracedecay_automation::config::admit_config(&config).unwrap()
+    ));
 
     config.tasks.memory_curator.schedule = Some("interval".to_string());
     config.tasks.memory_curator.interval_secs = None;
-    assert!(!super::super::automation_scheduler_configured(&config));
+    assert!(tracedecay_automation::config::admit_config(&config).is_err());
     config.tasks.memory_curator.interval_secs = Some(300);
-    assert!(super::super::automation_scheduler_configured(&config));
+    assert!(super::super::automation_scheduler_configured(
+        &tracedecay_automation::config::admit_config(&config).unwrap()
+    ));
 
     config.tasks.memory_curator.enabled = false;
     config.tasks.session_reflector = AutomationTaskConfig {
@@ -65,7 +71,9 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
         cooldown_secs: None,
         ..AutomationTaskConfig::default()
     };
-    assert!(super::super::automation_scheduler_configured(&config));
+    assert!(super::super::automation_scheduler_configured(
+        &tracedecay_automation::config::admit_config(&config).unwrap()
+    ));
 
     config.tasks.session_reflector.enabled = false;
     config.tasks.skill_writer = AutomationTaskConfig {
@@ -75,19 +83,28 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
         cooldown_secs: None,
         ..AutomationTaskConfig::default()
     };
-    assert!(super::super::automation_scheduler_configured(&config));
+    assert!(super::super::automation_scheduler_configured(
+        &tracedecay_automation::config::admit_config(&config).unwrap()
+    ));
 
     config.tasks.memory_curator.schedule = Some("every:5m".to_string());
     config.backend = AutomationBackend::Disabled;
-    assert!(!super::super::automation_scheduler_configured(&config));
+    config.model_id = None;
+    assert!(!super::super::automation_scheduler_configured(
+        &tracedecay_automation::config::admit_config(&config).unwrap()
+    ));
 
     config.backend = AutomationBackend::CodexAppServer;
     config.host_mode = AutomationHostMode::DelegatedHost;
-    assert!(!super::super::automation_scheduler_configured(&config));
+    assert!(!super::super::automation_scheduler_configured(
+        &tracedecay_automation::config::admit_config(&config).unwrap()
+    ));
 
     config.host_mode = AutomationHostMode::Standalone;
     config.enabled = false;
-    assert!(!super::super::automation_scheduler_configured(&config));
+    assert!(!super::super::automation_scheduler_configured(
+        &tracedecay_automation::config::admit_config(&config).unwrap()
+    ));
 }
 
 #[cfg(unix)]

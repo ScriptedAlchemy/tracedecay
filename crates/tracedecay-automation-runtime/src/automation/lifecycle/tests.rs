@@ -428,6 +428,7 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
         enabled: false,
         backend: AutomationBackend::Disabled,
         host_mode: AutomationHostMode::Standalone,
+        model_id: None,
         ..AutomationConfig::default()
     };
     let (gate, _) = task_run_gate(

@@ -934,19 +934,25 @@ mod automation_settings_tests {
 
     #[test]
     fn historical_lock_timeouts_preserve_their_serialized_identity() {
-        for timeout in [serde_json::Value::Null, serde_json::json!(3600)] {
+        for timeout in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(3600)),
+        ] {
             let mut historical = serde_json::to_value(AutomationSettingsV1::default()).unwrap();
             for task in ["memory_curator", "session_reflector", "skill_writer"] {
-                historical["tasks"][task]["stale_lock_secs"] = timeout.clone();
+                if let Some(timeout) = &timeout {
+                    historical["tasks"][task]["stale_lock_secs"] = timeout.clone();
+                }
             }
             let stored: AutomationSettingsV1 = serde_json::from_value(historical.clone()).unwrap();
             stored.validate().unwrap();
-            assert!(stored.has_retired_lock_timeout());
+            assert_eq!(stored.has_retired_lock_timeout(), timeout.is_some());
             assert_eq!(serde_json::to_value(&stored).unwrap(), historical);
             assert_eq!(
                 canonical_sha256(&stored).unwrap(),
                 canonical_sha256(&historical).unwrap(),
-                "loading a historical null or number must preserve the digest input"
+                "loading an absent, null, or numeric historical field must preserve the digest input"
             );
             assert!(
                 stored.is_default(),
@@ -954,7 +960,7 @@ mod automation_settings_tests {
             );
 
             let mut effective = stored.clone();
-            assert!(effective.retire_lock_timeout());
+            assert_eq!(effective.retire_lock_timeout(), timeout.is_some());
             assert_eq!(effective, AutomationSettingsV1::default());
             assert!(!effective.retire_lock_timeout(), "retirement is idempotent");
             for task in ["memory_curator", "session_reflector", "skill_writer"] {

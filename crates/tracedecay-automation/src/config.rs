@@ -5,6 +5,7 @@ pub use tracedecay_domain::configuration::{
     AutomationTaskSettingsV1 as AutomationTaskConfig,
 };
 
+use crate::backend::AgentTaskKind;
 use crate::{AutomationError, Result, config_error};
 
 pub const DEFAULT_SCHEDULER_TICK_SECS: u64 = 60;
@@ -140,6 +141,39 @@ pub fn merge_project_config(
 }
 
 pub fn validate_config(config: &AutomationConfig) -> Result<()> {
+    admit_config(config).map(|_| ())
+}
+
+/// One immutable configuration admission. External settings remain available
+/// for reports and backend identity, but cannot change independently of timing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedAutomationConfig {
+    settings: AutomationConfig,
+    schedules: [AutomationSchedule; 3],
+}
+
+impl std::ops::Deref for AdmittedAutomationConfig {
+    type Target = AutomationConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.settings
+    }
+}
+
+impl AdmittedAutomationConfig {
+    pub fn schedule(&self, task: AgentTaskKind) -> Option<AutomationSchedule> {
+        match task {
+            AgentTaskKind::MemoryCurator => Some(self.schedules[0]),
+            AgentTaskKind::SessionReflector => Some(self.schedules[1]),
+            AgentTaskKind::SkillWriter => Some(self.schedules[2]),
+            AgentTaskKind::CombinedReview | AgentTaskKind::UserJob => None,
+        }
+    }
+}
+
+pub fn admit_config(config: &AutomationConfig) -> Result<AdmittedAutomationConfig> {
+    let mut config = config.clone();
+    config.retire_lock_timeout();
     if config.timeout_secs == 0 {
         return Err(config_error(
             "automation timeout_secs must be greater than zero",
@@ -150,13 +184,38 @@ pub fn validate_config(config: &AutomationConfig) -> Result<()> {
             "automation scheduler_tick_secs must be greater than zero",
         ));
     }
-    validate_task_config("memory_curator", &config.tasks.memory_curator)?;
-    validate_task_config("session_reflector", &config.tasks.session_reflector)?;
-    validate_task_config("skill_writer", &config.tasks.skill_writer)?;
+    for (name, task) in [
+        ("memory_curator", &config.tasks.memory_curator),
+        ("session_reflector", &config.tasks.session_reflector),
+        ("skill_writer", &config.tasks.skill_writer),
+    ] {
+        for (field, value) in [
+            ("interval_secs", task.interval_secs),
+            ("cooldown_secs", task.cooldown_secs),
+            ("min_idle_secs", task.min_idle_secs),
+            (
+                "session_evidence_budget_backoff_secs",
+                task.session_evidence_budget_backoff_secs,
+            ),
+        ] {
+            if value == Some(0) {
+                return Err(config_error(format!(
+                    "{name} {field} must be greater than zero"
+                )));
+            }
+        }
+    }
     config
         .validate()
         .map_err(|error| config_error(format!("invalid automation settings: {error}")))?;
-    Ok(())
+    Ok(AdmittedAutomationConfig {
+        schedules: [
+            resolve_task_schedule("memory_curator", &config.tasks.memory_curator)?,
+            resolve_task_schedule("session_reflector", &config.tasks.session_reflector)?,
+            resolve_task_schedule("skill_writer", &config.tasks.skill_writer)?,
+        ],
+        settings: config,
+    })
 }
 
 fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
@@ -254,43 +313,57 @@ fn merge_optional_field<T>(current: &mut Option<T>, patch: Option<T>) {
     }
 }
 
-fn validate_task_config(task: &str, config: &AutomationTaskConfig) -> Result<()> {
-    if matches!(config.interval_secs, Some(0)) {
-        return Err(config_error(format!(
-            "{task} interval_secs must be greater than zero"
-        )));
-    }
-    if matches!(config.cooldown_secs, Some(0)) {
-        return Err(config_error(format!(
-            "{task} cooldown_secs must be greater than zero"
-        )));
-    }
-    if matches!(config.min_idle_secs, Some(0)) {
-        return Err(config_error(format!(
-            "{task} min_idle_secs must be greater than zero"
-        )));
-    }
-    if matches!(config.session_evidence_budget_backoff_secs, Some(0)) {
-        return Err(config_error(format!(
-            "{task} session_evidence_budget_backoff_secs must be greater than zero"
-        )));
-    }
-    let schedule = parse_schedule(config.schedule.as_deref())
-        .map_err(|error| AutomationError::config(format!("{task} schedule is invalid: {error}")))?;
-    if schedule == AutomationSchedule::ConfiguredInterval && config.interval_secs.is_none() {
-        return Err(config_error(format!(
-            "{task} interval_secs is required when schedule is interval"
-        )));
-    }
-    Ok(())
+fn resolve_task_schedule(task: &str, config: &AutomationTaskConfig) -> Result<AutomationSchedule> {
+    resolve_schedule(config.schedule.as_deref(), config.interval_secs).map_err(
+        |error| match error {
+            ScheduleResolutionError::Invalid(error) => {
+                AutomationError::config(format!("{task} schedule is invalid: {error}"))
+            }
+            ScheduleResolutionError::IntervalRequired => config_error(format!("{task} {error}")),
+        },
+    )
 }
 
+/// A task's admitted timing policy. The `interval` spelling and
+/// `interval_secs` are resolved into one concrete interval by
+/// [`resolve_schedule`], so nothing downstream carries both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutomationSchedule {
     Manual,
-    ConfiguredInterval,
     Interval { every_secs: u64 },
     Cron(CronSchedule),
+}
+
+/// Why a schedule spelling and `interval_secs` cannot form one timing policy.
+#[derive(Debug)]
+pub enum ScheduleResolutionError {
+    Invalid(AutomationError),
+    IntervalRequired,
+}
+
+impl std::fmt::Display for ScheduleResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(error) => error.fmt(formatter),
+            Self::IntervalRequired => {
+                formatter.write_str("interval_secs is required when schedule is interval")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ScheduleResolutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Invalid(error) => Some(error),
+            Self::IntervalRequired => None,
+        }
+    }
+}
+
+enum ScheduleSpelling {
+    Resolved(AutomationSchedule),
+    ConfiguredInterval,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,26 +444,46 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
+/// Resolves the schedule spelling and `interval_secs` into the one timing
+/// policy a task runs under. Absent or empty spellings are manual; the
+/// `interval` spelling takes its period from `interval_secs`.
+pub fn resolve_schedule(
+    schedule: Option<&str>,
+    interval_secs: Option<u64>,
+) -> std::result::Result<AutomationSchedule, ScheduleResolutionError> {
+    match parse_schedule_spelling(schedule).map_err(ScheduleResolutionError::Invalid)? {
+        ScheduleSpelling::Resolved(schedule) => Ok(schedule),
+        ScheduleSpelling::ConfiguredInterval => match interval_secs {
+            Some(every_secs) if every_secs > 0 => Ok(AutomationSchedule::Interval { every_secs }),
+            Some(_) => Err(ScheduleResolutionError::Invalid(config_error(
+                "interval_secs must be greater than zero",
+            ))),
+            None => Err(ScheduleResolutionError::IntervalRequired),
+        },
+    }
+}
+
+fn parse_schedule_spelling(schedule: Option<&str>) -> Result<ScheduleSpelling> {
+    let resolved = |schedule| Ok(ScheduleSpelling::Resolved(schedule));
     let Some(raw) = schedule.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(AutomationSchedule::Manual);
+        return resolved(AutomationSchedule::Manual);
     };
     let normalized = raw.to_ascii_lowercase();
     match normalized.as_str() {
-        "manual" | "off" | "disabled" => return Ok(AutomationSchedule::Manual),
-        "interval" => return Ok(AutomationSchedule::ConfiguredInterval),
+        "manual" | "off" | "disabled" => return resolved(AutomationSchedule::Manual),
+        "interval" => return Ok(ScheduleSpelling::ConfiguredInterval),
         "hourly" => {
-            return Ok(AutomationSchedule::Interval {
+            return resolved(AutomationSchedule::Interval {
                 every_secs: 60 * 60,
             });
         }
         "daily" => {
-            return Ok(AutomationSchedule::Interval {
+            return resolved(AutomationSchedule::Interval {
                 every_secs: 24 * 60 * 60,
             });
         }
         "weekly" => {
-            return Ok(AutomationSchedule::Interval {
+            return resolved(AutomationSchedule::Interval {
                 every_secs: 7 * 24 * 60 * 60,
             });
         }
@@ -398,7 +491,7 @@ pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
     }
 
     if normalized.split_whitespace().count() == 5 {
-        return parse_cron_expression(&normalized);
+        return parse_cron_expression(&normalized).map(ScheduleSpelling::Resolved);
     }
 
     let duration = normalized
@@ -417,11 +510,7 @@ pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
             "automation schedule interval must be greater than zero",
         ));
     }
-    Ok(AutomationSchedule::Interval { every_secs })
-}
-
-pub fn validate_schedule(schedule: Option<&str>) -> Result<()> {
-    parse_schedule(schedule).map(|_| ())
+    resolved(AutomationSchedule::Interval { every_secs })
 }
 
 fn parse_cron_expression(raw: &str) -> Result<AutomationSchedule> {
@@ -547,10 +636,25 @@ mod tests {
         stored["tasks"]["session_reflector"]["stale_lock_secs"] = serde_json::Value::Null;
         stored["timeout_secs"] = serde_json::json!(137);
         let stored: AutomationConfig = serde_json::from_value(stored).unwrap();
+        let historical_bytes = serde_json::to_vec(&stored).unwrap();
         let effective = effective_config(&stored, None).unwrap();
         assert_eq!(effective.timeout_secs, 137);
         assert!(!effective.has_retired_lock_timeout());
+        let admitted = admit_config(&stored).unwrap();
+        assert_eq!(admitted.settings, effective);
+        assert!(!admitted.has_retired_lock_timeout());
+        for (task, every_secs) in [
+            (AgentTaskKind::MemoryCurator, 900),
+            (AgentTaskKind::SessionReflector, 900),
+            (AgentTaskKind::SkillWriter, 3600),
+        ] {
+            assert_eq!(
+                admitted.schedule(task),
+                Some(AutomationSchedule::Interval { every_secs })
+            );
+        }
         assert!(stored.has_retired_lock_timeout());
+        assert_eq!(serde_json::to_vec(&stored).unwrap(), historical_bytes);
         for task in ["memory_curator", "session_reflector", "skill_writer"] {
             for value in [serde_json::Value::Null, serde_json::json!(3600)] {
                 let patch = serde_json::json!({ (task): { "stale_lock_secs": value } });
@@ -729,6 +833,53 @@ mod tests {
     }
 
     #[test]
+    fn schedule_admission_preserves_patch_omission_clear_and_precedence() {
+        let mut base = AutomationConfig::default();
+        base.tasks.memory_curator.schedule = Some("interval".to_owned());
+        base.tasks.memory_curator.interval_secs = Some(600);
+        for (patch, expected) in [
+            (
+                serde_json::json!({}),
+                AutomationSchedule::Interval { every_secs: 600 },
+            ),
+            (
+                serde_json::json!({"schedule": null}),
+                AutomationSchedule::Manual,
+            ),
+            (
+                serde_json::json!({"schedule": "manual", "interval_secs": null}),
+                AutomationSchedule::Manual,
+            ),
+            (
+                serde_json::json!({"schedule": "hourly", "interval_secs": 5}),
+                AutomationSchedule::Interval { every_secs: 3600 },
+            ),
+            (
+                serde_json::json!({"interval_secs": 300}),
+                AutomationSchedule::Interval { every_secs: 300 },
+            ),
+        ] {
+            let patch =
+                serde_json::from_value(serde_json::json!({"memory_curator": patch})).unwrap();
+            let effective = effective_config(&base, Some(&patch)).unwrap();
+            assert_eq!(
+                admit_config(&effective)
+                    .unwrap()
+                    .schedule(AgentTaskKind::MemoryCurator),
+                Some(expected),
+            );
+        }
+        for patch in [
+            serde_json::json!({"interval_secs": null}),
+            serde_json::json!({"schedule": "after lunch"}),
+        ] {
+            let patch =
+                serde_json::from_value(serde_json::json!({"memory_curator": patch})).unwrap();
+            assert!(effective_config(&base, Some(&patch)).is_err());
+        }
+    }
+
+    #[test]
     fn validation_rejects_zero_global_and_task_durations() {
         let mut config = AutomationConfig {
             timeout_secs: 0,
@@ -792,7 +943,7 @@ mod tests {
             ..AutomationConfigPatch::default()
         };
         effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
-        let AutomationSchedule::Cron(cron) = parse_schedule(Some(schedule)).unwrap() else {
+        let AutomationSchedule::Cron(cron) = resolve_schedule(Some(schedule), None).unwrap() else {
             panic!("expected cron schedule");
         };
         for day in 1..=31 {
@@ -804,16 +955,16 @@ mod tests {
     #[test]
     fn public_schedule_parser_preserves_interval_and_cron_behavior() {
         assert_eq!(
-            parse_schedule(Some("hourly")).unwrap(),
+            resolve_schedule(Some("hourly"), None).unwrap(),
             AutomationSchedule::Interval { every_secs: 3600 }
         );
-        let AutomationSchedule::Cron(cron) = parse_schedule(Some("*/15 9-17 * * 1-5")).unwrap()
+        let AutomationSchedule::Cron(cron) =
+            resolve_schedule(Some("*/15 9-17 * * 1-5"), None).unwrap()
         else {
             panic!("expected cron schedule");
         };
         assert!(cron.matches(32_400));
         assert_eq!(cron.previous_occurrence(32_459), Some(32_400));
-        assert!(validate_schedule(Some("hourly")).is_ok());
-        assert!(validate_schedule(Some("after lunch")).is_err());
+        assert!(resolve_schedule(Some("after lunch"), Some(60)).is_err());
     }
 }
