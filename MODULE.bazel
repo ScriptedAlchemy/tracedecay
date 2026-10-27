@@ -4,7 +4,7 @@ bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "bazel_lib", version = "3.7.2")
 bazel_dep(name = "rules_python", version = "2.4.5")
-bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "rules_rust", version = "0.75.0")
 # Rustc adds every dependency search directory to PATH on Windows; large
 # graphs exceed its environment limit (rust-lang/rust#110889). Native
 # shared symlinks preserve artifact identities with one search directory.
