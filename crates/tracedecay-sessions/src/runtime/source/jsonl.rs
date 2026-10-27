@@ -15,6 +15,11 @@ use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceCursorV1};
 use tracedecay_private_fs::ChangeClockReading;
 use tracedecay_private_fs::RewriteWitness;
 
+mod resume_digest;
+
+use resume_digest::digest_prefix_u64;
+pub(in crate::runtime) use resume_digest::{JsonlFirstFrameWitness, ResumeDigest};
+
 use super::{
     StoredCursor, TranscriptIngestError, TranscriptIngestResult, file_mtime_secs,
     should_resume_jsonl, stable_jsonl_file_id,
@@ -631,56 +636,6 @@ impl RawJsonlFrame {
     }
 }
 
-#[derive(Clone)]
-pub(in crate::runtime) struct ResumeDigest {
-    hasher: Sha256,
-}
-
-impl ResumeDigest {
-    pub(in crate::runtime) fn new() -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay-jsonl-resume-prefix-v2");
-        Self { hasher }
-    }
-
-    fn extend(&mut self, bytes: &[u8]) {
-        self.hasher.update(bytes);
-    }
-
-    /// 64-bit check of the hashed prefix plus `position`. This is not SHA-256
-    /// mid-state: the domain cursor (`StoredCursor` + optional resume
-    /// fingerprint) has no field that can carry hasher bytes without
-    /// displacing `file_id` / generation, which would collapse rewrite and
-    /// file-identity detection. A first append after a durable resume must
-    /// therefore re-walk `[0, cursor)` to rebuild this digest.
-    pub(in crate::runtime) fn fingerprint(&self, position: u64) -> u64 {
-        let mut hasher = self.hasher.clone();
-        hasher.update(position.to_le_bytes());
-        digest_prefix_u64(hasher.finalize())
-    }
-
-    pub(in crate::runtime) fn witness(&self, verified_position: u64) -> [u8; 32] {
-        let mut hasher = self.hasher.clone();
-        hasher.update(verified_position.to_le_bytes());
-        hasher.finalize().into()
-    }
-}
-
-fn digest_prefix_u64(digest: sha2::digest::Output<Sha256>) -> u64 {
-    let [
-        first,
-        second,
-        third,
-        fourth,
-        fifth,
-        sixth,
-        seventh,
-        eighth,
-        ..,
-    ] = <[u8; 32]>::from(digest);
-    u64::from_be_bytes([first, second, third, fourth, fifth, sixth, seventh, eighth])
-}
-
 pub(in crate::runtime) fn jsonl_prefix_digest<R: Read + Seek>(
     file: &mut R,
     extent: u64,
@@ -1071,6 +1026,7 @@ pub struct RawJsonlSkippedRange {
 
 /// Raw framing result. No JSON parser has inspected these bytes.
 pub struct RawNewJsonl {
+    pub(in crate::runtime) first_frame_witness: Option<JsonlFirstFrameWitness>,
     pub frames: Vec<RawJsonlRecord>,
     pub skipped: Vec<RawJsonlSkippedRange>,
     pub start_offset: u64,
@@ -1093,6 +1049,7 @@ impl RawNewJsonl {
     /// Nothing read past validation: the cursor stays where it was.
     fn prefix_diverged(previous: StoredCursor, file_identity: u64, io: JsonlIoAccounting) -> Self {
         Self {
+            first_frame_witness: None,
             frames: Vec::new(),
             skipped: Vec::new(),
             start_offset: previous.position,
@@ -1472,6 +1429,19 @@ impl<'a> PreparedJsonlScan<'a> {
         path: &Path,
         io: &mut JsonlIoAccounting,
     ) -> TranscriptIngestResult<RawNewJsonl> {
+        // An older cursor can reach EOF without a resume checkpoint. Establish
+        // its prefix evidence once through the canonical bounded reader; normal
+        // resumed/cached EOF already owns this digest and performs no extra I/O.
+        if self.validated_prefix.is_none() && self.generation.seek_to > 0 {
+            let (digest, hashed) = jsonl_prefix_digest(&mut self.file, self.generation.seek_to)
+                .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
+            io.prefix_validation_bytes = io.prefix_validation_bytes.saturating_add(hashed);
+            self.validated_prefix = Some((self.generation.seek_to, digest));
+        }
+        let first_frame_witness = self
+            .validated_prefix
+            .as_ref()
+            .and_then(|(_, digest)| digest.first_frame_witness());
         let metadata = self
             .file
             .inner()
@@ -1553,6 +1523,7 @@ impl<'a> PreparedJsonlScan<'a> {
         }
         let generation = self.generation;
         Ok(RawNewJsonl {
+            first_frame_witness,
             frames: Vec::new(),
             skipped: self.retained_prefix.into_iter().collect(),
             start_offset: generation.seek_to,
@@ -1940,6 +1911,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
                 path: path.to_path_buf(),
             });
         }
+        let first_frame_witness = offset_digest.first_frame_witness();
         let resume = JsonlResumeState {
             generation: self.generation.file_id,
             file_identity: self.generation.file_identity,
@@ -1969,6 +1941,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
             );
         }
         Ok(RawNewJsonl {
+            first_frame_witness,
             frames: self.frames,
             skipped: self.skipped,
             start_offset: self.generation.seek_to,
@@ -2051,6 +2024,67 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    #[test]
+    fn a_deferred_first_frame_does_not_publish_its_proof() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("partial-header.jsonl");
+        std::fs::write(&path, b"header").unwrap();
+        let partial = try_stream_new_jsonl_raw_strict(
+            &path,
+            StoredCursor::default(),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+        )
+        .unwrap();
+        assert!(partial.frames.is_empty());
+        assert!(partial.deferred.is_some());
+        assert_eq!(partial.new_cursor.position, 0);
+        assert_eq!(partial.first_frame_witness, None);
+        std::fs::write(&path, b"header\nbody\n").unwrap();
+        let complete = try_stream_new_jsonl_raw_strict(
+            &path,
+            StoredCursor::default(),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            complete.first_frame_witness,
+            Some(JsonlFirstFrameWitness::for_frame(b"header\n")),
+        );
+        let legacy_eof = try_stream_new_jsonl_raw_strict(
+            &path,
+            complete.new_cursor,
+            None,
+            MAX_JSONL_RECORD_BYTES,
+        )
+        .unwrap();
+        assert!(legacy_eof.frames.is_empty());
+        assert_eq!(legacy_eof.first_frame_witness, complete.first_frame_witness);
+        assert_eq!(
+            legacy_eof.io.prefix_validation_bytes,
+            b"header\nbody\n".len() as u64
+        );
+        let resumed_eof = try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            complete.new_cursor,
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            Some(JsonlResumeState {
+                generation: complete.new_cursor.file_id,
+                file_identity: complete.file_identity,
+                fingerprint: complete.frames.last().unwrap().resume_fingerprint,
+            }),
+        )
+        .unwrap();
+        assert!(resumed_eof.frames.is_empty());
+        assert_eq!(
+            resumed_eof.first_frame_witness,
+            complete.first_frame_witness
+        );
+        assert!(resumed_eof.io.prefix_validation_bytes <= b"header\nbody\n".len() as u64);
+    }
 
     #[test]
     fn bounded_generation_cache_keeps_one_latest_proof_with_logarithmic_admission_work() {

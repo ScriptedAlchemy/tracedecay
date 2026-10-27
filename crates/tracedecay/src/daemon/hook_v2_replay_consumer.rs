@@ -4,15 +4,15 @@
 //! admission. Host-spool replay itself lives in `tracedecay-hooks` and is
 //! invoked with an already-admitted spool plus the project's wire identity.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
-use tracedecay_contracts::ApplicationContractError;
 use tracedecay_contracts::retrieval::{
     StatusHookReplayFailureV1, StatusHookReplaySpoolV1, StatusHookReplayV1,
 };
+use tracedecay_contracts::{ApplicationContractError, HookOrchestrationAdmissionV1};
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
@@ -71,37 +71,22 @@ fn spool_root_absent(root: &Path) -> Result<bool, String> {
     }
 }
 
-/// The cause a pending-work redrive left its producer work owed, or `None`
-/// when the redrive admitted it.
-/// How many redrive attempts one pending-work envelope gets before the
-/// daemon stops retrying it for this process lifetime. The envelope stays
-/// in the durable ledger; only the in-process retry loop gives up.
-const PENDING_WORK_REDRIVE_CAP: u32 = 16;
-/// First redrive backoff (microseconds); doubles per attempt.
+/// First redrive backoff (microseconds); doubles per unresolved attempt.
 const PENDING_WORK_REDRIVE_BASE_MICROS: i64 = 30 * 1000 * 1000;
 /// Maximum redrive backoff (microseconds).
 const PENDING_WORK_REDRIVE_MAX_MICROS: i64 = 60 * 60 * 1000 * 1000;
 
+/// The replay consumer owns pacing, while the admission ledger owns whether
+/// work is still owed. Retiring the consumer releases its pacing state.
 #[derive(Default)]
 struct PendingWorkRedriveGate {
-    /// Keyed by the envelope's globally unique `event_id`.
-    state: std::collections::HashMap<[u8; 16], PendingWorkRedriveState>,
+    state: BTreeMap<(NativeHostIdentityV1, [u8; 16]), PendingWorkRedriveState>,
 }
 
-#[derive(Default)]
 struct PendingWorkRedriveState {
     attempts: u32,
     next_eligible_micros: i64,
-    terminal: bool,
-}
-
-static PENDING_WORK_REDRIVE_GATE: std::sync::OnceLock<
-    std::sync::Mutex<PendingWorkRedriveGate>,
-> = std::sync::OnceLock::new();
-
-fn pending_work_redrive_gate() -> &'static std::sync::Mutex<PendingWorkRedriveGate> {
-    PENDING_WORK_REDRIVE_GATE
-        .get_or_init(|| std::sync::Mutex::new(PendingWorkRedriveGate::default()))
+    cause: &'static str,
 }
 
 fn pending_work_redrive_backoff(attempts: u32) -> i64 {
@@ -111,14 +96,29 @@ fn pending_work_redrive_backoff(attempts: u32) -> i64 {
         .min(PENDING_WORK_REDRIVE_MAX_MICROS)
 }
 
+/// The cause a pending-work redrive left its producer work owed, or `None`
+/// when the normal driver admitted or settled it.
 fn unresolved_pending_work(outcome: &HookV2AdmissionOutcomeV1) -> Option<&'static str> {
     match outcome {
-        HookV2AdmissionOutcomeV1::Admitted { .. }
+        HookV2AdmissionOutcomeV1::Admitted {
+            orchestration: HookOrchestrationAdmissionV1::Backpressured,
+            ..
+        }
+        | HookV2AdmissionOutcomeV1::Backpressured => Some("was backpressured"),
+        HookV2AdmissionOutcomeV1::Admitted {
+            orchestration: HookOrchestrationAdmissionV1::Unavailable,
+            ..
+        }
+        | HookV2AdmissionOutcomeV1::Unavailable => Some("was unavailable"),
+        HookV2AdmissionOutcomeV1::Admitted {
+            orchestration:
+                HookOrchestrationAdmissionV1::Enqueued
+                | HookOrchestrationAdmissionV1::UnsupportedTrigger,
+            ..
+        }
         | HookV2AdmissionOutcomeV1::ExactDuplicate { .. } => None,
         HookV2AdmissionOutcomeV1::Conflict => Some("conflicted with an earlier admission"),
         HookV2AdmissionOutcomeV1::CatchupRequired => Some("requires binding catch-up"),
-        HookV2AdmissionOutcomeV1::Backpressured => Some("was backpressured"),
-        HookV2AdmissionOutcomeV1::Unavailable => Some("was unavailable"),
     }
 }
 
@@ -237,6 +237,7 @@ async fn drain_all_hosts(
     delivery_settlements: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+    redrive_gate: &mut PendingWorkRedriveGate,
 ) -> HookReplaySweepV1 {
     let mut sweep = HookReplaySweepV1::default();
     let project_id =
@@ -257,6 +258,7 @@ async fn drain_all_hosts(
             &mut sweep,
             project_sessions,
             background_cpu,
+            redrive_gate,
         ))
         .await;
         let report = match Box::pin(drain_admitted_host_spool(
@@ -309,11 +311,12 @@ async fn redrive_pending_work(
     sweep: &mut HookReplaySweepV1,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+    redrive_gate: &mut PendingWorkRedriveGate,
 ) {
     let data_root = &graph.hook_store_layout().data_root;
     let project_id =
         tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout());
-    let pending_work = match hook_v2_pending_work_envelopes(data_root, host, now) {
+    let mut pending_work = match hook_v2_pending_work_envelopes(data_root, host, now) {
         Ok(pending_work) => pending_work,
         Err(error) => {
             sweep.fail(
@@ -321,34 +324,35 @@ async fn redrive_pending_work(
                 StatusHookReplaySpoolV1::PendingWork,
                 error.to_string(),
             );
-            Vec::new()
+            return;
         }
     };
+    pending_work
+        .retain(|envelope| project_id.is_none_or(|project_id| envelope.project_id == project_id));
+    let pending_ids: BTreeSet<_> = pending_work
+        .iter()
+        .map(|envelope| envelope.event_id)
+        .collect();
+    redrive_gate
+        .state
+        .retain(|(entry_host, event_id), _| *entry_host != host || pending_ids.contains(event_id));
     let mut owed = 0_usize;
     let mut owed_cause = None;
+    let mut attempted = false;
     for envelope in pending_work {
-        if project_id.is_some_and(|project_id| envelope.project_id != project_id) {
+        let event_key = (host, envelope.event_id);
+        if let Some(state) = redrive_gate.state.get(&event_key)
+            && state.next_eligible_micros > now.0
+        {
+            // Backoff is unresolved work, not a drained ledger. Keep its last
+            // typed cause visible without warning again before another attempt.
+            owed += 1;
+            owed_cause.get_or_insert(state.cause);
             continue;
         }
-        // Per-envelope backoff and terminal cap: an envelope whose admission
-        // is permanently blocked stays in the durable ledger, but the daemon
-        // must not retry and warn for it on every sweep forever.
-        let event_key = envelope.event_id;
-        {
-            let gate = pending_work_redrive_gate()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(state) = gate.state.get(&event_key) {
-                if state.terminal {
-                    continue;
-                }
-                if state.next_eligible_micros > now.0 {
-                    continue;
-                }
-            }
-        }
-        // Owed work the daemon cannot admit now stays in the ledger and
-        // is redriven by the next sweep, under the gate's backoff.
+        attempted = true;
+        // Transient prerequisites can recover during this consumer's lifetime.
+        // Only the canonical driver/ledger can settle or expire the obligation.
         let outcome = admit_replayed_envelope_with_authoritative_session(
             envelope,
             None,
@@ -371,44 +375,36 @@ async fn redrive_pending_work(
         if let Some(cause) = unresolved_pending_work(&outcome) {
             owed += 1;
             owed_cause.get_or_insert(cause);
-            let mut gate = pending_work_redrive_gate()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let state = gate.state.entry(event_key).or_default();
+            let state = redrive_gate
+                .state
+                .entry(event_key)
+                .or_insert(PendingWorkRedriveState {
+                    attempts: 0,
+                    next_eligible_micros: now.0,
+                    cause,
+                });
             state.attempts = state.attempts.saturating_add(1);
-            if state.attempts >= PENDING_WORK_REDRIVE_CAP {
-                if !state.terminal {
-                    state.terminal = true;
-                    let event_hex: String = event_key
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .take(16)
-                        .collect();
-                    tracing::warn!(
-                        host = host.hook_key(),
-                        event_id = %event_hex,
-                        attempts = state.attempts,
-                        cause,
-                        "pending producer work stayed owed past its redrive cap; quarantined in-process until restart"
-                    );
-                }
-            } else {
-                state.next_eligible_micros =
-                    now.0.saturating_add(pending_work_redrive_backoff(state.attempts));
-            }
+            state.next_eligible_micros = now
+                .0
+                .saturating_add(pending_work_redrive_backoff(state.attempts));
+            state.cause = cause;
         } else {
-            let mut gate = pending_work_redrive_gate()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            gate.state.remove(&event_key);
+            redrive_gate.state.remove(&event_key);
         }
     }
     if let Some(cause) = owed_cause {
-        sweep.fail(
-            host,
-            StatusHookReplaySpoolV1::PendingWork,
-            format!("{owed} pending producer work redrive(s) stayed owed; the first {cause}"),
+        let cause = format!(
+            "{owed} pending producer work obligation(s) remain unresolved; the first {cause}"
         );
+        if attempted {
+            sweep.fail(host, StatusHookReplaySpoolV1::PendingWork, cause);
+        } else {
+            sweep.failures.push(StatusHookReplayFailureV1 {
+                host,
+                spool: StatusHookReplaySpoolV1::PendingWork,
+                cause,
+            });
+        }
     }
 }
 
@@ -580,6 +576,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
         if started.await.is_err() {
             return;
         }
+        let mut redrive_gate = PendingWorkRedriveGate::default();
         loop {
             let (Some(graph_owner), Some(delivery_settlements)) =
                 (task_graph.upgrade(), task_delivery_settlements.upgrade())
@@ -592,6 +589,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
                 delivery_settlements.as_ref(),
                 &task_project_sessions,
                 &task_background_cpu,
+                &mut redrive_gate,
             ))
             .await;
             drop(graph_owner);
@@ -798,6 +796,7 @@ mod tests {
             .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
             .unwrap();
         let background_cpu = admission_runtime.background_cpu();
+        let mut redrive_gate = PendingWorkRedriveGate::default();
         let lifecycle = tracedecay_hooks::NativeContextScoutLifecycleV1::new(
             "session.replay.edit",
             "call.replay.edit",
@@ -930,6 +929,7 @@ mod tests {
             &fixture.settlements,
             &project_sessions,
             &background_cpu,
+            &mut redrive_gate,
         )
         .await;
         assert!(
@@ -941,6 +941,21 @@ mod tests {
             runs.try_recv().is_err(),
             "ledger replay must not execute without lifecycle"
         );
+
+        let deferred_sweep = drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+            &mut redrive_gate,
+        )
+        .await;
+        assert!(deferred_sweep.failures.iter().any(|failure| {
+            failure.host == host && failure.spool == StatusHookReplaySpoolV1::PendingWork
+        }));
+        assert_eq!(pending(), vec![envelope.clone()]);
+        assert_eq!(redrive_gate.state[&(host, envelope.event_id)].attempts, 1);
 
         let root = hook_v2_spool_root(data_root, host);
         let (mut spool, _) = HookSpoolV1::open(&root, HookSpoolConfigV1::stock(host), now).unwrap();
@@ -954,6 +969,7 @@ mod tests {
             &fixture.settlements,
             &project_sessions,
             &background_cpu,
+            &mut redrive_gate,
         )
         .await;
         let mounted = tokio::time::timeout(Duration::from_secs(10), runs.recv())
@@ -1039,6 +1055,7 @@ mod tests {
             &fixture.settlements,
             &project_sessions,
             &background_cpu,
+            &mut redrive_gate,
         )
         .await;
         assert_eq!(pending(), vec![second_edit.clone()]);
@@ -1063,6 +1080,7 @@ mod tests {
             &fixture.settlements,
             &project_sessions,
             &background_cpu,
+            &mut redrive_gate,
         )
         .await;
         let second_mounted = tokio::time::timeout(Duration::from_secs(10), runs.recv())
@@ -1135,7 +1153,38 @@ mod tests {
         ));
         let disabled_pending =
             || hook_v2_pending_work_envelopes(data_root, claude, hook_replay_now()).unwrap();
-        assert_eq!(disabled_pending(), vec![disabled_edit]);
+        assert_eq!(disabled_pending(), vec![disabled_edit.clone()]);
+        let event_key = (claude, disabled_edit.event_id);
+        let mut redrive_at = hook_replay_now();
+        for _ in 0..20 {
+            let mut sweep = HookReplaySweepV1::default();
+            redrive_pending_work(
+                &graph,
+                claude,
+                redrive_at,
+                &mut sweep,
+                &project_sessions,
+                &background_cpu,
+                &mut redrive_gate,
+            )
+            .await;
+            assert!(sweep.failures.iter().any(|failure| {
+                failure.host == claude
+                    && failure.spool == StatusHookReplaySpoolV1::PendingWork
+                    && failure.cause.contains("was unavailable")
+            }));
+            assert_eq!(disabled_pending(), vec![disabled_edit.clone()]);
+            assert!(runs.try_recv().is_err());
+            redrive_at = UtcMicros(redrive_gate.state[&event_key].next_eligible_micros);
+        }
+        assert_eq!(redrive_gate.state[&event_key].attempts, 20);
+        // The ledger is still live and has not been aged out. Restoring the
+        // prerequisite must let this same consumer run it without a spool,
+        // a restart, or a process-lifetime retry reset.
+        assert_eq!(
+            hook_v2_pending_work_envelopes(data_root, claude, redrive_at).unwrap(),
+            vec![disabled_edit],
+        );
         assert!(
             tracedecay_daemon_service::register_hook_orchestration_runtime(
                 project_id,
@@ -1143,14 +1192,19 @@ mod tests {
                 &runtime,
             )
         );
-        drain_all_hosts(
+        let mut recovered = HookReplaySweepV1::default();
+        redrive_pending_work(
             &graph,
-            data_root,
-            &fixture.settlements,
+            claude,
+            redrive_at,
+            &mut recovered,
             &project_sessions,
             &background_cpu,
+            &mut redrive_gate,
         )
         .await;
+        assert!(recovered.failures.is_empty());
+        assert!(!redrive_gate.state.contains_key(&event_key));
         assert!(
             tokio::time::timeout(Duration::from_secs(10), runs.recv())
                 .await
@@ -1166,6 +1220,17 @@ mod tests {
         })
         .await
         .expect("disabled Claude work must settle without a spool");
+        let settled = drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+            &mut redrive_gate,
+        )
+        .await;
+        assert!(settled.failures.is_empty());
+        assert!(redrive_gate.state.is_empty());
         assert!(runtime.shutdown().await);
         assert!(
             pending().is_empty(),
@@ -1285,6 +1350,7 @@ mod tests {
             settlements,
             project_sessions,
             background_cpu,
+            &mut PendingWorkRedriveGate::default(),
         )
         .await;
         assert!(
