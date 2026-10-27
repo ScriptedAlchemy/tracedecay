@@ -21,17 +21,64 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::sync::Semaphore;
 
 use super::{Diagnostic, is_diagnostic_level};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
 use tracedecay_runtime_core::native_runtime;
 
-/// tsc has no deadline of its own: a check runs until it finishes or its
-/// caller drops it. This only satisfies the bounded runner's required field.
-const UNBOUNDED_CHECK: Duration = Duration::from_hours(365 * 24);
+/// Limit simultaneous compiler children as well as their background CPU demand.
+const MAX_CONCURRENT_COMPILERS: usize = 4;
+
+/// Shared by project producers in one daemon generation.
+#[derive(Clone)]
+pub struct TypeScriptCompilerAdmission {
+    permits: Arc<Semaphore>,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
+    cancellation: CancellationToken,
+}
+
+impl TypeScriptCompilerAdmission {
+    #[must_use]
+    pub fn new(background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_COMPILERS)),
+            background_cpu,
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn concurrency(&self) -> usize {
+        MAX_CONCURRENT_COMPILERS
+    }
+
+    pub fn cancel(&self) {
+        self.permits.close();
+        self.cancellation.cancel();
+    }
+}
+
+/// What one compiler child may consume once it holds a permit. A check that
+/// exceeds any bound fails; it never reports a clean project.
+#[derive(Clone, Copy)]
+struct CheckLimits {
+    deadline: Duration,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+}
+
+const CHECK_LIMITS: CheckLimits = CheckLimits {
+    deadline: Duration::from_mins(20),
+    max_stdout_bytes: 64 * 1024 * 1024,
+    max_stderr_bytes: 1024 * 1024,
+};
 
 /// Installs the project's own compiler where the producer looks for it; the
 /// command for a package with no workspace lockfile to install from.
@@ -47,6 +94,9 @@ pub const TYPESCRIPT_INSTALL_COMMAND: &str = "npm install --save-dev typescript"
 /// other exit, or a diagnostic without a file location means the project was
 /// not checked, and that is a typed failure rather than a clean page.
 ///
+/// Producers sharing `admission` share its compiler capacity. A running check is
+/// bounded by a deadline and output limits, and exceeding one is a failure.
+///
 /// With `build_info`, the check is incremental against that
 /// `--tsBuildInfoFile`: tsc rechecks only what changed since the check that
 /// wrote it and records the program files it read there.
@@ -56,10 +106,30 @@ pub const TYPESCRIPT_INSTALL_COMMAND: &str = "npm install --save-dev typescript"
     skip_all
 )]
 pub async fn run_compiler(
+    admission: &TypeScriptCompilerAdmission,
     compiler: &Path,
     project_root: &Path,
     tsconfig: &Path,
     build_info: Option<&Path>,
+) -> Result<Vec<Diagnostic>> {
+    run_compiler_within(
+        admission,
+        compiler,
+        project_root,
+        tsconfig,
+        build_info,
+        CHECK_LIMITS,
+    )
+    .await
+}
+
+async fn run_compiler_within(
+    admission: &TypeScriptCompilerAdmission,
+    compiler: &Path,
+    project_root: &Path,
+    tsconfig: &Path,
+    build_info: Option<&Path>,
+    limits: CheckLimits,
 ) -> Result<Vec<Diagnostic>> {
     let mut cmd = Command::new(compiler);
     cmd.arg("-p")
@@ -75,30 +145,62 @@ pub async fn run_compiler(
     cmd.current_dir(project_root);
     // Dropping this future cancels the token, and the runner then kills and
     // reaps tsc.
-    let cancel = CancellationToken::new();
+    let cancel = admission.cancellation.child_token();
     let _cancel_on_drop = CancelOnDrop(cancel.clone());
-    let bounds = GitCommandBounds {
-        deadline: Instant::now() + UNBOUNDED_CHECK,
-        cancel: Some(cancel),
-        max_stdout_bytes: usize::MAX,
-        max_stderr_bytes: usize::MAX,
-    };
-    let output = native_runtime::spawn_blocking(move || bounded_command_output(cmd, None, &bounds))
+    let permit = Arc::clone(&admission.permits)
+        .acquire_owned()
         .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to run `{}`: {error}", compiler.display()),
-        })?
-        .map_err(|error| TraceDecayError::Config {
-            message: match error {
-                GitCommandError::Unavailable(error) => {
-                    format!("failed to spawn `{}`: {error}", compiler.display())
-                }
-                GitCommandError::ReadOutput { stream, source } => {
-                    format!("failed to read `{}` {stream}: {source}", compiler.display())
-                }
-                other => format!("`{}` did not finish: {other}", compiler.display()),
-            },
+        .map_err(|_| TraceDecayError::Config {
+            message: "the TypeScript compiler admission closed".to_owned(),
         })?;
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + limits.deadline,
+        cancel: Some(cancel),
+        max_stdout_bytes: limits.max_stdout_bytes,
+        max_stderr_bytes: limits.max_stderr_bytes,
+    };
+    let background_cpu = Arc::clone(&admission.background_cpu);
+    // The permit travels with the blocking runner, which kills and reaps the
+    // child before returning, so it is held for the child's whole lifetime
+    // even when this future is dropped first.
+    let output = native_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let _cpu = background_cpu
+            .acquire_cancellable(|| {
+                bounds
+                    .cancel
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                    || Instant::now() >= bounds.deadline
+            })
+            .ok_or_else(|| {
+                if bounds
+                    .cancel
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    GitCommandError::Cancelled
+                } else {
+                    GitCommandError::DeadlineExceeded
+                }
+            })?;
+        bounded_command_output(cmd, None, &bounds)
+    })
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("failed to run `{}`: {error}", compiler.display()),
+    })?
+    .map_err(|error| TraceDecayError::Config {
+        message: match error {
+            GitCommandError::Unavailable(error) => {
+                format!("failed to spawn `{}`: {error}", compiler.display())
+            }
+            GitCommandError::ReadOutput { stream, source } => {
+                format!("failed to read `{}` {stream}: {source}", compiler.display())
+            }
+            other => format!("`{}` did not finish: {other}", compiler.display()),
+        },
+    })?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if let Some(global) = stdout
         .lines()
@@ -369,6 +471,13 @@ src/b.ts(2,2): warning TS6133: Second.
     }
 
     #[cfg(unix)]
+    fn admission() -> TypeScriptCompilerAdmission {
+        TypeScriptCompilerAdmission::new(Arc::new(ProcessBackgroundCpuV1::new(
+            std::num::NonZeroUsize::new(MAX_CONCURRENT_COMPILERS).unwrap(),
+        )))
+    }
+
+    #[cfg(unix)]
     #[test]
     fn run_compiler_accepts_every_diagnostics_present_exit_code() {
         for exit in [0, 1, 2] {
@@ -383,8 +492,14 @@ src/b.ts(2,2): warning TS6133: Second.
                 ),
             ).unwrap();
 
-            let diagnostics = block(run_compiler(&compiler, project.path(), &tsconfig, None))
-                .unwrap_or_else(|error| panic!("exit {exit} is a checked project: {error}"));
+            let diagnostics = block(run_compiler(
+                &admission(),
+                &compiler,
+                project.path(),
+                &tsconfig,
+                None,
+            ))
+            .unwrap_or_else(|error| panic!("exit {exit} is a checked project: {error}"));
             assert_eq!(diagnostics.len(), 1, "exit {exit}");
             assert_eq!(diagnostics[0].file, "packages/app/src/(auth)/index.ts");
             assert_eq!(diagnostics[0].code, "TS4023");
@@ -409,6 +524,7 @@ src/b.ts(2,2): warning TS6133: Second.
             )
             .unwrap();
             let result = block(run_compiler(
+                &admission(),
                 &compiler,
                 project.path(),
                 &project.path().join("tsconfig.json"),
@@ -425,6 +541,7 @@ src/b.ts(2,2): warning TS6133: Second.
         let compiler = project.path().join("tsc");
         write_executable_script(&compiler, "#!/bin/sh\nexit 0\n").unwrap();
         let diagnostics = block(run_compiler(
+            &admission(),
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
@@ -446,6 +563,7 @@ src/b.ts(2,2): warning TS6133: Second.
         .unwrap();
 
         let error = block(run_compiler(
+            &admission(),
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
@@ -461,6 +579,17 @@ src/b.ts(2,2): warning TS6133: Second.
     #[cfg(unix)]
     #[test]
     fn dropping_a_check_kills_the_compiler() {
+        assert_running_check_settles(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_admission_kills_the_running_compiler() {
+        assert_running_check_settles(true);
+    }
+
+    #[cfg(unix)]
+    fn assert_running_check_settles(close_admission: bool) {
         let project = tempfile::tempdir().unwrap();
         let compiler = project.path().join("tsc");
         let pid_file = project.path().join("tsc.pid");
@@ -471,8 +600,15 @@ src/b.ts(2,2): warning TS6133: Second.
         .unwrap();
         let tsconfig = project.path().join("tsconfig.json");
 
+        let admission = admission();
         let pid = block(async {
-            let check = std::pin::pin!(run_compiler(&compiler, project.path(), &tsconfig, None));
+            let check = std::pin::pin!(run_compiler(
+                &admission,
+                &compiler,
+                project.path(),
+                &tsconfig,
+                None
+            ));
             let started = std::pin::pin!(async {
                 loop {
                     if let Ok(pid) = std::fs::read_to_string(&pid_file) {
@@ -487,15 +623,22 @@ src/b.ts(2,2): warning TS6133: Second.
                 futures_util::future::Either::Left((result, _)) => {
                     panic!("the check finished before it was dropped: {result:?}")
                 }
-                futures_util::future::Either::Right((pid, _check)) => pid,
+                futures_util::future::Either::Right((pid, check)) => {
+                    if close_admission {
+                        admission.cancel();
+                        assert!(check.await.is_err());
+                    }
+                    pid
+                }
             }
         });
 
         let deadline = Instant::now() + Duration::from_secs(10);
         while Command::new("kill")
             .args(["-0", &pid])
-            .status()
+            .output()
             .unwrap()
+            .status
             .success()
         {
             assert!(
@@ -504,5 +647,280 @@ src/b.ts(2,2): warning TS6133: Second.
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while admission.permits.available_permits() != MAX_CONCURRENT_COMPILERS {
+            assert!(
+                Instant::now() < deadline,
+                "child settlement retained a permit"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(admission.background_cpu.active_units(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_waiting_check_never_spawns_and_releases_its_demand() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(&compiler, "#!/bin/sh\necho ran >> ran\nexit 0\n").unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+        let admission = admission();
+        block(async {
+            let held = admission
+                .permits
+                .acquire_many(MAX_CONCURRENT_COMPILERS as u32)
+                .await
+                .unwrap();
+            let mut waiting = Box::pin(run_compiler(
+                &admission,
+                &compiler,
+                project.path(),
+                &tsconfig,
+                None,
+            ));
+            assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+            assert!(!project.path().join("ran").exists());
+            drop(waiting);
+            drop(held);
+            assert!(
+                run_compiler(&admission, &compiler, project.path(), &tsconfig, None)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("ran")).unwrap(),
+            "ran\n"
+        );
+        assert_eq!(
+            admission.permits.available_permits(),
+            MAX_CONCURRENT_COMPILERS
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closed_admission_refuses_waiters_and_successor_checks() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(&compiler, "#!/bin/sh\necho ran > ran\nexit 0\n").unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+        let admission = admission();
+        block(async {
+            let held = admission
+                .permits
+                .acquire_many(MAX_CONCURRENT_COMPILERS as u32)
+                .await
+                .unwrap();
+            let mut waiting = Box::pin(run_compiler(
+                &admission,
+                &compiler,
+                project.path(),
+                &tsconfig,
+                None,
+            ));
+            assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+            admission.cancel();
+            assert!(
+                waiting
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("admission closed")
+            );
+            drop(held);
+            assert!(
+                run_compiler(&admission, &compiler, project.path(), &tsconfig, None)
+                    .await
+                    .is_err()
+            );
+        });
+        assert!(!project.path().join("ran").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_waits_for_the_existing_background_cpu_authority() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(&compiler, "#!/bin/sh\necho ran > ran\nexit 0\n").unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+        let cpu = Arc::new(ProcessBackgroundCpuV1::new(
+            std::num::NonZeroUsize::new(1).unwrap(),
+        ));
+        let admission = TypeScriptCompilerAdmission::new(Arc::clone(&cpu));
+        let held = cpu.acquire();
+        let release = std::thread::spawn({
+            let cpu = Arc::clone(&cpu);
+            let root = project.path().to_owned();
+            move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while cpu.waiting_work_units() == 0 {
+                    assert!(Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+                assert!(!root.join("ran").exists());
+                drop(held);
+            }
+        });
+        assert!(
+            block(run_compiler(
+                &admission,
+                &compiler,
+                project.path(),
+                &tsconfig,
+                None
+            ))
+            .unwrap()
+            .is_empty()
+        );
+        release.join().unwrap();
+        assert!(project.path().join("ran").exists());
+        assert_eq!(cpu.active_units(), 0);
+        assert_eq!(cpu.waiting_work_units(), 0);
+    }
+
+    #[cfg(unix)]
+    fn tiny_limits() -> CheckLimits {
+        CheckLimits {
+            deadline: Duration::from_millis(300),
+            max_stdout_bytes: 4096,
+            max_stderr_bytes: 4096,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn endless_compiler_output_fails_the_check() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(
+            &compiler,
+            "#!/bin/sh\nexec yes 'a.ts(1,1): error TS1: x.'\n",
+        )
+        .unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+        let error = block(run_compiler_within(
+            &admission(),
+            &compiler,
+            project.path(),
+            &tsconfig,
+            None,
+            CheckLimits {
+                deadline: Duration::from_secs(30),
+                ..tiny_limits()
+            },
+        ))
+        .expect_err("output beyond the bound is a failed check, not a report");
+        assert!(error.to_string().contains("exceeded"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn endless_compiler_stderr_fails_the_check() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(&compiler, "#!/bin/sh\nexec yes 'failure' >&2\n").unwrap();
+        let error = block(run_compiler_within(
+            &admission(),
+            &compiler,
+            project.path(),
+            &project.path().join("tsconfig.json"),
+            None,
+            CheckLimits {
+                deadline: Duration::from_secs(30),
+                ..tiny_limits()
+            },
+        ))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("stderr output exceeded 4096 bytes"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_compiler_fails_at_its_deadline() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(&compiler, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+        let started = Instant::now();
+        let error = block(run_compiler_within(
+            &admission(),
+            &compiler,
+            project.path(),
+            &tsconfig,
+            None,
+            tiny_limits(),
+        ))
+        .expect_err("a stalled compiler never reports clean");
+        assert!(error.to_string().contains("deadline"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_large_within_policy_report_retains_every_finding() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(
+            &compiler,
+            "#!/bin/sh\ni=0; while [ \"$i\" -lt 1000 ]; do echo 'a.ts(1,1): error TS1: x.'; i=$((i+1)); done\nexit 2\n",
+        ).unwrap();
+        let diagnostics = block(run_compiler_within(
+            &admission(),
+            &compiler,
+            project.path(),
+            &project.path().join("tsconfig.json"),
+            None,
+            CheckLimits {
+                deadline: Duration::from_secs(30),
+                max_stdout_bytes: 64 * 1024,
+                max_stderr_bytes: 4096,
+            },
+        ))
+        .unwrap();
+        assert_eq!(diagnostics.len(), 1000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_checks_never_exceed_the_shared_compiler_capacity() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        write_executable_script(
+            &compiler,
+            "#!/bin/sh\n\
+             d=\"$(dirname \"$0\")\"\n\
+             mkdir \"$d/active.$$\"\n\
+             ls -d \"$d\"/active.* | wc -l >> \"$d/seen\"\n\
+             sleep 0.3\n\
+             rmdir \"$d/active.$$\"\n\
+             exit 0\n",
+        )
+        .unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+        let admission = admission();
+        let results = block(futures_util::future::join_all(
+            (0..MAX_CONCURRENT_COMPILERS * 3)
+                .map(|_| run_compiler(&admission, &compiler, project.path(), &tsconfig, None)),
+        ));
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        let seen = std::fs::read_to_string(project.path().join("seen")).unwrap();
+        let peak = seen
+            .lines()
+            .map(|line| line.trim().parse::<usize>().unwrap())
+            .max()
+            .unwrap();
+        assert!(
+            (2..=MAX_CONCURRENT_COMPILERS).contains(&peak),
+            "peak concurrent compilers {peak}"
+        );
     }
 }

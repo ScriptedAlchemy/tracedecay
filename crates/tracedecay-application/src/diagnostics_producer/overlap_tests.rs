@@ -1,12 +1,14 @@
 //! A real compiler run may finish after its replacement has published.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::test_fixtures::id;
-use tracedecay_lsp::typescript_projects;
+use tracedecay_lsp::{TypeScriptCompilerAdmission, typescript_projects};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_runtime_core::test_executable::write_executable_script;
 
@@ -82,7 +84,9 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
     assert_eq!(projects.len(), 1);
     let build_info = temp.path().join("typescript-build-info");
     let status = TypeScriptProducerStatusHandleV1::default();
-    let mut predecessor = TypeScriptProducerStateV1::new(status.clone());
+    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::new(2).unwrap()));
+    let admission = TypeScriptCompilerAdmission::new(Arc::clone(&background_cpu));
+    let mut predecessor = TypeScriptProducerStateV1::new(status.clone(), admission.clone());
     let old_run = run_typescript_producer_v1(
         &root,
         &projects,
@@ -100,7 +104,7 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
         assert!(old_output.contains("TS7006"), "{old_output}");
         assert!(old_output.contains("TS2322"), "{old_output}");
         assert_eq!(status.current(), None, "the old producer is still running");
-        let mut replacement = TypeScriptProducerStateV1::new(status.clone());
+        let mut replacement = TypeScriptProducerStateV1::new(status.clone(), admission.clone());
         std::fs::write(
             root.join("node_modules/check.json"),
             r#"{"compilerOptions":{"noImplicitAny":false}}"#,
@@ -145,6 +149,11 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
         .await
         .expect("both real compiler processes must complete");
     assert_eq!(old_run, CompilerProducerRunV1::Superseded);
+    assert_eq!(
+        background_cpu.active_units(),
+        0,
+        "both compiler children were reaped"
+    );
     assert_eq!(
         store
             .current_records(identity.generation_id())

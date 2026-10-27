@@ -4,13 +4,13 @@
 //! Request cancellation stays threaded through the invocation boundary
 //! explicitly, including the `multi_root_family_allows` kill-switch.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use serde_json::Value;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_lsp::LspSessionRegistry;
+use tracedecay_lsp::{LspSessionRegistry, TypeScriptCompilerAdmission};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, detected_process_resident_memory_limit_v1,
@@ -49,6 +49,7 @@ pub(crate) struct DaemonInvocationState {
     pub(super) github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    pub(super) compiler_admission: Arc<OnceLock<TypeScriptCompilerAdmission>>,
     work_federated_query_authority: Arc<dyn WorkFederatedQueryAuthorityPortV1>,
 }
 
@@ -85,6 +86,7 @@ impl DaemonInvocationState {
             github_credential_lifecycle:
                 github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
             code_index_schedulers,
+            compiler_admission: Arc::new(OnceLock::new()),
             work_federated_query_authority,
         }
     }
@@ -168,6 +170,9 @@ impl DaemonInvocationState {
             .map_err(|error| TraceDecayError::Config {
                 message: format!("failed to configure Codex preparation resources: {error}"),
             })?;
+        self.compiler_admission.get_or_init(|| {
+            TypeScriptCompilerAdmission::new(Arc::clone(&installed.background_cpu))
+        });
         Ok(installed)
     }
 
@@ -1064,6 +1069,9 @@ impl DaemonInvocationState {
     pub(super) fn cancel_admissions(&self) {
         self.service.cancel_admissions();
         self.github_credential_lifecycle.shutdown();
+        if let Some(admission) = self.compiler_admission.get() {
+            admission.cancel();
+        }
         // Code-index workers only observe `shutting_down` / closed admission
         // once cancel runs. Leaving this until the join lets an in-flight
         // reconcile (graph seat, follow-up pass) keep the worker alive for
@@ -1238,6 +1246,62 @@ impl WorkFederatedQueryAuthorityPortV1 for DaemonWorkFederatedQueryAuthorityV1 {
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_shutdown_closes_compiler_admission_for_every_project_owner() {
+        let state = DaemonInvocationState::default();
+        assert!(state.compiler_admission.get().is_none());
+        state
+            .install_worker_selection(
+                &StoreAdministration::default(),
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
+            )
+            .unwrap();
+        let sibling = state.clone();
+        let admission = sibling.compiler_admission.get().unwrap().clone();
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        tracedecay_runtime_core::test_executable::write_executable_script(
+            &compiler,
+            "#!/bin/sh\necho ran >> ran\nexit 0\n",
+        )
+        .unwrap();
+        let config = project.path().join("tsconfig.json");
+        assert!(
+            tracedecay_lsp::run_typescript_compiler(
+                &admission,
+                &compiler,
+                project.path(),
+                &config,
+                None,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        state.cancel_admissions();
+        let error = tracedecay_lsp::run_typescript_compiler(
+            &admission,
+            &compiler,
+            project.path(),
+            &config,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("admission closed"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("ran")).unwrap(),
+            "ran\n"
+        );
+        assert!(
+            DaemonInvocationState::default()
+                .compiler_admission
+                .get()
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn failed_lsp_lease_is_preserved_in_the_invocation_owner_receipt() {

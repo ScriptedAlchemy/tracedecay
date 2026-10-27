@@ -27,6 +27,7 @@ use tracedecay_domain::configuration::{
     WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+use tracedecay_domain::source_path_policy::GENERATED_DIR_SEGMENTS;
 use tracedecay_domain::{DomainError, validate_index_path_patterns};
 
 /// Canonical default for configured-tier proximity warnings.
@@ -527,7 +528,7 @@ impl Default for ProjectDefaults {
             ".tracedecay/**".to_string(),
             "**/*.min.*".to_string(),
         ];
-        for segment in tracedecay_runtime_core::config::GENERATED_DIR_SEGMENTS {
+        for segment in GENERATED_DIR_SEGMENTS {
             exclude.push(format!("{segment}/**"));
             exclude.push(format!("**/{segment}/**"));
         }
