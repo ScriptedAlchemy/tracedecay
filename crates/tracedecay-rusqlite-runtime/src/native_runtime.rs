@@ -266,6 +266,8 @@ impl<T: Send + 'static> Drop for Settlement<T> {
 
 /// Completes at `deadline` on a native timer task, so a foreign executor never
 /// polls an Asupersync timer: its wait wakes through the join's `Waker`.
+/// An elapsed deadline completes on its first poll; it must not wait for a
+/// worker before a caller can prefer it over starting already-expired work.
 /// Dropping the returned future cancels the timer.
 ///
 /// Boxed so every timed caller proves this future `Send` once, here, instead
@@ -273,6 +275,9 @@ impl<T: Send + 'static> Drop for Settlement<T> {
 pub fn sleep_until(deadline: Instant) -> BoxFuture<'static, Result<(), String>> {
     Box::pin(async move {
         let cx = cx().ok_or("native execution context unavailable")?;
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
         let mut timer = cx
             .spawn(move |cx| async move {
                 // Measured before the timer clock is read, so the wake never
@@ -1120,10 +1125,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_past_deadline_takes_a_ready_value_and_elapses_a_pending_one() {
         let past = Instant::now() - Duration::from_millis(1);
-        assert_eq!(timeout_at(past, async { 7 }).await, Ok(7));
+        assert_eq!(sleep_until(past).now_or_never(), Some(Ok(())));
+        assert_eq!(timeout_at(past, async { 7 }).now_or_never(), Some(Ok(7)));
         assert_eq!(
-            timeout_at(past, std::future::pending::<()>()).await,
-            Err(TimeoutError::Elapsed)
+            timeout_at(past, std::future::pending::<()>()).now_or_never(),
+            Some(Err(TimeoutError::Elapsed))
         );
     }
 

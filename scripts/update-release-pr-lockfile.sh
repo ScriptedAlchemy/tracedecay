@@ -20,7 +20,7 @@ RELEASE_PR_BRANCH=$(
 )
 pnpm install --frozen-lockfile
 CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c
-bazel run //scripts:bazel/gen_builds.py
+bazel run //scripts:gen_builds
 pnpm --dir sdks/typescript run build
 pnpm --dir plugin/chatgpt-extension run build
 

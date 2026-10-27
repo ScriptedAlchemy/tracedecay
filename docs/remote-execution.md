@@ -1,7 +1,7 @@
 # Private Bazel execution
 
 The repository always expands its `tracedecay` Bazel configuration, which
-selects the pinned nightly toolchain. Add the following to the host's
+selects the pinned Rust toolchain. Add the following to the host's
 `~/.bazelrc` to extend that profile with private execution settings:
 
 ```bazelrc
@@ -15,7 +15,8 @@ build:fleet --remote_local_fallback
 
 Every new TraceDecay worktree inherits this host profile automatically. Other
 repositories do not select it. Without a host extension, including under
-`--nohome_rc` in CI, the repository still selects nightly and builds locally.
+`--nohome_rc` in CI, the repository still selects the pinned toolchain and
+builds locally.
 The ignored `.bazelrc.local` remains available for later per-checkout overrides;
 command-line options take precedence over rc settings.
 
@@ -83,11 +84,26 @@ including the action UUID, temporary fixture home, and `.tracedecay/daemon.sock`
 must be shorter than 104 bytes on macOS and 108 bytes on Linux. Validate the
 full path from an executed test; checking only the work directory misses this
 limit. Worker sandboxes must allow Unix socket bind/connect inside the owned
-action directories. Keep action `TMPDIR` on the same writable filesystem and
-mount as
+action directories. On macOS, give the CAS and action trees matching sandbox
+rights, including Unix socket permissions: macOS rejects hardlinks between
+paths with different sandbox rights even when both allow file reads and writes.
+Verify a CAS-to-action hardlink under the actual worker profile before starting
+the worker. Scope these permissions to the worker-owned trees.
+
+Keep action `TMPDIR` on the same writable filesystem and mount as
 compiler outputs: a separate temporary mount can make Rust's artifact renames
 fail with `EXDEV`. The action root may be separate from the CAS cache, but must
 remain on the intended build volume.
+
+NativeLink's macOS directory cache uses APFS `clonefile` automatically, with a
+hardlink fallback. For many actions sharing a large toolchain, enable
+`directory_cache.experimental_subtree_caching` so unchanged subtrees can be
+prepared once and cloned across different action roots. Size `max_entries` and
+`max_size_bytes` for subtree entries as well as roots; nested entries count their
+logical sizes even when APFS shares their physical blocks. Confirm nonzero
+`clonefile_hits` and `subtree_hits` in the directory-cache summary on a real run.
+When input preparation stalls with little network activity, inspect local disk
+throughput and the external drive's negotiated USB speed before tuning RPC limits.
 
 See [CI fleet configuration](ci-remote-builds.md) for hosted runners, dynamic
 execution, and restricted Tailscale enrollment.

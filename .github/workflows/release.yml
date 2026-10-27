@@ -155,13 +155,13 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/actions/package-release
+            .github/actions/build-cli
             .github/actions/setup-bazel
             scripts/generate-release-inventory.py
           sparse-checkout-cone-mode: false
 
-      # Fleet setup comes from this workflow revision even when rebuilding an
-      # older tag whose build-cli action predates macOS remote execution.
       - name: Set up Bazel for release builds
+        id: bazel
         uses: ./.release-automation/.github/actions/setup-bazel
         with:
           cache-key: release-${{ matrix.target }}
@@ -180,11 +180,12 @@ jobs:
       - name: Build release binary for packaging
         if: matrix.inventory_only != true
         id: cli
-        uses: ./.github/actions/build-cli
+        uses: ./.release-automation/.github/actions/build-cli
         with:
           config: dist
           dest: target/${{ matrix.target }}/release
           cache-key: release-${{ matrix.target }}
+          prepared-build: 'true'
 
       # verify-release requires every target to embed the same bundle.
       - name: Record the embedded dashboard digest
@@ -252,6 +253,13 @@ jobs:
           name: binary-${{ matrix.name }}
           path: tracedecay-${{ needs.validate-release.outputs.tag }}-${{ matrix.name }}.${{ matrix.archive }}
           if-no-files-found: error
+
+      - name: Save compiled Bazel actions
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.inventory_only != true && steps.bazel.outputs.disk-cache-key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
 
   verify-release:
     name: Verify immutable GitHub release

@@ -1,0 +1,5 @@
+[net]
+git-fetch-with-cli = true
+
+[unstable]
+git = "shallow-deps"
