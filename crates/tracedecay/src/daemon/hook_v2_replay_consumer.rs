@@ -1203,7 +1203,7 @@ mod tests {
             &mut redrive_gate,
         )
         .await;
-        assert!(recovered.failures.is_empty());
+        assert_eq!(recovered.failures, Vec::new());
         assert!(!redrive_gate.state.contains_key(&event_key));
         assert!(
             tokio::time::timeout(Duration::from_secs(10), runs.recv())
@@ -1229,7 +1229,7 @@ mod tests {
             &mut redrive_gate,
         )
         .await;
-        assert!(settled.failures.is_empty());
+        assert_eq!(settled.failures, Vec::new());
         assert!(redrive_gate.state.is_empty());
         assert!(runtime.shutdown().await);
         assert!(
