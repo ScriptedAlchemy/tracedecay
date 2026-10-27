@@ -1245,7 +1245,6 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
     })
     .await
     .expect("panicked worker must recover and drain its durable backlog");
-    let before_shutdown = registry.profile_worker_status(db.db_path()).await;
     // Shut down lease-owning workers before evaluating the recovery assertions.
     let stopped = tokio::time::timeout(
         tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE + Duration::from_secs(1),
