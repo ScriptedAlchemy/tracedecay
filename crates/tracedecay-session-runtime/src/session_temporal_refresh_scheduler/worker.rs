@@ -256,7 +256,9 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         policy,
     };
     let _instrumentation = SessionTemporalRefreshWorkerInstrumentation::new(&state);
-    state.mark_running();
+    // The registry marks a newly admitted worker running. A replacement keeps
+    // its recovery blocker until a pass succeeds; spawning alone has not
+    // established that the durable backlog can make progress again.
     loop {
         if state.cancelled.load(Ordering::Acquire) {
             return;

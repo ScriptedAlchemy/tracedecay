@@ -7,6 +7,8 @@ import {
   type OperationApplicationProjectContextResult,
   type OperationApplicationProjectListRequest,
   type OperationApplicationProjectListResult,
+  type OperationApplicationProjectSearchRequest,
+  type OperationApplicationProjectSearchResult,
 } from "@tracedecay/sdk";
 
 /** Executes a generated MCP tool binding against a projectless daemon session. */
@@ -28,6 +30,7 @@ function registryDescriptor<Req, Res>(operation: string): RegistryDescriptor<Req
 }
 
 const PROJECT_LIST = registryDescriptor<OperationApplicationProjectListRequest, OperationApplicationProjectListResult>("project_list");
+const PROJECT_SEARCH = registryDescriptor<OperationApplicationProjectSearchRequest, OperationApplicationProjectSearchResult>("project_search");
 const PROJECT_CONTEXT = registryDescriptor<OperationApplicationProjectContextRequest, OperationApplicationProjectContextResult>("project_context");
 
 /**
@@ -51,14 +54,20 @@ export class RegistryClient {
     return this.#invoke(PROJECT_CONTEXT, request, signal);
   }
 
+  projectSearch(request: OperationApplicationProjectSearchRequest, signal?: AbortSignal): Promise<OperationApplicationProjectSearchResult> {
+    return this.#invoke(PROJECT_SEARCH, request, signal);
+  }
+
   async #invoke<Req, Res>(descriptor: RegistryDescriptor<Req, Res>, request: Req, signal?: AbortSignal): Promise<Res> {
     const toolName = descriptor.transport.toolName as string;
     const decoded = descriptor.decodeRequest(request) as Record<string, unknown>;
     let response: unknown;
     try {
+      if (signal?.aborted) throw new TraceDecayAbortError(signal.reason);
       response = await this.#call(toolName, decoded, signal);
+      if (signal?.aborted) throw new TraceDecayAbortError(signal.reason);
     } catch (cause) {
-      if (signal?.aborted) throw new TraceDecayAbortError(signal.reason ?? cause);
+      if (signal?.aborted) throw new TraceDecayAbortError(signal.reason);
       throw new TraceDecayTransportError(`MCP tool ${toolName} failed`, cause);
     }
     try {

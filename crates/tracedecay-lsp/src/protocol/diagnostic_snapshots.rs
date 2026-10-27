@@ -412,9 +412,21 @@ where
     }
 
     pub(super) fn clear_document_diagnostics(&mut self) {
-        let documents: Vec<_> = self.diagnostics.active_refreshes.keys().cloned().collect();
+        let documents: BTreeSet<_> = self
+            .diagnostics
+            .active_refreshes
+            .keys()
+            .chain(self.outbound.queue.iter().filter_map(|frame| {
+                frame
+                    .publication
+                    .as_ref()
+                    .map(|publication| &publication.uri)
+            }))
+            .cloned()
+            .collect();
         for uri in documents {
             self.retire_diagnostic_refresh(&uri);
+            self.discard_queued_document_publications(&uri);
         }
         self.diagnostics.document_snapshots.clear();
     }
