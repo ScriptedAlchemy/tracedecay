@@ -135,20 +135,36 @@ impl AnalyzerProcess {
         frame: &[u8],
         deadline: Instant,
     ) -> std::result::Result<(), AsyncContentLengthError> {
+        if Instant::now() >= deadline {
+            return Err(AsyncContentLengthError::DeadlineElapsed);
+        }
         let encoded = ContentLengthCodec::encode(frame)?;
         let exited = || io::Error::new(io::ErrorKind::BrokenPipe, "LSP stdin writer exited");
         let (done, outcome) = async_channel::bounded(1);
         let written = until(deadline, async {
-            self.writes
-                .send((encoded, done))
+            let mut submit = pin!(self.writes.send((encoded, done)));
+            // `until` lets ready work finish before its asynchronous timer.
+            // Sending a new frame is admission, so check its deadline before
+            // every queue poll, including after waiting for write capacity.
+            poll_fn(|task| {
+                if Instant::now() >= deadline {
+                    Poll::Ready(Err(AsyncContentLengthError::DeadlineElapsed))
+                } else {
+                    submit
+                        .as_mut()
+                        .poll(task)
+                        .map(|sent| sent.map_err(|_| AsyncContentLengthError::from(exited())))
+                }
+            })
+            .await?;
+            outcome
+                .recv()
                 .await
-                .map_err(|_| exited())?;
-            outcome.recv().await.map_err(|_| exited())?
+                .map_err(|_| AsyncContentLengthError::from(exited()))?
+                .map_err(AsyncContentLengthError::from)
         })
         .await?;
-        written
-            .ok_or(AsyncContentLengthError::DeadlineElapsed)?
-            .map_err(Into::into)
+        written.ok_or(AsyncContentLengthError::DeadlineElapsed)?
     }
 
     /// Reads one frame before `deadline`.
@@ -410,6 +426,76 @@ mod tests {
             stderr: Arc::default(),
             stderr_closed,
         }
+    }
+
+    #[test]
+    fn an_expired_write_never_enters_the_analyzer_queue() {
+        let (_feed, input) = mpsc::channel();
+        let mut process = process_reading(Feed(input));
+        let (writes, queued) = async_channel::bounded(1);
+        process.writes = writes;
+        native_runtime::block_on(async {
+            assert!(matches!(
+                process.write_frame(b"expired", Instant::now()).await,
+                Err(AsyncContentLengthError::DeadlineElapsed),
+            ));
+            assert!(queued.is_empty(), "expired bytes must not reach the writer");
+
+            let live_deadline = Instant::now() + Duration::from_secs(10);
+            let mut live = pin!(process.write_frame(b"live", live_deadline));
+            assert!(futures_util::poll!(live.as_mut()).is_pending());
+            let (encoded, done) = queued.try_recv().unwrap();
+            assert_eq!(encoded, ContentLengthCodec::encode(b"live").unwrap());
+            done.try_send(Ok(())).unwrap();
+            live.await.unwrap();
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_write_that_expires_while_waiting_for_capacity_is_not_enqueued() {
+        let (_feed, input) = mpsc::channel();
+        let mut process = process_reading(Feed(input));
+        let (writes, queued) = async_channel::bounded(1);
+        process.writes = writes;
+        let (done, _receipt) = async_channel::bounded(1);
+        let occupied = ContentLengthCodec::encode(b"occupied").unwrap();
+        process.writes.try_send((occupied.clone(), done)).unwrap();
+        native_runtime::block_on(async {
+            let admission_bound = Instant::now() + Duration::from_secs(10);
+            loop {
+                assert!(
+                    Instant::now() < admission_bound,
+                    "the operation must reach the occupied writer queue",
+                );
+                let deadline = Instant::now() + Duration::from_millis(20);
+                let mut waiting = pin!(process.write_frame(b"expired in queue", deadline));
+                match futures_util::poll!(waiting.as_mut()) {
+                    Poll::Pending => {}
+                    Poll::Ready(Err(AsyncContentLengthError::DeadlineElapsed)) => {
+                        // Preemption before the first poll is valid expiry,
+                        // but does not exercise a wait for capacity. Require an
+                        // actual pending admission before releasing the queue.
+                        assert!(Instant::now() >= deadline);
+                        assert_eq!(queued.len(), 1);
+                        continue;
+                    }
+                    other => panic!("occupied writer did not retain the request: {other:?}"),
+                }
+                native_runtime::sleep_until(deadline).await.unwrap();
+                assert_eq!(queued.try_recv().unwrap().0, occupied);
+                assert!(matches!(
+                    waiting.await,
+                    Err(AsyncContentLengthError::DeadlineElapsed),
+                ));
+                assert!(
+                    queued.is_empty(),
+                    "capacity recovery cannot admit expired bytes"
+                );
+                break;
+            }
+        })
+        .unwrap();
     }
 
     #[test]

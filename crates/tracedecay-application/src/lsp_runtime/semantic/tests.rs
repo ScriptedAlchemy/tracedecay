@@ -353,18 +353,23 @@ async fn workspace_symbol_failure_cancels_pending_language_work() {
 #[tokio::test]
 async fn workspace_symbols_preserve_deadline_and_cancel_all_languages() {
     let harness = Harness::new(&[("alpha", true), ("beta", true)]).await;
-    let request = symbols_request();
+    let expired_request = SemanticRequest::WorkspaceSymbols {
+        query: "expired operation".to_owned(),
+    };
     let expired = Instant::now();
     assert!(matches!(
-        harness.complete(1, &request, expired).await,
+        harness.complete(1, &expired_request, expired).await,
         SemanticProviderOutcome::Partial { coverage, .. } if coverage == "analyzer-timeout"
     ));
+    let request = symbols_request();
     let deadline = Instant::now() + TEST_BOUND;
     assert_eq!(
         harness.request(2, &request, deadline),
         SemanticProviderOutcome::Pending
     );
     let (alpha, beta) = tokio::join!(harness.controls[0].next(), harness.controls[1].next());
+    assert_eq!(alpha.request["params"]["query"], "needle");
+    assert_eq!(beta.request["params"]["query"], "needle");
     assert!(
         harness
             .production
