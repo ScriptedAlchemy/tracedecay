@@ -346,12 +346,22 @@ fn assert_import_fixture_compiles(project: &Path) {
     );
 }
 
+const MARKER_DESTINATION: &str = "pub fn marker() {}\n";
+
 async fn assert_move_import_ownership(import: &str, binding: &str, preserve: bool) {
+    assert_move_into_destination(import, binding, preserve, MARKER_DESTINATION).await;
+}
+
+async fn assert_move_into_destination(
+    import: &str,
+    binding: &str,
+    preserve: bool,
+    original_destination: &str,
+) {
     let project = tempdir().unwrap();
     fs::create_dir_all(project.path().join("src")).unwrap();
     let moved_symbol = format!("pub fn moved(value: {binding}) -> {binding} {{\n    value\n}}");
     let original_source = format!("{import}\n\n{moved_symbol}\n\npub fn remains() {{}}\n");
-    let original_destination = "pub fn marker() {}\n";
     // This module never refers to `moved`; its dependency on the original
     // export path must survive moving that function to a different module.
     let consumer_type = if preserve {
@@ -508,6 +518,89 @@ async fn move_symbol_preserves_restricted_reexports_in_preview_and_apply() {
 #[tokio::test]
 async fn move_symbol_still_removes_an_unused_private_import() {
     assert_move_import_ownership("use crate::model::Widget;", "Widget", false).await;
+}
+
+#[tokio::test]
+async fn move_symbol_inserts_imports_after_a_multiline_use_group() {
+    assert_move_into_destination(
+        "use crate::model::Widget;",
+        "Widget",
+        false,
+        "use std::{\n    fmt::Debug,\n};\n\npub fn marker(_: &dyn Debug) {}\n",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn move_symbol_preserves_an_outer_attribute_after_a_same_line_import() {
+    assert_move_into_destination(
+        "use crate::model::Widget;",
+        "Widget",
+        false,
+        "use std::fmt::Debug; #[cfg(any())]\npub fn marker(_: &dyn Debug) {}\n",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn move_symbol_inserts_imports_after_module_inner_attributes() {
+    assert_move_into_destination(
+        "use crate::model::Widget;",
+        "Widget",
+        false,
+        "#![allow(dead_code)]\npub fn marker() {}\n",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn move_symbol_refuses_a_destination_that_does_not_parse() {
+    let project = tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    let source =
+        "use crate::model::Widget;\n\npub fn moved(value: Widget) -> Widget {\n    value\n}\n";
+    let broken = "pub fn marker( {\n";
+    for (path, content) in [
+        ("src/api.rs", source),
+        ("src/model.rs", "pub struct Widget;\n"),
+        ("src/relocated.rs", broken),
+    ] {
+        fs::write(project.path().join(path), content).unwrap();
+    }
+    let (graph, _) = fixture_graph(project.path()).await;
+    let code_graph = fixture_symbol_code_graph(
+        "src/api.rs",
+        source,
+        "pub fn moved(value: Widget) -> Widget {\n    value\n}",
+        "moved",
+        "api::moved",
+    );
+    let request = fixture_request_for_edit(
+        SourceEditRequest::MoveSymbol {
+            symbol: "moved".to_owned(),
+            dest_file: "src/relocated.rs".to_owned(),
+            dry_run: true,
+            update_references: false,
+        },
+        "source-edit.move-unparseable-destination",
+    );
+    let outcome = resolve_source_edit_preview(
+        &graph,
+        &code_graph,
+        &request.context,
+        request.observed_at,
+        request_graph_cancellation(&request.context),
+        request.edit.clone(),
+    )
+    .await;
+    assert!(
+        outcome.is_err() || !outcome.unwrap().outcome.success(),
+        "an unparseable destination must refuse the move"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("src/relocated.rs")).unwrap(),
+        broken
+    );
 }
 
 #[tokio::test]
