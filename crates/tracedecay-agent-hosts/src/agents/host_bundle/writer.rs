@@ -12,6 +12,8 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use sha2::{Digest, Sha256};
 use tracedecay_host_integration::host_bundle_storage_failure;
+#[cfg(windows)]
+use tracedecay_private_fs::capability_dir::rename_noreplace;
 use tracedecay_private_fs::capability_dir::replace_file;
 use tracedecay_runtime_core::storage::retry_transient_file_op;
 
@@ -831,23 +833,29 @@ pub(super) fn atomic_write_nofollow(
             // a final symlink; the preflight and capability parent prevent
             // traversal through any descendant component.
             if replace_existing {
-                // Host readers and Windows scanners can briefly deny delete
-                // sharing. Keep the staged bytes and retry only the rename
-                // under the workspace's bounded transient-file policy.
+                // Retain the staged bytes across transient failures under
+                // the shared bounded file policy.
                 retry_transient_file_op(|| replace_file(parent, temporary.as_ref(), name.as_ref()))
                     .map_err(|_| host_bundle_storage_failure!())?;
             } else {
-                parent
-                    .hard_link(&temporary, parent, name)
-                    .map_err(|error| {
-                        if error.kind() == io::ErrorKind::AlreadyExists {
-                            HostBundleError::OwnershipConflict(format!(
-                                "{name}: a file appeared at this deploy path mid-write"
-                            ))
-                        } else {
-                            host_bundle_storage_failure!()
-                        }
-                    })?;
+                #[cfg(windows)]
+                // First publication needs the same namespace durability as
+                // replacement, without ever displacing a raced entry.
+                let publication = retry_transient_file_op(|| {
+                    rename_noreplace(parent, temporary.as_ref(), parent, name.as_ref())
+                });
+                #[cfg(not(windows))]
+                let publication = parent.hard_link(&temporary, parent, name);
+                publication.map_err(|error| {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        HostBundleError::OwnershipConflict(format!(
+                            "{name}: a file appeared at this deploy path mid-write"
+                        ))
+                    } else {
+                        host_bundle_storage_failure!()
+                    }
+                })?;
+                #[cfg(not(windows))]
                 parent
                     .remove_file(&temporary)
                     .map_err(|_| host_bundle_storage_failure!())?;

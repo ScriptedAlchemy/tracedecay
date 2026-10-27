@@ -118,8 +118,8 @@ fn dir_entry_path(parent: &Dir, name: &OsStr) -> io::Result<std::path::PathBuf> 
 }
 
 /// Atomically replaces a sibling file beneath a held parent capability.
-/// Windows uses the shared handle-based POSIX replacement primitive rather
-/// than MoveFileEx, which can refuse replacement of recently read files.
+/// Windows uses the shared namespace-durable rename authority, including its
+/// NTFS fallback for replacement while delete-sharing readers remain open.
 pub fn replace_file(parent: &Dir, source: &OsStr, destination: &OsStr) -> io::Result<()> {
     for name in [source, destination] {
         let mut components = std::path::Path::new(name).components();
@@ -136,7 +136,11 @@ pub fn replace_file(parent: &Dir, source: &OsStr, destination: &OsStr) -> io::Re
     {
         let source = dir_entry_path(parent, source)?;
         let destination = dir_entry_path(parent, destination)?;
-        crate::windows::replace_file_atomically(&source, &destination).map(drop)
+        crate::windows::rename_paths_durable(
+            &source,
+            &destination,
+            crate::windows::RenameMode::Replace,
+        )
     }
     #[cfg(not(windows))]
     parent.rename(source, parent, destination)
@@ -233,6 +237,8 @@ pub fn remove_open_dir_all_nofollow(directory: Dir) -> io::Result<()> {
 
 #[cfg(test)]
 mod replacement_tests {
+    use std::io::Read;
+
     use super::*;
 
     #[test]
@@ -241,6 +247,7 @@ mod replacement_tests {
         let parent = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
         std::fs::write(root.path().join("published"), b"before").unwrap();
         std::fs::write(root.path().join("staged"), b"after").unwrap();
+        let mut reader = std::fs::File::open(root.path().join("published")).unwrap();
         let error =
             replace_file(&parent, OsStr::new("staged"), OsStr::new("../escape")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -253,6 +260,44 @@ mod replacement_tests {
         assert_eq!(
             std::fs::read(root.path().join("published")).unwrap(),
             b"after"
+        );
+        let mut displaced = Vec::new();
+        reader.read_to_end(&mut displaced).unwrap();
+        assert_eq!(displaced, b"before");
+        assert!(!root.path().join("staged").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn no_replace_publication_preserves_an_occupied_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        std::fs::write(root.path().join("staged"), b"owned").unwrap();
+        std::fs::write(root.path().join("published"), b"foreign").unwrap();
+        let error = rename_noreplace(
+            &parent,
+            OsStr::new("staged"),
+            &parent,
+            OsStr::new("published"),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(root.path().join("staged")).unwrap(), b"owned");
+        assert_eq!(
+            std::fs::read(root.path().join("published")).unwrap(),
+            b"foreign"
+        );
+        std::fs::remove_file(root.path().join("published")).unwrap();
+        rename_noreplace(
+            &parent,
+            OsStr::new("staged"),
+            &parent,
+            OsStr::new("published"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("published")).unwrap(),
+            b"owned"
         );
         assert!(!root.path().join("staged").exists());
     }
