@@ -348,12 +348,21 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         })
     }
 
-    pub(crate) fn refresh_grant(&self, grant: tracedecay_contracts::CapabilityGrantSnapshot) {
-        self.inner
+    pub(crate) fn refresh_admission(&self, registered: &RegisteredWorkRuntime) {
+        let mut retained = self
+            .inner
             .registered
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .grant = grant;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Future recovery pages use the same complete admission as requests.
+        // Keep the existing recovery owners and signal; copying the published
+        // fan-out owner into its own retained state would also create a cycle.
+        retained.grant = registered.grant.clone();
+        retained.policy_digest = registered.policy_digest.clone();
+        retained.configuration_digest = registered.configuration_digest.clone();
+        retained.work_topology_policy = registered.work_topology_policy.clone();
+        retained.proposal_routing = registered.proposal_routing.clone();
+        retained.evidence_retrieval = registered.evidence_retrieval.clone();
     }
 
     /// Stop this owner from starting another fan-out reconciliation pass,

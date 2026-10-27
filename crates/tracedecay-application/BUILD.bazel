@@ -137,6 +137,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
     data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    runfiles_env = {"TRACEDECAY_TEST_TYPESCRIPT_COMPILER": "//dashboard:typescript_compiler"},
 )
 
 filegroup(

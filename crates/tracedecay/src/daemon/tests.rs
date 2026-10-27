@@ -33,6 +33,7 @@ use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 
 mod bootstrap;
 mod code_index_hydration;
+mod compiler_status;
 mod feedback_impact;
 mod handshake;
 mod invocation_ownership;

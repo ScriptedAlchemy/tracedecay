@@ -908,6 +908,31 @@ impl OwnedGlobalDbConfigurationControlStore {
         self.db.clone()
     }
 
+    /// Publish a synchronous runtime projection while configuration commits
+    /// are excluded by this store's canonical writer lane. The callback must
+    /// not wait for another database operation or build a new runtime owner.
+    ///
+    /// This does not write configuration. Dropping the immediate transaction
+    /// rolls back before releasing its lane, with no await after publication.
+    pub fn with_current_state<'a, T, F>(&'a self, publish: F) -> ConfigurationOperationFuture<'a, T>
+    where
+        T: Send + 'a,
+        F: FnOnce(&ConfigurationCurrentStateV1) -> T + Send + 'a,
+    {
+        let db = self.database();
+        Box::pin(async move {
+            let transaction = db
+                .begin_write_transaction()
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?;
+            let current = current_state_from_transaction(&transaction).await?;
+            Self::require_active_mutation_scope(db.as_ref())?;
+            let result = publish(&current);
+            drop(transaction);
+            Ok(result)
+        })
+    }
+
     /// Revalidate mutation access against the capability's client-bound write
     /// authority, so no path-derived authority can be substituted here.
     fn require_active_mutation_scope(db: &RegisteredGlobalDb) -> Result<(), ConfigurationError> {
