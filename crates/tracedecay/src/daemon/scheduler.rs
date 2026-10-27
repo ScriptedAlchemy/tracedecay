@@ -4,6 +4,9 @@ use std::time::Duration;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
+use tracedecay_automation_runtime::automation::config::{
+    AdmittedAutomationConfig, AutomationSchedule,
+};
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
 use tracedecay_runtime_core::native_runtime::NativeTask;
@@ -1951,7 +1954,7 @@ mod global_retention_tests {
 struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
     configuration_digest: tracedecay_domain::ManifestDigest,
-    settings: tracedecay_automation_runtime::automation::config::AutomationConfig,
+    settings: Arc<AdmittedAutomationConfig>,
     /// The `codex` executable the same snapshot binds
     /// (`lcm.summarizer_executables.v1`); the automation backend spawns only
     /// this path.
@@ -1966,17 +1969,32 @@ struct PinnedAutomationConfiguration {
 async fn effective_automation_config_for_project(
     cg: &tracedecay_project::project::TraceDecay,
 ) -> Result<PinnedAutomationConfiguration> {
-    let configuration = cg
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("automation configuration authority is unavailable: {error}"),
-        })?;
-    let settings = tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-        configuration.snapshot(),
+    let runtime = cg.configuration_runtime();
+    let current =
+        runtime
+            .client()
+            .current_state()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("automation configuration authority is unavailable: {error}"),
+            })?;
+    let target = runtime.configuration_target();
+    let cached = tracedecay_project::config::cached_runtime_configuration(
+        &target.profile_root,
+        &target.project_root,
     )?;
+    let configuration = if cached.revision_id() == &current.revision_id
+        && cached.snapshot().snapshot_id == current.snapshot.snapshot_id
+    {
+        cached
+    } else {
+        tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+            target.clone(),
+            current.revision_id,
+            current.snapshot,
+        )?
+    };
+    let settings = configuration.admitted_automation()?;
     let configuration_digest = pinned_automation_configuration_digest(
         configuration.revision_id(),
         &configuration.snapshot().effective_behavior_digest,
@@ -1990,14 +2008,9 @@ async fn effective_automation_config_for_project(
     })
 }
 
-pub(super) fn automation_scheduler_configured(
-    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
-) -> bool {
+pub(super) fn automation_scheduler_configured(config: &AdmittedAutomationConfig) -> bool {
     use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationHostMode,
-    };
-    use tracedecay_automation_runtime::automation::scheduler::{
-        AutomationSchedule, parse_schedule,
     };
 
     if !config.enabled
@@ -2007,20 +2020,25 @@ pub(super) fn automation_scheduler_configured(
         return false;
     }
     [
-        &config.tasks.memory_curator,
-        &config.tasks.session_reflector,
-        &config.tasks.skill_writer,
+        AgentTaskKind::MemoryCurator,
+        AgentTaskKind::SessionReflector,
+        AgentTaskKind::SkillWriter,
     ]
     .into_iter()
     .any(|task| {
-        if !task.enabled {
+        let enabled = match task {
+            AgentTaskKind::MemoryCurator => config.tasks.memory_curator.enabled,
+            AgentTaskKind::SessionReflector => config.tasks.session_reflector.enabled,
+            AgentTaskKind::SkillWriter => config.tasks.skill_writer.enabled,
+            AgentTaskKind::CombinedReview | AgentTaskKind::UserJob => false,
+        };
+        if !enabled {
             return false;
         }
-        match parse_schedule(task.schedule.as_deref()) {
-            Ok(AutomationSchedule::Manual) | Err(_) => false,
-            Ok(AutomationSchedule::ConfiguredInterval) => task.interval_secs.is_some(),
-            Ok(AutomationSchedule::Interval { .. } | AutomationSchedule::Cron(_)) => true,
-        }
+        matches!(
+            config.schedule(task),
+            Some(AutomationSchedule::Interval { .. } | AutomationSchedule::Cron(_))
+        )
     })
 }
 
@@ -2033,7 +2051,7 @@ pub(super) fn automation_scheduler_configured(
 )]
 async fn automation_scheduler_has_work(
     cg: &tracedecay_project::project::TraceDecay,
-    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    config: &AdmittedAutomationConfig,
 ) -> Result<bool> {
     use tracedecay_automation_runtime::automation::config::{
         AutomationBackend, AutomationHostMode,
@@ -2079,7 +2097,9 @@ async fn run_user_jobs_scheduler_pass(
 ) {
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let jobs =
-        match tracedecay_automation_runtime::automation::jobs::load_jobs(&dashboard_root).await {
+        match tracedecay_automation_runtime::automation::jobs::load_admitted_jobs(&dashboard_root)
+            .await
+        {
             Ok(jobs) => jobs,
             Err(e) => {
                 log_daemon_event(

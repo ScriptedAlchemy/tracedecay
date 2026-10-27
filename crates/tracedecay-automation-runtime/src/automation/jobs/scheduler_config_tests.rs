@@ -3,8 +3,9 @@ use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::errors::TraceDecayError;
 
 use super::{
-    AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery, job_schedule_decision,
-    jobs_configured_for_scheduler, jobs_path, validate_job,
+    AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery,
+    job_schedule_decision as admitted_job_schedule_decision, jobs_configured_for_scheduler,
+    jobs_path, validate_job,
 };
 use crate::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use crate::automation::config::AutomationConfig;
@@ -12,6 +13,14 @@ use crate::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
     find_run_record_exact_bounded, load_run_records_for_task_key,
 };
+
+fn job_schedule_decision(
+    job: &AutomationJob,
+    records: &[AutomationRunLedgerRecord],
+    now_secs: i64,
+) -> Option<AutomationSkipReasonV1> {
+    admitted_job_schedule_decision(&super::admit_job(job).unwrap(), records, now_secs)
+}
 
 #[tokio::test]
 async fn corrupt_jobs_file_surfaces_error_instead_of_no_work() {
@@ -37,6 +46,123 @@ async fn corrupt_jobs_file_surfaces_error_instead_of_no_work() {
 async fn missing_jobs_file_reports_no_work_without_error() {
     let temp = tempfile::TempDir::new().unwrap();
     assert!(!jobs_configured_for_scheduler(temp.path()).await.unwrap());
+}
+
+#[tokio::test]
+async fn invalid_persisted_schedule_refuses_admission_without_rewriting_history() {
+    let root = tempfile::tempdir().unwrap();
+    for schedule in ["interval", "after lunch"] {
+        let document = json!({
+            "schema_version": JOBS_SCHEMA_VERSION,
+            "jobs": [{
+                "id": "broken",
+                "name": "Broken schedule",
+                "prompt": "summarize",
+                "enabled": true,
+                "schedule": schedule,
+                "delivery": { "mode": "file" }
+            }]
+        });
+        let bytes = serde_json::to_vec(&document).unwrap();
+        std::fs::write(jobs_path(root.path()), &bytes).unwrap();
+        assert!(jobs_configured_for_scheduler(root.path()).await.is_err());
+        assert_eq!(std::fs::read(jobs_path(root.path())).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn admitted_job_keeps_its_timing_until_a_new_revision_is_admitted() {
+    let mut input = interval_job();
+    input.interval_secs = Some(60);
+    let admitted = super::admit_job(&input).unwrap();
+    let records = [ledger_record(
+        "prior",
+        AutomationRunStatus::Succeeded,
+        None,
+        100,
+    )];
+    input.schedule = Some("manual".to_owned());
+    input.interval_secs = None;
+    for now in [159, 160, 161, 160] {
+        assert_eq!(
+            admitted_job_schedule_decision(&admitted, &records, now),
+            if now < 160 {
+                Some(AutomationSkipReasonV1::SchedulerIntervalNotElapsed)
+            } else {
+                None
+            },
+        );
+    }
+    let changed = super::admit_job(&input).unwrap();
+    assert_eq!(
+        admitted_job_schedule_decision(&changed, &records, 160),
+        Some(AutomationSkipReasonV1::SchedulerScheduleManual)
+    );
+}
+
+#[tokio::test]
+async fn inactive_or_manual_invalid_job_does_not_block_schedulable_siblings() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let hourly = json!({
+        "id": "nightly",
+        "name": "Nightly summary",
+        "enabled": true,
+        "schedule": "hourly",
+        "prompt": "summarize",
+        "delivery": { "mode": "file" }
+    });
+    for inactive in [
+        json!({
+            "id": "retired",
+            "name": "Retired",
+            "enabled": false,
+            "schedule": "hourly",
+            "prompt": "",
+            "delivery": { "mode": "file" }
+        }),
+        json!({
+            "id": "manual",
+            "name": "Manual",
+            "enabled": true,
+            "schedule": "manual",
+            "prompt": "",
+            "delivery": { "mode": "file" }
+        }),
+    ] {
+        let document = json!({
+            "schema_version": JOBS_SCHEMA_VERSION,
+            "jobs": [inactive, hourly]
+        });
+        std::fs::write(jobs_path(root), serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(
+            jobs_configured_for_scheduler(root).await.unwrap(),
+            "inactive or manual invalid siblings must not fail-close scheduled work"
+        );
+        assert_eq!(
+            super::load_admitted_jobs(root)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|job| job.id.clone())
+                .collect::<Vec<_>>(),
+            ["nightly"]
+        );
+    }
+
+    let disabled_only = json!({
+        "schema_version": JOBS_SCHEMA_VERSION,
+        "jobs": [{
+            "id": "retired",
+            "name": "Retired",
+            "enabled": false,
+            "schedule": "hourly",
+            "prompt": "",
+            "delivery": { "mode": "file" }
+        }]
+    });
+    std::fs::write(jobs_path(root), serde_json::to_vec(&disabled_only).unwrap()).unwrap();
+    assert!(!jobs_configured_for_scheduler(root).await.unwrap());
 }
 
 #[tokio::test]
@@ -85,10 +211,7 @@ fn large_cron_steps_do_not_make_user_jobs_due_on_unselected_days() {
     assert_eq!(job_schedule_decision(&job, &records, 89 * 86_400), None);
     job.schedule = Some("0 0 31/4294967296 * *".to_owned());
     assert!(validate_job(&job).is_err());
-    assert_eq!(
-        job_schedule_decision(&job, &records, 89 * 86_400),
-        Some(AutomationSkipReasonV1::SchedulerScheduleInvalid)
-    );
+    assert!(super::admit_job(&job).is_err());
 }
 
 #[test]

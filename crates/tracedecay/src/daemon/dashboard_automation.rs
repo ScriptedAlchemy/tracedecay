@@ -7,9 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
-use tracedecay_automation_runtime::automation::config::{
-    AutomationConfig, from_configuration_snapshot,
-};
+use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, ManagedSkillExt, ManagedSkillReadError, apply_managed_skill_update,
@@ -378,7 +376,7 @@ async fn execute_dashboard_automation_run(
         .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
             detail: format!("automation configuration authority is unavailable: {error}"),
         })?;
-    let config = from_configuration_snapshot(pinned.snapshot()).map_err(automation_failed)?;
+    let config = pinned.admitted_automation().map_err(automation_failed)?;
     let configuration_digest =
         tracedecay_automation_runtime::automation::effect_runtime::pinned_automation_configuration_digest(
             pinned.revision_id(),

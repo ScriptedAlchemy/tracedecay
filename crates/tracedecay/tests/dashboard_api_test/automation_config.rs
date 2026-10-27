@@ -1,4 +1,193 @@
 use crate::dashboard_api_support::*;
+use tracedecay_domain::configuration::{
+    AUTOMATION_SETTINGS_SETTING_KEY, AutomationSettingsV1, ConfigurationGrantId,
+    ConfigurationGrantReceiptId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationValueV1,
+    SettingKey,
+};
+use tracedecay_domain::{AccessPolicyDigest, UtcMicros};
+use tracedecay_global_db::configuration::contracts::{
+    ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
+};
+
+#[test]
+fn persisted_invalid_schedule_remains_readable_and_repairable_over_http() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_configuration_fixture().await;
+        let sibling = start_dashboard_configuration_fixture().await;
+        let options = tracedecay_project::project::TraceDecayOpenOptions::for_profile(
+            fixture.host_runtime.profile(),
+        );
+        let cg = fixture
+            .host_runtime
+            .open_project_graph_for_test(&fixture.project_root, options.clone())
+            .await
+            .unwrap();
+        let fact_id = seed_dashboard_fact(
+            &cg,
+            "Exact memory reads survive an invalid automation schedule.",
+            FactCategoryV1::Project,
+            0.95,
+            &["automation-isolation"],
+            &[],
+        )
+        .await;
+        let current = cg.configuration_runtime().client().current().await.unwrap();
+        let mut settings = current.config().automation.as_ref().clone();
+        settings.enabled = true;
+        settings.tasks.memory_curator.enabled = false;
+        settings.tasks.memory_curator.schedule = Some("after lunch".to_owned());
+        settings.validate().unwrap();
+        let mutation = DirectConfigurationMutation::Set {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: current.target().project_id.clone(),
+            },
+            key: SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap(),
+            value: Box::new(ConfigurationValueV1::AutomationSettings(Box::new(settings))),
+        };
+        let authority = ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                ConfigurationGrantReceiptId::new("configuration.grant-receipt.http-schedule").unwrap(),
+                ConfigurationGrantId::new("configuration.grant.http-schedule").unwrap(),
+                ActorId::new("actor.http-schedule").unwrap(),
+                ConfigurationMutationOperationV1::DirectMutation,
+                mutation.target_scope_digest().unwrap(),
+                current.revision_id().clone(),
+                1,
+                AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                Some(ConfigurationIdempotencyKey::new("configuration.http-schedule").unwrap()),
+                UtcMicros(1),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        };
+        let store = cg.configuration_runtime().configuration_store();
+        let receipt = ConfigurationControlStore::commit_direct(
+            &store, &authority, &mutation, current.revision_id(),
+        )
+        .await
+        .unwrap();
+        drop(cg);
+        let reopened = fixture
+            .host_runtime
+            .open_project_graph_for_test(&fixture.project_root, options)
+            .await
+            .expect("a stored schedule error must not block full registered project reopen");
+        let invalid = reopened.configuration_runtime().client().current().await.unwrap();
+        assert_eq!(invalid.revision_id(), &receipt.result_revision_id);
+        assert!(matches!(
+            invalid.admitted_automation(),
+            Err(tracedecay_domain::errors::TraceDecayError::Automation(_))
+        ));
+        tracedecay_configuration::config::publish_pinned_runtime_configuration(invalid.clone())
+            .unwrap();
+        assert_eq!(
+            tracedecay_agent_hosts::agents::context_scout::model::context_scout_backend_from_automation_config(
+                &invalid.config().automation,
+            ),
+            tracedecay_contracts::context_scout::ContextScoutModelBackendV1::CodexAppServer,
+        );
+        let agent = http_agent();
+        let config_url = format!("{}/api/plugins/holographic/curation/config", fixture.base_url);
+        let scheduler_url = format!("{}/api/automation/scheduler", fixture.base_url);
+        let (status, raw) = get_json(&agent, &config_url);
+        assert_eq!(status, 200, "{raw}");
+        assert_eq!(raw["configuration_revision_id"], receipt.result_revision_id.as_str());
+        assert_eq!(raw["effective"]["tasks"]["memory_curator"]["schedule"], "after lunch");
+        let (status, exact_fact) = get_json(
+            &agent,
+            &format!("{}/api/plugins/holographic/fact/{fact_id}", fixture.base_url),
+        );
+        assert_eq!(status, 200, "{exact_fact}");
+        assert!(exact_fact.to_string().contains("Exact memory reads survive an invalid automation schedule."));
+        let (status, settings) = get_json(&agent, &format!("{}/api/settings", fixture.base_url));
+        assert_eq!(status, 200, "{settings}");
+        assert_eq!(settings["payload"]["automation"]["availability"]["available"], true, "{settings}");
+        assert_eq!(settings["payload"]["automation"]["enabled"], true, "{settings}");
+        let control_path = tracedecay_automation_runtime::automation::scheduler::scheduler_control_path(
+            &reopened.store_layout().dashboard_root,
+        );
+        let control_before = fs::read(&control_path).ok();
+        let (status, refused) = get_json(&agent, &format!("{scheduler_url}/status"));
+        assert_eq!(status, 500, "{refused}");
+        assert!(refused.to_string().contains("memory_curator schedule is invalid"), "{refused}");
+        for action in ["pause", "resume"] {
+            let (status, refused) = post_json(&agent, &format!("{scheduler_url}/{action}"));
+            assert_eq!(status, 500, "{refused}");
+            assert!(refused.to_string().contains("memory_curator schedule is invalid"), "{refused}");
+            assert_eq!(fs::read(&control_path).ok(), control_before);
+        }
+        let effects_root = reopened.store_layout().dashboard_root.join("automation_effects");
+        assert!(!effects_root.exists());
+        let (status, curator_refused) = post_json_body(
+            &agent,
+            &format!("{}/api/application/retained/fact_store_curate", fixture.base_url),
+            &serde_json::json!({
+                "fact_review_limit": 4,
+                "min_confidence_millionths": 500_000
+            }),
+        );
+        assert_eq!(status, 503, "{curator_refused}");
+        assert_eq!(curator_refused["kind"], "problem", "{curator_refused}");
+        let problem = &curator_refused["value"]["problem"];
+        assert_eq!(problem["kind"], "unavailable", "{curator_refused}");
+        assert_eq!(
+            problem["code"],
+            "application.retained.authority-unavailable",
+            "{curator_refused}"
+        );
+        assert_eq!(problem["terminality"], "pre_admission", "{curator_refused}");
+        assert_eq!(problem.get("committed_receipt"), Some(&serde_json::Value::Null), "{curator_refused}");
+        assert!(curator_refused.to_string().contains("memory_curator schedule is invalid"), "{curator_refused}");
+        assert!(!effects_root.exists(), "refused curator must not reserve a durable effect");
+        assert!(tracedecay_automation_runtime::automation::run_ledger::load_run_records(
+            &reopened.store_layout().dashboard_root, 10,
+        ).await.unwrap().is_empty());
+        let (status, rejected) = patch_json_body(
+            &agent, &config_url,
+            &serde_json::json!({
+                "expected_revision_id": receipt.result_revision_id.as_str(),
+                "idempotency_key": "dashboard-invalid-schedule-unrelated-edit",
+                "timeout_secs": 90
+            }),
+        );
+        assert_eq!(status, 400, "{rejected}");
+        assert_eq!(rejected["detail"], "settings validation failed");
+        assert!(rejected["validation_errors"].as_array().is_some_and(|issues| !issues.is_empty()));
+        let (status, unchanged) = get_json(&agent, &config_url);
+        assert_eq!(status, 200, "{unchanged}");
+        assert_eq!(unchanged["configuration_revision_id"], raw["configuration_revision_id"]);
+        assert_eq!(unchanged["effective"], raw["effective"]);
+        let (status, repaired) = patch_json_body(
+            &agent, &config_url,
+            &serde_json::json!({
+                "expected_revision_id": receipt.result_revision_id.as_str(),
+                "idempotency_key": "dashboard-invalid-schedule-repair",
+                "memory_curator": {"schedule": "every 10m"}
+            }),
+        );
+        assert_eq!(status, 200, "{repaired}");
+        assert_ne!(repaired["configuration_revision_id"], raw["configuration_revision_id"]);
+        assert_eq!(repaired["effective"]["tasks"]["memory_curator"]["schedule"], "every 10m");
+        let (status, recovered) = get_json(&agent, &format!("{scheduler_url}/status"));
+        assert_eq!(status, 200, "{recovered}");
+        assert_eq!(recovered["configuration_revision_id"], repaired["configuration_revision_id"]);
+        assert!(invalid.admitted_automation().is_err());
+        let (status, sibling_raw) = get_json(
+            &agent,
+            &format!("{}/api/plugins/holographic/curation/config", sibling.base_url),
+        );
+        assert_eq!(status, 200, "{sibling_raw}");
+        assert_eq!(
+            sibling_raw["effective"],
+            serde_json::to_value(AutomationSettingsV1::default()).unwrap(),
+        );
+    });
+}
 
 #[test]
 fn automation_config_uses_revisioned_current_contract() {

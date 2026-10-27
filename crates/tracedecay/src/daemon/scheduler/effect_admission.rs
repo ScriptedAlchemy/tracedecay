@@ -124,7 +124,7 @@ fn log_scheduler_schedule_skip(
 )]
 async fn fixed_task_schedule_decision(
     dashboard_root: &Path,
-    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AdmittedAutomationConfig,
     executable: Option<&Path>,
     task: AgentTaskKind,
     activity: tracedecay_automation_runtime::automation::scheduler::SessionActivity,
@@ -931,7 +931,7 @@ mod tests {
 
         let decision = fixed_task_schedule_decision(
             dashboard.path(),
-            &config,
+            &tracedecay_automation::config::admit_config(&config).unwrap(),
             None,
             tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
             tracedecay_automation_runtime::automation::scheduler::SessionActivity::none(),

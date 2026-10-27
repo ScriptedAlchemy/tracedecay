@@ -5,6 +5,8 @@
 //! snapshot and submits a revision-fenced project mutation through the same
 //! application runtime as every other configuration write.
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -25,7 +27,7 @@ use super::DashboardState;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{
-    AutomationConfig, AutomationConfigPatch, effective_config, from_configuration_snapshot,
+    AdmittedAutomationConfig, AutomationConfig, AutomationConfigPatch, effective_config,
 };
 use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
@@ -50,8 +52,8 @@ pub struct AutomationConfigMutationRequest {
     skip_all
 )]
 pub async fn get_config(State(state): State<DashboardState>) -> ApiResult {
-    let (configuration_revision_id, effective, codex) = effective_automation_config(&state)
-        .map_err(|_| configuration_authority_unavailable_error())?;
+    let (configuration_revision_id, effective, codex) =
+        raw_automation_config(&state).map_err(|_| configuration_authority_unavailable_error())?;
     Ok(Json(config_payload(
         &configuration_revision_id,
         &effective,
@@ -91,8 +93,8 @@ pub async fn patch_config(
                     .to_owned(),
             }])
         })?;
-    let (current_revision, current, _) = effective_automation_config(&state)
-        .map_err(|_| configuration_authority_unavailable_error())?;
+    let (current_revision, current, _) =
+        raw_automation_config(&state).map_err(|_| configuration_authority_unavailable_error())?;
     if expected_revision != current_revision {
         return Err(configuration_revision_conflict_error(
             "automation settings changed after this edit began; refresh and retry",
@@ -107,7 +109,7 @@ pub async fn patch_config(
         }])
     })?;
 
-    let application_outcome = if candidate == current {
+    let application_outcome = if candidate == *current {
         None
     } else {
         let project_id = state
@@ -147,8 +149,8 @@ pub async fn patch_config(
     // The runtime refreshes the pinned snapshot as part of a settled
     // configuration effect. Re-read it instead of projecting the submitted
     // candidate, so a response never claims a setting that failed activation.
-    let (configuration_revision_id, effective, codex) = effective_automation_config(&state)
-        .map_err(|_| configuration_authority_unavailable_error())?;
+    let (configuration_revision_id, effective, codex) =
+        raw_automation_config(&state).map_err(|_| configuration_authority_unavailable_error())?;
     Ok(Json(config_payload(
         &configuration_revision_id,
         &effective,
@@ -165,14 +167,29 @@ pub(crate) fn effective_automation_config(
     state: &DashboardState,
 ) -> tracedecay_domain::errors::Result<(
     ConfigurationRevisionId,
-    AutomationConfig,
+    Arc<AdmittedAutomationConfig>,
     LcmSummarizerExecutableV1,
 )> {
     let pinned = state.cached_runtime_configuration()?;
-    let config = from_configuration_snapshot(pinned.snapshot())?;
+    let config = pinned.admitted_automation()?;
     Ok((
         pinned.revision_id().clone(),
         config,
+        pinned.config().lcm_summarizers.codex.clone(),
+    ))
+}
+
+fn raw_automation_config(
+    state: &DashboardState,
+) -> tracedecay_domain::errors::Result<(
+    ConfigurationRevisionId,
+    Arc<AutomationConfig>,
+    LcmSummarizerExecutableV1,
+)> {
+    let pinned = state.cached_runtime_configuration()?;
+    Ok((
+        pinned.revision_id().clone(),
+        pinned.config().automation.clone(),
         pinned.config().lcm_summarizers.codex.clone(),
     ))
 }
