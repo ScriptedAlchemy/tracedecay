@@ -12,6 +12,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use sha2::{Digest, Sha256};
 use tracedecay_host_integration::host_bundle_storage_failure;
+use tracedecay_private_fs::capability_dir::replace_file;
 use tracedecay_runtime_core::storage::retry_transient_file_op;
 
 use super::control::{
@@ -833,7 +834,7 @@ pub(super) fn atomic_write_nofollow(
                 // Host readers and Windows scanners can briefly deny delete
                 // sharing. Keep the staged bytes and retry only the rename
                 // under the workspace's bounded transient-file policy.
-                retry_transient_file_op(|| parent.rename(&temporary, parent, name))
+                retry_transient_file_op(|| replace_file(parent, temporary.as_ref(), name.as_ref()))
                     .map_err(|_| host_bundle_storage_failure!())?;
             } else {
                 parent

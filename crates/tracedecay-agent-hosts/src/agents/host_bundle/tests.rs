@@ -39,6 +39,7 @@ fn publication_survives_a_transient_windows_reader() {
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
 
     let destination = temp.path().join("artifact");
+    tracedecay_private_fs::make_private_file(&destination).unwrap();
     let reader =
         tracedecay_private_fs::windows::open_or_create_private_lock_file(&destination).unwrap();
     assert!(matches!(
