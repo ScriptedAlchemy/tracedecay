@@ -760,7 +760,19 @@ pub struct AutomationTaskSettingsV1 {
     pub interval_secs: Option<u64>,
     pub cooldown_secs: Option<u64>,
     pub min_idle_secs: Option<u64>,
-    pub stale_lock_secs: Option<u64>,
+    /// Historical snapshot payload only. Preserve absent, null, and numeric
+    /// forms so their recorded digests remain verifiable. Current settings
+    /// retire this field; task ownership is governed by the operating-system
+    /// lock, never by an elapsed-time override.
+    #[doc(hidden)]
+    #[schemars(skip)]
+    #[serde(
+        rename = "stale_lock_secs",
+        default,
+        deserialize_with = "deserialize_retired_lock_timeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_stale_lock_secs: Option<Option<u64>>,
     /// Suppression window between session-evidence retrieval attempts while
     /// the evidence budget stays exhausted. Unset uses the automation crate's
     /// one-hour default. Distinct from `cooldown_secs`, which paces retries
@@ -775,7 +787,7 @@ impl AutomationTaskSettingsV1 {
             self.interval_secs,
             self.cooldown_secs,
             self.min_idle_secs,
-            self.stale_lock_secs,
+            self.legacy_stale_lock_secs.flatten(),
             self.session_evidence_budget_backoff_secs,
         ] {
             if matches!(value, Some(0)) {
@@ -789,6 +801,18 @@ impl AutomationTaskSettingsV1 {
         }
         Ok(())
     }
+}
+
+#[allow(clippy::option_option)]
+fn deserialize_retired_lock_timeout<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<u64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // `default` handles an absent field. This function runs for an explicitly
+    // present null too, which ordinary nested Option deserialization loses.
+    Option::<u64>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
@@ -842,7 +866,34 @@ impl AutomationSettingsV1 {
     }
 
     pub fn is_default(&self) -> bool {
-        self == &Self::default()
+        let mut current = self.clone();
+        current.retire_lock_timeout();
+        current == Self::default()
+    }
+
+    pub fn has_retired_lock_timeout(&self) -> bool {
+        [
+            &self.tasks.memory_curator,
+            &self.tasks.session_reflector,
+            &self.tasks.skill_writer,
+        ]
+        .iter()
+        .any(|task| task.legacy_stale_lock_secs.is_some())
+    }
+
+    /// Project a historical value onto the current effective settings. The
+    /// store calls this on a copy when committing a converged child revision;
+    /// historical snapshots retain their original serialized representation.
+    pub fn retire_lock_timeout(&mut self) -> bool {
+        let mut changed = false;
+        for task in [
+            &mut self.tasks.memory_curator,
+            &mut self.tasks.session_reflector,
+            &mut self.tasks.skill_writer,
+        ] {
+            changed |= task.legacy_stale_lock_secs.take().is_some();
+        }
+        changed
     }
 }
 
@@ -854,7 +905,7 @@ impl Default for AutomationSettingsV1 {
             interval_secs: Some(interval_secs),
             cooldown_secs: Some(300),
             min_idle_secs,
-            stale_lock_secs: Some(3_600),
+            legacy_stale_lock_secs: None,
             session_evidence_budget_backoff_secs: None,
         };
         Self {
@@ -877,7 +928,53 @@ impl Default for AutomationSettingsV1 {
 }
 
 #[cfg(test)]
-mod automation_settings_tests {}
+mod automation_settings_tests {
+    use super::{AutomationSettingsV1, AutomationTaskSettingsV1};
+    use crate::canonical_sha256;
+
+    #[test]
+    fn historical_lock_timeouts_preserve_their_serialized_identity() {
+        for timeout in [serde_json::Value::Null, serde_json::json!(3600)] {
+            let mut historical = serde_json::to_value(AutomationSettingsV1::default()).unwrap();
+            for task in ["memory_curator", "session_reflector", "skill_writer"] {
+                historical["tasks"][task]["stale_lock_secs"] = timeout.clone();
+            }
+            let stored: AutomationSettingsV1 = serde_json::from_value(historical.clone()).unwrap();
+            stored.validate().unwrap();
+            assert!(stored.has_retired_lock_timeout());
+            assert_eq!(serde_json::to_value(&stored).unwrap(), historical);
+            assert_eq!(
+                canonical_sha256(&stored).unwrap(),
+                canonical_sha256(&historical).unwrap(),
+                "loading a historical null or number must preserve the digest input"
+            );
+            assert!(
+                stored.is_default(),
+                "a retired timeout is not an active override"
+            );
+
+            let mut effective = stored.clone();
+            assert!(effective.retire_lock_timeout());
+            assert_eq!(effective, AutomationSettingsV1::default());
+            assert!(!effective.retire_lock_timeout(), "retirement is idempotent");
+            for task in ["memory_curator", "session_reflector", "skill_writer"] {
+                assert!(
+                    serde_json::to_value(&effective).unwrap()["tasks"][task]
+                        .get("stale_lock_secs")
+                        .is_none()
+                );
+            }
+            assert_eq!(serde_json::to_value(&stored).unwrap(), historical);
+        }
+    }
+
+    #[test]
+    fn current_automation_schema_has_no_lock_timeout_control() {
+        let schema = serde_json::to_value(schemars::schema_for!(AutomationTaskSettingsV1)).unwrap();
+        assert!(schema["properties"].get("stale_lock_secs").is_none());
+        assert_eq!(schema["additionalProperties"], false);
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

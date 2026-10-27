@@ -72,12 +72,6 @@ pub struct AutomationTaskPatch {
         deserialize_with = "deserialize_clearable_field",
         skip_serializing_if = "Option::is_none"
     )]
-    pub stale_lock_secs: Option<Option<u64>>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_clearable_field",
-        skip_serializing_if = "Option::is_none"
-    )]
     pub session_evidence_budget_backoff_secs: Option<Option<u64>>,
 }
 
@@ -128,6 +122,7 @@ pub fn effective_config(
     project: Option<&AutomationConfigPatch>,
 ) -> Result<AutomationConfig> {
     let mut config = global.clone();
+    config.retire_lock_timeout();
     if let Some(patch) = project {
         apply_patch(&mut config, patch);
     }
@@ -216,9 +211,6 @@ fn apply_task_patch(config: &mut AutomationTaskConfig, patch: &AutomationTaskPat
     if let Some(min_idle_secs) = patch.min_idle_secs {
         config.min_idle_secs = min_idle_secs;
     }
-    if let Some(stale_lock_secs) = patch.stale_lock_secs {
-        config.stale_lock_secs = stale_lock_secs;
-    }
     if let Some(session_evidence_budget_backoff_secs) = patch.session_evidence_budget_backoff_secs {
         config.session_evidence_budget_backoff_secs = session_evidence_budget_backoff_secs;
     }
@@ -250,7 +242,6 @@ fn merge_task_patch(config: &mut AutomationTaskPatch, patch: AutomationTaskPatch
     merge_optional_field(&mut config.interval_secs, patch.interval_secs);
     merge_optional_field(&mut config.cooldown_secs, patch.cooldown_secs);
     merge_optional_field(&mut config.min_idle_secs, patch.min_idle_secs);
-    merge_optional_field(&mut config.stale_lock_secs, patch.stale_lock_secs);
     merge_optional_field(
         &mut config.session_evidence_budget_backoff_secs,
         patch.session_evidence_budget_backoff_secs,
@@ -277,11 +268,6 @@ fn validate_task_config(task: &str, config: &AutomationTaskConfig) -> Result<()>
     if matches!(config.min_idle_secs, Some(0)) {
         return Err(config_error(format!(
             "{task} min_idle_secs must be greater than zero"
-        )));
-    }
-    if matches!(config.stale_lock_secs, Some(0)) {
-        return Err(config_error(format!(
-            "{task} stale_lock_secs must be greater than zero"
         )));
     }
     if matches!(config.session_evidence_budget_backoff_secs, Some(0)) {
@@ -553,6 +539,30 @@ fn parse_schedule_duration_secs(value: &str) -> Option<u64> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_settings_retire_legacy_lock_timeout_and_patch_refuses_it() {
+        let mut stored = serde_json::to_value(AutomationConfig::default()).unwrap();
+        stored["tasks"]["memory_curator"]["stale_lock_secs"] = serde_json::json!(3600);
+        stored["tasks"]["session_reflector"]["stale_lock_secs"] = serde_json::Value::Null;
+        stored["timeout_secs"] = serde_json::json!(137);
+        let stored: AutomationConfig = serde_json::from_value(stored).unwrap();
+        let effective = effective_config(&stored, None).unwrap();
+        assert_eq!(effective.timeout_secs, 137);
+        assert!(!effective.has_retired_lock_timeout());
+        assert!(stored.has_retired_lock_timeout());
+        for task in ["memory_curator", "session_reflector", "skill_writer"] {
+            for value in [serde_json::Value::Null, serde_json::json!(3600)] {
+                let patch = serde_json::json!({ (task): { "stale_lock_secs": value } });
+                let error = serde_json::from_value::<AutomationConfigPatch>(patch).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("unknown field `stale_lock_secs`")
+                );
+            }
+        }
+    }
 
     #[test]
     fn session_evidence_budget_backoff_is_patchable_clearable_and_nonzero() {

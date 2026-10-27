@@ -28,6 +28,7 @@ use tracedecay_domain::configuration::{
     WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+use tracedecay_domain::source_path_policy::GENERATED_DIR_SEGMENTS;
 use tracedecay_domain::{DomainError, validate_index_path_patterns};
 
 /// Canonical default for configured-tier proximity warnings.
@@ -36,7 +37,7 @@ pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 7;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 8;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -65,6 +66,10 @@ pub enum ConfigurationRegistryError {
         pattern: String,
         message: String,
     },
+    #[error(
+        "setting {key} contains retired stale_lock_secs; task locks no longer accept an age override"
+    )]
+    RetiredAutomationLockTimeout { key: SettingKey },
     #[error("setting {key} cannot be written in layer {layer:?}")]
     InvalidLayer {
         key: SettingKey,
@@ -341,6 +346,13 @@ impl ConfigurationRegistry {
         value: &ConfigurationValueV1,
     ) -> Result<(), ConfigurationRegistryError> {
         self.validate_value(key, value)?;
+        if let ConfigurationValueV1::AutomationSettings(settings) = value
+            && settings.has_retired_lock_timeout()
+        {
+            return Err(ConfigurationRegistryError::RetiredAutomationLockTimeout {
+                key: key.clone(),
+            });
+        }
         if let ConfigurationValueV1::StringList(patterns) = value
             && matches!(
                 key.as_str(),
@@ -521,7 +533,7 @@ impl Default for ProjectDefaults {
             ".tracedecay/**".to_string(),
             "**/*.min.*".to_string(),
         ];
-        for segment in tracedecay_runtime_core::config::GENERATED_DIR_SEGMENTS {
+        for segment in GENERATED_DIR_SEGMENTS {
             exclude.push(format!("{segment}/**"));
             exclude.push(format!("**/{segment}/**"));
         }
@@ -749,6 +761,39 @@ mod proximity_threshold_tests {
 }
 
 #[cfg(test)]
+mod retired_automation_setting_tests {
+    use super::{ConfigurationRegistry, ConfigurationRegistryError};
+    use tracedecay_domain::configuration::{
+        AUTOMATION_SETTINGS_SETTING_KEY, AutomationSettingsV1, ConfigurationValueV1, SettingKey,
+    };
+
+    #[test]
+    fn historical_lock_timeout_loads_but_new_writes_refuse_it() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
+        for timeout in [serde_json::Value::Null, serde_json::json!(3600)] {
+            let mut stored = serde_json::to_value(AutomationSettingsV1::default()).unwrap();
+            stored["tasks"]["memory_curator"]["stale_lock_secs"] = timeout;
+            let settings = serde_json::from_value(stored).unwrap();
+            let value = ConfigurationValueV1::AutomationSettings(Box::new(settings));
+            assert!(registry.validate_value(&key, &value).is_ok());
+            assert!(matches!(
+                registry.validate_written_value(&key, &value),
+                Err(ConfigurationRegistryError::RetiredAutomationLockTimeout { .. })
+            ));
+        }
+        assert!(
+            registry
+                .validate_written_value(
+                    &key,
+                    &ConfigurationValueV1::AutomationSettings(Box::default())
+                )
+                .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
 mod index_path_pattern_tests {
     use super::*;
 
@@ -909,7 +954,7 @@ mod user_profile_settings_tests {
         );
         let definition = registry.definition(&key).expect("definition");
 
-        assert_eq!(definition.schema_revision, 7);
+        assert_eq!(definition.schema_revision, 8);
         assert_eq!(definition.scope, SettingScopeV1::UserProfile);
         assert_eq!(
             definition.value_kind,

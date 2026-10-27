@@ -33,8 +33,7 @@ pub fn from_configuration_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result
             message: "pinned automation setting has the wrong value kind".to_owned(),
         });
     };
-    validate_config(config)?;
-    Ok((**config).clone())
+    effective_config(config, None)
 }
 
 pub fn effective_config(

@@ -4,7 +4,7 @@ use super::read::validate_snapshot_registry_completeness;
 use super::revision::insert_revision;
 use super::{
     ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationCommitV1,
-    ConfigurationMutationAuthority, ConfigurationMutationReceiptV1,
+    ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceiptV1,
     ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
     ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationValueV1,
     GlobalDbConfigurationControlStore, TestConnection,
@@ -16,9 +16,10 @@ use crate::configuration::resolver::resolve_configuration;
 use crate::registered::RegisteredGlobalDbWriteTransaction;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::configuration::{
-    ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ConfigurationCandidateV1,
-    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
-    ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+    ACCESS_RULES_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY, AuthorityRef, AutomationSettingsV1,
+    CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationGrantId,
+    ConfigurationGrantReceiptId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, INDEX_EXCLUDE_SETTING_KEY,
     ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
@@ -30,6 +31,7 @@ use tracedecay_domain::{
 };
 
 use tracedecay_domain::test_fixtures::digest;
+use tracedecay_store::configuration::ConfigurationRevisionStore;
 
 #[test]
 fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
@@ -47,6 +49,88 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
             .to_string(),
         "configuration store data is invalid: configuration snapshot does not contain the complete registry"
     );
+}
+
+#[asupersync::test]
+async fn retired_automation_lock_timeout_converges_without_rewriting_history() {
+    let (_directory, runtime, root) = Box::pin(global_setup()).await;
+    let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
+    let mut stored = serde_json::to_value(AutomationSettingsV1::default()).unwrap();
+    stored["tasks"]["memory_curator"]["stale_lock_secs"] = serde_json::json!(3600);
+    stored["tasks"]["session_reflector"]["stale_lock_secs"] = serde_json::Value::Null;
+    stored["tasks"]["skill_writer"]["stale_lock_secs"] = serde_json::json!(7200);
+    stored["timeout_secs"] = serde_json::json!(137);
+    let settings: AutomationSettingsV1 = serde_json::from_value(stored).unwrap();
+    let mut effective_values = root.snapshot.effective_values.clone();
+    effective_values.insert(
+        key.clone(),
+        ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
+    );
+    let legacy_revision: ConfigurationRevisionId = id("configuration.revision.legacy-lock-timeout");
+    let mut provenance = root.snapshot.provenance.clone();
+    provenance.insert(
+        key.clone(),
+        vec![ConfigurationCandidateV1 {
+            layer: direct_project_layer(),
+            revision_id: legacy_revision.clone(),
+            disposition: CandidateDispositionV1::Winning,
+            safe_reason: None,
+        }],
+    );
+    let historical = ConfigurationRevisionRecordV1 {
+        revision_id: legacy_revision.clone(),
+        parent_revision_id: Some(root.revision_id.clone()),
+        snapshot: ConfigurationSnapshotV1::new(effective_values, provenance).unwrap(),
+        actor_id: id("actor.configuration.fixture"),
+        operation_kind: "direct_mutation".to_owned(),
+        created_at: UtcMicros(2),
+    };
+    let historical_bytes = serde_json::to_vec(&historical.snapshot).unwrap();
+    let db = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+    insert_revision(&transaction, &historical).await.unwrap();
+    transaction.commit().await.unwrap();
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    assert_eq!(store.current().await.unwrap().snapshot, historical.snapshot);
+    assert!(matches!(
+        store
+            .converge_registered_registry_shape(&root.revision_id, UtcMicros(3))
+            .await,
+        Err(ConfigurationError::RevisionConflict)
+    ));
+
+    let converged = store
+        .converge_registered_registry_shape(&legacy_revision, UtcMicros(3))
+        .await
+        .unwrap();
+    let mut expected = settings;
+    expected.retire_lock_timeout();
+    assert_ne!(converged.revision_id, legacy_revision);
+    assert_eq!(
+        converged.snapshot.effective_values[&key],
+        ConfigurationValueV1::AutomationSettings(Box::new(expected))
+    );
+    assert_eq!(
+        converged.snapshot.provenance,
+        historical.snapshot.provenance
+    );
+    let retained = store
+        .read_revision(&legacy_revision)
+        .await
+        .unwrap()
+        .unwrap();
+    retained.snapshot.validate().unwrap();
+    assert_eq!(
+        serde_json::to_vec(&retained.snapshot).unwrap(),
+        historical_bytes
+    );
+    let settled = store
+        .converge_registered_registry_shape(&converged.revision_id, UtcMicros(4))
+        .await
+        .unwrap();
+    assert_eq!(settled.revision_id, converged.revision_id);
 }
 
 #[asupersync::test]
