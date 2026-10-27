@@ -221,7 +221,7 @@ NO_DEFAULT_FEATURES = "!no-default-features"
 PRODUCTION_CONTEXT = ("tracedecay", "normal,build", frozenset())
 
 
-def owner_pkg(repo_rel, repo=REPO):
+def owner_pkg(repo_rel, repo):
     """Honor existing Bazel package boundaries before creating a shared package."""
     for directory in (repo_rel.parent, *repo_rel.parent.parents):
         if directory == Path("."):
@@ -921,7 +921,7 @@ def main():
     def group_label(repo_rel, *, sources=False):
         """filegroup label + pkg-relative file label for an out-of-package
         file, registering the group for emission in the owning package."""
-        pkg_dir, group_rel = owner_pkg(repo_rel)
+        pkg_dir, group_rel = owner_pkg(repo_rel, workspace)
         pkg_rel = "/".join(repo_rel.parts[len(pkg_dir.split("/")):])
         gname = group_rel.replace("/", "_") or pkg_dir
         entry = {"files": set(), "glob": group_rel}
