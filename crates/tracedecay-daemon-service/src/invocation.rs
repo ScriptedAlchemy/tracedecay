@@ -321,6 +321,13 @@ pub struct DaemonConfigurationRuntimeRegistrationPauseV1 {
     pub allow_return: tokio::sync::oneshot::Sender<()>,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+struct WorkRuntimeRefreshPauseV1 {
+    project_root: PathBuf,
+    candidate_captured: tokio::sync::oneshot::Sender<()>,
+    allow_refresh: tokio::sync::oneshot::Receiver<()>,
+}
+
 #[derive(Clone)]
 pub struct DaemonInvocationService {
     code_index_schedulers:
@@ -384,6 +391,8 @@ pub struct DaemonInvocationService {
     #[cfg(any(test, feature = "test-helpers"))]
     configuration_runtime_registration_pause:
         Arc<Mutex<Option<ConfigurationRuntimeRegistrationPauseV1>>>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    work_runtime_refresh_pause: Arc<Mutex<Option<WorkRuntimeRefreshPauseV1>>>,
     /// Home of the daemon owner's user, where daemon-run automation deploys
     /// managed skills. `None` when the owning profile has no home.
     owner_home: Option<PathBuf>,
@@ -434,6 +443,8 @@ impl DaemonInvocationService {
             native_integration_status_broadcasts: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(any(test, feature = "test-helpers"))]
             configuration_runtime_registration_pause: Arc::new(Mutex::new(None)),
+            #[cfg(any(test, feature = "test-helpers"))]
+            work_runtime_refresh_pause: Arc::new(Mutex::new(None)),
             owner_home: None,
         }
     }
@@ -504,6 +515,40 @@ impl DaemonInvocationService {
         project_root: &Path,
     ) -> Option<ConfigurationRuntimeRegistrationPauseV1> {
         let mut pause = self.configuration_runtime_registration_pause.lock().await;
+        if pause
+            .as_ref()
+            .is_some_and(|pause| pause.project_root == project_root)
+        {
+            pause.take()
+        } else {
+            None
+        }
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn pause_work_runtime_refresh(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (candidate_captured, candidate_observed) = tokio::sync::oneshot::channel();
+        let (allow_refresh, refresh_allowed) = tokio::sync::oneshot::channel();
+        *self.work_runtime_refresh_pause.lock().await = Some(WorkRuntimeRefreshPauseV1 {
+            project_root,
+            candidate_captured,
+            allow_refresh: refresh_allowed,
+        });
+        (candidate_observed, allow_refresh)
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    async fn take_work_runtime_refresh_pause(
+        &self,
+        project_root: &Path,
+    ) -> Option<WorkRuntimeRefreshPauseV1> {
+        let mut pause = self.work_runtime_refresh_pause.lock().await;
         if pause
             .as_ref()
             .is_some_and(|pause| pause.project_root == project_root)

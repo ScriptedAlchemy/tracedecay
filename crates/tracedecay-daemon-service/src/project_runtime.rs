@@ -1192,6 +1192,39 @@ impl ProjectRuntimeRegistryV1 {
             .then_some(result)
     }
 
+    /// Reconcile an existing component without waiting for a reservation or
+    /// constructing a new owner. Callers can hold an external authority fence
+    /// through this synchronous transition without awaiting another writer.
+    pub(crate) fn reconcile_registered<C, E, R, T>(
+        &self,
+        project_root: &Path,
+        reconcile: R,
+    ) -> Result<Option<T>, E>
+    where
+        C: ProjectRuntimeComponent,
+        E: From<ProjectRuntimeRegistryError>,
+        R: FnOnce(&mut C) -> Result<T, E>,
+    {
+        let root_fences = self.lock_root_fences();
+        let mut runtimes = self.lock_runtimes();
+        if self.closed.load(Ordering::Acquire) || root_fences.contains(project_root) {
+            return Err(ProjectRuntimeRegistryError::Closed.into());
+        }
+        let Some(runtime) = runtimes.get_mut(project_root) else {
+            return Ok(None);
+        };
+        let type_id = TypeId::of::<C>();
+        if runtime.reservations.contains(&type_id)
+            || runtime.registration_builds.contains_key(&type_id)
+        {
+            return Ok(None);
+        }
+        let Some(incumbent) = C::slot(runtime).as_mut() else {
+            return Ok(None);
+        };
+        reconcile(incumbent).map(Some)
+    }
+
     /// Register a component, or accept an incumbent the caller recognizes as
     /// the same authority.
     ///
