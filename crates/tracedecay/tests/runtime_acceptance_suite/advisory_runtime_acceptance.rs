@@ -361,7 +361,8 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
             serde_json::to_vec(&thread).unwrap().as_slice(),
         )
         .await
-        .expect("authentic GraphQL review thread decodes through sanitizer");
+        .expect("authentic GraphQL review thread decodes through sanitizer")
+        .ingress;
     assert_eq!(ingress.items.len(), 1);
     assert_eq!(ingress.items[0].comment_id.as_str(), "3556767423");
     assert_eq!(
@@ -1867,7 +1868,8 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
             serde_json::to_vec(&thread).unwrap().as_slice(),
         )
         .await
-        .expect("recorded review thread decodes through the production path");
+        .expect("recorded review thread decodes through the production path")
+        .ingress;
     assert_eq!(github_ingress.items.len(), 1);
     assert_eq!(
         github_ingress.items[0].lifecycle,

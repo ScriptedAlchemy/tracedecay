@@ -17,8 +17,8 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::feedback::{
-    GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1, GitHubReviewReadOperationV1,
-    GitHubReviewRemapStateV1, GitHubReviewStateV1,
+    GitHubPullRequestReviewV1, GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1,
+    GitHubReviewReadOperationV1, GitHubReviewRemapStateV1, GitHubReviewStateV1,
 };
 
 fn source(state: PrContextSourceStateV1, detail: impl Into<String>) -> PrContextSourceV1 {
@@ -67,10 +67,10 @@ fn github_source(
             "GitHub refresh failed; any retained observations remain historical evidence.",
             Some(timeline),
         ),
-        State::Denied { timeline } => (
+        State::Denied { .. } => (
             PrContextSourceStateV1::Denied,
-            "GitHub refresh was denied; any authorized retained observations are shown separately.",
-            Some(timeline),
+            "GitHub refresh was denied; retained GitHub observations are withheld from this briefing.",
+            None,
         ),
         State::NotPublished => (
             PrContextSourceStateV1::NotPublished,
@@ -191,9 +191,16 @@ pub(super) fn selected_base(
                 .chain(operation.last_complete.iter())
         })
         .find(|observed| {
-            observed.outcome == GitHubReviewIngressProviderOutcomeV1::Complete
-                && observed.coverage == GitHubReviewCoverageV1::Complete
-                && observed.quarantined.is_empty()
+            matches!(
+                (observed.outcome, observed.coverage),
+                (
+                    GitHubReviewIngressProviderOutcomeV1::Complete,
+                    GitHubReviewCoverageV1::Complete
+                ) | (
+                    GitHubReviewIngressProviderOutcomeV1::Partial,
+                    GitHubReviewCoverageV1::Partial
+                )
+            ) && observed.quarantined.is_empty()
                 && observed.fetched_at == identity.observed_at
                 && observed.provider_head_commit_id == identity.observed_head_commit_id
                 && observed.provider_base_commit_id == identity.observed_base_commit_id
@@ -487,6 +494,14 @@ fn project_conversation(
     discussions: &mut Vec<PrContextDiscussionV1>,
 ) -> Result<()> {
     let mut latest = BTreeMap::new();
+    let mut review_observations: BTreeMap<
+        &str,
+        (
+            &GitHubPullRequestReviewV1,
+            &ProjectDeliveryGitHubOperationSnapshotV1,
+            bool,
+        ),
+    > = BTreeMap::new();
     for operation in &pr.operations {
         if !matches!(
             operation.operation,
@@ -532,54 +547,67 @@ fn project_conversation(
                 retain_newest(&mut latest, id, value);
             }
             for item in &snapshot.reviews {
-                let superseded = matches!(
-                    item.state,
-                    GitHubReviewStateV1::Approved | GitHubReviewStateV1::ChangesRequested
-                ) && item.author.as_ref().is_some_and(|author| {
-                    snapshot.reviews.iter().any(|other| {
-                        other.author.as_ref() == Some(author)
-                            && matches!(
-                                other.state,
-                                GitHubReviewStateV1::Approved
-                                    | GitHubReviewStateV1::ChangesRequested
-                            )
-                            && item
-                                .submitted_at
-                                .as_ref()
-                                .zip(other.submitted_at.as_ref())
-                                .is_some_and(|(at, other_at)| other_at > at)
-                    })
-                });
-                let id = format!("review:{}", item.review_id);
-                let value = PrContextDiscussionV1 {
-                    id: id.clone(),
-                    thread_id: None,
-                    kind: "review".to_owned(),
-                    lifecycle: if superseded {
-                        "superseded"
-                    } else if is_latest {
-                        "submitted"
-                    } else {
-                        "retained"
+                match review_observations.get(item.review_id.as_str()) {
+                    Some((_, previous, _)) if previous.fetched_at > snapshot.fetched_at => {}
+                    _ => {
+                        review_observations
+                            .insert(item.review_id.as_str(), (item, snapshot, is_latest));
                     }
-                    .to_owned(),
-                    review_state: label(&item.state)?,
-                    file: None,
-                    line: None,
-                    text: item.body.clone(),
-                    text_truncated: false,
-                    url: item.url.clone(),
-                    body_anchor: None,
-                    observed_at: snapshot.fetched_at.0,
-                    matches_head: is_latest
-                        && item
-                            .commit_id
-                            .as_ref()
-                            .is_some_and(|commit| commit.as_str() == head),
-                };
-                retain_newest(&mut latest, id, value);
+                }
             }
         }
+    }
+    // Reconcile each review's current state before comparing votes across
+    // retained and partial observations. A dismissed older ID cannot supersede
+    // another vote merely because a complete snapshot once called it decisive.
+    for (item, snapshot, is_latest) in review_observations.values() {
+        let superseded = matches!(
+            item.state,
+            GitHubReviewStateV1::Approved | GitHubReviewStateV1::ChangesRequested
+        ) && item.author.as_ref().is_some_and(|author| {
+            review_observations.values().any(|(other, _, _)| {
+                other.author.as_ref() == Some(author)
+                    && matches!(
+                        other.state,
+                        GitHubReviewStateV1::Approved | GitHubReviewStateV1::ChangesRequested
+                    )
+                    && item
+                        .submitted_at
+                        .as_ref()
+                        .zip(other.submitted_at.as_ref())
+                        .is_some_and(|(at, other_at)| other_at > at)
+            })
+        });
+        let id = format!("review:{}", item.review_id);
+        latest.insert(
+            id.clone(),
+            PrContextDiscussionV1 {
+                id,
+                thread_id: None,
+                kind: "review".to_owned(),
+                lifecycle: if superseded {
+                    "superseded"
+                } else if *is_latest {
+                    "submitted"
+                } else {
+                    "retained"
+                }
+                .to_owned(),
+                review_state: label(&item.state)?,
+                file: None,
+                line: None,
+                text: item.body.clone(),
+                text_truncated: false,
+                url: item.url.clone(),
+                body_anchor: None,
+                observed_at: snapshot.fetched_at.0,
+                matches_head: *is_latest
+                    && item
+                        .commit_id
+                        .as_ref()
+                        .is_some_and(|commit| commit.as_str() == head),
+            },
+        );
     }
     discussions.extend(latest.into_values());
     Ok(())
@@ -761,6 +789,40 @@ mod tests {
     }
 
     #[test]
+    fn withheld_description_keeps_the_validated_current_pr_base() {
+        let mut pr = pull_request(42, "commit.head");
+        pr.identity.as_mut().unwrap().description = None;
+        let identity_read = pr.operations[0].latest_attempt.as_mut().unwrap();
+        identity_read.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+        identity_read.coverage = GitHubReviewCoverageV1::Partial;
+        let mut evidence = outcome(vec![pr], Vec::new());
+        let ProjectDeliveryReadOutcomeV1::Ready { snapshot } = &mut evidence else {
+            unreachable!();
+        };
+        let ProjectDeliveryGitHubSourceV1::Ready { timeline } = std::mem::replace(
+            &mut snapshot.github_reviews,
+            ProjectDeliveryGitHubSourceV1::NotPublished,
+        ) else {
+            unreachable!();
+        };
+        snapshot.github_reviews = ProjectDeliveryGitHubSourceV1::Partial { timeline };
+        let brief = project_hosted(Some(&evidence), Some(42), "commit.head").unwrap();
+        assert_eq!(brief.source.state, PrContextSourceStateV1::Partial);
+        let identity = brief.pull_request.unwrap();
+        assert_eq!(identity.number, 42);
+        assert!(identity.description.is_none());
+        assert!(identity.matches_head);
+        assert_eq!(
+            selected_base(Some(&evidence), Some(42), "commit.head"),
+            Some("commit.parent".to_owned()),
+        );
+        assert_eq!(
+            selected_base(Some(&evidence), Some(42), "commit.other"),
+            None
+        );
+    }
+
+    #[test]
     fn unsuccessful_first_use_refresh_preserves_evidence_without_claiming_ready() {
         use tracedecay_application::advisory::GitHubReviewRefreshOutcomeV1;
 
@@ -784,30 +846,37 @@ mod tests {
                 PrContextSourceStateV1::Stale,
             ),
         ] {
-            let mut retained = outcome(
-                vec![pull_request(42, "commit.head")],
+            let mut pr = pull_request(42, "commit.head");
+            let mut discussion = observation("commit.head", 25);
+            discussion
+                .conversation
+                .push(conversation("Keep the existing route."));
+            pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+                operation: GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+                last_complete: None,
+                latest_attempt: Some(discussion),
+            });
+            let retained = outcome(
+                vec![pr],
                 vec![ci_check(
                     "commit.head",
                     30,
                     ProjectDeliveryCiConclusionV1::Failure,
                 )],
             );
-            if refresh == GitHubReviewRefreshOutcomeV1::Denied {
-                // Current GitHub source denial empties that entire lane,
-                // while independently authorized CI remains available.
-                let ProjectDeliveryReadOutcomeV1::Ready { snapshot } = &mut retained else {
-                    unreachable!();
-                };
-                snapshot.github_reviews = ProjectDeliveryGitHubSourceV1::Denied {
-                    timeline: Default::default(),
-                };
-            }
+            let before = project_hosted(Some(&retained), Some(42), "commit.head").unwrap();
+            assert!(before.pull_request.unwrap().description.is_some());
+            assert_eq!(before.discussions.len(), 1);
             let evidence = with_github_refresh_outcome(retained, refresh.clone());
             let brief = project_hosted(Some(&evidence), Some(42), "commit.head").unwrap();
             assert_eq!(brief.source.state, expected_state);
             if refresh == GitHubReviewRefreshOutcomeV1::Denied {
                 assert!(brief.pull_request.is_none());
                 assert!(brief.discussions.is_empty());
+                assert_eq!(
+                    selected_base(Some(&evidence), Some(42), "commit.head"),
+                    None
+                );
             } else {
                 let identity = brief.pull_request.unwrap();
                 assert_eq!(identity.number, 42);
@@ -816,6 +885,11 @@ mod tests {
                 assert_eq!(
                     identity.description.as_deref(),
                     Some("Share startup across remote machines.")
+                );
+                assert_eq!(brief.discussions.len(), 1);
+                assert_eq!(
+                    brief.discussions[0].text.as_deref(),
+                    Some("Keep the existing route.")
                 );
             }
             assert_eq!(brief.ci_source.state, PrContextSourceStateV1::Ready);
@@ -1037,6 +1111,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn partial_review_votes_supersede_retained_votes_after_reconciling_dismissals() {
+        let review = |id: &str, state, minute| GitHubPullRequestReviewV1 {
+            review_id: GitHubReviewIdV1::new(id).unwrap(),
+            state,
+            author: Some("reviewer".to_owned()),
+            body: None,
+            commit_id: Some(CommitId::new("commit.head").unwrap()),
+            submitted_at: Some(format!("2026-10-26T18:{minute:02}:00Z")),
+            url: None,
+        };
+        let mut retained = observation("commit.head", 30);
+        retained
+            .reviews
+            .push(review("old-vote", GitHubReviewStateV1::ChangesRequested, 0));
+        let mut partial = observation("commit.head", 40);
+        partial.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+        partial.coverage = GitHubReviewCoverageV1::Partial;
+        partial
+            .reviews
+            .push(review("approval", GitHubReviewStateV1::Approved, 1));
+        let mut pr = pull_request(42, "commit.head");
+        pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+            operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
+            last_complete: Some(retained),
+            latest_attempt: Some(partial),
+        });
+        let mut rows = Vec::new();
+        project_conversation(&pr, "commit.head", &mut rows).unwrap();
+        let old = rows.iter().find(|row| row.id == "review:old-vote").unwrap();
+        assert_eq!(old.lifecycle, "superseded");
+        assert_eq!(old.observed_at, 30);
+        assert!(!old.matches_head);
+        let approval = rows.iter().find(|row| row.id == "review:approval").unwrap();
+        assert_eq!(approval.lifecycle, "submitted");
+        assert!(approval.matches_head);
+
+        // If the retained complete collection also has that approval, its
+        // later observed dismissal must remove its superseding authority.
+        let operation = pr.operations.last_mut().unwrap();
+        operation
+            .last_complete
+            .as_mut()
+            .unwrap()
+            .reviews
+            .push(review("approval", GitHubReviewStateV1::Approved, 1));
+        operation.latest_attempt.as_mut().unwrap().reviews[0].state =
+            GitHubReviewStateV1::Dismissed;
+        rows.clear();
+        project_conversation(&pr, "commit.head", &mut rows).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "review:old-vote")
+                .unwrap()
+                .lifecycle,
+            "retained"
+        );
+        let dismissed = rows.iter().find(|row| row.id == "review:approval").unwrap();
+        assert_eq!(dismissed.review_state, "dismissed");
+        assert_eq!(dismissed.observed_at, 40);
+    }
+
     fn ci_check(
         head: &str,
         at: i64,
@@ -1115,5 +1252,42 @@ mod tests {
             PrContextSourceStateV1::Denied
         );
         assert_eq!(selected_base(None, None, "commit.head"), None);
+
+        let mut retained = outcome(
+            vec![pull_request(42, "commit.head")],
+            vec![ci_check(
+                "commit.head",
+                30,
+                ProjectDeliveryCiConclusionV1::Success,
+            )],
+        );
+        let ProjectDeliveryReadOutcomeV1::Ready { snapshot } = &mut retained else {
+            unreachable!();
+        };
+        let ProjectDeliveryGitHubSourceV1::Ready { timeline } = std::mem::replace(
+            &mut snapshot.github_reviews,
+            ProjectDeliveryGitHubSourceV1::NotPublished,
+        ) else {
+            unreachable!();
+        };
+        assert!(
+            timeline.pull_requests[0]
+                .identity
+                .as_ref()
+                .unwrap()
+                .description
+                .is_some()
+        );
+        snapshot.github_reviews = ProjectDeliveryGitHubSourceV1::Denied { timeline };
+        let denied = project_hosted(Some(&retained), Some(42), "commit.head").unwrap();
+        assert_eq!(denied.source.state, PrContextSourceStateV1::Denied);
+        assert!(denied.pull_request.is_none());
+        assert!(denied.discussions.is_empty());
+        assert_eq!(denied.ci_source.state, PrContextSourceStateV1::Ready);
+        assert_eq!(denied.checks.len(), 1);
+        assert_eq!(
+            selected_base(Some(&retained), Some(42), "commit.head"),
+            None
+        );
     }
 }

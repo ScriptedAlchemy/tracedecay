@@ -135,6 +135,15 @@ pub(super) fn with_github_refresh_outcome(
     let ProjectDeliveryReadOutcomeV1::Ready { snapshot } = &mut outcome else {
         return outcome;
     };
+    if refresh == GitHubReviewRefreshOutcomeV1::Denied {
+        // This adapter treats an explicit refresh denial as withholding this
+        // GitHub lane, independently of the canonical retained-read policy.
+        // Other evidence, including independently authorized CI, is unchanged.
+        snapshot.github_reviews = ProjectDeliveryGitHubSourceV1::Denied {
+            timeline: Default::default(),
+        };
+        return outcome;
+    }
     let previous = std::mem::replace(
         &mut snapshot.github_reviews,
         ProjectDeliveryGitHubSourceV1::NotPublished,
@@ -152,7 +161,6 @@ pub(super) fn with_github_refresh_outcome(
         }
     };
     snapshot.github_reviews = match refresh {
-        GitHubReviewRefreshOutcomeV1::Denied => ProjectDeliveryGitHubSourceV1::Denied { timeline },
         GitHubReviewRefreshOutcomeV1::Stale => ProjectDeliveryGitHubSourceV1::Stale { timeline },
         _ => ProjectDeliveryGitHubSourceV1::Unavailable { timeline },
     };

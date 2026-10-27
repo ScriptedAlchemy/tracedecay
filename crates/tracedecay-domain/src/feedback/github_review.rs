@@ -86,7 +86,8 @@ pub struct GitHubPullRequestSnapshotV1 {
     /// The pull request's number in its repository, as discovery admitted it.
     pub number: u64,
     pub title: String,
-    /// Absent in older retained snapshots or when the PR has no description.
+    /// Absent when no description was retained, including withheld prose in a
+    /// partial observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub state: GitHubPullRequestStateV1,
@@ -582,8 +583,8 @@ pub struct GitHubReviewIngressResultV1 {
     /// comment id and disjoint from `items`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quarantined: Vec<GitHubReviewQuarantinedItemV1>,
-    /// Present exactly for every complete `RestGetPullRequest` read; every
-    /// other operation observes review items only and never a PR identity.
+    /// Present for complete `RestGetPullRequest` reads and partial reads that
+    /// withhold optional prose. Other operations never carry a PR identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<GitHubPullRequestSnapshotV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -642,7 +643,8 @@ impl GitHubReviewIngressResultV1 {
             (
                 Some(snapshot),
                 GitHubReviewReadOperationV1::RestGetPullRequest,
-                GitHubReviewIngressProviderOutcomeV1::Complete,
+                GitHubReviewIngressProviderOutcomeV1::Complete
+                | GitHubReviewIngressProviderOutcomeV1::Partial,
             ) => snapshot.validate()?,
             (
                 None,

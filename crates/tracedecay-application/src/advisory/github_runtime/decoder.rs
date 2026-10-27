@@ -12,7 +12,7 @@ use tracedecay_domain::feedback::{
     GitHubReviewIngressResultV1, GitHubReviewItemV1, GitHubReviewLifecycleV1,
     GitHubReviewQuarantineReasonV1, GitHubReviewQuarantinedItemV1, GitHubReviewReadOperationV1,
     GitHubReviewRemapStateV1, GitHubReviewStateV1, GitHubReviewThreadIdV1,
-    MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1,
+    MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1, MAX_GITHUB_PULL_REQUEST_TITLE_BYTES_V1,
 };
 use tracedecay_domain::{CommitId, ManifestDigest, ProviderId, RetrievalAnchorId, UtcMicros};
 
@@ -20,7 +20,10 @@ use super::dto::{
     GraphQlResponseV1, GraphQlReviewCommentV1, GraphQlReviewThreadV1, RestConversationCommentV1,
     RestPullRequestV1, RestReviewCommentV1, RestReviewV1,
 };
-use super::{GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1, GitHubReadResponseDecoderV1};
+use super::{
+    GitHubDecodedReadResponseV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
+    GitHubReadResponseDecoderV1,
+};
 
 pub const MAX_GITHUB_REVIEW_BODY_BYTES_V1: usize = 256 * 1024;
 
@@ -123,6 +126,7 @@ struct DecodedReviewCommentsV1 {
     quarantined: Vec<GitHubReviewQuarantinedItemV1>,
     conversation: Vec<GitHubConversationCommentV1>,
     reviews: Vec<GitHubPullRequestReviewV1>,
+    withheld_optional_prose: bool,
 }
 
 struct GitHubReviewItemDraftV1 {
@@ -184,7 +188,7 @@ where
         request: &'a GitHubReviewReadRequestV1,
         metadata: &'a GitHubReadNetworkMetadataV1,
         body: &'a [u8],
-    ) -> FeedbackPortFuture<'a, Option<GitHubReviewIngressResultV1>> {
+    ) -> FeedbackPortFuture<'a, Option<GitHubDecodedReadResponseV1>> {
         Box::pin(async move {
             if request.validate().is_err()
                 || request.scope.head_commit_id != self.identity.head_commit_id
@@ -208,14 +212,16 @@ where
             let mut pull_request = None;
             let comments = match request.operation {
                 GitHubReviewReadOperationV1::RestGetPullRequest => {
-                    pull_request = Some(self.decode_pull_request(request, body)?);
-                    DecodedReviewCommentsV1::default()
-                }
-                GitHubReviewReadOperationV1::RestListPullRequestReviews => {
+                    let (snapshot, withheld_optional_prose) =
+                        self.decode_pull_request(request, body)?;
+                    pull_request = Some(snapshot);
                     DecodedReviewCommentsV1 {
-                        reviews: self.decode_reviews(body)?,
+                        withheld_optional_prose,
                         ..DecodedReviewCommentsV1::default()
                     }
+                }
+                GitHubReviewReadOperationV1::RestListPullRequestReviews => {
+                    self.decode_reviews(body)?
                 }
                 GitHubReviewReadOperationV1::RestListPullRequestReviewComments => {
                     self.decode_rest_comments(request, body, outcome, fetched_at)
@@ -255,10 +261,19 @@ where
             quarantined,
             conversation,
             reviews,
+            withheld_optional_prose,
         }: DecodedReviewCommentsV1,
         pull_request: Option<GitHubPullRequestSnapshotV1>,
         fetched_at: UtcMicros,
-    ) -> Option<GitHubReviewIngressResultV1> {
+    ) -> Option<GitHubDecodedReadResponseV1> {
+        let (outcome, coverage) = if withheld_optional_prose {
+            (
+                GitHubReviewIngressProviderOutcomeV1::Partial,
+                GitHubReviewCoverageV1::Partial,
+            )
+        } else {
+            (outcome, coverage)
+        };
         let ingress = GitHubReviewIngressResultV1 {
             provider: self.identity.provider.clone(),
             scope: request.scope.clone(),
@@ -277,14 +292,17 @@ where
             fetched_at,
         };
         ingress.validate().ok()?;
-        Some(ingress)
+        Some(GitHubDecodedReadResponseV1 {
+            ingress,
+            withheld_optional_prose,
+        })
     }
 
     fn decode_pull_request(
         &self,
         request: &GitHubReviewReadRequestV1,
         body: &[u8],
-    ) -> Option<GitHubPullRequestSnapshotV1> {
+    ) -> Option<(GitHubPullRequestSnapshotV1, bool)> {
         let response = serde_json::from_slice::<RestPullRequestV1>(body).ok()?;
         (response.id.to_string() == request.pull_request_id.as_str()
             && response.number == self.identity.pull_request_number
@@ -298,15 +316,12 @@ where
             (false, "closed") => GitHubPullRequestStateV1::Closed,
             (false, _) => return None,
         };
+        let (description, withheld_optional_prose) =
+            retained_optional_prose(response.body.as_deref());
         let snapshot = GitHubPullRequestSnapshotV1 {
             number: response.number,
             title,
-            description: response
-                .body
-                .as_deref()
-                .map(retained_optional_prose)
-                .transpose()
-                .ok()?,
+            description,
             state,
             draft: response.draft,
             additions: response.additions,
@@ -314,13 +329,16 @@ where
             changed_files: response.changed_files,
         };
         snapshot.validate().ok()?;
-        Some(snapshot)
+        Some((snapshot, withheld_optional_prose))
     }
 
-    fn decode_reviews(&self, body: &[u8]) -> Option<Vec<GitHubPullRequestReviewV1>> {
+    fn decode_reviews(&self, body: &[u8]) -> Option<DecodedReviewCommentsV1> {
         let reviews = serde_json::from_slice::<Vec<RestReviewV1>>(body).ok()?;
         let mut seen = BTreeSet::new();
-        let mut retained = Vec::with_capacity(reviews.len());
+        let mut retained = DecodedReviewCommentsV1 {
+            reviews: Vec::with_capacity(reviews.len()),
+            ..DecodedReviewCommentsV1::default()
+        };
         for review in reviews {
             if review.id == 0
                 || !seen.insert(review.id)
@@ -332,6 +350,7 @@ where
             {
                 return None;
             }
+            let (body, withheld_optional_prose) = retained_optional_prose(review.body.as_deref());
             let value = GitHubPullRequestReviewV1 {
                 review_id: GitHubReviewIdV1::new(review.id.to_string()).ok()?,
                 state: match review.state.as_deref() {
@@ -344,20 +363,18 @@ where
                     .map(|user| retained_author(&user.login))
                     .transpose()
                     .ok()?,
-                body: review
-                    .body
-                    .as_deref()
-                    .map(retained_optional_prose)
-                    .transpose()
-                    .ok()?,
+                body,
                 commit_id: review.commit_id.map(CommitId::new).transpose().ok()?,
                 submitted_at: review.submitted_at,
                 url: review.html_url,
             };
             value.validate().ok()?;
-            retained.push(value);
+            retained.reviews.push(value);
+            retained.withheld_optional_prose |= withheld_optional_prose;
         }
-        retained.sort_by(|left, right| left.review_id.as_str().cmp(right.review_id.as_str()));
+        retained
+            .reviews
+            .sort_by(|left, right| left.review_id.as_str().cmp(right.review_id.as_str()));
         Some(retained)
     }
 
@@ -770,11 +787,22 @@ fn retained_review_body(body: &str) -> Result<String, GitHubReviewQuarantineReas
     Ok(retained)
 }
 
-fn retained_optional_prose(body: &str) -> Result<String, ()> {
-    if body.len() > MAX_GITHUB_REVIEW_BODY_BYTES_V1 {
-        return Err(());
+fn retained_optional_prose(body: Option<&str>) -> (Option<String>, bool) {
+    let Some(body) = body else {
+        return (None, false);
+    };
+    if body.len() > MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1 || body.contains('\0') {
+        return (None, true);
     }
-    tracedecay_privacy::sanitize_provider_metadata_text(body).ok_or(())
+    match tracedecay_privacy::sanitize_provider_metadata_text(body) {
+        Some(retained)
+            if retained.len() <= MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1
+                && !retained.contains('\0') =>
+        {
+            (Some(retained), false)
+        }
+        _ => (None, true),
+    }
 }
 
 fn retained_author(author: &str) -> Result<String, ()> {
@@ -1026,7 +1054,8 @@ mod tests {
                 serde_json::to_vec(&vec![first, second]).unwrap().as_slice(),
             )
             .await
-            .expect("both review comments must decode");
+            .expect("both review comments must decode")
+            .ingress;
         assert_eq!(ingress.items.len(), 2);
         assert_eq!(decoder.anchors.batch_calls.load(Ordering::Relaxed), 1);
         assert_eq!(decoder.anchors.resolve_calls.load(Ordering::Relaxed), 0);
@@ -1064,9 +1093,10 @@ mod tests {
             "base": {"sha": decoder.identity.base_commit_id.as_str()},
             "head": {"sha": request.scope.head_commit_id.as_str()}
         });
-        let snapshot = decoder
+        let (snapshot, withheld) = decoder
             .decode_pull_request(&request, &serde_json::to_vec(&pull).unwrap())
             .unwrap();
+        assert!(!withheld);
         assert_eq!(
             snapshot.description.as_deref(),
             Some("Keep old clients working while adding the new route.")
@@ -1077,9 +1107,11 @@ mod tests {
             "submitted_at": "2026-10-26T12:00:00Z",
             "html_url": "https://github.com/ScriptedAlchemy/tracedecay/pull/421#pullrequestreview-37"
         }]);
-        let reviews = decoder
+        let decoded = decoder
             .decode_reviews(&serde_json::to_vec(&votes).unwrap())
             .unwrap();
+        assert!(!decoded.withheld_optional_prose);
+        let reviews = decoded.reviews;
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].state, GitHubReviewStateV1::Approved);
         assert_eq!(reviews[0].author.as_deref(), Some("reviewer"));
@@ -1095,6 +1127,97 @@ mod tests {
                 .decode_pull_request(&request, &serde_json::to_vec(&wrong_head).unwrap())
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn withheld_optional_prose_keeps_valid_identity_and_review_votes_partial() {
+        let mut request = request();
+        let decoder = briefing_decoder(&request);
+        let metadata = GitHubReadNetworkMetadataV1 {
+            status: GitHubReadNetworkStatusV1::Ok,
+            etag: None,
+            next_cursor: None,
+            rate_limit: None,
+            retry_at: None,
+        };
+        for rejected in [
+            "X-Vault_Passphrase: ordinary-value\nsee the second call below".to_owned(),
+            "x".repeat(MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1 + 1),
+            "invalid\0prose".to_owned(),
+        ] {
+            request.operation = GitHubReviewReadOperationV1::RestGetPullRequest;
+            let mut pull = json!({
+                "id": 4_026_204_542_u64, "number": 421, "title": "Explain this change",
+                "body": rejected, "state": "open", "draft": false, "merged": false,
+                "additions": 4, "deletions": 2, "changed_files": 1,
+                "base": {"sha": decoder.identity.base_commit_id.as_str()},
+                "head": {"sha": request.scope.head_commit_id.as_str()}
+            });
+            let decoded = decoder
+                .decode(&request, &metadata, &serde_json::to_vec(&pull).unwrap())
+                .await
+                .expect("optional description must not discard a valid PR identity");
+            assert!(decoded.withheld_optional_prose);
+            let ingress = decoded.ingress;
+            assert_eq!(
+                ingress.outcome,
+                GitHubReviewIngressProviderOutcomeV1::Partial
+            );
+            assert_eq!(ingress.coverage, GitHubReviewCoverageV1::Partial);
+            ingress.validate().unwrap();
+            let identity = ingress.pull_request.unwrap();
+            assert_eq!(identity.title, "Explain this change");
+            assert_eq!(identity.number, 421);
+            assert!(identity.description.is_none());
+            pull["title"] = json!("");
+            assert!(
+                decoder
+                    .decode(&request, &metadata, &serde_json::to_vec(&pull).unwrap())
+                    .await
+                    .is_none()
+            );
+
+            request.operation = GitHubReviewReadOperationV1::RestListPullRequestReviews;
+            let mut reviews = json!([
+                {"id": 37, "state": "CHANGES_REQUESTED", "body": rejected,
+                 "user": {"login": "reviewer", "type": "User"},
+                 "commit_id": request.scope.head_commit_id.as_str()},
+                {"id": 38, "state": "APPROVED", "body": "Looks good.",
+                 "user": {"login": "another-reviewer", "type": "User"}}
+            ]);
+            let decoded = decoder
+                .decode(&request, &metadata, &serde_json::to_vec(&reviews).unwrap())
+                .await
+                .expect("withheld review prose must not discard review states or safe siblings");
+            assert!(decoded.withheld_optional_prose);
+            let ingress = decoded.ingress;
+            assert_eq!(
+                ingress.outcome,
+                GitHubReviewIngressProviderOutcomeV1::Partial
+            );
+            assert_eq!(ingress.coverage, GitHubReviewCoverageV1::Partial);
+            ingress.validate().unwrap();
+            assert_eq!(ingress.reviews.len(), 2);
+            assert_eq!(
+                ingress.reviews[0].state,
+                GitHubReviewStateV1::ChangesRequested
+            );
+            assert_eq!(ingress.reviews[0].author.as_deref(), Some("reviewer"));
+            assert_eq!(
+                ingress.reviews[0].commit_id.as_ref(),
+                Some(&request.scope.head_commit_id)
+            );
+            assert!(ingress.reviews[0].body.is_none());
+            assert_eq!(ingress.reviews[1].state, GitHubReviewStateV1::Approved);
+            assert_eq!(ingress.reviews[1].body.as_deref(), Some("Looks good."));
+            reviews[0]["user"]["login"] = json!("invalid\nauthor");
+            assert!(
+                decoder
+                    .decode(&request, &metadata, &serde_json::to_vec(&reviews).unwrap())
+                    .await
+                    .is_none()
+            );
+        }
     }
 
     #[tokio::test]
@@ -1131,7 +1254,8 @@ mod tests {
                 &body,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .ingress;
         assert!(ingress.items.is_empty());
         assert!(ingress.reviews.is_empty());
         assert_eq!(ingress.conversation.len(), 1);
