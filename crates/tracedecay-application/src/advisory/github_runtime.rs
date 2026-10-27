@@ -36,8 +36,8 @@ use tracedecay_contracts::feedback::{
     GitHubReviewReadResponseV1,
 };
 use tracedecay_domain::feedback::{
-    GitHubReviewCoverageV1, GitHubReviewCursorV1, GitHubReviewEtagV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
+    GitHubReviewCommentIdV1, GitHubReviewCoverageV1, GitHubReviewCursorV1, GitHubReviewEtagV1,
+    GitHubReviewIdV1, GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
     GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
@@ -761,16 +761,218 @@ impl GitHubReviewCompleteGenerationV1 {
 /// Durable refresh state keeps the latest ingress attempt separate from the
 /// last complete generation. The latest attempt may be partial, rate-limited,
 /// stale, or failed without replacing complete canonical observations.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitHubReviewRefreshStateV1 {
     pub revision: ManifestDigest,
     pub last_complete: Option<GitHubReviewCompleteGenerationV1>,
     pub latest_attempt: GitHubReviewReadResponseV1,
-    #[serde(default)]
     pub attempt_receipts: Vec<GitHubReviewRefreshAttemptReceiptV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_partial_collection: Option<GitHubReviewPartialCollectionGenerationV1>,
+}
+
+/// Storage-only sharing. The canonical response and its receipt remain full
+/// objects in memory and in revision hashes. Equal rows already retained in
+/// the latest attempt need only their IDs in the baseline's encoded form.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredGitHubReviewPartialCollectionV1 {
+    response: GitHubReviewReadResponseV1,
+    receipt: GitHubReviewRefreshAttemptReceiptV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shared_reviews: Vec<GitHubReviewIdV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shared_conversation: Vec<GitHubReviewCommentIdV1>,
+}
+
+fn shared_collection_row_indices<'a>(
+    shared: impl Iterator<Item = &'a str>,
+    inline: impl Iterator<Item = &'a str>,
+    latest: impl Iterator<Item = &'a str>,
+) -> Result<Vec<usize>, &'static str> {
+    let shared = shared.collect::<Vec<_>>();
+    if shared.is_empty() {
+        return Ok(Vec::new());
+    }
+    let inline = inline.collect::<Vec<_>>();
+    let latest = latest.collect::<Vec<_>>();
+    if shared.len() > latest.len()
+        || [&shared, &inline, &latest]
+            .into_iter()
+            .any(|ids| ids.windows(2).any(|pair| pair[0] >= pair[1]))
+    {
+        return Err("noncanonical shared collection rows");
+    }
+    shared
+        .into_iter()
+        .map(|id| {
+            if inline.binary_search(&id).is_ok() {
+                return Err("shared collection row also retained inline");
+            }
+            latest
+                .binary_search(&id)
+                .map_err(|_| "shared collection row missing from latest attempt")
+        })
+        .collect()
+}
+
+impl StoredGitHubReviewPartialCollectionV1 {
+    fn compact(
+        collection: &GitHubReviewPartialCollectionGenerationV1,
+        latest: &GitHubReviewReadResponseV1,
+    ) -> Self {
+        let mut response = collection.response.clone();
+        let mut shared_reviews = Vec::new();
+        response.ingress.reviews.retain(|row| {
+            let shared = latest
+                .ingress
+                .reviews
+                .binary_search_by(|candidate| {
+                    candidate.review_id.as_str().cmp(row.review_id.as_str())
+                })
+                .is_ok_and(|index| latest.ingress.reviews[index] == *row);
+            if shared {
+                shared_reviews.push(row.review_id.clone());
+            }
+            !shared
+        });
+        let mut shared_conversation = Vec::new();
+        response.ingress.conversation.retain(|row| {
+            let shared = latest
+                .ingress
+                .conversation
+                .binary_search_by(|candidate| {
+                    candidate.comment_id.as_str().cmp(row.comment_id.as_str())
+                })
+                .is_ok_and(|index| latest.ingress.conversation[index] == *row);
+            if shared {
+                shared_conversation.push(row.comment_id.clone());
+            }
+            !shared
+        });
+        Self {
+            response,
+            receipt: collection.receipt.clone(),
+            shared_reviews,
+            shared_conversation,
+        }
+    }
+
+    fn expand(
+        mut self,
+        latest: &GitHubReviewReadResponseV1,
+    ) -> Result<GitHubReviewPartialCollectionGenerationV1, &'static str> {
+        // Validate every reference before cloning any prose. Each latest row
+        // can appear only once, so expansion adds at most one copy of it.
+        let review_indices = shared_collection_row_indices(
+            self.shared_reviews.iter().map(GitHubReviewIdV1::as_str),
+            self.response
+                .ingress
+                .reviews
+                .iter()
+                .map(|row| row.review_id.as_str()),
+            latest
+                .ingress
+                .reviews
+                .iter()
+                .map(|row| row.review_id.as_str()),
+        )?;
+        let conversation_indices = shared_collection_row_indices(
+            self.shared_conversation
+                .iter()
+                .map(GitHubReviewCommentIdV1::as_str),
+            self.response
+                .ingress
+                .conversation
+                .iter()
+                .map(|row| row.comment_id.as_str()),
+            latest
+                .ingress
+                .conversation
+                .iter()
+                .map(|row| row.comment_id.as_str()),
+        )?;
+        if !review_indices.is_empty() {
+            self.response.ingress.reviews.extend(
+                review_indices
+                    .into_iter()
+                    .map(|index| latest.ingress.reviews[index].clone()),
+            );
+            self.response
+                .ingress
+                .reviews
+                .sort_by(|left, right| left.review_id.as_str().cmp(right.review_id.as_str()));
+        }
+        if !conversation_indices.is_empty() {
+            self.response.ingress.conversation.extend(
+                conversation_indices
+                    .into_iter()
+                    .map(|index| latest.ingress.conversation[index].clone()),
+            );
+            self.response
+                .ingress
+                .conversation
+                .sort_by(|left, right| left.comment_id.as_str().cmp(right.comment_id.as_str()));
+        }
+        Ok(GitHubReviewPartialCollectionGenerationV1 {
+            response: self.response,
+            receipt: self.receipt,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct StoredGitHubReviewRefreshStateRefV1<'a> {
+    revision: &'a ManifestDigest,
+    last_complete: &'a Option<GitHubReviewCompleteGenerationV1>,
+    latest_attempt: &'a GitHubReviewReadResponseV1,
+    attempt_receipts: &'a [GitHubReviewRefreshAttemptReceiptV1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_partial_collection: Option<StoredGitHubReviewPartialCollectionV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredGitHubReviewRefreshStateV1 {
+    revision: ManifestDigest,
+    last_complete: Option<GitHubReviewCompleteGenerationV1>,
+    latest_attempt: GitHubReviewReadResponseV1,
+    #[serde(default)]
+    attempt_receipts: Vec<GitHubReviewRefreshAttemptReceiptV1>,
+    #[serde(default)]
+    last_partial_collection: Option<StoredGitHubReviewPartialCollectionV1>,
+}
+
+impl Serialize for GitHubReviewRefreshStateV1 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        StoredGitHubReviewRefreshStateRefV1 {
+            revision: &self.revision,
+            last_complete: &self.last_complete,
+            latest_attempt: &self.latest_attempt,
+            attempt_receipts: &self.attempt_receipts,
+            last_partial_collection: self.last_partial_collection.as_ref().map(|collection| {
+                StoredGitHubReviewPartialCollectionV1::compact(collection, &self.latest_attempt)
+            }),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GitHubReviewRefreshStateV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = StoredGitHubReviewRefreshStateV1::deserialize(deserializer)?;
+        let last_partial_collection = stored
+            .last_partial_collection
+            .map(|collection| collection.expand(&stored.latest_attempt))
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            revision: stored.revision,
+            last_complete: stored.last_complete,
+            latest_attempt: stored.latest_attempt,
+            attempt_receipts: stored.attempt_receipts,
+            last_partial_collection,
+        })
+    }
 }
 
 impl GitHubReviewRefreshStateV1 {
@@ -2677,11 +2879,199 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(state.revision, expected);
+        let historical_bytes = format!(
+            "{{\"revision\":{},\"last_complete\":{},\"latest_attempt\":{},\"attempt_receipts\":[]}}",
+            serde_json::to_string(&state.revision).unwrap(),
+            serde_json::to_string(&state.last_complete).unwrap(),
+            serde_json::to_string(&state.latest_attempt).unwrap(),
+        );
+        assert_eq!(serde_json::to_string(&state).unwrap(), historical_bytes);
         let encoded_state = serde_json::to_value(&state).unwrap();
         assert!(encoded_state.get("last_partial_collection").is_none());
         let decoded: GitHubReviewRefreshStateV1 = serde_json::from_value(encoded_state).unwrap();
         assert_eq!(decoded, state);
         assert!(decoded.validate_for(&request));
+    }
+
+    fn shared_partial_collection_fixture(
+        operation: GitHubReviewReadOperationV1,
+    ) -> (GitHubReviewReadRequestV1, GitHubReviewRefreshStateV1) {
+        let (_, request) = context_and_request(operation);
+        let mut response = partial_review_collection(&request, &["1", "2"], 10);
+        if operation == GitHubReviewReadOperationV1::RestListPullRequestConversationComments {
+            response.ingress.reviews.clear();
+            response.ingress.conversation = ["1", "2"]
+                .into_iter()
+                .map(|id| GitHubConversationCommentV1 {
+                    comment_id: GitHubReviewCommentIdV1::new(id).unwrap(),
+                    author: Some("reviewer".to_owned()),
+                    author_class: GitHubReviewAuthorClassV1::OtherObservedRole,
+                    body: "original discussion".to_owned(),
+                    url: format!("https://github.com/example/project/issues/1#issuecomment-{id}"),
+                    created_at: "2026-10-27T00:00:00Z".to_owned(),
+                    updated_at: "2026-10-27T00:00:00Z".to_owned(),
+                })
+                .collect();
+        } else {
+            for row in &mut response.ingress.reviews {
+                row.body = Some("original review".to_owned());
+            }
+        }
+        let digest = github_review_scan_digest(&request, &response).unwrap();
+        let receipt = GitHubReviewRefreshAttemptReceiptV1 {
+            disposition: GitHubReviewRefreshAttemptDispositionV1::Agreed,
+            scan_digests: vec![digest.clone(), digest],
+            observed_at: response.ingress.fetched_at,
+        };
+        let state = GitHubReviewRefreshStateV1::transition_with_receipt(
+            &request,
+            None,
+            response,
+            Some(receipt),
+        )
+        .unwrap();
+        (request, state)
+    }
+
+    #[test]
+    fn shared_partial_collections_restore_exact_rows_and_legacy_proofs() {
+        for (operation, rows, shared) in [
+            (
+                GitHubReviewReadOperationV1::RestListPullRequestReviews,
+                "reviews",
+                "shared_reviews",
+            ),
+            (
+                GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+                "conversation",
+                "shared_conversation",
+            ),
+        ] {
+            let (request, state) = shared_partial_collection_fixture(operation);
+            let baseline = state.last_partial_collection.clone().unwrap();
+            let encoded = serde_json::to_value(&state).unwrap();
+            assert_eq!(
+                encoded["last_partial_collection"][shared],
+                serde_json::json!(["1", "2"])
+            );
+            assert!(
+                encoded["last_partial_collection"]["response"]["ingress"]
+                    .get(rows)
+                    .is_none()
+            );
+            let decoded: GitHubReviewRefreshStateV1 = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded, state);
+            assert!(decoded.validate_for(&request));
+
+            let mut changed = state.latest_attempt.clone();
+            changed.completed_collection_scan = false;
+            changed.ingress.fetched_at = UtcMicros(11);
+            changed.checkpoint.next_cursor =
+                Some(GitHubReviewCursorV1::new("rest-page:2").unwrap());
+            if rows == "reviews" {
+                changed.ingress.reviews[0].state = GitHubReviewStateV1::Dismissed;
+                changed.ingress.reviews[0].body = Some("changed review".to_owned());
+                let mut added = changed.ingress.reviews[1].clone();
+                added.review_id = GitHubReviewIdV1::new("3").unwrap();
+                changed.ingress.reviews.push(added);
+            } else {
+                changed.ingress.conversation[0].body = "changed discussion".to_owned();
+                let mut added = changed.ingress.conversation[1].clone();
+                added.comment_id = GitHubReviewCommentIdV1::new("3").unwrap();
+                changed.ingress.conversation.push(added);
+            }
+            let changed =
+                GitHubReviewRefreshStateV1::transition(&request, Some(&state), changed).unwrap();
+            assert_eq!(changed.last_partial_collection.as_ref(), Some(&baseline));
+            let encoded = serde_json::to_value(&changed).unwrap();
+            assert_eq!(
+                encoded["last_partial_collection"][shared],
+                serde_json::json!(["2"])
+            );
+            assert_eq!(
+                encoded["last_partial_collection"]["response"]["ingress"][rows]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                encoded["latest_attempt"]["ingress"][rows]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                3
+            );
+            let decoded: GitHubReviewRefreshStateV1 =
+                serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(decoded, changed);
+            assert!(decoded.validate_for(&request));
+            assert_eq!(decoded.last_partial_collection.as_ref(), Some(&baseline));
+            assert_eq!(baseline.response.ingress.fetched_at, UtcMicros(10));
+            assert_eq!(baseline.receipt.observed_at, UtcMicros(10));
+
+            // Previously persisted full baselines retain the same revision and
+            // canonical proof; reference fields were absent from their wire.
+            let mut historical = encoded;
+            historical["last_partial_collection"] = serde_json::to_value(&baseline).unwrap();
+            let decoded: GitHubReviewRefreshStateV1 = serde_json::from_value(historical).unwrap();
+            assert_eq!(decoded, changed);
+            assert!(decoded.validate_for(&request));
+        }
+    }
+
+    #[test]
+    fn shared_partial_collection_references_fail_closed_without_losing_content_binding() {
+        for (operation, rows, shared) in [
+            (
+                GitHubReviewReadOperationV1::RestListPullRequestReviews,
+                "reviews",
+                "shared_reviews",
+            ),
+            (
+                GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+                "conversation",
+                "shared_conversation",
+            ),
+        ] {
+            let (request, state) = shared_partial_collection_fixture(operation);
+            let encoded = serde_json::to_value(&state).unwrap();
+            for malformed in [
+                serde_json::json!(["1", "1"]),
+                serde_json::json!(["2", "1"]),
+                serde_json::json!(["1", "missing"]),
+                serde_json::json!(["1", "2", "3"]),
+                serde_json::json!([123]),
+            ] {
+                let mut invalid = encoded.clone();
+                invalid["last_partial_collection"][shared] = malformed;
+                assert!(serde_json::from_value::<GitHubReviewRefreshStateV1>(invalid).is_err());
+            }
+            let mut overlap = encoded.clone();
+            overlap["last_partial_collection"]["response"]["ingress"][rows] =
+                serde_json::json!([encoded["latest_attempt"]["ingress"][rows][0].clone()]);
+            assert!(serde_json::from_value::<GitHubReviewRefreshStateV1>(overlap).is_err());
+
+            // References share whole logical rows, and the unchanged receipt
+            // must still reject content tampering even if the outer revision
+            // is recomputed for the modified in-memory state.
+            let mut tampered = encoded;
+            tampered["latest_attempt"]["ingress"][rows][0]["body"] =
+                serde_json::json!("unproven body");
+            let mut tampered: GitHubReviewRefreshStateV1 =
+                serde_json::from_value(tampered).unwrap();
+            tampered.revision = github_review_refresh_revision(
+                tampered
+                    .last_complete
+                    .as_ref()
+                    .map(|generation| &generation.response),
+                &tampered.latest_attempt,
+                &tampered.attempt_receipts,
+                tampered.last_partial_collection.as_ref(),
+            )
+            .unwrap();
+            assert!(!tampered.validate_for(&request));
+        }
     }
 
     #[tokio::test]

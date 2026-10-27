@@ -805,7 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn partial_collection_baseline_obeys_the_existing_state_byte_bound() {
+    async fn partial_collection_shares_rows_within_the_existing_state_byte_bound() {
         let (context, mut request) = context_and_request();
         request.operation = GitHubReviewReadOperationV1::RestListPullRequestReviews;
         let temp = tempfile::tempdir().unwrap();
@@ -855,16 +855,113 @@ mod tests {
             Some(receipt),
         )
         .unwrap();
-        assert!(serde_json::to_vec(&next).unwrap().len() > MAX_STORED_REFRESH_BYTES_V1);
+        let baseline = next.last_partial_collection.clone().unwrap();
+        let mut duplicated = serde_json::to_value(&next).unwrap();
+        duplicated["last_partial_collection"] = serde_json::to_value(&baseline).unwrap();
+        assert!(serde_json::to_vec(&duplicated).unwrap().len() > MAX_STORED_REFRESH_BYTES_V1);
+        assert!(serde_json::to_vec(&next).unwrap().len() < MAX_STORED_REFRESH_BYTES_V1);
         assert_eq!(
             store
                 .compare_and_record(&context, &request, Some(&previous.revision), &next)
+                .await,
+            GitHubReviewRefreshStoreCommitOutcomeV1::Recorded,
+        );
+        assert_eq!(
+            store.load(&context, &request).await,
+            GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(next.clone()))
+        );
+        let compact_bytes = serde_json::to_vec(&next).unwrap().len();
+        let entry = GitHubReviewStoreManifestEntryV1 {
+            request: request.clone(),
+            state_revision: next.revision.clone(),
+        };
+        assert_eq!(
+            store
+                .load_bounded_entry(&context, &entry, compact_bytes)
+                .await,
+            Some((Box::new(next.clone()), compact_bytes))
+        );
+        assert!(
+            store
+                .load_bounded_entry(&context, &entry, compact_bytes - 1)
+                .await
+                .is_none()
+        );
+
+        let mut limited = complete_response(&request);
+        limited.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::RateLimited;
+        limited.ingress.coverage = GitHubReviewCoverageV1::Partial;
+        limited.ingress.fetched_at.0 = next.latest_attempt.ingress.fetched_at.0 + 1;
+        limited.checkpoint.rate_limit = Some(
+            tracedecay_domain::feedback::GitHubReviewRateLimitCheckpointV1 {
+                limit: 5_000,
+                remaining: 0,
+                reset_at: UtcMicros(limited.ingress.fetched_at.0 + 1_000),
+            },
+        );
+        let limited =
+            GitHubReviewRefreshStateV1::transition(&request, Some(&next), limited).unwrap();
+        assert_eq!(limited.last_partial_collection.as_ref(), Some(&baseline));
+        assert!(serde_json::to_vec(&limited).unwrap().len() < MAX_STORED_REFRESH_BYTES_V1);
+        assert_eq!(
+            store
+                .compare_and_record(&context, &request, Some(&next.revision), &limited)
+                .await,
+            GitHubReviewRefreshStoreCommitOutcomeV1::Recorded,
+        );
+        let GitHubReviewRefreshStoreReadOutcomeV1::State(loaded) =
+            store.load(&context, &request).await
+        else {
+            panic!("the shared baseline must reload after a rate limit");
+        };
+        assert_eq!(*loaded, limited);
+
+        let mut continued = complete_response(&request);
+        continued.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+        continued.ingress.coverage = GitHubReviewCoverageV1::Partial;
+        continued.ingress.fetched_at.0 = loaded.latest_attempt.ingress.fetched_at.0 + 1;
+        continued.checkpoint.next_cursor =
+            Some(tracedecay_domain::feedback::GitHubReviewCursorV1::new("rest-page:2").unwrap());
+        let mut added = baseline.response.ingress.reviews[0].clone();
+        added.review_id = GitHubReviewIdV1::new("10").unwrap();
+        added.body = Some("a later observed review".to_owned());
+        continued.ingress.reviews.push(added);
+        let continued =
+            GitHubReviewRefreshStateV1::transition(&request, Some(&loaded), continued).unwrap();
+        assert_eq!(continued.latest_attempt.ingress.reviews.len(), 11);
+        assert_eq!(continued.last_partial_collection.as_ref(), Some(&baseline));
+        assert!(serde_json::to_vec(&continued).unwrap().len() < MAX_STORED_REFRESH_BYTES_V1);
+        assert_eq!(
+            store
+                .compare_and_record(&context, &request, Some(&loaded.revision), &continued)
+                .await,
+            GitHubReviewRefreshStoreCommitOutcomeV1::Recorded,
+        );
+        assert_eq!(
+            store.load(&context, &request).await,
+            GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(continued.clone()))
+        );
+
+        // Distinct versions of the same logical rows cannot share content:
+        // their old bodies still belong to the exact proven baseline.
+        let mut oversized = continued.latest_attempt.clone();
+        oversized.ingress.fetched_at.0 += 1;
+        for review in &mut oversized.ingress.reviews {
+            review.body = Some("b".repeat(MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1));
+        }
+        let oversized =
+            GitHubReviewRefreshStateV1::transition(&request, Some(&continued), oversized).unwrap();
+        assert_eq!(oversized.last_partial_collection.as_ref(), Some(&baseline));
+        assert!(serde_json::to_vec(&oversized).unwrap().len() > MAX_STORED_REFRESH_BYTES_V1);
+        assert_eq!(
+            store
+                .compare_and_record(&context, &request, Some(&continued.revision), &oversized)
                 .await,
             GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable,
         );
         assert_eq!(
             store.load(&context, &request).await,
-            GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(previous))
+            GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(continued))
         );
     }
 
