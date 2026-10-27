@@ -551,7 +551,8 @@ pub(crate) fn hook_replay_status(data_root: &Path) -> StatusHookReplayV1 {
 fn publish_sweep(
     data_root: &Path,
     graph: &Weak<tracedecay_project::project::TraceDecay>,
-    sweep: PublishedSweepV1,
+    failures: Vec<StatusHookReplayFailureV1>,
+    waiting: Vec<StatusHookReplayFailureV1>,
 ) {
     let mut roots = registered_replay_roots()
         .lock()
@@ -559,7 +560,7 @@ fn publish_sweep(
     if let Some(registered) = roots.get_mut(data_root)
         && Weak::ptr_eq(&registered.graph, graph)
     {
-        registered.last_sweep = Some(sweep);
+        registered.last_sweep = Some(PublishedSweepV1 { failures, waiting });
     }
 }
 
@@ -622,14 +623,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
             // A sweep that leaves a backlog for the next one is not a
             // finished drain; only its failures are worth publishing early.
             if !sweep.more_pending || !sweep.failures.is_empty() {
-                publish_sweep(
-                    &task_data_root,
-                    &task_graph,
-                    PublishedSweepV1 {
-                        failures: sweep.failures,
-                        waiting: sweep.waiting,
-                    },
-                );
+                publish_sweep(&task_data_root, &task_graph, sweep.failures, sweep.waiting);
             }
             if sweep.more_pending {
                 tokio::task::yield_now().await;
