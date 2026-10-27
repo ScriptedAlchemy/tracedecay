@@ -39,6 +39,10 @@ pub enum SessionFactSourceSpan {
         message_id: String,
     },
     RawStore {
+        /// Signed 64-bit store identity. Prefer an integer JSON literal, which
+        /// retains the full range. Decimal and exponent forms are accepted only
+        /// when their parsed value is integral and within +/-9007199254740991.
+        /// JSON Schema's integer bounds do not express this representation rule.
         #[serde(deserialize_with = "deserialize_store_id")]
         #[schemars(range(min = i64::MIN, max = i64::MAX))]
         store_id: i64,
@@ -107,17 +111,24 @@ where
     if let Some(value) = number.as_i64() {
         return Ok(value);
     }
-    // JSON Schema treats 7 and 7.0 as the same integer. Normalize only exactly
-    // integral, representable numbers; a string is never an evidence identity.
-    // The positive bound is exclusive because i64::MAX rounds up as f64.
-    let minimum = i64::MIN as f64;
+    // Adjacent integers can share a binary64 value outside this range. Keep
+    // exact i64 literals above, but refuse ambiguous large floating identities.
+    // This checks the parsed Number, not its original token: serde_json can
+    // already have rounded a tiny fraction such as 7.0000000000000001 to 7.0.
+    const MAX_FLOAT_STORE_ID: f64 = 9_007_199_254_740_991.0;
     number
         .as_f64()
         .filter(|value| {
-            value.is_finite() && value.fract() == 0.0 && (minimum..-minimum).contains(value)
+            value.is_finite()
+                && value.fract() == 0.0
+                && (-MAX_FLOAT_STORE_ID..=MAX_FLOAT_STORE_ID).contains(value)
         })
         .map(|value| value as i64)
-        .ok_or_else(|| D::Error::custom("store_id must be an integer in the signed 64-bit range"))
+        .ok_or_else(|| {
+            D::Error::custom(
+                "store_id must be a signed 64-bit integer literal or an integral floating value within +/-9007199254740991",
+            )
+        })
 }
 
 #[cfg(test)]
@@ -202,6 +213,53 @@ mod tests {
             let mut value = proposal();
             value["source_span"]["store_id"] = store_id;
             assert!(serde_json::from_value::<SessionFactProposal>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn raw_store_numbers_preserve_i64_literals_and_bounded_integral_floats() {
+        for (number, expected) in [
+            ("-9223372036854775808", i64::MIN),
+            ("9223372036854775807", i64::MAX),
+            ("9007199254740993", 9_007_199_254_740_993),
+            ("7.0", 7),
+            ("7e0", 7),
+            ("70e-1", 7),
+            ("-0.0", 0),
+            ("9007199254740991.0", 9_007_199_254_740_991),
+            ("-9007199254740991.0", -9_007_199_254_740_991),
+        ] {
+            // The backend materializes Value before the proposal decoder runs.
+            let source: serde_json::Value =
+                serde_json::from_str(&format!(r#"{{"store_id":{number}}}"#)).unwrap();
+            assert_eq!(
+                serde_json::from_value::<SessionFactSourceSpan>(source).unwrap(),
+                SessionFactSourceSpan::RawStore { store_id: expected },
+                "{number}",
+            );
+        }
+    }
+
+    #[test]
+    fn raw_store_numbers_reject_overflow_and_ambiguous_large_floats() {
+        for number in [
+            "-9223372036854775809",
+            "9223372036854775808",
+            "9007199254740992.0",
+            "-9007199254740992.0",
+            "9007199254740993.0",
+            "-9007199254740993.0",
+            "9007199254740991.5",
+            "-9007199254740991.5",
+            "-9223372036854775808.0",
+            "9223372036854775807.0",
+        ] {
+            let source: serde_json::Value =
+                serde_json::from_str(&format!(r#"{{"store_id":{number}}}"#)).unwrap();
+            assert!(
+                serde_json::from_value::<SessionFactSourceSpan>(source).is_err(),
+                "{number} must not select a rounded store identity",
+            );
         }
     }
 
