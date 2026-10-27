@@ -21,6 +21,8 @@ use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, IntoPa
 use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
+use super::store_access::SessionTranscriptProgressProofs;
+
 /// Read-only SQL the session store can issue on a snapshot, read connection, or txn.
 pub trait SessionQuery: Send + Sync {
     fn query<P>(
@@ -105,6 +107,8 @@ pub trait SessionRegisteredDb: Sync {
     fn writer_connection(&self) -> Result<Self::WriterConn<'_>, TraceDecayError>;
 
     fn db_path(&self) -> &Path;
+
+    fn transcript_progress_proofs(&self) -> &SessionTranscriptProgressProofs;
 
     fn registered_binding(&self) -> &StoreRuntimeBindingV1;
 
