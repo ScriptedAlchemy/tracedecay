@@ -1061,6 +1061,46 @@ impl DaemonWorkRuntimeRegistrar {
             canonical_sha256(&authority).map_err(|error| TraceDecayError::Config {
                 message: format!("Workflow authority digest failed: {error}"),
             })?;
+        let retained = self
+            .service
+            .project_runtimes
+            .read::<RegisteredWorkRuntime, _, _>(&project_root, Clone::clone)
+            .await;
+        let refresh = if let Some(retained) = retained.filter(|retained| {
+            !retained.configuration_matches(
+                &policy_digest,
+                &configuration_digest,
+                &work_topology_policy,
+                &proposal_routing,
+            )
+        }) {
+            let configuration = self
+                .service
+                .project_runtimes
+                .read::<RegisteredConfigurationRuntime, _, _>(&project_root, Clone::clone)
+                .await
+                .filter(|configuration| {
+                    configuration.scope == grant.scope && configuration.actor == actor
+                })
+                .ok_or_else(|| TraceDecayError::Config {
+                    message:
+                        "Work configuration refresh requires its registered configuration authority"
+                            .to_owned(),
+                })?;
+            let current = configuration
+                .runtime
+                .client()
+                .current_state()
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "Work configuration refresh could not read current state: {error}"
+                    ),
+                })?;
+            Some((retained, current))
+        } else {
+            None
+        };
         let observability_producer = self
             .service
             .observability_producer(Some(&project_root))
@@ -1081,27 +1121,53 @@ impl DaemonWorkRuntimeRegistrar {
                     // whose server was replaced, and left it permanently
                     // degraded. Its own project scope is already proven by
                     // `grant.scope` and the authority digest.
-                    if registered.actor == actor
+                    if registered.database.binding() == database.binding()
+                        && registered.database.verified_locator() == database.verified_locator()
+                        && registered.actor == actor
                         && registered.grant.digest == grant.digest
                         && registered.grant.scope == grant.scope
                         && registered.authority_digest == authority_digest
-                        && registered.policy_digest == policy_digest
-                        && registered.configuration_digest == configuration_digest
-                        && registered
-                            .proposal_routing
-                            .same_configuration_as(&proposal_routing)
                     {
-                        // The same authority re-registering only renews its grant.
-                        if registered.grant != grant {
-                            let recovery = registered.workflow_fan_out_recovery.as_ref().ok_or_else(
-                                || TraceDecayError::Config {
-                                    message: "Workflow fan-out recovery owner is not mounted"
-                                        .to_owned(),
-                                },
-                            )?;
-                            recovery.refresh_grant(grant.clone());
-                            registered.grant = grant.clone();
+                        if !registered.configuration_matches(
+                            &policy_digest,
+                            &configuration_digest,
+                            &work_topology_policy,
+                            &proposal_routing,
+                        ) {
+                            // The durable current-state read belongs to this
+                            // captured incumbent. Check both inside the registry
+                            // transition so a delayed reopen cannot overwrite a
+                            // newer installed configuration.
+                            let Some((captured, current)) = &refresh else {
+                                return Err(TraceDecayError::Config {
+                                    message: "Work configuration changed during reopen".to_owned(),
+                                });
+                            };
+                            if !registered.configuration_matches(
+                                &captured.policy_digest,
+                                &captured.configuration_digest,
+                                &captured.work_topology_policy,
+                                &captured.proposal_routing,
+                            ) || !proposal_routing.matches_current_configuration(current)
+                            {
+                                return Err(TraceDecayError::Config {
+                                    message: "Work configuration changed during reopen".to_owned(),
+                                });
+                            }
                         }
+                        let recovery = registered.workflow_fan_out_recovery.clone().ok_or_else(
+                            || TraceDecayError::Config {
+                                message: "Workflow fan-out recovery owner is not mounted"
+                                    .to_owned(),
+                            },
+                        )?;
+                        registered.grant = grant.clone();
+                        registered.policy_digest = policy_digest.clone();
+                        registered.configuration_digest = configuration_digest.clone();
+                        registered.work_topology_policy = work_topology_policy.clone();
+                        registered.proposal_routing = proposal_routing.clone();
+                        registered.evidence_retrieval = evidence_retrieval.clone();
+                        recovery.refresh_admission(registered);
                         return Ok(());
                     }
                     Err(TraceDecayError::Config {
