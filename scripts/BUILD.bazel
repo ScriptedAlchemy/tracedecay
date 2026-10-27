@@ -1,6 +1,14 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("//scripts:bazel/rust_test.bzl", "rust_test")
 
+# Runs on Bazel's pinned interpreter: the generator needs Python 3.11+
+# (tomllib), which a host python3 behind the file's shebang may not be.
+py_binary(
+    name = "gen_builds",
+    srcs = ["bazel/gen_builds.py"],
+    main = "bazel/gen_builds.py",
+)
+
 py_binary(
     name = "measure_unused_tool_context",
     srcs = ["measure-unused-tool-context.py"],

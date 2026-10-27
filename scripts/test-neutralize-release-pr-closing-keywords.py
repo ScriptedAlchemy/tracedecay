@@ -244,7 +244,7 @@ for path in (
                 '  "fetch --repo=@c")\n'
                 '    [ "${CARGO_BAZEL_REPIN:-}" = workspace ] || exit 65\n'
                 "    printf 'version = 4\\n# refreshed by Bazel\\n' > Cargo.lock ;;\n"
-                '  "run //scripts:bazel/gen_builds.py")\n'
+                '  "run //scripts:gen_builds")\n'
                 '    grep -q "# refreshed by Bazel" Cargo.lock || exit 66\n'
                 '    exec python3 scripts/bazel/gen_builds.py ;;\n'
                 '  *) exit 64 ;;\n'
