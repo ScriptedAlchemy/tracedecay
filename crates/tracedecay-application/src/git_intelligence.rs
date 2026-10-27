@@ -78,16 +78,16 @@ const READ_ONLY_SUBCOMMANDS: &[&str] = &[
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
-/// One parsed `--raw -z` record.
+/// File metadata from the canonical raw diff, without materializing patch bodies.
 #[derive(Debug)]
-struct RawFileEntry {
-    path: String,
-    original_path: Option<String>,
-    change: GitChangeKindV1,
-    old_mode: Option<GitFileModeV1>,
-    new_mode: Option<GitFileModeV1>,
-    old_blob: Option<GitOidV1>,
-    new_blob: Option<GitOidV1>,
+pub struct GitDiffFileMetadata {
+    pub path: String,
+    pub original_path: Option<String>,
+    pub change: GitChangeKindV1,
+    pub old_mode: Option<GitFileModeV1>,
+    pub new_mode: Option<GitFileModeV1>,
+    pub old_blob: Option<GitOidV1>,
+    pub new_blob: Option<GitOidV1>,
 }
 
 /// One parsed hunk with its retained body lines (adapter-internal only;
@@ -159,7 +159,7 @@ struct PatchFile {
 /// Raw/patch join result for one diff scope.
 #[derive(Debug)]
 struct JoinedDiffEntry {
-    raw: RawFileEntry,
+    raw: GitDiffFileMetadata,
     /// `None` for a coalesced unmerged path (combined diff, not typed as
     /// ordinary hunks).
     patch: Option<PatchFile>,
@@ -648,6 +648,37 @@ impl NativeGitIntelligence {
         };
         status.validate()?;
         Ok(status)
+    }
+
+    /// Enumerate one pinned commit comparison without reading the entire patch.
+    /// Consumers that read exact blobs separately must not spend their output
+    /// allowance on a second copy of every changed source line.
+    #[tracing::instrument(
+        name = "usecases.git_intelligence.diff.metadata",
+        level = "trace",
+        skip_all
+    )]
+    pub fn diff_file_metadata(
+        &self,
+        base: &GitOidV1,
+        head: &GitOidV1,
+    ) -> Result<Vec<GitDiffFileMetadata>, GitIntelligenceError> {
+        parse_diff_raw(&self.stdout(
+            "diff metadata",
+            &[
+                "diff",
+                "--raw",
+                "-z",
+                "-M",
+                "--no-abbrev",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                base.as_str(),
+                head.as_str(),
+                "--",
+            ],
+        )?)
     }
 
     /// Typed diff for one scope with file and hunk structure.
@@ -1456,7 +1487,7 @@ fn split_combined_diff_output(output: Vec<u8>) -> Result<(String, String), GitIn
 }
 
 /// Parse `git diff --raw -z` records.
-fn parse_diff_raw(text: &str) -> Result<Vec<RawFileEntry>, GitIntelligenceError> {
+fn parse_diff_raw(text: &str) -> Result<Vec<GitDiffFileMetadata>, GitIntelligenceError> {
     let malformed = |detail: String| GitIntelligenceError::MalformedOutput {
         operation: "diff",
         detail,
@@ -1523,7 +1554,7 @@ fn parse_diff_raw(text: &str) -> Result<Vec<RawFileEntry>, GitIntelligenceError>
             }
         };
 
-        entries.push(RawFileEntry {
+        entries.push(GitDiffFileMetadata {
             path,
             original_path,
             change,

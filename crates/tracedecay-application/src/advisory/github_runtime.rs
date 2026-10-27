@@ -2264,8 +2264,11 @@ mod tests {
                 response.ingress.outcome = outcome;
                 if outcome == GitHubReviewIngressProviderOutcomeV1::Stale {
                     response.ingress.coverage = GitHubReviewCoverageV1::Stale;
+                    response.checkpoint.etag =
+                        Some(GitHubReviewEtagV1::new("W/\"revalidated\"").unwrap());
                 }
                 response.ingress.fetched_at = UtcMicros(12);
+                response.validate_for(&request).unwrap();
                 let refreshed =
                     GitHubReviewRefreshStateV1::transition(&request, Some(&partial), response)
                         .unwrap();

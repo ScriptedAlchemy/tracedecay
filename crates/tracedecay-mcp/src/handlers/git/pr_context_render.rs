@@ -32,6 +32,13 @@ fn short_oid(value: &str) -> &str {
     }
 }
 
+fn source_read(node_id: &str) -> String {
+    code(&format!(
+        "tracedecay_source_body {}",
+        serde_json::json!({ "node_id": node_id })
+    ))
+}
+
 fn state(value: PrContextSourceStateV1) -> &'static str {
     match value {
         PrContextSourceStateV1::Ready => "ready",
@@ -109,7 +116,7 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
     }
     lines.push(String::new());
     lines.push(format!(
-        "Comparison: {} → {} (merge base {}); {} files, +{} / −{}.",
+        "Comparison: {} → {} (merge base {}); {} files, known text lines +{} / −{}.",
         code(&brief.base),
         code(&brief.head),
         code(short_oid(&brief.merge_base)),
@@ -135,15 +142,25 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
         lines.push("No discussion rows are included in this briefing; source coverage above determines what was observed.".to_owned());
     }
     for discussion in &brief.hosted.discussions {
+        let author = discussion
+            .author
+            .as_deref()
+            .map(|author| format!(" by {}", code(author)))
+            .unwrap_or_default();
+        let event = discussion
+            .event_at
+            .map(|at| format!("; activity {}", observed_at(at)))
+            .unwrap_or_default();
         let anchor = match (&discussion.file, discussion.line) {
             (Some(file), Some(line)) => format!(" at {}", code(&format!("{file}:{line}"))),
             (Some(file), None) => format!(" at {}", code(file)),
             _ => String::new(),
         };
         lines.push(format!(
-            "- {} {}: {} / {}{} [{}; observed {}].",
+            "- {} {}{}: {} / {}{} [{}{}; observed {}].",
             discussion.kind,
             code(&discussion.id),
+            author,
             discussion.review_state,
             discussion.lifecycle,
             anchor,
@@ -152,6 +169,7 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
             } else {
                 "historical or unremapped"
             },
+            event,
             observed_at(discussion.observed_at)
         ));
         if let Some(text) = &discussion.text {
@@ -165,7 +183,7 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
             lines.push("  Comment exists; body was not expanded.".to_owned());
         }
         if let Some(anchor) = &discussion.body_anchor {
-            lines.push(format!("  Body: {}.", code(anchor)));
+            lines.push(format!("  Body provenance: {}.", code(anchor)));
         }
         if let Some(url) = &discussion.url {
             lines.push(format!("  Source: {url}"));
@@ -235,15 +253,34 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
                 entry.reason
             ));
             let indent = " ".repeat((index + 1).to_string().len() + 2);
+            if let Some(node_id) = &entry.node_id {
+                lines.push(format!("{indent}Read: {}.", source_read(node_id)));
+            }
             if let Some(value) = &entry.before_excerpt {
                 excerpt(&mut lines, "Before", value, &indent);
             } else if let Some(signature) = &entry.before_signature {
-                lines.push(format!("{indent}Before: {}", code(signature)));
+                lines.push(format!(
+                    "{indent}Before: {}{}",
+                    code(signature),
+                    if entry.before_signature_truncated {
+                        " (signature excerpt)"
+                    } else {
+                        ""
+                    }
+                ));
             }
             if let Some(value) = &entry.after_excerpt {
                 excerpt(&mut lines, "After", value, &indent);
             } else if let Some(signature) = &entry.after_signature {
-                lines.push(format!("{indent}After: {}", code(signature)));
+                lines.push(format!(
+                    "{indent}After: {}{}",
+                    code(signature),
+                    if entry.after_signature_truncated {
+                        " (signature excerpt)"
+                    } else {
+                        ""
+                    }
+                ));
             }
         }
     }
@@ -269,25 +306,11 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
                 .as_ref()
                 .map(|path| format!("{} → ", code(path)))
                 .unwrap_or_default();
-            let symbols = if change.symbols.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "; {}",
-                    change
-                        .symbols
-                        .iter()
-                        .map(|symbol| code(symbol))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
             lines.push(format!(
-                "- {}{}: {}{}.",
+                "- {}{}: {}.",
                 previous,
                 code(&change.file),
-                change.change,
-                symbols
+                change.change
             ));
         }
     }
@@ -307,6 +330,9 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
                     "unchanged"
                 }
             ));
+            if let Some(node_id) = &impact.node_id {
+                lines.push(format!("  Read: {}.", source_read(node_id)));
+            }
         }
     }
     lines.push(String::new());

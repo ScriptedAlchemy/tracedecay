@@ -256,6 +256,8 @@ fn discussion(
         kind: kind.to_owned(),
         lifecycle: label(&item.lifecycle)?,
         review_state: label(&item.review_state)?,
+        author: None,
+        event_at: None,
         file: (!item.path.is_empty()).then(|| item.path.clone()),
         line: if matches_head {
             item.line
@@ -277,7 +279,9 @@ fn discussion(
     })
 }
 
-fn discussion_priority(item: &PrContextDiscussionV1) -> (u8, Reverse<i64>, &str) {
+fn discussion_priority(
+    item: &PrContextDiscussionV1,
+) -> (u8, Reverse<Option<i64>>, Reverse<i64>, &str) {
     let active = !matches!(
         item.lifecycle.as_str(),
         "resolved" | "outdated" | "deleted" | "superseded" | "retained"
@@ -288,7 +292,25 @@ fn discussion_priority(item: &PrContextDiscussionV1) -> (u8, Reverse<i64>, &str)
         (false, true, _) => 2,
         _ => 3,
     };
-    (priority, Reverse(item.observed_at), &item.id)
+    (
+        priority,
+        Reverse(item.event_at),
+        Reverse(item.observed_at),
+        &item.id,
+    )
+}
+
+fn provider_event_at(value: &str) -> Option<i64> {
+    // strptime accepts numeric offsets; GitHub spells UTC as `Z`.
+    let utc_offset = value
+        .strip_suffix('Z')
+        .map(|value| format!("{value}+00:00"));
+    gix::date::Zoned::strptime(
+        "%Y-%m-%dT%H:%M:%S%.f%:z",
+        utc_offset.as_deref().unwrap_or(value),
+    )
+    .ok()
+    .map(|time| time.timestamp().as_microsecond())
 }
 
 fn check(check: &ProjectDeliveryCiCheckV1, head: &str) -> Result<PrContextCheckV1> {
@@ -482,7 +504,7 @@ pub(super) fn project_hosted(
         .any(|item| item.text.is_none() && item.body_anchor.is_some())
     {
         result.source.detail.push_str(
-            " Some comment bodies were not expanded; use their body anchors to inspect them.",
+            " Some comment bodies were not expanded; open supplied provider URLs for context. Body anchors record retained provenance.",
         );
     }
     Ok(result)
@@ -561,6 +583,9 @@ fn project_conversation(
                     kind: "conversation".to_owned(),
                     lifecycle: if is_latest { "observed" } else { "retained" }.to_owned(),
                     review_state: "not_applicable".to_owned(),
+                    author: item.author.clone(),
+                    event_at: provider_event_at(&item.updated_at)
+                        .or_else(|| provider_event_at(&item.created_at)),
                     file: None,
                     line: None,
                     text: Some(item.body.clone()),
@@ -601,24 +626,37 @@ fn project_conversation(
     // Reconcile each review's current state before comparing votes across
     // retained and partial observations. A dismissed older ID cannot supersede
     // another vote merely because a complete snapshot once called it decisive.
+    let mut decisive_by_author: BTreeMap<String, i64> = BTreeMap::new();
+    for (item, _, _) in review_observations.values() {
+        if !matches!(
+            item.state,
+            GitHubReviewStateV1::Approved | GitHubReviewStateV1::ChangesRequested
+        ) {
+            continue;
+        }
+        if let (Some(author), Some(submitted_at)) = (
+            item.author.as_deref(),
+            item.submitted_at.as_deref().and_then(provider_event_at),
+        ) {
+            decisive_by_author
+                .entry(author.to_ascii_lowercase())
+                .and_modify(|latest| *latest = (*latest).max(submitted_at))
+                .or_insert(submitted_at);
+        }
+    }
     for (item, snapshot, is_latest) in review_observations.values() {
         let superseded = matches!(
             item.state,
             GitHubReviewStateV1::Approved | GitHubReviewStateV1::ChangesRequested
-        ) && item.author.as_ref().is_some_and(|author| {
-            review_observations.values().any(|(other, _, _)| {
-                other.author.as_ref() == Some(author)
-                    && matches!(
-                        other.state,
-                        GitHubReviewStateV1::Approved | GitHubReviewStateV1::ChangesRequested
-                    )
-                    && item
-                        .submitted_at
-                        .as_ref()
-                        .zip(other.submitted_at.as_ref())
-                        .is_some_and(|(at, other_at)| other_at > at)
-            })
-        });
+        ) && item
+            .author
+            .as_deref()
+            .zip(item.submitted_at.as_deref().and_then(provider_event_at))
+            .is_some_and(|(author, submitted_at)| {
+                decisive_by_author
+                    .get(&author.to_ascii_lowercase())
+                    .is_some_and(|latest| *latest > submitted_at)
+            });
         let id = format!("review:{}", item.review_id);
         latest.insert(
             id.clone(),
@@ -635,6 +673,8 @@ fn project_conversation(
                 }
                 .to_owned(),
                 review_state: label(&item.state)?,
+                author: item.author.clone(),
+                event_at: item.submitted_at.as_deref().and_then(provider_event_at),
                 file: None,
                 line: None,
                 text: item.body.clone(),
@@ -1172,12 +1212,14 @@ mod tests {
         retained
             .reviews
             .push(review("old-vote", GitHubReviewStateV1::ChangesRequested, 0));
+        retained.reviews[0].author = Some("Reviewer".to_owned());
         let mut partial = observation("commit.head", 40);
         partial.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
         partial.coverage = GitHubReviewCoverageV1::Partial;
         partial
             .reviews
             .push(review("approval", GitHubReviewStateV1::Approved, 1));
+        partial.reviews[0].submitted_at = Some("2026-10-26T11:01:00-07:00".to_owned());
         let mut pr = pull_request(42, "commit.head");
         pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
             last_partial_collection: None,
@@ -1343,6 +1385,48 @@ mod tests {
             failure_kind: CiFailureKindV1::Unknown,
             observed_at: UtcMicros(at),
         }
+    }
+
+    #[test]
+    fn recent_discussion_events_rank_before_older_comments_from_the_same_fetch() {
+        let mut old = conversation("Earlier discussion.");
+        old.comment_id = GitHubReviewCommentIdV1::new("1").unwrap();
+        old.author = Some("EarlierReviewer".to_owned());
+        old.created_at = "2026-10-26T17:00:00Z".to_owned();
+        old.updated_at = "2026-10-26T18:00:00Z".to_owned();
+        let mut recent = conversation("Latest clarification.");
+        recent.comment_id = GitHubReviewCommentIdV1::new("99").unwrap();
+        recent.author = Some("Maintainer".to_owned());
+        recent.updated_at = "2026-10-26T11:30:00.123456-07:00".to_owned();
+        let mut unknown = conversation("Legacy comment with no usable event time.");
+        unknown.comment_id = GitHubReviewCommentIdV1::new("0").unwrap();
+        unknown.created_at = "unknown".to_owned();
+        unknown.updated_at = "unknown".to_owned();
+        let mut observations = observation("commit.head", 40);
+        observations.conversation = vec![old, recent, unknown];
+        let mut pr = pull_request(42, "commit.head");
+        pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+            last_partial_collection: None,
+            operation: GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+            last_complete: None,
+            latest_attempt: Some(observations),
+        });
+        let result =
+            project_hosted(Some(&outcome(vec![pr], Vec::new())), None, "commit.head").unwrap();
+        let rows = result.discussions;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, "conversation:99");
+        assert_eq!(rows[0].author.as_deref(), Some("Maintainer"));
+        assert!(rows[0].event_at.is_some());
+        assert_eq!(
+            rows[0].event_at,
+            provider_event_at("2026-10-26T18:30:00.123456Z")
+        );
+        assert!(rows[0].event_at > rows[1].event_at);
+        assert_eq!(rows[1].id, "conversation:1");
+        assert_eq!(rows[2].id, "conversation:0");
+        assert!(rows[2].event_at.is_none());
+        assert!(rows.iter().all(|row| row.observed_at == 40));
     }
 
     #[test]

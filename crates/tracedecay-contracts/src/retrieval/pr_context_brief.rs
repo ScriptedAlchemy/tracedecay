@@ -60,6 +60,13 @@ pub struct PrContextDiscussionV1 {
     pub kind: String,
     pub lifecycle: String,
     pub review_state: String,
+    /// Provider login when retained; an opaque author anchor is not a login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// Provider activity time in UTC microseconds: comment update/creation or
+    /// review submission. Absent when not retained or not parseable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,11 +138,19 @@ pub struct PrContextEntryPointV1 {
     pub location: PrContextLocationV1,
     pub revision: String,
     pub symbol: String,
+    /// Exact-head graph occurrence accepted by source_body and impact.
+    /// Absent when graph provenance or declaration matching is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub change: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_signature: Option<String>,
+    #[serde(default)]
+    pub before_signature_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_signature: Option<String>,
+    #[serde(default)]
+    pub after_signature_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_excerpt: Option<PrContextExcerptV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,7 +168,6 @@ pub struct PrContextFileV1 {
     pub role: GitFileRoleV1,
     pub additions: Option<u32>,
     pub deletions: Option<u32>,
-    pub symbols: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -170,6 +184,9 @@ pub struct PrContextAreaV1 {
 pub struct PrContextImpactV1 {
     pub changed_symbol: String,
     pub consumer: String,
+    /// Exact-head consumer occurrence accepted by source_body and impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub location: PrContextLocationV1,
     pub relation: String,
     /// Whether the consumer's file is in the PR diff; this does not imply

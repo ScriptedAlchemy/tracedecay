@@ -1166,18 +1166,18 @@ async fn commit_context_staged_source_and_test_reports_symbols() {
                     "name": "billed_total",
                     "kind": "function",
                     "file": "src/lib.rs",
-                    "line": 0
+                    "line": 1
                 }],
                 "test": [{
                     "name": "covers_billed_total",
                     "kind": "function",
                     "file": "tests/invoice_test.rs",
-                    "line": 0
+                    "line": 1
                 }]
             },
             "suggested_category": "feature/fix (source + tests)",
             "recent_commits": ["seed context"],
-            "summary": "2 file(s) changed, 2 symbol(s) affected",
+            "summary": "2 changed file(s); 2 indexed symbol/config entries",
         })
     );
 }
@@ -1232,7 +1232,7 @@ async fn commit_context_config_and_docs_report_chore() {
             },
             "suggested_category": "chore/docs/config",
             "recent_commits": ["seed context"],
-            "summary": "2 file(s) changed, 1 symbol(s) affected",
+            "summary": "2 changed file(s); 1 indexed symbol/config entries",
         })
     );
 }
@@ -1294,12 +1294,12 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
                     "name": "staged_total",
                     "kind": "function",
                     "file": "src/lib.rs",
-                    "line": 0
+                    "line": 1
                 }]
             },
             "suggested_category": "feature/fix/refactor",
             "recent_commits": ["seed context"],
-            "summary": "1 file(s) changed, 1 symbol(s) affected",
+            "summary": "1 changed file(s); 1 indexed symbol/config entries",
         })
     );
     assert_eq!(everything.value.get("isError"), None);
@@ -1316,12 +1316,12 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
                     "name": "staged_total",
                     "kind": "function",
                     "file": "src/lib.rs",
-                    "line": 0
+                    "line": 1
                 }]
             },
             "suggested_category": "feature/fix/refactor",
             "recent_commits": ["seed context"],
-            "summary": "2 file(s) changed, 1 symbol(s) affected",
+            "summary": "2 changed file(s); 1 indexed symbol/config entries",
         })
     );
 }
@@ -1375,12 +1375,12 @@ async fn commit_context_reports_an_edit_inside_the_index_mtime_second() {
                     "name": "clean",
                     "kind": "function",
                     "file": "src/lib.rs",
-                    "line": 0
+                    "line": 1
                 }]
             },
             "suggested_category": "feature/fix/refactor",
             "recent_commits": ["seed context"],
-            "summary": "1 file(s) changed, 1 symbol(s) affected",
+            "summary": "1 changed file(s); 1 indexed symbol/config entries",
         })
     );
 }
@@ -3662,11 +3662,11 @@ async fn pr_context_reports_the_pinned_feature_summary() {
         "next_cursor": null,
         "status": "complete",
         "symbols_added": [
-            {"file": "tests/greet.rs", "kind": "annotation_usage", "line": 0, "name": "test"},
-            {"file": "tests/greet.rs", "kind": "function", "line": 1, "name": "greet_says_hello"}
+            {"file": "tests/greet.rs", "kind": "annotation_usage", "line": 1, "name": "test"},
+            {"file": "tests/greet.rs", "kind": "function", "line": 2, "name": "greet_says_hello"}
         ],
         "symbols_modified": [
-            {"file": "src/lib.rs", "kind": "function", "line": 2, "name": "greet"}
+            {"file": "src/lib.rs", "kind": "function", "line": 3, "name": "greet"}
         ],
         "symbols_removed": [],
         "symbols_added_count": 2,
@@ -4706,16 +4706,16 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         diff_symbol_facts(&changed["modified_symbols"]),
         vec![
-            json!({"name": "checks_tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 5}),
-            json!({"name": "test", "kind": "annotation_usage", "file": "src/tier_c.rs", "line": 4}),
-            json!({"name": "tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 0}),
+            json!({"name": "checks_tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 6}),
+            json!({"name": "test", "kind": "annotation_usage", "file": "src/tier_c.rs", "line": 5}),
+            json!({"name": "tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 1}),
         ],
         "modified symbols: {changed}"
     );
     assert_eq!(changed["impacted_symbols_count"], json!(1));
     assert_eq!(
         diff_symbol_facts(&changed["impacted_symbols"]),
-        vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 2}),],
+        vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 3}),],
         "direct callers of tier_c: {changed}"
     );
     assert_eq!(
@@ -4738,8 +4738,8 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         diff_symbol_facts(&wider["impacted_symbols"]),
         vec![
-            json!({"name": "tier_a", "kind": "function", "file": "src/tier_a.rs", "line": 2}),
-            json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 2}),
+            json!({"name": "tier_a", "kind": "function", "file": "src/tier_a.rs", "line": 3}),
+            json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 3}),
         ],
         "depth 2 also reaches tier_a, which only calls tier_b: {wider}"
     );
@@ -4761,14 +4761,14 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         diff_symbol_facts(&duplicated["modified_symbols"]),
         vec![
-            json!({"name": "checks_tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 5}),
-            json!({"name": "test", "kind": "annotation_usage", "file": "src/tier_c.rs", "line": 4}),
-            json!({"name": "tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 0}),
+            json!({"name": "checks_tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 6}),
+            json!({"name": "test", "kind": "annotation_usage", "file": "src/tier_c.rs", "line": 5}),
+            json!({"name": "tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 1}),
         ]
     );
     assert_eq!(
         diff_symbol_facts(&duplicated["impacted_symbols"]),
-        vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 2}),]
+        vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 3}),]
     );
 
     // A path this generation never published carries no symbols, so the

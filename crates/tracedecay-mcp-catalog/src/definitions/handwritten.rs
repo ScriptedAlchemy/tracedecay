@@ -102,7 +102,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_impact",
         "Impact Radius",
-        "Compute the impact radius of a node: all symbols that directly or indirectly depend on it.",
+        "Trace indexed dependents of one node, bounded by max_depth (default 3, at most 10) and graph limits. Start shallow and expand only when needed. Read complete and freshness with the result; neither proves coverage of external or unindexed consumers.",
     ),
     read(
         "tracedecay_node",
@@ -165,7 +165,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_affected",
         "Affected Tests",
-        "Which tests to run, run affected tests, tests impacted by a change. Find test files affected by changed source files via dependency graph traversal.",
+        "Select candidate test files for the supplied changed-file manifest through bounded file-dependency traversal, ranked by dependency distance. This does not execute tests. Use test_map for a specific symbol, run_affected_tests for an authorized run, or affected_tests to read an existing feedback cycle's selection by request_handle.",
     ),
     read(
         "tracedecay_dead_code",
@@ -182,7 +182,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_diff_context",
         "Diff Context",
-        "Given changed file paths, return semantic context: which symbols were modified, what depends on them, and affected tests.",
+        "Analyze possible consumers and test candidates for supplied file paths. Every indexed symbol in those files seeds the analysis; modified_symbols is a file-scoped candidate list, not exact patch-change detection. Use pr_context for a committed PR/ref comparison. git_diff returns bounded file/hunk metadata; use shell git diff or git diff --cached for raw patch text. Set budget_tokens to bound the large symbol and test sections.",
     ),
     read(
         "tracedecay_circular",
@@ -297,7 +297,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_changelog",
         "Changelog",
-        "git log, git history, git blame, diff between refs. Generate a semantic diff/changelog between two git refs, categorizing symbols as added, removed, or modified.",
+        "Compare from_ref directly with to_ref: changed files plus added, removed, and modified symbols from exact indexed generations when available. If those generations are unavailable, returns the changed-file inventory with partial symbol coverage. Read symbol_changes_coverage with the result. Use pr_context for PR orientation from the merge base.",
     ),
     read(
         "tracedecay_port_status",
@@ -312,7 +312,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_commit_context",
         "Commit Context",
-        "git diff, git status, git log style, staged changes for a commit message. Semantic summary of uncommitted changes for drafting a commit message. Returns changed symbols, file roles, and recent commit style.",
+        "Summarize uncommitted file roles, indexed symbols in those files, and recent commit style for drafting a message. staged_only filters the file list; symbol metadata still comes from the current graph, not the staged blobs. Use git_diff with scope: staged for structured file/hunk metadata and shell git diff --cached to inspect the exact staged patch text.",
     ),
     read(
         "tracedecay_pr_context",

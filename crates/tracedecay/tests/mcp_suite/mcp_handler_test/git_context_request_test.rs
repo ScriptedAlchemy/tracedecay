@@ -183,6 +183,8 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     .await;
     let base_oid = git_stdout(&fixture.project_root, &["rev-parse", "pr-base"]);
     let head_oid = git_stdout(&fixture.project_root, &["rev-parse", "HEAD"]);
+    let server = fixture.harness.server(&fixture.project_root).unwrap();
+    wait_for_current_graph(&server).await;
     let output = call_json(
         &fixture,
         "tracedecay_pr_context",
@@ -197,6 +199,14 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     assert_eq!(brief["head_oid"], head_oid, "{brief}");
     assert_eq!(brief["files_changed"], 1, "{brief}");
     assert_eq!(brief["source_analysis"]["state"], "ready", "{brief}");
+    assert_eq!(brief["graph_analysis"]["state"], "partial", "{brief}");
+    assert!(
+        brief["graph_analysis"]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("Exact head graph;"),
+        "{brief}"
+    );
     let entries = brief["entry_points"].as_array().unwrap();
     assert!(
         entries.iter().any(|entry| {
@@ -217,6 +227,23 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
                 .is_some_and(|symbol| symbol.ends_with("unchanged"))
         }),
         "{brief}"
+    );
+    let node_id = entries[0]["node_id"]
+        .as_str()
+        .expect("exact-head source handle");
+    let body = call_json(
+        &fixture,
+        "tracedecay_source_body",
+        json!({"node_id":node_id}),
+    )
+    .await;
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        body["outcome"]["value"]["payload"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("fn changed(value: u64)"),
+        "{body}"
     );
     assert_eq!(brief["budget"]["over_budget"], false, "{brief}");
     assert!(brief["budget"]["estimated_tokens"].as_u64().unwrap() <= 4000);
@@ -440,6 +467,15 @@ async fn pr_context_symbol_pages_do_not_spend_the_limit_on_unchanged_code() {
         assert_eq!(page["symbol_page"]["returned"], 1, "{page}");
         let modified = page["modified"].as_array().unwrap();
         assert_eq!(modified.len(), 1, "{page}");
+        let expected_line = match modified[0]["name"].as_str().unwrap() {
+            "changed_alpha" => 41,
+            "changed_beta" => 42,
+            other => panic!("unexpected changed symbol {other}"),
+        };
+        assert_eq!(
+            modified[0]["line"], expected_line,
+            "public coordinates are one-based: {page}"
+        );
         assert!(names.insert(modified[0]["name"].as_str().unwrap().to_owned()));
         cursor = page["next_cursor"].as_str().map(str::to_owned);
         assert_eq!(cursor.is_some(), page_index == 0, "{page}");

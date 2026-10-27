@@ -204,7 +204,19 @@ where
                 )
                 .await
                 {
-                    Ok(true) => enrich_navigation(&mut brief, &graph, &controls)?,
+                    Ok(true) => match enrich_navigation(&mut brief, &graph, &controls) {
+                        Ok(()) => {}
+                        Err(error)
+                            if graph_enrichment_is_transient(&error)
+                                || matches!(
+                                    error.project_route_context(),
+                                    Some(("code-graph-budget-exhausted", _, _))
+                                ) =>
+                        {
+                            brief.graph_analysis = unavailable(&error.to_string());
+                        }
+                        Err(error) => return Err(error),
+                    },
                     Ok(false) => {
                         brief.graph_analysis = unavailable(
                             "The graph generation does not match the exact head snapshot.",
@@ -305,7 +317,7 @@ fn prioritize_entries(brief: &mut PrContextBriefV1) {
                 1
             } else {
                 match entry.change.as_str() {
-                    "signature_changed" => 2,
+                    "signature_changed" | "visibility_changed" => 2,
                     "removed" => 3,
                     "added" => 4,
                     "modified" => 5,
@@ -341,6 +353,23 @@ fn prioritize_entries(brief: &mut PrContextBriefV1) {
             entry.location.line,
         )
     });
+    let mut file_order = HashMap::new();
+    for (index, entry) in brief.entry_points.iter().enumerate() {
+        file_order
+            .entry(entry.location.file.as_str())
+            .or_insert(index);
+    }
+    brief.changes.sort_by_key(|file| {
+        file_order
+            .get(file.file.as_str())
+            .copied()
+            .or_else(|| {
+                file.previous_file
+                    .as_deref()
+                    .and_then(|path| file_order.get(path).copied())
+            })
+            .unwrap_or(usize::MAX)
+    });
 }
 
 fn enrich_navigation(
@@ -356,12 +385,14 @@ fn enrich_navigation(
     let entries = brief
         .entry_points
         .iter()
-        .filter(|entry| entry.revision == brief.head_oid && entry.change != "file_change")
+        .enumerate()
+        .filter(|(_, entry)| entry.revision == brief.head_oid && entry.change != "file_change")
         .take(MAX_NAVIGATION_SEEDS)
+        .map(|(index, _)| index)
         .collect::<Vec<_>>();
     let paths = entries
         .iter()
-        .map(|entry| entry.location.file.clone())
+        .map(|&index| brief.entry_points[index].location.file.clone())
         .collect::<HashSet<_>>();
     let page = graph.symbols_in_logical_files_page(&paths, None, 500_000, 500_000)?;
     controls.checkpoint()?;
@@ -382,7 +413,8 @@ fn enrich_navigation(
                 .push(&symbol.occurrence);
         }
     }
-    for entry in &entries {
+    for index in entries {
+        let entry = &mut brief.entry_points[index];
         if let Some(matches) = by_location.get(&(
             entry.location.file.as_str(),
             entry.symbol.as_str(),
@@ -391,6 +423,7 @@ fn enrich_navigation(
         {
             seeds.push((*occurrence).clone());
             names.push(entry.symbol.clone());
+            entry.node_id = Some(occurrence.as_str().to_owned());
         }
     }
     let relations = graph.callers_truncated(
@@ -417,6 +450,7 @@ fn enrich_navigation(
             brief.impact.push(PrContextImpactV1 {
                 changed_symbol: name.clone(),
                 consumer: metadata.qualified_name.as_str().to_owned(),
+                node_id: Some(relation.neighbor.occurrence.as_str().to_owned()),
                 consumer_changed: changed_paths.contains(path.as_str()),
                 location: PrContextLocationV1 {
                     file: path,
@@ -459,19 +493,24 @@ fn add_quality_and_next_steps(brief: &mut PrContextBriefV1) {
     let contracts = brief
         .entry_points
         .iter()
-        .filter(|entry| matches!(entry.change.as_str(), "signature_changed" | "removed"))
+        .filter(|entry| {
+            matches!(
+                entry.change.as_str(),
+                "signature_changed" | "visibility_changed" | "removed"
+            )
+        })
         .count();
     brief.quality.insert(0, PrContextQualityV1 { signal: "test_changes".to_owned(), observation: format!("{test_paths} changed test paths; inline tests and test execution are not inferred from this count.") });
-    brief.quality.insert(1, PrContextQualityV1 { signal: "declaration_contracts".to_owned(), observation: format!("{contracts} removed declarations or changed signatures. Inspect the reading entrypoints and their consumers.") });
+    brief.quality.insert(1, PrContextQualityV1 { signal: "declaration_contracts".to_owned(), observation: format!("{contracts} removed declarations or changed signatures/visibility. Inspect the reading entrypoints and their consumers.") });
     if !brief.hosted.required_checks_known {
         brief.quality.push(PrContextQualityV1 { signal: "merge_readiness_unknown".to_owned(), observation: "Retained CI observations do not enumerate all required checks; merge readiness is unknown.".to_owned() });
     }
     brief.next_steps.push("Read the ranked entry_points at their recorded revisions; inspect before_signature and after_signature before expanding a full diff.".to_owned());
     if !brief.hosted.discussions.is_empty() {
-        brief.next_steps.push("Open relevant discussion URLs or retrieve their body_anchor for full retained prose; resolved and old-head comments remain historical context.".to_owned());
+        brief.next_steps.push("Open supplied discussion URLs for provider context. body_anchor records retained provenance; feedback_expand requires a server-minted finding expansion handle.".to_owned());
     }
     if !brief.impact.is_empty() {
-        brief.next_steps.push("Read listed consumers outside the changed files, then use impact on a specific changed symbol if deeper traversal is needed.".to_owned());
+        brief.next_steps.push("Read the listed consumers, prioritizing those outside changed files; use impact on a specific changed symbol for deeper traversal.".to_owned());
     }
     brief.next_steps.push("Use pr_context with view: symbols for exact indexed symbol pages, or increase budget_tokens to expand this briefing.".to_owned());
 }
@@ -502,7 +541,7 @@ pub(super) fn fit_budget(brief: &mut PrContextBriefV1) -> Result<()> {
                 break;
             }
         }
-        if !brief.changes.is_empty() {
+        if brief.changes.len() > 3 {
             remove_last(&mut brief.changes, &mut estimate)?;
             brief.budget.files_omitted += 1;
         } else if brief.commits.len() > 1 {
@@ -526,6 +565,9 @@ pub(super) fn fit_budget(brief: &mut PrContextBriefV1) -> Result<()> {
         } else if brief.areas.len() > 1 {
             remove_last(&mut brief.areas, &mut estimate)?;
             brief.budget.areas_omitted += 1;
+        } else if brief.changes.len() > 1 {
+            remove_last(&mut brief.changes, &mut estimate)?;
+            brief.budget.files_omitted += 1;
         } else if brief.entry_points.len() > 1 {
             remove_last(&mut brief.entry_points, &mut estimate)?;
             brief.budget.entry_points_omitted += 1;
@@ -632,6 +674,7 @@ mod tests {
         assert_eq!(brief.entry_points[0].change, "added");
         assert_eq!(brief.entry_points[0].revision, brief.head_oid);
         assert_eq!(brief.entry_points[0].location.line, 2);
+        assert!(brief.entry_points[0].node_id.is_none());
         assert!(!brief.hosted.required_checks_known);
         assert!(brief.hosted.pull_request.is_none());
         assert_eq!(
@@ -709,6 +752,254 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_loss_and_module_wiring_survive_an_unrelated_body_change() {
+        let repo = branched_repository();
+        test_git(repo.path(), &["switch", "main"]);
+        std::fs::write(repo.path().join("api.ts"),
+            "import { dependency } from './old';\nexport function api() { return 1; }\nfunction other() { return 2; }\n").unwrap();
+        test_git(repo.path(), &["add", "."]);
+        test_git(repo.path(), &["commit", "-m", "base exported API"]);
+        test_git(repo.path(), &["switch", "-c", "visibility-change"]);
+        std::fs::write(repo.path().join("api.ts"),
+            "import { dependency } from './new';\nfunction api() { return 1; }\nfunction other() { return 3; }\n").unwrap();
+        test_git(repo.path(), &["add", "."]);
+        test_git(
+            repo.path(),
+            &["commit", "-m", "remove export and rewire import"],
+        );
+
+        let brief = briefing(repo.path(), json!({"base_ref":"main"})).await;
+        let export = brief
+            .entry_points
+            .iter()
+            .find(|entry| entry.symbol.ends_with("api") && entry.change == "visibility_changed")
+            .expect("export removal");
+        assert_eq!(export.location.line, 2);
+        assert_eq!(export.revision, brief.head_oid);
+        assert!(
+            export.reason.contains("public to private"),
+            "{}",
+            export.reason
+        );
+        assert!(
+            brief
+                .entry_points
+                .iter()
+                .any(|entry| entry.symbol.ends_with("other") && entry.change == "modified")
+        );
+        let wiring = brief
+            .entry_points
+            .iter()
+            .find(|entry| entry.change == "file_change")
+            .expect("module wiring survives a declaration change in the same file");
+        assert_eq!(wiring.location.line, 1);
+        assert_eq!(wiring.revision, brief.head_oid);
+        assert!(wiring.reason.contains("imports and module wiring"));
+        assert!(
+            brief
+                .quality
+                .iter()
+                .any(|signal| signal.signal == "declaration_contracts"
+                    && signal.observation.starts_with("1 "))
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_line_wiring_is_retained_without_repeating_pure_body_edits() {
+        for (before, after, file_entry, body_entry) in [
+            (
+                "import './old'; function f() { return 1; }\n",
+                "import './new'; function f() { return 1; }\n",
+                true,
+                false,
+            ),
+            (
+                "import './old'; function f() { return 1; }\n",
+                "import './new'; function f() { return 2; }\n",
+                true,
+                true,
+            ),
+            (
+                "function f() { return 1; }\n",
+                "function f() { return 2; }\n",
+                false,
+                true,
+            ),
+            (
+                "import './old'; function f() { return 1; }\n",
+                "import './old'; function f() { return 2; }\n",
+                false,
+                true,
+            ),
+            (
+                "export function f() { return 1; }\n",
+                "export function f() { return 2; }\n",
+                false,
+                true,
+            ),
+        ] {
+            let repo = branched_repository();
+            test_git(repo.path(), &["switch", "main"]);
+            std::fs::write(repo.path().join("shared.ts"), before).unwrap();
+            test_git(repo.path(), &["add", "."]);
+            test_git(repo.path(), &["commit", "-m", "base shared line"]);
+            test_git(repo.path(), &["switch", "-c", "shared-line"]);
+            std::fs::write(repo.path().join("shared.ts"), after).unwrap();
+            test_git(repo.path(), &["add", "."]);
+            test_git(repo.path(), &["commit", "-m", "edit shared line"]);
+
+            let brief = briefing(repo.path(), json!({"base_ref":"main"})).await;
+            assert_eq!(brief.source_analysis.state, PrContextSourceStateV1::Ready);
+            assert_eq!(
+                brief
+                    .entry_points
+                    .iter()
+                    .any(|entry| entry.change == "file_change"),
+                file_entry,
+                "{before:?} -> {after:?}: {:?}",
+                brief.entry_points
+            );
+            assert_eq!(
+                brief
+                    .entry_points
+                    .iter()
+                    .any(|entry| entry.symbol.ends_with("f") && entry.change == "modified"),
+                body_entry,
+                "{before:?} -> {after:?}: {:?}",
+                brief.entry_points
+            );
+            assert!(!brief.entry_points.is_empty());
+            assert!(
+                brief
+                    .entry_points
+                    .iter()
+                    .all(|entry| entry.location.line == 1 && entry.revision == brief.head_oid)
+            );
+            if file_entry {
+                assert!(brief.entry_points.iter().any(|entry| {
+                    entry
+                        .reason
+                        .contains("does not isolate which portion changed")
+                }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregate_patch_larger_than_transport_limit_still_produces_a_brief() {
+        let repo = branched_repository();
+        test_git(repo.path(), &["switch", "main"]);
+        // Each blob is below the historical-blob bound, while the complete
+        // before/after patch is over the 4 MiB command-output allowance.
+        let before = format!("{}\n", "a".repeat(1_024)).repeat(2_400);
+        let after = format!("{}\n", "b".repeat(1_024)).repeat(2_400);
+        assert!(before.len() + after.len() > 4 * 1024 * 1024);
+        std::fs::write(repo.path().join("large.txt"), before).unwrap();
+        test_git(repo.path(), &["add", "."]);
+        test_git(repo.path(), &["commit", "-m", "base large text"]);
+        test_git(repo.path(), &["switch", "-c", "large-comparison"]);
+        std::fs::write(repo.path().join("large.txt"), after).unwrap();
+        test_git(repo.path(), &["add", "."]);
+        test_git(repo.path(), &["commit", "-m", "replace large text"]);
+
+        let brief = briefing(repo.path(), json!({"base_ref":"main"})).await;
+        assert_eq!(brief.files_changed, 1);
+        assert_eq!(brief.additions, 2_400);
+        assert_eq!(brief.deletions, 2_400);
+        assert_eq!(brief.changes[0].additions, Some(2_400));
+        assert_eq!(brief.changes[0].deletions, Some(2_400));
+        assert_eq!(brief.source_analysis.state, PrContextSourceStateV1::Partial);
+        assert_eq!(brief.entry_points[0].location.file, "large.txt");
+        assert_eq!(brief.entry_points[0].revision, brief.head_oid);
+        assert!(!brief.budget.over_budget);
+    }
+
+    #[tokio::test]
+    async fn deleted_trailing_text_keeps_a_real_before_side_entrypoint() {
+        let repo = branched_repository();
+        test_git(repo.path(), &["switch", "main"]);
+        std::fs::write(repo.path().join("notes.txt"), "retained\ndeleted\n").unwrap();
+        test_git(repo.path(), &["add", "."]);
+        test_git(repo.path(), &["commit", "-m", "base unsupported text"]);
+        test_git(repo.path(), &["switch", "-c", "delete-trailing-text"]);
+        std::fs::write(repo.path().join("notes.txt"), "retained\n").unwrap();
+        test_git(repo.path(), &["add", "."]);
+        test_git(repo.path(), &["commit", "-m", "remove trailing text"]);
+
+        let brief = briefing(repo.path(), json!({"base_ref":"main"})).await;
+        assert_eq!(brief.entry_points.len(), 1);
+        let entry = &brief.entry_points[0];
+        assert_eq!(entry.location.file, "notes.txt");
+        assert_eq!(entry.location.line, 2);
+        assert_eq!(entry.revision, brief.merge_base);
+        assert_eq!(brief.additions, 0);
+        assert_eq!(brief.deletions, 1);
+    }
+
+    #[tokio::test]
+    async fn initializer_signatures_are_bounded_without_erasing_the_change_map() {
+        let repo = branched_repository();
+        test_git(repo.path(), &["switch", "main"]);
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        std::fs::write(
+            repo.path().join("api.ts"),
+            format!("export const payload = '{}';\n", "変更前".repeat(4_000)),
+        )
+        .unwrap();
+        for index in 0..30 {
+            std::fs::write(
+                repo.path().join(format!("src/file_{index:02}.rs")),
+                format!("pub fn entry_{index}() -> u32 {{ 1 }}\n"),
+            )
+            .unwrap();
+        }
+        test_git(repo.path(), &["add", "."]);
+        test_git(repo.path(), &["commit", "-m", "base initializers"]);
+        test_git(repo.path(), &["switch", "-c", "bounded-signatures"]);
+        std::fs::write(
+            repo.path().join("api.ts"),
+            format!("export const payload = '{}';\n", "変更後".repeat(4_000)),
+        )
+        .unwrap();
+        for index in 0..30 {
+            std::fs::write(
+                repo.path().join(format!("src/file_{index:02}.rs")),
+                format!("pub fn entry_{index}() -> u32 {{ 2 }}\n"),
+            )
+            .unwrap();
+        }
+        test_git(repo.path(), &["add", "."]);
+        test_git(
+            repo.path(),
+            &["commit", "-m", "change initializers and callers"],
+        );
+
+        let brief = briefing(
+            repo.path(),
+            json!({"base_ref":"main", "budget_tokens":4_000}),
+        )
+        .await;
+        let entry = brief
+            .entry_points
+            .iter()
+            .find(|entry| entry.symbol.ends_with("payload"))
+            .expect("highest-priority contract remains in the briefing");
+        assert_eq!(entry.change, "signature_changed");
+        assert!(entry.before_signature_truncated);
+        assert!(entry.after_signature_truncated);
+        assert!(entry.before_signature.as_ref().unwrap().len() <= 600);
+        assert!(entry.after_signature.as_ref().unwrap().len() <= 600);
+        assert_eq!(entry.revision, brief.head_oid);
+        assert!(!brief.budget.over_budget);
+        assert!(estimated_tokens(&brief).unwrap() <= 4_000);
+        assert!(!brief.changes.is_empty(), "retain a usable file map");
+        assert!(!brief.areas.is_empty(), "retain a usable area map");
+        assert_eq!(brief.changes[0].file, "api.ts");
+        assert_eq!(brief.changes.len() + brief.budget.files_omitted, 31);
+        assert_eq!(brief.files_changed, 31);
+    }
+
+    #[tokio::test]
     async fn detached_head_and_advanced_base_keep_the_merge_base_comparison() {
         let repo = branched_repository();
         test_git(repo.path(), &["switch", "main"]);
@@ -764,6 +1055,8 @@ mod tests {
                 kind: "review".to_owned(),
                 lifecycle: "current".to_owned(),
                 review_state: "changes_requested".to_owned(),
+                author: None,
+                event_at: None,
                 file: Some("lib.rs".to_owned()),
                 line: Some(2),
                 text: Some("This contract needs a test. ".repeat(12)),

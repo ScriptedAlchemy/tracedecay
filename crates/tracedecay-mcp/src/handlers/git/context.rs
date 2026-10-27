@@ -2,6 +2,7 @@
 
 use super::super::bounded_search::SetFlagOnDrop;
 use super::super::dependency_hints;
+use super::super::graph::user_line;
 use super::affected::collect_verified_affected_test_files;
 use super::pr_context_cursor::{
     PrContextCursorBinding, PrContextCursorComparison, decode_pr_context_cursor,
@@ -320,7 +321,7 @@ fn context_symbol(symbol: &CodeGraphSymbolSummaryV1) -> Result<GitContextSymbolV
         name: metadata.simple_name.as_str().to_owned(),
         kind: metadata.kind.as_str().to_owned(),
         file: symbol_path(symbol)?.to_owned(),
-        line: metadata.start_line,
+        line: user_line(metadata.start_line),
     })
 }
 
@@ -329,7 +330,9 @@ struct CoChangeEvidence {
     unavailable: Option<CoChangeUnavailableV1>,
 }
 
-pub(super) struct CancelGitReadOnDrop(pub(super) tracedecay_runtime_core::cancellation::CancellationToken);
+pub(super) struct CancelGitReadOnDrop(
+    pub(super) tracedecay_runtime_core::cancellation::CancellationToken,
+);
 
 impl Drop for CancelGitReadOnDrop {
     fn drop(&mut self) {
@@ -1028,7 +1031,7 @@ where
 
         // Config files (Cargo.toml, *.yaml, package.json, ...) explode into
         // one node per key. Surface a single summary entry per file instead.
-        // Agents only need to know "Cargo.toml changed, N keys touched",
+        // Agents only need to know "Cargo.toml changed, N indexed keys",
         // not the name of every dependency listed.
         if role == GitFileRoleV1::Config {
             symbols_by_role
@@ -1050,7 +1053,7 @@ where
                     name: metadata.simple_name.as_str().to_owned(),
                     kind: metadata.kind.as_str().to_owned(),
                     file: symbol_path(symbol)?.to_owned(),
-                    line: metadata.start_line,
+                    line: user_line(metadata.start_line),
                 }));
         }
     }
@@ -1078,7 +1081,7 @@ where
         suggested_category: Some(category),
         recent_commits,
         summary: format!(
-            "{} file(s) changed, {} symbol(s) affected",
+            "{} changed file(s); {} indexed symbol/config entries",
             changed_files.len(),
             total_symbols
         ),
