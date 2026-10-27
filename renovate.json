@@ -41,11 +41,10 @@
       "enabled": false
     },
     {
-      "description": "Keep every Rust pin on Blaze's supported compiler until its standard-library ABI support changes",
+      "description": "One PR moves every Rust toolchain pin",
       "matchDepNames": ["rust"],
       "matchDatasources": ["rust-version"],
       "groupName": "rust toolchain",
-      "allowedVersions": "1.99.0",
       "separateMajorMinor": false
     }
   ]
