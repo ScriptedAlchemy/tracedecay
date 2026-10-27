@@ -4803,6 +4803,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         extract_json(&absent.value),
         json!({
+            "comparison": {"kind": "proposed_files"},
             "freshness": {"state": "fresh"},
             "changed_files": ["src/not_in_repo.rs"],
             "modified_symbols": [],

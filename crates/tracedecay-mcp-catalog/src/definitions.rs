@@ -33,7 +33,8 @@ mod workflow;
 use application::*;
 pub use application_schema::mcp_input_schema;
 use application_schema::{
-    add_request_property, canonical_application_request_schema, project_input_schema,
+    RequestPropertyMerge, add_request_property, canonical_application_request_schema,
+    project_input_schema,
 };
 use handwritten::{HANDWRITTEN_TOOLS, HandwrittenTool, ToolSchema};
 pub use work::work_tool_name;
@@ -463,6 +464,7 @@ fn add_registered_project_selector_properties(
             &project_selector_object(
                 "Optional registered project selector. Omit to use the active project.",
             ),
+            RequestPropertyMerge::KeepExisting,
         )?;
     }
     Ok(())
@@ -521,6 +523,7 @@ fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCata
                 "default": "markdown",
                 "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
             }),
+            RequestPropertyMerge::Replace,
         )?;
     }
     Ok(())

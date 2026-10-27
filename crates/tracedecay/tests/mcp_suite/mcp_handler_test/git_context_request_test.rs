@@ -99,6 +99,7 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
         .expect("production git-context server");
     wait_for_current_graph(&server).await;
 
+    let head = git_stdout(&fixture.project_root, &["rev-parse", "HEAD^{commit}"]);
     assert_eq!(
         call_json(
             &fixture,
@@ -106,7 +107,9 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
             json!({"staged_only": true, "format": "json"}),
         )
         .await,
-        r#"{"changed_files":[],"freshness":{"state":"fresh"},"recent_commits":["production composition fixture"],"suggested_category":null,"summary":"No changes detected.","symbols_by_role":{}}"#
+        format!(
+            r#"{{"changed_files":[],"comparison":{{"head":"{head}","kind":"staged"}},"recent_commits":["production composition fixture"],"source_coverage":{{"complete":true,"consistency":"immutable_blobs","gaps":[],"git":{{"degradations":[]}}}},"suggested_category":null,"summary":"No staged changes.","symbols_by_role":{{}}}}"#
+        )
     );
     assert_invalid_request(
         &refusal(
@@ -185,6 +188,14 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     let head_oid = git_stdout(&fixture.project_root, &["rev-parse", "HEAD"]);
     let server = fixture.harness.server(&fixture.project_root).unwrap();
     wait_for_current_graph(&server).await;
+    // Brief enrichment only reads a resident graph and never warms one; the
+    // exact symbols view loads it, as a reviewer's first read would.
+    call_json(
+        &fixture,
+        "tracedecay_pr_context",
+        json!({"view": "symbols", "base_ref": base_oid, "head_ref": head_oid, "format": "json"}),
+    )
+    .await;
     let output = call_json(
         &fixture,
         "tracedecay_pr_context",
