@@ -1969,12 +1969,24 @@ impl RefusalMemo {
             file_id: generation,
         };
         let expected = match admission.get_parse_offset(scope, &key).await {
-            Ok(Some(current)) => current,
-            _ => tracedecay_store::ParseOffset {
+            Ok(current) => current.unwrap_or(tracedecay_store::ParseOffset {
                 byte_offset: 0,
                 mtime: 0,
                 file_id: 0,
-            },
+            }),
+            Err(outcome) => {
+                // A read failure is not an absent row: fabricating a zero
+                // expected value would only CAS-fail against the real row
+                // and bury the read failure inside a replace conflict. Keep
+                // the in-memory mark, surface the read outcome, and let the
+                // next pass retry the persist.
+                tracing::debug!(
+                    key = %key,
+                    outcome = ?outcome,
+                    "refusal memo read failed; persist deferred to the next pass"
+                );
+                return;
+            }
         };
         if let Err(error) = admission
             .replace_parse_offset(scope, &key, expected, next)
