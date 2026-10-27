@@ -96,6 +96,11 @@ fn pending_work_redrive_backoff(attempts: u32) -> i64 {
         .min(PENDING_WORK_REDRIVE_MAX_MICROS)
 }
 
+/// An admitted event whose orchestrator has not mounted yet. Production
+/// registers one per open project once a complete code-index generation
+/// exists, so this work waits rather than fails.
+const AWAITING_ORCHESTRATOR: &str = "awaits the project's hook orchestrator";
+
 /// The cause a pending-work redrive left its producer work owed, or `None`
 /// when the normal driver admitted or settled it.
 fn unresolved_pending_work(outcome: &HookV2AdmissionOutcomeV1) -> Option<&'static str> {
@@ -108,8 +113,8 @@ fn unresolved_pending_work(outcome: &HookV2AdmissionOutcomeV1) -> Option<&'stati
         HookV2AdmissionOutcomeV1::Admitted {
             orchestration: HookOrchestrationAdmissionV1::Unavailable,
             ..
-        }
-        | HookV2AdmissionOutcomeV1::Unavailable => Some("was unavailable"),
+        } => Some(AWAITING_ORCHESTRATOR),
+        HookV2AdmissionOutcomeV1::Unavailable => Some("was unavailable"),
         HookV2AdmissionOutcomeV1::Admitted {
             orchestration:
                 HookOrchestrationAdmissionV1::Enqueued
@@ -220,6 +225,8 @@ struct HookReplaySweepV1 {
     /// runs at once.
     more_pending: bool,
     failures: Vec<StatusHookReplayFailureV1>,
+    /// Owed work that only waits for its orchestrator to mount.
+    waiting: Vec<StatusHookReplayFailureV1>,
 }
 
 impl HookReplaySweepV1 {
@@ -338,6 +345,7 @@ async fn redrive_pending_work(
         .retain(|(entry_host, event_id), _| *entry_host != host || pending_ids.contains(event_id));
     let mut owed = 0_usize;
     let mut owed_cause = None;
+    let mut only_awaiting_orchestrator = true;
     let mut attempted = false;
     for envelope in pending_work {
         let event_key = (host, envelope.event_id);
@@ -348,6 +356,7 @@ async fn redrive_pending_work(
             // typed cause visible without warning again before another attempt.
             owed += 1;
             owed_cause.get_or_insert(state.cause);
+            only_awaiting_orchestrator &= state.cause == AWAITING_ORCHESTRATOR;
             continue;
         }
         attempted = true;
@@ -375,6 +384,7 @@ async fn redrive_pending_work(
         if let Some(cause) = unresolved_pending_work(&outcome) {
             owed += 1;
             owed_cause.get_or_insert(cause);
+            only_awaiting_orchestrator &= cause == AWAITING_ORCHESTRATOR;
             let state = redrive_gate
                 .state
                 .entry(event_key)
@@ -396,7 +406,13 @@ async fn redrive_pending_work(
         let cause = format!(
             "{owed} pending producer work obligation(s) remain unresolved; the first {cause}"
         );
-        if attempted {
+        if only_awaiting_orchestrator {
+            sweep.waiting.push(StatusHookReplayFailureV1 {
+                host,
+                spool: StatusHookReplaySpoolV1::PendingWork,
+                cause,
+            });
+        } else if attempted {
             sweep.fail(host, StatusHookReplaySpoolV1::PendingWork, cause);
         } else {
             sweep.failures.push(StatusHookReplayFailureV1 {
@@ -498,8 +514,14 @@ struct RegisteredReplayConsumer {
     task: Option<tracedecay_runtime_core::native_runtime::NativeTask<()>>,
     /// This registration's spool wake; its identity is the registration's.
     wake: Arc<tokio::sync::Notify>,
-    /// The failures of the last finished sweep; `None` before the first.
-    last_sweep: Option<Vec<StatusHookReplayFailureV1>>,
+    /// What the last finished sweep left; `None` before the first.
+    last_sweep: Option<PublishedSweepV1>,
+}
+
+/// The failures and orchestrator waits of one finished sweep.
+struct PublishedSweepV1 {
+    failures: Vec<StatusHookReplayFailureV1>,
+    waiting: Vec<StatusHookReplayFailureV1>,
 }
 
 fn registered_replay_roots() -> &'static StdMutex<BTreeMap<PathBuf, RegisteredReplayConsumer>> {
@@ -516,17 +538,20 @@ pub(crate) fn hook_replay_status(data_root: &Path) -> StatusHookReplayV1 {
     match roots.get(data_root).map(|consumer| &consumer.last_sweep) {
         None => StatusHookReplayV1::Unowned,
         Some(None) => StatusHookReplayV1::Starting,
-        Some(Some(failures)) if failures.is_empty() => StatusHookReplayV1::Drained,
-        Some(Some(failures)) => StatusHookReplayV1::Failed {
-            failures: failures.clone(),
+        Some(Some(sweep)) if !sweep.failures.is_empty() => StatusHookReplayV1::Failed {
+            failures: sweep.failures.clone(),
         },
+        Some(Some(sweep)) if !sweep.waiting.is_empty() => StatusHookReplayV1::Waiting {
+            waiting: sweep.waiting.clone(),
+        },
+        Some(Some(_)) => StatusHookReplayV1::Drained,
     }
 }
 
 fn publish_sweep(
     data_root: &Path,
     graph: &Weak<tracedecay_project::project::TraceDecay>,
-    failures: Vec<StatusHookReplayFailureV1>,
+    sweep: PublishedSweepV1,
 ) {
     let mut roots = registered_replay_roots()
         .lock()
@@ -534,7 +559,7 @@ fn publish_sweep(
     if let Some(registered) = roots.get_mut(data_root)
         && Weak::ptr_eq(&registered.graph, graph)
     {
-        registered.last_sweep = Some(failures);
+        registered.last_sweep = Some(sweep);
     }
 }
 
@@ -597,7 +622,14 @@ pub(crate) fn register_hook_v2_replay_consumer(
             // A sweep that leaves a backlog for the next one is not a
             // finished drain; only its failures are worth publishing early.
             if !sweep.more_pending || !sweep.failures.is_empty() {
-                publish_sweep(&task_data_root, &task_graph, sweep.failures);
+                publish_sweep(
+                    &task_data_root,
+                    &task_graph,
+                    PublishedSweepV1 {
+                        failures: sweep.failures,
+                        waiting: sweep.waiting,
+                    },
+                );
             }
             if sweep.more_pending {
                 tokio::task::yield_now().await;
@@ -1168,10 +1200,12 @@ mod tests {
                 &mut redrive_gate,
             )
             .await;
-            assert!(sweep.failures.iter().any(|failure| {
-                failure.host == claude
-                    && failure.spool == StatusHookReplaySpoolV1::PendingWork
-                    && failure.cause.contains("was unavailable")
+            // An unmounted orchestrator is owed work that waits, not a failure.
+            assert!(sweep.failures.is_empty(), "{:?}", sweep.failures);
+            assert!(sweep.waiting.iter().any(|waiting| {
+                waiting.host == claude
+                    && waiting.spool == StatusHookReplaySpoolV1::PendingWork
+                    && waiting.cause.contains(AWAITING_ORCHESTRATOR)
             }));
             assert_eq!(disabled_pending(), vec![disabled_edit.clone()]);
             assert!(runs.try_recv().is_err());
