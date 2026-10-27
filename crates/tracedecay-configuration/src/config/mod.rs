@@ -271,7 +271,12 @@ fn runtime_config_from_snapshot(
     Ok(RuntimeTraceDecayConfig {
         automation: match required_setting(snapshot, AUTOMATION_SETTINGS_SETTING_KEY)? {
             ConfigurationValueV1::AutomationSettings(settings) => {
-                Arc::new(settings.as_ref().clone())
+                // Read-only pins can precede registry convergence. Project
+                // current settings without changing the historical snapshot
+                // or admitting schedules that reports still need to expose.
+                let mut current = settings.as_ref().clone();
+                current.retire_lock_timeout();
+                Arc::new(current)
             }
             _ => return Err(config_error("expected automation settings")),
         },
@@ -656,6 +661,67 @@ mod tests {
             "a retargeted pin must share, not copy, its snapshot"
         );
         assert_eq!(moved.config(), pinned.config());
+    }
+
+    #[test]
+    fn pin_projects_retired_automation_settings_without_rewriting_history() {
+        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
+        let task = tracedecay_automation::backend::AgentTaskKind::MemoryCurator;
+        for schedule in ["every 10m", "after lunch"] {
+            let mut settings = tracedecay_automation::config::AutomationConfig::default();
+            settings.tasks.memory_curator.schedule = Some(schedule.to_owned());
+            settings.tasks.memory_curator.interval_secs = Some(5);
+            let mut snapshot = resolved(BTreeMap::from([(
+                key.clone(),
+                ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
+            )]));
+            let mut historical_settings = serde_json::to_value(&settings).unwrap();
+            historical_settings["tasks"]["memory_curator"]["stale_lock_secs"] =
+                serde_json::json!(3600);
+            historical_settings["tasks"]["session_reflector"]["stale_lock_secs"] =
+                serde_json::Value::Null;
+            // The third task keeps the absent historical representation.
+            snapshot.effective_values.insert(
+                key.clone(),
+                ConfigurationValueV1::AutomationSettings(Box::new(
+                    serde_json::from_value(historical_settings).unwrap(),
+                )),
+            );
+            let historical =
+                ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance)
+                    .unwrap();
+            let stored_bytes = serde_json::to_vec(&historical).unwrap();
+
+            let pin = PinnedRuntimeConfiguration::new(
+                target(),
+                revision(),
+                serde_json::from_slice(&stored_bytes).unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(pin.config().automation.as_ref(), &settings);
+            let effective = serde_json::to_value(pin.config().automation.as_ref()).unwrap();
+            for task in ["memory_curator", "session_reflector", "skill_writer"] {
+                assert!(effective["tasks"][task].get("stale_lock_secs").is_none());
+            }
+            assert_eq!(serde_json::to_vec(pin.snapshot()).unwrap(), stored_bytes);
+            pin.snapshot().validate().unwrap();
+            if schedule == "every 10m" {
+                assert_eq!(
+                    pin.admitted_automation().unwrap().schedule(task),
+                    Some(
+                        tracedecay_automation::config::AutomationSchedule::Interval {
+                            every_secs: 600,
+                        }
+                    ),
+                );
+            } else {
+                assert!(matches!(
+                    pin.admitted_automation(),
+                    Err(TraceDecayError::Automation(_))
+                ));
+            }
+        }
     }
 
     #[test]
