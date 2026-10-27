@@ -80,13 +80,17 @@ impl ReconcilePanicGuardV1 {
         }
     }
 
-    /// Any pass that completed without panicking clears the accounting: the
-    /// next panic starts again at the floor.
+    /// Any pass that completed without panicking clears the retry
+    /// accounting: the next panic starts again at the floor. A quarantine
+    /// is keyed to the input that panicked, so progress from OTHER files
+    /// must not lift it — only changed input (a control epoch advance,
+    /// checked in [`Self::suppresses_pass`]) re-arms a quarantined guard.
+    /// Clearing the quarantine on any progress let one poisoned file
+    /// sawtooth panic→quarantine→progress→panic forever.
     pub fn record_progress(&mut self) {
         self.consecutive_panics = 0;
         self.backoff = RECONCILE_PANIC_BACKOFF_FLOOR;
         self.next_attempt_at = None;
-        self.quarantined = false;
     }
 
     /// Record a panicking pass and decide whether the same input is worth
@@ -467,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_progressing_pass_clears_the_accounting() {
+    fn a_progressing_pass_clears_the_accounting_but_not_the_quarantine() {
         let mut guard = ReconcilePanicGuardV1::new();
         let now = origin();
         for _ in 0..MAX_CONSECUTIVE_RECONCILE_PANICS_V1 {
@@ -475,12 +479,22 @@ mod tests {
         }
         assert!(guard.suppresses_pass(now, 7));
 
+        // A progressing pass is progress from OTHER files: the accounting
+        // clears, but the quarantined input stays suppressed until the
+        // control epoch advances.
         guard.record_progress();
 
-        assert!(!guard.suppresses_pass(now, 7), "progress lifts suppression");
+        assert!(
+            guard.suppresses_pass(now, 7),
+            "progress must not lift a quarantine over unchanged input"
+        );
         assert_eq!(guard.consecutive_panics(), 0);
+        assert!(
+            !guard.suppresses_pass(now, 8),
+            "changed input re-arms the guard"
+        );
         assert_eq!(
-            guard.record_panic(now, 7),
+            guard.record_panic(now, 8),
             ReconcilePanicDecisionV1::RetryAfter(RECONCILE_PANIC_BACKOFF_FLOOR),
             "the next panic restarts at the floor"
         );
