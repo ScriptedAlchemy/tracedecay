@@ -1398,6 +1398,7 @@ mod store_file_identity_tests {
             .collect()
     }
 
+    #[cfg(not(windows))]
     #[asupersync::test]
     async fn a_mounted_store_path_reports_replacement_and_removal() {
         let temporary = tempfile::tempdir().expect("identity fixture root");
@@ -1437,5 +1438,35 @@ mod store_file_identity_tests {
             state_of(&registry, &database_path),
             [(database_path.clone(), StoreFileIdentityStateV1::Missing)]
         );
+    }
+
+    #[cfg(windows)]
+    #[asupersync::test]
+    async fn a_mounted_windows_store_refuses_replacement_and_removal() {
+        let temporary = tempfile::tempdir().expect("identity fixture root");
+        let database_path = temporary.path().join("project.db");
+        let (database, scope) = super::table_growth_tests::growth_fixture(&database_path).await;
+        let registry = StoreTelemetrySamplingRegistry::default();
+        assert!(registry.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        let replacement = temporary.path().join("replacement.db");
+        std::fs::write(&replacement, b"replacement").expect("replacement file");
+        // SQLite's Windows handles exclude deletion while the store is open.
+        let replacement_error = std::fs::rename(&replacement, &database_path).unwrap_err();
+        assert!(
+            matches!(replacement_error.raw_os_error(), Some(5 | 32)),
+            "{replacement_error}"
+        );
+        let removal_error = std::fs::remove_file(&database_path).unwrap_err();
+        assert!(
+            matches!(removal_error.raw_os_error(), Some(5 | 32)),
+            "{removal_error}"
+        );
+        assert_eq!(
+            state_of(&registry, &database_path),
+            [(database_path, StoreFileIdentityStateV1::Current)]
+        );
+        assert_eq!(std::fs::read(replacement).unwrap(), b"replacement");
     }
 }

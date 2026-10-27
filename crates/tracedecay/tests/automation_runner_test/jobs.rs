@@ -624,7 +624,14 @@ async fn user_job_pre_run_command_runs_from_project_root() {
     fs::write(project_root.join("marker.txt"), "project-marker").unwrap();
 
     let mut job = sample_job("cmd-cwd");
-    job.pre_run_command = Some("cat marker.txt".to_string());
+    job.pre_run_command = Some(
+        if cfg!(windows) {
+            "type marker.txt"
+        } else {
+            "cat marker.txt"
+        }
+        .to_string(),
+    );
 
     struct AssertProjectCommandOutputBackend;
     impl AgentTaskBackend for AssertProjectCommandOutputBackend {

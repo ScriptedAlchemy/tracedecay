@@ -2,12 +2,13 @@ use std::path::Path;
 use std::process::Command;
 
 use tracedecay_domain::ProjectId;
+use tracedecay_runtime_core::path_safety::plain_git_args;
 use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
         .current_dir(root)
-        .args(args)
+        .args(plain_git_args(args))
         .status()
         .expect("git command starts");
     assert!(status.success(), "git command failed: {args:?}");

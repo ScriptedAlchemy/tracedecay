@@ -2,6 +2,7 @@
 //! and hook-event plan execution.
 
 use super::*;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl McpServer {
     /// Authorizes and admits one branch reconciliation without waiting for indexing.
@@ -85,6 +86,8 @@ impl McpServer {
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> std::result::Result<crate::mcp::project_route::ResolvedProjectRoute, HostAdmissionOutcome>
     {
+        let effect_root = canonical_existing_identity(effect_root)
+            .map_err(|_| HostAdmissionOutcome::degraded("project_route_stale"))?;
         let Some(registry) = self.registry_db.as_deref() else {
             return Err(HostAdmissionOutcome::retained_unavailable(
                 "project_registry_route_unavailable",
@@ -103,13 +106,13 @@ impl McpServer {
             }
         };
         let (root, current_scope) =
-            match tracedecay_mcp::scope::resolve_query_scope(&owner, effect_root) {
+            match tracedecay_mcp::scope::resolve_query_scope(&owner, &effect_root) {
                 Ok(resolved) => resolved,
                 Err(_) => return Err(HostAdmissionOutcome::degraded("project_route_stale")),
             };
         // Ref is mutable checkout state. Fixed route identity must still match
         // exactly; indexing reconciles the canonical current branch below.
-        if root.as_path() != effect_root || !current_scope.identifies_same_checkout(scope) {
+        if root != effect_root || !current_scope.identifies_same_checkout(scope) {
             return Err(HostAdmissionOutcome::degraded("project_route_stale"));
         }
         let resolved = match crate::mcp::project_route::resolve_registered_project_route(
@@ -177,7 +180,11 @@ impl McpServer {
             );
         }
         let (cg, branch) = server.reopen_if_branch_drifted_memoized().await;
-        if cg.project_root() != root {
+        let graph_root = match canonical_existing_identity(cg.project_root()) {
+            Ok(root) => root,
+            Err(_) => return HostAdmissionOutcome::degraded("project_route_stale"),
+        };
+        if graph_root != root {
             return HostAdmissionOutcome::degraded("project_route_stale");
         }
         if let Some(seq) = admission_seq {

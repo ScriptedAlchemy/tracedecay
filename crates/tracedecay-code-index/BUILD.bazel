@@ -300,7 +300,7 @@ genrule(
     srcs = [":rustfmt_sources_2024", "//:rustfmt.toml"],
     outs = ["rustfmt_check_2024.ok"],
     cmd = "\"$(RUSTFMT)\" --config-path \"$(location //:rustfmt.toml)\" --edition 2024 --config skip_children=true --check $(locations :rustfmt_sources_2024) && touch \"$@\"",
-    cmd_ps = "foreach ($$source in ('$(locations :rustfmt_sources_2024)' -split ' ')) { & \"$(RUSTFMT)\" --config-path \"$(location //:rustfmt.toml)\" --edition 2024 --config skip_children=true --check $$source; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE } }; New-Item -ItemType File -Path \"$@\" -Force | Out-Null",
+    cmd_ps = "$$env:PATHEXT += ';.EXE'; foreach ($$source in ('$(locations :rustfmt_sources_2024)' -split ' ')) { & \"$(RUSTFMT)\" --config-path \"$(location //:rustfmt.toml)\" --edition 2024 --config skip_children=true --check $$source; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE } }; New-Item -ItemType File -Path \"$@\" -Force | Out-Null",
     tools = ["//:rustfmt_toolchain"],
     toolchains = ["//:rustfmt_toolchain"],
     tags = ["manual"],
