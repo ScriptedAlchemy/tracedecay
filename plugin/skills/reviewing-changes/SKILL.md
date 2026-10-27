@@ -59,11 +59,12 @@ candidate finding against concrete behavior and a reachable caller. A scan hit
 is a lead: test unwraps and unsafe blocks are not defects by themselves. For
 dead-code or ship-risk work, see [safety audit](references/safety-audit.md).
 
-**Report:** actionable findings with location, failure mode, and evidence, plus
-material coverage gaps. Distinguish executed tests from structural test links.
-
 A review alone grants no write authority. Honor writes already authorized by
 the user; otherwise read [write authority](references/write-authority.md)
 before Git apply, native integration, or worktree cleanup. Structural test
 selection belongs to `assessing-impact`; structural mutation belongs to
 `editing-safely`.
+
+**Report:** actionable findings with location, failure mode, and evidence, plus
+material coverage gaps. Distinguish executed tests from structural test links.
+Do not apply changes without write authority.
