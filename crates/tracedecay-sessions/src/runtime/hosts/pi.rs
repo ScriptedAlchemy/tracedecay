@@ -104,7 +104,10 @@ fn file_stamp(metadata: &std::fs::Metadata) -> PathFileStamp {
     let (mtime_secs, inode) = {
         use std::os::unix::fs::MetadataExt;
         (
-            metadata.mtime().unsigned_abs().saturating_mul(1_000_000_000)
+            metadata
+                .mtime()
+                .unsigned_abs()
+                .saturating_mul(1_000_000_000)
                 + metadata.mtime_nsec().unsigned_abs(),
             metadata.ino(),
         )
@@ -923,8 +926,12 @@ async fn admit_scheduled_file(
     // re-enter admission, or every restart re-pays the whole corpus.
     let stamp = {
         let path_buf = path.to_path_buf();
-        run_blocking_transcript_section("pi", move || std::fs::metadata(&path_buf).ok().map(|meta| file_stamp(&meta)))
-            .await?
+        run_blocking_transcript_section("pi", move || {
+            std::fs::metadata(&path_buf)
+                .ok()
+                .map(|meta| file_stamp(&meta))
+        })
+        .await?
     };
     if let Some(stamp) = stamp {
         if path_memo_matches(facade, scope, PI_COMPLETE_MEMO_PREFIX, path, stamp).await {

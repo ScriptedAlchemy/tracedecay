@@ -166,7 +166,8 @@ fn installed_rust_client_requires_workflow_reads_and_exact_lifecycle_capability(
             let frontier = &open.data["data"]["frontier"];
             let resume = StreamResume {
                 token: frontier["resume_token"].as_str().unwrap().to_owned(),
-                next_sequence: frontier["next_sequence"].as_u64().unwrap(),
+                // Only open was consumed; no retained event has been delivered.
+                next_sequence: 0,
             };
             drop(initial);
             let resumed = client
