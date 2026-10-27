@@ -935,6 +935,19 @@ fn assert_catalog_build_accounts_for_its_peak(
     generation: &CodeGenerationId,
     parent: Option<&CodeGraphProjectionStore>,
 ) -> (u64, u64) {
+    // Prime the same cold or carried catalog path once before measurement.
+    // Process-level parser, tracing, and graph-read initialization may
+    // allocate on this thread only on the first call. Those allocations do
+    // not belong to each catalog build's memory reservation.
+    {
+        let primer =
+            CodeGraphProjectionStore::from_verified_snapshot(snapshot.clone(), generation.clone())
+                .expect("catalog primer");
+        primer.warm_serving_engine().expect("prime serving engine");
+        primer
+            .warm_interactive_catalog_with_cancellation(parent, Arc::new(NeverCancelled))
+            .expect("prime the exact catalog path");
+    }
     let measured =
         CodeGraphProjectionStore::from_verified_snapshot(snapshot.clone(), generation.clone())
             .expect("measured catalog store");
