@@ -907,10 +907,12 @@ impl ProductionPrimitiveOpenRequestV1 {
         Ok(())
     }
 
+    /// Validate the stable store/source authority and report whether the
+    /// retained facade already has this configuration and capability set.
     pub fn validate_retained(
         &self,
         runtime: &PrimitiveProjectRuntime,
-    ) -> Result<(), ApplicationContractError> {
+    ) -> Result<bool, ApplicationContractError> {
         runtime.validate_reopen(
             self.source_runtime.db(),
             &self.session_db,
