@@ -1,0 +1,473 @@
+diff --git a/src/graph/compact/column.rs b/src/graph/compact/column.rs
+index 861a9595..098e900f 100644
+--- a/src/graph/compact/column.rs
++++ b/src/graph/compact/column.rs
+@@ -291,6 +291,28 @@ pub enum ColumnCodec {
+ }
+ 
+ impl ColumnCodec {
++    /// Reads borrowed codec storage. It never decodes a Value.
++    pub fn allocation_bytes(&self, index: usize) -> usize {
++        use std::mem::size_of;
++        use grafeo_common::memory::heap::arc_slice_bytes;
++        match self {
++            Self::Dict(dict) => dict.get(index).map_or(0, |entry| {
++                // A malformed marker falls back to a literal string. Include
++                // the partial hex vector as well as that fallback allocation.
++                entry.len().saturating_mul(2).saturating_add(2 * size_of::<usize>())
++            }),
++            Self::Int8Vector { dimensions, .. } => {
++                usize::from(*dimensions).saturating_mul(size_of::<Value>())
++                    .saturating_add(arc_slice_bytes::<Value>(usize::from(*dimensions)))
++            }
++            Self::Float32Vector { dimensions, .. } => {
++                usize::from(*dimensions).saturating_mul(size_of::<f32>())
++                    .saturating_add(arc_slice_bytes::<f32>(usize::from(*dimensions)))
++            }
++            _ => 0,
++        }
++    }
++
+     // ── Phase 3a: Bytes-backed constructors ─────────────────────────
+ 
+     /// Constructs a [`RawI64`](Self::RawI64) column from a `Vec<i64>`
+diff --git a/src/graph/compact/graph_store_impl.rs b/src/graph/compact/graph_store_impl.rs
+index 341460db..75dfac1b 100644
+--- a/src/graph/compact/graph_store_impl.rs
++++ b/src/graph/compact/graph_store_impl.rs
+@@ -19,6 +19,40 @@ use crate::graph::traits::{GraphStore, GraphStoreSearch};
+ use crate::statistics::Statistics;
+ 
+ impl GraphStore for CompactStore {
++    fn node_allocation_bytes(&self, id: NodeId) -> Option<usize> {
++        let Some((table, offset)) = self.resolve_node(id) else { return Some(0); };
++        let table = self.resolve_node_table(table)?;
++        Some(table.allocation_bytes(usize::try_from(offset).ok()?).saturating_add(table.label().len()))
++    }
++
++    fn edge_allocation_bytes(&self, id: EdgeId) -> Option<usize> {
++        let Some((table, offset)) = self.resolve_edge(id) else { return Some(0); };
++        Some(self.resolve_rel_table(table)?.allocation_bytes(usize::try_from(offset).ok()?))
++    }
++
++    fn node_property_allocation_bytes(&self, id: NodeId, key: &PropertyKey) -> Option<usize> {
++        let Some((table, offset)) = self.resolve_node(id) else { return Some(0); };
++        Some(self.resolve_node_table(table)?.property_allocation_bytes(usize::try_from(offset).ok()?, key))
++    }
++
++    fn label_allocation_bytes(&self) -> Option<usize> {
++        Some(self.table_id_to_label.iter().fold(
++            self.table_id_to_label.len().saturating_mul(std::mem::size_of::<String>()),
++            |bytes, label| bytes.saturating_add(label.len()),
++        ))
++    }
++
++    fn property_lookup_allocation_bytes(&self, key: &PropertyKey, value: &Value) -> Option<usize> {
++        let index = self.property_value_index(key)?;
++        let mut count = 0_usize;
++        for (table, order) in index.iter() {
++            let col = self.resolve_node_table(*table)?.column(key)?;
++            count = count.saturating_add(super::value_order::equality_count(col, order, value)?);
++        }
++        let payload = match value { Value::String(value) => value.len(), Value::Bytes(value) => value.len() * 2, _ => 0 };
++        Some(count.saturating_mul(8 * std::mem::size_of::<NodeId>()).saturating_add(payload.saturating_mul(3)).saturating_add(128))
++    }
++
+     fn get_node(&self, id: NodeId) -> Option<Node> {
+         let (table_id, offset) = self.resolve_node(id)?;
+         let nt = self.resolve_node_table(table_id)?;
+@@ -29,10 +63,7 @@ impl GraphStore for CompactStore {
+ 
+         let mut node = Node::new(id);
+         node.add_label(nt.label());
+-        let props = nt.get_all_properties(row);
+-        for (k, v) in props {
+-            node.set_property(k, v);
+-        }
++        nt.for_each_property(row, |key, value| node.set_property(key.clone(), value));
+         Some(node)
+     }
+ 
+@@ -48,10 +79,7 @@ impl GraphStore for CompactStore {
+         let edge_type = rt.edge_type().clone();
+ 
+         let mut edge = Edge::new(id, src, dst, edge_type);
+-        let props = rt.get_all_edge_properties(pos as usize);
+-        for (k, v) in props {
+-            edge.set_property(k, v);
+-        }
++        rt.for_each_property(pos as usize, |key, value| edge.set_property(key.clone(), value));
+         Some(edge)
+     }
+ 
+diff --git a/src/graph/compact/layered.rs b/src/graph/compact/layered.rs
+index 6eb25cb7..ed189b50 100644
+--- a/src/graph/compact/layered.rs
++++ b/src/graph/compact/layered.rs
+@@ -437,6 +437,31 @@ impl LayeredStore {
+ // ── GraphStore implementation ──────────────────────────────────────
+ 
+ impl GraphStore for LayeredStore {
++    fn node_allocation_bytes(&self, id: NodeId) -> Option<usize> {
++        Some(self.base.load().node_allocation_bytes(id)?
++            .saturating_add(self.overlay.load().node_allocation_bytes(id)?))
++    }
++
++    fn edge_allocation_bytes(&self, id: EdgeId) -> Option<usize> {
++        Some(self.base.load().edge_allocation_bytes(id)?
++            .saturating_add(self.overlay.load().edge_allocation_bytes(id)?))
++    }
++
++    fn node_property_allocation_bytes(&self, id: NodeId, key: &PropertyKey) -> Option<usize> {
++        Some(self.base.load().node_property_allocation_bytes(id, key)?
++            .saturating_add(self.overlay.load().node_property_allocation_bytes(id, key)?))
++    }
++
++    fn label_allocation_bytes(&self) -> Option<usize> {
++        Some(self.base.load().label_allocation_bytes()?
++            .saturating_add(self.overlay.load().label_allocation_bytes()?).saturating_mul(4))
++    }
++
++    fn property_lookup_allocation_bytes(&self, key: &PropertyKey, value: &Value) -> Option<usize> {
++        Some(self.base.load().property_lookup_allocation_bytes(key, value)?
++            .saturating_add(self.overlay.load().property_lookup_allocation_bytes(key, value)?).saturating_mul(2))
++    }
++
+     fn get_node(&self, id: NodeId) -> Option<Node> {
+         if self.is_node_deleted_from_base(id) {
+             return None;
+diff --git a/src/graph/compact/node_table.rs b/src/graph/compact/node_table.rs
+index 95ee80e5..103db9d0 100644
+--- a/src/graph/compact/node_table.rs
++++ b/src/graph/compact/node_table.rs
+@@ -135,6 +135,34 @@ impl NodeTable {
+     /// A `true` row is one the builder padded because the node never had the
+     /// property; its column body still decodes to a value there, which no
+     /// read may surface.
++    pub fn allocation_bytes(&self, offset: usize) -> usize {
++        use std::mem::size_of;
++        if offset >= self.len { return 0; }
++        self.columns.iter().fold(
++            self.columns.len().saturating_mul(4 * size_of::<(PropertyKey, Value)>()),
++            |bytes, (key, col)| {
++                if self.is_null(offset, key) { bytes } else {
++                    bytes.saturating_add(col.allocation_bytes(offset)).saturating_add(key.as_str().len())
++                }
++            },
++        )
++    }
++
++    pub fn for_each_property(&self, offset: usize, mut visit: impl FnMut(&PropertyKey, Value)) {
++        for (key, col) in &self.columns {
++            if !self.is_null(offset, key) {
++                if let Some(value) = col.get(offset) {
++                    visit(key, value);
++                }
++            }
++        }
++    }
++
++    pub fn property_allocation_bytes(&self, offset: usize, key: &PropertyKey) -> usize {
++        if self.is_null(offset, key) { return 0; }
++        self.columns.get(key).map_or(0, |col| col.allocation_bytes(offset))
++    }
++
+     #[must_use]
+     pub fn is_null(&self, offset: usize, key: &PropertyKey) -> bool {
+         self.null_masks
+diff --git a/src/graph/compact/rel_table.rs b/src/graph/compact/rel_table.rs
+index f5e5df76..55eb73e3 100644
+--- a/src/graph/compact/rel_table.rs
++++ b/src/graph/compact/rel_table.rs
+@@ -182,6 +182,28 @@ impl RelTable {
+ 
+     /// Returns the property value for a specific edge (by CSR position) and
+     /// key; `None` when the edge holds no value for it.
++    pub fn allocation_bytes(&self, offset: usize) -> usize {
++        use std::mem::size_of;
++        self.properties.iter().fold(
++            self.properties.len().saturating_mul(4 * size_of::<(PropertyKey, Value)>()),
++            |bytes, (key, col)| {
++                if self.is_null(offset, key) { bytes } else {
++                    bytes.saturating_add(col.allocation_bytes(offset)).saturating_add(key.as_str().len())
++                }
++            },
++        )
++    }
++
++    pub fn for_each_property(&self, offset: usize, mut visit: impl FnMut(&PropertyKey, Value)) {
++        for (key, col) in &self.properties {
++            if !self.is_null(offset, key) {
++                if let Some(value) = col.get(offset) {
++                    visit(key, value);
++                }
++            }
++        }
++    }
++
+     #[must_use]
+     pub fn get_edge_property(&self, csr_position: usize, key: &PropertyKey) -> Option<Value> {
+         if self.is_null(csr_position, key) {
+diff --git a/src/graph/compact/value_order.rs b/src/graph/compact/value_order.rs
+index 230b3a4d..83a3c523 100644
+--- a/src/graph/compact/value_order.rs
++++ b/src/graph/compact/value_order.rs
+@@ -137,6 +137,46 @@ pub(crate) fn build_row_order(
+     Some(RowOrder::Inline(rows))
+ }
+ 
++/// The number of rows whose value equals `value`, found by binary search
++/// over `order`, mirroring [`find_eq`] without collecting the rows.
++///
++/// `None` when the codec and value are not an orderable pair this index
++/// serves, so the caller can decline rather than assume zero.
++pub(crate) fn equality_count(codec: &ColumnCodec, order: &RowOrder, value: &Value) -> Option<usize> {
++    let entry;
++    let compare: Box<dyn Fn(usize) -> Option<Ordering> + '_> = match (codec, value) {
++        (ColumnCodec::Dict(dict), Value::String(_) | Value::Bytes(_)) => {
++            entry = encode_dict_entry(value);
++            Box::new(|row| {
++                let code = dict.code_at(row)?;
++                Some(dict.entry(code as usize)?.cmp(entry.as_str()))
++            })
++        }
++        (ColumnCodec::BitPacked(packed), &Value::Int64(target)) => {
++            let target = u64::try_from(target).ok()?;
++            Box::new(move |row| Some(packed.get(row)?.cmp(&target)))
++        }
++        (ColumnCodec::RawI64(store), &Value::Int64(target)) => {
++            Box::new(move |row| Some(store.get(row)?.cmp(&target)))
++        }
++        _ => return None,
++    };
++    let bound = |inclusive: bool| -> Option<usize> {
++        let (mut low, mut high) = (0, order.len());
++        while low < high {
++            let mid = low + (high - low) / 2;
++            let ordering = order.row(mid).and_then(&compare)?;
++            if ordering == Ordering::Less || (inclusive && ordering == Ordering::Equal) {
++                low = mid + 1;
++            } else {
++                high = mid;
++            }
++        }
++        Some(low)
++    };
++    Some(bound(true)?.saturating_sub(bound(false)?))
++}
++
+ /// The rows of `codec` whose value equals `value`, in row order, found by
+ /// binary search over `order`.
+ pub(crate) fn find_eq(codec: &ColumnCodec, order: &RowOrder, value: &Value) -> Vec<usize> {
+diff --git a/src/graph/lpg/property.rs b/src/graph/lpg/property.rs
+index 415d1498..e22be7fd 100644
+--- a/src/graph/lpg/property.rs
++++ b/src/graph/lpg/property.rs
+@@ -302,6 +302,27 @@ impl<Id: EntityId> PropertyStorage<Id> {
+     }
+ 
+     /// Gets all properties for an entity.
++    #[must_use]
++    /// Borrowed current values, without a map, Value clone, or payload decode.
++    pub fn allocation_bytes(&self, id: Id, key: Option<&PropertyKey>) -> usize {
++        use std::mem::size_of;
++        let columns = self.columns.read();
++        let mut bytes = 0_usize;
++        for (name, col) in columns.iter() {
++            if key.is_some_and(|key| key != name) { continue; }
++            if let Some(value) = col.borrowed(id) {
++                bytes = bytes.saturating_add(4 * size_of::<(PropertyKey, Value)>())
++                    .saturating_add(name.as_str().len())
++                    .saturating_add(match value {
++                        Value::String(value) => value.len(),
++                        Value::Bytes(value) => value.len(),
++                        _ => 0,
++                    });
++            }
++        }
++        bytes
++    }
++
+     #[must_use]
+     pub fn get_all(&self, id: Id) -> FxHashMap<PropertyKey, Value> {
+         let columns = self.columns.read();
+@@ -705,6 +726,16 @@ impl<Id: EntityId> PropertyStorage<Id> {
+         }
+     }
+ 
++    /// Visits the same visible epoch values as get_all_at.
++    pub fn for_each_at(&self, id: Id, epoch: EpochId, mut visit: impl FnMut(&PropertyKey, Value)) {
++        let columns = self.columns.read();
++        for (key, col) in columns.iter() {
++            if let Some(value) = col.get_at(id, epoch) {
++                visit(key, value);
++            }
++        }
++    }
++
+     /// Removes all PENDING entries from all columns (transaction rollback).
+     pub fn remove_pending(&self) {
+         let mut columns = self.columns.write();
+@@ -1020,6 +1051,12 @@ impl<Id: EntityId> PropertyColumn<Id> {
+     ///
+     /// First checks the hot buffer (uncompressed values), then falls back
+     /// to the compressed data if present.
++    #[must_use]
++    #[cfg(not(feature = "temporal"))]
++    fn borrowed(&self, id: Id) -> Option<&Value> {
++        self.values.get(&id)
++    }
++
+     #[must_use]
+     pub fn get(&self, id: Id) -> Option<Value> {
+         // First check hot buffer
+@@ -1685,6 +1722,12 @@ impl<Id: EntityId> PropertyColumn<Id> {
+     }
+ 
+     /// Gets the latest value for an entity, filtering out tombstones (Null).
++    #[must_use]
++    #[cfg(feature = "temporal")]
++    fn borrowed(&self, id: Id) -> Option<&Value> {
++        self.values.get(&id).and_then(|log| log.latest()).filter(|value| !value.is_null())
++    }
++
+     #[must_use]
+     pub fn get(&self, id: Id) -> Option<Value> {
+         self.values
+diff --git a/src/graph/lpg/store/edge_ops.rs b/src/graph/lpg/store/edge_ops.rs
+index 2aa96b6c..e9a49569 100644
+--- a/src/graph/lpg/store/edge_ops.rs
++++ b/src/graph/lpg/store/edge_ops.rs
+@@ -20,7 +20,9 @@ impl LpgStore {
+             id_to_type.get(record.type_id as usize)?.clone()
+         };
+         let mut edge = Edge::new(id, record.src, record.dst, edge_type);
+-        edge.properties = self.edge_properties.get_all(id).into_iter().collect();
++        self.edge_properties.for_each(id, |key, value| {
++            edge.set_property(key.clone(), value);
++        });
+         Some(edge)
+     }
+ 
+@@ -76,11 +78,7 @@ impl LpgStore {
+             id_to_type.get(record.type_id as usize)?.clone()
+         };
+         let mut edge = Edge::new(id, record.src, record.dst, edge_type);
+-        edge.properties = self
+-            .edge_properties
+-            .get_all_at(id, epoch)
+-            .into_iter()
+-            .collect();
++        self.edge_properties.for_each_at(id, epoch, |key, value| edge.set_property(key.clone(), value));
+         Some(edge)
+     }
+ 
+diff --git a/src/graph/lpg/store/graph_store_impl.rs b/src/graph/lpg/store/graph_store_impl.rs
+index f19a3e9e..8fb6e2e8 100644
+--- a/src/graph/lpg/store/graph_store_impl.rs
++++ b/src/graph/lpg/store/graph_store_impl.rs
+@@ -20,6 +20,41 @@ use grafeo_common::utils::hash::FxHashMap;
+ use std::sync::Arc;
+ 
+ impl GraphStore for LpgStore {
++    fn node_allocation_bytes(&self, id: NodeId) -> Option<usize> {
++        if !self.node_visible(id) { return Some(0); }
++        let labels = self.node_labels.read();
++        #[cfg(not(feature = "temporal"))]
++        let count = labels.get(&id).map_or(0, |labels| labels.len());
++        #[cfg(feature = "temporal")]
++        let count = labels.get(&id).and_then(|log| log.latest()).map_or(0, |labels| labels.len());
++        Some(self.node_properties.allocation_bytes(id, None)
++            .saturating_add(count.saturating_mul(4 * std::mem::size_of::<ArcStr>())))
++    }
++
++    fn property_lookup_allocation_bytes(&self, key: &PropertyKey, value: &Value) -> Option<usize> {
++        let indexes = self.property_indexes.read();
++        let index = indexes.get(key)?;
++        let value = grafeo_common::types::HashableValue::new(value.clone());
++        Some(index.get(&value).map_or(0, |nodes| nodes.len()).saturating_mul(std::mem::size_of::<NodeId>()))
++    }
++
++    fn edge_allocation_bytes(&self, id: EdgeId) -> Option<usize> {
++        if self.edge_header(id).is_none() { return Some(0); }
++        Some(self.edge_properties.allocation_bytes(id, None))
++    }
++
++    fn node_property_allocation_bytes(&self, id: NodeId, key: &PropertyKey) -> Option<usize> {
++        Some(self.node_properties.allocation_bytes(id, Some(key)))
++    }
++
++    fn label_allocation_bytes(&self) -> Option<usize> {
++        let registry = self.label_registry.read();
++        Some(registry.names().iter().fold(
++            registry.names().len().saturating_mul(std::mem::size_of::<String>()),
++            |bytes, label| bytes.saturating_add(label.len()),
++        ))
++    }
++
+     fn get_node(&self, id: NodeId) -> Option<Node> {
+         LpgStore::get_node(self, id)
+     }
+diff --git a/src/graph/lpg/store/node_ops.rs b/src/graph/lpg/store/node_ops.rs
+index 3cd1b525..bd3a02d9 100644
+--- a/src/graph/lpg/store/node_ops.rs
++++ b/src/graph/lpg/store/node_ops.rs
+@@ -102,7 +102,9 @@ impl LpgStore {
+             }
+         }
+ 
+-        node.properties = self.node_properties.get_all(id).into_iter().collect();
++        self.node_properties.for_each(id, |key, value| {
++            node.set_property(key.clone(), value);
++        });
+         node
+     }
+ 
+@@ -181,11 +183,7 @@ impl LpgStore {
+             }
+         }
+ 
+-        node.properties = self
+-            .node_properties
+-            .get_all_at(id, epoch)
+-            .into_iter()
+-            .collect();
++        self.node_properties.for_each_at(id, epoch, |key, value| node.set_property(key.clone(), value));
+         node
+     }
+ 
+diff --git a/src/graph/traits.rs b/src/graph/traits.rs
+index 4b226ec2..cb2154e6 100644
+--- a/src/graph/traits.rs
++++ b/src/graph/traits.rs
+@@ -44,6 +44,30 @@ use std::sync::Arc;
+ pub trait GraphStore: Send + Sync {
+     // --- Point lookups ---
+ 
++    /// Allocation demand of materializing a native row, without materializing it.
++    /// None means this store cannot supply allocation metadata.
++    fn node_allocation_bytes(&self, _id: NodeId) -> Option<usize> {
++        None
++    }
++
++    fn edge_allocation_bytes(&self, _id: EdgeId) -> Option<usize> {
++        None
++    }
++
++    /// Allocation demand of one property lookup, including dictionary decoding.
++    fn node_property_allocation_bytes(&self, _id: NodeId, _key: &PropertyKey) -> Option<usize> {
++        None
++    }
++
++    /// Allocation demand of enumerating the label universe.
++    fn label_allocation_bytes(&self) -> Option<usize> {
++        None
++    }
++
++    fn property_lookup_allocation_bytes(&self, _key: &PropertyKey, _value: &Value) -> Option<usize> {
++        None
++    }
++
+     /// Returns a node by ID (latest visible version at current epoch).
+     fn get_node(&self, id: NodeId) -> Option<Node>;
+ 

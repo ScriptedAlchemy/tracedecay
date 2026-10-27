@@ -3,7 +3,7 @@
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-use tracedecay_graph_db::GraphBudgetKind;
+use tracedecay_graph_db::{GraphBudgetKind, GraphDbError};
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryAdmissionFailureV1,
     ResidentMemoryComponentIdV1, ResidentMemoryOperationV1,
@@ -25,6 +25,15 @@ pub(super) struct CatalogBuildChargeV1 {
 }
 
 impl CatalogBuildChargeV1 {
+    pub(super) fn cover_read(&mut self, bytes: usize) -> Result<(), GraphDbError> {
+        self.cover(bytes).map_err(|error| match error {
+            CodeGraphProjectionError::BudgetExhausted { limit, .. } => {
+                GraphDbError::budget_exhausted(GraphBudgetKind::ResidentMemory, limit)
+            }
+            error => GraphDbError::unavailable(error.to_string()),
+        })
+    }
+
     /// A store bound to no authority charges nothing.
     pub(super) fn new(memory: Option<&Arc<ProcessResidentMemoryV1>>) -> Self {
         Self {

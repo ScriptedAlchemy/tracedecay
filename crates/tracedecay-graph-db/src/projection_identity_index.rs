@@ -1,7 +1,7 @@
 //! An ordered identity access path for projection pagination.
 //!
 //! Paging a projection used to cost a full projection scan *per page*: every
-//! `query_identity_page` call expanded the owner label into every node it
+//! identity-page call expanded the owner label into every node it
 //! covers, read each node twice (once to confirm the record label, once for
 //! the identity property), and threw away all but one page. Warming a large
 //! catalog therefore ran in O(N^2 / page) and was measured at 47 back-to-back
@@ -30,7 +30,8 @@ use grafeo_engine::GrafeoDB;
 
 use crate::projection::check_cancelled;
 use crate::projection_read::IdentityScope;
-use crate::schema::{decode_identity, has_native_label, nodes_with_label};
+use crate::schema::{decode_identity, has_native_label, nodes_with_label_admitted};
+use crate::state::{ReadAllocationAdmission, admitted_node};
 use crate::{GraphCancellation, GraphDbError};
 
 /// Identity bytes one cached index may retain. A projection whose identities
@@ -62,6 +63,16 @@ pub(crate) struct ProjectionIdentityIndex {
 }
 
 impl ProjectionIdentityIndex {
+    pub(crate) fn page_bytes(&self, after: Option<&str>, limit: usize) -> usize {
+        let start = after.map_or(0, |after| {
+            self.identities.partition_point(|id| id.as_ref() <= after)
+        });
+        self.identities[start..]
+            .iter()
+            .take(limit)
+            .map(|id| id.len().saturating_add(size_of::<String>()))
+            .fold(0_usize, usize::saturating_add)
+    }
     /// The `limit` smallest identities strictly greater than `after`.
     pub(crate) fn page(&self, after: Option<&str>, limit: usize) -> Vec<String> {
         let start = match after {
@@ -143,6 +154,16 @@ impl IdentityIndexCache {
         scope: IdentityScope<'_>,
         cancellation: &dyn GraphCancellation,
     ) -> Result<Option<Arc<ProjectionIdentityIndex>>, GraphDbError> {
+        self.ordered_identities_admitted(database, scope, cancellation, &mut None)
+    }
+
+    pub(crate) fn ordered_identities_admitted(
+        &self,
+        database: &GrafeoDB,
+        scope: IdentityScope<'_>,
+        cancellation: &dyn GraphCancellation,
+        admit: &mut ReadAllocationAdmission<'_>,
+    ) -> Result<Option<Arc<ProjectionIdentityIndex>>, GraphDbError> {
         let epoch = self.epoch.load(Ordering::Acquire);
         let key = IdentityIndexKey {
             owner_label: scope.owner_label.to_owned(),
@@ -163,7 +184,7 @@ impl IdentityIndexCache {
             return Ok(Some(index));
         }
 
-        let Some(index) = build_identity_index(database, scope, cancellation)? else {
+        let Some(index) = build_identity_index(database, scope, cancellation, admit)? else {
             return Ok(None);
         };
         crate::runtime::ensure_intact(database)?;
@@ -212,6 +233,7 @@ fn build_identity_index(
     database: &GrafeoDB,
     scope: IdentityScope<'_>,
     cancellation: &dyn GraphCancellation,
+    admit: &mut ReadAllocationAdmission<'_>,
 ) -> Result<Option<ProjectionIdentityIndex>, GraphDbError> {
     check_cancelled(cancellation)?;
     let IdentityScope {
@@ -220,11 +242,29 @@ fn build_identity_index(
         identity_property,
     } = scope;
     let store = database.graph_store();
-    let mut identities: Vec<Box<str>> = Vec::new();
+    let nodes = nodes_with_label_admitted(store.as_ref(), owner_label, admit)?;
+    let mut held = nodes
+        .capacity()
+        .saturating_mul(size_of::<grafeo_common::types::NodeId>())
+        .saturating_add(nodes.len().saturating_mul(size_of::<Box<str>>()));
+    if let Some(admit) = admit {
+        admit(held)?;
+    }
+    let mut identities: Vec<Box<str>> = Vec::with_capacity(nodes.len());
     let mut identity_bytes = 0usize;
-    for node in nodes_with_label(store.as_ref(), owner_label) {
+    for node in nodes {
         check_cancelled(cancellation)?;
-        let Some(record) = store.get_node(node) else {
+        let guarded = admit.is_some();
+        let mut row_admit = |bytes| match admit {
+            Some(admit) => admit(held.saturating_add(bytes)),
+            None => Ok(()),
+        };
+        let mut admission = if guarded {
+            Some(&mut row_admit as &mut dyn FnMut(usize) -> Result<(), GraphDbError>)
+        } else {
+            None
+        };
+        let Some(record) = admitted_node(store.as_ref(), node, &mut admission)? else {
             continue;
         };
         if !has_native_label(&record, record_label) {
@@ -232,6 +272,7 @@ fn build_identity_index(
         }
         let identity = decode_identity(record.get_property(identity_property), identity_property)?;
         identity_bytes = identity_bytes.saturating_add(identity.len());
+        held = held.saturating_add(identity.len());
         if identity_bytes > MAX_IDENTITY_INDEX_BYTES {
             return Ok(None);
         }

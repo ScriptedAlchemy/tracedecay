@@ -6434,6 +6434,7 @@ dependencies = [
  "flate2",
  "hex",
  "ignore",
+ "miniz_oxide",
  "rayon",
  "regex",
  "serde",

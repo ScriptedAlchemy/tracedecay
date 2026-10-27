@@ -7,9 +7,13 @@ use grafeo_engine::GrafeoDB;
 use crate::projection::check_cancelled;
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL, decode_identity,
-    entity_projection_label, relation_projection_label,
+    entity_projection_label, has_native_label, nodes_with_label_admitted,
+    relation_projection_label,
 };
-use crate::state::{labeled_projection_nodes, latest_projection, load_entity, load_relation};
+use crate::state::{
+    ReadAllocationAdmission, admitted_node, labeled_projection_nodes, latest_projection,
+    load_entity_admitted, load_relation_admitted,
+};
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId,
     GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
@@ -62,6 +66,50 @@ pub struct GraphProjectionPage {
     pub next_relation: Option<GraphRelationId>,
 }
 
+pub(crate) fn decoded_entity_bytes(entity: &GraphEntity) -> usize {
+    entity
+        .identity
+        .as_str()
+        .len()
+        .saturating_add(
+            entity
+                .labels
+                .iter()
+                .map(|label| label.as_str().len() + 64)
+                .sum::<usize>(),
+        )
+        .saturating_add(property_allocation_bytes(&entity.properties))
+}
+
+pub(crate) fn decoded_relation_bytes(relation: &GraphRelation) -> usize {
+    relation
+        .identity
+        .as_str()
+        .len()
+        .saturating_add(relation.from.as_str().len())
+        .saturating_add(relation.to.as_str().len())
+        .saturating_add(relation.kind.as_str().len())
+        .saturating_add(property_allocation_bytes(&relation.properties))
+}
+
+fn property_allocation_bytes(
+    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
+) -> usize {
+    properties
+        .iter()
+        .map(|(key, value)| {
+            key.as_str()
+                .len()
+                .saturating_add(128)
+                .saturating_add(match value {
+                    crate::GraphProperty::String(value) => value.capacity(),
+                    crate::GraphProperty::Bytes(value) => value.capacity(),
+                    _ => 0,
+                })
+        })
+        .sum()
+}
+
 #[derive(Clone)]
 pub struct GraphProjectionTelemetryRequest {
     pub namespace: GraphNamespace,
@@ -94,10 +142,18 @@ impl GraphDb {
         &self,
         request: GraphProjectionReadRequest,
     ) -> Result<GraphProjectionPage, GraphDbError> {
+        self.read_projection_admitted(request, &mut None)
+    }
+
+    pub(crate) fn read_projection_admitted(
+        &self,
+        request: GraphProjectionReadRequest,
+        admit: &mut ReadAllocationAdmission<'_>,
+    ) -> Result<GraphProjectionPage, GraphDbError> {
         let cancellation = Arc::clone(&request.cancellation);
         let page = self.read_intact(cancellation.as_ref(), |database| {
             self.ensure_projection_readable(&request.namespace, &request.projection)?;
-            read_projection(self, database, request)
+            read_projection(self, database, request, admit)
         })?;
         crate::observe::record_counts(page.entities.len(), page.relations.len(), 0, 0);
         crate::observe::record_hydration_source(crate::observe::HydrationSource::Live);
@@ -191,6 +247,7 @@ fn read_projection(
     handle: &GraphDb,
     database: &GrafeoDB,
     request: GraphProjectionReadRequest,
+    admit: &mut ReadAllocationAdmission<'_>,
 ) -> Result<GraphProjectionPage, GraphDbError> {
     check_cancelled(request.cancellation.as_ref())?;
     if request.max_entities == 0 && request.max_relations == 0 {
@@ -202,9 +259,9 @@ fn read_projection(
     validate_optional_page_limit(request.max_entities)?;
     validate_optional_page_limit(request.max_relations)?;
 
-    let (entities, next_entity) = read_entity_page(handle, database, &request)?;
+    let (entities, next_entity) = read_entity_page(handle, database, &request, admit)?;
     check_cancelled(request.cancellation.as_ref())?;
-    let (relations, next_relation) = read_relation_page(handle, database, &request)?;
+    let (relations, next_relation) = read_relation_page(handle, database, &request, admit)?;
     check_cancelled(request.cancellation.as_ref())?;
     Ok(GraphProjectionPage {
         entities,
@@ -218,13 +275,14 @@ fn read_entity_page(
     handle: &GraphDb,
     database: &GrafeoDB,
     request: &GraphProjectionReadRequest,
+    admit: &mut ReadAllocationAdmission<'_>,
 ) -> Result<(Vec<GraphEntity>, Option<GraphEntityId>), GraphDbError> {
     if request.max_entities == 0 {
         return Ok((Vec::new(), None));
     }
-    authenticate_entity_cursor(database, request)?;
+    authenticate_entity_cursor(database, request, admit)?;
     let owner_label = entity_projection_label(&request.namespace, &request.projection);
-    let identities = query_identity_page(
+    let identities = query_identity_page_admitted(
         handle,
         database,
         IdentityScope {
@@ -235,23 +293,51 @@ fn read_entity_page(
         request.after_entity.as_ref().map(GraphEntityId::as_str),
         request.max_entities.saturating_add(1),
         request.cancellation.as_ref(),
+        admit,
     )?;
     let has_more = identities.len() > request.max_entities;
+    let mut held = identities
+        .iter()
+        .map(String::capacity)
+        .sum::<usize>()
+        .saturating_add(
+            identities
+                .capacity()
+                .saturating_mul(std::mem::size_of::<String>()),
+        )
+        .saturating_add(
+            identities
+                .len()
+                .saturating_mul(std::mem::size_of::<GraphEntity>()),
+        );
+    if let Some(admit) = admit {
+        admit(held)?;
+    }
     let mut entities = Vec::with_capacity(identities.len().min(request.max_entities));
     for identity in identities.into_iter().take(request.max_entities) {
         check_cancelled(request.cancellation.as_ref())?;
         let identity = GraphEntityId::new(identity)
             .map_err(|error| persisted_identity_error("entity", error))?;
-        let stored = load_entity(database, &request.namespace, &identity)?.ok_or_else(|| {
-            GraphDbError::Corrupt {
+        let guarded = admit.is_some();
+        let mut row_admit = |bytes| match admit {
+            Some(admit) => admit(held.saturating_add(bytes)),
+            None => Ok(()),
+        };
+        let mut admission = if guarded {
+            Some(&mut row_admit as &mut dyn FnMut(usize) -> Result<(), GraphDbError>)
+        } else {
+            None
+        };
+        let stored = load_entity_admitted(database, &request.namespace, &identity, &mut admission)?
+            .ok_or_else(|| GraphDbError::Corrupt {
                 message: "projection query returned an unindexed entity".to_owned(),
-            }
-        })?;
+            })?;
         if stored.projection != request.projection {
             return Err(GraphDbError::Corrupt {
                 message: "projection entity index does not match ownership".to_owned(),
             });
         }
+        held = held.saturating_add(decoded_entity_bytes(&stored.entity));
         entities.push(stored.entity);
     }
     let next = has_more
@@ -264,13 +350,14 @@ fn read_relation_page(
     handle: &GraphDb,
     database: &GrafeoDB,
     request: &GraphProjectionReadRequest,
+    admit: &mut ReadAllocationAdmission<'_>,
 ) -> Result<(Vec<GraphRelation>, Option<GraphRelationId>), GraphDbError> {
     if request.max_relations == 0 {
         return Ok((Vec::new(), None));
     }
-    authenticate_relation_cursor(database, request)?;
+    authenticate_relation_cursor(database, request, admit)?;
     let owner_label = relation_projection_label(&request.namespace, &request.projection);
-    let identities = query_identity_page(
+    let identities = query_identity_page_admitted(
         handle,
         database,
         IdentityScope {
@@ -281,23 +368,52 @@ fn read_relation_page(
         request.after_relation.as_ref().map(GraphRelationId::as_str),
         request.max_relations.saturating_add(1),
         request.cancellation.as_ref(),
+        admit,
     )?;
     let has_more = identities.len() > request.max_relations;
+    let mut held = identities
+        .iter()
+        .map(String::capacity)
+        .sum::<usize>()
+        .saturating_add(
+            identities
+                .capacity()
+                .saturating_mul(std::mem::size_of::<String>()),
+        )
+        .saturating_add(
+            identities
+                .len()
+                .saturating_mul(std::mem::size_of::<GraphRelation>()),
+        );
+    if let Some(admit) = admit {
+        admit(held)?;
+    }
     let mut relations = Vec::with_capacity(identities.len().min(request.max_relations));
     for identity in identities.into_iter().take(request.max_relations) {
         check_cancelled(request.cancellation.as_ref())?;
         let identity = GraphRelationId::new(identity)
             .map_err(|error| persisted_identity_error("relation", error))?;
-        let stored = load_relation(database, &request.namespace, &identity)?.ok_or_else(|| {
-            GraphDbError::Corrupt {
-                message: "projection query returned an unindexed relation".to_owned(),
-            }
-        })?;
+        let guarded = admit.is_some();
+        let mut row_admit = |bytes| match admit {
+            Some(admit) => admit(held.saturating_add(bytes)),
+            None => Ok(()),
+        };
+        let mut admission = if guarded {
+            Some(&mut row_admit as &mut dyn FnMut(usize) -> Result<(), GraphDbError>)
+        } else {
+            None
+        };
+        let stored =
+            load_relation_admitted(database, &request.namespace, &identity, &mut admission)?
+                .ok_or_else(|| GraphDbError::Corrupt {
+                    message: "projection query returned an unindexed relation".to_owned(),
+                })?;
         if stored.projection != request.projection {
             return Err(GraphDbError::Corrupt {
                 message: "projection relation index does not match ownership".to_owned(),
             });
         }
+        held = held.saturating_add(decoded_relation_bytes(&stored.relation));
         relations.push(stored.relation);
     }
     let next = has_more
@@ -309,11 +425,12 @@ fn read_relation_page(
 fn authenticate_entity_cursor(
     database: &GrafeoDB,
     request: &GraphProjectionReadRequest,
+    admit: &mut ReadAllocationAdmission<'_>,
 ) -> Result<(), GraphDbError> {
     let Some(cursor) = &request.after_entity else {
         return Ok(());
     };
-    let stored = load_entity(database, &request.namespace, cursor)?;
+    let stored = load_entity_admitted(database, &request.namespace, cursor, admit)?;
     if stored.is_some_and(|stored| stored.projection == request.projection) {
         Ok(())
     } else {
@@ -326,11 +443,12 @@ fn authenticate_entity_cursor(
 fn authenticate_relation_cursor(
     database: &GrafeoDB,
     request: &GraphProjectionReadRequest,
+    admit: &mut ReadAllocationAdmission<'_>,
 ) -> Result<(), GraphDbError> {
     let Some(cursor) = &request.after_relation else {
         return Ok(());
     };
-    let stored = load_relation(database, &request.namespace, cursor)?;
+    let stored = load_relation_admitted(database, &request.namespace, cursor, admit)?;
     if stored.is_some_and(|stored| stored.projection == request.projection) {
         Ok(())
     } else {
@@ -360,27 +478,35 @@ fn authenticate_relation_cursor(
     level = "trace",
     skip_all
 )]
-pub(crate) fn query_identity_page(
+pub(crate) fn query_identity_page_admitted(
     handle: &GraphDb,
     database: &GrafeoDB,
     scope: IdentityScope<'_>,
     after: Option<&str>,
     limit: usize,
     cancellation: &dyn GraphCancellation,
+    admit: &mut ReadAllocationAdmission<'_>,
 ) -> Result<Vec<String>, GraphDbError> {
     check_cancelled(cancellation)?;
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let page =
-        match handle
-            .inner
-            .identity_indexes
-            .ordered_identities(database, scope, cancellation)?
-        {
-            Some(index) => index.page(after, limit),
-            None => streaming_identity_page(database, scope, after, limit, cancellation)?,
-        };
+    let page = match handle.inner.identity_indexes.ordered_identities_admitted(
+        database,
+        scope,
+        cancellation,
+        admit,
+    )? {
+        Some(index) => {
+            if let Some(admit) = admit {
+                admit(index.page_bytes(after, limit))?;
+            }
+            index.page(after, limit)
+        }
+        None => {
+            streaming_identity_page_admitted(database, scope, after, limit, cancellation, admit)?
+        }
+    };
     check_cancelled(cancellation)?;
     Ok(page)
 }
@@ -388,26 +514,50 @@ pub(crate) fn query_identity_page(
 /// The pre-index page scan, kept for projections whose identities exceed the
 /// index's retention budget. Bounded in memory by `limit` rather than by the
 /// projection's size.
-fn streaming_identity_page(
+fn streaming_identity_page_admitted(
     database: &GrafeoDB,
     scope: IdentityScope<'_>,
     after: Option<&str>,
     limit: usize,
     cancellation: &dyn GraphCancellation,
+    admit: &mut ReadAllocationAdmission<'_>,
 ) -> Result<Vec<String>, GraphDbError> {
     let IdentityScope {
         owner_label,
         record_label,
         identity_property,
     } = scope;
-    let nodes = labeled_projection_nodes(database, owner_label, record_label)?;
     let store = database.graph_store();
+    let nodes = nodes_with_label_admitted(store.as_ref(), owner_label, admit)?;
+    let node_bytes = nodes
+        .capacity()
+        .saturating_mul(std::mem::size_of::<grafeo_common::types::NodeId>());
     let mut page: BTreeSet<String> = BTreeSet::new();
-    for node in nodes {
+    let mut strings = 0_usize;
+    for &node in &nodes {
         check_cancelled(cancellation)?;
-        let Some(record) = store.get_node(node) else {
+        let held =
+            node_bytes
+                .saturating_add(strings)
+                .saturating_add((page.len() + 1).saturating_mul(
+                    12 * std::mem::size_of::<String>() + 12 * std::mem::size_of::<usize>(),
+                ));
+        let guarded = admit.is_some();
+        let mut row_admit = |bytes| match admit {
+            Some(admit) => admit(held.saturating_add(bytes)),
+            None => Ok(()),
+        };
+        let mut admission = if guarded {
+            Some(&mut row_admit as &mut dyn FnMut(usize) -> Result<(), GraphDbError>)
+        } else {
+            None
+        };
+        let Some(record) = admitted_node(store.as_ref(), node, &mut admission)? else {
             continue;
         };
+        if !has_native_label(&record, record_label) {
+            continue;
+        }
         let identity = decode_identity(record.get_property(identity_property), identity_property)?;
         if after.is_some_and(|after| identity.as_str() <= after) {
             continue;
@@ -416,9 +566,23 @@ fn streaming_identity_page(
             if page.last().is_some_and(|widest| identity >= *widest) {
                 continue;
             }
-            page.pop_last();
+            if let Some(removed) = page.pop_last() {
+                strings = strings.saturating_sub(removed.capacity());
+            }
+        }
+        if !page.contains(&identity) {
+            strings = strings.saturating_add(identity.capacity());
         }
         page.insert(identity);
+    }
+    if let Some(admit) = admit {
+        admit(
+            node_bytes
+                .saturating_add(strings)
+                .saturating_add(page.len().saturating_mul(
+                    13 * std::mem::size_of::<String>() + 12 * std::mem::size_of::<usize>(),
+                )),
+        )?;
     }
     Ok(page.into_iter().collect())
 }
@@ -474,7 +638,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
-    use super::{IdentityScope, query_identity_page, streaming_identity_page};
+    use super::{IdentityScope, query_identity_page_admitted, streaming_identity_page_admitted};
     use crate::schema::{ENTITY_ID_PROPERTY, ENTITY_LABEL, entity_projection_label};
     use crate::{
         GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
@@ -557,21 +721,23 @@ mod tests {
             Some("zzz"),
         ] {
             for limit in [1usize, 7, 64, 1_000] {
-                let indexed = query_identity_page(
+                let indexed = query_identity_page_admitted(
                     &db,
                     database,
                     scope(&owner_label),
                     after,
                     limit,
                     &cancellation,
+                    &mut None,
                 )
                 .unwrap();
-                let streamed = streaming_identity_page(
+                let streamed = streaming_identity_page_admitted(
                     database,
                     scope(&owner_label),
                     after,
                     limit,
                     &cancellation,
+                    &mut None,
                 )
                 .unwrap();
                 assert_eq!(indexed, streamed, "after={after:?} limit={limit}");
@@ -589,7 +755,7 @@ mod tests {
         let before = {
             let guard = db.read_guard().unwrap();
             let database = guard.as_ref().unwrap();
-            query_identity_page(
+            query_identity_page_admitted(
                 &db,
                 database,
                 scope(&entity_projection_label(
@@ -599,6 +765,7 @@ mod tests {
                 None,
                 100,
                 &NeverCancelled,
+                &mut None,
             )
             .unwrap()
         };
@@ -608,7 +775,7 @@ mod tests {
 
         let guard = db.read_guard().unwrap();
         let database = guard.as_ref().unwrap();
-        let after = query_identity_page(
+        let after = query_identity_page_admitted(
             &db,
             database,
             scope(&entity_projection_label(
@@ -618,6 +785,7 @@ mod tests {
             None,
             100,
             &NeverCancelled,
+            &mut None,
         )
         .unwrap();
 

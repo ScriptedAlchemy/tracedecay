@@ -3321,7 +3321,14 @@ async fn catalog_builds_reserve_the_heap_they_hold() {
     };
 
     let (refused, memory) = charged(peak / 10 * 9);
-    let refusal = warm(&refused).expect_err("an authority short of the build's heap refuses it");
+    let (result, _, refused_peak) =
+        crate::thread_allocation::live_and_peak_during(|| warm(&refused));
+    println!("catalog allocation peak={peak} refused_peak={refused_peak}");
+    let refusal = result.expect_err("an authority short of the build's heap refuses it");
+    assert!(
+        u64::try_from(refused_peak).expect("positive refusal peak") <= peak / 10 * 9,
+        "resident memory must refuse before allocating beyond the admitted limit"
+    );
     assert!(
         matches!(
             &refusal,

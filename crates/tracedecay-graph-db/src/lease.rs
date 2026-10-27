@@ -364,8 +364,26 @@ impl VerifiedGraphSnapshot {
         reference: &GraphEntityRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
+        self.entity_admitted(reference, cancellation, &mut None)
+    }
+
+    pub fn entity_with_allocation_admission(
+        &self,
+        reference: &GraphEntityRef,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut dyn FnMut(usize) -> Result<(), GraphDbError>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
+        self.entity_admitted(reference, cancellation, &mut Some(admit))
+    }
+
+    fn entity_admitted(
+        &self,
+        reference: &GraphEntityRef,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
         let (store, entity) = if let Some(served) =
-            self.sealed_entity_without_staging_gate(reference, Arc::clone(&cancellation))?
+            self.sealed_entity_without_staging_gate(reference, Arc::clone(&cancellation), admit)?
         {
             served
         } else {
@@ -375,17 +393,23 @@ impl VerifiedGraphSnapshot {
                 // this gate. Either may have landed while this read waited,
                 // so the sealed probe repeats under the gate before the
                 // staging answer is trusted as absent.
-                if let Some(served) =
-                    self.sealed_entity_without_staging_gate(reference, Arc::clone(&cancellation))?
-                {
+                if let Some(served) = self.sealed_entity_without_staging_gate(
+                    reference,
+                    Arc::clone(&cancellation),
+                    admit,
+                )? {
                     return Ok(served);
                 }
                 let lease = self.lease_for_projection(&reference.projection)?;
                 let namespace = lease.locator.physical_namespace()?;
                 Ok((
                     GraphReadStore::Staging,
-                    self.database
-                        .entity(&namespace, &reference.identity, cancellation)?,
+                    self.database.entity_admitted(
+                        &namespace,
+                        &reference.identity,
+                        cancellation,
+                        admit,
+                    )?,
                 ))
             })?
         };
@@ -405,8 +429,26 @@ impl VerifiedGraphSnapshot {
         reference: &GraphRelationRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
+        self.relation_admitted(reference, cancellation, &mut None)
+    }
+
+    pub fn relation_with_allocation_admission(
+        &self,
+        reference: &GraphRelationRef,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut dyn FnMut(usize) -> Result<(), GraphDbError>,
+    ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
+        self.relation_admitted(reference, cancellation, &mut Some(admit))
+    }
+
+    fn relation_admitted(
+        &self,
+        reference: &GraphRelationRef,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
+    ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
         let (store, relation) = if let Some(served) =
-            self.sealed_relation_without_staging_gate(reference, Arc::clone(&cancellation))?
+            self.sealed_relation_without_staging_gate(reference, Arc::clone(&cancellation), admit)?
         {
             served
         } else {
@@ -414,15 +456,21 @@ impl VerifiedGraphSnapshot {
                 // Same mid-wait transition as `entity`: a sealed store
                 // installed while this read queued on the gate is
                 // authoritative over staging rows that may already be gone.
-                if let Some(served) =
-                    self.sealed_relation_without_staging_gate(reference, Arc::clone(&cancellation))?
-                {
+                if let Some(served) = self.sealed_relation_without_staging_gate(
+                    reference,
+                    Arc::clone(&cancellation),
+                    admit,
+                )? {
                     return Ok(served);
                 }
                 Ok((
                     GraphReadStore::Staging,
-                    self.database
-                        .generation_relation(self, reference, cancellation)?,
+                    self.database.generation_relation_admitted(
+                        self,
+                        reference,
+                        cancellation,
+                        admit,
+                    )?,
                 ))
             })?
         };
@@ -453,11 +501,33 @@ impl VerifiedGraphSnapshot {
         reference: &GraphEntityRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
+        self.base_entity_admitted(reference, cancellation, &mut None)
+    }
+
+    pub fn base_entity_with_allocation_admission(
+        &self,
+        reference: &GraphEntityRef,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut dyn FnMut(usize) -> Result<(), GraphDbError>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
+        self.base_entity_admitted(reference, cancellation, &mut Some(admit))
+    }
+
+    fn base_entity_admitted(
+        &self,
+        reference: &GraphEntityRef,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
         let Some(sealed) = self.sealed_head() else {
             return Ok(None);
         };
         self.with_operation(|| match sealed.layered_reads() {
-            Some(reads) => reads.layer.base_entity(&reference.identity, cancellation),
+            Some(reads) => {
+                reads
+                    .layer
+                    .base_entity_admitted(&reference.identity, cancellation, admit)
+            }
             None => Ok(None),
         })
     }
@@ -470,14 +540,33 @@ impl VerifiedGraphSnapshot {
         reference: &GraphRelationRef,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
+        self.base_relation_admitted(reference, cancellation, &mut None)
+    }
+
+    pub fn base_relation_with_allocation_admission(
+        &self,
+        reference: &GraphRelationRef,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut dyn FnMut(usize) -> Result<(), GraphDbError>,
+    ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
+        self.base_relation_admitted(reference, cancellation, &mut Some(admit))
+    }
+
+    fn base_relation_admitted(
+        &self,
+        reference: &GraphRelationRef,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
+    ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
         let Some(sealed) = self.sealed_head() else {
             return Ok(None);
         };
         self.with_operation(|| match sealed.layered_reads() {
-            Some(reads) => reads.layer.base_relation(
+            Some(reads) => reads.layer.base_relation_admitted(
                 reads.projection,
                 &reference.identity,
                 cancellation.as_ref(),
+                admit,
             ),
             None => Ok(None),
         })
@@ -486,18 +575,36 @@ impl VerifiedGraphSnapshot {
     #[tracing::instrument(name = "graph_db.lease.read_projection", level = "trace", skip_all)]
     pub fn read_projection(
         &self,
+        request: GraphProjectionReadRequest,
+    ) -> Result<GraphProjectionPage, GraphDbError> {
+        self.read_projection_admitted(request, &mut None)
+    }
+
+    /// The callback covers this read's total additional allocation demand.
+    /// It runs under the snapshot and database fences and must not reenter them.
+    pub fn read_projection_with_allocation_admission(
+        &self,
+        request: GraphProjectionReadRequest,
+        admit: &mut dyn FnMut(usize) -> Result<(), GraphDbError>,
+    ) -> Result<GraphProjectionPage, GraphDbError> {
+        self.read_projection_admitted(request, &mut Some(admit))
+    }
+
+    fn read_projection_admitted(
+        &self,
         mut request: GraphProjectionReadRequest,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<GraphProjectionPage, GraphDbError> {
         self.require_head_projection(&request.namespace, &request.projection)?;
         request.namespace = self.head.locator.physical_namespace()?;
         self.with_operation(|| {
             if let Some(sealed) = self.sealed_head() {
                 if let Some(layered) = sealed.layered_reads() {
-                    return layered.read_projection(request);
+                    return layered.read_projection_admitted(request, admit);
                 }
-                return sealed.database().read_projection(request);
+                return sealed.database().read_projection_admitted(request, admit);
             }
-            self.database.read_projection(request)
+            self.database.read_projection_admitted(request, admit)
         })
     }
 
@@ -944,6 +1051,7 @@ impl VerifiedGraphSnapshot {
         &self,
         reference: &GraphEntityRef,
         cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<Option<(GraphReadStore, Option<GraphEntity>)>, GraphDbError> {
         let lease = self.lease_for_projection(&reference.projection)?;
         let namespace = lease.locator.physical_namespace()?;
@@ -954,14 +1062,18 @@ impl VerifiedGraphSnapshot {
         {
             return Ok(Some((
                 GraphReadStore::Sealed,
-                layered.entity(&reference.identity, cancellation)?,
+                layered.entity_admitted(&reference.identity, cancellation, admit)?,
             )));
         }
         if self.direct_sealed {
             return Ok(Some((
                 GraphReadStore::Sealed,
-                self.database
-                    .entity(&namespace, &reference.identity, cancellation)?,
+                self.database.entity_admitted(
+                    &namespace,
+                    &reference.identity,
+                    cancellation,
+                    admit,
+                )?,
             )));
         }
         // A sealed generation's point reads serve from its compacted
@@ -970,9 +1082,12 @@ impl VerifiedGraphSnapshot {
         if let Some(sealed) = self.database.sealed_generation_reader(&lease.locator) {
             return Ok(Some((
                 GraphReadStore::Sealed,
-                sealed
-                    .database()
-                    .entity(&namespace, &reference.identity, cancellation)?,
+                sealed.database().entity_admitted(
+                    &namespace,
+                    &reference.identity,
+                    cancellation,
+                    admit,
+                )?,
             )));
         }
         Ok(None)
@@ -982,6 +1097,7 @@ impl VerifiedGraphSnapshot {
         &self,
         reference: &GraphRelationRef,
         cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<Option<(GraphReadStore, Option<GraphGenerationRelation>)>, GraphDbError> {
         let lease = self.lease_for_projection(&reference.projection)?;
         // The owning generation's sealed store holds the relation, its
@@ -993,14 +1109,14 @@ impl VerifiedGraphSnapshot {
         if let Some(layered) = sealed.layered_reads() {
             return Ok(Some((
                 GraphReadStore::Sealed,
-                layered.relation(&reference.identity, cancellation.as_ref())?,
+                layered.relation_admitted(&reference.identity, cancellation.as_ref(), admit)?,
             )));
         }
         Ok(Some((
             GraphReadStore::Sealed,
             sealed
                 .database()
-                .generation_relation(self, reference, cancellation)?,
+                .generation_relation_admitted(self, reference, cancellation, admit)?,
         )))
     }
 
@@ -1118,6 +1234,19 @@ impl VerifiedGraphSnapshot {
                 ))
             })
             .collect()
+    }
+
+    pub(crate) fn namespace_projection_allocation_bytes(&self) -> usize {
+        self.closure.values().fold(0_usize, |bytes, lease| {
+            bytes
+                .saturating_add(lease.locator.projection.namespace.as_str().len())
+                .saturating_add(lease.locator.projection.projection.as_str().len())
+                .saturating_add(lease.locator.generation.as_str().len())
+                .saturating_add(2 * crate::MAX_GRAPH_IDENTIFIER_BYTES)
+                .saturating_add(
+                    12 * std::mem::size_of::<(GraphNamespace, GraphProjectionIdentity)>(),
+                )
+        })
     }
 }
 

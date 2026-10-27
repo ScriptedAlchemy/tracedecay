@@ -28,7 +28,7 @@ use crate::runtime::{GraphBatchPlan, PreparedGraphBatch};
 use crate::schema::{NAMESPACE_PROPERTY, relation_kind_from_type, required_string};
 use crate::sealed_store::{SealedReleaseEvidence, SealedStoreInstall};
 use crate::state::{
-    EndpointIdentityCache, latest_projection, load_relation, load_relation_by_edge_cached,
+    EndpointIdentityCache, latest_projection, load_relation_by_edge_cached,
     projection_entity_deletion_page_checked, projection_node_counts,
     projection_relation_deletion_page_checked,
 };
@@ -1987,24 +1987,63 @@ impl GraphDb {
     }
 
     #[tracing::instrument(name = "graph_db.read.generation_relation", level = "trace", skip_all)]
-    pub(crate) fn generation_relation(
+    pub(crate) fn generation_relation_admitted(
         &self,
         snapshot: &VerifiedGraphSnapshot,
         reference: &GraphRelationRef,
         cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
+        }
+        let map_bytes = snapshot.namespace_projection_allocation_bytes();
+        if let Some(admit) = admit {
+            admit(map_bytes)?;
         }
         let namespace_projection = snapshot.namespace_projection_map()?;
         self.read_intact(cancellation.as_ref(), |database| {
             let relation_lease = snapshot.lease_for_projection(&reference.projection)?;
             let relation_namespace = relation_lease.locator.physical_namespace()?;
-            let Some(stored) = load_relation(database, &relation_namespace, &reference.identity)?
+            let guarded = admit.is_some();
+            let mut row_admit = |bytes| match admit {
+                Some(admit) => admit(map_bytes.saturating_add(bytes)),
+                None => Ok(()),
+            };
+            let mut admission = if guarded {
+                Some(&mut row_admit as &mut dyn FnMut(usize) -> Result<(), GraphDbError>)
+            } else {
+                None
+            };
+            let Some(stored) = crate::state::load_relation_admitted(
+                database,
+                &relation_namespace,
+                &reference.identity,
+                &mut admission,
+            )?
             else {
                 return Ok(None);
             };
             let mut endpoints = EndpointIdentityCache::default();
+            if let Some(admit) = admit {
+                let store = database.graph_store();
+                let bytes = [stored.source, stored.target].into_iter().try_fold(
+                    map_bytes.saturating_add(crate::projection_read::decoded_relation_bytes(
+                        &stored.relation,
+                    )),
+                    |bytes, node| {
+                        store
+                            .node_allocation_bytes(node)
+                            .map(|next| bytes.saturating_add(next.saturating_mul(3)))
+                            .ok_or_else(|| {
+                                GraphDbError::unavailable(
+                                    "native graph allocation metadata unavailable",
+                                )
+                            })
+                    },
+                )?;
+                admit(bytes)?;
+            }
             let from = typed_entity_ref(
                 database,
                 stored.source,

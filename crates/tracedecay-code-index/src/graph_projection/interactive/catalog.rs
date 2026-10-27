@@ -15,9 +15,9 @@ use tracedecay_graph_db::{
 };
 
 use super::super::schema::{
-    FILE_IMPORT_EDGE_KIND, FILE_LABEL, FILE_RECORD_PROPERTY, IMPORT_LABEL, IMPORT_RECORD_PROPERTY,
-    SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, file_entity_id,
-    file_import_relation_id, has_label, import_entity_id,
+    CatalogRecord, FILE_IMPORT_EDGE_KIND, FILE_LABEL, FILE_RECORD_PROPERTY, IMPORT_LABEL,
+    IMPORT_RECORD_PROPERTY, SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_catalog_property,
+    file_entity_id, file_import_relation_id, has_label, import_entity_id,
 };
 use super::super::{
     CodeGraphProjectionError, EDGE_RECORD_PROPERTY, SymbolRecordV1, code_edge_kind_edge,
@@ -26,12 +26,52 @@ use super::super::{
 use super::build_charge::CatalogBuildChargeV1;
 use super::models::{
     CatalogBuilder, CatalogLayerV1, CatalogSymbol, DeltaEntityV1, DeltaRelationV1,
-    InteractiveCatalog,
+    InteractiveCatalog, aggregate_allocation_bytes,
 };
 use crate::chunks::CodeIndexImportEvidenceV1;
 use crate::production::resident_bytes::{btree_bytes, import_heap_bytes};
 
 const CATALOG_SCAN_PAGE_ITEMS: usize = 1_024;
+
+pub(super) fn entity_bytes(entity: &GraphEntity) -> usize {
+    size_of::<GraphEntity>()
+        .saturating_add(entity.identity.as_str().len())
+        .saturating_add(
+            entity
+                .labels
+                .iter()
+                .map(|label| label.as_str().len() + 64)
+                .sum::<usize>(),
+        )
+        .saturating_add(properties_bytes(&entity.properties))
+}
+
+pub(super) fn relation_bytes(relation: &GraphRelation) -> usize {
+    size_of::<GraphRelation>()
+        .saturating_add(relation.identity.as_str().len())
+        .saturating_add(relation.from.as_str().len())
+        .saturating_add(relation.to.as_str().len())
+        .saturating_add(relation.kind.as_str().len())
+        .saturating_add(properties_bytes(&relation.properties))
+}
+
+fn properties_bytes(
+    properties: &BTreeMap<
+        tracedecay_graph_db::GraphPropertyName,
+        tracedecay_graph_db::GraphProperty,
+    >,
+) -> usize {
+    properties.iter().fold(0_usize, |bytes, (name, property)| {
+        bytes
+            .saturating_add(name.as_str().len())
+            .saturating_add(128)
+            .saturating_add(match property {
+                tracedecay_graph_db::GraphProperty::String(value) => value.capacity(),
+                tracedecay_graph_db::GraphProperty::Bytes(value) => value.capacity(),
+                _ => 0,
+            })
+    })
+}
 
 pub(super) fn build_interactive_catalog(
     snapshot: &VerifiedGraphSnapshot,
@@ -46,25 +86,41 @@ pub(super) fn build_interactive_catalog(
     // past instead of being held until the scan ends.
     let read_page = |after_entity: Option<GraphEntityId>,
                      after_relation: Option<GraphRelationId>,
-                     entities: bool| {
+                     entities: bool,
+                     held: usize,
+                     charge: &mut CatalogBuildChargeV1| {
         let _span = tracing::trace_span!("code_graph.catalog.scan_page").entered();
-        snapshot.read_projection(GraphProjectionReadRequest {
-            namespace: projection.namespace.clone(),
-            projection: projection.projection.clone(),
-            after_entity,
-            after_relation,
-            max_entities: if entities { CATALOG_SCAN_PAGE_ITEMS } else { 0 },
-            max_relations: if entities { 0 } else { CATALOG_SCAN_PAGE_ITEMS },
-            cancellation: Arc::clone(&cancellation),
-        })
+        snapshot.read_projection_with_allocation_admission(
+            GraphProjectionReadRequest {
+                namespace: projection.namespace.clone(),
+                projection: projection.projection.clone(),
+                after_entity,
+                after_relation,
+                max_entities: if entities { CATALOG_SCAN_PAGE_ITEMS } else { 0 },
+                max_relations: if entities { 0 } else { CATALOG_SCAN_PAGE_ITEMS },
+                cancellation: Arc::clone(&cancellation),
+            },
+            &mut |bytes| charge.cover_read(held.saturating_add(bytes)),
+        )
     };
     let mut after_entity = None;
     loop {
         check_cancelled(cancellation.as_ref())?;
-        let page = read_page(after_entity, None, true)?;
+        let page = read_page(after_entity, None, true, scan.held_bytes(), charge)?;
+        let page_bytes = page
+            .entities
+            .iter()
+            .map(entity_bytes)
+            .fold(0_usize, usize::saturating_add);
         {
             let _span = tracing::trace_span!("code_graph.catalog.record_entities").entered();
-            scan.record_entity_page(&page.entities, projection_node_count, cancellation.as_ref())
+            scan.record_entity_page(
+                &page.entities,
+                projection_node_count,
+                cancellation.as_ref(),
+                page_bytes,
+                charge,
+            )
         }?;
         charge.cover(scan.held_bytes())?;
         after_entity = page.next_entity;
@@ -75,10 +131,15 @@ pub(super) fn build_interactive_catalog(
     let mut after_relation = None;
     loop {
         check_cancelled(cancellation.as_ref())?;
-        let page = read_page(None, after_relation, false)?;
+        let page = read_page(None, after_relation, false, scan.held_bytes(), charge)?;
+        let page_bytes = page
+            .relations
+            .iter()
+            .map(relation_bytes)
+            .fold(0_usize, usize::saturating_add);
         {
             let _span = tracing::trace_span!("code_graph.catalog.record_relations").entered();
-            scan.record_relation_page(&page.relations, cancellation.as_ref())
+            scan.record_relation_page(&page.relations, cancellation.as_ref(), page_bytes, charge)
         }?;
         charge.cover(scan.held_bytes())?;
         after_relation = page.next_relation;
@@ -88,7 +149,15 @@ pub(super) fn build_interactive_catalog(
     }
 
     check_cancelled(cancellation.as_ref())?;
-    charge.cover(scan.held_bytes().saturating_add(scan.frozen_bytes()))?;
+    charge.cover(
+        scan.held_bytes()
+            .saturating_add(scan.frozen_bytes())
+            .saturating_add(aggregate_allocation_bytes(
+                scan.catalog.files.values(),
+                scan.catalog.symbols_by_logical_path.keys(),
+                scan.dependency_edge_counts.keys(),
+            )?),
+    )?;
     {
         let _span = tracing::trace_span!("code_graph.catalog.finish").entered();
         scan.finish(projection_node_count)
@@ -142,14 +211,18 @@ impl LayerScan {
         }
     }
 
-    fn record_entity(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
+    fn record_entity(
+        &mut self,
+        entity: &GraphEntity,
+        admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
+    ) -> Result<(), CodeGraphProjectionError> {
         if self
             .rows
             .delta_entities
             .binary_search(&entity.identity)
             .is_ok()
         {
-            let delta = delta_entity(entity)?;
+            let delta = delta_entity(entity, admit)?;
             self.heap = self
                 .heap
                 .saturating_add(entity.identity.as_str().len())
@@ -162,6 +235,7 @@ impl LayerScan {
     fn record_relation(
         &mut self,
         relation: &GraphRelation,
+        admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
     ) -> Result<(), CodeGraphProjectionError> {
         if self
             .rows
@@ -169,7 +243,7 @@ impl LayerScan {
             .binary_search(&relation.identity)
             .is_ok()
         {
-            let delta = delta_relation(relation)?;
+            let delta = delta_relation(relation, admit)?;
             self.heap = self
                 .heap
                 .saturating_add(relation.identity.as_str().len())
@@ -217,13 +291,14 @@ impl LayerScan {
 /// What an entity row contributes, as the layer records it.
 pub(super) fn delta_entity(
     entity: &GraphEntity,
+    admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
 ) -> Result<DeltaEntityV1, CodeGraphProjectionError> {
     Ok(if has_label(entity, FILE_LABEL) {
-        DeltaEntityV1::File(decode_file_record(entity)?.file_occurrence_id)
+        DeltaEntityV1::File(decode_file_record(entity, admit)?.file_occurrence_id)
     } else if has_label(entity, SYMBOL_LABEL) {
-        DeltaEntityV1::Symbol(decode_symbol_record(entity)?.occurrence)
+        DeltaEntityV1::Symbol(decode_symbol_record(entity, admit)?.occurrence)
     } else if has_label(entity, IMPORT_LABEL) {
-        DeltaEntityV1::Import(decode_import_record(entity)?)
+        DeltaEntityV1::Import(decode_import_record(entity, admit)?)
     } else {
         DeltaEntityV1::Other
     })
@@ -232,6 +307,7 @@ pub(super) fn delta_entity(
 /// What a relation row contributes, as the layer records it.
 pub(super) fn delta_relation(
     relation: &GraphRelation,
+    admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
 ) -> Result<DeltaRelationV1, CodeGraphProjectionError> {
     if relation.kind.as_str() == FILE_IMPORT_EDGE_KIND {
         return Ok(DeltaRelationV1::ImportLink {
@@ -240,7 +316,7 @@ pub(super) fn delta_relation(
     }
     match code_edge_kind_edge(relation.kind.as_str()) {
         Some(kind) => {
-            let (from, to) = edge_endpoints(relation)?;
+            let (from, to) = edge_endpoints(relation, admit)?;
             Ok(DeltaRelationV1::Edge { kind, from, to })
         }
         None => Ok(DeltaRelationV1::Other),
@@ -272,6 +348,22 @@ struct DependencyEdgeRecord {
     to_occurrence: String,
 }
 
+impl CatalogRecord for DependencyEdgeRecord {
+    const PROPERTY: &'static str = EDGE_RECORD_PROPERTY;
+}
+
+impl CatalogRecord for SanitizedCodeFileV1 {
+    const PROPERTY: &'static str = FILE_RECORD_PROPERTY;
+}
+
+impl CatalogRecord for SymbolRecordV1 {
+    const PROPERTY: &'static str = SYMBOL_RECORD_PROPERTY;
+}
+
+impl CatalogRecord for CodeIndexImportEvidenceV1 {
+    const PROPERTY: &'static str = IMPORT_RECORD_PROPERTY;
+}
+
 /// Whether edges of `kind` fold into file dependencies.
 pub(super) fn is_dependency_kind(kind: RelationEdgeKindV1) -> bool {
     matches!(kind, RelationEdgeKindV1::Calls | RelationEdgeKindV1::Uses)
@@ -280,9 +372,9 @@ pub(super) fn is_dependency_kind(kind: RelationEdgeKindV1) -> bool {
 /// The symbol occurrences a code edge row joins, as its payload names them.
 pub(super) fn edge_endpoints(
     relation: &GraphRelation,
+    admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
 ) -> Result<(SymbolOccurrenceId, SymbolOccurrenceId), CodeGraphProjectionError> {
-    let edge: DependencyEdgeRecord =
-        deserialize_property(&relation.properties, EDGE_RECORD_PROPERTY)?;
+    let edge: DependencyEdgeRecord = deserialize_catalog_property(&relation.properties, admit)?;
     let endpoint = |occurrence: String| {
         SymbolOccurrenceId::new(occurrence)
             .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
@@ -353,6 +445,8 @@ impl CatalogScan {
         entities: &[GraphEntity],
         projection_node_count: usize,
         cancellation: &dyn GraphCancellation,
+        page_bytes: usize,
+        charge: &mut CatalogBuildChargeV1,
     ) -> Result<(), CodeGraphProjectionError> {
         self.scanned_entities = self
             .scanned_entities
@@ -370,29 +464,44 @@ impl CatalogScan {
         }
         for entity in entities {
             check_cancelled(cancellation)?;
-            self.record_entity(entity)?;
+            let held = self.held_bytes().saturating_add(page_bytes).saturating_add(
+                btree_bytes(1, size_of::<(SymbolOccurrenceId, CatalogSymbol)>()).saturating_mul(10),
+            );
+            charge.cover(held)?;
+            self.record_entity(entity, &mut |bytes| {
+                charge.cover(held.saturating_add(bytes))
+            })?;
         }
         Ok(())
     }
 
-    fn record_entity(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
+    fn record_entity(
+        &mut self,
+        entity: &GraphEntity,
+        admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
+    ) -> Result<(), CodeGraphProjectionError> {
         if has_label(entity, FILE_LABEL) {
-            self.catalog.insert_file(decode_file_record(entity)?)?;
+            self.catalog
+                .insert_file(decode_file_record(entity, admit)?)?;
         }
         if has_label(entity, SYMBOL_LABEL) {
-            self.record_symbol(entity)?;
+            self.record_symbol(entity, admit)?;
         }
         if has_label(entity, IMPORT_LABEL) {
-            self.record_import(entity)?;
+            self.record_import(entity, admit)?;
         }
         if let Some(layer) = &mut self.layer {
-            layer.record_entity(entity)?;
+            layer.record_entity(entity, admit)?;
         }
         Ok(())
     }
 
-    fn record_symbol(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
-        let record = decode_symbol_record(entity)?;
+    fn record_symbol(
+        &mut self,
+        entity: &GraphEntity,
+        admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
+    ) -> Result<(), CodeGraphProjectionError> {
+        let record = decode_symbol_record(entity, admit)?;
         if self.catalog.symbols.contains_key(&record.occurrence) {
             return Err(CodeGraphProjectionError::Corrupt(
                 "code graph contains a duplicate symbol entity".to_owned(),
@@ -415,8 +524,12 @@ impl CatalogScan {
         Ok(())
     }
 
-    fn record_import(&mut self, entity: &GraphEntity) -> Result<(), CodeGraphProjectionError> {
-        let record = decode_import_record(entity)?;
+    fn record_import(
+        &mut self,
+        entity: &GraphEntity,
+        admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
+    ) -> Result<(), CodeGraphProjectionError> {
+        let record = decode_import_record(entity, admit)?;
         let heap = import_heap_bytes(&record).saturating_add(entity.identity.as_str().len());
         if self
             .imports_by_entity
@@ -435,20 +548,28 @@ impl CatalogScan {
         &mut self,
         relations: &[GraphRelation],
         cancellation: &dyn GraphCancellation,
+        page_bytes: usize,
+        charge: &mut CatalogBuildChargeV1,
     ) -> Result<(), CodeGraphProjectionError> {
         for relation in relations {
             check_cancelled(cancellation)?;
+            let held = self
+                .held_bytes()
+                .saturating_add(page_bytes)
+                .saturating_add(btree_bytes(2, size_of::<(GraphEntityId, (u64, u64))>()));
+            charge.cover(held)?;
+            let mut admit = |bytes| charge.cover(held.saturating_add(bytes));
             self.count_relation()?;
             match relation.kind.as_str() {
                 FILE_IMPORT_EDGE_KIND => self.record_import_link(relation)?,
                 kind => {
                     if let Some(edge_kind) = code_edge_kind_edge(kind) {
-                        self.record_code_edge(relation, edge_kind)?;
+                        self.record_code_edge(relation, edge_kind, &mut admit)?;
                     }
                 }
             }
             if let Some(layer) = &mut self.layer {
-                layer.record_relation(relation)?;
+                layer.record_relation(relation, &mut admit)?;
             }
         }
         Ok(())
@@ -458,6 +579,7 @@ impl CatalogScan {
         &mut self,
         relation: &GraphRelation,
         kind: RelationEdgeKindV1,
+        admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
     ) -> Result<(), CodeGraphProjectionError> {
         for (endpoint, outgoing) in [(&relation.from, true), (&relation.to, false)] {
             let tallied = self.degrees.len();
@@ -471,7 +593,7 @@ impl CatalogScan {
             }
         }
         if is_dependency_kind(kind) {
-            let (from, to) = edge_endpoints(relation)?;
+            let (from, to) = edge_endpoints(relation, admit)?;
             self.dependency_edges = self.dependency_edges.saturating_add(1);
             if let (Some(source), Some(target)) = (
                 self.catalog.bound_logical_path(&from),
@@ -615,9 +737,9 @@ impl<K: Ord> SymbolDegreeCounts<K> {
 /// The file record a `CodeFile` entity carries, proven to be the entity's own.
 pub(super) fn decode_file_record(
     entity: &GraphEntity,
+    admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
 ) -> Result<SanitizedCodeFileV1, CodeGraphProjectionError> {
-    let record: SanitizedCodeFileV1 =
-        deserialize_property(&entity.properties, FILE_RECORD_PROPERTY)?;
+    let record: SanitizedCodeFileV1 = deserialize_catalog_property(&entity.properties, admit)?;
     record
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
@@ -633,8 +755,9 @@ pub(super) fn decode_file_record(
 /// entity's own.
 pub(super) fn decode_symbol_record(
     entity: &GraphEntity,
+    admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
 ) -> Result<SymbolRecordV1, CodeGraphProjectionError> {
-    let record: SymbolRecordV1 = deserialize_property(&entity.properties, SYMBOL_RECORD_PROPERTY)?;
+    let record: SymbolRecordV1 = deserialize_catalog_property(&entity.properties, admit)?;
     validate_symbol_record(&record)?;
     if symbol_entity_id(&record.occurrence)? != entity.identity {
         return Err(CodeGraphProjectionError::Corrupt(
@@ -648,14 +771,26 @@ pub(super) fn decode_symbol_record(
 /// entity's own.
 pub(super) fn decode_import_record(
     entity: &GraphEntity,
+    admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
 ) -> Result<CodeIndexImportEvidenceV1, CodeGraphProjectionError> {
     let record: CodeIndexImportEvidenceV1 =
-        deserialize_property(&entity.properties, IMPORT_RECORD_PROPERTY)?;
+        deserialize_catalog_property(&entity.properties, &mut *admit)?;
     record.validate().map_err(|error| {
         CodeGraphProjectionError::Corrupt(format!(
             "code graph import row is not canonical: {error}"
         ))
     })?;
+    let serialized = super::super::schema::serialized_record_len(&record)?;
+    // serde_json's byte Vec starts at 128 and grows by max(required, 2 *
+    // capacity). Its reallocation peak is at most 128 + 3 * written bytes.
+    // hex::encode then holds that Vec alongside exactly 2 * written bytes.
+    // The final fixed-size identity and digest text fit in another 128 bytes.
+    admit(
+        import_heap_bytes(&record)
+            .saturating_add(serialized.saturating_mul(3))
+            .saturating_add(serialized.saturating_mul(2))
+            .saturating_add(256),
+    )?;
     if import_entity_id(&record)? != entity.identity {
         return Err(CodeGraphProjectionError::Corrupt(
             "code graph import identity does not match its payload".to_owned(),

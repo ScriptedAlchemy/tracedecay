@@ -944,6 +944,53 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
     let child = child_runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("publish the refresh");
+    let measured_carry =
+        CodeGraphProjectionStore::from_verified_snapshot(child.clone(), child_generation.clone())
+            .expect("measurement store");
+    measured_carry
+        .warm_serving_engine()
+        .expect("measurement engine");
+    let (result, _, peak) = crate::thread_allocation::live_and_peak_during(|| {
+        measured_carry
+            .warm_interactive_catalog_with_cancellation(Some(&base_store), Arc::new(NeverCancelled))
+    });
+    result.expect("measured carry");
+    let limit = u64::try_from(peak).expect("carry allocates") / 10 * 9;
+    let limit = std::num::NonZeroU64::new(limit).expect("carry limit");
+    let memory = Arc::new(
+        tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::with_pressure(
+            limit,
+            Arc::new(
+                tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+                    limit,
+                    Arc::new(|| None),
+                ),
+            ),
+        ),
+    );
+    let refused = CodeGraphProjectionStore::from_verified_snapshot_charged(
+        child.clone(),
+        child_generation.clone(),
+        Arc::clone(&memory),
+    )
+    .expect("charged carry store");
+    refused.warm_serving_engine().expect("charged carry engine");
+    let (result, _, refused_peak) = crate::thread_allocation::live_and_peak_during(|| {
+        refused
+            .warm_interactive_catalog_with_cancellation(Some(&base_store), Arc::new(NeverCancelled))
+    });
+    println!(
+        "carry parent={} peak={peak} limit={limit} refused_peak={refused_peak} result={result:?}",
+        base_store
+            .interactive_catalog_bytes()
+            .expect("parent bytes"),
+    );
+    assert!(
+        matches!(result, Err(tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted { .. })),
+        "an unaffordable incremental carry must be refused"
+    );
+    assert_eq!(memory.snapshot().used_bytes, 0);
+    assert!(u64::try_from(refused_peak).expect("carry refusal peak") <= limit.get());
     let carried_child = warmed_store(child.clone(), &child_generation, Some(&base_store));
     assert_eq!(
         carried_child.interactive_catalog_scan_builds(),

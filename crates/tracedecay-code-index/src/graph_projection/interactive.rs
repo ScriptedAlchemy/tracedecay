@@ -1987,11 +1987,9 @@ impl CodeGraphInteractiveReader {
         &self,
         parent: Option<Arc<InteractiveCatalog>>,
         cancellation: &Arc<dyn GraphCancellation>,
+        charge: &mut CatalogBuildChargeV1,
     ) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
-        let mut charge = CatalogBuildChargeV1::new(self.catalog.memory.as_ref());
         if let Some(parent) = parent {
-            // A carried catalog is a full successor of the parent's size.
-            charge.cover(usize::try_from(parent.retained_bytes()).unwrap_or(usize::MAX))?;
             let carried = {
                 let _span = tracing::trace_span!("code_graph.catalog.carry").entered();
                 carry::carry_interactive_catalog(
@@ -2000,6 +1998,7 @@ impl CodeGraphInteractiveReader {
                     &self.projection,
                     self.projection_node_count,
                     Arc::clone(cancellation),
+                    charge,
                 )
             };
             match carried {
@@ -2021,7 +2020,7 @@ impl CodeGraphInteractiveReader {
             &self.projection,
             self.projection_node_count,
             Arc::clone(cancellation),
-            &mut charge,
+            charge,
         )
     }
 
@@ -2064,9 +2063,10 @@ impl CodeGraphInteractiveReader {
             };
             taken_over
         };
+        let mut charge = CatalogBuildChargeV1::new(self.catalog.memory.as_ref());
         let built = {
             let _span = tracing::trace_span!("code_graph.catalog.build").entered();
-            self.build_catalog(parent, &cancellation)
+            self.build_catalog(parent, &cancellation, &mut charge)
         };
         let result = built.and_then(|catalog| {
             if cancellation.is_cancelled() {

@@ -16,7 +16,7 @@ use super::super::{CodeGraphProjectionError, CodeGraphSymbolBindingV1, symbol_en
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::resident_bytes::{
-    ARC_HEADER_BYTES, btree_bytes, hash_table_bytes, import_heap_bytes, opt,
+    ARC_HEADER_BYTES, btree_bytes, hash_table_bytes, hash_table_capacity, import_heap_bytes, opt,
     snapshot_file_heap_bytes, symbol_heap_bytes, unresolved_heap_bytes, vec_bytes,
 };
 
@@ -292,7 +292,14 @@ impl<K: Ord, V> SortedMap<K, V> {
         K: Clone,
         V: Clone,
     {
-        let mut merged = Vec::with_capacity(self.0.len().saturating_add(edits.len()));
+        let length = edits.iter().fold(self.0.len(), |length, (key, value)| {
+            match (self.get(key).is_some(), value.is_some()) {
+                (true, false) => length.saturating_sub(1),
+                (false, true) => length.saturating_add(1),
+                _ => length,
+            }
+        });
+        let mut merged = Vec::with_capacity(length);
         let mut edits = edits.into_iter().peekable();
         for (key, value) in &self.0 {
             while let Some((edit_key, _)) = edits.peek()
@@ -586,6 +593,62 @@ pub(super) fn fold_file_dependencies(
     }
 }
 
+pub(super) fn aggregate_allocation_bytes<'a>(
+    files: impl Iterator<Item = &'a SanitizedCodeFileV1>,
+    paths: impl Iterator<Item = &'a String>,
+    dependencies: impl Iterator<Item = &'a (String, String)>,
+) -> Result<usize, CodeGraphProjectionError> {
+    let table = |entries| {
+        hash_table_capacity::<(String, HashSet<String>)>(entries)
+            .map(hash_table_bytes::<(String, HashSet<String>)>)
+            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
+    };
+    let mut bytes = ARC_HEADER_BYTES + size_of::<HashMap<String, HashSet<String>>>();
+    let mut file_count = 0_usize;
+    let mut languages = 0_usize;
+    for file in files {
+        file_count = file_count.saturating_add(1);
+        bytes = bytes.saturating_add(file.logical_path.len());
+        if let Some(language) = &file.language {
+            languages = languages.saturating_add(1);
+            bytes = bytes.saturating_add(language.as_str().len());
+        }
+    }
+    bytes = bytes
+        .saturating_add(btree_bytes(languages, size_of::<(String, u64)>()))
+        .saturating_add(languages.saturating_mul(size_of::<(String, u64)>()));
+    let mut ranked = 0_usize;
+    for path in paths {
+        ranked = ranked.saturating_add(1);
+        bytes = bytes.saturating_add(path.len());
+    }
+    bytes =
+        bytes.saturating_add(ranked.saturating_mul(2 * size_of::<CodeGraphFileSymbolCountV1>()));
+    let set = |entries| {
+        hash_table_capacity::<String>(entries)
+            .map(hash_table_bytes::<String>)
+            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
+    };
+    let mut sources = 0_usize;
+    let mut previous = None;
+    let mut targets = 0_usize;
+    for (source, target) in dependencies {
+        if previous != Some(source) {
+            bytes = bytes.saturating_add(set(targets)?.saturating_mul(2));
+            targets = 0;
+            sources = sources.saturating_add(1);
+            bytes = bytes.saturating_add(source.len());
+            previous = Some(source);
+        }
+        targets = targets.saturating_add(1);
+        bytes = bytes
+            .saturating_add(target.len())
+            .saturating_add(source.len());
+    }
+    bytes = bytes.saturating_add(set(targets)?.saturating_mul(2));
+    Ok(bytes.saturating_add(table(file_count.saturating_add(sources))?.saturating_mul(2)))
+}
+
 /// The catalog while a scan fills it: ordered maps that take one entry at a
 /// time, frozen into an [`InteractiveCatalog`] once every entity is recorded.
 pub(super) struct CatalogBuilder {
@@ -601,9 +664,9 @@ pub(super) struct CatalogBuilder {
     unresolved_call_sources: BTreeMap<String, Vec<SymbolOccurrenceId>>,
     unresolved_sources_by_entity: BTreeMap<GraphEntityId, SymbolOccurrenceId>,
     symbols_by_kind: BTreeMap<String, u64>,
-    symbols_by_logical_path: BTreeMap<String, u64>,
+    pub(super) symbols_by_logical_path: BTreeMap<String, u64>,
     /// Heap the entries hold beyond their inline slots: strings, records,
-    /// and list slots, the latter at twice their length for `Vec` growth.
+    /// and list slots, including the initial four-slot `Vec` allocation.
     heap: usize,
 }
 
@@ -660,6 +723,15 @@ impl CatalogBuilder {
             .saturating_add(array(&self.symbols_by_kind))
             .saturating_add(array(&self.symbols_by_logical_path))
             .saturating_add(self.symbols.len().saturating_mul(size_of::<usize>()))
+            .saturating_add(
+                self.by_qualified_name
+                    .values()
+                    .chain(self.by_simple_name.values())
+                    .chain(self.by_file.values())
+                    .chain(self.unresolved_call_sources.values())
+                    .map(|ids| ids.len().saturating_mul(size_of::<SymbolOccurrenceId>()))
+                    .fold(0_usize, usize::saturating_add),
+            )
     }
 
     /// Records a file and its logical path, refusing a duplicate file or a
@@ -774,12 +846,11 @@ impl CatalogBuilder {
     }
 
     pub(super) fn insert(&mut self, occurrence: SymbolOccurrenceId, record: CatalogSymbol) {
-        // A list slot is one id clone and, with `Vec` doubling, at most two
-        // inline slots.
+        // Four slots per member cover the initial allocation and later doubling.
         let slot = occurrence
             .as_str()
             .len()
-            .saturating_add(2 * size_of::<SymbolOccurrenceId>());
+            .saturating_add(4 * size_of::<SymbolOccurrenceId>());
         let mut heap = occurrence
             .as_str()
             .len()
