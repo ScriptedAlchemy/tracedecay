@@ -930,8 +930,10 @@ mod tests {
     async fn get_projects_retired_automation_fields_without_rewriting_the_source_snapshot() {
         let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
         let revision_id: ConfigurationRevisionId = id("configuration.revision.legacy-timeout");
-        let mut expected = AutomationSettingsV1::default();
-        expected.timeout_secs = 137;
+        let expected = AutomationSettingsV1 {
+            timeout_secs: 137,
+            ..AutomationSettingsV1::default()
+        };
         let mut stored = serde_json::to_value(&expected).unwrap();
         stored["tasks"]["memory_curator"]["stale_lock_secs"] = serde_json::json!(3600);
         stored["tasks"]["session_reflector"]["stale_lock_secs"] = serde_json::Value::Null;
