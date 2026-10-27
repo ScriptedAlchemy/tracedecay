@@ -374,8 +374,9 @@ mod runtime_configuration_cutover {
                 .await
                 .unwrap();
 
-            let options =
-                crate::project::TraceDecayOpenOptions::for_profile(host_runtime.profile());
+            let options = crate::project::TraceDecayOpenOptions::for_profile(
+                &tracedecay_runtime_core::config::ProfileRoot::new(profile.path()),
+            );
             let initialized = host_runtime
                 .initialize_project_graph_for_test(root.path(), options.clone())
                 .await
