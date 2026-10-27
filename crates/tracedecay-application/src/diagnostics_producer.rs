@@ -20,13 +20,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use futures_util::FutureExt;
 use futures_util::future::join_all;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
-use tracedecay_domain::{CodeGenerationId, ContentDigest, UtcMicros};
+use tracedecay_domain::{ContentDigest, UtcMicros};
 use tracedecay_lsp::{
     SearchedTsconfig, TypeScriptFileOwner, TypeScriptProject, TypeScriptProjectConfigInputs,
     run_typescript_compiler, typescript_build_info_program, typescript_file_owner,
@@ -42,111 +42,33 @@ use crate::diagnostics_publication::{
 };
 use crate::diagnostics_store::DiagnosticsStore;
 
-/// Outcome of one producer run over one project root.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompilerProducerRunV1 {
-    Published {
-        generation: CodeGenerationId,
-        inserted: u64,
-        unresolved: usize,
-        /// Projects tsc checked for this generation.
-        checked: usize,
-        /// Projects whose previous result this generation republished.
-        reused: usize,
-    },
-    /// The compiler reported findings, but none resolved onto a file the
-    /// code-index generation knows, so nothing was published.
-    NoResolvableDiagnostics {
-        unresolved: Vec<String>,
-    },
-    /// The code index has no complete generation for this root yet.
-    CodeIndexGenerationUnavailable,
-    /// No project could be checked: every compiler failed (spawn failure, a
-    /// tsconfig naming no inputs, a crash), or none is installed.
-    CompilerFailed {
-        reason: String,
-    },
-    PublicationFailed {
-        reason: String,
-    },
-}
+mod status;
 
-/// How one tsconfig fared in the most recent run. A project with no compiler
-/// is not recorded: reads resolve that from the filesystem.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TypeScriptProjectCheckV1 {
-    /// Its findings are part of the published snapshot.
-    Checked,
-    Failed {
-        reason: String,
-    },
-}
+#[cfg(all(test, unix))]
+mod overlap_tests;
 
-/// The latest producer outcome of one project owner: the run and how each
-/// tsconfig fared in it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypeScriptProducerStatusV1 {
-    run: CompilerProducerRunV1,
-    checks: BTreeMap<PathBuf, TypeScriptProjectCheckV1>,
-}
-
-impl TypeScriptProducerStatusV1 {
-    #[must_use]
-    pub fn new(
-        run: CompilerProducerRunV1,
-        checks: BTreeMap<PathBuf, TypeScriptProjectCheckV1>,
-    ) -> Self {
-        Self { run, checks }
-    }
-
-    #[must_use]
-    pub fn run(&self) -> &CompilerProducerRunV1 {
-        &self.run
-    }
-}
-
-/// Read view of one project owner's producer status. The producer task and the
-/// owner's diagnostics reads share one handle created with the owner, so a
-/// successor owner at the same path starts with no status and a superseded
-/// producer can only publish into the handle it was given.
-#[derive(Clone, Debug, Default)]
-pub struct TypeScriptProducerStatusHandleV1 {
-    latest: Arc<RwLock<Option<Arc<TypeScriptProducerStatusV1>>>>,
-}
-
-impl TypeScriptProducerStatusHandleV1 {
-    fn publish(&self, status: TypeScriptProducerStatusV1) {
-        *self
-            .latest
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(status));
-    }
-
-    /// The most recent producer status, if the producer has run.
-    #[must_use]
-    pub fn current(&self) -> Option<Arc<TypeScriptProducerStatusV1>> {
-        self.latest
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-}
+use status::TypeScriptProducerStatusWriterV1;
+pub use status::{
+    CompilerProducerRunV1, TypeScriptProducerStatusHandleV1, TypeScriptProducerStatusV1,
+    TypeScriptProjectCheckV1,
+};
 
 /// What one project root's producer remembers between generations: the file
 /// digests of the generation it last checked and how each project fared.
 pub struct TypeScriptProducerStateV1 {
-    status: TypeScriptProducerStatusHandleV1,
+    status: TypeScriptProducerStatusWriterV1,
     checked_files: Option<BTreeMap<String, ContentDigest>>,
     projects: BTreeMap<PathBuf, ProjectResult>,
 }
 
 impl TypeScriptProducerStateV1 {
-    /// State for one project owner's producer, publishing its status into
-    /// `status`.
+    /// Appoint this producer as the current writer of `status`. Construct its
+    /// state before spawning it: a retained runtime may still have an older
+    /// producer completing a check while the old route is being retired.
     #[must_use]
     pub fn new(status: TypeScriptProducerStatusHandleV1) -> Self {
         Self {
-            status,
+            status: status.start_producer(),
             checked_files: None,
             projects: BTreeMap::new(),
         }
@@ -197,45 +119,6 @@ pub async fn run_typescript_producer_v1(
     observed_at: UtcMicros,
 ) -> CompilerProducerRunV1 {
     let mut checks = BTreeMap::new();
-    let run = produce(
-        project_root,
-        projects,
-        identity,
-        store,
-        build_info_dir,
-        state,
-        observed_at,
-        &mut checks,
-    )
-    .await;
-    state
-        .status
-        .publish(TypeScriptProducerStatusV1::new(run.clone(), checks));
-    run
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "One producer run: its inputs, the state it carries, and the checks it records."
-)]
-async fn produce(
-    project_root: &Path,
-    projects: &[TypeScriptProject],
-    identity: &CodeIndexPublicationIdentityV1,
-    store: &DiagnosticsStore<'_>,
-    build_info_dir: &Path,
-    state: &mut TypeScriptProducerStateV1,
-    observed_at: UtcMicros,
-    checks: &mut BTreeMap<PathBuf, TypeScriptProjectCheckV1>,
-) -> CompilerProducerRunV1 {
-    let (Ok(analyzer_revision), Ok(configuration_revision)) = (
-        compiler_diagnostic_analyzer_revision_v1(),
-        compiler_diagnostic_configuration_revision_v1(),
-    ) else {
-        return CompilerProducerRunV1::PublicationFailed {
-            reason: "compiler pillar identity is unavailable".to_owned(),
-        };
-    };
     let files = identity
         .file_digests()
         .map(|(path, digest)| (path.to_owned(), digest.clone()))
@@ -282,53 +165,70 @@ async fn produce(
         checks.insert(tsconfig.clone(), check);
     }
     state.projects = results;
-    if !checks
-        .values()
-        .any(|check| *check == TypeScriptProjectCheckV1::Checked)
-    {
-        return CompilerProducerRunV1::CompilerFailed {
-            reason: if failures.is_empty() {
-                "no TypeScript project under the project root has a compiler installed".to_owned()
+    let Some(publication) = state.status.begin_publication().await else {
+        return CompilerProducerRunV1::Superseded;
+    };
+    let run = match (
+        compiler_diagnostic_analyzer_revision_v1(),
+        compiler_diagnostic_configuration_revision_v1(),
+    ) {
+        (Ok(analyzer_revision), Ok(configuration_revision)) => {
+            if checks
+                .values()
+                .any(|check| *check == TypeScriptProjectCheckV1::Checked)
+            {
+                match publish_compiler_diagnostics_for_identity_v1(
+                    project_root,
+                    identity,
+                    store,
+                    &parsed,
+                    analyzer_revision,
+                    configuration_revision,
+                    observed_at,
+                )
+                .await
+                {
+                    CompilerDiagnosticPublicationOutcomeV1::Published {
+                        generation,
+                        report,
+                        unresolved,
+                    } => CompilerProducerRunV1::Published {
+                        generation,
+                        inserted: report.inserted,
+                        unresolved: unresolved.len(),
+                        checked,
+                        reused,
+                    },
+                    CompilerDiagnosticPublicationOutcomeV1::NoResolvableDiagnostics {
+                        unresolved,
+                    } => CompilerProducerRunV1::NoResolvableDiagnostics {
+                        unresolved: unresolved.iter().map(ToString::to_string).collect(),
+                    },
+                    CompilerDiagnosticPublicationOutcomeV1::CodeIndexIdentityUnavailable
+                    | CompilerDiagnosticPublicationOutcomeV1::CodeIndexGenerationUnavailable => {
+                        CompilerProducerRunV1::CodeIndexGenerationUnavailable
+                    }
+                    CompilerDiagnosticPublicationOutcomeV1::Failed { reason } => {
+                        CompilerProducerRunV1::PublicationFailed { reason }
+                    }
+                }
             } else {
-                failures.join("; ")
-            },
-        };
-    }
-    match publish_compiler_diagnostics_for_identity_v1(
-        project_root,
-        identity,
-        store,
-        &parsed,
-        analyzer_revision,
-        configuration_revision,
-        observed_at,
-    )
-    .await
-    {
-        CompilerDiagnosticPublicationOutcomeV1::Published {
-            generation,
-            report,
-            unresolved,
-        } => CompilerProducerRunV1::Published {
-            generation,
-            inserted: report.inserted,
-            unresolved: unresolved.len(),
-            checked,
-            reused,
-        },
-        CompilerDiagnosticPublicationOutcomeV1::NoResolvableDiagnostics { unresolved } => {
-            CompilerProducerRunV1::NoResolvableDiagnostics {
-                unresolved: unresolved.iter().map(ToString::to_string).collect(),
+                CompilerProducerRunV1::CompilerFailed {
+                    reason: if failures.is_empty() {
+                        "no TypeScript project under the project root has a compiler installed"
+                            .to_owned()
+                    } else {
+                        failures.join("; ")
+                    },
+                }
             }
         }
-        CompilerDiagnosticPublicationOutcomeV1::CodeIndexIdentityUnavailable
-        | CompilerDiagnosticPublicationOutcomeV1::CodeIndexGenerationUnavailable => {
-            CompilerProducerRunV1::CodeIndexGenerationUnavailable
-        }
-        CompilerDiagnosticPublicationOutcomeV1::Failed { reason } => {
-            CompilerProducerRunV1::PublicationFailed { reason }
-        }
-    }
+        _ => CompilerProducerRunV1::PublicationFailed {
+            reason: "compiler pillar identity is unavailable".to_owned(),
+        },
+    };
+    publication.publish(TypeScriptProducerStatusV1::new(run.clone(), checks));
+    run
 }
 
 /// Logical paths whose content differs between two generations, including
@@ -610,28 +510,10 @@ mod tests {
         assert_eq!(warning.code, None);
     }
 
-    #[test]
-    fn a_status_handle_publishes_to_its_owner_only() {
-        let owner = TypeScriptProducerStatusHandleV1::default();
-        assert_eq!(owner.current(), None);
-        let run = CompilerProducerRunV1::CompilerFailed {
-            reason: "tsc exited with 2".to_owned(),
-        };
-        owner.publish(TypeScriptProducerStatusV1::new(
-            run.clone(),
-            BTreeMap::new(),
-        ));
-        assert_eq!(
-            owner.current().map(|status| status.run().clone()),
-            Some(run)
-        );
-        assert_eq!(TypeScriptProducerStatusHandleV1::default().current(), None);
-    }
-
     /// A read about a file reports the check of the tsconfig that owns it,
     /// not whichever package happened to publish.
-    #[test]
-    fn availability_reports_the_owning_tsconfigs_own_check() {
+    #[tokio::test]
+    async fn availability_reports_the_owning_tsconfigs_own_check() {
         let root = tempfile::tempdir().expect("project root");
         let root = root.path();
         for package in ["app", "lib"] {
@@ -647,16 +529,21 @@ mod tests {
             reason: "TS5083: Cannot read file".to_owned(),
         };
         let status = TypeScriptProducerStatusHandleV1::default();
-        status.publish(TypeScriptProducerStatusV1::new(
-            CompilerProducerRunV1::CodeIndexGenerationUnavailable,
-            BTreeMap::from([
-                (
-                    root.join("packages/app/tsconfig.json"),
-                    TypeScriptProjectCheckV1::Checked,
-                ),
-                (lib.clone(), failed.clone()),
-            ]),
-        ));
+        status
+            .start_producer()
+            .begin_publication()
+            .await
+            .unwrap()
+            .publish(TypeScriptProducerStatusV1::new(
+                CompilerProducerRunV1::CodeIndexGenerationUnavailable,
+                BTreeMap::from([
+                    (
+                        root.join("packages/app/tsconfig.json"),
+                        TypeScriptProjectCheckV1::Checked,
+                    ),
+                    (lib.clone(), failed.clone()),
+                ]),
+            ));
 
         let TypeScriptDiagnosticsAvailabilityV1::Configured {
             tsconfig, check, ..

@@ -1971,14 +1971,16 @@ fn unpublished_diagnostics_problem(
                 // is the same pending state: the producer publishes exactly once
                 // per generation, so the current generation's run is what the
                 // caller is waiting on.
-                None | Some(CompilerProducerRunV1::CodeIndexGenerationUnavailable) => {
-                    ApplicationProblem::from_detail(
-                        ApplicationProblemDetailV1::DiagnosticsPending {
-                            producer: compiler,
-                            generation: None,
-                        },
-                    )
-                }
+                None
+                | Some(
+                    CompilerProducerRunV1::CodeIndexGenerationUnavailable
+                    | CompilerProducerRunV1::Superseded,
+                ) => ApplicationProblem::from_detail(
+                    ApplicationProblemDetailV1::DiagnosticsPending {
+                        producer: compiler,
+                        generation: None,
+                    },
+                ),
                 Some(CompilerProducerRunV1::Published { generation, .. }) => {
                     ApplicationProblem::from_detail(
                         ApplicationProblemDetailV1::DiagnosticsPending {
