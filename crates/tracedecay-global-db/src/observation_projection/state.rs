@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
+#[cfg(windows)]
+use std::path::{Component, Path, Prefix};
 
 use tracedecay_domain::{
     CanonicalObservationIdV1, DurableObservationV1, ObservationSourceGenerationV1, PayloadDigestV1,
@@ -18,6 +20,8 @@ use tracedecay_lcm::{LcmError, LcmStorageKind};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Row, params};
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
+#[cfg(windows)]
+use tracedecay_sessions::runtime::shared::path_identity_key;
 use tracedecay_sessions::runtime::store_access::{
     message_record_from_row, session_record_from_row,
 };
@@ -1237,12 +1241,19 @@ pub(super) fn reconcile_session_rows_detailed(
             .chain(expected.started_at)
             .min(),
         ended_at: actual.ended_at.into_iter().chain(expected.ended_at).max(),
-        // A lexical path key cannot establish transcript identity.
-        transcript_path: reconcile_optional(
-            "transcript_path",
-            actual.transcript_path.as_ref(),
-            expected.transcript_path.as_ref(),
-        )?,
+        transcript_path: match (&actual.transcript_path, &expected.transcript_path) {
+            #[cfg(windows)]
+            (Some(actual), Some(expected))
+                if actual != expected && existing_windows_transcript_alias(actual, expected) =>
+            {
+                Some(actual.clone())
+            }
+            _ => reconcile_optional(
+                "transcript_path",
+                actual.transcript_path.as_ref(),
+                expected.transcript_path.as_ref(),
+            )?,
+        },
         metadata_json: reconcile_metadata(
             actual.metadata_json.as_ref(),
             expected.metadata_json.as_ref(),
@@ -1268,6 +1279,33 @@ pub(super) fn reconcile_session_rows_detailed(
 
 fn project_key_is_directory(session: &SessionRecord) -> bool {
     session.project_key == session.project_path
+}
+
+#[cfg(windows)]
+fn existing_windows_transcript_alias(actual: &str, expected: &str) -> bool {
+    if path_identity_key(actual) != path_identity_key(expected) {
+        return false;
+    }
+    let actual = Path::new(actual);
+    let expected = Path::new(expected);
+    // The lexical key only selects candidates; it cannot prove identity.
+    // Do not turn arbitrary UNC annotations into network probes.
+    if ![actual, expected].into_iter().all(|path| {
+        path.is_absolute()
+            && matches!(path.components().next(), Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+    }) {
+        return false;
+    }
+    // Keep the native canonical spelling. Stripping its verbatim prefix can
+    // reinterpret literal Windows names before the identity comparison.
+    match (actual.canonicalize(), expected.canonicalize()) {
+        (Ok(actual), Ok(expected)) if actual.as_os_str() == expected.as_os_str() => {
+            actual.is_file()
+        }
+        // Missing evidence follows the ordinary typed collision refusal.
+        _ => false,
+    }
 }
 
 fn reconcile_optional<T: Clone + Eq>(
@@ -1462,6 +1500,8 @@ pub(super) async fn protected_message_rows_compatible(
 #[allow(clippy::unwrap_used)]
 mod reconcile_tests {
     use std::collections::BTreeSet;
+    #[cfg(windows)]
+    use std::path::Path;
 
     use crate::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_domain::{
@@ -1473,6 +1513,8 @@ mod reconcile_tests {
     };
     #[cfg(unix)]
     use tracedecay_runtime_core::db::engine::params;
+    #[cfg(windows)]
+    use tracedecay_runtime_core::path_safety::plain_host_path;
     use tracedecay_sessions::runtime::shared::path_identity_key;
     use tracedecay_store::{
         ObservationProjection, ProjectionStoreError, SessionMessageRecord, SessionRecord,
@@ -1729,8 +1771,96 @@ mod reconcile_tests {
         );
     }
 
+    #[cfg(windows)]
+    fn windows_transcript_spellings(root: &Path, name: &str) -> (String, String) {
+        let verbatim = root.canonicalize().unwrap().join(name);
+        (
+            plain_host_path(&verbatim).to_str().unwrap().to_owned(),
+            verbatim.to_str().unwrap().to_owned(),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_transcript_disk_aliases_retain_the_stored_spelling() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (native, verbatim) = windows_transcript_spellings(fixture.path(), "rollout.jsonl");
+        std::fs::write(&verbatim, b"transcript").unwrap();
+        let actual = SessionRecord {
+            transcript_path: Some(native.clone()),
+            ..record("user")
+        };
+        let expected = SessionRecord {
+            transcript_path: Some(verbatim.clone()),
+            ..actual.clone()
+        };
+        let slash_spelling = SessionRecord {
+            transcript_path: Some(native.replace('\\', "/")),
+            ..actual.clone()
+        };
+        for (stored, incoming) in [
+            (&actual, &expected),
+            (&expected, &actual),
+            (&actual, &slash_spelling),
+            (&slash_spelling, &actual),
+        ] {
+            assert_eq!(
+                reconcile_session_rows_detailed(stored, incoming)
+                    .unwrap()
+                    .transcript_path,
+                stored.transcript_path
+            );
+        }
+
+        std::fs::remove_file(&verbatim).unwrap();
+        assert_eq!(
+            reconcile_session_rows_detailed(&actual, &expected)
+                .unwrap_err()
+                .field(),
+            "transcript_path"
+        );
+        std::fs::create_dir(&verbatim).unwrap();
+        assert_eq!(
+            reconcile_session_rows_detailed(&actual, &expected)
+                .unwrap_err()
+                .field(),
+            "transcript_path"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dos_and_verbatim_trailing_dot_paths_to_distinct_files_collide() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (native, literal) = windows_transcript_spellings(fixture.path(), "rollout.jsonl.");
+        let ordinary = fixture.path().join("rollout.jsonl");
+        std::fs::write(&ordinary, b"ordinary").unwrap();
+        std::fs::write(&literal, b"literal dot").unwrap();
+        assert_eq!(std::fs::read(&native).unwrap(), b"ordinary");
+        assert_eq!(std::fs::read(&literal).unwrap(), b"literal dot");
+        let actual = SessionRecord {
+            transcript_path: Some(native),
+            ..record("user")
+        };
+        let expected = SessionRecord {
+            transcript_path: Some(literal.clone()),
+            ..actual.clone()
+        };
+        for (stored, incoming) in [(&actual, &expected), (&expected, &actual)] {
+            assert_eq!(
+                reconcile_session_rows_detailed(stored, incoming)
+                    .unwrap_err()
+                    .field(),
+                "transcript_path"
+            );
+        }
+        std::fs::remove_file(literal).unwrap();
+    }
+
     #[test]
     fn distinct_transcript_spellings_with_the_same_path_key_collide() {
+        #[cfg(windows)]
+        let fixture = tempfile::tempdir().unwrap();
         for (actual_path, expected_path) in [
             (
                 r"C:\sessions\rollout.jsonl",
@@ -1749,10 +1879,17 @@ mod reconcile_tests {
                 "//sessions/archive/rollout.jsonl",
             ),
         ] {
+            #[cfg(windows)]
+            let (actual_path, expected_path) = match actual_path.strip_prefix("C:\\sessions\\") {
+                Some(name) => windows_transcript_spellings(fixture.path(), name),
+                None => (actual_path.to_owned(), expected_path.to_owned()),
+            };
+            #[cfg(not(windows))]
+            let (actual_path, expected_path) = (actual_path.to_owned(), expected_path.to_owned());
             assert_ne!(actual_path, expected_path);
             assert_eq!(
-                path_identity_key(actual_path),
-                path_identity_key(expected_path),
+                path_identity_key(&actual_path),
+                path_identity_key(&expected_path),
                 "the lexical key is not evidence of native transcript identity"
             );
             let actual = SessionRecord {
@@ -1777,8 +1914,18 @@ mod reconcile_tests {
     #[asupersync::test]
     async fn applying_transcript_key_collision_preserves_the_stored_session() {
         let harness = RegisteredGlobalDbHarness::open("transcript-key-collision").await;
+        #[cfg(windows)]
+        let fixture = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let (original_path, incoming_path) =
+            windows_transcript_spellings(fixture.path(), "rollout.jsonl.");
+        #[cfg(not(windows))]
+        let (original_path, incoming_path) = (
+            r"C:\sessions\rollout.jsonl.".to_owned(),
+            r"\\?\C:\sessions\rollout.jsonl.".to_owned(),
+        );
         let original = SessionRecord {
-            transcript_path: Some(r"C:\sessions\rollout.jsonl.".to_owned()),
+            transcript_path: Some(original_path),
             ..record("user")
         };
         let transaction = harness.registered.begin_write_transaction().await.unwrap();
@@ -1795,7 +1942,7 @@ mod reconcile_tests {
         assert_eq!(persisted, original);
 
         let incoming = SessionRecord {
-            transcript_path: Some(r"\\?\C:\sessions\rollout.jsonl.".to_owned()),
+            transcript_path: Some(incoming_path),
             title: Some("Rejected transcript annotation".to_owned()),
             ended_at: Some(3),
             ..original.clone()
