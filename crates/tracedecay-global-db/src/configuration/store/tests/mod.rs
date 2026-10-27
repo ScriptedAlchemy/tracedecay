@@ -9,8 +9,10 @@ use super::{
     ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationValueV1,
     GlobalDbConfigurationControlStore, TestConnection,
 };
-use crate::configuration::contracts::ScopeRevalidationEvidenceV1;
 use crate::configuration::contracts::ports::ConfigurationControlStore;
+use crate::configuration::contracts::{
+    ConfigurationRollbackRequest, DirectConfigurationMutation, ScopeRevalidationEvidenceV1,
+};
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
 use crate::registered::RegisteredGlobalDbWriteTransaction;
@@ -21,10 +23,10 @@ use tracedecay_domain::configuration::{
     ConfigurationGrantReceiptId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, INDEX_EXCLUDE_SETTING_KEY,
-    ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
+    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+    ScopeControlOperationV1, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    TELEMETRY_TIMINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256,
@@ -52,7 +54,7 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
 }
 
 #[asupersync::test]
-async fn retired_automation_lock_timeout_converges_without_rewriting_history() {
+async fn retired_automation_lock_timeout_stays_retired_through_rollback() {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
     let mut stored = serde_json::to_value(AutomationSettingsV1::default()).unwrap();
@@ -131,6 +133,190 @@ async fn retired_automation_lock_timeout_converges_without_rewriting_history() {
         .await
         .unwrap();
     assert_eq!(settled.revision_id, converged.revision_id);
+
+    let rollback = ConfigurationRollbackRequest {
+        target_revision_id: legacy_revision.clone(),
+        mode: RollbackModeV1::AllOrNothing,
+    };
+    assert_eq!(
+        store
+            .dry_run_rollback(
+                &control_authority(
+                    ConfigurationMutationOperationV1::RollbackDryRun,
+                    &converged.revision_id,
+                ),
+                &rollback,
+                UtcMicros(20),
+            )
+            .await,
+        Err(ConfigurationError::PlanStale),
+        "retired fields alone cannot make a rollback change current behavior"
+    );
+
+    let ConfigurationValueV1::AutomationSettings(mut changed_settings) =
+        converged.snapshot.effective_values[&key].clone()
+    else {
+        panic!("automation setting must retain its registered type");
+    };
+    changed_settings.timeout_secs = 171;
+    let changed_value = ConfigurationValueV1::AutomationSettings(changed_settings);
+    let changed = store
+        .commit_direct(
+            &control_authority(
+                ConfigurationMutationOperationV1::DirectMutation,
+                &converged.revision_id,
+            ),
+            &DirectConfigurationMutation::Set {
+                layer: direct_project_layer(),
+                key: key.clone(),
+                value: Box::new(changed_value.clone()),
+            },
+            &converged.revision_id,
+        )
+        .await
+        .unwrap();
+    let plan = store
+        .dry_run_rollback(
+            &control_authority(
+                ConfigurationMutationOperationV1::RollbackDryRun,
+                &changed.result_revision_id,
+            ),
+            &rollback,
+            UtcMicros(20),
+        )
+        .await
+        .unwrap();
+    assert_eq!(plan.redacted_changes.len(), 1);
+    assert_eq!(plan.redacted_changes[0].setting_key, key);
+    assert_eq!(
+        plan.redacted_changes[0].before_digest,
+        Some(
+            canonical_sha256(&("tracedecay.configuration.rollback-value.v1", &changed_value,))
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        plan.redacted_changes[0].after_digest,
+        Some(
+            canonical_sha256(&(
+                "tracedecay.configuration.rollback-value.v1",
+                &converged.snapshot.effective_values[&key],
+            ))
+            .unwrap()
+        )
+    );
+
+    // A plan saved by an older release described the unprojected historical
+    // value. Do not apply a different change under that old confirmation.
+    let mut legacy_plan = plan.clone();
+    legacy_plan.plan_id = id("configuration.plan.legacy-lock-timeout");
+    legacy_plan.redacted_changes[0].after_digest = Some(
+        canonical_sha256(&(
+            "tracedecay.configuration.rollback-value.v1",
+            &historical.snapshot.effective_values[&key],
+        ))
+        .unwrap(),
+    );
+    store
+        .save_change_plan(&ConfigurationProtectedPlanRecordV1 {
+            plan: legacy_plan.clone(),
+            operation: ConfigurationProtectedOperationV1::Rollback {
+                target_revision_id: legacy_revision.clone(),
+                mode: RollbackModeV1::AllOrNothing,
+            },
+        })
+        .await
+        .unwrap();
+    let apply_authority = control_authority_with_key(
+        ConfigurationMutationOperationV1::RollbackApply,
+        &changed.result_revision_id,
+        Some(id("configuration.idempotency.retired-lock-rollback")),
+    );
+    let mut request = ProtectedApplyRequest {
+        plan_id: legacy_plan.plan_id.clone(),
+        actor_id: id("actor.configuration.fixture"),
+        expected_base_revision_id: changed.result_revision_id.clone(),
+        operation_digest: plan.operation_digest.clone(),
+        idempotency_key: id("configuration.idempotency.retired-lock-rollback"),
+    };
+    assert_eq!(
+        store
+            .apply_rollback(
+                &apply_authority,
+                &request,
+                &legacy_plan,
+                &evidence_for(&legacy_plan)
+            )
+            .await,
+        Err(ConfigurationError::PlanStale)
+    );
+    assert_eq!(
+        store.current().await.unwrap().revision_id,
+        changed.result_revision_id
+    );
+
+    request.plan_id = plan.plan_id.clone();
+    let receipt = store
+        .apply_rollback(&apply_authority, &request, &plan, &evidence_for(&plan))
+        .await
+        .unwrap();
+    let restored = store.current().await.unwrap();
+    assert_eq!(restored.revision_id, receipt.result_revision_id);
+    assert_ne!(restored.revision_id, legacy_revision);
+    assert_eq!(restored.snapshot, converged.snapshot);
+    let written = store
+        .read_revision(&restored.revision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(written.parent_revision_id, Some(changed.result_revision_id));
+    assert_eq!(
+        store
+            .apply_rollback(&apply_authority, &request, &plan, &evidence_for(&plan))
+            .await
+            .unwrap(),
+        receipt,
+        "replay returns the same projected revision"
+    );
+    let stale_request = ProtectedApplyRequest {
+        idempotency_key: id("configuration.idempotency.stale-lock-rollback"),
+        ..request.clone()
+    };
+    let stale_authority = control_authority_with_key(
+        ConfigurationMutationOperationV1::RollbackApply,
+        &plan.base_revision_id,
+        Some(stale_request.idempotency_key.clone()),
+    );
+    assert_eq!(
+        store
+            .apply_rollback(
+                &stale_authority,
+                &stale_request,
+                &plan,
+                &evidence_for(&plan),
+            )
+            .await,
+        Err(ConfigurationError::PlanStale),
+        "a new application cannot use the base revision consumed by the rollback"
+    );
+    assert_eq!(
+        store
+            .converge_registered_registry_shape(&restored.revision_id, UtcMicros(30))
+            .await
+            .unwrap()
+            .revision_id,
+        restored.revision_id,
+        "rollback needs no further convergence"
+    );
+    let retained = store
+        .read_revision(&legacy_revision)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&retained.snapshot).unwrap(),
+        historical_bytes
+    );
 }
 
 #[asupersync::test]
