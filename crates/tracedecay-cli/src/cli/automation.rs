@@ -87,9 +87,6 @@ pub enum AutomationConfigAction {
         /// Memory curator idle seconds. Empty string clears it.
         #[arg(long)]
         memory_curator_min_idle_secs: Option<String>,
-        /// Memory curator stale-lock seconds. Empty string clears it.
-        #[arg(long)]
-        memory_curator_stale_lock_secs: Option<String>,
         /// Enable or disable the session reflector task.
         #[arg(long)]
         session_reflector: Option<bool>,
@@ -105,9 +102,6 @@ pub enum AutomationConfigAction {
         /// Session reflector idle seconds. Empty string clears it.
         #[arg(long)]
         session_reflector_min_idle_secs: Option<String>,
-        /// Session reflector stale-lock seconds. Empty string clears it.
-        #[arg(long)]
-        session_reflector_stale_lock_secs: Option<String>,
         /// Enable or disable the skill writer task.
         #[arg(long)]
         skill_writer: Option<bool>,
@@ -123,9 +117,6 @@ pub enum AutomationConfigAction {
         /// Skill writer idle seconds. Empty string clears it.
         #[arg(long)]
         skill_writer_min_idle_secs: Option<String>,
-        /// Skill writer stale-lock seconds. Empty string clears it.
-        #[arg(long)]
-        skill_writer_stale_lock_secs: Option<String>,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,

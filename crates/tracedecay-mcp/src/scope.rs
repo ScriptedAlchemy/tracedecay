@@ -172,6 +172,7 @@ mod tests {
     use std::process::Command;
 
     use tempfile::TempDir;
+    use tracedecay_runtime_core::path_safety::{canonical_existing_identity, plain_git_args};
 
     use super::{QueryScopeError, resolve_query_scope as resolve_query_scope_with_root};
     use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext};
@@ -186,7 +187,7 @@ mod tests {
     fn git(root: &Path, args: &[&str]) {
         let output = Command::new("git")
             .current_dir(root)
-            .args(args)
+            .args(plain_git_args(args))
             .output()
             .expect("git runs");
         assert!(
@@ -236,7 +237,7 @@ mod tests {
     #[test]
     fn subdirectory_request_converges_to_registered_canonical_root() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = canonical_existing_identity(temp.path()).unwrap();
         init_repo(&root);
         write_identity_marker(&root, "project.mcp-scope-test");
         let subdir = root.join("src/deep");
@@ -282,7 +283,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let (root, scope) = resolve_query_scope_with_root(&owner, &subdirectory).unwrap();
-        assert_eq!(root, package);
+        assert_eq!(root, canonical_existing_identity(&package).unwrap());
         assert_eq!(scope.project_id.as_str(), project_id);
         assert_eq!(scope, resolve_query_scope(&owner, &package).unwrap());
         assert_ne!(
@@ -366,7 +367,7 @@ mod tests {
                 "feature",
             ],
         );
-        let linked = linked.canonicalize().unwrap();
+        let linked = canonical_existing_identity(&linked).unwrap();
         let owner = owner_for(&root, "project.mcp-scope-test");
 
         let main_scope = resolve_query_scope(&owner, &root).unwrap();

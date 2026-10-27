@@ -3,8 +3,8 @@
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ChangePlanId, ConfigurationMutationEffectV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
-    ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, RollbackModeV1,
-    SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ConfigurationValueV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
+    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
@@ -157,12 +157,18 @@ where
             // default is the authority for that case. Reporting it as
             // not-found made every install that predates a key's registration
             // look as though the setting did not exist.
-            let effective_value = current
+            let mut effective_value = current
                 .snapshot
                 .effective_values
                 .get(&key)
                 .cloned()
                 .unwrap_or_else(|| definition.default_value.clone());
+            // A read-only store, or a concurrent write during convergence,
+            // can still carry the historical field. Project today's settings
+            // without changing the source snapshot or its CAS identity.
+            if let ConfigurationValueV1::AutomationSettings(settings) = &mut effective_value {
+                settings.retire_lock_timeout();
+            }
             Ok(ResolvedSetting {
                 findings: setting_findings(&key, &effective_value),
                 key: key.clone(),
@@ -619,9 +625,11 @@ mod tests {
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
     use tracedecay_domain::configuration::{
-        AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
-        ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1, ConfigurationValueV1,
-        ProtectedChange, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+        AUTOMATION_SETTINGS_SETTING_KEY, AuthorityRef, AutomationSettingsV1,
+        CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationGrantId,
+        ConfigurationGrantReceiptId, ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1,
+        ConfigurationSnapshotV1, ConfigurationValueV1, ProtectedChange, ScopeSourceBinding,
+        SettingKey, SourceBindingId, SourceKindV1,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, LocatorDigest, ProjectId};
     use tracedecay_global_db::configuration::contracts::ports::{
@@ -915,6 +923,102 @@ mod tests {
         assert!(
             resolved.candidates.is_empty(),
             "a default carries no layer candidate"
+        );
+    }
+
+    #[asupersync::test]
+    async fn get_projects_retired_automation_fields_without_rewriting_the_source_snapshot() {
+        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
+        let revision_id: ConfigurationRevisionId = id("configuration.revision.legacy-timeout");
+        let expected = AutomationSettingsV1 {
+            timeout_secs: 137,
+            ..AutomationSettingsV1::default()
+        };
+        let mut stored = serde_json::to_value(&expected).unwrap();
+        stored["tasks"]["memory_curator"]["stale_lock_secs"] = serde_json::json!(3600);
+        stored["tasks"]["session_reflector"]["stale_lock_secs"] = serde_json::Value::Null;
+        let snapshot = ConfigurationSnapshotV1::new(
+            BTreeMap::from([(
+                key.clone(),
+                ConfigurationValueV1::AutomationSettings(Box::new(
+                    serde_json::from_value(stored).unwrap(),
+                )),
+            )]),
+            BTreeMap::from([(
+                key.clone(),
+                vec![ConfigurationCandidateV1 {
+                    layer: ConfigurationLayerIdV1::Project {
+                        project_id: id("project.fixture"),
+                    },
+                    revision_id: revision_id.clone(),
+                    disposition: CandidateDispositionV1::Winning,
+                    safe_reason: None,
+                }],
+            )]),
+        )
+        .unwrap();
+        let stored_bytes = serde_json::to_vec(&snapshot).unwrap();
+        let store = Store {
+            current: ConfigurationCurrentStateV1 {
+                revision_id: revision_id.clone(),
+                snapshot: snapshot.clone(),
+            },
+            saved: Mutex::new(None),
+            replay: Mutex::new(None),
+        };
+        let registry = ConfigurationRegistry::core().unwrap();
+        let authorization = Authorization {
+            current: CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: 1,
+                grant_digest: digest('c'),
+                scope_digest: digest('a'),
+                policy_epoch: 7,
+                policy_digest: policy_digest('b'),
+            },
+        };
+        let scope = Scope {
+            evidence: ScopeRevalidationEvidenceV1 {
+                resolved_scope_digest: digest('a'),
+                membership_digest: None,
+                authorization_policy_digest: policy_digest('b'),
+                policy_epoch: 7,
+            },
+        };
+        let operations = ConfigurationControlPlaneOperations::new(
+            &registry,
+            &store,
+            &scope,
+            &authorization,
+            clock,
+        );
+        let resolved = operations
+            .get(
+                AuthorizedActor {
+                    actor_id: id("actor.configuration.read"),
+                },
+                key.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.effective_value,
+            ConfigurationValueV1::AutomationSettings(Box::new(expected))
+        );
+        assert_eq!(resolved.revision_id, revision_id);
+        assert_eq!(resolved.snapshot_id, snapshot.snapshot_id);
+        assert_eq!(
+            resolved.effective_behavior_digest,
+            snapshot.effective_behavior_digest
+        );
+        assert_eq!(
+            resolved.resolution_provenance_digest,
+            snapshot.resolution_provenance_digest
+        );
+        assert_eq!(resolved.candidates, snapshot.provenance[&key]);
+        store.current.snapshot.validate().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&store.current.snapshot).unwrap(),
+            stored_bytes
         );
     }
 

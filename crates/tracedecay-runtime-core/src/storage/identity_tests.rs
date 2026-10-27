@@ -345,12 +345,28 @@ mod identity_anchor_tests {
             crate::git::normalize_git_remote_url("file:///srv/repos/remote.git/"),
             crate::git::normalize_git_remote_url("/srv/repos/remote.git"),
         );
-        assert_eq!(
-            crate::git::local_remote_path("file:///srv/repos/checkout"),
-            Some(PathBuf::from("/srv/repos/checkout"))
-        );
+    }
+
+    #[test]
+    fn local_origins_resolve_native_absolute_paths_and_file_urls() {
+        #[cfg(unix)]
+        let (path, url) = ("/srv/repos/checkout", "file:///srv/repos/checkout");
+        #[cfg(windows)]
+        let (path, url) = ("C:/repos/checkout", "file:///C:/repos/checkout");
+        for spelling in [path, url] {
+            assert_eq!(
+                crate::git::local_remote_path(spelling),
+                Some(PathBuf::from(path)),
+                "{spelling}"
+            );
+        }
         assert_eq!(
             crate::git::local_remote_path("git@github.com:owner/repo.git"),
+            None
+        );
+        assert_eq!(crate::git::local_remote_path("relative/checkout"), None);
+        assert_eq!(
+            crate::git::local_remote_path("file://server/repos/checkout"),
             None
         );
     }

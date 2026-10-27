@@ -445,11 +445,36 @@ async fn mounted_graph_listing_takes_no_server_lease_while_it_reads() {
         .await
         .expect("mount project server");
 
+    engine.lifecycle.begin_draining();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.lifecycle.wait_for_idle(),
+    )
+    .await
+    .expect("fixture startup owners must release their server handles");
+    let startup_lifecycle = DaemonLifecycle::default();
+    let startup_server = Arc::clone(&server);
+    let (startup_entered, startup_parked) = tokio::sync::oneshot::channel();
+    super::super::project_open_orchestration::spawn_lifecycle_automation_scheduler_activation(
+        startup_lifecycle.clone(),
+        async move {
+            startup_entered.send(()).expect("startup owner entered");
+            std::future::pending::<()>().await;
+            drop(startup_server);
+        },
+    );
+    startup_parked.await.expect("startup owner parked");
+
+    let graph = server.cg().await;
+    let key = ProjectServerKey::from_open_project(&graph, &handshake).expect("mounted owner key");
+    let route = ProjectRouteKey::from_handshake(graph.project_root(), &handshake)
+        .expect("mounted route key");
+    let server_witness = Arc::downgrade(&server);
     let swap = server.graph_slot().write_owned().await;
+    drop(server);
     let mut registry_gate = Some(engine.store_administration.project_servers().lock().await);
     let listing = engine.store_administration.mounted_project_graphs();
     let mut listing = std::pin::pin!(listing);
-    let handles = Arc::strong_count(&server);
     let registry_lock = engine.store_administration.project_servers().lock();
     let mut registry_lock = std::pin::pin!(registry_lock);
     // Force the first listing poll to wait for another registry user. Tokio's
@@ -457,7 +482,7 @@ async fn mounted_graph_listing_takes_no_server_lease_while_it_reads() {
     // Drive both futures with real wakeups: the fair registry mutex admits
     // the listing before this later lock request, then must release it while
     // the graph write guard still prevents the listing from completing.
-    let registry = tokio::time::timeout(
+    let mut registry = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         std::future::poll_fn(|context| {
             assert!(
@@ -470,14 +495,44 @@ async fn mounted_graph_listing_takes_no_server_lease_while_it_reads() {
     )
     .await
     .expect("a parked graph listing must release the registry lock for route binds");
-    assert_eq!(
-        Arc::strong_count(&server),
-        handles,
-        "a parked graph listing must hold no server handle"
+    assert_eq!(registry.servers.len(), 1);
+    assert!(
+        registry
+            .retire_lru_ready_under_graph_pressure(|server| Arc::strong_count(server) > 1)
+            .is_err(),
+        "the controlled startup handle must deny retirement while the listing is parked"
     );
+    assert!(registry.get(&key).is_some());
+    startup_lifecycle.begin_draining();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        startup_lifecycle.wait_for_idle(),
+    )
+    .await
+    .expect("startup owner must release its handle while the listing is parked");
+    let (owner, retired) = registry
+        .retire_lru_ready_under_graph_pressure(|server| Arc::strong_count(server) > 1)
+        .expect("a parked graph listing must not lease the idle server")
+        .expect("the idle owner must be eligible for retirement");
+    assert_eq!(owner, key.owner);
+    assert_eq!(retired.len(), 1);
+    let (retired_key, retired_server) = retired.into_iter().next().expect("retired server");
+    assert_eq!(retired_key, key);
+    assert_eq!(
+        Arc::as_ptr(&retired_server),
+        server_witness.as_ptr(),
+        "retirement must transfer the exact listed server"
+    );
+    assert!(registry.get(&key).is_none());
+    assert!(registry.get_route(&route).is_none());
+    registry.insert_route(route, retired_key, retired_server);
     drop(registry);
     drop(swap);
-    assert_eq!(listing.await.len(), 1);
+    let listed = listing.await;
+    assert_eq!(listed.len(), 1);
+    assert!(Arc::ptr_eq(&listed[0], &graph));
+    drop((listed, graph));
+    engine.shutdown_all().await;
 }
 
 /// A mounted route alias answers without re-running registry admission: the

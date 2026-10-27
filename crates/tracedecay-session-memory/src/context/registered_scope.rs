@@ -77,6 +77,7 @@ fn resolve_authorized_root(
                     requested_root.display()
                 ))
             })?;
+            let checkout = canonical_root(&checkout, "Git checkout")?;
             // An independently enrolled package owns its path-local identity;
             // discovery of the enclosing repository cannot widen that scope.
             if requested_root.starts_with(&registered_root)

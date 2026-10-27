@@ -688,8 +688,7 @@ async fn scheduler_memory_curator_applies_validated_ops_automatically() {
     let backend = JsonBackend::new(json!({
         "ops": [normalize_tags_op(&facts)]
     }));
-    let mut config = scheduler_config(None, None);
-    config.tasks.memory_curator.interval_secs = Some(1);
+    let config = scheduler_config(Some(1), None);
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let run = settle_memory_curator(

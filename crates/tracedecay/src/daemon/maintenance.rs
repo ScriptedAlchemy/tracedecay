@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_mounted_store_deleted_under_the_daemon_requires_a_restart() {
+    async fn mounted_store_identity_tracks_native_removal_outcomes() {
         let temporary = tempfile::tempdir().expect("store identity fixture root");
         let profile_root = temporary.path().join("profile");
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
@@ -1594,13 +1594,25 @@ mod tests {
             "a live store is not lost"
         );
 
-        std::fs::remove_file(&database_path).expect("delete the mounted store");
-        super::record_lost_store_files(&sampling, &registry);
-        assert_eq!(
-            lost(&registry),
-            [tracedecay_domain::errors::DAEMON_RESTART_COMMAND.to_owned()],
-            "a store deleted under the daemon must be reset-required, naming the restart"
-        );
+        #[cfg(windows)]
+        {
+            let error = std::fs::remove_file(&database_path)
+                .expect_err("Windows must refuse deletion of a mounted SQLite store");
+            assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}");
+            super::record_lost_store_files(&sampling, &registry);
+            assert!(database_path.is_file());
+            assert!(lost(&registry).is_empty());
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::remove_file(&database_path).expect("delete the mounted store");
+            super::record_lost_store_files(&sampling, &registry);
+            assert_eq!(
+                lost(&registry),
+                [tracedecay_domain::errors::DAEMON_RESTART_COMMAND.to_owned()],
+                "a store deleted under the daemon must be reset-required, naming the restart"
+            );
+        }
     }
 
     #[tokio::test]

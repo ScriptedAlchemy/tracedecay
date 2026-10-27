@@ -284,7 +284,9 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
 #[tokio::test]
 async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
     let (cg, project, authority) = init_indexed_repo().await;
-    let expected_root = cg.project_root().to_path_buf();
+    let expected_root =
+        tracedecay_runtime_core::path_safety::canonical_existing_identity(cg.project_root())
+            .unwrap();
     type RecordedDeliveries = Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>;
     let recorded: RecordedDeliveries = Arc::new(Mutex::new(Vec::new()));
     let sink_recorded = Arc::clone(&recorded);

@@ -50,8 +50,8 @@ use super::symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
 use crate::ProjectSourceAccessSnapshot;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::diagnostics_producer::{
-    CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProjectCheckV1,
-    typescript_diagnostics_availability,
+    CompilerProducerRunV1, TypeScriptDiagnosticsAvailabilityV1, TypeScriptProducerStatusHandleV1,
+    TypeScriptProjectCheckV1, typescript_diagnostics_availability,
 };
 use crate::managed_test_runs::{
     ManagedTestRunCurrentScope, ManagedTestRunReadOutcome, ManagedTestRunStaleReason,
@@ -344,6 +344,9 @@ pub struct OwnedPrimitiveRuntime {
     /// The filesystem root `admitted_root_uri` names; diagnostics reads probe
     /// the producer state here when no publication exists.
     admitted_project_root: PathBuf,
+    /// This owner's TypeScript producer status; diagnostics reads that find no
+    /// publication describe it, never another owner's run at the same path.
+    compiler_status: TypeScriptProducerStatusHandleV1,
     test_runs: RetainedManagedTestRuns,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
     convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
@@ -372,9 +375,10 @@ impl PrimitiveCapacity {
 /// Dropping this value releases the dispatch facade and every Arc-backed
 /// project primitive authority together. The database and Arc-backed ports
 /// keep the exact project-open owners alive for the same lifetime as dispatch.
+#[derive(Clone)]
 pub struct PrimitiveProjectRuntime {
     database: Database,
-    dispatch: Arc<dyn PrimitiveDispatch>,
+    dispatch: Arc<OwnedPrimitiveRuntime>,
 }
 
 /// Replace the mount-time authority carried by an owned primitive result with
@@ -398,11 +402,79 @@ pub fn reauthorize_primitive_evidence(
 
 impl PrimitiveProjectRuntime {
     pub fn dispatch(&self) -> Arc<dyn PrimitiveDispatch> {
-        Arc::clone(&self.dispatch)
+        self.dispatch.clone()
     }
 
     pub fn database(&self) -> &Database {
         &self.database
+    }
+
+    pub fn compiler_status(&self) -> TypeScriptProducerStatusHandleV1 {
+        self.dispatch.compiler_status.clone()
+    }
+
+    pub(super) fn validate_reopen(
+        &self,
+        database: &Database,
+        session_db: &RegisteredGlobalDbLeaseV1,
+        access: &ProjectSourceAccessSnapshot,
+        admitted_root_uri: &str,
+    ) -> Result<bool, ApplicationContractError> {
+        // Request admission checks each renewed grant; its expiry is not
+        // part of the retained source/configuration authority.
+        let retained = &self.dispatch.access;
+        let sessions = &self.dispatch.test_runs.store;
+        if self.database.canonical_database_path() != database.canonical_database_path()
+            || self.database.opened_file_identity() != database.opened_file_identity()
+            || sessions.binding() != session_db.binding()
+            || sessions.verified_locator() != session_db.verified_locator()
+            || self.dispatch.admitted_root_uri != admitted_root_uri
+            || retained.scope != access.scope
+            || retained.requester != access.requester
+            || retained.binding != access.binding
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "retained application primitive authority",
+            });
+        }
+        Ok(
+            retained.configuration_revision == access.configuration_revision
+                && retained.configuration_digest == access.configuration_digest
+                && retained.configuration_provenance_digest
+                    == access.configuration_provenance_digest
+                && retained.effective_capabilities == access.effective_capabilities,
+        )
+    }
+
+    /// Install one complete configuration-bound facade after preparing it
+    /// outside the registry lock. The captured dispatch fences a concurrent
+    /// reopen, so a delayed preparation cannot restore older authority.
+    pub fn reconcile_reopen(
+        &mut self,
+        captured: &Self,
+        replacement: &Self,
+    ) -> Result<(), ApplicationContractError> {
+        if self.validate_reopen(
+            &replacement.database,
+            &replacement.dispatch.test_runs.store,
+            &replacement.dispatch.access,
+            &replacement.dispatch.admitted_root_uri,
+        )? {
+            return Ok(());
+        }
+        if !Arc::ptr_eq(&self.dispatch, &captured.dispatch) {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "application primitive authority changed during reopen",
+            });
+        }
+        let mut dispatch = (*replacement.dispatch).clone();
+        // The store owner survives route eviction. Its producer publication
+        // fence and in-flight operation capacity survive this facade refresh
+        // too; only the configuration-bound ports and access are replaced.
+        dispatch.compiler_status = self.dispatch.compiler_status.clone();
+        dispatch.capacity = self.dispatch.capacity.clone();
+        self.dispatch = Arc::new(dispatch);
+        Ok(())
     }
 }
 
@@ -540,6 +612,7 @@ pub fn open_primitive_project_runtime(
     test_runs: RetainedManagedTestRuns,
     test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
     convergence_park: Arc<dyn CodeIndexConvergenceParkPortV1>,
+    compiler_status: TypeScriptProducerStatusHandleV1,
 ) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
     scope.validate()?;
     let admitted_project_root = validate_admitted_root_uri(&admitted_root_uri)?;
@@ -571,12 +644,13 @@ pub fn open_primitive_project_runtime(
         health,
         extended,
     };
-    let dispatch: Arc<dyn PrimitiveDispatch> = Arc::new(OwnedPrimitiveRuntime {
+    let dispatch = Arc::new(OwnedPrimitiveRuntime {
         project_runtime: services,
         scope,
         access,
         admitted_root_uri,
         admitted_project_root,
+        compiler_status,
         test_runs,
         test_run_scope,
         convergence_park,
@@ -930,6 +1004,7 @@ async fn dispatch_admitted(
                     evidence.omissions.first().map(|omission| omission.reason),
                     &runtime.admitted_project_root,
                     file,
+                    &runtime.compiler_status,
                 );
             }
             // Another package's publication is no evidence about a file whose
@@ -939,8 +1014,11 @@ async fn dispatch_admitted(
                     .payload
                     .as_ref()
                     .is_some_and(|result| result.diagnostics.is_empty())
-                && let Some(unchecked) =
-                    unchecked_owner_problem(&runtime.admitted_project_root, file)?
+                && let Some(unchecked) = unchecked_owner_problem(
+                    &runtime.admitted_project_root,
+                    file,
+                    &runtime.compiler_status,
+                )?
             {
                 return problem(&context, &operation, unchecked);
             }
@@ -1852,11 +1930,12 @@ fn diagnostics_unavailable_problem<T>(
     reason: Option<OmissionReason>,
     project_root: &Path,
     file: Option<&Path>,
+    status: &TypeScriptProducerStatusHandleV1,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
     problem(
         context,
         operation,
-        diagnostics_absence_problem(reason, project_root, file)?,
+        diagnostics_absence_problem(reason, project_root, file, status)?,
     )
 }
 
@@ -1870,6 +1949,7 @@ fn diagnostics_absence_problem(
     reason: Option<OmissionReason>,
     project_root: &Path,
     file: Option<&Path>,
+    status: &TypeScriptProducerStatusHandleV1,
 ) -> Result<ApplicationProblem, ApplicationContractError> {
     let (code, message) = match reason {
         Some(OmissionReason::Stale) => (
@@ -1878,7 +1958,7 @@ fn diagnostics_absence_problem(
                 .to_owned(),
         ),
         Some(OmissionReason::Unsupported) => {
-            return unpublished_diagnostics_problem(project_root, file);
+            return unpublished_diagnostics_problem(project_root, file, status);
         }
         Some(OmissionReason::Redacted) => (
             "application.diagnostics.redacted",
@@ -1904,8 +1984,9 @@ fn diagnostics_absence_problem(
 fn unpublished_diagnostics_problem(
     project_root: &Path,
     file: Option<&Path>,
+    status: &TypeScriptProducerStatusHandleV1,
 ) -> Result<ApplicationProblem, ApplicationContractError> {
-    let problem = match typescript_diagnostics_availability(project_root, file) {
+    let problem = match typescript_diagnostics_availability(project_root, file, status) {
         TypeScriptDiagnosticsAvailabilityV1::NoTsconfig { searched } => {
             no_tsconfig_problem(file, &searched)
         }
@@ -1927,14 +2008,16 @@ fn unpublished_diagnostics_problem(
                 // is the same pending state: the producer publishes exactly once
                 // per generation, so the current generation's run is what the
                 // caller is waiting on.
-                None | Some(CompilerProducerRunV1::CodeIndexGenerationUnavailable) => {
-                    ApplicationProblem::from_detail(
-                        ApplicationProblemDetailV1::DiagnosticsPending {
-                            producer: compiler,
-                            generation: None,
-                        },
-                    )
-                }
+                None
+                | Some(
+                    CompilerProducerRunV1::CodeIndexGenerationUnavailable
+                    | CompilerProducerRunV1::Superseded,
+                ) => ApplicationProblem::from_detail(
+                    ApplicationProblemDetailV1::DiagnosticsPending {
+                        producer: compiler,
+                        generation: None,
+                    },
+                ),
                 Some(CompilerProducerRunV1::Published { generation, .. }) => {
                     ApplicationProblem::from_detail(
                         ApplicationProblemDetailV1::DiagnosticsPending {
@@ -1985,8 +2068,9 @@ fn unpublished_diagnostics_problem(
 fn unchecked_owner_problem(
     project_root: &Path,
     file: &Path,
+    status: &TypeScriptProducerStatusHandleV1,
 ) -> Result<Option<ApplicationProblem>, ApplicationContractError> {
-    let problem = match typescript_diagnostics_availability(project_root, Some(file)) {
+    let problem = match typescript_diagnostics_availability(project_root, Some(file), status) {
         TypeScriptDiagnosticsAvailabilityV1::CompilerMissing {
             tsconfig,
             install_command,
@@ -2094,9 +2178,9 @@ mod tests {
     use super::{
         ExtendedPrimitivePort, MAX_SAFE_DIAGNOSTIC_MESSAGE_BYTES, OmissionReason,
         PrimitiveCapacity, PrimitiveDispatch, PrimitiveRequest, StorageStatusPrimitiveRequest,
-        diagnostics_absence_problem, safe_problem_message, session_structural_refusal_problem,
-        symbol_temporal_state, unchecked_owner_problem, unpublished_diagnostics_problem,
-        valid_owned_primitive_request, validate_admitted_root_uri,
+        TypeScriptProducerStatusHandleV1, diagnostics_absence_problem, safe_problem_message,
+        session_structural_refusal_problem, symbol_temporal_state, unchecked_owner_problem,
+        unpublished_diagnostics_problem, valid_owned_primitive_request, validate_admitted_root_uri,
     };
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, GraphRelationRequest, ImplementationSelector,
@@ -2176,8 +2260,13 @@ mod tests {
                 "application.diagnostics.unsupported",
             ),
         ] {
-            let problem = diagnostics_absence_problem(reason, project.path(), None)
-                .expect("typed diagnostics absence");
+            let problem = diagnostics_absence_problem(
+                reason,
+                project.path(),
+                None,
+                &TypeScriptProducerStatusHandleV1::default(),
+            )
+            .expect("typed diagnostics absence");
             assert_eq!(problem.kind(), kind, "reason {reason:?}");
             assert_eq!(
                 problem
@@ -2199,6 +2288,7 @@ mod tests {
     fn unpublished_diagnostics_name_the_producer_route() {
         let project = tempfile::tempdir().expect("project root");
         let root = project.path();
+        let status = TypeScriptProducerStatusHandleV1::default();
         let file = Path::new("packages/app/src/index.ts");
 
         for (scope, detail) in [
@@ -2226,7 +2316,8 @@ mod tests {
                 },
             ),
         ] {
-            let no_tsconfig = unpublished_diagnostics_problem(root, scope).expect("no tsconfig");
+            let no_tsconfig =
+                unpublished_diagnostics_problem(root, scope, &status).expect("no tsconfig");
             assert_eq!(no_tsconfig.detail(), Some(&detail));
             assert_eq!(no_tsconfig.kind(), ApplicationProblemKind::Unsupported);
             assert_eq!(
@@ -2257,7 +2348,8 @@ mod tests {
         .expect("package tsconfig");
         std::fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").expect("lock");
         for scope in [None, Some(file)] {
-            let missing = unpublished_diagnostics_problem(root, scope).expect("missing compiler");
+            let missing =
+                unpublished_diagnostics_problem(root, scope, &status).expect("missing compiler");
             assert_eq!(missing.kind(), ApplicationProblemKind::Unsupported);
             assert_eq!(missing.legal_actions(), [LegalAction::Refresh]);
             assert_eq!(
@@ -2272,7 +2364,7 @@ mod tests {
             );
         }
         assert!(
-            unchecked_owner_problem(root, file)
+            unchecked_owner_problem(root, file, &status)
                 .expect("owner state")
                 .is_some(),
             "an empty page is no evidence for a file whose compiler is missing"
@@ -2283,11 +2375,11 @@ mod tests {
         std::fs::write(bin.join(if cfg!(windows) { "tsc.cmd" } else { "tsc" }), "")
             .expect("workspace tsc");
         assert!(
-            unchecked_owner_problem(root, file)
+            unchecked_owner_problem(root, file, &status)
                 .expect("owner state")
                 .is_none()
         );
-        let pending = unpublished_diagnostics_problem(root, Some(file)).expect("pending");
+        let pending = unpublished_diagnostics_problem(root, Some(file), &status).expect("pending");
         assert_eq!(
             pending.detail(),
             Some(&ApplicationProblemDetailV1::DiagnosticsPending {

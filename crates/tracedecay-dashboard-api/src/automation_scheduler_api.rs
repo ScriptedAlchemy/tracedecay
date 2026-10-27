@@ -9,7 +9,9 @@ use super::DashboardState;
 use super::automation_config_api::effective_automation_config;
 use super::util::{JsonError, internal_error};
 use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
-use tracedecay_automation_runtime::automation::config::AutomationConfig;
+use tracedecay_automation_runtime::automation::config::{
+    AdmittedAutomationConfig, AutomationConfig,
+};
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, load_run_ledger_task_summary,
 };
@@ -87,6 +89,7 @@ async fn set_scheduler_paused(
     state: &DashboardState,
     paused: bool,
 ) -> std::result::Result<(), JsonError> {
+    effective_automation_config(state).map_err(|err| internal_error(&err))?;
     save_scheduler_control(
         &state.dashboard_root,
         &AutomationSchedulerControl { paused },
@@ -171,7 +174,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
 }
 
 fn task_status(
-    config: &AutomationConfig,
+    config: &AdmittedAutomationConfig,
     codex: &LcmSummarizerExecutableV1,
     paused: bool,
     summary: &AutomationRunLedgerTaskSummary,
@@ -319,7 +322,7 @@ mod tests {
         };
 
         let status = task_status(
-            &config,
+            &tracedecay_automation::config::admit_config(&config).unwrap(),
             &LcmSummarizerExecutableV1::Unconfigured,
             false,
             &summary,

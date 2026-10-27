@@ -23,6 +23,7 @@ use tracedecay_agent_hosts::native_integration::{
     DaemonNativeIntegrationAnalysisV1, DaemonNativeIntegrationServiceRegistry,
     NativeIntegrationTargetV1,
 };
+use tracedecay_application::diagnostics_producer::TypeScriptProducerStatusHandleV1;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -167,7 +168,7 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 
 /// Registers the owners that serve code reads on an admitted route: the
 /// callable-code authorization and the primitive runtime. Returns the
-/// admitted root URI they were bound to.
+/// admitted root URI and the compiler status retained by their runtime.
 #[tracing::instrument(name = "daemon.project.owners.code_reads", level = "trace", skip_all)]
 async fn register_project_code_read_owners(
     invocation: &DaemonInvocationState,
@@ -177,7 +178,7 @@ async fn register_project_code_read_owners(
     access: &ProjectSourceAccessSnapshot,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
-) -> Result<String> {
+) -> Result<(String, TypeScriptProducerStatusHandleV1)> {
     // Primitive reads are part of the admitted core route. Publish their
     // runtime and callable-code authorization before the slower mutation,
     // delivery, native-integration, and Work owners finish mounting.
@@ -380,7 +381,7 @@ pub(super) async fn register_project_open_production_owners(
     let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
         server.project_session_application_retrieval_service(&access.scope)?,
     ));
-    let admitted_root_uri = Box::pin(register_project_code_read_owners(
+    let (admitted_root_uri, compiler_status) = Box::pin(register_project_code_read_owners(
         invocation,
         project_root,
         server,
@@ -792,6 +793,7 @@ pub(super) async fn register_project_open_production_owners(
             project_root.to_path_buf(),
             &scope,
             Arc::clone(&graph),
+            compiler_status,
         );
 
     tracing::info!(

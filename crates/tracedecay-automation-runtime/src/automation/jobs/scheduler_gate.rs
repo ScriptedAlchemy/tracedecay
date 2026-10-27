@@ -2,11 +2,13 @@ use std::path::Path;
 
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
+#[cfg(test)]
+use super::admit_job;
 use super::{
-    AgentTaskKind, AutomationConfig, AutomationJob, AutomationRunLedgerPublication,
-    AutomationTrigger, JobRunContext, Result, TraceDecayError, UserJobAutomationRun,
-    config_skip_reason, current_timestamp, job_schedule_decision, job_task_key,
-    load_run_ledger_task_summary, try_acquire_job_task_lock, validate_job,
+    AdmittedAutomationJob, AgentTaskKind, AutomationConfig, AutomationJob,
+    AutomationRunLedgerPublication, AutomationTrigger, JobRunContext, Result, TraceDecayError,
+    UserJobAutomationRun, config_skip_reason, current_timestamp, job_schedule_decision,
+    job_task_key, load_run_ledger_task_summary, try_acquire_job_task_lock,
 };
 /// Applies the configuration, canonical job-lock, and schedule gates before
 /// the daemon reserves an external effect. Every skip is recorded under a
@@ -37,11 +39,10 @@ pub async fn evaluate_and_record_scheduler_skip(
     dashboard_root: &Path,
     config: &AutomationConfig,
     executable: Option<&Path>,
-    job: &AutomationJob,
+    job: &AdmittedAutomationJob,
     run_id: &str,
     occurrence_anchor_run_id: Option<&str>,
 ) -> Result<Option<UserJobAutomationRun>> {
-    validate_job(job)?;
     if let Some(reason) = config_skip_reason(config) {
         return record_scheduler_diagnostic(
             dashboard_root,
@@ -105,7 +106,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
     now_secs: i64,
     occurrence_anchor_run_id: Option<&str>,
 ) -> Result<Option<UserJobAutomationRun>> {
-    validate_job(job)?;
+    let admitted_job = admit_job(job)?;
     if let Some(reason) = config_skip_reason(config) {
         return record_scheduler_diagnostic(
             dashboard_root,
@@ -136,7 +137,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
     };
 
     let summary = load_scheduler_summary(dashboard_root, job).await?;
-    let Some(reason) = job_schedule_decision(job, summary.records(), now_secs) else {
+    let Some(reason) = job_schedule_decision(&admitted_job, summary.records(), now_secs) else {
         return Ok(None);
     };
     record_scheduler_diagnostic(

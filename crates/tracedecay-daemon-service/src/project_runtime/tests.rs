@@ -70,10 +70,17 @@ async fn a_second_registration_is_refused_and_leaves_the_incumbent_live() {
     let project = root("alpha");
 
     registry
-        .register(project.clone(), component(1))
+        .publish(project.clone(), component(1))
         .await
         .expect("the first registration owns the empty slot");
-    let refused = registry.register(project.clone(), component(2)).await;
+    let refused = registry
+        .register_or_reconcile_with::<Component, ProjectRuntimeRegistryError, _, _, _, _, _>(
+            project.clone(),
+            |_| Err(ProjectRuntimeRegistryError::AlreadyRegistered),
+            || async { panic!("a rejected incumbent must not build a replacement") },
+            mark,
+        )
+        .await;
 
     assert_eq!(refused, Err(ProjectRuntimeRegistryError::AlreadyRegistered));
     assert_eq!(
@@ -495,7 +502,7 @@ async fn concurrent_successful_registrations_build_only_once() {
         registrations.spawn(async move {
             barrier.wait().await;
             registry
-                .register_or_reconcile::<Component, TestReconcileError, _, _, _>(
+                .register_or_reconcile_with::<Component, TestReconcileError, _, _, _, _, _>(
                     project,
                     |incumbent| {
                         assert_eq!(mark(incumbent), Some(11));
@@ -506,6 +513,7 @@ async fn concurrent_successful_registrations_build_only_once() {
                         release_build.notified().await;
                         Ok(component(11))
                     },
+                    Arc::clone,
                 )
                 .await
         });
@@ -521,9 +529,11 @@ async fn concurrent_successful_registrations_build_only_once() {
 
     let mut successes = 0;
     while let Some(result) = registrations.join_next().await {
-        result
+        let returned = result
             .expect("registration task")
             .expect("joined registration succeeds");
+        let installed = registry.get::<Component>(&project).await.unwrap();
+        assert!(Arc::ptr_eq(&installed, &returned));
         successes += 1;
     }
     assert_eq!(successes, REGISTRATIONS);
@@ -938,7 +948,14 @@ async fn shutting_down_empties_the_registry() {
     assert!(registry.is_empty());
     assert!(!registry.holds::<Component>(&root("alpha")).await);
     assert_eq!(
-        registry.register(root("late"), component(3)).await,
+        registry
+            .register_or_reconcile_with::<Component, ProjectRuntimeRegistryError, _, _, _, _, _>(
+                root("late"),
+                |_| Ok(()),
+                || async { Ok(component(3)) },
+                mark,
+            )
+            .await,
         Err(ProjectRuntimeRegistryError::Closed),
         "registration must fail after shutdown closes the registry"
     );
@@ -974,7 +991,14 @@ async fn retiring_exact_roots_fences_republication_without_closing_other_project
     );
     assert!(!registry.holds::<Component>(&retired).await);
     assert_eq!(
-        registry.register(retired.clone(), component(3)).await,
+        registry
+            .register_or_reconcile_with::<Component, ProjectRuntimeRegistryError, _, _, _, _, _>(
+                retired.clone(),
+                |_| Ok(()),
+                || async { Ok(component(3)) },
+                mark,
+            )
+            .await,
         Err(ProjectRuntimeRegistryError::Closed)
     );
     assert_eq!(
@@ -1041,4 +1065,36 @@ async fn daemon_shutdown_does_not_wait_for_drained_runtime_deallocation() {
     dropped
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("the detached release must still free the drained runtime");
+}
+
+#[tokio::test]
+async fn registration_projection_refuses_shutdown_during_build() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let project = root("projection-shutdown");
+    let building_registry = registry.clone();
+    let building_project = project.clone();
+    let (started, building) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    let registration = tokio::spawn(async move {
+        building_registry
+            .register_or_reconcile_with::<Component, ProjectRuntimeRegistryError, _, _, _, _, _>(
+                building_project,
+                |_| Ok(()),
+                || async {
+                    started.send(()).unwrap();
+                    resume.await.unwrap();
+                    Ok(component(42))
+                },
+                mark,
+            )
+            .await
+    });
+    building.await.unwrap();
+    registry.begin_shutdown();
+    release.send(()).unwrap();
+    assert_eq!(
+        registration.await.unwrap(),
+        Err(ProjectRuntimeRegistryError::Closed)
+    );
+    assert!(!registry.holds::<Component>(&project).await);
 }
