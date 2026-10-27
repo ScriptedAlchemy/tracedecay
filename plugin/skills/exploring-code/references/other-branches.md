@@ -19,3 +19,11 @@ For PR orientation or a committed ref range, start with `tracedecay_pr_context`:
 its local-code briefing compares exact Git blobs even when indexed branch
 generations are unavailable. Its `base_ref` and `head_ref` also accept
 remote-tracking refs; the branch tools above select local branch names.
+
+Read a committed source span with `source_lines` using the full commit
+`revision`, repository-relative `file`, and one-based inclusive
+`start_line`/`end_line`. Continue from `next_line` with the original revision,
+file, and end line. This follows the normal admitted source-service lifecycle
+and path policy; unavailable primitive authority is still unavailable.
+The PR briefing reads retained hosted evidence by default; request
+`refresh_github: true` only when a configured matching PR refresh is useful.

@@ -3,6 +3,84 @@ use tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1;
 use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 
 #[test]
+fn source_lines_advertises_complete_selectors_with_supported_transport_controls() {
+    use tracedecay_contracts::retrieval::{
+        PageRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
+    };
+
+    let definition = get_tool_definitions()
+        .unwrap()
+        .into_iter()
+        .find(|definition| definition.name == "tracedecay_source_lines")
+        .unwrap();
+    let schema = &definition.input_schema;
+    assert_eq!(schema["type"], "object");
+    let branches = schema["anyOf"].as_array().expect("two source selectors");
+    assert_eq!(branches.len(), 2);
+    let root_properties = schema["properties"].as_object().unwrap();
+    assert!(root_properties.contains_key("format"));
+    assert!(!root_properties.contains_key("project_selector"));
+    for branch in branches {
+        assert_eq!(branch["additionalProperties"], false);
+        for (name, property) in root_properties {
+            assert_eq!(branch["properties"][name], *property);
+        }
+    }
+
+    let indexed = json!({
+        "file": "file.source",
+        "span": {"start_byte": 0, "end_byte": 10},
+        "meta": RetrievalRequestMeta::current(
+            PageRequest::first(10).unwrap(), ResultProjection::Evidence, RetrievalOrder::SourcePosition,
+        ),
+    });
+    let historical = json!({
+        "revision": "a".repeat(40), "file": "src/lib.rs", "start_line": 1, "end_line": 10,
+    });
+    for selector in [indexed.clone(), historical.clone()] {
+        for format in [None, Some("json"), Some("markdown")] {
+            let mut arguments = selector.clone();
+            if let Some(format) = format {
+                arguments["format"] = json!(format);
+            }
+            let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(
+                "tracedecay_source_lines",
+                arguments,
+            )
+            .unwrap();
+            assert!(
+                tracedecay_daemon_protocol::parse_application_surface_request(
+                    ApplicationSurfaceOperation::SourceLines,
+                    adapted.request,
+                )
+                .unwrap()
+                .matches(ApplicationSurfaceOperation::SourceLines)
+            );
+        }
+    }
+    let mut mixed = historical.clone();
+    mixed["span"] = indexed["span"].clone();
+    let mut unsupported_project = historical.clone();
+    unsupported_project["project_selector"] = json!({"project_id":"project.other"});
+    for invalid in [mixed, unsupported_project] {
+        let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(
+            "tracedecay_source_lines",
+            invalid,
+        );
+        assert!(
+            adapted
+                .and_then(
+                    |adapted| tracedecay_daemon_protocol::parse_application_surface_request(
+                        ApplicationSurfaceOperation::SourceLines,
+                        adapted.request,
+                    )
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn work_and_workflow_advertise_every_executable_request_schema() {
     let definitions = get_tool_definitions().expect("tool definitions");
     for (family, registry) in [

@@ -49,6 +49,11 @@ where
     let request: PrContextSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_pr_context")?;
     if request.view == PrContextViewV1::Symbols {
+        if request.refresh_github {
+            return Err(TraceDecayError::Config {
+                message: "refresh_github requires pr_context view: brief".to_owned(),
+            });
+        }
         if request.pull_request.is_some() {
             return Err(TraceDecayError::Config { message: "pull_request selects hosted context in view: brief; use explicit base_ref and head_ref for view: symbols".to_owned() });
         }
@@ -83,13 +88,19 @@ where
                 CommitId::new(head_oid.clone()).map_err(|error| TraceDecayError::Config {
                     message: error.to_string(),
                 })?,
+                request.refresh_github,
             )
             .await,
         ),
         None => None,
     };
     controls.checkpoint()?;
-    let hosted = project_hosted(hosted_outcome.as_ref(), request.pull_request, &head_oid)?;
+    let mut hosted = project_hosted(hosted_outcome.as_ref(), request.pull_request, &head_oid)?;
+    if !request.refresh_github {
+        hosted.source.detail.push_str(
+            " No GitHub refresh was requested; available observations are retained evidence.",
+        );
+    }
     let base = request
         .base_ref
         .or_else(|| selected_base(hosted_outcome.as_ref(), request.pull_request, &head_oid))
@@ -128,11 +139,14 @@ where
     );
     let merge_base = comparison.merge_base.clone();
     let pinned_head = head_oid.clone();
+    let source_policy = ctx.index_path_policy().clone();
     let mut work = std::pin::pin!(blocking_git_span_controlled(
         "PR declarations",
         controls.cancellation.clone(),
         controls.deadline.clone(),
-        move |cancelled| { compare_source(&git, &merge_base, &pinned_head, cancelled) }
+        move |cancelled| {
+            compare_source(&git, &merge_base, &pinned_head, &source_policy, cancelled)
+        }
     ));
     let source = match ctx.cancellation() {
         Some(signal) => tokio::select! {
@@ -239,7 +253,13 @@ where
             ));
             graph_cost = Some(graph.read_cost());
         }
-        Err(error) if graph_enrichment_is_transient(&error) => {
+        Err(error)
+            if graph_enrichment_is_transient(&error)
+                || matches!(
+                    error.project_route_context(),
+                    Some(("code-graph-parked", _, _))
+                ) =>
+        {
             brief.graph_analysis = unavailable(&error.to_string())
         }
         Err(error) => return Err(error),
@@ -505,14 +525,14 @@ fn add_quality_and_next_steps(brief: &mut PrContextBriefV1) {
     if !brief.hosted.required_checks_known {
         brief.quality.push(PrContextQualityV1 { signal: "merge_readiness_unknown".to_owned(), observation: "Retained CI observations do not enumerate all required checks; merge readiness is unknown.".to_owned() });
     }
-    brief.next_steps.push("Read the ranked entry_points at their recorded revisions; inspect before_signature and after_signature before expanding a full diff.".to_owned());
+    brief.next_steps.push("Read the ranked entry_points and their before/after excerpts first. Expand missing code with source_lines using the recorded full revision, file, start_line, and end_line; use source_body for an attached node_id.".to_owned());
     if !brief.hosted.discussions.is_empty() {
         brief.next_steps.push("Open supplied discussion URLs for provider context. body_anchor records retained provenance; feedback_expand requires a server-minted finding expansion handle.".to_owned());
     }
     if !brief.impact.is_empty() {
         brief.next_steps.push("Read the listed consumers, prioritizing those outside changed files; use impact on a specific changed symbol for deeper traversal.".to_owned());
     }
-    brief.next_steps.push("Use pr_context with view: symbols for exact indexed symbol pages, or increase budget_tokens to expand this briefing.".to_owned());
+    brief.next_steps.push("Use refresh_github: true when a new hosted observation is needed. Use view: symbols for indexed symbol pages, or increase budget_tokens to expand this briefing.".to_owned());
 }
 
 /// Budget the entire structured result, including source states and omission
@@ -632,7 +652,10 @@ fn remove_last<T: serde::Serialize>(rows: &mut Vec<T>, estimate: &mut u32) -> Re
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use crate::tool_context::{McpRequestAuthoritiesV1, McpToolBinding, PrContextDeliveryReader};
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use tracedecay_application::delivery::ProjectDeliveryReadOutcomeV1;
 
     use super::super::test_support::{
         branched_repository, fixture_context, fixture_project, test_git,
@@ -656,6 +679,115 @@ mod tests {
             GraphToolResultV1::PrContext(PrContextResultV1::Brief(brief)) => *brief,
             other => panic!("expected a brief, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn brief_forwards_exact_head_and_explicit_refresh_without_hiding_source_denial() {
+        let repo = branched_repository();
+        let head = git_pr_head(repo.path(), "HEAD").unwrap();
+        let project = fixture_project(repo.path());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let observed = calls.clone();
+        let reader: PrContextDeliveryReader = Arc::new(move |head, refresh| {
+            observed.lock().unwrap().push((head.to_string(), refresh));
+            Box::pin(async { ProjectDeliveryReadOutcomeV1::Denied })
+        });
+        let ctx = McpToolContext::bind(McpToolBinding {
+            project: &project,
+            request: McpRequestAuthoritiesV1 {
+                pr_context_delivery: Some(&reader),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        for arguments in [
+            json!({"base_ref":"main"}),
+            json!({"base_ref":"main", "refresh_github":true}),
+        ] {
+            let refresh = arguments
+                .get("refresh_github")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let completion = compute_pr_context(&ctx, async { Err(graph_pending()) }, arguments)
+                .await
+                .unwrap();
+            let GraphToolResultV1::PrContext(PrContextResultV1::Brief(brief)) = completion.result
+            else {
+                panic!("expected local brief")
+            };
+            assert_eq!(brief.hosted.source.state, PrContextSourceStateV1::Denied);
+            assert_eq!(
+                brief
+                    .hosted
+                    .source
+                    .detail
+                    .contains("No GitHub refresh was requested"),
+                !refresh
+            );
+            assert!(brief.hosted.discussions.is_empty());
+            assert_eq!(brief.source_analysis.state, PrContextSourceStateV1::Ready);
+            assert!(!brief.entry_points.is_empty());
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(head.clone(), false), (head, true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn symbols_rejects_github_refresh_before_reading_delivery() {
+        let repo = branched_repository();
+        let project = fixture_project(repo.path());
+        let reader: PrContextDeliveryReader =
+            Arc::new(|_, _| panic!("delivery must stay uncalled"));
+        let ctx = McpToolContext::bind(McpToolBinding {
+            project: &project,
+            request: McpRequestAuthoritiesV1 {
+                pr_context_delivery: Some(&reader),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let error = compute_pr_context(
+            &ctx,
+            async { Err(graph_pending()) },
+            json!({"view":"symbols", "refresh_github":true}),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("refresh_github"));
+    }
+
+    #[tokio::test]
+    async fn parked_graph_preserves_the_completed_local_brief() {
+        let repo = branched_repository();
+        let project = fixture_project(repo.path());
+        let ctx = fixture_context(&project);
+        let error = tracedecay_graph_query::map_code_graph_read_runtime_error(
+            tracedecay_graph_query::CodeGraphReadError::Parked {
+                cause: "resource limit".to_owned(),
+                remedy: "reduce the indexed scope".to_owned(),
+                retries_on_wake: false,
+            },
+        );
+        assert!(matches!(
+            error.project_route_context(),
+            Some(("code-graph-parked", false, _))
+        ));
+        let completion = compute_pr_context(&ctx, async { Err(error) }, json!({"base_ref":"main"}))
+            .await
+            .unwrap();
+        let GraphToolResultV1::PrContext(PrContextResultV1::Brief(brief)) = completion.result
+        else {
+            panic!("expected local brief")
+        };
+        assert_eq!(brief.files_changed, 1);
+        assert_eq!(brief.source_analysis.state, PrContextSourceStateV1::Ready);
+        assert_eq!(
+            brief.graph_analysis.state,
+            PrContextSourceStateV1::Unavailable
+        );
+        assert!(!brief.entry_points.is_empty());
     }
 
     #[tokio::test]
@@ -918,22 +1050,38 @@ mod tests {
     async fn deleted_trailing_text_keeps_a_real_before_side_entrypoint() {
         let repo = branched_repository();
         test_git(repo.path(), &["switch", "main"]);
-        std::fs::write(repo.path().join("notes.txt"), "retained\ndeleted\n").unwrap();
+        std::fs::write(
+            repo.path().join("notes with  spaces.txt"),
+            "retained\ndeleted\n",
+        )
+        .unwrap();
         test_git(repo.path(), &["add", "."]);
         test_git(repo.path(), &["commit", "-m", "base unsupported text"]);
         test_git(repo.path(), &["switch", "-c", "delete-trailing-text"]);
-        std::fs::write(repo.path().join("notes.txt"), "retained\n").unwrap();
+        std::fs::write(repo.path().join("notes with  spaces.txt"), "retained\n").unwrap();
         test_git(repo.path(), &["add", "."]);
         test_git(repo.path(), &["commit", "-m", "remove trailing text"]);
 
         let brief = briefing(repo.path(), json!({"base_ref":"main"})).await;
         assert_eq!(brief.entry_points.len(), 1);
         let entry = &brief.entry_points[0];
-        assert_eq!(entry.location.file, "notes.txt");
+        assert_eq!(entry.location.file, "notes with  spaces.txt");
         assert_eq!(entry.location.line, 2);
         assert_eq!(entry.revision, brief.merge_base);
         assert_eq!(brief.additions, 0);
         assert_eq!(brief.deletions, 1);
+        let rendered = super::super::pr_context_render::render_pr_context_brief(&brief);
+        let read = rendered
+            .lines()
+            .find(|line| line.contains("tracedecay_source_lines"))
+            .expect("historical read hint");
+        let json_start = read.find('{').unwrap();
+        let json_end = read.rfind('}').unwrap();
+        let selector: Value = serde_json::from_str(&read[json_start..=json_end]).unwrap();
+        assert_eq!(selector["revision"], brief.merge_base);
+        assert_eq!(selector["file"], "notes with  spaces.txt");
+        assert_eq!(selector["start_line"], 2);
+        assert_eq!(selector["end_line"], 2);
     }
 
     #[tokio::test]
@@ -1137,6 +1285,20 @@ mod tests {
         let repo = branched_repository();
         let project = fixture_project(repo.path());
         let ctx = fixture_context(&project);
+        for graph_error in [
+            tracedecay_graph_query::CodeGraphReadError::Denied,
+            tracedecay_graph_query::CodeGraphReadError::Cancelled,
+            tracedecay_graph_query::CodeGraphReadError::Corrupt {
+                detail: "invalid retained graph".to_owned(),
+            },
+        ] {
+            let error = tracedecay_graph_query::map_code_graph_read_runtime_error(graph_error);
+            assert!(
+                compute_pr_context(&ctx, async { Err(error) }, json!({"base_ref":"main"}))
+                    .await
+                    .is_err()
+            );
+        }
         let error = compute_pr_context(
             &ctx,
             async { Err(graph_pending()) },

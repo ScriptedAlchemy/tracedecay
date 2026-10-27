@@ -1,16 +1,18 @@
-//! Declaration changes from exact Git blobs, independent of index readiness.
+//! PR presentation over the shared exact Git selection and source comparison.
 
 use std::collections::{BTreeMap, HashSet};
-use std::ops::Range;
 
-use tracedecay_application::git_intelligence::NativeGitIntelligence;
-use tracedecay_code_extraction::LanguageRegistry;
-use tracedecay_contracts::git::{GIT_HISTORICAL_BLOB_MAX_BYTES, GitHistoricalBlobRequestV1};
-use tracedecay_contracts::retrieval::{
-    PrContextAreaV1, PrContextEntryPointV1, PrContextExcerptV1, PrContextFileV1,
-    PrContextLocationV1, PrContextQualityV1, PrContextSourceStateV1, PrContextSourceV1,
+use tracedecay_application::git_intelligence::{
+    GitChangeSelection, GitChangedDeclaration, GitSourceDeclaration as Declaration, GitSourceError,
+    NativeGitIntelligence, analyze_source_changes,
 };
-use tracedecay_domain::{GitChangeKindV1, GitOidV1, Node, NodeKind};
+use tracedecay_code_extraction::LanguageRegistry;
+use tracedecay_contracts::retrieval::{
+    GitContextSourceSideV1, GitDeclarationChangeKindV1, PrContextAreaV1, PrContextEntryPointV1,
+    PrContextExcerptV1, PrContextFileV1, PrContextLocationV1, PrContextQualityV1,
+    PrContextSourceStateV1, PrContextSourceV1,
+};
+use tracedecay_domain::{GitChangeKindV1, GitDiffScopeV1, GitOidV1, IndexPathPolicyV1};
 
 use super::shell::classify_file_role;
 
@@ -25,131 +27,12 @@ pub(super) struct SourceBrief {
     pub clean_at_head: bool,
 }
 
-struct Declaration {
-    node: Node,
-    content: String,
-    span: Range<usize>,
-    revision: String,
-    path: String,
-}
-
-fn read_source(
-    git: &NativeGitIntelligence,
-    revision: &GitOidV1,
-    path: &str,
-) -> std::result::Result<String, String> {
-    let blob = git
-        .historical_blob(&GitHistoricalBlobRequestV1 {
-            commit: revision.clone(),
-            path: path.to_owned(),
-            max_bytes: GIT_HISTORICAL_BLOB_MAX_BYTES,
-            include_bytes: true,
-        })
-        .map_err(|error| error.to_string())?;
-    let bytes = blob
-        .bytes
-        .ok_or_else(|| format!("missing blob at {}:{path}", revision.as_str()))?;
-    if bytes.contains(&0) {
-        return Err("binary source".to_owned());
-    }
-    String::from_utf8(bytes).map_err(|_| "non-UTF-8 source".to_owned())
-}
-
-/// Both sides use the head's logical path when extracting names, so a path
-/// rename cannot manufacture a deletion and addition of every declaration.
-fn declarations(
-    registry: &LanguageRegistry,
-    source: &str,
-    revision: &GitOidV1,
-    path: &str,
-    logical_path: &str,
-) -> std::result::Result<Vec<Declaration>, String> {
-    let extractor = registry
-        .extractor_for_file(logical_path)
-        .ok_or_else(|| "unsupported language".to_owned())?;
-    let artifact = extractor.extract_artifact(logical_path, source);
-    if !artifact.result.errors.is_empty() {
-        return Err(format!(
-            "{} extraction errors",
-            artifact.result.errors.len()
-        ));
-    }
-    let lines = source.split_inclusive('\n').collect::<Vec<_>>();
-    let mut offsets = Vec::with_capacity(lines.len() + 1);
-    offsets.push(0usize);
-    for line in &lines {
-        offsets.push(offsets.last().copied().unwrap_or_default() + line.len());
-    }
-    artifact
-        .result
-        .nodes
-        .into_iter()
-        .filter(|node| {
-            !matches!(
-                node.kind,
-                NodeKind::File
-                    | NodeKind::Module
-                    | NodeKind::Impl
-                    | NodeKind::Use
-                    | NodeKind::Package
-                    | NodeKind::GoPackage
-                    | NodeKind::ScalaPackage
-                    | NodeKind::KotlinPackage
-                    | NodeKind::GenericParam
-                    | NodeKind::AnnotationUsage
-            )
-        })
-        .map(|node| {
-            let start = if node.attrs_start_line < node.start_line {
-                offsets.get(node.attrs_start_line as usize).copied()
-            } else {
-                offsets
-                    .get(node.start_line as usize)
-                    .and_then(|offset| offset.checked_add(node.start_column as usize))
-            };
-            let end = offsets
-                .get(node.end_line as usize)
-                .and_then(|offset| offset.checked_add(node.end_column as usize));
-            let (span, content) = start
-                .zip(end)
-                .and_then(|(start, end)| {
-                    source
-                        .get(start..end)
-                        .map(|text| (start..end, text.to_owned()))
-                })
-                .ok_or_else(|| format!("invalid source span for {}", node.qualified_name))?;
-            Ok(Declaration {
-                node,
-                content,
-                span,
-                revision: revision.as_str().to_owned(),
-                path: path.to_owned(),
-            })
-        })
-        .collect()
-}
-
-fn group_declarations(
-    declarations: Vec<Declaration>,
-) -> BTreeMap<(String, String), Vec<Declaration>> {
-    let mut grouped = BTreeMap::<_, Vec<_>>::new();
-    for declaration in declarations {
-        grouped
-            .entry((
-                declaration.node.qualified_name.clone(),
-                declaration.node.kind.as_str().to_owned(),
-            ))
-            .or_default()
-            .push(declaration);
-    }
-    grouped
-}
-
 fn entry(
     declaration: &Declaration,
     previous: Option<&Declaration>,
     path: &str,
     revision: &str,
+    previous_revision: &str,
     change: &str,
 ) -> PrContextEntryPointV1 {
     let node = &declaration.node;
@@ -187,14 +70,14 @@ fn entry(
         after_signature,
         after_signature_truncated,
         before_excerpt: if change == "removed" {
-            Some(excerpt(declaration, 0))
+            Some(excerpt(declaration, revision, 0))
         } else {
-            previous.map(|old| excerpt(old, preview_start))
+            previous.map(|old| excerpt(old, previous_revision, preview_start))
         },
         after_excerpt: if change == "removed" {
             None
         } else {
-            Some(excerpt(declaration, preview_start))
+            Some(excerpt(declaration, revision, preview_start))
         },
         reason: match change {
             "signature_changed" => {
@@ -227,7 +110,11 @@ fn signature_excerpt(signature: Option<&String>) -> (Option<String>, bool) {
     (Some(signature[..end].to_owned()), end < signature.len())
 }
 
-fn excerpt(declaration: &Declaration, requested_start: usize) -> PrContextExcerptV1 {
+fn excerpt(
+    declaration: &Declaration,
+    revision: &str,
+    requested_start: usize,
+) -> PrContextExcerptV1 {
     let lines = declaration.content.lines().collect::<Vec<_>>();
     let start = requested_start.min(lines.len().saturating_sub(1));
     let selected = lines
@@ -253,7 +140,7 @@ fn excerpt(declaration: &Declaration, requested_start: usize) -> PrContextExcerp
         .saturating_add(1);
     let line_count = text.lines().count() as u32;
     PrContextExcerptV1 {
-        revision: declaration.revision.clone(),
+        revision: revision.to_owned(),
         location: PrContextLocationV1 {
             file: declaration.path.clone(),
             line,
@@ -293,313 +180,138 @@ fn file_entry(path: &str, revision: &str, line: u32, reason: String) -> PrContex
     }
 }
 
-struct OutsideText<'a> {
-    parts: Vec<&'a str>,
-    lines: Vec<Range<u32>>,
-}
-
-/// Use the extractor's exact byte spans, including columns. A declaration
-/// does not own an import or top-level expression sharing its first/last line.
-/// Keep the slices separate so moving outside text across declarations also
-/// changes the comparison, while ordinary body edits leave them unchanged.
-fn outside_text<'a>(
-    declarations: &[Declaration],
-    source: &'a str,
-) -> std::result::Result<OutsideText<'a>, String> {
-    let mut ranges = declarations
-        .iter()
-        .map(|declaration| declaration.span.clone())
-        .collect::<Vec<_>>();
-    ranges.sort_by_key(|range| (range.start, range.end));
-    let mut merged = Vec::<Range<usize>>::new();
-    for range in ranges {
-        if let Some(previous) = merged.last_mut()
-            && range.start <= previous.end
-        {
-            previous.end = previous.end.max(range.end);
-        } else {
-            merged.push(range);
-        }
-    }
-    let mut line_starts = vec![0usize];
-    line_starts.extend(source.match_indices('\n').map(|(offset, _)| offset + 1));
-    let mut outside = OutsideText {
-        parts: Vec::new(),
-        lines: Vec::new(),
-    };
-    let mut offset = 0;
-    let end = source.len()..source.len();
-    for range in merged.iter().chain(std::iter::once(&end)) {
-        let text = source
-            .get(offset..range.start)
-            .ok_or_else(|| "invalid uncovered source span".to_owned())?;
-        outside.parts.push(text);
-        if !text.trim().is_empty() {
-            let first = offset + text.len() - text.trim_start().len();
-            let last = offset + text.trim_end().len() - 1;
-            // Historical blobs are bounded at 8 MiB, so line indices fit u32.
-            let first_line = line_starts.partition_point(|start| *start <= first) - 1;
-            let last_line = line_starts.partition_point(|start| *start <= last) - 1;
-            outside.lines.push(first_line as u32..last_line as u32 + 1);
-        }
-        offset = range.end;
-    }
-    Ok(outside)
-}
-
-fn first_outside_changed_line(changed: &Range<u32>, outside: &[Range<u32>]) -> Option<u32> {
-    outside.iter().find_map(|range| {
-        let line = changed.start.max(range.start);
-        (line < changed.end.min(range.end)).then_some(line)
-    })
-}
-
-fn compare_declarations(
+fn project_declaration(
     brief: &mut SourceBrief,
-    before: Vec<Declaration>,
-    after: Vec<Declaration>,
-    path: &str,
-    old_path: &str,
-    base: &GitOidV1,
-    head: &GitOidV1,
-    renamed: bool,
-) -> usize {
-    let mut ambiguous = 0;
-    let mut before = group_declarations(before);
-    for (key, mut new_group) in group_declarations(after) {
-        let mut old_group = before.remove(&key).unwrap_or_default();
-        // Visibility can be represented outside the declaration's own syntax
-        // span (for example TypeScript's export wrapper).
-        new_group.retain(|new| {
-            if let Some(position) = old_group.iter().position(|old| {
-                old.content == new.content
-                    && old.node.signature == new.node.signature
-                    && old.node.visibility == new.node.visibility
-            }) {
-                let old = old_group.remove(position);
-                if renamed {
-                    brief
-                        .entries
-                        .push(entry(new, Some(&old), path, head.as_str(), "renamed"));
-                }
-                false
-            } else {
-                true
-            }
-        });
-        if new_group.len() > 1 || old_group.len() > 1 {
-            ambiguous += 1;
-            for new in &new_group {
-                let mut point = entry(new, None, path, head.as_str(), "changed_overload");
-                point.reason = "Overload group changed; before/after pairing is ambiguous. Inspect this declaration and the file diff.".to_owned();
-                brief.entries.push(point);
-            }
-            for old in &old_group {
-                let mut point = entry(old, None, old_path, base.as_str(), "removed");
-                point.change = "changed_overload".to_owned();
-                point.reason =
-                    "Before-side declaration in an ambiguous changed overload group.".to_owned();
-                brief.entries.push(point);
-            }
-        } else if let Some(new) = new_group.first() {
-            let old = old_group.first();
-            let change = match old {
-                None => "added",
-                Some(old) if old.node.visibility != new.node.visibility => "visibility_changed",
-                Some(old) if old.node.signature != new.node.signature => "signature_changed",
-                Some(_) => "modified",
-            };
-            let mut point = entry(new, old, path, head.as_str(), change);
-            if change == "visibility_changed"
-                && let Some(old) = old
-            {
-                point.reason = format!(
-                    "Declaration visibility changed from {} to {}; inspect its public contract and consumers.",
-                    old.node.visibility.as_str(),
-                    new.node.visibility.as_str()
-                );
-            }
-            brief.entries.push(point);
-            if let Some(old) = old
-                && old.node.kind.is_callable_kind()
-                && old.node.complexity_analysis.is_complete()
-                && new.node.complexity_analysis.is_complete()
-                && old.node.branches != new.node.branches
-            {
-                brief.quality.push(PrContextQualityV1 {
-                    signal: "branch_count_changed".to_owned(),
-                    observation: format!(
-                        "{}: {} → {} branches (static count, not a correctness verdict).",
-                        new.node.qualified_name, old.node.branches, new.node.branches
-                    ),
-                });
-            }
-        } else if let Some(old) = old_group.first() {
-            brief
-                .entries
-                .push(entry(old, None, old_path, base.as_str(), "removed"));
+    changed: &GitChangedDeclaration,
+    base: &str,
+    head: &str,
+) {
+    let name = match changed.change {
+        GitDeclarationChangeKindV1::Added => "added",
+        GitDeclarationChangeKindV1::Removed => "removed",
+        GitDeclarationChangeKindV1::Modified => "modified",
+        GitDeclarationChangeKindV1::SignatureChanged => "signature_changed",
+        GitDeclarationChangeKindV1::VisibilityChanged => "visibility_changed",
+        GitDeclarationChangeKindV1::Renamed => "renamed",
+        GitDeclarationChangeKindV1::AmbiguousOverload => "changed_overload",
+    };
+    let mut point = match (&changed.before, &changed.after) {
+        (old, Some(new)) => entry(new, old.as_ref(), &new.path, head, base, name),
+        (Some(old), None) => entry(old, None, &old.path, base, base, "removed"),
+        (None, None) => return,
+    };
+    if changed.change == GitDeclarationChangeKindV1::AmbiguousOverload {
+        point.change = name.to_owned();
+        point.reason = "Overload group changed; before/after pairing is ambiguous. Inspect this declaration and the file diff.".to_owned();
+    }
+    if let (Some(old), Some(new)) = (&changed.before, &changed.after) {
+        if changed.change == GitDeclarationChangeKindV1::VisibilityChanged {
+            point.reason = format!(
+                "Declaration visibility changed from {} to {}; inspect its public contract and consumers.",
+                old.node.visibility.as_str(),
+                new.node.visibility.as_str()
+            );
+        }
+        if old.node.kind.is_callable_kind()
+            && old.node.complexity_analysis.is_complete()
+            && new.node.complexity_analysis.is_complete()
+            && old.node.branches != new.node.branches
+        {
+            brief.quality.push(PrContextQualityV1 {
+                signal: "branch_count_changed".to_owned(),
+                observation: format!(
+                    "{}: {} → {} branches (static count, not a correctness verdict).",
+                    new.node.qualified_name, old.node.branches, new.node.branches
+                ),
+            });
         }
     }
-    for old in before.into_values().flatten() {
-        brief
-            .entries
-            .push(entry(&old, None, old_path, base.as_str(), "removed"));
-    }
-    ambiguous
+    brief.entries.push(point);
 }
 
 pub(super) fn compare_source(
     git: &NativeGitIntelligence,
     base: &str,
     head: &str,
+    policy: &IndexPathPolicyV1,
     cancelled: &dyn Fn() -> bool,
-) -> std::result::Result<SourceBrief, String> {
+) -> Result<SourceBrief, String> {
     checkpoint(cancelled)?;
     let base = GitOidV1::new(base).map_err(|error| error.to_string())?;
     let head = GitOidV1::new(head).map_err(|error| error.to_string())?;
-    let files = git
-        .diff_file_metadata(&base, &head)
+    let comparison = git
+        .compare_changes(&GitChangeSelection::Diff(GitDiffScopeV1::CommitRange {
+            base: base.clone(),
+            head: head.clone(),
+        }))
         .map_err(|error| error.to_string())?;
     let mut brief = SourceBrief {
-        additions: 0,
-        deletions: 0,
-        changes: Vec::new(),
-        areas: Vec::new(),
-        entries: Vec::new(),
-        quality: Vec::new(),
-        source: PrContextSourceV1 {
-            state: PrContextSourceStateV1::Ready,
-            detail: "Exact merge-base and head blobs; declaration contracts compared. Line totals use the native Myers diff without materializing a full PR patch.".to_owned(),
-        },
+        additions: 0, deletions: 0, changes: Vec::new(), areas: Vec::new(), entries: Vec::new(), quality: Vec::new(),
+        source: PrContextSourceV1 { state: PrContextSourceStateV1::Ready, detail: "Exact merge-base and head blobs; declaration contracts compared. Line totals use the native Myers diff without materializing a full PR patch.".to_owned() },
         clean_at_head: false,
     };
     let registry = LanguageRegistry::new();
     let mut areas = BTreeMap::<String, PrContextAreaV1>::new();
-    let mut gaps = 0usize;
-    let mut unreadable = 0usize;
-    let mut ambiguous = 0usize;
-    for file in files {
+    let (mut gaps, mut unreadable, mut excluded, mut ambiguous) = (0usize, 0usize, 0usize, 0usize);
+    for file in &comparison.files {
         checkpoint(cancelled)?;
         let old_path = file.original_path.as_deref().unwrap_or(&file.path);
-        let submodule = file
-            .new_mode
-            .as_ref()
-            .is_some_and(|mode| mode.is_submodule())
-            || file
-                .old_mode
-                .as_ref()
-                .is_some_and(|mode| mode.is_submodule());
-        let before = if file.change == GitChangeKindV1::Added {
-            Ok(String::new())
-        } else if submodule {
-            Err("submodule change".to_owned())
-        } else {
-            read_source(git, &base, old_path)
-        };
-        checkpoint(cancelled)?;
-        let after = if file.change == GitChangeKindV1::Deleted {
-            Ok(String::new())
-        } else if submodule {
-            Err("submodule change".to_owned())
-        } else {
-            read_source(git, &head, &file.path)
-        };
         let removed = file.change == GitChangeKindV1::Deleted;
-        let mut additions = None;
-        let mut deletions = None;
-        match before.and_then(|before| after.map(|after| (before, after))) {
-            Ok((before_source, after_source)) => {
-                let input = gix::diff::blob::InternedInput::new(
-                    before_source.as_str(),
-                    after_source.as_str(),
-                );
-                let diff = gix::diff::blob::diff_with_slider_heuristics(
-                    gix::diff::blob::Algorithm::Myers,
-                    &input,
-                );
-                additions = Some(diff.count_additions());
-                deletions = Some(diff.count_removals());
-                let hunks = diff.hunks().collect::<Vec<_>>();
+        let (mut additions, mut deletions) = (None, None);
+        match git.compare_file(&comparison, file, policy) {
+            Ok(source) => {
+                additions = Some(source.additions);
+                deletions = Some(source.deletions);
                 checkpoint(cancelled)?;
-                let before = if file.change == GitChangeKindV1::Added {
-                    Ok(Vec::new())
-                } else {
-                    declarations(&registry, &before_source, &base, old_path, &file.path)
-                };
-                checkpoint(cancelled)?;
-                let after = if removed {
-                    Ok(Vec::new())
-                } else {
-                    declarations(&registry, &after_source, &head, &file.path, &file.path)
-                };
-                match before.and_then(|before| after.map(|after| (before, after))) {
-                    Ok((before, after)) => {
-                        let before_outside = outside_text(&before, &before_source)?;
-                        let after_outside = outside_text(&after, &after_source)?;
-                        let outside = (before_outside.parts != after_outside.parts)
-                            .then(|| {
-                                hunks.iter().find_map(|hunk| {
-                                    first_outside_changed_line(&hunk.after, &after_outside.lines)
-                                        .map(|line| (false, line))
-                                        .or_else(|| {
-                                            first_outside_changed_line(
-                                                &hunk.before,
-                                                &before_outside.lines,
-                                            )
-                                            .map(|line| (true, line))
-                                        })
-                                })
-                            })
-                            .flatten();
-                        ambiguous += compare_declarations(
-                            &mut brief,
-                            before,
-                            after,
-                            &file.path,
-                            old_path,
-                            &base,
-                            &head,
-                            file.change == GitChangeKindV1::Renamed,
-                        );
-                        if let Some((before_side, line)) = outside {
-                            brief.entries.push(file_entry(
-                                if before_side { old_path } else { &file.path },
-                                if before_side { base.as_str() } else { head.as_str() },
-                                line + 1,
-                                "A changed line contains text outside retained declarations, possibly sharing their line; inspect its imports and module wiring. The line diff does not isolate which portion changed.".to_owned(),
-                            ));
-                        } else if hunks.is_empty() && file.old_mode != file.new_mode {
-                            brief.entries.push(file_entry(if removed { old_path } else { &file.path },
-                                if removed { base.as_str() } else { head.as_str() }, 1,
+                match analyze_source_changes(&registry, file, &source) {
+                    Ok(analysis) => {
+                        ambiguous += analysis.ambiguous_groups;
+                        for declaration in &analysis.declarations {
+                            project_declaration(
+                                &mut brief,
+                                declaration,
+                                base.as_str(),
+                                head.as_str(),
+                            );
+                        }
+                        if let Some((side, line)) = analysis.outside {
+                            let before = side == GitContextSourceSideV1::Before;
+                            brief.entries.push(file_entry(if before { old_path } else { &file.path }, if before { base.as_str() } else { head.as_str() }, line + 1,
+                                "A changed line contains text outside retained declarations, possibly sharing their line; inspect its imports and module wiring. The line diff does not isolate which portion changed.".to_owned()));
+                        } else if source.changed_lines.is_empty() && file.old_mode != file.new_mode
+                        {
+                            brief.entries.push(file_entry(if removed { old_path } else { &file.path }, if removed { base.as_str() } else { head.as_str() }, 1,
                                 "Git file mode changed; inspect its existence, executable or file-type contract.".to_owned()));
                         }
                     }
                     Err(reason) => {
                         gaps += 1;
-                        let (before_side, line) = hunks.first().map_or((removed, 1), |hunk| {
-                            if hunk.after.is_empty() {
-                                (true, hunk.before.start + 1)
-                            } else {
-                                (false, hunk.after.start + 1)
-                            }
-                        });
+                        let (before, line) =
+                            source.changed_lines.first().map_or((removed, 1), |hunk| {
+                                if hunk.after.is_empty() {
+                                    (true, hunk.before.start + 1)
+                                } else {
+                                    (false, hunk.after.start + 1)
+                                }
+                            });
                         brief.entries.push(file_entry(
-                            if before_side { old_path } else { &file.path },
-                            if before_side {
-                                base.as_str()
-                            } else {
-                                head.as_str()
-                            },
+                            if before { old_path } else { &file.path },
+                            if before { base.as_str() } else { head.as_str() },
                             line,
                             format!("File-level entrypoint: {reason}."),
                         ));
                     }
                 }
             }
-            Err(reason) => {
+            Err(error) => {
+                if error.is_terminal() {
+                    return Err(error.to_string());
+                }
                 gaps += 1;
                 unreadable += 1;
-                if !submodule && !matches!(reason.as_str(), "binary source" | "non-UTF-8 source") {
+                if matches!(error, GitSourceError::Excluded) {
+                    excluded += 1;
+                } else if !error.is_opaque() {
                     brief.entries.push(file_entry(
                         if removed { old_path } else { &file.path },
                         if removed {
@@ -608,7 +320,7 @@ pub(super) fn compare_source(
                             head.as_str()
                         },
                         1,
-                        format!("File-level entrypoint: {reason}; line totals unavailable."),
+                        format!("File-level entrypoint: {error}; line totals unavailable."),
                     ));
                 }
             }
@@ -627,8 +339,8 @@ pub(super) fn compare_source(
         area.deletions += u64::from(deletions.unwrap_or(0));
         brief.changes.push(PrContextFileV1 {
             role: classify_file_role(&file.path, &HashSet::new()),
-            file: file.path,
-            previous_file: file.original_path,
+            file: file.path.clone(),
+            previous_file: file.original_path.clone(),
             change: change_name(file.change).to_owned(),
             additions,
             deletions,
@@ -641,7 +353,7 @@ pub(super) fn compare_source(
     if gaps > 0 || ambiguous > 0 {
         brief.source.state = PrContextSourceStateV1::Partial;
         brief.source.detail = format!(
-            "Exact Git comparison; {gaps} files have file-level analysis only, {ambiguous} overload groups cannot be paired. Native Myers line totals exclude {unreadable} binary, submodule, or unreadable files; their file totals are null."
+            "Exact Git comparison; {gaps} files have file-level analysis only, {ambiguous} overload groups cannot be paired. Native Myers line totals exclude {unreadable} opaque or unreadable files, including {excluded} files excluded by configured source policy; their file totals are null."
         );
     }
     checkpoint(cancelled)?;
@@ -649,13 +361,18 @@ pub(super) fn compare_source(
         Ok(status) => {
             brief.clean_at_head = status.head.commit().is_some_and(|oid| oid == &head)
                 && !status.coverage.leaves_state_unread()
-                && status.staged_count() == 0 && status.unstaged_count() == 0
-                && status.conflicted_count() == 0 && status.untracked_count() == 0;
+                && status.staged_count() == 0
+                && status.unstaged_count() == 0
+                && status.conflicted_count() == 0
+                && status.untracked_count() == 0;
             if !brief.clean_at_head {
                 brief.quality.push(PrContextQualityV1 { signal: "checkout_differs".to_owned(), observation: "The checkout is dirty or is not the compared head. Source entrypoints refer to committed Git blobs.".to_owned() });
             }
         }
-        Err(error) => brief.quality.push(PrContextQualityV1 { signal: "checkout_unverified".to_owned(), observation: format!("Worktree status unavailable: {error}. Graph enrichment cannot prove correspondence to the compared head.") }),
+        Err(error) => {
+            git.checkpoint().map_err(|error| error.to_string())?;
+            brief.quality.push(PrContextQualityV1 { signal: "checkout_unverified".to_owned(), observation: format!("Worktree status unavailable: {error}. Graph enrichment cannot prove correspondence to the compared head.") });
+        }
     }
     Ok(brief)
 }

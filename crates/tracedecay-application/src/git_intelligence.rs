@@ -56,7 +56,16 @@ use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git_repository::GitRepositoryError;
 
+mod comparison;
+mod source_changes;
 mod topology;
+
+pub use comparison::{
+    GitChangeComparison, GitChangeSelection, GitChangedLines, GitComparedSource, GitSourceError,
+};
+pub use source_changes::{
+    GitChangedDeclaration, GitSourceAnalysis, GitSourceDeclaration, analyze_source_changes,
+};
 
 /// Read subcommands the adapter is allowed to run. Anything outside this
 /// list is refused before spawn, which makes index/ref/worktree/config
@@ -79,7 +88,7 @@ const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
 /// File metadata from the canonical raw diff, without materializing patch bodies.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GitDiffFileMetadata {
     pub path: String,
     pub original_path: Option<String>,
@@ -174,6 +183,7 @@ struct JoinedDiff {
 struct RepositoryReadSnapshot {
     git_dir: PathBuf,
     object_format: GitObjectFormatV1,
+    trust_file_mode: bool,
     head: GitHeadStateV1,
     head_degradations: BTreeSet<GitDegradationV1>,
     degradations: BTreeSet<GitDegradationV1>,
@@ -293,12 +303,15 @@ impl NativeGitIntelligence {
         &self,
         request: &GitHistoricalBlobRequestV1,
     ) -> Result<GitHistoricalBlobV1, GitIntelligenceError> {
-        NativeHistoricalBlobReaderV1::new(
+        self.checkpoint()?;
+        let result = NativeHistoricalBlobReaderV1::new(
             self.repo_root.clone(),
             self.repository.clone(),
             self.worktree.clone(),
         )
-        .read(request)
+        .read(request);
+        self.checkpoint()?;
+        result
     }
 
     /// Spawn `git <args>` under the structural read-only guard.
@@ -459,6 +472,10 @@ impl NativeGitIntelligence {
         Ok(RepositoryReadSnapshot {
             git_dir,
             object_format: GitObjectFormatV1::Sha1,
+            trust_file_mode: repo
+                .config_snapshot()
+                .boolean("core.filemode")
+                .unwrap_or(true),
             head,
             head_degradations,
             degradations,
@@ -489,6 +506,29 @@ impl NativeGitIntelligence {
                 return Err(GitIntelligenceError::MalformedOutput {
                     operation: "rev-parse",
                     detail: format!("unsupported object format {unsupported:?}"),
+                });
+            }
+        };
+        let trust_file_mode = match self
+            .stdout(
+                "config",
+                &[
+                    "config",
+                    "--get",
+                    "--bool",
+                    "--default",
+                    "true",
+                    "core.filemode",
+                ],
+            )?
+            .trim()
+        {
+            "true" => true,
+            "false" => false,
+            value => {
+                return Err(GitIntelligenceError::MalformedOutput {
+                    operation: "config",
+                    detail: format!("invalid core.filemode boolean {value:?}"),
                 });
             }
         };
@@ -527,6 +567,7 @@ impl NativeGitIntelligence {
         Ok(RepositoryReadSnapshot {
             git_dir,
             object_format,
+            trust_file_mode,
             head,
             head_degradations,
             degradations,
@@ -612,7 +653,7 @@ impl NativeGitIntelligence {
     /// state plus explicit coverage.
     #[tracing::instrument(name = "usecases.git_intelligence.status", level = "trace", skip_all)]
     pub fn status(&self) -> Result<GitStatusV1, GitIntelligenceError> {
-        self.typed_status(None)
+        self.typed_status(&self.command_bounds)
     }
 
     /// [`Self::status`] stopped by the caller's request deadline and
@@ -621,23 +662,21 @@ impl NativeGitIntelligence {
         &self,
         bounds: &tracedecay_runtime_core::git::GitCommandBounds,
     ) -> Result<GitStatusV1, GitIntelligenceError> {
-        self.typed_status(Some(bounds))
+        self.typed_status(bounds)
     }
 
     fn typed_status(
         &self,
-        bounds: Option<&tracedecay_runtime_core::git::GitCommandBounds>,
+        bounds: &tracedecay_runtime_core::git::GitCommandBounds,
     ) -> Result<GitStatusV1, GitIntelligenceError> {
         let authority = tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(
             &self.repo_root,
         )
         .map_err(map_repository_error)?;
         let _object_format = authority.object_format().map_err(map_repository_error)?;
-        let snapshot = match bounds {
-            Some(bounds) => authority.status_bounded(bounds),
-            None => authority.status(),
-        }
-        .map_err(map_repository_error)?;
+        let snapshot = authority
+            .status_bounded(bounds)
+            .map_err(map_repository_error)?;
 
         let status = GitStatusV1 {
             repository: self.repository.clone(),
@@ -648,37 +687,6 @@ impl NativeGitIntelligence {
         };
         status.validate()?;
         Ok(status)
-    }
-
-    /// Enumerate one pinned commit comparison without reading the entire patch.
-    /// Consumers that read exact blobs separately must not spend their output
-    /// allowance on a second copy of every changed source line.
-    #[tracing::instrument(
-        name = "usecases.git_intelligence.diff.metadata",
-        level = "trace",
-        skip_all
-    )]
-    pub fn diff_file_metadata(
-        &self,
-        base: &GitOidV1,
-        head: &GitOidV1,
-    ) -> Result<Vec<GitDiffFileMetadata>, GitIntelligenceError> {
-        parse_diff_raw(&self.stdout(
-            "diff metadata",
-            &[
-                "diff",
-                "--raw",
-                "-z",
-                "-M",
-                "--no-abbrev",
-                "--no-color",
-                "--no-ext-diff",
-                "--no-textconv",
-                base.as_str(),
-                head.as_str(),
-                "--",
-            ],
-        )?)
     }
 
     /// Typed diff for one scope with file and hunk structure.
@@ -790,29 +798,9 @@ impl NativeGitIntelligence {
         scope: &GitDiffScopeV1,
         snapshot: &RepositoryReadSnapshot,
     ) -> Result<JoinedDiff, GitIntelligenceError> {
-        let mut scope_args: Vec<String> = Vec::new();
-        match scope {
-            GitDiffScopeV1::WorkingTree => {}
-            GitDiffScopeV1::Staged => {
-                // With an unborn HEAD, `--cached` diffs against the empty
-                // tree so newly staged files are reported truthfully.
-                if matches!(snapshot.head, GitHeadStateV1::Unborn { .. }) {
-                    scope_args.push(
-                        match snapshot.object_format {
-                            GitObjectFormatV1::Sha1 => EMPTY_TREE_SHA1,
-                            GitObjectFormatV1::Sha256 => EMPTY_TREE_SHA256,
-                        }
-                        .to_owned(),
-                    );
-                }
-                scope_args.push("--cached".to_owned());
-            }
-            GitDiffScopeV1::CommitRange { base, head } => {
-                scope_args.push(base.as_str().to_owned());
-                scope_args.push(head.as_str().to_owned());
-            }
-        }
-        let scope_refs: Vec<&str> = scope_args.iter().map(String::as_str).collect();
+        let resolved =
+            comparison::ResolvedComparison::new(&GitChangeSelection::Diff(scope.clone()), snapshot);
+        let scope_refs: Vec<&str> = resolved.args.iter().map(String::as_str).collect();
         let abbrev = match snapshot.object_format {
             GitObjectFormatV1::Sha1 => "--abbrev=40",
             GitObjectFormatV1::Sha256 => "--abbrev=64",
@@ -1901,6 +1889,502 @@ mod tests {
                 tracedecay_domain::research::WorktreeId::new("worktree.fixture").unwrap(),
             )
         }
+    }
+
+    #[test]
+    fn source_comparison_pins_index_blobs_and_separates_worktree_edits() {
+        let Some(fixture) = Fixture::init() else {
+            return;
+        };
+        fixture.write(
+            "lib.rs",
+            "pub fn changed() -> u32 { 1 }\nfn untouched() {}\n",
+        );
+        fixture.commit_all("base");
+        fixture.write(
+            "lib.rs",
+            "pub fn changed() -> u32 { 2 }\nfn untouched() {}\n",
+        );
+        fixture.git_ok(&["add", "lib.rs"]);
+        let adapter = fixture.adapter();
+        let selected = adapter
+            .compare_changes(&GitChangeSelection::Diff(GitDiffScopeV1::Staged))
+            .unwrap();
+        let staged_oid = fixture.git_ok(&["rev-parse", ":lib.rs"]).trim().to_owned();
+        fixture.write(
+            "lib.rs",
+            "pub fn changed() -> u32 { 3 }\nfn untouched() {}\n",
+        );
+        fixture.git_ok(&["add", "lib.rs"]);
+        fixture.write(
+            "lib.rs",
+            "pub fn changed() -> u32 { 4 }\nfn untouched() {}\n",
+        );
+        let policy = tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap();
+        let source = adapter
+            .compare_file(&selected, &selected.files[0], &policy)
+            .unwrap();
+        assert!(source.after.contains("{ 2 }"));
+        assert_eq!(source.after_blob.as_ref().unwrap().as_str(), staged_oid);
+        let analysis = analyze_source_changes(
+            &tracedecay_code_extraction::LanguageRegistry::new(),
+            &selected.files[0],
+            &source,
+        )
+        .unwrap();
+        assert_eq!(analysis.declarations.len(), 1);
+        assert_eq!(
+            analysis.declarations[0].after.as_ref().unwrap().node.name,
+            "changed"
+        );
+        let worktree = adapter
+            .compare_changes(&GitChangeSelection::Diff(GitDiffScopeV1::WorkingTree))
+            .unwrap();
+        let source = adapter
+            .compare_file(&worktree, &worktree.files[0], &policy)
+            .unwrap();
+        assert!(source.before.contains("{ 3 }"));
+        assert!(source.after.contains("{ 4 }"));
+        assert_eq!(
+            source.after_blob.unwrap().as_str(),
+            fixture.git_ok(&["hash-object", "lib.rs"]).trim()
+        );
+        fixture.write(
+            "lib.rs",
+            "pub fn changed() -> u32 { 3 }\nfn untouched() {}\n",
+        );
+        assert!(matches!(
+            adapter.compare_file(&worktree, &worktree.files[0], &policy),
+            Err(GitSourceError::Read(
+                GitIntelligenceError::MalformedOutput { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn source_comparison_retains_renames_deletions_and_untracked_files() {
+        let Some(fixture) = Fixture::init() else {
+            return;
+        };
+        fixture.write("old.rs", "pub fn moved() {}\n");
+        fixture.write("gone.rs", "pub fn removed() {}\n");
+        fixture.commit_all("base");
+        fixture.git_ok(&["mv", "old.rs", "new.rs"]);
+        fixture.git_ok(&["rm", "gone.rs"]);
+        fixture.write("untracked.rs", "pub fn added() {}\n");
+        let adapter = fixture.adapter();
+        let comparison = adapter
+            .compare_changes(&GitChangeSelection::HeadToWorktree)
+            .unwrap();
+        assert_eq!(comparison.files.len(), 3);
+        let policy = tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap();
+        let registry = tracedecay_code_extraction::LanguageRegistry::new();
+        for file in &comparison.files {
+            let source = adapter.compare_file(&comparison, file, &policy).unwrap();
+            let analysis = analyze_source_changes(&registry, file, &source).unwrap();
+            assert_eq!(analysis.declarations.len(), 1);
+            let changed = &analysis.declarations[0];
+            match file.path.as_str() {
+                "new.rs" => {
+                    assert_eq!(file.original_path.as_deref(), Some("old.rs"));
+                    assert_eq!(
+                        changed.change,
+                        tracedecay_contracts::retrieval::GitDeclarationChangeKindV1::Renamed
+                    );
+                    assert_eq!(changed.before.as_ref().unwrap().path, "old.rs");
+                }
+                "gone.rs" => assert!(changed.after.is_none()),
+                "untracked.rs" => assert!(changed.before.is_none()),
+                path => panic!("unexpected changed file {path}"),
+            }
+        }
+        // A staged deletion with an untracked replacement is a net modification.
+        fixture.write("gone.rs", "pub fn replacement() {}\n");
+        let replacement = adapter
+            .compare_changes(&GitChangeSelection::HeadToWorktree)
+            .unwrap();
+        let file = replacement
+            .files
+            .iter()
+            .find(|file| file.path == "gone.rs")
+            .unwrap();
+        assert_eq!(file.change, GitChangeKindV1::Modified);
+        assert_eq!(
+            file.new_mode.as_ref().unwrap().as_str(),
+            GitFileModeV1::REGULAR
+        );
+        let source = adapter.compare_file(&replacement, file, &policy).unwrap();
+        assert!(source.before.contains("removed"));
+        assert!(source.after.contains("replacement"));
+        assert_eq!((source.additions, source.deletions), (1, 1));
+        let staged = adapter
+            .compare_changes(&GitChangeSelection::Diff(GitDiffScopeV1::Staged))
+            .unwrap();
+        let deleted = staged
+            .files
+            .iter()
+            .find(|file| file.path == "gone.rs")
+            .unwrap();
+        assert_eq!(deleted.change, GitChangeKindV1::Deleted);
+        assert!(
+            adapter
+                .compare_file(&staged, deleted, &policy)
+                .unwrap()
+                .after
+                .is_empty()
+        );
+        std::fs::remove_file(fixture.path().join("gone.rs")).unwrap();
+        assert!(matches!(
+            adapter.compare_file(&replacement, file, &policy),
+            Err(GitSourceError::Read(
+                GitIntelligenceError::MalformedOutput { .. }
+            ))
+        ));
+        fixture.write("gone.rs", "pub fn removed() {}\n");
+        let unchanged_replacement = adapter
+            .compare_changes(&GitChangeSelection::HeadToWorktree)
+            .unwrap();
+        let file = unchanged_replacement
+            .files
+            .iter()
+            .find(|file| file.path == "gone.rs")
+            .unwrap();
+        let source = adapter
+            .compare_file(&unchanged_replacement, file, &policy)
+            .unwrap();
+        assert_eq!(source.before_blob, source.after_blob);
+        assert_eq!((source.additions, source.deletions), (0, 0));
+    }
+
+    #[test]
+    fn source_comparison_restores_recreated_rename_origins() {
+        let Some(fixture) = Fixture::init() else {
+            return;
+        };
+        let original = "pub fn moved() {}\n";
+        fixture.write("old.rs", original);
+        fixture.write("other.rs", "pub fn other() {}\n");
+        fixture.commit_all("base");
+        fixture.git_ok(&["mv", "old.rs", "new.rs"]);
+        fixture.write("old.rs", "pub fn replacement() {}\n");
+        let adapter = fixture.adapter();
+        let policy = tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap();
+        let registry = tracedecay_code_extraction::LanguageRegistry::new();
+        let comparison = adapter
+            .compare_changes(&GitChangeSelection::HeadToWorktree)
+            .unwrap();
+        assert_eq!(comparison.files.len(), 2);
+        let added = comparison
+            .files
+            .iter()
+            .find(|file| file.path == "new.rs")
+            .unwrap();
+        assert_eq!(added.change, GitChangeKindV1::Added);
+        assert!(added.original_path.is_none());
+        assert!(added.old_blob.is_none());
+        assert!(added.old_mode.is_none());
+        let source = adapter.compare_file(&comparison, added, &policy).unwrap();
+        assert!(source.before.is_empty());
+        assert_eq!(source.after, original);
+        let analysis = analyze_source_changes(&registry, added, &source).unwrap();
+        assert_eq!(analysis.declarations.len(), 1);
+        assert_eq!(
+            analysis.declarations[0].change,
+            tracedecay_contracts::retrieval::GitDeclarationChangeKindV1::Added
+        );
+        let restored = comparison
+            .files
+            .iter()
+            .find(|file| file.path == "old.rs")
+            .unwrap();
+        assert_eq!(restored.change, GitChangeKindV1::Modified);
+        let source = adapter
+            .compare_file(&comparison, restored, &policy)
+            .unwrap();
+        assert_eq!(source.before, original);
+        assert_eq!(source.after, "pub fn replacement() {}\n");
+        assert_ne!(source.before_blob, source.after_blob);
+
+        // Recreating the original bytes leaves only the destination added.
+        // The commit projection can discard this proven per-file no-op.
+        fixture.write("old.rs", original);
+        let comparison = adapter
+            .compare_changes(&GitChangeSelection::HeadToWorktree)
+            .unwrap();
+        let restored = comparison
+            .files
+            .iter()
+            .find(|file| file.path == "old.rs")
+            .unwrap();
+        let source = adapter
+            .compare_file(&comparison, restored, &policy)
+            .unwrap();
+        assert_eq!(source.before_blob, source.after_blob);
+        assert_eq!((source.additions, source.deletions), (0, 0));
+
+        // This rename chain is A/M/D in Git's selected raw diff: the original
+        // path is modified in place. Preserve each exact comparison once.
+        std::fs::remove_file(fixture.path().join("old.rs")).unwrap();
+        fixture.git_ok(&["mv", "other.rs", "old.rs"]);
+        let chained = adapter
+            .compare_changes(&GitChangeSelection::HeadToWorktree)
+            .unwrap();
+        assert_eq!(chained.files.len(), 3);
+        let paths = chained
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(paths.len(), chained.files.len());
+        assert_eq!(paths, BTreeSet::from(["new.rs", "old.rs", "other.rs"]));
+        for file in &chained.files {
+            let (change, before, after, counts) = match file.path.as_str() {
+                "new.rs" => (GitChangeKindV1::Added, "", original, (1, 0)),
+                "old.rs" => (
+                    GitChangeKindV1::Modified,
+                    original,
+                    "pub fn other() {}\n",
+                    (1, 1),
+                ),
+                "other.rs" => (GitChangeKindV1::Deleted, "pub fn other() {}\n", "", (0, 1)),
+                path => panic!("unexpected changed path {path}"),
+            };
+            assert_eq!(file.change, change);
+            assert!(file.original_path.is_none());
+            let source = adapter.compare_file(&chained, file, &policy).unwrap();
+            assert_eq!(source.before, before);
+            assert_eq!(source.after, after);
+            assert_eq!((source.additions, source.deletions), counts);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_comparison_respects_git_filemode_and_capture_races() {
+        let Some(fixture) = Fixture::init() else {
+            return;
+        };
+        let original = "fn main() {}\n";
+        fixture.write("run.rs", original);
+        let path = fixture.path().join("run.rs");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fixture.commit_all("executable base");
+        fixture.git_ok(&["config", "core.filemode", "false"]);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        fixture.write("run.rs", "fn main() { changed(); }\n");
+        let adapter = fixture.adapter();
+        let policy = tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap();
+        for selection in [
+            GitChangeSelection::HeadToWorktree,
+            GitChangeSelection::Diff(GitDiffScopeV1::WorkingTree),
+        ] {
+            let comparison = adapter.compare_changes(&selection).unwrap();
+            assert_eq!(comparison.files.len(), 1);
+            let file = &comparison.files[0];
+            assert_eq!(
+                file.new_mode.as_ref().unwrap().as_str(),
+                GitFileModeV1::EXECUTABLE
+            );
+            let source = adapter.compare_file(&comparison, file, &policy).unwrap();
+            assert_eq!(source.before, original);
+            assert_eq!(source.after, "fn main() { changed(); }\n");
+        }
+
+        // When Git trusts executable bits, a chmod after selection remains a
+        // source race and cannot be silently paired with the old file mode.
+        fixture.git_ok(&["config", "core.filemode", "true"]);
+        let comparison = adapter
+            .compare_changes(&GitChangeSelection::HeadToWorktree)
+            .unwrap();
+        assert_eq!(
+            comparison.files[0].new_mode.as_ref().unwrap().as_str(),
+            GitFileModeV1::REGULAR
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            adapter.compare_file(&comparison, &comparison.files[0], &policy),
+            Err(GitSourceError::Read(
+                GitIntelligenceError::MalformedOutput { .. }
+            ))
+        ));
+
+        // A recreated index deletion also follows Git's logical mode, making
+        // identical content a net no-op when executable bits are ignored.
+        fixture.git_ok(&["config", "core.filemode", "false"]);
+        fixture.git_ok(&["rm", "--cached", "-f", "run.rs"]);
+        fixture.write("run.rs", original);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let comparison = adapter
+            .compare_changes(&GitChangeSelection::HeadToWorktree)
+            .unwrap();
+        let file = &comparison.files[0];
+        assert_eq!(file.old_mode, file.new_mode);
+        let source = adapter.compare_file(&comparison, file, &policy).unwrap();
+        assert_eq!(source.before_blob, source.after_blob);
+    }
+
+    #[test]
+    fn source_comparison_retains_reordered_duplicate_definitions() {
+        let Some(fixture) = Fixture::init() else {
+            return;
+        };
+        let first = "def choose():\n    return 1\n";
+        let second = "def choose():\n    return 2\n";
+        let neighbor = "def untouched():\n    return 0\n";
+        fixture.write("api.py", &format!("{first}\n{second}\n{neighbor}"));
+        fixture.commit_all("duplicate definitions");
+        fixture.write("api.py", &format!("{second}\n{first}\n{neighbor}"));
+        fixture.git_ok(&["add", "api.py"]);
+        let adapter = fixture.adapter();
+        let policy = tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap();
+        let registry = tracedecay_code_extraction::LanguageRegistry::new();
+        let comparison = adapter
+            .compare_changes(&GitChangeSelection::Diff(GitDiffScopeV1::Staged))
+            .unwrap();
+        let file = &comparison.files[0];
+        let source = adapter.compare_file(&comparison, file, &policy).unwrap();
+        let analysis = analyze_source_changes(&registry, file, &source).unwrap();
+        assert_eq!(analysis.ambiguous_groups, 1);
+        assert_eq!(analysis.declarations.len(), 4);
+        assert!(analysis.outside.is_none());
+        assert!(analysis.declarations.iter().all(|declaration| {
+            declaration.change == tracedecay_contracts::retrieval::GitDeclarationChangeKindV1::AmbiguousOverload
+        }));
+        let before = analysis
+            .declarations
+            .iter()
+            .filter_map(|change| change.before.as_ref())
+            .collect::<Vec<_>>();
+        let after = analysis
+            .declarations
+            .iter()
+            .filter_map(|change| change.after.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(before.len(), 2);
+        assert_eq!(after.len(), 2);
+        assert!(
+            before
+                .iter()
+                .chain(after.iter())
+                .all(|declaration| declaration.node.name == "choose")
+        );
+        assert!(before[0].content.contains("return 1"));
+        assert!(after[0].content.contains("return 2"));
+
+        // Stable duplicates stay out of the changed-unit inventory when only
+        // their neighbor changes. Existence of an overload is not itself a gap.
+        fixture.write(
+            "api.py",
+            &format!("{first}\n{second}\ndef untouched():\n    return 3\n"),
+        );
+        fixture.git_ok(&["add", "api.py"]);
+        let comparison = adapter
+            .compare_changes(&GitChangeSelection::Diff(GitDiffScopeV1::Staged))
+            .unwrap();
+        let file = &comparison.files[0];
+        let source = adapter.compare_file(&comparison, file, &policy).unwrap();
+        let analysis = analyze_source_changes(&registry, file, &source).unwrap();
+        assert_eq!(analysis.ambiguous_groups, 0);
+        assert_eq!(analysis.declarations.len(), 1);
+        assert_eq!(
+            analysis.declarations[0].after.as_ref().unwrap().node.name,
+            "untouched"
+        );
+    }
+
+    #[test]
+    fn source_comparison_supports_unborn_index_and_cancellation() {
+        let Some(fixture) = Fixture::init() else {
+            return;
+        };
+        fixture.write("new.rs", "pub fn first() {}\n");
+        fixture.git_ok(&["add", "new.rs"]);
+        let adapter = fixture.adapter();
+        let comparison = adapter
+            .compare_changes(&GitChangeSelection::Diff(GitDiffScopeV1::Staged))
+            .unwrap();
+        assert!(matches!(
+            comparison.selection,
+            tracedecay_contracts::retrieval::GitContextComparisonV1::Staged { head: None }
+        ));
+        let policy = tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap();
+        let source = adapter
+            .compare_file(&comparison, &comparison.files[0], &policy)
+            .unwrap();
+        assert!(source.before.is_empty());
+        assert!(source.after.contains("first"));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let adapter = fixture
+            .adapter()
+            .with_execution_bounds(None, Some(cancel), 4 * 1024 * 1024);
+        assert!(matches!(
+            adapter.compare_changes(&GitChangeSelection::HeadToWorktree),
+            Err(GitIntelligenceError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn source_comparison_keeps_conflicted_stages_unavailable() {
+        let Some(fixture) = Fixture::init() else {
+            return;
+        };
+        fixture.write("lib.rs", "fn value() -> u32 { 0 }\n");
+        fixture.commit_all("base");
+        fixture.git_ok(&["switch", "-c", "side"]);
+        fixture.write("lib.rs", "fn value() -> u32 { 1 }\n");
+        fixture.commit_all("side");
+        fixture.git_ok(&["switch", "main"]);
+        fixture.write("lib.rs", "fn value() -> u32 { 2 }\n");
+        fixture.commit_all("main");
+        assert!(!fixture.git(&["merge", "side"]).status.success());
+        let adapter = fixture.adapter();
+        let policy = tracedecay_domain::IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap();
+        for selection in [
+            GitChangeSelection::Diff(GitDiffScopeV1::Staged),
+            GitChangeSelection::HeadToWorktree,
+        ] {
+            let comparison = adapter.compare_changes(&selection).unwrap();
+            assert_eq!(comparison.files.len(), 1);
+            assert!(
+                comparison
+                    .coverage
+                    .records(GitDegradationV1::ConflictedState)
+            );
+            assert!(matches!(
+                adapter.compare_file(&comparison, &comparison.files[0], &policy),
+                Err(GitSourceError::Unmerged)
+            ));
+        }
+    }
+
+    #[test]
+    fn historical_blob_read_checks_request_bounds_before_opening_objects() {
+        let Some(fixture) = Fixture::standard() else {
+            return;
+        };
+        let request = GitHistoricalBlobRequestV1 {
+            commit: GitOidV1::new(fixture.git_ok(&["rev-parse", "HEAD"]).trim()).unwrap(),
+            path: "src/main.txt".to_owned(),
+            max_bytes: GIT_HISTORICAL_BLOB_MAX_BYTES,
+            include_bytes: true,
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let cancelled = fixture
+            .adapter()
+            .with_execution_bounds(None, Some(cancel), 4096);
+        assert!(matches!(
+            cancelled.historical_blob(&request),
+            Err(GitIntelligenceError::Cancelled)
+        ));
+        let expired = fixture
+            .adapter()
+            .with_execution_bounds(Some(Instant::now()), None, 4096);
+        assert!(matches!(
+            expired.historical_blob(&request),
+            Err(GitIntelligenceError::DeadlineExceeded)
+        ));
     }
 
     #[test]

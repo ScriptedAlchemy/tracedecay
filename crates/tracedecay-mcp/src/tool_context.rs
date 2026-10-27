@@ -32,9 +32,12 @@ use std::sync::Arc;
 
 /// The daemon's admitted delivery reader, queried for the exact compared head.
 /// PR tools share the same provider/store authority as the delivery dashboard.
+/// The boolean explicitly requests a GitHub refresh; false reads currently
+/// authorized retained evidence without waiting for the refresh owner.
 pub type PrContextDeliveryReader = Arc<
     dyn Fn(
             tracedecay_domain::CommitId,
+            bool,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<

@@ -78,6 +78,7 @@ async fn admitted_graph_query_for_operation(
     let VerifiedGraphRead {
         operation,
         readiness,
+        open_policy,
     } = read;
     let Some(port) = options.verified_graph_query_port.as_deref() else {
         return Err(graph_read_unavailable(
@@ -103,7 +104,8 @@ async fn admitted_graph_query_for_operation(
     let query = tracing::Instrument::instrument(
         port.open(
             VerifiedGraphQueryRequest::new(&operation, request_id, deadline, cancellation)
-                .with_readiness(readiness),
+                .with_readiness(readiness)
+                .with_open_policy(open_policy),
         ),
         tracing::trace_span!("mcp.dispatch.graph_query_admission"),
     )
@@ -514,7 +516,7 @@ fn pr_context_delivery_reader(
     let cancellation = options.application_cancellation.clone()?;
     let root = project.identity().project_root.clone();
     let scope = project.identity().scope.clone();
-    Some(std::sync::Arc::new(move |head| {
+    Some(std::sync::Arc::new(move |head, refresh_github| {
         let service = service.clone();
         let request_id = request_id.clone();
         let deadline = deadline.clone();
@@ -530,6 +532,7 @@ fn pr_context_delivery_reader(
                 &deadline,
                 &cancellation,
                 head,
+                refresh_github,
             )
             .await
         })

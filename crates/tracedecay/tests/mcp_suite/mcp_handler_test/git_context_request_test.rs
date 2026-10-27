@@ -265,6 +265,53 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     }
     assert!(compact.contains("signature_changed"), "{compact}");
     assert!(compact.contains("Budget:"), "{compact}");
+
+    // Follow the briefing's exact revisions after the worktree has moved on.
+    fs::write(
+        fixture.project_root.join("src/lib.rs"),
+        "pub fn local_only() -> u8 { 99 }\n",
+    )
+    .unwrap();
+    let changed = entries
+        .iter()
+        .find(|entry| entry["change"] == "signature_changed")
+        .unwrap();
+    for (side, expected) in [
+        (
+            "before_excerpt",
+            "pub fn changed(value: u32) -> u32 { value + 1 }\n",
+        ),
+        (
+            "after_excerpt",
+            "pub fn changed(value: u64) -> u64 { value + 2 }\n",
+        ),
+    ] {
+        let excerpt = &changed[side];
+        let result = call_json(
+            &fixture,
+            "tracedecay_source_lines",
+            json!({
+                "revision": excerpt["revision"],
+                "file": excerpt["location"]["file"],
+                "start_line": excerpt["location"]["line"],
+                "end_line": excerpt["location"]["end_line"],
+                "format": "json",
+            }),
+        )
+        .await;
+        let result: Value = serde_json::from_str(&result).unwrap();
+        let source = &result["outcome"]["value"]["payload"];
+        assert_eq!(source["body"], expected, "{result}");
+        assert_eq!(source["revision"], excerpt["revision"], "{result}");
+        let object = format!("{}:src/lib.rs", excerpt["revision"].as_str().unwrap());
+        assert_eq!(
+            source["blob_oid"],
+            git_stdout(&fixture.project_root, &["rev-parse", &object])
+        );
+        assert_eq!(source["span"]["start_byte"], 0, "{result}");
+        assert_eq!(source["span"]["end_byte"], expected.len(), "{result}");
+        assert!(source.get("next_line").is_none(), "{result}");
+    }
     fixture.harness.shutdown().await;
 }
 

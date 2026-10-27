@@ -1,10 +1,9 @@
 //! Git-backed graph-tool computations.
 //!
-//! `shell` owns every `git` subprocess call; the other siblings turn its output
-//! into typed tool results. This module holds the shared imports (siblings pick
-//! them up through `use super::*`), the comparison shape `shell` returns, the
-//! typed git refusal, and the semantic failure message each refusal renders
-//! with.
+//! `shell` owns the remaining ref/history subprocess adapters. Selected source
+//! comparisons use the application's shared `NativeGitIntelligence` authority.
+//! This module holds shared imports, the ref-comparison shape, and typed Git
+//! refusals and their semantic failure messages.
 //!
 //! Every authority the family reads arrives through [`McpToolContext`]: the
 //! admitted project route, the caller's deadline and cancellation, the
@@ -18,8 +17,8 @@ mod context;
 mod pr_context_brief;
 mod pr_context_cursor;
 mod pr_context_hosted;
-mod pr_context_source;
 mod pr_context_render;
+mod pr_context_source;
 mod shell;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -27,9 +26,7 @@ mod test_support;
 
 pub use affected::compute_affected;
 pub use branch::{compute_branch_diff, compute_branch_list, compute_branch_search};
-pub use context::{
-    compute_changelog, compute_commit_context, compute_diff_context,
-};
+pub use context::{compute_changelog, compute_commit_context, compute_diff_context};
 pub use pr_context_brief::compute_pr_context;
 pub(crate) use pr_context_render::render_pr_context_brief;
 

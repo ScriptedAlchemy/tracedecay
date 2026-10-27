@@ -1,8 +1,6 @@
 //! The `git` subprocess calls: diffs, PR comparisons, commit logs, and the file-role classification applied to their output.
 
 use super::*;
-use tracedecay_domain::{GitChangeKindV1, GitStatusEntryV1};
-use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
 
 const PR_CONTEXT_MAX_ANCESTRY_COMMITS: usize = 100_000;
 const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
@@ -345,85 +343,6 @@ fn git_diff_file_changes_controlled(
 pub(super) fn default_pr_base_ref(project_root: &std::path::Path) -> String {
     tracedecay_runtime_core::branch::detect_default_branch(project_root)
         .unwrap_or_else(|| "main".to_string())
-}
-
-/// Returns tracked file paths changed against HEAD (staged + unstaged, or
-/// staged-only), from the repository status authority. Its worktree side
-/// compares content for entries the index stat cannot vouch for, so an edit
-/// inside the index's own mtime second is still reported.
-#[tracing::instrument(name = "mcp.git.shell.changed_files", level = "trace", skip_all)]
-pub(super) fn git_changed_files(
-    project_root: &std::path::Path,
-    staged_only: bool,
-) -> std::result::Result<Vec<String>, String> {
-    open_project_repository(project_root)?
-        .head()
-        .map_err(|e| format!("cannot read HEAD: {e}"))?
-        .peel_to_commit()
-        .map_err(|e| format!("cannot peel HEAD to commit: {e}"))?;
-    let status = GitRepositoryAuthority::discover(project_root)
-        .and_then(|repository| repository.status())
-        .map_err(|error| error.to_string())?;
-    let mut changed = status
-        .entries
-        .into_iter()
-        .filter_map(|entry| match entry {
-            GitStatusEntryV1::Tracked(tracked)
-                if tracked.index != GitChangeKindV1::Unmodified
-                    || (!staged_only && tracked.worktree != GitChangeKindV1::Unmodified) =>
-            {
-                Some(tracked.path)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    changed.sort();
-    changed.dedup();
-    Ok(changed)
-}
-
-/// Returns the last N commit subjects from HEAD.
-#[tracing::instrument(name = "mcp.git.shell.recent_commits", level = "trace", skip_all)]
-pub(super) fn git_recent_commits(
-    project_root: &std::path::Path,
-    count: usize,
-) -> std::result::Result<Vec<String>, String> {
-    let repo = open_project_repository(project_root)?;
-
-    let mut commits = Vec::new();
-    let head = repo
-        .head()
-        .map_err(|e| format!("cannot read HEAD: {e}"))?
-        .into_peeled_id()
-        .map_err(|e| format!("cannot peel HEAD: {e}"))?;
-
-    let mut current_id = head.detach();
-
-    for _ in 0..count {
-        let commit = repo
-            .find_object(current_id)
-            .map_err(|e| format!("cannot find object: {e}"))?
-            .try_into_commit()
-            .map_err(|e| format!("not a commit: {e}"))?;
-
-        let message = commit
-            .message_raw()
-            .map_err(|e| format!("cannot read commit message: {e}"))?;
-        let subject = String::from_utf8_lossy(message.as_ref())
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string();
-        commits.push(subject);
-
-        let parent_id = commit.parent_ids().next().map(gix::Id::detach);
-        match parent_id {
-            Some(pid) => current_id = pid,
-            None => break,
-        }
-    }
-
-    Ok(commits)
 }
 
 /// Returns commit subjects between two refs.

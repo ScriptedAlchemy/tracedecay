@@ -147,7 +147,7 @@ The MCP server exposes tools grouped around normal coding workflows:
 - Discovery: `tracedecay_context`, `tracedecay_search`, `tracedecay_source_outline`, `tracedecay_files`
 - Graph traversal: `tracedecay_callers`, `tracedecay_callees`, `tracedecay_impact`, `tracedecay_affected`
 - Code health: `tracedecay_complexity`, `tracedecay_dead_code`, `tracedecay_unmounted_files`, `tracedecay_coupling`, `tracedecay_test_risk`
-- Git workflow: `tracedecay_diff_context`, `tracedecay_pr_context`, `tracedecay_changelog`, `tracedecay_test_map`
+- Git workflow: `tracedecay_pr_context`, `tracedecay_commit_context`, `tracedecay_diff_context`, `tracedecay_git_diff`, `tracedecay_changelog`, `tracedecay_test_map`
 - Editing: `tracedecay_str_replace`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_ast_grep_rewrite`
 - Memory: exact `tracedecay_fact_store_add|search|probe|related|reason|contradict|get|update|remove|list` routes, plus `tracedecay_fact_feedback` and `tracedecay_memory_status`
 
@@ -155,12 +155,23 @@ Most read tools are safe to call in parallel. Edit tools are single-file, anchor
 
 Start a PR task with `tracedecay_pr_context`. Its compact briefing joins PR
 description and discussion, retained CI observations, a change map, and
-prioritized source entry points. It refreshes the configured GitHub PR when its
-head matches and the refresh owner is available; limited or unavailable reads
-show an explicit retained fallback. It does not fetch arbitrary PRs by number.
-Read the entry points next; use `view: "symbols"` for the full changed-symbol
-inventory. Source coverage and commit identity remain explicit, and retained CI
-does not establish merge readiness.
+prioritized source entry points. The default reads retained GitHub evidence;
+set `refresh_github: true` to request a refresh through the configured owner.
+Limited or unavailable refreshes leave an explicit retained fallback. A PR
+number selects this checkout's evidence; it does not fetch arbitrary PRs.
+
+Read entry points at their recorded revision. `source_lines` accepts a full
+commit ID, repository-relative `file`, and inclusive `start_line`/`end_line`;
+follow its `next_line` for another whole-line window. Use returned `node_id`
+values for current indexed source and graph navigation, and `view: "symbols"`
+for a paginated changed-symbol report. Source coverage remains explicit,
+`budget_tokens` is approximate, and retained CI does not establish merge readiness.
+
+For a pending commit, `commit_context` with `staged_only: true` reads the actual
+index blobs. Its default compares HEAD with current working-tree contents,
+including untracked files: a staged edit undone in the worktree has no net
+change in that default view. `diff_context` answers prospective impact for all
+indexed symbols in supplied files, including declarations the patch did not change.
 
 ## Index Freshness
 

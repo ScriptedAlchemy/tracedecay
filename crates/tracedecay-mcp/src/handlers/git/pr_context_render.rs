@@ -11,6 +11,10 @@ fn inline(value: &str) -> String {
 
 fn code(value: &str) -> String {
     let value = inline(value);
+    literal_code(&value)
+}
+
+fn literal_code(value: &str) -> String {
     let longest = value.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let delimiter = "`".repeat(longest + 1);
     format!("{delimiter} {value} {delimiter}")
@@ -33,9 +37,21 @@ fn short_oid(value: &str) -> &str {
 }
 
 fn source_read(node_id: &str) -> String {
-    code(&format!(
+    literal_code(&format!(
         "tracedecay_source_body {}",
         serde_json::json!({ "node_id": node_id })
+    ))
+}
+
+fn revision_source_read(revision: &str, location: &PrContextLocationV1) -> String {
+    literal_code(&format!(
+        "tracedecay_source_lines {}",
+        serde_json::json!({
+            "revision": revision,
+            "file": location.file,
+            "start_line": location.line,
+            "end_line": location.end_line,
+        })
     ))
 }
 
@@ -253,8 +269,23 @@ pub(crate) fn render_pr_context_brief(brief: &PrContextBriefV1) -> String {
                 entry.reason
             ));
             let indent = " ".repeat((index + 1).to_string().len() + 2);
-            if let Some(node_id) = &entry.node_id {
-                lines.push(format!("{indent}Read: {}.", source_read(node_id)));
+            let complete_excerpt = [&entry.before_excerpt, &entry.after_excerpt]
+                .into_iter()
+                .flatten()
+                .any(|excerpt| {
+                    !excerpt.truncated
+                        && excerpt.revision == entry.revision
+                        && excerpt.location.file == entry.location.file
+                        && excerpt.location.line <= entry.location.line
+                        && excerpt.location.end_line >= entry.location.end_line
+                });
+            if !complete_excerpt {
+                let selector = entry
+                    .node_id
+                    .as_deref()
+                    .map(source_read)
+                    .unwrap_or_else(|| revision_source_read(&entry.revision, &entry.location));
+                lines.push(format!("{indent}Read: {selector}."));
             }
             if let Some(value) = &entry.before_excerpt {
                 excerpt(&mut lines, "Before", value, &indent);

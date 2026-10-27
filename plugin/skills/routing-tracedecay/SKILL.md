@@ -27,6 +27,8 @@ it. Stop when the question is answered. Locate a file before opening it.
 | Find a symbol by its full qualified name | exploring-code | `tracedecay_by_qualified_name` |
 | Read a known symbol's signature without its body | exploring-code | `tracedecay_signature` |
 | Read a known symbol's body | exploring-code | `tracedecay_source_body` with its `node_id` |
+| Read a committed source span, including deleted code | exploring-code | `tracedecay_source_lines` with full `revision`, `file`, `start_line`, and `end_line` |
+| Summarize exact staged or net HEAD-to-worktree declarations | reviewing-changes | `tracedecay_commit_context` (`staged_only: true` for the index) |
 | Understand or review a PR or committed ref range | reviewing-changes | `tracedecay_pr_context` |
 | Inspect working-tree or staged file/hunk metadata | reviewing-changes | `tracedecay_git_diff` with `scope: working_tree` or `scope: staged` |
 | Read the raw working-tree or staged patch | reviewing-changes | Shell `git diff` or `git diff --cached` |
@@ -39,12 +41,22 @@ A name you already have is a lookup, not a tour of the repository. A question
 one `grep` in a file you can already name would answer does not need the graph.
 
 For PR review, read the briefing's ranked entrypoints before widening the diff.
-`diff_context` seeds its analysis with every indexed symbol in the supplied
-files; its symbol list does not identify the exact declarations changed by a
-patch. Use the patch or PR comparison to establish that distinction.
-`tracedecay_git_diff` returns structured metadata without hunk bodies. To read
-deleted or non-head code, use shell `git show '<commit-oid>:path/to/file'` at the
-briefing's recorded revision and inspect its recorded span.
+Hosted evidence is retained by default; `refresh_github: true` requests the
+configured matching PR's provider refresh. Retained CI is not a live inventory
+of required checks. The brief's output budget is approximate and reports cuts.
+
+`diff_context` is prospective: it seeds analysis with every indexed symbol in
+the supplied files. `commit_context` selects changed declarations from Git:
+its default is the net HEAD-to-worktree result, including untracked files;
+`staged_only: true` selects immutable index blobs. Worktree captures are checked
+per file, not an atomic checkout snapshot. Read comparison and coverage fields.
+
+`git_diff` returns structured metadata without hunk bodies. Its `working_tree`
+scope means index-to-worktree; use shell `git diff` or `git diff --cached` for
+patch text. `source_lines` reads exact historical commit/path spans as well as
+indexed selectors. Continue historical reads at `next_line`, keeping the
+original revision, file, and end line. This uses normal admitted source-service
+availability and path policy. Raw staged blob IDs are not commit selectors.
 
 **Report:** the answer supported by the returned evidence, plus its freshness
 line when it is not `fresh` and any coverage needed to qualify the conclusion.

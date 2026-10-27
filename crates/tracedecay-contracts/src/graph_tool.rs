@@ -199,7 +199,10 @@ impl GraphToolResultV1 {
     pub fn carries_freshness_verdict(&self) -> bool {
         matches!(
             self,
-            Self::Search(_) | Self::Context(_) | Self::PrContext(PrContextResultV1::Brief(_))
+            Self::Search(_)
+                | Self::Context(_)
+                | Self::CommitContext(_)
+                | Self::PrContext(PrContextResultV1::Brief(_))
         )
     }
 

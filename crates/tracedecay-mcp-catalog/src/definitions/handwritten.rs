@@ -312,12 +312,12 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_commit_context",
         "Commit Context",
-        "Summarize uncommitted file roles, indexed symbols in those files, and recent commit style for drafting a message. staged_only filters the file list; symbol metadata still comes from the current graph, not the staged blobs. Use git_diff with scope: staged for structured file/hunk metadata and shell git diff --cached to inspect the exact staged patch text.",
+        "Summarize actual changed declarations, source identities, file roles, and recent commit style for drafting a message. staged_only compares pinned HEAD with the selected index blobs; the default reports net HEAD-to-worktree changes including untracked files. Source gaps are explicit. Use git_diff for structured file/hunk metadata and shell git diff --cached for staged patch text.",
     ),
     read(
         "tracedecay_pr_context",
         "PR Context",
-        "Orient on a PR before reading its full diff: description, status, discussion, retained CI, changed areas, prioritized code entry points, nearby consumers, and quality evidence with exact commit and source coverage. Refreshes the configured matching GitHub PR when its owner is available, with explicit retained fallback for limited or unavailable reads; does not fetch arbitrary PRs or establish merge readiness. Defaults to a compact briefing; view: symbols returns the paginated changed-symbol inventory.",
+        "Orient on a PR before reading its full diff: description, status, discussion, retained CI, changed areas, prioritized code entry points, nearby consumers, and quality evidence with exact commit and source coverage. Uses retained hosted evidence by default; refresh_github: true requests a new observation of the configured matching PR under the request deadline. Exact revision source_lines selectors expand omitted code. Does not fetch arbitrary PRs or establish merge readiness. Defaults to a compact briefing; view: symbols returns the paginated changed-symbol inventory.",
     ),
     read(
         "tracedecay_test_map",

@@ -29,8 +29,9 @@ use tracedecay_runtime_core::path_safety::plain_host_path;
 use super::queries::{FileDependentsV1, GraphQueryManager};
 use super::source_authority::AdmittedSourceAuthority;
 use super::{
-    CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
-    CodeGraphReadError, CodeGraphReadRequest, application_graph_cancellation,
+    CodeGraphOpenPolicy, CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort,
+    CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadRequest,
+    application_graph_cancellation,
 };
 use crate::SourceReadContext;
 use crate::context::source_read;
@@ -45,6 +46,7 @@ pub struct VerifiedGraphQueryRequest<'a> {
     pub cancellation: &'a CancellationSignal,
     /// The residency the read's answer needs before the open returns.
     pub readiness: CodeGraphReadinessRequirement,
+    pub open_policy: CodeGraphOpenPolicy,
 }
 
 impl<'a> VerifiedGraphQueryRequest<'a> {
@@ -60,11 +62,17 @@ impl<'a> VerifiedGraphQueryRequest<'a> {
             deadline,
             cancellation,
             readiness: CodeGraphReadinessRequirement::Catalog,
+            open_policy: CodeGraphOpenPolicy::AwaitRewarm,
         }
     }
 
     pub fn with_readiness(mut self, readiness: CodeGraphReadinessRequirement) -> Self {
         self.readiness = readiness;
+        self
+    }
+
+    pub fn with_open_policy(mut self, policy: CodeGraphOpenPolicy) -> Self {
+        self.open_policy = policy;
         self
     }
 }
@@ -724,6 +732,7 @@ pub async fn open_verified_graph_query(
         projection.open(
             CodeGraphReadRequest::new(&context, observed_at, Arc::clone(&graph_cancellation))
                 .with_readiness(request.readiness)
+                .with_open_policy(request.open_policy)
                 .with_deadline(request.deadline.clone())
                 .with_live_cancellation(request.cancellation),
         ),

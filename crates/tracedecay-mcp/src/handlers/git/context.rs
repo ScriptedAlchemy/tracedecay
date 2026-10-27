@@ -9,14 +9,18 @@ use super::pr_context_cursor::{
     encode_pr_context_cursor, pr_context_cursor_authority, pr_context_request_binding,
 };
 use super::shell::{
-    classify_file_role, default_pr_base_ref, git_changed_files, git_diff_file_changes,
-    git_pr_comparison_controlled, git_recent_commits,
+    classify_file_role, default_pr_base_ref, git_diff_file_changes, git_pr_comparison_controlled,
 };
 use super::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracedecay_application::git_intelligence::{
+    GitChangeSelection, NativeGitIntelligence, analyze_source_changes,
+};
+use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_contracts::git::{GIT_QUERY_DEFAULT_MAX_BYTES, GitHistoryRequest};
 use tracedecay_contracts::retrieval::{
     ChangelogCompleteV1, ChangelogPartialV1, ChangelogSurfaceRequestV1, CoChangeUnavailableV1,
     CommitCategoryV1, CommitContextSummaryV1, CommitContextSurfaceRequestV1, CommitFileRoleV1,
@@ -28,9 +32,15 @@ use tracedecay_contracts::retrieval::{
     PrSymbolChangesCompleteV1, PrSymbolEntryV1, PrSymbolPageV1, PrSymbolSelectionV1,
     SymbolChangesCompleteV1, SymbolChangesUnavailableV1,
 };
+use tracedecay_contracts::retrieval::{
+    GitContextComparisonV1, GitContextFileComparisonV1, GitContextSourceCoverageV1,
+    GitContextSourceGapV1, GitContextSourceSideV1,
+};
 use tracedecay_contracts::{InvocationAnalyticsV1, PrContextAnalyticsV1, PrContextStageTimingsV1};
 use tracedecay_domain::{CanonicalRelationEdgeV1, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{GitDiffScopeV1, IndexPathPolicyV1};
 use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git::GitCommandBounds;
 use tracedecay_runtime_core::git::co_change::missing_co_change_partners;
 
@@ -796,6 +806,7 @@ where
     .await??;
     let budget_tokens = request.budget_tokens;
     let mut result = DiffContextResultV1 {
+        comparison: Some(GitContextComparisonV1::ProposedFiles),
         changed_files: files,
         modified_symbols,
         impacted_symbols_count: impacted_symbols.len(),
@@ -925,172 +936,256 @@ pub async fn compute_changelog(
     ))
 }
 
+/// Commit context reads selected Git source, so it does not await an unrelated
+/// graph projection. Staged and worktree selection share the PR comparison owner.
 #[tracing::instrument(name = "mcp.git.commit_context.total", level = "trace", skip_all)]
-pub async fn compute_commit_context<F>(
+pub async fn compute_commit_context(
     ctx: &McpToolContext<'_>,
-    graph: F,
     args: Value,
-) -> Result<GraphToolCompletionV1>
-where
-    F: Future<Output = Result<VerifiedGraphQuery>>,
-{
+) -> Result<GraphToolCompletionV1> {
     let request: CommitContextSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_commit_context")?;
     let staged_only = request.staged_only.unwrap_or(false);
-    let graph = graph.await?;
-    ctx.verify_graph_scope(&graph)?;
-    let git_failure_completion = |operation, message| {
-        graph_tool_completion(
+    let controls = PrContextControls {
+        deadline: ctx.deadline().cloned(),
+        cancellation: ctx.cancellation().cloned(),
+    };
+    controls.checkpoint()?;
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = CancelGitReadOnDrop(cancel.clone());
+    let deadline = ctx
+        .deadline()
+        .and_then(tracedecay_daemon_protocol::deadline_remaining)
+        .map(|remaining| std::time::Instant::now() + remaining);
+    let git = NativeGitIntelligence::new(
+        ctx.project_root(),
+        ctx.admitted_scope().repository_id.clone(),
+        ctx.admitted_scope().worktree_id.clone(),
+    )
+    .with_execution_bounds(
+        deadline,
+        Some(cancel.clone()),
+        GIT_QUERY_DEFAULT_MAX_BYTES as usize,
+    );
+    let policy = ctx.index_path_policy().clone();
+    let mut work = std::pin::pin!(blocking_git_span_controlled(
+        "commit source",
+        controls.cancellation.clone(),
+        controls.deadline.clone(),
+        move |cancelled| commit_source_summary(&git, staged_only, &policy, cancelled)
+    ));
+    let summary = match ctx.cancellation() {
+        Some(signal) => {
+            tokio::select! { biased; result = &mut work => result, () = signal.cancelled() => { cancel.cancel(); work.await } }
+        }
+        None => work.await,
+    }?;
+    controls.checkpoint()?;
+    match summary {
+        Ok(summary) => {
+            let touched = summary
+                .changed_files
+                .iter()
+                .map(|file| file.file.clone())
+                .collect();
+            Ok(graph_tool_completion(
+                GraphToolResultV1::CommitContext(CommitContextResultV1::Summary(Box::new(summary))),
+                touched,
+            ))
+        }
+        Err((operation, message)) => Ok(graph_tool_completion(
             GraphToolResultV1::CommitContext(CommitContextResultV1::GitFailure(git_failure(
                 operation, message,
             ))),
             Vec::new(),
-        )
-    };
+        )),
+    }
+}
 
-    // gix status classification walks the whole worktree; keep it off the
-    // request runtime's workers so the carried dispatch deadline can preempt it.
-    let changed_files = {
-        let project_root = ctx.project_root().to_path_buf();
-        match tracing::Instrument::instrument(
-            blocking_git_span("status", move || {
-                git_changed_files(&project_root, staged_only)
-            }),
-            tracing::trace_span!("mcp.git.commit_context.status"),
-        )
-        .await?
-        {
-            Ok(files) => files,
-            Err(message) => {
-                return Ok(git_failure_completion(GitToolOperationV1::Status, message));
+fn commit_source_summary(
+    git: &NativeGitIntelligence,
+    staged_only: bool,
+    policy: &IndexPathPolicyV1,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<CommitContextSummaryV1, (GitToolOperationV1, String)> {
+    let checkpoint = || {
+        if cancelled() {
+            return Err((
+                GitToolOperationV1::Diff,
+                "Commit source comparison cancelled or expired".to_owned(),
+            ));
+        }
+        git.checkpoint()
+            .map_err(|error| (GitToolOperationV1::Diff, error.to_string()))
+    };
+    checkpoint()?;
+    let selection = if staged_only {
+        GitChangeSelection::Diff(GitDiffScopeV1::Staged)
+    } else {
+        GitChangeSelection::HeadToWorktree
+    };
+    let comparison = git
+        .compare_changes(&selection)
+        .map_err(|error| (GitToolOperationV1::Diff, error.to_string()))?;
+    let registry = LanguageRegistry::new();
+    let mut file_roles = Vec::new();
+    let mut symbols_by_role = BTreeMap::<GitFileRoleV1, Vec<CommitSymbolEntryV1>>::new();
+    let mut gaps = Vec::new();
+    for file in &comparison.files {
+        checkpoint()?;
+        let role = classify_file_role(&file.path, &HashSet::new());
+        let mut provenance = GitContextFileComparisonV1 {
+            change: file.change,
+            previous_file: file.original_path.clone(),
+            before_blob: file.old_blob.clone(),
+            after_blob: file.new_blob.clone(),
+        };
+        let mut count = 0;
+        match git.compare_file(&comparison, file, policy) {
+            Ok(source) => {
+                // A staged deletion can leave an untracked replacement whose
+                // captured bytes equal HEAD. Only an admitted source read can
+                // establish this net no-op; excluded/unreadable files retain
+                // their inventory row and explicit gap.
+                if matches!(
+                    comparison.selection,
+                    GitContextComparisonV1::HeadToWorktree { .. }
+                ) && file.change == tracedecay_domain::GitChangeKindV1::Modified
+                    && file.old_mode == file.new_mode
+                    && source.before_blob == source.after_blob
+                {
+                    continue;
+                }
+                provenance.before_blob = source.before_blob.clone();
+                provenance.after_blob = source.after_blob.clone();
+                match analyze_source_changes(&registry, file, &source) {
+                    Ok(analysis) => {
+                        count = analysis.declarations.len();
+                        if analysis.ambiguous_groups > 0 {
+                            gaps.push(GitContextSourceGapV1 {
+                                file: file.path.clone(),
+                                reason: format!(
+                                    "{} changed overload groups cannot be paired",
+                                    analysis.ambiguous_groups
+                                ),
+                            });
+                        }
+                        if analysis.outside.is_some() {
+                            gaps.push(GitContextSourceGapV1 { file: file.path.clone(), reason: "Changed text outside retained declarations; inspect the selected file diff.".to_owned() });
+                        }
+                        if role == GitFileRoleV1::Config {
+                            if count > 0 {
+                                symbols_by_role.entry(role).or_default().push(
+                                    CommitSymbolEntryV1::ConfigSummary(ConfigSummaryV1 {
+                                        file: file.path.clone(),
+                                        kind: ConfigSummaryKindV1::ConfigSummary,
+                                        config_keys: count,
+                                    }),
+                                );
+                            }
+                        } else {
+                            for changed in analysis.declarations {
+                                let (declaration, side) = match (changed.before, changed.after) {
+                                    (_, Some(after)) => (after, GitContextSourceSideV1::After),
+                                    (Some(before), None) => {
+                                        (before, GitContextSourceSideV1::Before)
+                                    }
+                                    (None, None) => continue,
+                                };
+                                symbols_by_role.entry(role).or_default().push(
+                                    CommitSymbolEntryV1::Symbol(CommitSymbolV1 {
+                                        name: declaration.node.name,
+                                        kind: declaration.node.kind.as_str().to_owned(),
+                                        file: declaration.path,
+                                        line: user_line(declaration.node.start_line),
+                                        change: Some(changed.change),
+                                        source_side: Some(side),
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                    Err(reason) => gaps.push(GitContextSourceGapV1 {
+                        file: file.path.clone(),
+                        reason,
+                    }),
+                }
+            }
+            Err(error) => {
+                if error.is_terminal() {
+                    return Err((GitToolOperationV1::Diff, error.to_string()));
+                }
+                gaps.push(GitContextSourceGapV1 {
+                    file: file.path.clone(),
+                    reason: error.to_string(),
+                });
             }
         }
-    };
-
-    let recent_commits = {
-        let project_root = ctx.project_root().to_path_buf();
-        tracing::Instrument::instrument(
-            blocking_git_span("rev-walk", move || git_recent_commits(&project_root, 5)),
-            tracing::trace_span!("mcp.git.commit_context.recent_commits"),
-        )
-    };
-
-    if changed_files.is_empty() {
-        let recent_commits = match recent_commits.await? {
-            Ok(commits) => commits,
-            Err(message) => {
-                return Ok(git_failure_completion(GitToolOperationV1::Log, message));
-            }
-        };
-        let summary = CommitContextSummaryV1 {
-            changed_files: Vec::new(),
-            symbols_by_role: BTreeMap::new(),
-            suggested_category: None,
-            recent_commits,
-            summary: "No changes detected.".to_owned(),
-            freshness: None,
-        };
-        return Ok(graph_tool_completion(
-            GraphToolResultV1::CommitContext(CommitContextResultV1::Summary(Box::new(summary))),
-            Vec::new(),
-        ));
-    }
-
-    let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
-    let files_with_inline_tests = {
-        let _span = tracing::trace_span!("mcp.git.commit_context.test_annotations").entered();
-        graph.test_annotated_logical_files(
-            &changed_paths,
-            VERIFIED_GRAPH_MAX_SYMBOLS,
-            VERIFIED_GRAPH_MAX_RELATIONS,
-        )?
-    };
-    let graph_symbols = {
-        let _span = tracing::trace_span!("mcp.git.commit_context.symbols").entered();
-        all_symbols_in_files(&graph, &changed_paths)?
-    };
-    let mut symbols_by_file: HashMap<String, Vec<&CodeGraphSymbolSummaryV1>> = HashMap::new();
-    for symbol in &graph_symbols {
-        symbols_by_file
-            .entry(symbol_path(symbol)?.to_owned())
-            .or_default()
-            .push(symbol);
-    }
-
-    let mut file_roles: Vec<CommitFileRoleV1> = Vec::new();
-    let mut symbols_by_role: BTreeMap<GitFileRoleV1, Vec<CommitSymbolEntryV1>> = BTreeMap::new();
-
-    for file in &changed_files {
-        let role = classify_file_role(file, &files_with_inline_tests);
-        let symbols = symbols_by_file.get(file).map_or(&[][..], Vec::as_slice);
         file_roles.push(CommitFileRoleV1 {
-            file: file.clone(),
+            file: file.path.clone(),
             role,
-            symbols: symbols.len(),
+            symbols: count,
+            comparison: Some(provenance),
         });
-
-        // Config files (Cargo.toml, *.yaml, package.json, ...) explode into
-        // one node per key. Surface a single summary entry per file instead.
-        // Agents only need to know "Cargo.toml changed, N indexed keys",
-        // not the name of every dependency listed.
-        if role == GitFileRoleV1::Config {
-            symbols_by_role
-                .entry(role)
-                .or_default()
-                .push(CommitSymbolEntryV1::ConfigSummary(ConfigSummaryV1 {
-                    file: file.clone(),
-                    kind: ConfigSummaryKindV1::ConfigSummary,
-                    config_keys: symbols.len(),
-                }));
-            continue;
-        }
-        for symbol in symbols {
-            let metadata = symbol_metadata(symbol)?;
-            symbols_by_role
-                .entry(role)
-                .or_default()
-                .push(CommitSymbolEntryV1::Symbol(CommitSymbolV1 {
-                    name: metadata.simple_name.as_str().to_owned(),
-                    kind: metadata.kind.as_str().to_owned(),
-                    file: symbol_path(symbol)?.to_owned(),
-                    line: user_line(metadata.start_line),
-                }));
-        }
     }
-
-    let has_tests = file_roles.iter().any(|f| f.role == GitFileRoleV1::Test);
-    let has_source = file_roles.iter().any(|f| f.role == GitFileRoleV1::Source);
-    let category = match (has_source, has_tests) {
-        (true, true) => CommitCategoryV1::SourceAndTests,
-        (true, false) => CommitCategoryV1::Source,
-        (false, true) => CommitCategoryV1::Test,
-        (false, false) => CommitCategoryV1::Chore,
+    checkpoint()?;
+    let recent_commits = git
+        .history(&GitHistoryRequest {
+            max_count: 5,
+            first_parent: true,
+            ..GitHistoryRequest::default()
+        })
+        .map_err(|error| (GitToolOperationV1::Log, error.to_string()))?
+        .commits
+        .into_iter()
+        .map(|commit| commit.subject)
+        .collect();
+    checkpoint()?;
+    let has_tests = file_roles
+        .iter()
+        .any(|file| file.role == GitFileRoleV1::Test);
+    let has_source = file_roles
+        .iter()
+        .any(|file| file.role == GitFileRoleV1::Source);
+    let category = if file_roles.is_empty() {
+        None
+    } else {
+        Some(match (has_source, has_tests) {
+            (true, true) => CommitCategoryV1::SourceAndTests,
+            (true, false) => CommitCategoryV1::Source,
+            (false, true) => CommitCategoryV1::Test,
+            (false, false) => CommitCategoryV1::Chore,
+        })
     };
-
-    let recent_commits = match recent_commits.await? {
-        Ok(commits) => commits,
-        Err(message) => {
-            return Ok(git_failure_completion(GitToolOperationV1::Log, message));
+    let summary = if file_roles.is_empty() {
+        if staged_only {
+            "No staged changes.".to_owned()
+        } else {
+            "No HEAD-to-working-tree changes.".to_owned()
         }
+    } else {
+        format!(
+            "{} changed file(s); {} changed declaration/config entries",
+            file_roles.len(),
+            symbols_by_role.values().map(Vec::len).sum::<usize>()
+        )
     };
-
-    let total_symbols: usize = symbols_by_role.values().map(Vec::len).sum();
-    let summary = CommitContextSummaryV1 {
+    let source_coverage = GitContextSourceCoverageV1 {
+        complete: gaps.is_empty() && !comparison.coverage.leaves_state_unread(),
+        git: comparison.coverage.clone(),
+        gaps,
+        consistency: comparison.consistency(),
+    };
+    Ok(CommitContextSummaryV1 {
+        comparison: Some(comparison.selection),
+        source_coverage: Some(source_coverage),
         changed_files: file_roles,
         symbols_by_role,
-        suggested_category: Some(category),
+        suggested_category: category,
         recent_commits,
-        summary: format!(
-            "{} changed file(s); {} indexed symbol/config entries",
-            changed_files.len(),
-            total_symbols
-        ),
+        summary,
         freshness: None,
-    };
-    Ok(graph_tool_completion(
-        GraphToolResultV1::CommitContext(CommitContextResultV1::Summary(Box::new(summary))),
-        changed_files,
-    ))
+    })
 }
 
 const PR_CONTEXT_DEFAULT_SYMBOLS: usize = 200;
@@ -2203,3 +2298,224 @@ mod blast_gate_tests {
 }
 
 // ── Cross-branch tools ─────────────────────────────────────────────────
+
+#[cfg(test)]
+mod commit_source_tests {
+    use super::super::test_support::test_git;
+    use super::*;
+    use tracedecay_domain::{RepositoryId, WorktreeId};
+
+    fn adapter(root: &std::path::Path) -> NativeGitIntelligence {
+        NativeGitIntelligence::new(
+            root,
+            RepositoryId::new("repository.commit-source").unwrap(),
+            WorktreeId::new("worktree.commit-source").unwrap(),
+        )
+    }
+
+    fn git_oid(root: &std::path::Path, revision: &str) -> String {
+        let output =
+            std::process::Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())
+                .args(["rev-parse", revision])
+                .current_dir(root)
+                .output()
+                .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn policy() -> IndexPathPolicyV1 {
+        IndexPathPolicyV1::new(Vec::new(), Vec::new()).unwrap()
+    }
+
+    fn symbols(summary: &CommitContextSummaryV1) -> Vec<&CommitSymbolV1> {
+        summary
+            .symbols_by_role
+            .values()
+            .flatten()
+            .filter_map(|entry| match entry {
+                CommitSymbolEntryV1::Symbol(symbol) => Some(symbol),
+                CommitSymbolEntryV1::ConfigSummary(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn staged_context_uses_changed_index_declarations_without_a_graph() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        test_git(root, &["init", "-b", "main"]);
+        let unchanged = "fn unchanged() {}\n#[cfg(test)] mod tests { #[test] fn existing() {} }\n";
+        std::fs::write(
+            root.join("lib.rs"),
+            format!("pub fn changed() -> u32 {{ 1 }}\n{unchanged}"),
+        )
+        .unwrap();
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "base"]);
+        std::fs::write(
+            root.join("lib.rs"),
+            format!("pub fn changed() -> u64 {{ 2 }}\n{unchanged}"),
+        )
+        .unwrap();
+        test_git(root, &["add", "lib.rs"]);
+        let staged_blob = git_oid(root, ":lib.rs");
+        std::fs::write(root.join("lib.rs"), "pub fn dirty_worktree() {}\n").unwrap();
+        let summary = commit_source_summary(&adapter(root), true, &policy(), &|| false).unwrap();
+        assert_eq!(summary.changed_files.len(), 1);
+        assert_eq!(summary.changed_files[0].role, GitFileRoleV1::Source);
+        assert_eq!(
+            summary.changed_files[0]
+                .comparison
+                .as_ref()
+                .unwrap()
+                .after_blob
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            staged_blob.trim()
+        );
+        let changed = symbols(&summary);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].name, "changed");
+        assert_eq!(changed[0].line, 1);
+        assert_eq!(changed[0].source_side, Some(GitContextSourceSideV1::After));
+        assert_eq!(
+            changed[0].change,
+            Some(tracedecay_contracts::retrieval::GitDeclarationChangeKindV1::SignatureChanged)
+        );
+        assert!(summary.freshness.is_none());
+    }
+
+    #[test]
+    fn initial_context_includes_untracked_source_and_binary_gaps() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        test_git(root, &["init", "-b", "main"]);
+        std::fs::write(root.join("new.rs"), "pub fn initial() {}\n").unwrap();
+        std::fs::write(root.join("opaque.bin"), b"binary\0bytes").unwrap();
+        let summary = commit_source_summary(&adapter(root), false, &policy(), &|| false).unwrap();
+        assert_eq!(summary.changed_files.len(), 2);
+        assert_eq!(symbols(&summary)[0].name, "initial");
+        assert!(matches!(
+            summary.comparison,
+            Some(GitContextComparisonV1::HeadToWorktree { head: None })
+        ));
+        let coverage = summary.source_coverage.unwrap();
+        assert!(!coverage.complete);
+        assert!(
+            coverage
+                .gaps
+                .iter()
+                .any(|gap| gap.file == "opaque.bin" && gap.reason.contains("binary"))
+        );
+        assert!(summary.recent_commits.is_empty());
+    }
+
+    #[test]
+    fn default_context_reports_net_head_to_worktree_changes() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        test_git(root, &["init", "-b", "main"]);
+        let original = "fn value() -> u32 { 1 }\n";
+        std::fs::write(root.join("lib.rs"), original).unwrap();
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "base"]);
+        std::fs::write(root.join("lib.rs"), "fn value() -> u32 { 2 }\n").unwrap();
+        test_git(root, &["add", "lib.rs"]);
+        std::fs::write(root.join("lib.rs"), original).unwrap();
+        let adapter = adapter(root);
+        let default = commit_source_summary(&adapter, false, &policy(), &|| false).unwrap();
+        assert!(default.changed_files.is_empty());
+        assert_eq!(default.summary, "No HEAD-to-working-tree changes.");
+        let staged = commit_source_summary(&adapter, true, &policy(), &|| false).unwrap();
+        assert_eq!(staged.changed_files.len(), 1);
+        assert_eq!(symbols(&staged).len(), 1);
+        assert!(matches!(
+            staged.comparison,
+            Some(GitContextComparisonV1::Staged { .. })
+        ));
+        // Index deletion plus an untracked copy of HEAD is also a net no-op.
+        test_git(root, &["rm", "--cached", "-f", "lib.rs"]);
+        let unchanged_replacement =
+            commit_source_summary(&adapter, false, &policy(), &|| false).unwrap();
+        assert!(unchanged_replacement.changed_files.is_empty());
+        assert_eq!(
+            unchanged_replacement.summary,
+            "No HEAD-to-working-tree changes."
+        );
+        assert!(unchanged_replacement.source_coverage.unwrap().complete);
+        let staged_deletion = commit_source_summary(&adapter, true, &policy(), &|| false).unwrap();
+        assert_eq!(staged_deletion.changed_files.len(), 1);
+        assert_eq!(
+            staged_deletion.changed_files[0]
+                .comparison
+                .as_ref()
+                .unwrap()
+                .change,
+            tracedecay_domain::GitChangeKindV1::Deleted
+        );
+        assert_eq!(
+            symbols(&staged_deletion)[0].source_side,
+            Some(GitContextSourceSideV1::Before)
+        );
+        let excluded = IndexPathPolicyV1::new(vec!["lib.rs".to_owned()], Vec::new()).unwrap();
+        let withheld = commit_source_summary(&adapter, false, &excluded, &|| false).unwrap();
+        assert_eq!(withheld.changed_files.len(), 1);
+        assert!(
+            withheld.source_coverage.unwrap().gaps[0]
+                .reason
+                .contains("excluded")
+        );
+    }
+
+    #[test]
+    fn configured_exclusions_cover_rename_origins_in_pr_and_commit_context() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        test_git(root, &["init", "-b", "main"]);
+        std::fs::create_dir(root.join("private")).unwrap();
+        std::fs::create_dir(root.join("public")).unwrap();
+        std::fs::write(root.join("private/api.rs"), "pub fn secret() {}\n").unwrap();
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "base"]);
+        let base = git_oid(root, "HEAD");
+        test_git(root, &["mv", "private/api.rs", "public/api.rs"]);
+        let policy = IndexPathPolicyV1::new(vec!["private/**".to_owned()], Vec::new()).unwrap();
+        let summary = commit_source_summary(&adapter(root), true, &policy, &|| false).unwrap();
+        assert_eq!(summary.changed_files.len(), 1);
+        assert_eq!(
+            summary.changed_files[0]
+                .comparison
+                .as_ref()
+                .unwrap()
+                .previous_file
+                .as_deref(),
+            Some("private/api.rs")
+        );
+        assert!(symbols(&summary).is_empty());
+        assert!(
+            summary.source_coverage.as_ref().unwrap().gaps[0]
+                .reason
+                .contains("excluded")
+        );
+        test_git(root, &["commit", "-m", "move"]);
+        let head = git_oid(root, "HEAD");
+        let brief = super::super::pr_context_source::compare_source(
+            &adapter(root),
+            base.trim(),
+            head.trim(),
+            &policy,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(brief.changes.len(), 1);
+        assert!(brief.entries.is_empty());
+        assert_eq!(
+            brief.source.state,
+            tracedecay_contracts::retrieval::PrContextSourceStateV1::Partial
+        );
+        assert!(brief.source.detail.contains("1 files excluded"));
+        assert!(brief.changes[0].additions.is_none());
+    }
+}

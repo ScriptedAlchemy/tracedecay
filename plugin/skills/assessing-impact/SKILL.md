@@ -8,8 +8,9 @@ metadata:
 # Assessing impact
 
 Connect a proposed change to dependents and tests. For specified files,
-`diff_context` analyzes every indexed symbol in those files; use the actual
-patch to distinguish changed declarations from file-scoped candidates. For one
+`diff_context` is prospective and analyzes every indexed symbol in those files.
+Use `pr_context` for exact committed changes or `commit_context` for exact
+staged/net HEAD-to-worktree declarations before tracing their consumers. For one
 known symbol, start with shallow `impact` and widen when its dependents warrant
 it. Keep the returned node identity for follow-up; resolve an ambiguous name
 before interpreting its consumers.

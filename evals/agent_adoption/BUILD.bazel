@@ -6,11 +6,13 @@ py_test(
     srcs = [
         "carry_claude_profile.py",
         "grade.py",
+        "pr_review_fixture.py",
         "select_scenarios.py",
         "selftest.py",
         "stock_check.py",
     ],
     data = ["claude_tools.sh"] + glob([
+        "fixture_pr_review/**",
         "learned_skills/**",
         "scenarios/*.json",
     ]),

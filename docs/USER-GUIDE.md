@@ -1043,15 +1043,15 @@ Marked functions are excluded from `tracedecay_test_risk` attribution calculatio
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_diff_context` | File-scoped context: all indexed symbols in supplied files, possible consumers, and test candidates. It does not identify the exact declarations changed by a patch. |
+| `tracedecay_diff_context` | Prospective context for supplied files: all indexed declarations, possible consumers, and test candidates. `comparison.kind` is `proposed_files`; declarations may be unchanged. |
 | `tracedecay_changelog` | Compare two refs directly: changed files and added, removed, or modified symbols from exact indexed generations. If symbol generations are unavailable, returns the file inventory with partial symbol coverage. |
-| `tracedecay_commit_context` | Uncommitted file roles, indexed symbols in those files, and recent commit style. `staged_only` filters paths; it does not read symbol metadata from staged blobs. |
-| `tracedecay_pr_context` | Compact PR briefing: description, status, discussion, retained CI, changed areas, code entry points, nearby consumers, and quality evidence. Refreshes a configured matching GitHub PR when available. `view: "symbols"` returns the paginated symbol report. |
+| `tracedecay_commit_context` | Changed declarations, file roles, source identities/coverage, and recent commit style. `staged_only: true` reads immutable staged index blobs; the default compares HEAD with captured worktree bytes, including untracked files. |
+| `tracedecay_pr_context` | Compact PR briefing: description, status, discussion, retained CI, changed areas, code entry points, nearby consumers, and quality evidence. Reads retained hosted evidence by default; `refresh_github: true` explicitly refreshes a configured matching GitHub PR. `view: "symbols"` returns the paginated symbol report. |
 | `tracedecay_git_diff` | Read bounded structured file and hunk metadata for working-tree, staged, or exact commit-range changes. Hunk bodies are not returned. |
 | `tracedecay_branch_diff` | Compare indexed snapshots of two exact local branch tips. This compares the tips directly; PR context uses their merge base. |
 | `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. Finds test callers up to depth 3, so a listed test may be a direct caller or a transitive one, see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for the direct-vs-closure distinction. |
 
-For raw patch text, use shell `git diff -- path/to/file` for working-tree changes
+For raw patch text, use shell `git diff -- path/to/file` for index-to-worktree changes
 or `git diff --cached -- path/to/file` for staged changes. For a direct commit
 comparison, use `git diff <base-oid> <head-oid> -- path/to/file`. To match a PR
 briefing's comparison, use its `merge_base` and `head_oid` as the two commits.
@@ -1066,11 +1066,13 @@ which areas changed, and where to begin reading the source:
 tracedecay tool pr_context --args '{"base_ref":"origin/master","head_ref":"HEAD","budget_tokens":4000}'
 ```
 
-When a GitHub refresh owner is available for a configured PR whose head matches
-the comparison, the briefing first refreshes its description, review votes,
-conversation, and inline discussion. Limited or unavailable provider reads
-leave an explicitly marked retained fallback. CI uses retained observations;
-this call does not refresh or enumerate all required checks.
+The default reads retained authorized GitHub evidence without waiting on a
+provider refresh. Set `refresh_github: true` when current description, review
+votes, conversation, or inline discussion is needed. This refreshes the
+configured matching PR within the caller's deadline; a limited provider read
+leaves an explicitly marked retained fallback. CI remains retained: the call
+does not refresh or enumerate all required checks. `refresh_github` applies to
+the brief view.
 
 The comparison uses the merge base and immutable Git revisions. For a stacked
 PR, pass its parent branch as `base_ref`. When `base_ref` is absent, a uniquely
@@ -1079,13 +1081,12 @@ default branch is used. Set `pull_request` to a PR number when multiple retained
 PRs match the head. This selects from the checkout's PR evidence after any
 configured refresh; it does not fetch an arbitrary PR by number.
 
-Read the `entry_points` in order, using each entry's revision and source span.
-When an exact-head graph match supplies a `node_id`, pass it directly to
-`source_body`, `impact`, or `test_map` without repeating symbol discovery. Read
-deleted or non-head source with shell `git show '<commit-oid>:path/to/file'`
-at the recorded revision, then select the recorded span. `source_body` and
-`source_lines` read current source; they do not expand arbitrary historical Git
-blobs. Discussion locations and CI annotations can prioritize these reads.
+Read the ranked `entry_points` using each entry's revision and source span.
+When an exact-head resident graph match supplies a `node_id`, pass it directly
+to `source_body`, `impact`, or `test_map` without repeating symbol discovery.
+Optional graph enrichment does not warm a missing graph. Read deleted or
+non-head code through the historical `source_lines` selector below. Discussion
+locations and CI annotations can prioritize these reads.
 
 Expand only the comments, checks, or consumers relevant to the task. Use supplied
 discussion URLs for provider context. A retained `body_anchor` is a provenance
@@ -1099,7 +1100,59 @@ remains historical context. Empty or unexpanded discussion does not mean there
 are no comments, and the retained check inventory does not enumerate required
 checks. Source and graph gaps are explicit, while local change analysis still
 works without a mounted GitHub source. `budget_tokens` sizes the briefing and
-reports omitted sections; it is an approximate serialized-output budget.
+reports omission counts and `over_budget`; it is an approximate serialized-output
+budget, not a hard bound that makes every returned section exhaustive.
+
+#### Staged and working-tree context
+
+`commit_context` reports actual declaration changes independently of graph
+readiness. `comparison` identifies the selected edge, and each file's
+`comparison` carries its change kind, rename origin, and available before/after
+blob IDs. Symbols record their change kind and source side; their lines are
+one-based. Source coverage reports unavailable, excluded, opaque, or
+unsupported files instead of inventing an empty successful analysis.
+
+With `staged_only: true`, HEAD is pinned and declarations come from the exact
+selected index blobs. Later worktree or index edits do not substitute different
+source for that selection. By default, the tool compares pinned HEAD with the
+working tree, including untracked files. This is the net result: stage an edit
+and then restore that file's worktree bytes to HEAD, and the default reports
+`No HEAD-to-working-tree changes.` while the staged request still reports the
+edit. An unborn HEAD is compared with the empty tree. Working-tree reads are
+checked per file; they are not an atomic snapshot of the whole checkout.
+
+For prospective planning, use `diff_context` with a file list. Its indexed
+symbol inventory can include unchanged declarations. `git_diff` supplies bounded
+structured hunk metadata; its `working_tree` scope is index-to-worktree, while
+`staged` is HEAD-to-index. Use `git diff --cached` for staged patch text; a blob
+ID returned by commit context is not a historical commit selector.
+
+#### Expanding exact historical source
+
+Use the existing `source_lines` tool to read the revision and location returned
+by a PR entrypoint:
+
+```json
+{"revision":"0123456789abcdef0123456789abcdef01234567","file":"src/lib.rs","start_line":12,"end_line":40}
+```
+
+Replace `revision` with the actual full lowercase commit OID (SHA-1 or SHA-256).
+`file` is a canonical repository-relative path; lines are one-based and the end
+line is inclusive. This selector reads the committed Git blob, so dirty
+worktree contents do not replace historical source. The existing indexed
+`source_lines` selector continues to use a canonical file occurrence and source
+span; `source_body` reads a known indexed `node_id`.
+
+The result identifies the exact revision, blob, and returned lines. If it
+returns `next_line`, continue at that line with the same revision, file, and
+original end line. Pages preserve whole lines, including UTF-8 and line
+endings; a single line larger than the byte allowance is reported as a bounded
+read limitation rather than silently split. Configured source exclusions apply
+to historical and briefing reads. Historical source uses the same admitted
+source-service lifecycle, availability, disclosure policy, cancellation, and
+deadline as other source reads; it does not bypass unavailable primitive
+authority. Symlink blobs contain their target text, without following that
+target; submodule entries are not source blobs.
 
 ### Porting tools
 

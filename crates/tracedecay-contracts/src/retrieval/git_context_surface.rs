@@ -29,7 +29,8 @@ pub struct AffectedSurfaceRequestV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiffContextSurfaceRequestV1 {
-    /// List of changed file paths.
+    /// Files to inspect prospectively. All indexed declarations in these files
+    /// are candidates; this does not select exact Git-changed declarations.
     pub files: Vec<String>,
     /// Maximum impact traversal depth (default: 2, at most 10).
     pub depth: Option<u32>,
@@ -50,8 +51,9 @@ pub struct ChangelogSurfaceRequestV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommitContextSurfaceRequestV1 {
-    /// If true, only analyze staged changes (default: false = all uncommitted
-    /// changes).
+    /// If true, compare pinned HEAD with immutable staged index blobs. The
+    /// default compares HEAD with captured working-tree bytes, including
+    /// untracked files: a staged edit undone in the working tree cancels out.
     pub staged_only: Option<bool>,
 }
 
@@ -63,6 +65,10 @@ pub struct PrContextSurfaceRequestV1 {
     pub view: super::PrContextViewV1,
     /// Select a retained PR number for this checkout when several are known.
     pub pull_request: Option<u64>,
+    /// Explicitly refresh the configured matching GitHub PR within the caller
+    /// deadline. By default, read retained authorized evidence. CI stays retained.
+    #[serde(default)]
+    pub refresh_github: bool,
     /// Base branch or ref (default: the matching retained PR base, otherwise
     /// the detected repository default branch). A short branch name selects the descendant of its
     /// local and origin tracking tips; use an explicit ref when they diverge.
@@ -254,6 +260,8 @@ pub struct CoChangeUnavailableV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiffContextResultV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<super::GitContextComparisonV1>,
     pub changed_files: Vec<String>,
     pub modified_symbols: Vec<GitContextSymbolV1>,
     pub impacted_symbols_count: usize,
@@ -457,6 +465,8 @@ pub struct CommitFileRoleV1 {
     pub file: String,
     pub role: GitFileRoleV1,
     pub symbols: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<super::GitContextFileComparisonV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -466,6 +476,10 @@ pub struct CommitSymbolV1 {
     pub kind: String,
     pub file: String,
     pub line: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<super::GitDeclarationChangeKindV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_side: Option<super::GitContextSourceSideV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -491,6 +505,10 @@ pub enum CommitCategoryV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommitContextSummaryV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<super::GitContextComparisonV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_coverage: Option<super::GitContextSourceCoverageV1>,
     pub changed_files: Vec<CommitFileRoleV1>,
     pub symbols_by_role: BTreeMap<GitFileRoleV1, Vec<CommitSymbolEntryV1>>,
     /// Absent when the worktree has no changes.

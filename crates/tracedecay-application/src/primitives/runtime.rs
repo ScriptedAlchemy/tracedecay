@@ -20,9 +20,9 @@ use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveResultV1, HealthDeltaRequest, HealthDeltaResult,
     OperationalRetrievalPort, PrimitiveInvocation, PrimitiveRequest, PrimitiveSupportGap,
     RetrievalPortContext, RetrievalPortOutcome, SessionRetrievalBudgetStageV1,
-    SessionRetrievalStructuralRefusalV1, SourceReadPortContext, SourceReadPortOutcome,
-    SourceReadPrimitivePort, SourceRetrievalPort, SymbolGraphItem, SymbolGraphPage,
-    SymbolGraphPortContext, SymbolGraphPortOutcome, SymbolGraphPrimitivePort,
+    SessionRetrievalStructuralRefusalV1, SourceLinesRequest, SourceReadPortContext,
+    SourceReadPortOutcome, SourceReadPrimitivePort, SourceRetrievalPort, SymbolGraphItem,
+    SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortOutcome, SymbolGraphPrimitivePort,
     TemporalRetrievalPort, TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext,
     TestPrimitivePortOutcome,
 };
@@ -503,11 +503,13 @@ const fn reads_code_index(request: &PrimitiveRequest) -> bool {
         | PrimitiveRequest::QualifiedName(_)
         | PrimitiveRequest::CallChain(_)
         | PrimitiveRequest::FileDependents(_)
-        | PrimitiveRequest::SourceLines(_)
         | PrimitiveRequest::SourceBody(_)
         | PrimitiveRequest::SourceOutline(_)
         | PrimitiveRequest::ModuleApi(_)
         | PrimitiveRequest::HealthDelta(_) => true,
+        PrimitiveRequest::SourceLines(request) => {
+            matches!(request, SourceLinesRequest::Indexed { .. })
+        }
         PrimitiveRequest::SessionLookup(_)
         | PrimitiveRequest::HealthRead(_)
         | PrimitiveRequest::StorageStatus(_)
@@ -1045,6 +1047,7 @@ fn valid_owned_primitive_request(request: &PrimitiveRequest) -> bool {
         PrimitiveRequest::Impact(request) => request.validate().is_ok(),
         PrimitiveRequest::TestMap(request) => request.validate(),
         PrimitiveRequest::AffectedFileTests(request) => request.validate(),
+        PrimitiveRequest::SourceLines(request) => request.validate().is_ok(),
         _ => true,
     }
 }

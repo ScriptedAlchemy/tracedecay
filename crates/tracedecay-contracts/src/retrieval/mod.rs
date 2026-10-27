@@ -7,6 +7,7 @@ mod callable_code;
 mod callable_code_catalog;
 mod callable_code_service;
 pub mod catalog;
+mod git_change_context;
 mod git_context_surface;
 mod git_topology_anchor;
 mod graph_lookup_surface;
@@ -161,6 +162,11 @@ pub use callable_code_catalog::{
 pub use callable_code_service::{
     CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort, CallableCodeQueryFuture,
     CallableCodeQueryPort, CallableCodeQueryService, UNPINNED_LATEST_GENERATION_SENTINEL,
+};
+pub use git_change_context::{
+    GitContextComparisonV1, GitContextFileComparisonV1, GitContextSourceConsistencyV1,
+    GitContextSourceCoverageV1, GitContextSourceGapV1, GitContextSourceSideV1,
+    GitDeclarationChangeKindV1,
 };
 pub use git_context_surface::{
     AffectedRankingMetadataV1, AffectedResultV1, AffectedSurfaceRequestV1, BranchDiffCompleteV1,
