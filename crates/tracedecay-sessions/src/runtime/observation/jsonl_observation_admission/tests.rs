@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
@@ -62,6 +63,8 @@ struct SeamSpyAdmission {
     scripted_capture_error_once: Mutex<Option<HostAdmissionOutcome>>,
     scripted_batch_error: Mutex<Option<HostAdmissionOutcome>>,
     scripted_cursor_refusal: Mutex<Option<HostAdmissionOutcome>>,
+    scripted_coverage_error: Mutex<Option<HostAdmissionOutcome>>,
+    cancel_on_coverage: AtomicBool,
     report_no_cursor: AtomicBool,
     capture_calls: AtomicU64,
     capture_collision_dispositions: Mutex<Vec<ObservationIdentityCollisionDispositionV1>>,
@@ -966,6 +969,12 @@ impl HostAdmission for SeamSpyAdmission {
             .push(advance.clone());
         let peer_through = self.peer_covers_advance_through.lock().unwrap().take();
         Box::pin(async move {
+            if self.cancel_on_coverage.swap(false, Ordering::SeqCst) {
+                cancellation.cancel();
+            }
+            if let Some(outcome) = self.scripted_coverage_error.lock().unwrap().clone() {
+                return Err(outcome);
+            }
             if let Some(offset) = peer_through {
                 let next = advance.next_cursor();
                 let peer = ObservationCursorAdvance::new(
@@ -1738,6 +1747,165 @@ async fn content_refusals_cover_past_so_the_stream_converges() {
         spy.cover_past_advances().len(),
         2,
         "converged coverage must not be re-written"
+    );
+}
+
+#[tokio::test]
+async fn failed_refusal_coverage_blocks_without_skipping_the_later_message() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    spy.script_batch_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "invalid_observation_contract",
+    ));
+    spy.script_capture_error_once(HostAdmissionOutcome::deterministic_content_refusal(
+        "invalid_observation_contract",
+    ));
+    *spy.scripted_coverage_error.lock().unwrap() = Some(HostAdmissionOutcome::degraded(
+        "observation_cursor_advance_ledger_disagreement",
+    ));
+
+    let failed =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await;
+    assert!(
+        matches!(
+            failed,
+            Err(TranscriptIngestError::NonDurableRecord { offset: 0, .. })
+        ),
+        "uncovered refusal bytes must block, not claim pass success: {failed:?}"
+    );
+    assert_eq!(stored_cursor(&spy).await, None);
+    assert!(spy.inner.observations().is_empty());
+    assert!(spy.inner.non_durable_advances().is_empty());
+
+    *spy.scripted_coverage_error.lock().unwrap() = None;
+    spy.script_batch_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "invalid_observation_contract",
+    ));
+    spy.script_capture_error_once(HostAdmissionOutcome::deterministic_content_refusal(
+        "invalid_observation_contract",
+    ));
+    let recovered =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .unwrap();
+    assert_eq!(recovered.frames_refused, 1);
+    assert_eq!(recovered.frames_persisted, 1);
+    assert_eq!(stored_cursor(&spy).await.unwrap().position(), len);
+    assert_eq!(spy.inner.observations().len(), 1);
+    assert_eq!(
+        spy.inner.non_durable_advances()[0].reason(),
+        ObservationCoverageReason::AdmissionRefused
+    );
+}
+
+#[tokio::test]
+async fn cancellation_during_refusal_coverage_preserves_the_uncovered_cursor() {
+    let (_temp, path, _) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    spy.script_capture_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "invalid_observation_contract",
+    ));
+    spy.cancel_on_coverage.store(true, Ordering::SeqCst);
+    let failed =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await;
+    assert!(matches!(
+        failed,
+        Err(TranscriptIngestError::Cancelled { .. })
+    ));
+    assert_eq!(stored_cursor(&spy).await, None);
+    assert!(spy.inner.observations().is_empty());
+    assert!(spy.inner.non_durable_advances().is_empty());
+}
+
+#[tokio::test]
+async fn a_refusal_memo_cannot_authorize_uncovered_bytes_or_hide_an_in_place_rewrite() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let contents = std::fs::read(&path).unwrap();
+    let header_end = contents.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+    let initial = try_admit_codex_jsonl_observations_for_profile_with_admission(
+        &path,
+        None,
+        &[],
+        &spy,
+        Some(header_end as u64),
+    )
+    .await
+    .unwrap();
+    assert_eq!(initial.frames_persisted, 1);
+    let committed = stored_cursor(&spy).await.unwrap();
+    let (page, _) = super::shared_jsonl_page(&path, StoredCursor::default(), None, None, false)
+        .await
+        .unwrap();
+    let source = crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay-refusal-memo-v1");
+    hasher.update(b"codex");
+    hasher.update(source.session_id().as_str().as_bytes());
+    hasher.update(source.source_key().as_str().as_bytes());
+    let key = format!(
+        "host-memo://codex/refused/v1/{}",
+        hex::encode(&hasher.finalize()[..8])
+    );
+    let foreign = ParseOffset {
+        byte_offset: len,
+        mtime: page.frames.last().unwrap().resume_fingerprint,
+        file_id: committed.generation().generation_id(),
+    };
+    spy.advance_parse_offset(&ObservationScopeV1::Profile, &key, foreign)
+        .await
+        .unwrap();
+
+    let appended = format!(
+        "{}\n",
+        json!({
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "later valid message"}
+        })
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    let resumed =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .unwrap();
+    assert_eq!(
+        resumed.frames_persisted, 2,
+        "both uncovered messages must persist"
+    );
+    assert_eq!(spy.inner.observations().len(), 3);
+    assert_eq!(
+        spy.get_parse_offset(&ObservationScopeV1::Profile, &key)
+            .await
+            .unwrap(),
+        Some(foreign),
+        "foreign parse-offset state must remain untouched"
+    );
+
+    let edited = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("seam contract message", "edit contract message");
+    std::fs::write(&path, edited).unwrap();
+    let rewritten =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .unwrap();
+    assert!(
+        rewritten.frames_persisted > 0,
+        "rewritten uncovered bytes must be re-admitted"
+    );
+    assert_eq!(
+        spy.get_parse_offset(&ObservationScopeV1::Profile, &key)
+            .await
+            .unwrap(),
+        Some(foreign)
     );
 }
 
@@ -2782,4 +2950,84 @@ async fn renamed_rewrite_of_a_middle_record_reingests_only_the_bytes_after_the_e
         [ObservationSourceRangeV1::new(0, 25_600).unwrap()]
     );
     assert_eq!(admission.observations().len(), 401);
+}
+
+struct RefusalWarnings(Arc<AtomicU64>);
+
+impl tracing::Subscriber for RefusalWarnings {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() == tracing::Level::WARN
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct MessageVisitor(bool);
+        impl tracing::field::Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message"
+                    && format!("{value:?}") == "admission refused a record; covering past it"
+                {
+                    self.0 = true;
+                }
+            }
+        }
+        let mut visitor = MessageVisitor(false);
+        event.record(&mut visitor);
+        if visitor.0 {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[tokio::test]
+async fn refusal_warnings_latch_per_pass_and_recur_for_new_uncovered_records() {
+    let (_temp, path, _) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    spy.script_capture_error(HostAdmissionOutcome::deterministic_content_refusal(
+        "invalid_observation_contract",
+    ));
+    let warnings = Arc::new(AtomicU64::new(0));
+    let _guard = tracedecay_runtime_core::logging::set_tracing_capture(RefusalWarnings(
+        Arc::clone(&warnings),
+    ));
+    let first =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .unwrap();
+    assert_eq!(first.frames_refused, 2);
+    assert_eq!(warnings.load(Ordering::Relaxed), 1);
+    let settled =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .unwrap();
+    assert_eq!(settled.bytes_consumed, 0);
+    assert_eq!(warnings.load(Ordering::Relaxed), 1);
+    let appended = format!(
+        "{}\n",
+        json!({
+            "timestamp": "2026-01-01T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "new refusal"}
+        })
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    let next =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .unwrap();
+    assert_eq!(next.frames_refused, 1);
+    assert_eq!(warnings.load(Ordering::Relaxed), 2);
 }

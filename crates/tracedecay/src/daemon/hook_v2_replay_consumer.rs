@@ -73,6 +73,44 @@ fn spool_root_absent(root: &Path) -> Result<bool, String> {
 
 /// The cause a pending-work redrive left its producer work owed, or `None`
 /// when the redrive admitted it.
+/// How many redrive attempts one pending-work envelope gets before the
+/// daemon stops retrying it for this process lifetime. The envelope stays
+/// in the durable ledger; only the in-process retry loop gives up.
+const PENDING_WORK_REDRIVE_CAP: u32 = 16;
+/// First redrive backoff (microseconds); doubles per attempt.
+const PENDING_WORK_REDRIVE_BASE_MICROS: i64 = 30 * 1000 * 1000;
+/// Maximum redrive backoff (microseconds).
+const PENDING_WORK_REDRIVE_MAX_MICROS: i64 = 60 * 60 * 1000 * 1000;
+
+#[derive(Default)]
+struct PendingWorkRedriveGate {
+    /// Keyed by the envelope's globally unique `event_id`.
+    state: std::collections::HashMap<[u8; 16], PendingWorkRedriveState>,
+}
+
+#[derive(Default)]
+struct PendingWorkRedriveState {
+    attempts: u32,
+    next_eligible_micros: i64,
+    terminal: bool,
+}
+
+static PENDING_WORK_REDRIVE_GATE: std::sync::OnceLock<
+    std::sync::Mutex<PendingWorkRedriveGate>,
+> = std::sync::OnceLock::new();
+
+fn pending_work_redrive_gate() -> &'static std::sync::Mutex<PendingWorkRedriveGate> {
+    PENDING_WORK_REDRIVE_GATE
+        .get_or_init(|| std::sync::Mutex::new(PendingWorkRedriveGate::default()))
+}
+
+fn pending_work_redrive_backoff(attempts: u32) -> i64 {
+    let shift = attempts.saturating_sub(1).min(12);
+    PENDING_WORK_REDRIVE_BASE_MICROS
+        .saturating_mul(1_i64 << shift)
+        .min(PENDING_WORK_REDRIVE_MAX_MICROS)
+}
+
 fn unresolved_pending_work(outcome: &HookV2AdmissionOutcomeV1) -> Option<&'static str> {
     match outcome {
         HookV2AdmissionOutcomeV1::Admitted { .. }
@@ -292,8 +330,25 @@ async fn redrive_pending_work(
         if project_id.is_some_and(|project_id| envelope.project_id != project_id) {
             continue;
         }
+        // Per-envelope backoff and terminal cap: an envelope whose admission
+        // is permanently blocked stays in the durable ledger, but the daemon
+        // must not retry and warn for it on every sweep forever.
+        let event_key = envelope.event_id;
+        {
+            let gate = pending_work_redrive_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(state) = gate.state.get(&event_key) {
+                if state.terminal {
+                    continue;
+                }
+                if state.next_eligible_micros > now.0 {
+                    continue;
+                }
+            }
+        }
         // Owed work the daemon cannot admit now stays in the ledger and
-        // is redriven by the next sweep.
+        // is redriven by the next sweep, under the gate's backoff.
         let outcome = admit_replayed_envelope_with_authoritative_session(
             envelope,
             None,
@@ -316,6 +371,36 @@ async fn redrive_pending_work(
         if let Some(cause) = unresolved_pending_work(&outcome) {
             owed += 1;
             owed_cause.get_or_insert(cause);
+            let mut gate = pending_work_redrive_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = gate.state.entry(event_key).or_default();
+            state.attempts = state.attempts.saturating_add(1);
+            if state.attempts >= PENDING_WORK_REDRIVE_CAP {
+                if !state.terminal {
+                    state.terminal = true;
+                    let event_hex: String = event_key
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .take(16)
+                        .collect();
+                    tracing::warn!(
+                        host = host.hook_key(),
+                        event_id = %event_hex,
+                        attempts = state.attempts,
+                        cause,
+                        "pending producer work stayed owed past its redrive cap; quarantined in-process until restart"
+                    );
+                }
+            } else {
+                state.next_eligible_micros =
+                    now.0.saturating_add(pending_work_redrive_backoff(state.attempts));
+            }
+        } else {
+            let mut gate = pending_work_redrive_gate()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            gate.state.remove(&event_key);
         }
     }
     if let Some(cause) = owed_cause {
@@ -644,6 +729,18 @@ async fn stop_replay_consumer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_work_redrive_backoff_doubles_then_caps() {
+        assert_eq!(pending_work_redrive_backoff(1), 30 * 1000 * 1000);
+        assert_eq!(pending_work_redrive_backoff(2), 60 * 1000 * 1000);
+        assert_eq!(pending_work_redrive_backoff(5), 480 * 1000 * 1000);
+        assert_eq!(
+            pending_work_redrive_backoff(40),
+            PENDING_WORK_REDRIVE_MAX_MICROS,
+            "the backoff must cap at the maximum"
+        );
+    }
 
     #[test]
     fn only_an_admitted_redrive_settles_pending_work() {

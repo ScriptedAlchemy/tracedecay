@@ -11,6 +11,7 @@ use std::collections::BinaryHeap;
 use std::ffi::OsStr;
 use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use std::time::Instant;
 
 use tracedecay_capture::pi::{self as pi_capture, PiSessionHeader};
@@ -59,6 +60,122 @@ const MAX_DISCOVERY_UNITS: usize = MAX_DISCOVERY_CANDIDATES * 2;
 const PI_DISCOVERY_FRONTIER_KEY: &str = "host-frontier://pi/discovery/v1";
 const PI_QUEUE_FRONTIER_KEY: &str = "host-frontier://pi/queue/v1";
 const PI_FRONTIER_VERSION: u64 = 1;
+/// Durable per-path completion memos: a file admitted to EOF with this
+/// `(len, mtime)` never re-enters admission until it changes. Without this,
+/// the in-process [`SourceLedger`] forgets every converged source at each
+/// daemon restart and the whole corpus (observed: 1,029 files / 713 MB) is
+/// re-admitted from scratch, re-hitting every deterministic refusal again.
+const PI_COMPLETE_MEMO_PREFIX: &str = "host-memo://pi/complete/v1/";
+/// Durable per-path header-quarantine memos: a file whose header cannot be
+/// parsed is skipped until its `(len, mtime)` changes, instead of being
+/// re-opened and re-failed on every sweep pass.
+const PI_QUARANTINE_MEMO_PREFIX: &str = "host-memo://pi/quarantine/v1/";
+
+fn path_memo_key(prefix: &str, path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay-pi-path-memo-v1");
+    hasher.update(path.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let mut key = String::with_capacity(prefix.len() + 16);
+    key.push_str(prefix);
+    for byte in &digest[..8] {
+        key.push_str(&format!("{byte:02x}"));
+    }
+    key
+}
+
+/// Cheap `(len, mtime, inode)` file stamp; any append, rewrite, or
+/// replacement changes it. The inode (unix) closes the equal-length,
+/// timestamp-preserving replacement case an atomic rename produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PathFileStamp {
+    len: u64,
+    mtime_secs: u64,
+    #[allow(dead_code, reason = "windows keeps the slot for symmetry")]
+    inode: u64,
+}
+
+fn file_stamp(metadata: &std::fs::Metadata) -> PathFileStamp {
+    // Sub-second precision on platforms that expose it: a rewrite within
+    // the same second changes the stamp, so a fixed malformed file is
+    // retried immediately instead of after the next whole-second tick.
+    #[cfg(unix)]
+    let (mtime_secs, inode) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            metadata.mtime().unsigned_abs().saturating_mul(1_000_000_000)
+                + metadata.mtime_nsec().unsigned_abs(),
+            metadata.ino(),
+        )
+    };
+    #[cfg(not(unix))]
+    let (mtime_secs, inode) = (
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0),
+        0,
+    );
+    PathFileStamp {
+        len: metadata.len(),
+        mtime_secs,
+        inode,
+    }
+}
+
+/// Reads a path memo when its recorded stamp still matches the file.
+async fn path_memo_matches(
+    facade: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    prefix: &str,
+    path: &Path,
+    stamp: PathFileStamp,
+) -> bool {
+    let key = path_memo_key(prefix, path);
+    matches!(
+        facade.get_parse_offset(scope, &key).await,
+        Ok(Some(ParseOffset {
+            byte_offset: len,
+            mtime: mtime_secs,
+            file_id: inode,
+        })) if len == stamp.len
+            && mtime_secs == stamp.mtime_secs
+            && inode == stamp.inode
+    )
+}
+
+/// Best-effort durable memo write; a memo failure never fails the sweep.
+async fn write_path_memo(
+    facade: &dyn HostAdmission,
+    scope: &ObservationScopeV1,
+    prefix: &str,
+    path: &Path,
+    stamp: PathFileStamp,
+) {
+    let key = path_memo_key(prefix, path);
+    if let Err(error) = facade
+        .advance_parse_offset(
+            scope,
+            &key,
+            ParseOffset {
+                byte_offset: stamp.len,
+                mtime: stamp.mtime_secs,
+                file_id: stamp.inode,
+            },
+        )
+        .await
+    {
+        tracing::debug!(
+            provider = PROVIDER,
+            path = %path.display(),
+            error = ?error,
+            "Pi path memo write failed; the next sweep will re-check the file"
+        );
+    }
+}
 
 /// Discovery failures already reported, keyed by the failing file's digest, so
 /// a malformed file re-scanned every pass logs once per state change.
@@ -68,6 +185,28 @@ static PI_DISCOVERY_FAILURE_GATE: StateChangeLogGate<
 > = StateChangeLogGate::new();
 static PI_DISCOVERY_SUMMARY_GATE: StateChangeLogGate<PathBuf, (u64, usize)> =
     StateChangeLogGate::new();
+/// Session files whose header parse failed, with the stamp observed at the
+/// failure. Discovery re-reads such files on every pass otherwise; the entry
+/// drops as soon as the file's `(len, mtime)` changes.
+static PI_INVALID_HEADER_SKIP: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<(PathBuf, PathFileStamp)>>,
+> = std::sync::OnceLock::new();
+
+fn invalid_header_skip_holds(path: &Path, stamp: PathFileStamp) -> bool {
+    PI_INVALID_HEADER_SKIP
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&(path.to_path_buf(), stamp))
+}
+
+fn invalid_header_skip_record(path: &Path, stamp: PathFileStamp) {
+    PI_INVALID_HEADER_SKIP
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((path.to_path_buf(), stamp));
+}
 
 /// The agent directory Pi loads for `home`. `PI_CODING_AGENT_DIR` relocates
 /// it only to an absolute directory inside `home`: a sandbox or tempdir home
@@ -271,6 +410,14 @@ impl PiSource {
                             }
                             Err(error) => return Err(error),
                         };
+                        let candidate_stamp = std::fs::metadata(&candidate)
+                            .ok()
+                            .map(|meta| file_stamp(&meta));
+                        if candidate_stamp
+                            .is_some_and(|stamp| invalid_header_skip_holds(&candidate, stamp))
+                        {
+                            continue;
+                        }
                         let header = match read_session_header(&candidate) {
                             Ok(HeaderRead::Header(header)) => header,
                             Ok(HeaderRead::Incomplete) => {
@@ -278,6 +425,13 @@ impl PiSource {
                                 continue;
                             }
                             Err((kind, error)) => {
+                                if let (PiDiscoveryFailureKind::InvalidSessionHeader, Some(stamp)) =
+                                    (kind, candidate_stamp)
+                                {
+                                    // Only a malformed header is deterministic;
+                                    // an unavailable header stays retryable.
+                                    invalid_header_skip_record(&candidate, stamp);
+                                }
                                 discovery.record_failure(kind, &candidate, &error, &mut budget);
                                 continue;
                             }
@@ -764,6 +918,22 @@ async fn admit_scheduled_file(
     cancellation: &ObservationCancellation,
     outcome: &mut PiCaptureOutcome,
 ) -> TranscriptIngestResult<Option<JsonlObservationAdmissionProgress>> {
+    // Durable convergence memos come first: an unchanged file that already
+    // converged (or was header-quarantined) in a previous daemon run must not
+    // re-enter admission, or every restart re-pays the whole corpus.
+    let stamp = {
+        let path_buf = path.to_path_buf();
+        run_blocking_transcript_section("pi", move || std::fs::metadata(&path_buf).ok().map(|meta| file_stamp(&meta)))
+            .await?
+    };
+    if let Some(stamp) = stamp {
+        if path_memo_matches(facade, scope, PI_COMPLETE_MEMO_PREFIX, path, stamp).await {
+            return Ok(None);
+        }
+        if path_memo_matches(facade, scope, PI_QUARANTINE_MEMO_PREFIX, path, stamp).await {
+            return Ok(None);
+        }
+    }
     let path_buf = path.to_path_buf();
     let header = match run_blocking_transcript_section("pi", move || read_session_header(&path_buf))
         .await?
@@ -775,6 +945,12 @@ async fn admit_scheduled_file(
         }
         Err((kind, error)) => {
             warn_isolated_source(path, kind, error.kind());
+            if let (PiDiscoveryFailureKind::InvalidSessionHeader, Some(stamp)) = (kind, stamp) {
+                // Only a malformed header quarantines durably; an
+                // unavailable header (sharing violation, transient io)
+                // stays retryable on every sweep.
+                write_path_memo(facade, scope, PI_QUARANTINE_MEMO_PREFIX, path, stamp).await;
+            }
             outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
             outcome.deferred = true;
             return Ok(None);
@@ -789,6 +965,13 @@ async fn admit_scheduled_file(
         .bytes_consumed
         .saturating_add(progress.bytes_consumed);
     outcome.deferred |= progress.source_deferred;
+    if !progress.source_deferred
+        && let Some(stamp) = stamp
+    {
+        // The pass read this file to EOF within its budget; an unchanged
+        // (len, mtime) file needs no further admission work ever again.
+        write_path_memo(facade, scope, PI_COMPLETE_MEMO_PREFIX, path, stamp).await;
+    }
     Ok(Some(progress))
 }
 
