@@ -486,7 +486,7 @@ async fn analyze_dependencies(
         if matched.is_empty() {
             continue;
         }
-        if stmt.leaves.len() == 1 && !stmt.glob {
+        if stmt.leaves.len() == 1 && !stmt.has_unnamed_dependencies {
             if let Some(import) = portable_dependency_import(&stmt) {
                 out.auto_imports.push(import);
             } else {
@@ -534,7 +534,7 @@ async fn analyze_dependencies(
                 file: dest_rel.to_string(),
                 line: None,
                 detail: format!(
-                    "moved body uses {names:?} from a grouped/glob import in {source_rel}"
+                    "moved body uses {names:?} from a grouped or unnamed import in {source_rel}"
                 ),
                 suggestion: Some(format!(
                     "add an import for {names:?} at the destination (from `{}`)",
