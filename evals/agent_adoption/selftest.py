@@ -1324,7 +1324,9 @@ def test_pr_review_journey():
         check("PR fixture: Git records the pure move",
               "R100\tshop/receipts.py\tshop/receipt_format.py"
               in git("diff", "--name-status", "--find-renames", "main", "HEAD"))
-        environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        # Bazel's interpreter sets PYTHONSAFEPATH, so the fixture root must be
+        # named explicitly for `tests` to import the `shop` package.
+        environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(root))
         git("checkout", "-q", "--detach", revisions["base"])
         before = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
