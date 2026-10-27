@@ -934,7 +934,7 @@ fn assert_catalog_build_accounts_for_its_peak(
     snapshot: &VerifiedGraphSnapshot,
     generation: &CodeGenerationId,
     parent: Option<&CodeGraphProjectionStore>,
-) -> u64 {
+) -> (u64, u64) {
     let measured =
         CodeGraphProjectionStore::from_verified_snapshot(snapshot.clone(), generation.clone())
             .expect("measured catalog store");
@@ -945,15 +945,6 @@ fn assert_catalog_build_accounts_for_its_peak(
     built.expect("measure the catalog build");
     let peak = u64::try_from(peak).expect("positive catalog build peak");
     let refusal_limit = peak / 10 * 9;
-    if let Some(parent) = parent {
-        assert!(
-            refusal_limit
-                > parent
-                    .interactive_catalog_bytes()
-                    .expect("ready parent bytes"),
-            "the successor must outgrow the predecessor-only reservation"
-        );
-    }
     assert_eq!(
         measured.interactive_catalog_scan_builds(),
         usize::from(parent.is_none())
@@ -1003,7 +994,7 @@ fn assert_catalog_build_accounts_for_its_peak(
         admitted.interactive_catalog_differences(&measured),
         Some(Vec::new())
     );
-    admitted_limit
+    (peak, admitted_limit)
 }
 
 struct CancelReservedCatalog {
@@ -1061,7 +1052,15 @@ async fn a_growing_catalog_carry_accounts_for_its_peak_and_releases_on_cancellat
         snapshot.layered_rows().is_some(),
         "the fixture must exercise a layered carry"
     );
-    let limit = assert_catalog_build_accounts_for_its_peak(&snapshot, &generation, Some(&parent));
+    let (peak, limit) =
+        assert_catalog_build_accounts_for_its_peak(&snapshot, &generation, Some(&parent));
+    assert!(
+        peak / 10 * 9
+            > parent
+                .interactive_catalog_bytes()
+                .expect("ready parent bytes"),
+        "the successor must outgrow the predecessor-only reservation"
+    );
     let (cancelled, memory) = charged_catalog_store(snapshot, &generation, limit);
     let cancellation = Arc::new(CancelReservedCatalog {
         memory: Arc::clone(&memory),
@@ -1085,6 +1084,77 @@ async fn a_growing_catalog_carry_accounts_for_its_peak_and_releases_on_cancellat
         .expect("retry the cancelled carry");
     assert_eq!(cancelled.interactive_catalog_scan_builds(), 0);
     assert_eq!(memory.snapshot().used_bytes, 0);
+}
+
+/// Editing a few files changes many large shared-name and unresolved-call
+/// lookups. Every rebuilt list stays live until its lookup map is merged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_catalog_carry_accounts_for_many_rebuilt_lookup_lists() {
+    const SHARED_NAMES: usize = 32;
+    let temporary = tempfile::tempdir().expect("fixture directory");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let fixture = RefreshFixture::create(&root, MODULES);
+    let source = |module: usize, revision: usize| {
+        let mut source = module_source(MODULES, module, &module.to_string());
+        for name in 0..SHARED_NAMES {
+            source.push_str(&format!(
+                "pub fn shared_{name:03}() -> usize {{ missing_{name:03}() + {revision} }}\n"
+            ));
+        }
+        source
+    };
+    for module in 0..MODULES {
+        std::fs::write(
+            fixture.project_root.join(format!("src/m{module:03}.rs")),
+            source(module, 0),
+        )
+        .expect("shared-name module");
+    }
+    fixture.commit("populate shared lookup lists");
+    let (base_source, base_generation, _, base_binding) = fixture.seal();
+    let (_scope, registry, database) = fixture.open_profile("catalog-lookup-admission", 61).await;
+    let base_runtime = base_source
+        .retain(&registry, &database, &base_generation, base_binding)
+        .await
+        .expect("retain base");
+    let base = base_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("base snapshot");
+    let parent = warmed_store(base, &base_generation, None);
+
+    for module in [3, 10, 20] {
+        std::fs::write(
+            fixture.project_root.join(format!("src/m{module:03}.rs")),
+            source(module, 1),
+        )
+        .expect("edit shared-name module");
+    }
+    fixture.commit("replace members of every shared lookup list");
+    let (source, generation, _, binding) = fixture.seal();
+    let runtime = source
+        .retain(&registry, &database, &generation, binding)
+        .await
+        .expect("retain successor");
+    let snapshot = runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("successor snapshot");
+    assert!(
+        snapshot.layered_rows().is_some(),
+        "exercise a layered carry"
+    );
+    assert_catalog_build_accounts_for_its_peak(&snapshot, &generation, Some(&parent));
+    let carried = warmed_store(snapshot.clone(), &generation, Some(&parent));
+    let scanned = warmed_store(snapshot, &generation, None);
+    assert_eq!(carried.interactive_catalog_scan_builds(), 0);
+    assert_eq!(scanned.interactive_catalog_scan_builds(), 1);
+    assert_eq!(
+        carried.interactive_catalog_differences(&scanned),
+        Some(Vec::new()),
+        "every lookup must match a cold scan after the bounded carry"
+    );
 }
 
 /// Many unique names and cross-file dependencies exercise the lookup-list

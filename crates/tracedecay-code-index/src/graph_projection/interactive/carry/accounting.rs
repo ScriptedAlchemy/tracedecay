@@ -55,6 +55,39 @@ fn simple_name_bytes(qualified_name: &str) -> usize {
     tail.len().max(lowered).saturating_mul(2)
 }
 
+/// `list_edits` retains every rebuilt list until the whole map is passed to
+/// `SortedMap::edited`. Admit their combined heap, the collected entries and
+/// tree nodes, and the largest Vec slab that freezing a list may replace.
+fn rebuilt_lists_bytes<K: Ord>(
+    parent: &SortedMap<K, SymbolIds>,
+    edits: &BTreeMap<K, ListEdit>,
+    key_heap: impl Fn(&K) -> usize,
+) -> usize {
+    let entry_bytes = size_of::<(K, Option<SymbolIds>)>();
+    let mut bytes = btree_bytes(edits.len(), entry_bytes)
+        .saturating_add(edits.len().saturating_mul(entry_bytes));
+    let mut freeze_slab = 0;
+    for (key, edit) in edits {
+        let current = parent.get(key).map_or(&[][..], |ids| &ids[..]);
+        let slab = current
+            .len()
+            .saturating_add(edit.add.len())
+            .saturating_mul(size_of::<SymbolOccurrenceId>());
+        freeze_slab = freeze_slab.max(slab);
+        bytes = bytes
+            .saturating_add(key_heap(key))
+            .saturating_add(slab)
+            .saturating_add(
+                current
+                    .iter()
+                    .chain(&edit.add)
+                    .map(|id| id.as_str().len())
+                    .fold(0_usize, usize::saturating_add),
+            );
+    }
+    bytes.saturating_add(freeze_slab)
+}
+
 impl<'a> CarryBuildBytes<'a> {
     pub(super) fn new(parent: &InteractiveCatalog, rows: &'a GraphLayeredRowsV1) -> Self {
         let entity_len = |id: &GraphEntityId| id.as_str().len();
@@ -253,36 +286,30 @@ impl<'a> CarryBuildBytes<'a> {
         &self,
         carry: &CatalogCarry<'_>,
     ) -> Result<usize, CodeGraphProjectionError> {
-        fn list_peak<K: Ord>(
-            parent: &SortedMap<K, SymbolIds>,
-            edits: &BTreeMap<K, ListEdit>,
-        ) -> usize {
-            edits
-                .iter()
-                .map(|(key, edit)| {
-                    let current = parent.get(key).map_or(&[][..], |ids| &ids[..]);
-                    let count = current.len().saturating_add(edit.add.len());
-                    count
-                        .saturating_mul(size_of::<SymbolOccurrenceId>())
-                        .saturating_add(
-                            current
-                                .iter()
-                                .chain(&edit.add)
-                                .map(|id| id.as_str().len())
-                                .fold(0_usize, usize::saturating_add),
-                        )
-                })
-                .max()
-                .unwrap_or(0)
-        }
         let parent = carry.parent;
-        let lists = list_peak(&parent.by_qualified_name, &carry.by_qualified_name)
-            .max(list_peak(&parent.by_simple_name, &carry.by_simple_name))
-            .max(list_peak(&parent.by_file, &carry.by_file))
-            .max(list_peak(
-                &parent.unresolved_call_sources,
-                &carry.unresolved_call_sources,
-            ));
+        // Lookups are converted sequentially. The successor's retained
+        // lists are already covered by `fixed` and the admitted edits; this
+        // is the largest complete temporary conversion alongside them.
+        let lists = rebuilt_lists_bytes(
+            &parent.by_qualified_name,
+            &carry.by_qualified_name,
+            String::len,
+        )
+        .max(rebuilt_lists_bytes(
+            &parent.by_simple_name,
+            &carry.by_simple_name,
+            String::len,
+        ))
+        .max(rebuilt_lists_bytes(
+            &parent.by_file,
+            &carry.by_file,
+            |file| file.as_str().len(),
+        ))
+        .max(rebuilt_lists_bytes(
+            &parent.unresolved_call_sources,
+            &carry.unresolved_call_sources,
+            String::len,
+        ));
         let touched = carry
             .symbols
             .len()
@@ -614,5 +641,65 @@ impl EditBytes {
             }
             RelationContent::Edge(_) | RelationContent::Other => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::mem::size_of_val;
+
+    use tracedecay_domain::SymbolOccurrenceId;
+    use tracedecay_domain::test_fixtures::id;
+
+    use super::super::{ListEdit, list_edits};
+    use super::{SortedMap, SymbolIds, rebuilt_lists_bytes};
+
+    #[test]
+    fn lookup_conversion_covers_all_rebuilt_lists_held_together() {
+        let parent: SortedMap<String, SymbolIds> = (0..32)
+            .map(|key| {
+                let ids = (0..256)
+                    .map(|index| {
+                        id::<SymbolOccurrenceId>(&format!(
+                            "symbol.lookup.{key:03}.{index:03}.{}",
+                            "x".repeat(64)
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                (format!("lookup_{key:03}"), ids)
+            })
+            .collect::<BTreeMap<_, _>>()
+            .into();
+        let edits = parent
+            .iter()
+            .map(|(key, ids)| {
+                let mut add = BTreeSet::from([ids[128].clone()]);
+                add.insert(id(&format!("symbol.lookup.{key}.new")));
+                (
+                    key.clone(),
+                    ListEdit {
+                        remove: ids[..128].iter().cloned().collect(),
+                        add,
+                    },
+                )
+            })
+            .collect();
+        let admitted = rebuilt_lists_bytes(&parent, &edits, String::len);
+        let rebuilt = list_edits(&parent, edits);
+        let retained_heap = rebuilt.iter().fold(0_usize, |bytes, (key, ids)| {
+            let ids = ids.as_ref().expect("each lookup retains symbols");
+            assert_eq!(ids.len(), 129, "removals and duplicate additions apply");
+            assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+            bytes
+                + key.len()
+                + size_of_val(&ids[..])
+                + ids.iter().map(|id| id.as_str().len()).sum::<usize>()
+        });
+        assert!(
+            admitted >= retained_heap,
+            "all rebuilt lists coexist before the sorted merge: {admitted} < {retained_heap}"
+        );
     }
 }
