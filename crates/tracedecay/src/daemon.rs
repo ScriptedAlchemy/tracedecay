@@ -42,6 +42,7 @@ pub(crate) use tracedecay_daemon_protocol::{
 };
 pub(crate) use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
+use tracedecay_mcp::project_catalog_discovery_scope;
 use tracedecay_mcp::tools::catalog_discovery::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
 };
@@ -49,7 +50,6 @@ use tracedecay_mcp::transport::ReplayTransport;
 use tracedecay_mcp::{
     BrokerStreamTransport, ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
 };
-use tracedecay_mcp::{explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Human-facing detail fragment for a still-warming project/profile owner.
@@ -301,7 +301,7 @@ mod bootstrap;
 mod bootstrap_route;
 use bootstrap_route::{
     apply_daemon_initialize_route, attach_initialize_route_metadata, attach_reset_required_stores,
-    cached_project_node_count, daemon_bootstrap_response, prewarm_daemon_bootstrap_catalog,
+    daemon_bootstrap_response, prewarm_daemon_bootstrap_catalog,
 };
 mod branch_add;
 mod branch_admin;

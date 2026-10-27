@@ -13,8 +13,7 @@ use tracedecay_mcp::tools::catalog_discovery::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
 };
 use tracedecay_mcp::{
-    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, explore_call_budget,
-    project_catalog_discovery_scope,
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, project_catalog_discovery_scope,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -249,8 +248,6 @@ fn projectless_tools_list_payload() -> std::result::Result<serde_json::Value, St
     let authority = default_catalog_discovery_authority()
         .map_err(|error| format!("MCP catalog discovery unavailable: {error}"))?;
     let mut payload = catalog_discovery_tools_list_payload(
-        None,
-        explore_call_budget(0),
         &profile_id,
         &authority,
         &project_catalog_discovery_scope(),

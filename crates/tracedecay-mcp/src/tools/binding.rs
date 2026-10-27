@@ -1295,16 +1295,14 @@ mod tests {
     ];
 
     fn advertised_tool_names() -> Vec<String> {
+        use crate::project_catalog_discovery_scope;
         use crate::tools::catalog_discovery::{
-            default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
+            default_catalog_discovery_authority, get_catalog_filtered_tool_definitions,
         };
-        use crate::{explore_call_budget, project_catalog_discovery_scope};
 
         let profile_id = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
             .expect("default profile");
-        get_catalog_filtered_tool_definitions_with_budget(
-            0,
-            explore_call_budget(0),
+        get_catalog_filtered_tool_definitions(
             &profile_id,
             &default_catalog_discovery_authority().expect("default discovery authority"),
             &project_catalog_discovery_scope(),
