@@ -109,6 +109,10 @@ pub struct ProjectDeliveryPullRequestOperationV1 {
     pub operation: GitHubReviewReadOperationV1,
     pub latest_attempt: Option<ProjectDeliveryGitHubOperationSnapshotV1>,
     pub last_complete: Option<ProjectDeliveryGitHubOperationSnapshotV1>,
+    /// A newer, consensus-validated collection with partial prose coverage.
+    /// Consumers retain its observation time and use its membership instead
+    /// of resurrecting rows from the historical complete generation.
+    pub last_partial_collection: Option<ProjectDeliveryGitHubOperationSnapshotV1>,
 }
 
 /// Retained pull-request identity and diff shape from the allowlisted
@@ -1575,6 +1579,10 @@ impl ProjectDeliveryReadAuthorityV1 {
                 &mut unavailable,
                 latest,
                 ProjectDeliveryReviewObservationKindV1::LatestAttempt,
+                state
+                    .last_partial_collection
+                    .as_ref()
+                    .map(|collection| &collection.response),
             );
             collect_review_observations(
                 &mut review_items,
@@ -1588,6 +1596,7 @@ impl ProjectDeliveryReadAuthorityV1 {
                     &mut unavailable,
                     &complete.response,
                     ProjectDeliveryReviewObservationKindV1::LastComplete,
+                    None,
                 );
                 if complete.response != *latest {
                     if complete.response.ingress.provider != latest.ingress.provider {
@@ -1959,6 +1968,7 @@ fn collect_pull_request_operation(
     unavailable: &mut bool,
     response: &GitHubReviewReadResponseV1,
     kind: ProjectDeliveryReviewObservationKindV1,
+    partial_collection: Option<&GitHubReviewReadResponseV1>,
 ) {
     let key = (
         response.ingress.provider.as_str().to_owned(),
@@ -1996,6 +2006,7 @@ fn collect_pull_request_operation(
             pull_request
                 .operations
                 .push(ProjectDeliveryPullRequestOperationV1 {
+                    last_partial_collection: None,
                     operation: response.ingress.operation,
                     latest_attempt: None,
                     last_complete: None,
@@ -2012,6 +2023,9 @@ fn collect_pull_request_operation(
         *unavailable = true;
     } else {
         *slot = Some(github_operation_snapshot(response));
+        if kind == ProjectDeliveryReviewObservationKindV1::LatestAttempt {
+            operation.last_partial_collection = partial_collection.map(github_operation_snapshot);
+        }
     }
 }
 
@@ -2375,6 +2389,7 @@ mod tests {
         coverage: GitHubReviewCoverageV1,
     ) -> GitHubReviewReadResponseV1 {
         GitHubReviewReadResponseV1 {
+            completed_collection_scan: false,
             ingress: tracedecay_domain::feedback::GitHubReviewIngressResultV1 {
                 provider: ProviderId::new(provider).unwrap(),
                 scope: scope.clone(),
@@ -2421,6 +2436,7 @@ mod tests {
             },
         };
         ProjectDeliveryPullRequestOperationV1 {
+            last_partial_collection: None,
             operation: GitHubReviewReadOperationV1::RestGetPullRequest,
             latest_attempt: (kind == ProjectDeliveryReviewObservationKindV1::LatestAttempt)
                 .then_some(snapshot.clone()),
@@ -2538,6 +2554,7 @@ mod tests {
             &mut unavailable,
             &latest,
             ProjectDeliveryReviewObservationKindV1::LatestAttempt,
+            None,
         );
         if complete.ingress.provider != latest.ingress.provider {
             unavailable = true;
@@ -2547,6 +2564,7 @@ mod tests {
             &mut unavailable,
             &complete,
             ProjectDeliveryReviewObservationKindV1::LastComplete,
+            None,
         );
 
         assert!(unavailable);
@@ -2600,12 +2618,14 @@ mod tests {
             &mut unavailable,
             &complete,
             ProjectDeliveryReviewObservationKindV1::LastComplete,
+            None,
         );
         collect_pull_request_operation(
             &mut pull_requests,
             &mut unavailable,
             &latest,
             ProjectDeliveryReviewObservationKindV1::LatestAttempt,
+            None,
         );
 
         let pull_request = pull_requests

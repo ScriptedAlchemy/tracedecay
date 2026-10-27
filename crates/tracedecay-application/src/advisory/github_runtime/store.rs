@@ -603,9 +603,11 @@ mod tests {
         RequestId, ResolvedScope,
     };
     use tracedecay_domain::feedback::{
-        GitHubPullRequestIdV1, GitHubPullRequestSnapshotV1, GitHubPullRequestStateV1,
-        GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
-        GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
+        GitHubPullRequestIdV1, GitHubPullRequestReviewV1, GitHubPullRequestSnapshotV1,
+        GitHubPullRequestStateV1, GitHubReviewCoverageV1, GitHubReviewIdV1,
+        GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
+        GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1, GitHubReviewStateV1,
+        MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1,
     };
     use tracedecay_domain::{
         ActorId, CommitId, ProjectId, ProviderId, RefId, RepositoryId, UtcMicros, WorktreeId,
@@ -674,6 +676,7 @@ mod tests {
 
     fn complete_response(request: &GitHubReviewReadRequestV1) -> GitHubReviewReadResponseV1 {
         GitHubReviewReadResponseV1 {
+            completed_collection_scan: false,
             ingress: GitHubReviewIngressResultV1 {
                 provider: ProviderId::new("github").unwrap(),
                 scope: request.scope.clone(),
@@ -798,6 +801,70 @@ mod tests {
                 .load_inventory_manifest(&context, &request.scope)
                 .await,
             GitHubReviewStoreManifestLoadOutcomeV1::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_collection_baseline_obeys_the_existing_state_byte_bound() {
+        let (context, mut request) = context_and_request();
+        request.operation = GitHubReviewReadOperationV1::RestListPullRequestReviews;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("github-review-collection-bound.db");
+        crate::register_test_schema_installer();
+        let authority = DatabaseAuthority::acquire_test(&path, "github-collection-bound").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let store = ProjectGitHubReviewStoreV1::new(database, request.scope.clone()).unwrap();
+        let previous =
+            GitHubReviewRefreshStateV1::transition(&request, None, complete_response(&request))
+                .unwrap();
+        assert_eq!(
+            store
+                .compare_and_record(&context, &request, None, &previous)
+                .await,
+            GitHubReviewRefreshStoreCommitOutcomeV1::Recorded,
+        );
+        let mut response = complete_response(&request);
+        response.completed_collection_scan = true;
+        response.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+        response.ingress.coverage = GitHubReviewCoverageV1::Partial;
+        response.ingress.fetched_at.0 += 1;
+        response.ingress.reviews = (0..10)
+            .map(|id| GitHubPullRequestReviewV1 {
+                review_id: GitHubReviewIdV1::new(id.to_string()).unwrap(),
+                state: GitHubReviewStateV1::Approved,
+                author: None,
+                body: Some("a".repeat(MAX_GITHUB_PULL_REQUEST_PROSE_BYTES_V1)),
+                commit_id: None,
+                submitted_at: None,
+                url: None,
+            })
+            .collect();
+        let digest = github_review_scan_digest(&request, &response).unwrap();
+        let receipt = GitHubReviewRefreshAttemptReceiptV1 {
+            disposition: GitHubReviewRefreshAttemptDispositionV1::Agreed,
+            scan_digests: vec![digest.clone(), digest],
+            observed_at: response.ingress.fetched_at,
+        };
+        let next = GitHubReviewRefreshStateV1::transition_with_receipt(
+            &request,
+            Some(&previous),
+            response,
+            Some(receipt),
+        )
+        .unwrap();
+        assert!(serde_json::to_vec(&next).unwrap().len() > MAX_STORED_REFRESH_BYTES_V1);
+        assert_eq!(
+            store
+                .compare_and_record(&context, &request, Some(&previous.revision), &next)
+                .await,
+            GitHubReviewRefreshStoreCommitOutcomeV1::Unavailable,
+        );
+        assert_eq!(
+            store.load(&context, &request).await,
+            GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(previous))
         );
     }
 

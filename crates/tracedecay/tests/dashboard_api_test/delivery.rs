@@ -274,6 +274,7 @@ fn delivery_http_admission_pull_request(
             changed_files: 1,
         }),
         operations: vec![ProjectDeliveryPullRequestOperationV1 {
+            last_partial_collection: None,
             operation: GitHubReviewReadOperationV1::RestGetPullRequest,
             latest_attempt: Some(ProjectDeliveryGitHubOperationSnapshotV1 {
                 provider_base_commit_id: CommitId::new("commit.delivery-http-admission.base")

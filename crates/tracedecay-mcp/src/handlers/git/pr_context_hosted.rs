@@ -510,24 +510,50 @@ fn project_conversation(
         ) {
             continue;
         }
-        let newest = operation
-            .latest_attempt
-            .iter()
-            .chain(operation.last_complete.iter())
+        let retained = operation
+            .last_partial_collection
+            .as_ref()
+            .or(operation.last_complete.as_ref());
+        let newest = retained
+            .into_iter()
+            .chain(operation.latest_attempt.iter())
             .max_by_key(|snapshot| snapshot.fetched_at.0);
         let Some(newest) = newest else { continue };
-        let complete = newest.outcome == GitHubReviewIngressProviderOutcomeV1::Complete
+        let owns_membership = newest.outcome == GitHubReviewIngressProviderOutcomeV1::Complete
             && newest.coverage == GitHubReviewCoverageV1::Complete;
-        for snapshot in operation
-            .last_complete
-            .iter()
-            .chain(operation.latest_attempt.iter())
-        {
-            if complete && snapshot.fetched_at < newest.fetched_at {
+        for snapshot in retained.into_iter().chain(operation.latest_attempt.iter()) {
+            if owns_membership && !std::ptr::eq(snapshot, newest) {
                 continue;
             }
-            let is_latest = snapshot.fetched_at == newest.fetched_at;
+            let is_latest = std::ptr::eq(snapshot, newest)
+                && matches!(
+                    snapshot.outcome,
+                    GitHubReviewIngressProviderOutcomeV1::Complete
+                        | GitHubReviewIngressProviderOutcomeV1::Partial
+                );
             for item in &snapshot.conversation {
+                if operation.latest_attempt.as_ref().is_some_and(|latest| {
+                    latest
+                        .quarantined
+                        .binary_search_by(|withheld| {
+                            withheld.comment_id.as_str().cmp(item.comment_id.as_str())
+                        })
+                        .is_ok()
+                }) || operation
+                    .last_partial_collection
+                    .as_ref()
+                    .is_some_and(|baseline| {
+                        snapshot.fetched_at > baseline.fetched_at
+                            && baseline
+                                .conversation
+                                .binary_search_by(|prior| {
+                                    prior.comment_id.as_str().cmp(item.comment_id.as_str())
+                                })
+                                .is_ok_and(|index| baseline.conversation[index] == *item)
+                    })
+                {
+                    continue;
+                }
                 let id = format!("conversation:{}", item.comment_id);
                 let value = PrContextDiscussionV1 {
                     id: id.clone(),
@@ -547,6 +573,21 @@ fn project_conversation(
                 retain_newest(&mut latest, id, value);
             }
             for item in &snapshot.reviews {
+                if operation
+                    .last_partial_collection
+                    .as_ref()
+                    .is_some_and(|baseline| {
+                        snapshot.fetched_at > baseline.fetched_at
+                            && baseline
+                                .reviews
+                                .binary_search_by(|prior| {
+                                    prior.review_id.as_str().cmp(item.review_id.as_str())
+                                })
+                                .is_ok_and(|index| baseline.reviews[index] == *item)
+                    })
+                {
+                    continue;
+                }
                 match review_observations.get(item.review_id.as_str()) {
                     Some((_, previous, _)) if previous.fetched_at > snapshot.fetched_at => {}
                     _ => {
@@ -685,6 +726,7 @@ mod tests {
                 changed_files: 2,
             }),
             operations: vec![ProjectDeliveryPullRequestOperationV1 {
+                last_partial_collection: None,
                 operation: GitHubReviewReadOperationV1::RestGetPullRequest,
                 latest_attempt: Some(observation(head, 20)),
                 last_complete: None,
@@ -852,6 +894,7 @@ mod tests {
                 .conversation
                 .push(conversation("Keep the existing route."));
             pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+                last_partial_collection: None,
                 operation: GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
                 last_complete: None,
                 latest_attempt: Some(discussion),
@@ -970,6 +1013,7 @@ mod tests {
             .conversation
             .push(conversation("Keep a single migration for this release."));
         pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+            last_partial_collection: None,
             operation: GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
             last_complete: Some(old),
             latest_attempt: Some(current),
@@ -1000,6 +1044,7 @@ mod tests {
             });
         }
         pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+            last_partial_collection: None,
             operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
             last_complete: None,
             latest_attempt: Some(reviews),
@@ -1059,6 +1104,7 @@ mod tests {
                 ];
                 let mut pr = pull_request(42, "commit.head");
                 pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+                    last_partial_collection: None,
                     operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
                     last_complete: None,
                     latest_attempt: Some(observations),
@@ -1134,6 +1180,7 @@ mod tests {
             .push(review("approval", GitHubReviewStateV1::Approved, 1));
         let mut pr = pull_request(42, "commit.head");
         pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+            last_partial_collection: None,
             operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
             last_complete: Some(retained),
             latest_attempt: Some(partial),
@@ -1172,6 +1219,93 @@ mod tests {
         let dismissed = rows.iter().find(|row| row.id == "review:approval").unwrap();
         assert_eq!(dismissed.review_state, "dismissed");
         assert_eq!(dismissed.observed_at, 40);
+    }
+
+    #[test]
+    fn agreed_partial_membership_excludes_deleted_votes_and_preserves_observation_time() {
+        let review = |id: &str, state, author: &str, minute| GitHubPullRequestReviewV1 {
+            review_id: GitHubReviewIdV1::new(id).unwrap(),
+            state,
+            author: Some(author.to_owned()),
+            body: None,
+            commit_id: Some(CommitId::new("commit.head").unwrap()),
+            submitted_at: Some(format!("2026-10-26T18:{minute:02}:00Z")),
+            url: None,
+        };
+        let mut complete = observation("commit.head", 10);
+        complete.reviews = vec![
+            review("1", GitHubReviewStateV1::ChangesRequested, "alice", 0),
+            review("2", GitHubReviewStateV1::Approved, "bob", 1),
+            review("3", GitHubReviewStateV1::Approved, "alice", 2),
+        ];
+        let mut baseline = complete.clone();
+        baseline.fetched_at = UtcMicros(20);
+        baseline.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+        baseline.coverage = GitHubReviewCoverageV1::Partial;
+        baseline.reviews.truncate(2);
+        let mut pr = pull_request(42, "commit.head");
+        pr.operations.push(ProjectDeliveryPullRequestOperationV1 {
+            operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
+            last_complete: Some(complete),
+            last_partial_collection: Some(baseline.clone()),
+            latest_attempt: Some(baseline),
+        });
+        let mut rows = Vec::new();
+        project_conversation(&pr, "commit.head", &mut rows).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["review:1", "review:2"]
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.lifecycle == "submitted" && row.observed_at == 20)
+        );
+
+        let operation = pr.operations.last_mut().unwrap();
+        let latest = operation.latest_attempt.as_mut().unwrap();
+        latest.outcome = GitHubReviewIngressProviderOutcomeV1::RateLimited;
+        latest.fetched_at = UtcMicros(30);
+        rows.clear();
+        project_conversation(&pr, "commit.head", &mut rows).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| row.lifecycle == "retained" && row.observed_at == 20)
+        );
+        assert!(rows.iter().all(|row| !row.matches_head));
+
+        let operation = pr.operations.last_mut().unwrap();
+        let latest = operation.latest_attempt.as_mut().unwrap();
+        latest.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+        latest.fetched_at = UtcMicros(40);
+        latest
+            .reviews
+            .push(review("4", GitHubReviewStateV1::Commented, "carol", 3));
+        rows.clear();
+        project_conversation(&pr, "commit.head", &mut rows).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["review:1", "review:2", "review:4"]
+        );
+        assert_eq!(
+            rows[0].lifecycle, "retained",
+            "the deleted approval must not supersede Alice's current vote"
+        );
+        assert_eq!(rows[0].review_state, "changes_requested");
+        assert_eq!(rows[0].observed_at, 20);
+        assert_eq!(rows[1].observed_at, 20);
+        assert_eq!(rows[2].lifecycle, "submitted");
+        assert_eq!(rows[2].observed_at, 40);
+        assert_eq!(
+            pr.operations
+                .last()
+                .unwrap()
+                .latest_attempt
+                .as_ref()
+                .unwrap()
+                .coverage,
+            GitHubReviewCoverageV1::Partial
+        );
     }
 
     fn ci_check(

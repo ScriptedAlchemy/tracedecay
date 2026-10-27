@@ -2773,6 +2773,7 @@ mod tests {
 
     fn complete_response(request: &GitHubReviewReadRequestV1) -> GitHubReviewReadResponseV1 {
         GitHubReviewReadResponseV1 {
+            completed_collection_scan: false,
             ingress: GitHubReviewIngressResultV1 {
                 provider: ProviderId::new("provider.github").unwrap(),
                 scope: request.scope.clone(),

@@ -63,6 +63,15 @@ impl GitHubReviewReadRequestV1 {
 pub struct GitHubReviewReadResponseV1 {
     pub ingress: GitHubReviewIngressResultV1,
     pub checkpoint: GitHubReviewReadCheckpointV1,
+    /// The transport visited every page of a PR detail collection. This is
+    /// acquisition provenance, not proof that repeated scans agreed or that
+    /// every optional body was retained.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub completed_collection_scan: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl GitHubReviewReadResponseV1 {
@@ -73,6 +82,22 @@ impl GitHubReviewReadResponseV1 {
         request.validate()?;
         self.ingress.validate()?;
         self.checkpoint.validate_for(self.ingress.outcome)?;
+        if self.completed_collection_scan
+            && (!matches!(
+                self.ingress.operation,
+                GitHubReviewReadOperationV1::RestListPullRequestReviews
+                    | GitHubReviewReadOperationV1::RestListPullRequestConversationComments
+            ) || !matches!(
+                self.ingress.outcome,
+                GitHubReviewIngressProviderOutcomeV1::Complete
+                    | GitHubReviewIngressProviderOutcomeV1::Partial
+            ) || self.checkpoint.next_cursor.is_some()
+                || !self.ingress.items.is_empty())
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "github completed collection scan",
+            });
+        }
         let stale_has_checkpoint_evidence = self.ingress.provider_head_commit_id
             != self.ingress.scope.head_commit_id
             || self.checkpoint.etag.is_some()

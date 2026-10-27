@@ -38,7 +38,7 @@ use tracedecay_contracts::feedback::{
 use tracedecay_domain::feedback::{
     GitHubReviewCoverageV1, GitHubReviewCursorV1, GitHubReviewEtagV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
-    GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1,
+    GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
@@ -328,6 +328,7 @@ where
         let response = GitHubReviewReadResponseV1 {
             ingress,
             checkpoint,
+            completed_collection_scan: false,
         };
         if response.validate_for(request).is_ok() {
             Ok((response, withheld_optional_prose))
@@ -488,6 +489,13 @@ where
                 item.provider_outcome = response.ingress.outcome;
             }
             response.checkpoint.next_cursor = None;
+            response.completed_collection_scan = matches!(
+                request.operation,
+                GitHubReviewReadOperationV1::RestListPullRequestReviews
+                    | GitHubReviewReadOperationV1::RestListPullRequestConversationComments
+            ) && (response.ingress.outcome
+                == GitHubReviewIngressProviderOutcomeV1::Complete
+                || withheld_optional_prose);
             if !visited_cursors.is_empty() || withheld_optional_prose {
                 // A page-specific validator cannot revalidate this aggregate
                 // or an incomplete prose snapshot as the last complete read.
@@ -611,8 +619,18 @@ fn github_review_refresh_revision(
     last_complete: Option<&GitHubReviewReadResponseV1>,
     latest_attempt: &GitHubReviewReadResponseV1,
     attempt_receipts: &[GitHubReviewRefreshAttemptReceiptV1],
+    last_partial_collection: Option<&GitHubReviewPartialCollectionGenerationV1>,
 ) -> Option<ManifestDigest> {
-    if attempt_receipts.is_empty() {
+    if let Some(collection) = last_partial_collection {
+        canonical_sha256(&(
+            GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1,
+            last_complete,
+            latest_attempt,
+            attempt_receipts,
+            collection,
+        ))
+        .ok()
+    } else if attempt_receipts.is_empty() {
         canonical_sha256(&(
             GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1,
             last_complete,
@@ -676,6 +694,41 @@ impl GitHubReviewRefreshAttemptReceiptV1 {
             }
         }
     }
+
+    fn agrees_with(
+        &self,
+        request: &GitHubReviewReadRequestV1,
+        response: &GitHubReviewReadResponseV1,
+    ) -> bool {
+        self.validate()
+            && matches!(
+                self.disposition,
+                GitHubReviewRefreshAttemptDispositionV1::Agreed
+                    | GitHubReviewRefreshAttemptDispositionV1::RetryAgreed
+            )
+            && self.observed_at == response.ingress.fetched_at
+            && github_review_scan_digest(request, response)
+                .as_ref()
+                .is_some_and(|digest| self.scan_digests.last() == Some(digest))
+    }
+}
+
+/// The latest agreed collection whose optional prose remains partial. Its
+/// membership and proof survive later incomplete attempts and receipt-ring
+/// pruning without claiming a complete prose generation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubReviewPartialCollectionGenerationV1 {
+    pub response: GitHubReviewReadResponseV1,
+    pub receipt: GitHubReviewRefreshAttemptReceiptV1,
+}
+
+impl GitHubReviewPartialCollectionGenerationV1 {
+    fn validate_for(&self, request: &GitHubReviewReadRequestV1) -> bool {
+        self.response.completed_collection_scan
+            && self.response.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Partial
+            && self.receipt.agrees_with(request, &self.response)
+    }
 }
 
 /// A complete canonical item set and its cursor/checkpoint are one durable
@@ -716,6 +769,8 @@ pub struct GitHubReviewRefreshStateV1 {
     pub latest_attempt: GitHubReviewReadResponseV1,
     #[serde(default)]
     pub attempt_receipts: Vec<GitHubReviewRefreshAttemptReceiptV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_partial_collection: Option<GitHubReviewPartialCollectionGenerationV1>,
 }
 
 impl GitHubReviewRefreshStateV1 {
@@ -739,6 +794,22 @@ impl GitHubReviewRefreshStateV1 {
         {
             return None;
         }
+        let acquired_collection = receipt.as_ref().and_then(|receipt| {
+            let generation = GitHubReviewPartialCollectionGenerationV1 {
+                response: latest_attempt.clone(),
+                receipt: receipt.clone(),
+            };
+            generation.validate_for(request).then_some(generation)
+        });
+        let previous_collection = previous.and_then(|state| state.last_partial_collection.as_ref());
+        if (acquired_collection.is_some()
+            || latest_attempt.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Complete)
+            && previous_collection.is_some_and(|collection| {
+                latest_attempt.ingress.fetched_at < collection.response.ingress.fetched_at
+            })
+        {
+            return None;
+        }
         let latest_attempt =
             normalize_refresh_attempt(request, previous, latest_attempt, receipt.as_ref())?;
         let last_complete =
@@ -749,6 +820,12 @@ impl GitHubReviewRefreshStateV1 {
                 )?)
             } else {
                 previous.and_then(|state| state.last_complete.clone())
+            };
+        let last_partial_collection =
+            if latest_attempt.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Complete {
+                None
+            } else {
+                acquired_collection.or_else(|| previous_collection.cloned())
             };
         let mut attempt_receipts = previous.map_or_default(|state| state.attempt_receipts.clone());
         if let Some(receipt) = receipt {
@@ -764,12 +841,14 @@ impl GitHubReviewRefreshStateV1 {
                 .map(|generation| &generation.response),
             &latest_attempt,
             &attempt_receipts,
+            last_partial_collection.as_ref(),
         )?;
         let state = Self {
             revision,
             last_complete,
             latest_attempt,
             attempt_receipts,
+            last_partial_collection,
         };
         state.validate_for(request).then_some(state)
     }
@@ -785,6 +864,22 @@ impl GitHubReviewRefreshStateV1 {
                 .last_complete
                 .as_ref()
                 .is_some_and(|generation| !generation.validate_for(request))
+            || self
+                .last_partial_collection
+                .as_ref()
+                .is_some_and(|collection| {
+                    !collection.validate_for(request)
+                        || collection.response.ingress.provider
+                            != self.latest_attempt.ingress.provider
+                        || collection.response.ingress.fetched_at
+                            > self.latest_attempt.ingress.fetched_at
+                        || self.latest_attempt.ingress.outcome
+                            == GitHubReviewIngressProviderOutcomeV1::Complete
+                        || self.last_complete.as_ref().is_some_and(|complete| {
+                            complete.response.ingress.fetched_at
+                                > collection.response.ingress.fetched_at
+                        })
+                })
         {
             return false;
         }
@@ -802,6 +897,7 @@ impl GitHubReviewRefreshStateV1 {
                 .map(|generation| &generation.response),
             &self.latest_attempt,
             &self.attempt_receipts,
+            self.last_partial_collection.as_ref(),
         )
         .is_some_and(|expected| expected == self.revision)
     }
@@ -814,6 +910,12 @@ fn normalize_refresh_attempt(
     receipt: Option<&GitHubReviewRefreshAttemptReceiptV1>,
 ) -> Option<GitHubReviewReadResponseV1> {
     if latest.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Stale {
+        // A partial prose collection has no aggregate validator. A later
+        // opaque 304 must not revalidate the older complete generation and
+        // resurrect membership that the agreed collection removed.
+        if previous.is_some_and(|state| state.last_partial_collection.is_some()) {
+            return None;
+        }
         let revalidated_at = latest.ingress.fetched_at;
         let checkpoint = latest.checkpoint;
         let previous_complete = previous?.last_complete.as_ref()?;
@@ -834,29 +936,41 @@ fn normalize_refresh_attempt(
             response.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Partial
                 && response.ingress.operation == latest.ingress.operation
         });
+    let previous_collection = previous.and_then(|state| state.last_partial_collection.as_ref());
+    let replaces_collection = latest.ingress.outcome
+        == GitHubReviewIngressProviderOutcomeV1::Complete
+        || (latest.completed_collection_scan
+            && latest.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Partial
+            && receipt.is_some_and(|receipt| receipt.agrees_with(request, &latest)));
+    if !replaces_collection {
+        // A proven collection remains the membership baseline through rate
+        // limits, disagreement and continued pages. Never fall back to the
+        // older complete prose generation after this baseline removed IDs.
+        if let Some(collection) = previous_collection {
+            for comment in &collection.response.ingress.conversation {
+                conversation.insert(comment.comment_id.as_str().to_owned(), comment.clone());
+            }
+            for review in &collection.response.ingress.reviews {
+                reviews.insert(review.review_id.as_str().to_owned(), review.clone());
+            }
+        }
+        let retained_attempt = previous_partial.or_else(|| {
+            previous_collection.and_then(|_| previous.map(|state| &state.latest_attempt))
+        });
+        if let Some(retained) = retained_attempt {
+            for comment in &retained.ingress.conversation {
+                conversation.insert(comment.comment_id.as_str().to_owned(), comment.clone());
+            }
+            for review in &retained.ingress.reviews {
+                reviews.insert(review.review_id.as_str().to_owned(), review.clone());
+            }
+        }
+        latest.completed_collection_scan = false;
+    }
     if let Some(previous_partial) = previous_partial {
         for mut item in previous_partial.ingress.items.clone() {
             item.provider_outcome = latest.ingress.outcome;
             items.insert(item.comment_id.as_str().to_owned(), item);
-        }
-        // A completed scan owns collection membership even when optional
-        // prose was withheld. Only the acquisition owner's terminal receipt
-        // proves that a cursor-free partial response finished successfully;
-        // quarantined or opaque partial reads still retain prior evidence.
-        let replaces_collection = latest.ingress.outcome
-            == GitHubReviewIngressProviderOutcomeV1::Complete
-            || (latest.ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Partial
-                && latest.checkpoint.next_cursor.is_none()
-                && receipt.is_some_and(|receipt| {
-                    receipt.disposition == GitHubReviewRefreshAttemptDispositionV1::Terminal
-                }));
-        if !replaces_collection {
-            for comment in previous_partial.ingress.conversation.clone() {
-                conversation.insert(comment.comment_id.as_str().to_owned(), comment);
-            }
-            for review in previous_partial.ingress.reviews.clone() {
-                reviews.insert(review.review_id.as_str().to_owned(), review);
-            }
         }
         for item in previous_partial.ingress.quarantined.clone() {
             quarantined.insert(item.comment_id.as_str().to_owned(), item);
@@ -957,15 +1071,17 @@ fn quarantined_refresh_attempt(
     }
     response.checkpoint.etag = None;
     response.checkpoint.next_cursor = None;
+    response.completed_collection_scan = false;
     response.validate_for(request).ok().map(|()| response)
 }
 
 fn requires_refresh_scan_consensus(response: &GitHubReviewReadResponseV1) -> bool {
-    matches!(
-        response.ingress.outcome,
-        GitHubReviewIngressProviderOutcomeV1::Complete
-            | GitHubReviewIngressProviderOutcomeV1::Stale
-    )
+    response.completed_collection_scan
+        || matches!(
+            response.ingress.outcome,
+            GitHubReviewIngressProviderOutcomeV1::Complete
+                | GitHubReviewIngressProviderOutcomeV1::Stale
+        )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1727,6 +1843,7 @@ mod tests {
 
     fn complete_response(request: &GitHubReviewReadRequestV1) -> GitHubReviewReadResponseV1 {
         GitHubReviewReadResponseV1 {
+            completed_collection_scan: false,
             ingress: GitHubReviewIngressResultV1 {
                 provider: ProviderId::new("github").unwrap(),
                 scope: request.scope.clone(),
@@ -2165,11 +2282,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_scan_keeps_partial_prose_coverage_and_current_collection_membership() {
+    async fn review_scan_consensus_retains_partial_prose_and_collection_membership() {
         for withheld_id in [1, 2] {
             let (context, request) =
                 context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviews);
-            let page = |id: u64, next_cursor: Option<&str>| {
+            let page = |id: u64, next_cursor: Option<&str>, withhold: bool| {
                 GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
                     metadata: GitHubReadNetworkMetadataV1 {
                         status: GitHubReadNetworkStatusV1::Ok,
@@ -2181,7 +2298,7 @@ mod tests {
                     },
                     body: serde_json::to_vec(&serde_json::json!([{
                         "id": id, "state": "APPROVED",
-                        "body": if id == withheld_id {
+                        "body": if withhold && id == withheld_id {
                             "X-Vault_Passphrase: ordinary-value\nsee the second call below"
                         } else { "Reviewed." },
                         "commit_id": request.scope.head_commit_id.as_str()
@@ -2204,11 +2321,13 @@ mod tests {
             .unwrap();
             let network = PageNetwork {
                 outcomes: Mutex::new(VecDeque::from([
-                    page(1, Some("rest-page:2")),
-                    page(2, Some("rest-page:3")),
-                    page(3, None),
-                    page(1, Some("rest-page:2")),
-                    page(2, None),
+                    page(1, Some("rest-page:2"), false),
+                    page(2, Some("rest-page:3"), false),
+                    page(3, None, false),
+                    page(1, Some("rest-page:2"), true),
+                    page(2, None, true),
+                    page(1, Some("rest-page:2"), true),
+                    page(2, None, true),
                 ])),
                 cursors: Mutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
@@ -2225,49 +2344,16 @@ mod tests {
                 )
                 .await;
             let GitHubReviewReadPortOutcomeV1::Read(response) = outcome else {
-                panic!("withheld optional prose must retain every page of review votes");
+                panic!("the initial complete review scan must retain all three pages");
             };
-            response.validate_for(&request).unwrap();
             assert_eq!(
                 response.ingress.outcome,
-                GitHubReviewIngressProviderOutcomeV1::Partial
+                GitHubReviewIngressProviderOutcomeV1::Complete
             );
-            assert_eq!(response.ingress.coverage, GitHubReviewCoverageV1::Partial);
             assert_eq!(response.ingress.reviews.len(), 3);
-            for review in &response.ingress.reviews {
-                assert_eq!(review.state, GitHubReviewStateV1::Approved);
-                if review.review_id.as_str() == withheld_id.to_string() {
-                    assert!(review.body.is_none());
-                } else {
-                    assert_eq!(review.body.as_deref(), Some("Reviewed."));
-                }
-            }
-            assert_eq!(transport.network.calls.load(Ordering::SeqCst), 3);
-            assert!(response.checkpoint.next_cursor.is_none());
-            assert!(response.checkpoint.etag.is_none());
-
+            assert!(response.completed_collection_scan);
             let previous =
                 GitHubReviewRefreshStateV1::transition(&request, None, *response).unwrap();
-            // Continued pages must keep previously observed IDs until their
-            // terminal scan, even when the current page only repeats one ID.
-            let mut continued = previous.latest_attempt.clone();
-            continued.ingress.reviews.truncate(1);
-            continued.checkpoint.next_cursor =
-                Some(GitHubReviewCursorV1::new("rest-page:2").unwrap());
-            let continued_receipt = GitHubReviewRefreshAttemptReceiptV1 {
-                disposition: GitHubReviewRefreshAttemptDispositionV1::Terminal,
-                scan_digests: vec![github_review_scan_digest(&request, &continued).unwrap()],
-                observed_at: continued.ingress.fetched_at,
-            };
-            let continued = GitHubReviewRefreshStateV1::transition_with_receipt(
-                &request,
-                Some(&previous),
-                continued,
-                Some(continued_receipt),
-            )
-            .unwrap();
-            assert_eq!(continued.latest_attempt.ingress.reviews.len(), 3);
-
             let store = RefreshStore::default();
             *store.state.lock().unwrap() = Some(previous);
             let connector = GitHubReadOnlyConnector::new(
@@ -2283,31 +2369,319 @@ mod tests {
             let refreshed = coordinator.refresh(&context, &request).await;
             assert!(refreshed.has_usable_observation());
             let GitHubReviewRefreshOutcomeV1::Stored(receipt) = refreshed else {
-                panic!("the real transport's terminal partial scan must be retained");
+                panic!("two equivalent partial-prose scans must establish collection membership");
             };
+            let mut state = receipt.state;
             assert_eq!(
-                receipt.state.attempt_receipts.last().unwrap().disposition,
-                GitHubReviewRefreshAttemptDispositionV1::Terminal,
+                state.attempt_receipts.last().unwrap().disposition,
+                GitHubReviewRefreshAttemptDispositionV1::Agreed,
             );
-            assert!(receipt.state.last_complete.is_none());
-            let latest = &receipt.state.latest_attempt;
+            assert_eq!(
+                state
+                    .last_complete
+                    .as_ref()
+                    .unwrap()
+                    .response
+                    .ingress
+                    .reviews
+                    .len(),
+                3
+            );
+            assert!(
+                state
+                    .last_partial_collection
+                    .as_ref()
+                    .unwrap()
+                    .validate_for(&request)
+            );
+            let latest = &state.latest_attempt;
             assert_eq!(latest.ingress.coverage, GitHubReviewCoverageV1::Partial);
             assert_eq!(
                 latest.ingress.outcome,
                 GitHubReviewIngressProviderOutcomeV1::Partial
             );
-            assert_eq!(
-                latest
-                    .ingress
-                    .reviews
-                    .iter()
-                    .map(|review| review.review_id.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["1", "2"],
-                "the terminal scan must not resurrect review 3 from a previous partial scan",
-            );
+            assert!(latest.completed_collection_scan);
+            assert!(latest.checkpoint.next_cursor.is_none());
+            assert!(latest.checkpoint.etag.is_none());
+            assert_eq!(review_ids(latest), ["1", "2"]);
+            for review in &latest.ingress.reviews {
+                assert_eq!(review.state, GitHubReviewStateV1::Approved);
+                if review.review_id.as_str() == withheld_id.to_string() {
+                    assert!(review.body.is_none());
+                } else {
+                    assert_eq!(review.body.as_deref(), Some("Reviewed."));
+                }
+            }
             assert_eq!(store.commits.load(Ordering::SeqCst), 1);
+
+            // A 304 cannot resurrect the older full-prose generation after a
+            // newer collection without an aggregate ETag removed review 3.
+            let mut stale = latest.clone();
+            stale.completed_collection_scan = false;
+            stale.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Stale;
+            stale.ingress.coverage = GitHubReviewCoverageV1::Stale;
+            stale.ingress.reviews.clear();
+            stale.checkpoint.etag = Some(GitHubReviewEtagV1::new("W/\"older\"").unwrap());
+            assert!(
+                GitHubReviewRefreshStateV1::transition(&request, Some(&state), stale).is_none()
+            );
+
+            // The baseline proof is independent of the bounded attempt ring.
+            // Each rate-limited attempt retains membership without relabeling
+            // the partial collection as a complete prose generation.
+            for _ in 0..=MAX_GITHUB_REFRESH_ATTEMPT_RECEIPTS_V1 {
+                let mut limited = state.latest_attempt.clone();
+                limited.completed_collection_scan = false;
+                limited.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::RateLimited;
+                limited.ingress.coverage = GitHubReviewCoverageV1::Partial;
+                limited.ingress.reviews.clear();
+                limited.ingress.fetched_at.0 += 1;
+                limited.checkpoint.rate_limit = Some(GitHubReviewRateLimitCheckpointV1 {
+                    limit: 5_000,
+                    remaining: 0,
+                    reset_at: UtcMicros(limited.ingress.fetched_at.0 + 1_000),
+                });
+                let attempt = GitHubReviewRefreshAttemptReceiptV1 {
+                    disposition: GitHubReviewRefreshAttemptDispositionV1::Terminal,
+                    scan_digests: vec![github_review_scan_digest(&request, &limited).unwrap()],
+                    observed_at: limited.ingress.fetched_at,
+                };
+                state = GitHubReviewRefreshStateV1::transition_with_receipt(
+                    &request,
+                    Some(&state),
+                    limited,
+                    Some(attempt),
+                )
+                .unwrap();
+                assert_eq!(review_ids(&state.latest_attempt), ["1", "2"]);
+            }
+            assert!(state.attempt_receipts.iter().all(|receipt| {
+                receipt.disposition == GitHubReviewRefreshAttemptDispositionV1::Terminal
+            }));
+            let encoded = serde_json::to_string(&state).unwrap();
+            state = serde_json::from_str(&encoded).unwrap();
+            assert!(state.validate_for(&request));
+            assert!(
+                state
+                    .last_partial_collection
+                    .as_ref()
+                    .unwrap()
+                    .validate_for(&request)
+            );
+
+            // An opaque continued page adds its observed ID to that baseline;
+            // neither the removed ID nor a missing baseline vote may return.
+            let mut continued = state.latest_attempt.clone();
+            continued.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+            continued.ingress.fetched_at.0 += 1;
+            continued.ingress.reviews.truncate(1);
+            continued.ingress.reviews[0].review_id = GitHubReviewIdV1::new("4").unwrap();
+            continued.checkpoint.rate_limit = None;
+            continued.checkpoint.next_cursor =
+                Some(GitHubReviewCursorV1::new("rest-page:2").unwrap());
+            state =
+                GitHubReviewRefreshStateV1::transition(&request, Some(&state), continued).unwrap();
+            assert_eq!(review_ids(&state.latest_attempt), ["1", "2", "4"]);
+            assert!(!state.latest_attempt.completed_collection_scan);
+            assert!(state.last_partial_collection.is_some());
+
+            let mut complete = state.latest_attempt.clone();
+            complete.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Complete;
+            complete.ingress.coverage = GitHubReviewCoverageV1::Complete;
+            complete.ingress.fetched_at.0 += 1;
+            complete.ingress.reviews.truncate(1);
+            complete.checkpoint.next_cursor = None;
+            state =
+                GitHubReviewRefreshStateV1::transition(&request, Some(&state), complete).unwrap();
+            assert!(state.last_partial_collection.is_none());
+            assert_eq!(review_ids(&state.latest_attempt), ["1"]);
         }
+    }
+
+    fn review_ids(response: &GitHubReviewReadResponseV1) -> Vec<&str> {
+        response
+            .ingress
+            .reviews
+            .iter()
+            .map(|review| review.review_id.as_str())
+            .collect()
+    }
+
+    fn partial_review_collection(
+        request: &GitHubReviewReadRequestV1,
+        ids: &[&str],
+        at: i64,
+    ) -> GitHubReviewReadResponseV1 {
+        let mut response = complete_response(request);
+        response.completed_collection_scan = true;
+        response.ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+        response.ingress.coverage = GitHubReviewCoverageV1::Partial;
+        response.ingress.fetched_at = UtcMicros(at);
+        response.ingress.reviews = ids
+            .iter()
+            .map(|id| GitHubPullRequestReviewV1 {
+                review_id: GitHubReviewIdV1::new(*id).unwrap(),
+                state: GitHubReviewStateV1::Approved,
+                author: None,
+                body: None,
+                commit_id: Some(request.scope.head_commit_id.clone()),
+                submitted_at: None,
+                url: None,
+            })
+            .collect();
+        response
+    }
+
+    #[tokio::test]
+    async fn partial_collection_disagreement_preserves_retained_membership() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviews);
+        let previous = partial_review_collection(&request, &["1", "2", "3"], 10);
+        let previous = GitHubReviewRefreshStateV1::transition(&request, None, previous).unwrap();
+        assert!(!previous.latest_attempt.completed_collection_scan);
+        let store = RefreshStore::default();
+        *store.state.lock().unwrap() = Some(previous);
+        let reads = Reads::new(vec![
+            read(partial_review_collection(&request, &["1", "2"], 11)),
+            read(partial_review_collection(&request, &["1"], 12)),
+            read(partial_review_collection(&request, &["2"], 13)),
+        ]);
+        let coordinator = GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready);
+        assert_eq!(
+            coordinator.refresh(&context, &request).await,
+            GitHubReviewRefreshOutcomeV1::Stale
+        );
+        assert_eq!(reads.calls.load(Ordering::SeqCst), 3);
+        let state = store.state.lock().unwrap().clone().unwrap();
+        assert_eq!(review_ids(&state.latest_attempt), ["1", "2", "3"]);
+        assert!(state.last_partial_collection.is_none());
+        assert!(!state.latest_attempt.completed_collection_scan);
+
+        let reads = Reads::new(vec![
+            read(partial_review_collection(&request, &["1"], 14)),
+            read(partial_review_collection(&request, &["1", "2"], 15)),
+            read(partial_review_collection(&request, &["1", "2"], 16)),
+        ]);
+        let coordinator = GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready);
+        assert!(
+            coordinator
+                .refresh(&context, &request)
+                .await
+                .has_usable_observation()
+        );
+        assert_eq!(reads.calls.load(Ordering::SeqCst), 3);
+        let state = store.state.lock().unwrap().clone().unwrap();
+        assert_eq!(review_ids(&state.latest_attempt), ["1", "2"]);
+        let baseline = state.last_partial_collection.clone().unwrap();
+        assert_eq!(
+            baseline.receipt.disposition,
+            GitHubReviewRefreshAttemptDispositionV1::RetryAgreed
+        );
+
+        let reads = Reads::new(vec![
+            read(partial_review_collection(&request, &["1"], 16)),
+            read(partial_review_collection(&request, &["2"], 17)),
+            read(partial_review_collection(&request, &["4"], 18)),
+        ]);
+        let coordinator = GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready);
+        assert_eq!(
+            coordinator.refresh(&context, &request).await,
+            GitHubReviewRefreshOutcomeV1::Stale
+        );
+        assert_eq!(reads.calls.load(Ordering::SeqCst), 3);
+        let state = store.state.lock().unwrap().clone().unwrap();
+        assert_eq!(state.last_partial_collection.as_ref(), Some(&baseline));
+        assert_eq!(review_ids(&state.latest_attempt), ["1", "2", "4"]);
+        assert!(state.validate_for(&request));
+    }
+
+    #[test]
+    fn partial_collection_authority_is_bound_to_the_current_acquisition() {
+        let (_, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviews);
+        let previous = partial_review_collection(&request, &["1", "2", "3"], 10);
+        let previous = GitHubReviewRefreshStateV1::transition(&request, None, previous).unwrap();
+        let scan = partial_review_collection(&request, &["1", "2"], 11);
+        let digest = github_review_scan_digest(&request, &scan).unwrap();
+        let agreed = GitHubReviewRefreshAttemptReceiptV1 {
+            disposition: GitHubReviewRefreshAttemptDispositionV1::Agreed,
+            scan_digests: vec![digest.clone(), digest.clone()],
+            observed_at: scan.ingress.fetched_at,
+        };
+        let mut wrong_time = agreed.clone();
+        wrong_time.observed_at = UtcMicros(10);
+        let mut wrong_content = agreed.clone();
+        let other =
+            github_review_scan_digest(&request, &partial_review_collection(&request, &["1"], 11))
+                .unwrap();
+        wrong_content.scan_digests = vec![other.clone(), other];
+        let terminal = GitHubReviewRefreshAttemptReceiptV1 {
+            disposition: GitHubReviewRefreshAttemptDispositionV1::Terminal,
+            scan_digests: vec![digest],
+            observed_at: scan.ingress.fetched_at,
+        };
+        for receipt in [None, Some(terminal), Some(wrong_time), Some(wrong_content)] {
+            let state = GitHubReviewRefreshStateV1::transition_with_receipt(
+                &request,
+                Some(&previous),
+                scan.clone(),
+                receipt,
+            )
+            .unwrap();
+            assert_eq!(review_ids(&state.latest_attempt), ["1", "2", "3"]);
+            assert!(state.last_partial_collection.is_none());
+            assert!(!state.latest_attempt.completed_collection_scan);
+        }
+        let state = GitHubReviewRefreshStateV1::transition_with_receipt(
+            &request,
+            Some(&previous),
+            scan,
+            Some(agreed),
+        )
+        .unwrap();
+        assert_eq!(review_ids(&state.latest_attempt), ["1", "2"]);
+        let mut tampered = state.clone();
+        tampered
+            .last_partial_collection
+            .as_mut()
+            .unwrap()
+            .receipt
+            .observed_at = UtcMicros(10);
+        assert!(!tampered.validate_for(&request));
+        let mut wrong_scope = request.clone();
+        wrong_scope.pull_request_id = GitHubPullRequestIdV1::new("another-pr").unwrap();
+        assert!(
+            !state
+                .last_partial_collection
+                .as_ref()
+                .unwrap()
+                .validate_for(&wrong_scope)
+        );
+    }
+
+    #[test]
+    fn absent_collection_provenance_preserves_stored_revision_and_wire_bytes() {
+        let (_, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviews);
+        let response = complete_response(&request);
+        let encoded_response = serde_json::to_value(&response).unwrap();
+        assert!(encoded_response.get("completed_collection_scan").is_none());
+        let state = GitHubReviewRefreshStateV1::transition(&request, None, response).unwrap();
+        let expected = canonical_sha256(&(
+            GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1,
+            state
+                .last_complete
+                .as_ref()
+                .map(|generation| &generation.response),
+            &state.latest_attempt,
+        ))
+        .unwrap();
+        assert_eq!(state.revision, expected);
+        let encoded_state = serde_json::to_value(&state).unwrap();
+        assert!(encoded_state.get("last_partial_collection").is_none());
+        let decoded: GitHubReviewRefreshStateV1 = serde_json::from_value(encoded_state).unwrap();
+        assert_eq!(decoded, state);
+        assert!(decoded.validate_for(&request));
     }
 
     #[tokio::test]
