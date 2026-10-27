@@ -30,6 +30,7 @@ async fn an_overlapping_old_compiler_cannot_replace_new_records_or_status_for_th
     let temp = tempfile::tempdir().expect("isolated compiler project");
     let root = temp.path().join("project");
     std::fs::create_dir_all(root.join("src")).unwrap();
+    let root = root.canonicalize().unwrap();
     let source =
         b"export function echo(value) { return value; }\nexport const label: string = 1;\n";
     std::fs::write(root.join("src/index.ts"), source).unwrap();
