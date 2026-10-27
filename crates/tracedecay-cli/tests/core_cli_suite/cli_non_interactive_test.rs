@@ -1952,6 +1952,30 @@ fn automation_config_set_rejects_unimplemented_external_backend() {
 }
 
 #[test]
+fn automation_config_set_rejects_retired_lock_timeout_flags() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    for flag in [
+        "--memory-curator-stale-lock-secs",
+        "--session-reflector-stale-lock-secs",
+        "--skill-writer-stale-lock-secs",
+    ] {
+        let mut command = tracedecay_command(home.path(), project.path());
+        command.args(["automation", "config", "set", flag, "3600"]);
+        let output = run_with_timeout(command, cli_timeout());
+        assert!(
+            !output.status.success(),
+            "retired flag {flag} must be rejected"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unexpected argument") && stderr.contains(flag),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
 fn automation_config_set_writes_complete_canonical_project_setting_noninteractively() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -1991,8 +2015,6 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
         "interval",
         "--skill-writer-interval-secs",
         "3600",
-        "--skill-writer-stale-lock-secs",
-        "7200",
     ]);
     let output = run_with_timeout(set, cli_timeout());
     assert!(
@@ -2011,10 +2033,13 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
         payload["effective"]["tasks"]["session_reflector"]["interval_secs"],
         1800
     );
-    assert_eq!(
-        payload["effective"]["tasks"]["skill_writer"]["stale_lock_secs"],
-        7200
-    );
+    for task in ["memory_curator", "session_reflector", "skill_writer"] {
+        assert!(
+            payload["effective"]["tasks"][task]
+                .get("stale_lock_secs")
+                .is_none()
+        );
+    }
     assert_eq!(
         payload["effective"]["tasks"]["memory_curator"]["cooldown_secs"],
         300

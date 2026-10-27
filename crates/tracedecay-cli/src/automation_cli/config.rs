@@ -71,19 +71,16 @@ pub(super) async fn handle_automation_config_command(
             memory_curator_interval_secs,
             memory_curator_cooldown_secs,
             memory_curator_min_idle_secs,
-            memory_curator_stale_lock_secs,
             session_reflector,
             session_reflector_schedule,
             session_reflector_interval_secs,
             session_reflector_cooldown_secs,
             session_reflector_min_idle_secs,
-            session_reflector_stale_lock_secs,
             skill_writer,
             skill_writer_schedule,
             skill_writer_interval_secs,
             skill_writer_cooldown_secs,
             skill_writer_min_idle_secs,
-            skill_writer_stale_lock_secs,
             ..
         } => {
             let backend = backend
@@ -104,7 +101,6 @@ pub(super) async fn handle_automation_config_command(
                     memory_curator_interval_secs,
                     memory_curator_cooldown_secs,
                     memory_curator_min_idle_secs,
-                    memory_curator_stale_lock_secs,
                     "memory_curator",
                 )?,
                 session_reflector: automation_task_patch(
@@ -113,7 +109,6 @@ pub(super) async fn handle_automation_config_command(
                     session_reflector_interval_secs,
                     session_reflector_cooldown_secs,
                     session_reflector_min_idle_secs,
-                    session_reflector_stale_lock_secs,
                     "session_reflector",
                 )?,
                 skill_writer: automation_task_patch(
@@ -122,7 +117,6 @@ pub(super) async fn handle_automation_config_command(
                     skill_writer_interval_secs,
                     skill_writer_cooldown_secs,
                     skill_writer_min_idle_secs,
-                    skill_writer_stale_lock_secs,
                     "skill_writer",
                 )?,
                 ..AutomationConfigPatch::default()
@@ -148,8 +142,7 @@ pub(crate) async fn load_canonical_automation_config(
     .await?
     {
         tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(config) => {
-            tracedecay_automation_runtime::automation::config::validate_config(&config)?;
-            Ok(*config)
+            tracedecay_automation_runtime::automation::config::effective_config(&config, None)
         }
         _ => Err(config_error(
             "automation setting has the wrong canonical value kind",
@@ -225,7 +218,6 @@ fn automation_task_patch(
     interval_secs: Option<String>,
     cooldown_secs: Option<String>,
     min_idle_secs: Option<String>,
-    stale_lock_secs: Option<String>,
     task: &str,
 ) -> tracedecay_domain::errors::Result<
     tracedecay_automation_runtime::automation::config::AutomationTaskPatch,
@@ -237,10 +229,6 @@ fn automation_task_patch(
             interval_secs: parse_optional_u64(interval_secs, &format!("{task} interval_secs"))?,
             cooldown_secs: parse_optional_u64(cooldown_secs, &format!("{task} cooldown_secs"))?,
             min_idle_secs: parse_optional_u64(min_idle_secs, &format!("{task} min_idle_secs"))?,
-            stale_lock_secs: parse_optional_u64(
-                stale_lock_secs,
-                &format!("{task} stale_lock_secs"),
-            )?,
             // The budget-backoff window is patched through the configuration
             // surfaces (dashboard/application PATCH); the CLI does not expose
             // a flag for it.

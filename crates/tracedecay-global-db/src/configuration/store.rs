@@ -12,17 +12,18 @@ use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbWriteTx};
 use tracedecay_domain::configuration::{
-    ACCESS_RULES_SETTING_KEY, CandidateDispositionV1, ChangePlanId, CodeIndexWorkerSelectionV1,
-    ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
-    ConfigurationCandidateV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
-    ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
-    ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
-    RETIRED_CORE_SETTING_KEYS_V1, RETIRED_PROFILE_SETTING_KEYS_V1, RedactedConfigurationChangeV1,
-    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
-    ScopeControlOperationV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_REPEATED_QUERY_HINTS_SETTING_KEY,
-    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    ACCESS_RULES_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY, CandidateDispositionV1,
+    ChangePlanId, CodeIndexWorkerSelectionV1, ConfigurationAuditEvent, ConfigurationAuditEventId,
+    ConfigurationAuditEventKindV1, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
+    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
+    ProtectedChangeSnapshotError, RETIRED_CORE_SETTING_KEYS_V1, RETIRED_PROFILE_SETTING_KEYS_V1,
+    RedactedConfigurationChangeV1, RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY,
+    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1, SettingKey,
+    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
@@ -439,7 +440,32 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 })
                 .map(|definition| definition.key.clone())
                 .collect::<Vec<_>>();
-            if missing_keys.is_empty() && removals.is_empty() && stale_defaults.is_empty() {
+            // The old automation timeout was serialized even when null. Keep
+            // historical snapshots intact, and remove it from the current
+            // value under the same revision fence as other registry upgrades.
+            let retired_automation_values = current
+                .snapshot
+                .effective_values
+                .iter()
+                .filter(|(key, _)| key.as_str() == AUTOMATION_SETTINGS_SETTING_KEY)
+                .filter_map(|(key, value)| {
+                    if let ConfigurationValueV1::AutomationSettings(settings) = value {
+                        let mut settings = settings.clone();
+                        if settings.retire_lock_timeout() {
+                            return Some((
+                                key.clone(),
+                                ConfigurationValueV1::AutomationSettings(settings),
+                            ));
+                        }
+                    }
+                    None
+                })
+                .collect::<Vec<_>>();
+            if missing_keys.is_empty()
+                && removals.is_empty()
+                && stale_defaults.is_empty()
+                && retired_automation_values.is_empty()
+            {
                 validate_snapshot_registry_completeness_with_registry(&current.snapshot, &registry)
                     .map_err(map_store_error)?;
                 return Ok(current);
@@ -471,6 +497,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 &expected_revision_id,
                 &additions,
                 &removals,
+                &retired_automation_values,
             ))
             .map_err(ConfigurationError::validation)?;
             let next_revision_id: ConfigurationRevisionId = derived_identifier(
@@ -492,6 +519,13 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             for (key, default_value) in additions {
                 effective_values.insert(key.clone(), default_value);
                 provenance.insert(key, default_provenance.clone());
+            }
+            for (key, value) in retired_automation_values {
+                // Preserve an operator's active settings and their provenance.
+                // A registry-default value has already adopted today's default.
+                if !stale_defaults.contains(&key) {
+                    effective_values.insert(key, value);
+                }
             }
             let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance)
                 .map_err(ConfigurationError::validation)?;

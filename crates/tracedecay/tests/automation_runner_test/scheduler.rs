@@ -1337,7 +1337,7 @@ fn config_requires_interval_secs_for_configured_interval_schedule() {
 }
 
 #[test]
-fn config_validates_scheduler_idle_and_lock_bounds() {
+fn config_validates_scheduler_idle_bound_and_rejects_retired_lock_timeout() {
     let patch = AutomationConfigPatch {
         memory_curator: AutomationTaskPatch {
             min_idle_secs: Some(Some(0)),
@@ -1353,27 +1353,26 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
         "zero min_idle_secs must retain its field-specific rejection: {error}"
     );
 
-    let patch = AutomationConfigPatch {
-        memory_curator: AutomationTaskPatch {
-            stale_lock_secs: Some(Some(0)),
-            ..AutomationTaskPatch::default()
-        },
-        ..AutomationConfigPatch::default()
-    };
-    let error = effective_config(&AutomationConfig::default(), Some(&patch))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("memory_curator stale_lock_secs must be greater than zero"),
-        "zero stale_lock_secs must retain its field-specific rejection: {error}"
-    );
+    for value in [
+        serde_json::json!(0),
+        serde_json::json!(3600),
+        serde_json::Value::Null,
+    ] {
+        let error = serde_json::from_value::<AutomationConfigPatch>(serde_json::json!({
+            "memory_curator": { "stale_lock_secs": value }
+        }))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `stale_lock_secs`")
+        );
+    }
 
-    // Nonzero bounds on the same fields remain accepted, so the rejection
-    // above is about the zero value rather than the fields themselves.
+    // The active idle bound still accepts a nonzero value.
     let patch = AutomationConfigPatch {
         memory_curator: AutomationTaskPatch {
             min_idle_secs: Some(Some(600)),
-            stale_lock_secs: Some(Some(3_600)),
             ..AutomationTaskPatch::default()
         },
         ..AutomationConfigPatch::default()
@@ -1381,7 +1380,6 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
     let config =
         effective_config(&AutomationConfig::default(), Some(&patch)).expect("nonzero bounds");
     assert_eq!(config.tasks.memory_curator.min_idle_secs, Some(600));
-    assert_eq!(config.tasks.memory_curator.stale_lock_secs, Some(3_600));
 }
 
 #[cfg(any(unix, windows))]

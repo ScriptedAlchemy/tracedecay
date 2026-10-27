@@ -685,7 +685,7 @@ const USER_JOB_TASK_CONFIG: AutomationTaskConfig = AutomationTaskConfig {
     interval_secs: None,
     cooldown_secs: None,
     min_idle_secs: None,
-    stale_lock_secs: None,
+    legacy_stale_lock_secs: None,
     session_evidence_budget_backoff_secs: None,
 };
 
