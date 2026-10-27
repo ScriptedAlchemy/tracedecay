@@ -2028,9 +2028,7 @@ impl GraphDb {
             if let Some(admit) = admit {
                 let store = database.graph_store();
                 let bytes = [stored.source, stored.target].into_iter().try_fold(
-                    map_bytes.saturating_add(crate::projection_read::decoded_relation_bytes(
-                        &stored.relation,
-                    )),
+                    map_bytes.saturating_add(stored.relation.heap_allocation_bound()),
                     |bytes, node| {
                         store
                             .node_allocation_bytes(node)

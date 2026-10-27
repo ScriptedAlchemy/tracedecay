@@ -34,43 +34,11 @@ use crate::production::resident_bytes::{btree_bytes, import_heap_bytes};
 const CATALOG_SCAN_PAGE_ITEMS: usize = 1_024;
 
 pub(super) fn entity_bytes(entity: &GraphEntity) -> usize {
-    size_of::<GraphEntity>()
-        .saturating_add(entity.identity.as_str().len())
-        .saturating_add(
-            entity
-                .labels
-                .iter()
-                .map(|label| label.as_str().len() + 64)
-                .sum::<usize>(),
-        )
-        .saturating_add(properties_bytes(&entity.properties))
+    size_of::<GraphEntity>().saturating_add(entity.heap_allocation_bound())
 }
 
 pub(super) fn relation_bytes(relation: &GraphRelation) -> usize {
-    size_of::<GraphRelation>()
-        .saturating_add(relation.identity.as_str().len())
-        .saturating_add(relation.from.as_str().len())
-        .saturating_add(relation.to.as_str().len())
-        .saturating_add(relation.kind.as_str().len())
-        .saturating_add(properties_bytes(&relation.properties))
-}
-
-fn properties_bytes(
-    properties: &BTreeMap<
-        tracedecay_graph_db::GraphPropertyName,
-        tracedecay_graph_db::GraphProperty,
-    >,
-) -> usize {
-    properties.iter().fold(0_usize, |bytes, (name, property)| {
-        bytes
-            .saturating_add(name.as_str().len())
-            .saturating_add(128)
-            .saturating_add(match property {
-                tracedecay_graph_db::GraphProperty::String(value) => value.capacity(),
-                tracedecay_graph_db::GraphProperty::Bytes(value) => value.capacity(),
-                _ => 0,
-            })
-    })
+    size_of::<GraphRelation>().saturating_add(relation.heap_allocation_bound())
 }
 
 pub(super) fn build_interactive_catalog(

@@ -66,50 +66,6 @@ pub struct GraphProjectionPage {
     pub next_relation: Option<GraphRelationId>,
 }
 
-pub(crate) fn decoded_entity_bytes(entity: &GraphEntity) -> usize {
-    entity
-        .identity
-        .as_str()
-        .len()
-        .saturating_add(
-            entity
-                .labels
-                .iter()
-                .map(|label| label.as_str().len() + 64)
-                .sum::<usize>(),
-        )
-        .saturating_add(property_allocation_bytes(&entity.properties))
-}
-
-pub(crate) fn decoded_relation_bytes(relation: &GraphRelation) -> usize {
-    relation
-        .identity
-        .as_str()
-        .len()
-        .saturating_add(relation.from.as_str().len())
-        .saturating_add(relation.to.as_str().len())
-        .saturating_add(relation.kind.as_str().len())
-        .saturating_add(property_allocation_bytes(&relation.properties))
-}
-
-fn property_allocation_bytes(
-    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
-) -> usize {
-    properties
-        .iter()
-        .map(|(key, value)| {
-            key.as_str()
-                .len()
-                .saturating_add(128)
-                .saturating_add(match value {
-                    crate::GraphProperty::String(value) => value.capacity(),
-                    crate::GraphProperty::Bytes(value) => value.capacity(),
-                    _ => 0,
-                })
-        })
-        .sum()
-}
-
 #[derive(Clone)]
 pub struct GraphProjectionTelemetryRequest {
     pub namespace: GraphNamespace,
@@ -337,7 +293,7 @@ fn read_entity_page(
                 message: "projection entity index does not match ownership".to_owned(),
             });
         }
-        held = held.saturating_add(decoded_entity_bytes(&stored.entity));
+        held = held.saturating_add(stored.entity.heap_allocation_bound());
         entities.push(stored.entity);
     }
     let next = has_more
@@ -413,7 +369,7 @@ fn read_relation_page(
                 message: "projection relation index does not match ownership".to_owned(),
             });
         }
-        held = held.saturating_add(decoded_relation_bytes(&stored.relation));
+        held = held.saturating_add(stored.relation.heap_allocation_bound());
         relations.push(stored.relation);
     }
     let next = has_more

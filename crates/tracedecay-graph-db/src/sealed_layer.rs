@@ -1401,7 +1401,7 @@ impl LayeredReads<'_> {
                     .ok_or_else(|| GraphDbError::Corrupt {
                         message: "layered projection page named an unreadable entity".to_owned(),
                     })?;
-                held = held.saturating_add(crate::projection_read::decoded_entity_bytes(&entity));
+                held = held.saturating_add(entity.heap_allocation_bound());
                 page.entities.push(entity);
             }
             page.next_entity = has_more
@@ -1452,8 +1452,7 @@ impl LayeredReads<'_> {
                         message: "layered projection page named an unreadable relation".to_owned(),
                     })?;
                 let relation = relation.storage_relation()?;
-                held =
-                    held.saturating_add(crate::projection_read::decoded_relation_bytes(&relation));
+                held = held.saturating_add(relation.heap_allocation_bound());
                 page.relations.push(relation);
             }
             page.next_relation = has_more
