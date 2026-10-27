@@ -6,6 +6,7 @@ use tempfile::tempdir;
 use tracedecay_contracts::{
     EffectTermination, SourceEditKind, SourceEditRequest, source_edit_operation,
 };
+use tracedecay_domain::errors::TraceDecayError;
 
 use super::test_support::{
     fixture_authorization, fixture_graph, fixture_request_for_edit, fixture_symbol_code_graph,
@@ -176,6 +177,22 @@ async fn move_symbol_imports_preserve_destination_syntax_in_preview_and_apply() 
 }
 
 #[tokio::test]
+async fn move_symbol_ignores_destination_imports_in_comments_and_nested_scopes() {
+    for (before, after) in [
+        (
+            "/* Import example:\nuse crate::model::Widget;\n*/\n",
+            "pub fn marker() {}\n",
+        ),
+        (
+            "",
+            "mod nested {\n    use crate::model::Widget;\n    pub fn marker(value: Widget) -> Widget { value }\n}\npub fn marker() {}\n",
+        ),
+    ] {
+        move_with_destination_header(before, after, "\n", true).await;
+    }
+}
+
+#[tokio::test]
 async fn move_symbol_preserves_destination_bytes_when_adding_imports() {
     move_with_destination_header(
         "//! Module ☃.\r\nuse std::fmt::Debug;\r\n\r\n",
@@ -190,12 +207,20 @@ async fn move_symbol_preserves_destination_bytes_when_adding_imports() {
 }
 
 #[tokio::test]
-async fn move_symbol_refuses_unparseable_destination_before_preview_or_apply() {
+async fn move_symbol_refuses_unsupported_destination_before_preview_or_apply() {
     for (destination, dependency) in [
         ("use std::{\n", true),
         ("pub fn marker() {\n", false),
         ("/* unclosed destination comment", true),
         ("/// Detached documentation.\n#[inline]\n", false),
+        (
+            "#[cfg(any())]\nuse crate::model::Widget;\npub fn marker() {}\n",
+            true,
+        ),
+        (
+            "#[cfg(all())]\nuse crate::model::Widget;\npub fn marker() {}\n",
+            true,
+        ),
     ] {
         let project = tempdir().unwrap();
         fs::create_dir(project.path().join("src")).unwrap();
@@ -232,10 +257,11 @@ async fn move_symbol_refuses_unparseable_destination_before_preview_or_apply() {
             request.edit.clone(),
         )
         .await;
-        assert!(
-            preview.is_err(),
-            "malformed destination must not get an accepted preview"
-        );
+        assert!(matches!(
+            preview,
+            Err(TraceDecayError::ProjectRoute { reason_code, retryable: false, .. })
+                if reason_code == "source-edit-destination-syntax-unsupported"
+        ));
         let authorization = fixture_authorization(&request);
         let applied = execute_source_edit(
             &graph,

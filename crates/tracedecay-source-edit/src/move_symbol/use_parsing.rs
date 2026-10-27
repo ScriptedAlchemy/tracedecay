@@ -97,7 +97,7 @@ fn source_relative_use_path(node: TsNode<'_>) -> bool {
     }
 }
 
-fn has_outer_attributes(node: TsNode<'_>) -> bool {
+pub(super) fn has_outer_attributes(node: TsNode<'_>) -> bool {
     let mut previous = node.prev_named_sibling();
     while let Some(sibling) = previous {
         match sibling.kind() {

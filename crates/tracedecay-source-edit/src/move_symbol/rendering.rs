@@ -8,8 +8,11 @@ use std::collections::HashSet;
 
 use tracedecay_code_extraction::ts_provider::parse_extractor_source;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tree_sitter::Tree;
 
 use crate::edits::{MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff};
+
+use super::use_parsing::has_outer_attributes;
 
 /// Removes `lines[start..=end]` and collapses the blank-line separator the
 /// removed item left behind so the source stays tidy.
@@ -100,16 +103,21 @@ fn destination_syntax_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::project_route("source-edit-destination-syntax-unsupported", false, message)
 }
 
-fn rust_import_offset(source: &str) -> Result<usize> {
+fn parse_rust_destination(source: &str) -> Result<Tree> {
     let tree = parse_extractor_source("rust", "Rust", source).map_err(|error| {
         destination_syntax_error(format!("cannot parse Rust destination: {error}"))
     })?;
-    let root = tree.root_node();
-    if root.has_error() {
+    if tree.root_node().has_error() {
         return Err(destination_syntax_error(
             "Rust destination contains incomplete or unsupported syntax",
         ));
     }
+    Ok(tree)
+}
+
+fn rust_import_offset(source: &str) -> Result<usize> {
+    let tree = parse_rust_destination(source)?;
+    let root = tree.root_node();
     let mut offset = None;
     let mut seen_item = false;
     let mut pending_outer = false;
@@ -146,19 +154,50 @@ fn rust_import_offset(source: &str) -> Result<usize> {
     Ok(offset.unwrap_or(source.len()))
 }
 
-/// Drops imports already present verbatim in the destination and de-duplicates
-/// within the batch, preserving order.
+/// Drops matching unconditional module imports and de-duplicates within the
+/// batch. Text in comments or nested scopes cannot supply a module binding.
 pub(super) fn dedup_preserve(
     imports: &[String],
     dest_original: &str,
     dest_module: Option<&str>,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
+    if imports.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tree = parse_rust_destination(dest_original)?;
+    let mut existing = HashSet::new();
+    let mut attributed = HashSet::new();
+    for node in tree.root_node().named_children(&mut tree.walk()) {
+        if node.kind() != "use_declaration" {
+            continue;
+        }
+        let path = node
+            .child_by_field_name("argument")
+            .and_then(|argument| argument.utf8_text(dest_original.as_bytes()).ok())
+            .ok_or_else(|| {
+                destination_syntax_error("cannot identify a complete destination import")
+            })?;
+        let import = format!("use {path};");
+        if has_outer_attributes(node) {
+            attributed.insert(import);
+        } else {
+            existing.insert(import);
+        }
+    }
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     for imp in imports {
         let trimmed = imp.trim();
-        if dest_original.lines().any(|l| l.trim() == trimmed) {
+        if existing.contains(trimmed) {
             continue;
+        }
+        if attributed.contains(trimmed) {
+            // A conditional import may or may not bind the name. Neither
+            // dropping the dependency nor adding an unconditional duplicate
+            // is safe without resolving that configuration.
+            return Err(destination_syntax_error(format!(
+                "automatic import matches an attributed destination declaration: {trimmed}"
+            )));
         }
         // An import of an item the destination module itself declares
         // (`use crate::SweepType;` inserted into `src/lib.rs`) would be a
@@ -178,7 +217,7 @@ pub(super) fn dedup_preserve(
             out.push(imp.clone());
         }
     }
-    out
+    Ok(out)
 }
 
 /// Removes each orphaned single-leaf `use` line (only the moved symbol needed
@@ -380,7 +419,8 @@ mod tests {
             ],
             "use c::D;\n",
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(out, vec!["use a::B;".to_string()]);
     }
 
@@ -402,7 +442,8 @@ mod tests {
             ],
             "pub struct SweepType { pub value: i32 }\n",
             Some("crate"),
-        );
+        )
+        .unwrap();
         assert_eq!(out, vec!["use crate::nested::Other;".to_string()]);
     }
 }
