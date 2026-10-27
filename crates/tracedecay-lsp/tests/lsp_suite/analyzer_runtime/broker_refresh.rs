@@ -3399,3 +3399,371 @@ async fn semantic_cancellation_reaches_and_releases_the_registered_operation() {
     assert!(!authority.cancel_request(&root, &request_id));
     assert!(!authority.cancel_request(&root, &LspRequestId::Number(20)));
 }
+
+#[tokio::test]
+async fn partial_root_refresh_replaces_only_published_document_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    for root in [temp.path().to_path_buf(), temp.path().join("member")] {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("workspace.marker"), "").unwrap();
+    }
+    let script_path = temp.path().join("partial_root_lsp.py");
+    let publish = FAKE_DIAGNOSTIC_PUBLISH.replace(
+        r#""fake type error""#,
+        r#""old b" if uri.endswith("b.fake") else ("old a" if text == "old a" else "new a")"#,
+    );
+    let body = format!(
+        r#"        text = message["params"].get("contentChanges", [message["params"]["textDocument"]])[0]["text"]
+        if text == "fail b":
+            sys.exit(17)
+{publish}"#
+    );
+    std::fs::write(&script_path, fake_lsp_script_with_preamble("", &body)).unwrap();
+    let adapter = fake_adapter_with_root_markers(
+        FAKE_LANGUAGE,
+        "fake",
+        python_command(),
+        vec![script_path.display().to_string()],
+        vec!["workspace.marker".to_owned()],
+    );
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(temp.path(), vec![adapter]);
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![
+                fake_document(FAKE_LANGUAGE, "src/a.fake", "old a"),
+                fake_document(FAKE_LANGUAGE, "member/src/b.fake", "old b"),
+            ],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    let completed = broker
+        .prepare_refresh(
+            FAKE_LANGUAGE,
+            vec![
+                fake_document(FAKE_LANGUAGE, "src/a.fake", "new a"),
+                fake_document(FAKE_LANGUAGE, "member/src/b.fake", "fail b"),
+            ],
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .collect_diagnostics_with_timeouts(loaded_runner_fake_lsp_timeouts())
+        .await;
+    assert!(
+        broker.finish_refresh_snapshot(completed).is_err(),
+        "the caller must see that one root was incomplete"
+    );
+    let diagnostics = broker.snapshot().diagnostics;
+    assert_eq!(diagnostics.len(), 2);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.file == "src/a.fake" && diagnostic.message == "new a")
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.file == "member/src/b.fake"
+                && diagnostic.message == "old b")
+    );
+    let a = fake_document(FAKE_LANGUAGE, "src/a.fake", "new a");
+    assert!(matches!(
+        broker.document_diagnostic_evidence(&a),
+        Ok(lsp::broker::BrokerDocumentEvidence::Published { .. })
+    ));
+    let b = fake_document(FAKE_LANGUAGE, "member/src/b.fake", "old b");
+    assert!(broker.document_diagnostic_evidence(&b).is_err());
+    broker
+        .refresh_documents_with_timeouts(FAKE_LANGUAGE, vec![a], loaded_runner_fake_lsp_timeouts())
+        .await
+        .unwrap();
+    assert!(broker.document_diagnostic_evidence(&b).is_err());
+}
+
+#[tokio::test]
+async fn queue_denial_keeps_requested_evidence_unavailable_after_an_unrelated_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("evidence_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let a = fake_document(FAKE_LANGUAGE, "src/a.fake", "a");
+    let b = fake_document(FAKE_LANGUAGE, "src/b.fake", "b");
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone(), b.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert!(broker.document_diagnostic_evidence(&a).is_ok());
+    let mut queued = Vec::new();
+    for _ in 0..lsp::broker::MAX_ANALYZER_QUEUED_ROOT_BATCHES {
+        queued.push(
+            broker
+                .prepare_refresh(FAKE_LANGUAGE, vec![b.clone()])
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let Err(error) = broker.prepare_refresh(FAKE_LANGUAGE, vec![a.clone()]).await else {
+        panic!("a full queue must reject the requested document before client acquisition");
+    };
+    assert!(error.to_string().contains("queue saturated"));
+    drop(queued);
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![b.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert!(broker.document_diagnostic_evidence(&b).is_ok());
+    assert!(matches!(
+        broker.document_diagnostic_evidence(&a),
+        Err(lsp::broker::DiagnosticEvidenceUnavailable::PublicationUncommitted)
+    ));
+    let snapshot = broker.snapshot();
+    assert_eq!(snapshot.diagnostics.len(), 2);
+    assert!(
+        !snapshot.coverage[FAKE_LANGUAGE]
+            .documents
+            .contains_key(&a.relative_path)
+    );
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert!(broker.document_diagnostic_evidence(&a).is_ok());
+}
+
+#[tokio::test]
+async fn identical_empty_collection_requires_commit_and_stale_cleanup_preserves_its_successor() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("empty_evidence_lsp.py");
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble("", EMPTY_DIAGNOSTIC_PUBLISH),
+    )
+    .unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let a = fake_document(FAKE_LANGUAGE, "src/a.fake", "a");
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    let initial = broker.snapshot();
+    let stale = broker
+        .prepare_refresh(FAKE_LANGUAGE, vec![a.clone()])
+        .await
+        .unwrap()
+        .unwrap()
+        .collect_diagnostics_with_timeouts(loaded_runner_fake_lsp_timeouts())
+        .await;
+    assert!(stale.is_ok());
+    assert!(stale.diagnostic_refresh().unwrap().diagnostics.is_empty());
+    assert_eq!(
+        stale.diagnostic_refresh().unwrap().coverage,
+        initial.coverage[FAKE_LANGUAGE]
+    );
+    assert!(matches!(
+        broker.document_diagnostic_evidence(&a),
+        Err(lsp::broker::DiagnosticEvidenceUnavailable::PublicationUncommitted)
+    ));
+    let abandoned = broker
+        .prepare_refresh(FAKE_LANGUAGE, vec![a.clone()])
+        .await
+        .unwrap()
+        .unwrap()
+        .collect_diagnostics_with_timeouts(loaded_runner_fake_lsp_timeouts())
+        .await;
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        broker.finish_refresh_snapshot(stale).unwrap(),
+        lsp::broker::RefreshCommitOutcome::Superseded
+    ));
+    drop(abandoned);
+    let lsp::broker::BrokerDocumentEvidence::Published { diagnostics, .. } =
+        broker.document_diagnostic_evidence(&a).unwrap()
+    else {
+        panic!("the successor empty publication must remain committed");
+    };
+    assert!(diagnostics.is_empty());
+    let cancelled = broker
+        .prepare_refresh(FAKE_LANGUAGE, vec![a.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    drop(cancelled);
+    assert!(matches!(
+        broker.document_diagnostic_evidence(&a),
+        Err(lsp::broker::DiagnosticEvidenceUnavailable::PublicationUncommitted)
+    ));
+}
+
+#[tokio::test]
+async fn identical_settings_replacement_rejects_collected_work_from_the_old_client() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("replaced_evidence_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    let adapter = fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path);
+    let mut broker =
+        lsp::broker::DiagnosticBroker::new_for_test(temp.path(), vec![adapter.clone()]);
+    let a = fake_document(FAKE_LANGUAGE, "src/a.fake", "a");
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    let stale = broker
+        .prepare_refresh(FAKE_LANGUAGE, vec![a.clone()])
+        .await
+        .unwrap()
+        .unwrap()
+        .collect_diagnostics_with_timeouts(loaded_runner_fake_lsp_timeouts())
+        .await;
+    broker.update_settings(broker.snapshot().settings);
+    assert!(broker.document_diagnostic_evidence(&a).is_err());
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        broker.finish_refresh_snapshot(stale).unwrap(),
+        lsp::broker::RefreshCommitOutcome::Superseded
+    ));
+    assert!(broker.document_diagnostic_evidence(&a).is_ok());
+    let stale = broker
+        .prepare_refresh(FAKE_LANGUAGE, vec![a.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    broker.update_adapters(vec![adapter]);
+    let stale = stale
+        .collect_diagnostics_with_timeouts(loaded_runner_fake_lsp_timeouts())
+        .await;
+    assert!(matches!(
+        broker.finish_refresh_snapshot(stale).unwrap(),
+        lsp::broker::RefreshCommitOutcome::Superseded
+    ));
+    assert!(broker.document_diagnostic_evidence(&a).is_err());
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert!(broker.document_diagnostic_evidence(&a).is_ok());
+}
+
+#[tokio::test]
+async fn semantic_retirement_revokes_committed_diagnostic_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join(FAKE_PATH), "a").unwrap();
+    let control = FakeLspPhaseControl::bind().await;
+    let script_path = temp.path().join("semantic_evidence_lsp.py");
+    let mut script = fake_lsp_script_with_preamble(
+        &control.script_preamble(&["semantic-request"]),
+        EMPTY_DIAGNOSTIC_PUBLISH,
+    );
+    script.push_str(
+        r#"    elif message.get("method") == "textDocument/documentSymbol":
+        tracedecay_maybe_phase("semantic-request")
+"#,
+    );
+    std::fs::write(&script_path, script).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        temp.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let a = fake_document(FAKE_LANGUAGE, FAKE_PATH, "a");
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert!(broker.document_diagnostic_evidence(&a).is_ok());
+    let root_uri = url::Url::from_directory_path(temp.path())
+        .unwrap()
+        .to_string();
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            temp.path().to_path_buf(),
+            root_uri.clone(),
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let root = AdmittedRoot::new(root_uri.clone());
+    let id = LspRequestId::Number(31);
+    let operation = tokio::spawn(
+        authority.start(
+            root.clone(),
+            id.clone(),
+            tracedecay_lsp::lsp_semantic_request(&SemanticRequest::DocumentSymbols {
+                document_uri: format!("{root_uri}{FAKE_PATH}"),
+            })
+            .unwrap(),
+        ),
+    );
+    let reached = control.wait_for("semantic-request").await;
+    assert!(authority.cancel_request(&root, &id));
+    assert!(matches!(
+        operation.await.unwrap(),
+        tracedecay_lsp::LspSemanticOperationOutcome::Partial { .. }
+    ));
+    drop(reached);
+    assert!(matches!(
+        broker.document_diagnostic_evidence(&a),
+        Err(lsp::broker::DiagnosticEvidenceUnavailable::IncarnationRetired)
+    ));
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![a.clone()],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
+        .unwrap();
+    assert!(broker.document_diagnostic_evidence(&a).is_ok());
+}

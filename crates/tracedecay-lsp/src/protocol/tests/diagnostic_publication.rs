@@ -164,7 +164,11 @@ fn assert_diagnostic_delivery(
             .collect::<Vec<_>>();
         assert!(messages.windows(2).all(|pair| pair[0] < pair[1]));
     };
-    assert!(session.publish_complete_snapshot("file:///root/a.rs", 1, snapshot.clone()));
+    assert!(
+        session
+            .publish_complete_snapshot("file:///root/a.rs", 1, snapshot.clone())
+            .is_ok()
+    );
     let publication: Value = session
         .drain_outbound()
         .iter()
@@ -666,7 +670,10 @@ fn pull_diagnostics_are_generation_bound_and_return_unchanged_for_same_result_id
     let first = session.drain_outbound();
     let first: Value = serde_json::from_slice(&first[0]).unwrap();
     let result_id = first["result"]["resultId"].as_str().unwrap().to_owned();
-    assert_eq!(result_id, "generation:9:version:0");
+    assert_eq!(
+        result_id,
+        format!("generation:9:version:0:authority:sha256:{}", "a".repeat(64))
+    );
     let request = json!({
         "jsonrpc": "2.0",
         "id": 4,

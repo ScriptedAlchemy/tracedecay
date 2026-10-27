@@ -1439,12 +1439,15 @@ fn observe_http_connections(action: impl FnOnce(SocketAddr)) -> usize {
         let observer = scope.spawn(move || {
             let mut accepted = 0;
             loop {
-                match listener.accept() {
+                // Read the flag before accepting: a WouldBlock that follows a
+                // set flag proves the backlog was already empty once the
+                // action finished, so no completed connection is left behind.
+                let stopping = stop.load(Ordering::SeqCst);
+                let connection = listener.accept();
+                match connection {
                     Ok((_stream, _peer)) => accepted += 1,
-                    // Stop only after all connections already in the backlog
-                    // have been observed, regardless of thread scheduling.
                     Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                        if stop.load(Ordering::SeqCst) {
+                        if stopping {
                             return Ok::<_, std::io::Error>(accepted);
                         }
                         std::thread::sleep(Duration::from_millis(5));

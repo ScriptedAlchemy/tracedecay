@@ -7,6 +7,12 @@ description = "TraceDecay command-line interface and daemon binary"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+# Five complete 48,000-function generations take 53–65 seconds each on the
+# four-vCPU fleet. Keep the memory workload intact instead of letting the
+# default five-minute medium deadline interrupt its final verification.
+[package.metadata.bazel.test_sizes]
+refresh_memory_journey = "large"
+
 [[bin]]
 name = "tracedecay"
 path = "src/main.rs"

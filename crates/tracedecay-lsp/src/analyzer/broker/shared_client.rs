@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex as SyncMutex};
 use tokio::sync::{Mutex, MutexGuard};
 
 use super::super::client::{
-    StdioLspClient, StdioLspClientStartup, StdioLspClientStartupSettlement,
+    AnalyzerDocuments, StdioLspClient, StdioLspClientStartup, StdioLspClientStartupSettlement,
 };
 use super::super::error::{AnalyzerResult, AnalyzerRuntimeError};
 use crate::{AdmittedRoot, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor};
@@ -120,6 +120,7 @@ impl SharedAnalyzerClientSlot {
 pub(crate) struct SharedAnalyzerClient {
     client: Mutex<SharedAnalyzerClientSlot>,
     supervisor: SyncMutex<AnalyzerSupervisor>,
+    pub(crate) documents: Arc<AnalyzerDocuments>,
 }
 
 impl SharedAnalyzerClient {
@@ -127,6 +128,7 @@ impl SharedAnalyzerClient {
         Arc::new(Self {
             client: Mutex::new(SharedAnalyzerClientSlot::new()),
             supervisor: SyncMutex::new(AnalyzerSupervisor::new(root)),
+            documents: AnalyzerDocuments::new(),
         })
     }
 
@@ -310,6 +312,7 @@ impl<'a> AnalyzerClientUse<'a> {
     }
 
     pub(crate) fn retire(mut self, event: AnalyzerEvent) {
+        self.shared.documents.retire(Some(self.attempt));
         self.concluded = true;
         self.shared.record(self.attempt, event);
     }
@@ -319,6 +322,7 @@ impl Drop for AnalyzerClientUse<'_> {
     fn drop(&mut self) {
         self.client_slot.cancel_startup();
         if !self.concluded {
+            self.shared.documents.retire(Some(self.attempt));
             self.shared.record(self.attempt, AnalyzerEvent::Retired);
         }
         if let Some(client) = self.client.take() {

@@ -4482,7 +4482,7 @@ export type ProximityAddressV1 = {
 
 export type ProximityCoverageV1 = "complete" | "denied" | "partial" | "private" | "stale" | "unavailable";
 
-export type ProximityWarningClassV1 = "incompatible_branch_worktree" | "neighborhood" | "overlapping_range" | "same_crate" | "same_file" | "same_package" | "same_symbol" | "shared_caller" | "shared_dependency" | "shared_test";
+export type ProximityWarningClassV1 = "neighborhood" | "overlapping_range" | "same_crate" | "same_file" | "same_package" | "same_symbol" | "shared_caller" | "shared_dependency" | "shared_test";
 
 export type PublicCodeProject = {
   canonical_root: string;
