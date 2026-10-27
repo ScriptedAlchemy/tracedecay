@@ -854,6 +854,74 @@ fn dependency_invalidation_discards_queued_stale_publications() {
 }
 
 #[test]
+fn workspace_mutation_discards_stale_publications_and_preserves_in_flight_delivery() {
+    for in_flight in [false, true] {
+        let mut harness = Harness::new(true);
+        harness.open(1);
+        harness.start_refresh();
+        harness.runtime.complete_next();
+        harness.session.flush_due(harness.now_ms);
+        let pending = if in_flight {
+            Some(harness.session.poll_outbound().unwrap().to_vec())
+        } else {
+            None
+        };
+        harness
+            .session
+            .publish_diagnostics(DOCUMENT, 1, 2, Vec::new())
+            .unwrap();
+        let response = json!({ "jsonrpc": "2.0", "id": 900, "result": null });
+        assert!(harness.session.enqueue_value(response.clone()));
+        harness.session.handle_payload(
+            &serde_json::to_vec(&json!({
+                "jsonrpc": "2.0", "method": "workspace/didChangeWorkspaceFolders",
+                "params": { "event": {
+                    "added": [{ "uri": "file:///other", "name": "other" }],
+                    "removed": [],
+                } },
+            }))
+            .unwrap(),
+            harness.now_ms + 1,
+        );
+        let mutation = harness.session.pending_workspace_folder_mutation().unwrap();
+        harness
+            .session
+            .apply_workspace_folder_mutation(
+                &mutation,
+                AuthorizedLspWorkspace::new(
+                    Some(digest('d')),
+                    vec![
+                        AdmittedRoot::authorized("file:///root", digest('b')),
+                        AdmittedRoot::authorized("file:///other", digest('e')),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        if let Some(pending) = pending {
+            assert_eq!(harness.session.poll_outbound().unwrap(), pending);
+            assert!(harness.session.acknowledge_outbound());
+        }
+        assert_eq!(harness.messages(), vec![response], "in_flight={in_flight}");
+        harness
+            .session
+            .publish_diagnostics(DOCUMENT, 1, 2, Vec::new())
+            .expect("the discarded report was never delivered");
+        assert!(
+            harness
+                .session
+                .publish_diagnostics(DOCUMENT, 1, 2, Vec::new())
+                .is_err(),
+            "an identical queued publication must still be deduplicated"
+        );
+        let delivered = harness.messages();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(delivered[0]["params"]["uri"], DOCUMENT);
+    }
+}
+
+#[test]
 fn late_completion_cannot_answer_a_reopened_document_lifetime() {
     let mut harness = Harness::new(false);
     harness.open(1);

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { request as httpRequest } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonBridge } from "../src/server/bridge.js";
 import { createExtensionServer, serveLoopbackHttp } from "../src/server/main.js";
 import { DaemonFailure, ServeSession } from "../src/server/serve-client.js";
@@ -161,8 +161,14 @@ describe("composer mentions", () => {
     { project_id: "proj_b", label: "shipping" },
   ];
 
-  async function mentions(symbolSearch: (projectId: string) => Promise<unknown>): Promise<CallToolResult> {
-    const bridge = { listProjects: async () => projects, symbolSearch } as unknown as DaemonBridge;
+  async function mentions(symbolSearch: (projectId: string) => Promise<unknown>, availableProjects = projects): Promise<CallToolResult> {
+    const bridge = {
+      listProjects: async () => ({
+        projects: availableProjects, limit: 10, truncated: false,
+        summary: { project_count: availableProjects.length, repo_count: availableProjects.length, truncated: false },
+      }),
+      symbolSearch,
+    } as unknown as DaemonBridge;
     const server = createExtensionServer({ bridge, assets: ASSETS });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
@@ -189,5 +195,24 @@ describe("composer mentions", () => {
     const result = await mentions(async () => ({ items: [] }));
     expect(result.isError ?? false).toBe(false);
     expect(result.structuredContent).toEqual({ items: [] });
+  });
+
+  it("keeps mention discovery to four recent projects and eight items per project", async () => {
+    const available = Array.from({ length: 10 }, (_, index) => ({ project_id: `proj_${index}`, label: `project-${index}` }));
+    const symbolSearch = vi.fn(async (_projectId: string) => ({
+      items: Array.from({ length: 12 }, (_, index) => ({
+        node_id: `node_${index}`, qualified_name: `render${index}`, kind: "function",
+        name: `render${index}`, file: "src/render.ts", line: index + 1,
+      })),
+    }));
+    const result = await mentions(symbolSearch, available);
+    expect(result.isError ?? false).toBe(false);
+    expect(symbolSearch.mock.calls.map((args) => args[0])).toEqual(available.slice(0, 4).map((project) => project.project_id));
+    const items = (result.structuredContent as { items: { uri: string }[] }).items;
+    expect(items).toHaveLength(32);
+    for (const project of available.slice(0, 4)) {
+      expect(items.filter((item) => item.uri.startsWith(`tracedecay://projects/${project.project_id}/`))).toHaveLength(8);
+    }
+    expect(items.some((item) => item.uri.endsWith("/node_8"))).toBe(false);
   });
 });
