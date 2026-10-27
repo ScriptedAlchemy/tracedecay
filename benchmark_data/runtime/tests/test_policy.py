@@ -104,6 +104,7 @@ class AcceptancePolicyTests(unittest.TestCase):
             path.write_text(
                 json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n",
                 encoding="utf-8",
+                newline="\n",
             )
             with self.assertRaisesRegex(PolicyViolation, "modified"):
                 load_journey_policy(path)
