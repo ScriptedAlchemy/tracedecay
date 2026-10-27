@@ -23,7 +23,7 @@ use tracedecay_application::advisory::{
     AdvisoryRuntimeOpenV1, CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1,
     CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
     GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
-    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
+    GitHubReviewProviderIdentityV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRuntimeOwnerConfigV1,
     ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
     ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
@@ -56,7 +56,7 @@ use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
 use tracedecay_contracts::feedback::{
-    FeedbackRuntimeStatePort, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+    FeedbackPortFuture, FeedbackRuntimeStatePort, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1,
     PROXIMITY_USE_CASE_ID_V1, ProximityEvaluationRequestV1,
 };
@@ -466,6 +466,69 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
 }
 
 impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
+    fn refresh_github<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        expected_head_commit_id: &'a CommitId,
+    ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
+        Box::pin(async move {
+            if context.cancellation().is_cancelled() {
+                return GitHubReviewRefreshOutcomeV1::Cancelled;
+            }
+            if context.scope() != &self.producer.scope {
+                return GitHubReviewRefreshOutcomeV1::Denied;
+            }
+            if context.deadline().is_elapsed_at(now_micros()) {
+                return GitHubReviewRefreshOutcomeV1::Unavailable;
+            }
+            if expected_head_commit_id != &self.feedback_scope.head_commit_id {
+                return GitHubReviewRefreshOutcomeV1::Stale;
+            }
+            let Some((pull_request_id, inline_operation)) = self.github_review_read.as_ref() else {
+                return GitHubReviewRefreshOutcomeV1::Unavailable;
+            };
+            let github = self
+                .producer
+                .feedback_cycle
+                .read()
+                .await
+                .registration
+                .runtime()
+                .github_owner();
+            let Some(github) = github else {
+                return GitHubReviewRefreshOutcomeV1::Unavailable;
+            };
+            // Identity is useful before the larger review collections finish.
+            // Every operation shares the caller's grant, deadline, and the
+            // configured PR owner; no feedback evaluation is invoked here.
+            for operation in [
+                GitHubReviewReadOperationV1::RestGetPullRequest,
+                GitHubReviewReadOperationV1::RestListPullRequestReviews,
+                GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+            ] {
+                let request = GitHubReviewReadRequestV1 {
+                    operation,
+                    scope: self.feedback_scope.clone(),
+                    pull_request_id: pull_request_id.clone(),
+                };
+                let outcome = github.refresh(context, &request).await;
+                if !outcome.has_usable_observation() {
+                    return outcome;
+                }
+            }
+            github
+                .refresh(
+                    context,
+                    &GitHubReviewReadRequestV1 {
+                        operation: *inline_operation,
+                        scope: self.feedback_scope.clone(),
+                        pull_request_id: pull_request_id.clone(),
+                    },
+                )
+                .await
+        })
+    }
+
     fn invoke(
         &self,
         request: DaemonAdvisoryCycleInvocationRequest,
@@ -2446,6 +2509,7 @@ async fn register_project_delivery_read_authority(
                 feedback_scope: feedback_scope.clone(),
                 github_target: access.target.clone(),
                 github_http: access.http.clone(),
+                github_source_access: Arc::clone(&access.source_access),
                 review_bodies,
             }) {
                 ProjectDeliveryReadAuthorityOpenOutcomeV1::Ready(handle) => {

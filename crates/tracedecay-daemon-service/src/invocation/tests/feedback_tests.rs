@@ -1,4 +1,9 @@
 use super::*;
+use tracedecay_application::advisory::GitHubReviewRefreshOutcomeV1;
+use tracedecay_contracts::feedback::{
+    GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+};
+use tracedecay_domain::{CommitId, RefId, RepositoryId, WorktreeId};
 
 #[test]
 fn advisory_cycle_wire_request_has_no_client_selected_handle() {
@@ -91,6 +96,63 @@ async fn advisory_cycle_dispatches_to_the_mounted_project_owner() {
             }
         } if code == "feedback.test-mounted-advisory-owner"
     ));
+}
+
+#[tokio::test]
+async fn github_refresh_stays_unavailable_without_provider_and_denies_other_projects() {
+    let observed_at = now_micros();
+    let expires_at = UtcMicros(observed_at.0 + 30_000_000);
+    let project_id = ProjectId::new("project.github-refresh").expect("project id");
+    let scope = ResolvedScope::new(
+        project_id.clone(),
+        RepositoryId::new("repository.github-refresh").expect("repository"),
+        WorktreeId::new("worktree.github-refresh").expect("worktree"),
+        Some(RefId::new("refs/heads/main").expect("ref")),
+    )
+    .expect("scope");
+    let actor = ActorId::new("actor.github-refresh").expect("actor");
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.github-refresh").expect("grant id"),
+        1,
+        canonical_sha256(&"github-refresh-grant").expect("digest"),
+        actor.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        [CapabilityId::new(GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1).expect("capability")]
+            .into_iter()
+            .collect(),
+        [UseCaseId::new(GITHUB_REVIEW_INGEST_USE_CASE_ID_V1).expect("use case")]
+            .into_iter()
+            .collect(),
+        DisclosureClass::Evidence,
+    )
+    .expect("grant");
+    let context = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.github-refresh").expect("request id"),
+        Deadline::new(expires_at).expect("deadline"),
+        CancellationContext::active("cancel.github-refresh").expect("cancellation"),
+    )
+    .expect("context");
+    let head = CommitId::new("a".repeat(40)).expect("head");
+    let owner = DaemonAdvisoryCycleInvocationOwner::new(project_id, Arc::new(MountedAdvisoryCycle));
+    assert_eq!(
+        owner.refresh_github(&context, &head).await,
+        GitHubReviewRefreshOutcomeV1::Unavailable,
+        "mounting an advisory port does not imply a GitHub refresh provider"
+    );
+    let other_owner = DaemonAdvisoryCycleInvocationOwner::new(
+        ProjectId::new("project.other").expect("other project"),
+        Arc::new(MountedAdvisoryCycle),
+    );
+    assert_eq!(
+        other_owner.refresh_github(&context, &head).await,
+        GitHubReviewRefreshOutcomeV1::Denied,
+        "a source grant never dispatches to another project's owner"
+    );
 }
 
 #[test]

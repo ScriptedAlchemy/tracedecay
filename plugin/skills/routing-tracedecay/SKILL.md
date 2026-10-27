@@ -7,9 +7,9 @@ metadata:
 
 # Routing TraceDecay
 
-Use this when you know the kind of question and not the tool. One row is one
-call. After that call answers the question, stop. Do not open a file you have
-not already located.
+Use this when you know the kind of question and not the tool. Start with the
+opening call for that question, then follow only the evidence needed to answer
+it. Stop when the question is answered. Locate a file before opening it.
 
 | Moment | Skill | Opening call |
 | --- | --- | --- |
@@ -26,12 +26,37 @@ not already located.
 | Find a symbol by its bare name | exploring-code | `tracedecay_find_exact_symbol` |
 | Find a symbol by its full qualified name | exploring-code | `tracedecay_by_qualified_name` |
 | Read a known symbol's signature without its body | exploring-code | `tracedecay_signature` |
-| Review a diff | reviewing-changes | `tracedecay_diff_context` |
-| Which tests reach a change | assessing-impact | `tracedecay_affected_tests` |
+| Read a known symbol's body | exploring-code | `tracedecay_source_body` with its `node_id` |
+| Read a committed source span, including deleted code | exploring-code | `tracedecay_source_lines` with full `revision`, `file`, `start_line`, and `end_line` |
+| Summarize exact staged or net HEAD-to-worktree declarations | reviewing-changes | `tracedecay_commit_context` (`staged_only: true` for the index) |
+| Understand or review a PR or committed ref range | reviewing-changes | `tracedecay_pr_context` |
+| Inspect working-tree or staged file/hunk metadata | reviewing-changes | `tracedecay_git_diff` with `scope: working_tree` or `scope: staged` |
+| Read the raw working-tree or staged patch | reviewing-changes | Shell `git diff` or `git diff --cached` |
+| Inspect possible consumers and tests for specified files | assessing-impact | `tracedecay_diff_context` with `files` |
+| Select test files for a changed-file manifest | assessing-impact | `tracedecay_affected` with `files` |
+| Read a completed feedback cycle's test selection | assessing-impact | `tracedecay_affected_tests` with its `request_handle` |
 | A build or type error | fixing-build-and-type-errors | `tracedecay_diagnose` |
 
 A name you already have is a lookup, not a tour of the repository. A question
 one `grep` in a file you can already name would answer does not need the graph.
 
-**Report:** the answer the one call returned, plus its freshness line when it is
-not `fresh`. Do not chain calls the row did not name.
+For PR review, read the briefing's ranked entrypoints before widening the diff.
+Hosted evidence is retained by default; `refresh_github: true` requests the
+configured matching PR's provider refresh. Retained CI is not a live inventory
+of required checks. The brief's output budget is approximate and reports cuts.
+
+`diff_context` is prospective: it seeds analysis with every indexed symbol in
+the supplied files. `commit_context` selects changed declarations from Git:
+its default is the net HEAD-to-worktree result, including untracked files;
+`staged_only: true` selects immutable index blobs. Worktree captures are checked
+per file, not an atomic checkout snapshot. Read comparison and coverage fields.
+
+`git_diff` returns structured metadata without hunk bodies. Its `working_tree`
+scope means index-to-worktree; use shell `git diff` or `git diff --cached` for
+patch text. `source_lines` reads exact historical commit/path spans as well as
+indexed selectors. Continue historical reads at `next_line`, keeping the
+original revision, file, and end line. This uses normal admitted source-service
+availability and path policy. Raw staged blob IDs are not commit selectors.
+
+**Report:** the answer supported by the returned evidence, plus its freshness
+line when it is not `fresh` and any coverage needed to qualify the conclusion.

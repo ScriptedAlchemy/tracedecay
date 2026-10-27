@@ -142,6 +142,15 @@ where
     ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
         Box::pin(async move {
             let outcome = self.coordinator.refresh(context, request).await;
+            if !outcome.has_usable_observation()
+                || !matches!(
+                    request.operation,
+                    GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
+                        | GitHubReviewReadOperationV1::RestListPullRequestReviewComments
+                )
+            {
+                return outcome;
+            }
             let stack_read_enabled = match self
                 .stack_coordinator
                 .should_read_provider_stack(&self.stack_scope)
@@ -156,7 +165,7 @@ where
                     false
                 }
             };
-            if matches!(outcome, GitHubReviewRefreshOutcomeV1::Stored(_)) && stack_read_enabled {
+            if stack_read_enabled {
                 let client = self.stack_client.clone();
                 let stack_context = context.clone();
                 let stack_review_request = request.clone();
@@ -271,6 +280,7 @@ where
         rest_descriptor(GitHubReviewReadOperationV1::RestGetPullRequest),
         rest_descriptor(GitHubReviewReadOperationV1::RestListPullRequestReviews),
         rest_descriptor(GitHubReviewReadOperationV1::RestListPullRequestReviewComments),
+        rest_descriptor(GitHubReviewReadOperationV1::RestListPullRequestConversationComments),
     ])
     .map_err(map_admission_error)?;
     let stack_scope = config.resolved_scope.clone();

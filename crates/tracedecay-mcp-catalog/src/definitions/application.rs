@@ -316,7 +316,8 @@ mod tests {
             // transport arguments or accidentally introduce a duplicate name.
             let mut expected = vec![definition.clone()];
             project_input_schema(&mut expected[0].input_schema);
-            add_registered_project_selector_properties(&mut expected);
+            add_registered_project_selector_properties(&mut expected)
+                .expect("project transport controls");
             add_format_property(&mut expected).expect("transport format schema");
             let published = advertised
                 .iter()

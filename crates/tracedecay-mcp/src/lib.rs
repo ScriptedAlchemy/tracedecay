@@ -84,7 +84,8 @@ pub use tool_call_deadline::{
 pub use tool_call_invoker::ToolCallInvoker;
 pub use tool_context::{
     AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
-    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls,
+    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, PrContextDeliveryReader,
+    RequestControls,
 };
 #[cfg(test)]
 pub(crate) use tool_errors::structured_hook_error_data;
@@ -94,8 +95,8 @@ pub use tool_errors::{
     tool_error_response, tool_result_has_semantic_error,
 };
 pub use tools::{
-    RESERVED_FLAGS_FOOTER, ToolResult, render_tool_cli_help, resolve_property_schema,
-    short_tool_name,
+    RESERVED_FLAGS_FOOTER, ToolResult, render_tool_cli_help, request_object_alternatives,
+    resolve_property_schema, short_tool_name,
 };
 pub use tracedecay_mcp_catalog::{
     ALWAYS_LOAD_META, MAX_RESPONSE_CHARS, McpCatalogError, ToolCategory, ToolDefinition,

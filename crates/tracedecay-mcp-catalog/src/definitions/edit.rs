@@ -52,86 +52,115 @@ fn source_edit_schema(mut schema: Value) -> Value {
 }
 
 pub(super) fn source_edit_reconcile_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "original_operation": {
-                "type": "string",
+    let mut schema = schemars::schema_for!(
+        tracedecay_contracts::source_edit::SourceEditReconcileSurfaceRequestV1
+    )
+    .to_value();
+    // Some surface identity fields remain strings until dispatcher validation.
+    // Keep their published bounds and guidance without duplicating the DTO's
+    // selector shapes or adding fields to variants that do not accept them.
+    let annotations = [
+        (
+            "original_operation",
+            json!({
                 "minLength": 1,
                 "maxLength": 256,
                 "description": "Canonical UseCaseId from the original effect receipt's operation field. It identifies the retained effect without invoking the original operation."
-            },
-            "effect_id": {
-                "type": "string",
+            }),
+        ),
+        (
+            "effect_id",
+            json!({
                 "minLength": 1,
                 "maxLength": 512,
                 "description": "Exact effect ID from the EffectUnknown receipt."
-            },
-            "idempotency_key": {
-                "type": "string",
+            }),
+        ),
+        (
+            "idempotency_key",
+            json!({
                 "minLength": 1,
                 "maxLength": 512,
                 "description": "Original caller-provided idempotency key."
-            },
-            "attempt_idempotency_key": {
-                "type": "string",
+            }),
+        ),
+        (
+            "attempt_idempotency_key",
+            json!({
                 "minLength": 1,
                 "maxLength": 512,
                 "description": "A new idempotency key for this reconciliation attempt. It must differ from the original edit key; exact retries replay this attempt's receipt. Use a fresh attempt key to refresh an inspection."
-            },
-            "input_digest": {
-                "type": "string",
+            }),
+        ),
+        (
+            "input_digest",
+            json!({
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "description": "Exact input digest from the EffectUnknown receipt."
-            },
-            "disposition": {
-                "type": "string",
-                "enum": ["inspect", "confirm_committed", "confirm_unchanged", "acknowledge_partial"],
+            }),
+        ),
+        (
+            "disposition",
+            json!({
                 "description": "Inspect returns files and observed_state without concluding the original effect. Conclusions verify the live candidate-file digest."
-            },
-            "committed_state": {
-                "type": "string",
+            }),
+        ),
+        (
+            "committed_state",
+            json!({
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "description": "Exact independently observed committed-state digest; required only for confirm_committed."
-            },
-            "observed_state": {
-                "type": "string",
+            }),
+        ),
+        (
+            "observed_state",
+            json!({
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "description": "Exact observed_state returned by inspect; required only for acknowledge_partial."
-            },
-            "confirm": {
-                "type": "boolean",
+            }),
+        ),
+        (
+            "confirm",
+            json!({
                 "description": "Caller attestation that this concludes a retained uncertain effect without retrying it. Set true after your own inspection; do not ask a human to confirm the observed file state."
+            }),
+        ),
+    ];
+    // The canonical DTO owns complete, closed selector shapes. Preserve the
+    // dispatcher's caller-attestation requirement on every concluding branch.
+    if let Some(variants) = schema.get_mut("oneOf").and_then(Value::as_array_mut) {
+        for variant in variants {
+            if let Some(properties) = variant.get_mut("properties").and_then(Value::as_object_mut) {
+                for (name, annotation) in &annotations {
+                    if let Some(property) = properties.get_mut(*name).and_then(Value::as_object_mut)
+                        && let Some(annotation) = annotation.as_object()
+                    {
+                        property.extend(annotation.clone());
+                    }
+                }
             }
-        },
-        "required": [
-            "original_operation",
-            "effect_id",
-            "idempotency_key",
-            "attempt_idempotency_key",
-            "input_digest",
-            "disposition"
-        ],
-        "allOf": [
+            if variant
+                .pointer("/properties/disposition/const")
+                .and_then(Value::as_str)
+                == Some("inspect")
             {
-                "if": {"properties": {"disposition": {"const": "inspect"}}, "required": ["disposition"]},
-                "then": {"not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
-            },
-            {
-                "if": {"properties": {"disposition": {"const": "confirm_committed"}}, "required": ["disposition"]},
-                "then": {"properties": {"confirm": {"const": true}}, "required": ["committed_state", "confirm"], "not": {"required": ["observed_state"]}}
-            },
-            {
-                "if": {"properties": {"disposition": {"const": "acknowledge_partial"}}, "required": ["disposition"]},
-                "then": {"properties": {"confirm": {"const": true}}, "required": ["observed_state", "confirm"], "not": {"required": ["committed_state"]}}
-            },
-            {
-                "if": {"properties": {"disposition": {"const": "confirm_unchanged"}}, "required": ["disposition"]},
-                "then": {"properties": {"confirm": {"const": true}}, "required": ["confirm"], "not": {"anyOf": [{"required": ["committed_state"]}, {"required": ["observed_state"]}]}}
+                continue;
             }
-        ]
-    })
+            if let Some(confirm) = variant
+                .pointer_mut("/properties/confirm")
+                .and_then(Value::as_object_mut)
+            {
+                confirm.remove("default");
+                confirm.insert("const".to_owned(), json!(true));
+            }
+            if let Some(required) = variant.get_mut("required").and_then(Value::as_array_mut)
+                && !required.contains(&json!("confirm"))
+            {
+                required.push(json!("confirm"));
+            }
+        }
+    }
+    schema
 }
 
 pub(super) fn str_replace_schema() -> Value {
@@ -560,49 +589,46 @@ mod tests {
     #[test]
     fn source_edit_reconciliation_requires_exact_identity_and_confirmation() {
         let schema = handwritten("tracedecay_source_edit_reconcile").input_schema;
-        assert_eq!(schema["additionalProperties"], json!(false));
-        assert_eq!(
-            schema["required"],
-            json!([
+        for (disposition, state) in [
+            ("inspect", None),
+            ("confirm_committed", Some("committed_state")),
+            ("confirm_unchanged", None),
+            ("acknowledge_partial", Some("observed_state")),
+        ] {
+            let branch = schema["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|branch| branch["properties"]["disposition"]["const"] == disposition)
+                .expect("canonical reconciliation selector");
+            assert_eq!(branch["additionalProperties"], json!(false));
+            let required = branch["required"].as_array().unwrap();
+            for field in [
                 "original_operation",
                 "effect_id",
                 "idempotency_key",
                 "attempt_idempotency_key",
                 "input_digest",
-                "disposition"
-            ])
-        );
-        assert!(schema["properties"]["confirm"].get("const").is_none());
-        for conclusion in &schema["allOf"].as_array().unwrap()[1..] {
-            assert_eq!(
-                conclusion["then"]["properties"]["confirm"]["const"],
-                json!(true)
-            );
+                "disposition",
+            ] {
+                assert!(required.contains(&json!(field)));
+            }
+            for field in ["committed_state", "observed_state"] {
+                assert_eq!(
+                    branch["properties"].get(field).is_some(),
+                    state == Some(field)
+                );
+                assert_eq!(required.contains(&json!(field)), state == Some(field));
+            }
+            let confirm = &branch["properties"]["confirm"];
+            if disposition == "inspect" {
+                assert!(confirm.get("const").is_none());
+                assert!(!required.contains(&json!("confirm")));
+            } else {
+                assert_eq!(confirm["const"], true);
+                assert!(confirm.get("default").is_none());
+                assert!(required.contains(&json!("confirm")));
+            }
         }
-        assert_eq!(
-            schema["allOf"][1]["then"]["required"],
-            json!(["committed_state", "confirm"])
-        );
-        assert_eq!(
-            schema["allOf"][1]["if"]["properties"]["disposition"]["const"],
-            json!("confirm_committed")
-        );
-        assert_eq!(
-            schema["properties"]["disposition"]["enum"],
-            json!([
-                "inspect",
-                "confirm_committed",
-                "confirm_unchanged",
-                "acknowledge_partial"
-            ])
-        );
-        assert_eq!(
-            schema["allOf"][2]["then"]["required"],
-            json!(["observed_state", "confirm"])
-        );
-        assert_eq!(
-            schema["properties"]["observed_state"]["pattern"],
-            "^sha256:[0-9a-f]{64}$"
-        );
     }
 }

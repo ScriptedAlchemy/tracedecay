@@ -115,21 +115,24 @@ elif [[ "${1:-} ${2:-}" == "tool pr_context" ]]; then
   project=""
   base=""
   head=""
+  view=""
   shift 2
   while (($#)); do
     case "$1" in
       --project) project="$2"; shift 2 ;;
       --base-ref) base="$2"; shift 2 ;;
       --head-ref) head="$2"; shift 2 ;;
+      --view) view="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
+  [[ "$view" == "symbols" ]]
   git -C "$project" show-ref --verify --quiet "refs/heads/$base"
   git -C "$project" show-ref --verify --quiet "refs/heads/$head"
   base_oid="$(git -C "$project" rev-parse "$base^{commit}")"
   head_oid="$(git -C "$project" rev-parse "$head^{commit}")"
   merge_base="$(git -C "$project" merge-base "$base" "$head")"
-  printf '{"base_oid":"%s","head_oid":"%s","merge_base":"%s","graph_generation":"code-graph:sha256:ready-generation","files_changed":1,"changes":[{"path":"fixture.txt","status":"modified"}],"added":[],"modified":[{"name":"fixture_symbol","kind":"function"}],"next_cursor":"pr-context.cursor.next","symbol_page":{"limit":1,"returned":1,"has_more":true,"complete":false,"selection":"stable_prefix","continuation_available":true},"analysis_coverage":{"seed_symbols_analyzed":1,"symbols_returned":1,"symbols_complete":false,"impact_nodes_admitted":2,"impact_nodes_returned":2,"direct_call_edges_admitted":1,"impact_bytes_admitted":256,"impact_partial":false,"complete":false}}\\n' \\
+  printf '{"base_oid":"%s","head_oid":"%s","merge_base":"%s","graph_generation":"code-graph:sha256:ready-generation","files_changed":1,"changes":[{"path":"fixture.txt","status":"modified"}],"added":[],"modified":[{"name":"fixture_symbol","kind":"function"}],"removed":[],"next_cursor":"pr-context.cursor.next","symbol_page":{"limit":1,"returned":1,"has_more":true,"complete":false,"selection":"stable_prefix","continuation_available":true},"analysis_coverage":{"seed_symbols_analyzed":1,"symbols_returned":1,"symbols_complete":false,"impact_nodes_admitted":2,"impact_nodes_returned":2,"direct_call_edges_admitted":1,"impact_bytes_admitted":256,"impact_partial":false,"complete":false}}\\n' \\
     "$base_oid" "$head_oid" "$merge_base"
 else
   echo "unexpected fake TraceDecay arguments: $*" >&2

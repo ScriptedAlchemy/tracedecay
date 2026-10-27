@@ -27,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import carry_claude_profile  # noqa: E402
 import grade  # noqa: E402
+import pr_review_fixture  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -1303,7 +1304,81 @@ def test_outcome_vs_adoption():
     check("schema: answer, effect, and ungraded outcomes are all in use", kinds == {"answer", "effect", "ungraded"})
 
 
+def test_pr_review_journey():
+    """The independently graded facts come from a real before/after journey."""
+    scenario = json.loads((Path(HERE) / "scenarios/git_pr_summary.json").read_text())
+    expected = scenario["outcome"]["answer"]["json_equals"]
+    with tempfile.TemporaryDirectory(prefix="pr-review-eval-") as directory:
+        root = Path(directory) / "project"
+        revisions = pr_review_fixture.build(root)
+        git = lambda *args: pr_review_fixture.git(root, *args)
+        check("PR fixture: feature has a real main-to-head comparison",
+              revisions["base"] != revisions["head"]
+              and git("merge-base", "main", "HEAD") == revisions["base"])
+        for path in ("shop/orders.py", "tests/test_orders.py"):
+            check(f"PR fixture: relevant boundary remains unchanged ({path})",
+                  git("rev-parse", f"main:{path}") == git("rev-parse", f"HEAD:{path}"))
+        check("PR fixture: moved module bytes are identical",
+              git("rev-parse", "main:shop/receipts.py")
+              == git("rev-parse", "HEAD:shop/receipt_format.py"))
+        check("PR fixture: Git records the pure move",
+              "R100\tshop/receipts.py\tshop/receipt_format.py"
+              in git("diff", "--name-status", "--find-renames", "main", "HEAD"))
+        # Bazel's interpreter sets PYTHONSAFEPATH, so the fixture root must be
+        # named explicitly for `tests` to import the `shop` package.
+        environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(root))
+        git("checkout", "-q", "--detach", revisions["base"])
+        before = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+            cwd=root, env=environment, capture_output=True, text=True,
+        )
+        check("PR fixture: baseline behavior passes all three assertions",
+              before.returncode == 0 and "Ran 3 tests" in before.stderr,
+              before.stderr[-1000:])
+        git("checkout", "-q", "feature/stock-result")
+        after = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+            cwd=root, env=environment, capture_output=True, text=True,
+        )
+        check("PR fixture: only unchanged shortage regression fails at head",
+              after.returncode == 1 and "FAILED (failures=1)" in after.stderr
+              and "FAIL: test_rejects_unavailable_order" in after.stderr
+              and "test_receipt_display (test_orders.OrderTests.test_receipt_display) ... ok" in after.stderr,
+              after.stderr[-1600:])
+        check("PR fixture: verification leaves the tracked comparison clean",
+              git("status", "--porcelain") == "")
+
+    correct_answer = json.dumps(expected)
+    native = grade.score_scenario(scenario, transcript([claude_result(correct_answer)]), {}, {})
+    product = grade.score_scenario(scenario, transcript([
+        claude_tool("mcp__plugin_tracedecay_graph__tracedecay_pr_context", {"base_ref": "main"}),
+        claude_result(correct_answer),
+    ]), {}, {})
+    check("PR grading: native and product source conclusions pass equally",
+          native["correctness"]["status"] == product["correctness"]["status"] == "pass")
+    for field, incorrect in (
+        ("unchanged_consumer", "reserve_stock"),
+        ("shortage_after", "rejected"),
+        ("test_relation", "test_receipt_display -> render_receipt"),
+        ("test_evidence", "executed"),
+        ("move_behavior", "regressed"),
+    ):
+        wrong = dict(expected, **{field: incorrect})
+        result = grade.grade_outcome(scenario, transcript([claude_result(json.dumps(wrong))]))
+        check(f"PR grading: rejects incorrect {field}", result["status"] == "fail")
+    check("PR grading: rejects a contradictory extra claim",
+          grade.grade_outcome(scenario, transcript([claude_result(
+              correct_answer + " The unchanged caller remains safe."
+          )]))["status"] == "fail")
+    check("PR grading: scenario is active, neutral and independently graded",
+          scenario["status"] == "active"
+          and scenario["fixture"] == "pr-review"
+          and grade.lint_prompt(scenario["prompt"]) == []
+          and grade.lint_outcomes({scenario["id"]: scenario}) == [])
+
+
 def main() -> int:
+    test_pr_review_journey()
     test_outcome_vs_adoption()
     test_carry_claude_profile()
     test_transcript_base_repetitions()

@@ -216,6 +216,8 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
             observed_at: UtcMicros(1),
         }],
         quarantined: Vec::new(),
+        conversation: Vec::new(),
+        reviews: Vec::new(),
         pull_request: None,
         fetched_at: UtcMicros(2),
     };
@@ -229,6 +231,31 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
         scope: scope.clone(),
         pull_request_id: github.pull_request_id.clone(),
     };
+    let mut collection_request = github_request.clone();
+    collection_request.operation = GitHubReviewReadOperationV1::RestListPullRequestReviews;
+    let mut collection_ingress = github.clone();
+    collection_ingress.operation = collection_request.operation;
+    collection_ingress.items.clear();
+    collection_ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+    collection_ingress.coverage = GitHubReviewCoverageV1::Partial;
+    let mut collection = GitHubReviewReadResponseV1 {
+        ingress: collection_ingress,
+        checkpoint: GitHubReviewReadCheckpointV1 {
+            etag: None,
+            next_cursor: None,
+            rate_limit: None,
+        },
+        completed_collection_scan: true,
+    };
+    collection.validate_for(&collection_request).unwrap();
+    collection.checkpoint.next_cursor = Some(GitHubReviewCursorV1::new("page:2").unwrap());
+    assert!(collection.validate_for(&collection_request).is_err());
+    collection.checkpoint.next_cursor = None;
+    collection_request.operation = GitHubReviewReadOperationV1::RestGetPullRequest;
+    collection.ingress.operation = collection_request.operation;
+    assert!(collection.validate_for(&collection_request).is_err());
+    collection.completed_collection_scan = false;
+    collection.validate_for(&collection_request).unwrap();
     let mut stale_without_evidence = github.clone();
     stale_without_evidence.outcome = GitHubReviewIngressProviderOutcomeV1::Stale;
     stale_without_evidence.coverage = GitHubReviewCoverageV1::Stale;
@@ -240,6 +267,7 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
     };
     assert!(
         GitHubReviewReadResponseV1 {
+            completed_collection_scan: false,
             ingress: stale_without_evidence.clone(),
             checkpoint: empty_checkpoint.clone(),
         }
@@ -247,6 +275,7 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
         .is_err()
     );
     GitHubReviewReadResponseV1 {
+        completed_collection_scan: false,
         ingress: stale_without_evidence,
         checkpoint: GitHubReviewReadCheckpointV1 {
             etag: Some(GitHubReviewEtagV1::new("W/\"advisory-fixture\"").unwrap()),
@@ -257,6 +286,7 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
     .unwrap();
     assert!(
         GitHubReviewReadResponseV1 {
+            completed_collection_scan: false,
             ingress: github.clone(),
             checkpoint: GitHubReviewReadCheckpointV1 {
                 next_cursor: Some(

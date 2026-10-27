@@ -32,7 +32,10 @@ mod workflow;
 
 use application::*;
 pub use application_schema::mcp_input_schema;
-use application_schema::{canonical_application_request_schema, project_input_schema};
+use application_schema::{
+    RequestPropertyMerge, add_request_property, canonical_application_request_schema,
+    project_input_schema,
+};
 use handwritten::{HANDWRITTEN_TOOLS, HandwrittenTool, ToolSchema};
 pub use work::work_tool_name;
 pub use workflow::workflow_tool_name;
@@ -135,23 +138,6 @@ fn time_filter_schema(description: &str) -> Value {
         ],
         "description": description
     })
-}
-
-/// Copies `project_selector` into each tool schema.
-///
-/// A `$ref` would shrink `tools/list`, and a host would still send the same
-/// `project_selector.project_id` object. Hosts that do not resolve `$ref`
-/// would drop the field from the schema they show the agent, so the copy
-/// stays inline.
-fn with_project_selector_properties(mut properties: Value) -> Value {
-    if let Some(target) = properties.as_object_mut() {
-        target.entry("project_selector").or_insert_with(|| {
-            project_selector_object(
-                "Optional registered project selector. Omit to use the active project.",
-            )
-        });
-    }
-    properties
 }
 
 fn project_selector_object(description: &str) -> Value {
@@ -299,7 +285,7 @@ fn build_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     for definition in &mut definitions {
         project_input_schema(&mut definition.input_schema);
     }
-    add_registered_project_selector_properties(&mut definitions);
+    add_registered_project_selector_properties(&mut definitions)?;
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions)?;
     mark_always_loaded(&mut definitions)?;
@@ -419,15 +405,22 @@ fn matching_tool_definitions_mut<'a>(
         .filter(move |definition| tool_names.contains(&definition.name.as_str()))
 }
 
-fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]) {
+fn add_registered_project_selector_properties(
+    definitions: &mut [ToolDefinition],
+) -> Result<(), McpCatalogError> {
     for definition in
         matching_tool_definitions_mut(definitions, &registered_project_reader_tool_names())
     {
-        let Some(properties) = definition.input_schema.get_mut("properties") else {
-            continue;
-        };
-        *properties = with_project_selector_properties(std::mem::take(properties));
+        add_request_property(
+            &mut definition.input_schema,
+            "project_selector",
+            &project_selector_object(
+                "Optional registered project selector. Omit to use the active project.",
+            ),
+            RequestPropertyMerge::KeepExisting,
+        )?;
     }
+    Ok(())
 }
 
 /// Every public application operation accepts the `format` presentation flag.
@@ -472,36 +465,19 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
 
 fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCatalogError> {
     for definition in matching_tool_definitions_mut(definitions, format_capable_tool_names()) {
-        let Some(schema) = definition.input_schema.as_object_mut() else {
-            // Reachable on every tools/list and dispatch admission check, so a
-            // malformed definition must surface as the builders' typed error
-            // rather than a production panic.
-            return Err(McpCatalogError::Initialization(format!(
-                "{} must define an object schema",
-                definition.name
-            )));
-        };
-        let properties = schema
-            .entry("properties")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| {
-                McpCatalogError::Initialization(format!(
-                    "{} must define object properties",
-                    definition.name
-                ))
-            })?;
         // Repeated once per format-capable tool in every `tools/list`, so the
         // wording stays short.
-        properties.insert(
-            "format".to_string(),
-            json!({
+        add_request_property(
+            &mut definition.input_schema,
+            "format",
+            &json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
                 "default": "markdown",
                 "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
             }),
-        );
+            RequestPropertyMerge::Replace,
+        )?;
     }
     Ok(())
 }

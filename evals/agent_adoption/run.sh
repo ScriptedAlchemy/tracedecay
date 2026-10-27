@@ -383,6 +383,7 @@ build_fixture() {
 
 fixture_main="$work/fixture-main"
 fixture_broken="$work/fixture-broken"
+fixture_pr_review="$work/fixture-pr-review"
 setup_started_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
 echo "indexing fixture-main (with seeded git history)..."
 build_fixture "$fixture_main" clean history
@@ -392,10 +393,16 @@ if [[ -n "${LEARNED_SKILL_GENERATE:-}" ]]; then
 fi
 echo "indexing fixture-broken..."
 build_fixture "$fixture_broken" broken
+echo "indexing fixture-pr-review (contract change and preserved module move)..."
+python3 "$here/pr_review_fixture.py" "$fixture_pr_review"
+( cd "$fixture_pr_review" && "$TD" init >/dev/null 2>&1 )
+fixture_pr_review_base="$(git -C "$fixture_pr_review" rev-parse main)"
+fixture_pr_review_head="$(git -C "$fixture_pr_review" rev-parse HEAD)"
 
 fixture_dir_for() {
   case "$1" in
     broken) echo "$fixture_broken" ;;
+    pr-review) echo "$fixture_pr_review" ;;
     *) echo "$fixture_main" ;;
   esac
 }
@@ -494,6 +501,7 @@ PY
 }
 fixture_main_sha256="$(fixture_digest "$fixture_main")"
 fixture_broken_sha256="$(fixture_digest "$fixture_broken")"
+fixture_pr_review_sha256="$(fixture_digest "$fixture_pr_review")"
 cat > "$run_dir/meta.json" <<JSON
 {
   "git_sha": "$git_sha",
@@ -501,7 +509,8 @@ cat > "$run_dir/meta.json" <<JSON
   "binary_sha256": "$binary_sha256",
   "binary_version": "$binary_version",
   "fixture_sha256": "$fixture_main_sha256",
-  "fixture_hashes": {"main": "$fixture_main_sha256", "broken": "$fixture_broken_sha256"},
+  "fixture_hashes": {"main": "$fixture_main_sha256", "broken": "$fixture_broken_sha256", "pr-review": "$fixture_pr_review_sha256"},
+  "fixture_comparisons": {"pr-review": {"base": "$fixture_pr_review_base", "head": "$fixture_pr_review_head"}},
   "fixture_setup_elapsed_ms": $setup_elapsed_ms,
   "hosts": {"claude": {"models": "$CLAUDE_MODELS"}, "codex": {"models": "$CODEX_MODELS"}},
   "channels": "$CHANNELS",
@@ -666,6 +675,7 @@ run_one() {
   fdir="$(fixture_dir_for "$fixture")"
   fixture_sha="$fixture_main_sha256"
   [[ "$fixture" == "broken" ]] && fixture_sha="$fixture_broken_sha256"
+  [[ "$fixture" == "pr-review" ]] && fixture_sha="$fixture_pr_review_sha256"
   out="$run_dir/${base}.stdout.jsonl"
   err="$run_dir/${base}.stderr.log"
   echo "RUN  $sid [$host/$model/$cond${variant:+/v-$variant}] ..."

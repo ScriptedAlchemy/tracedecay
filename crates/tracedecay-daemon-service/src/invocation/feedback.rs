@@ -1,8 +1,12 @@
 //! Feedback runtime lookup, feedback-cycle wiring, and the `execute_feedback*` daemon invocation handlers.
 
 use super::*;
+use tracedecay_application::advisory::GitHubReviewRefreshOutcomeV1;
 #[cfg(all(test, not(windows)))]
 use tracedecay_application::feedback::FeedbackCycleRuntime;
+use tracedecay_contracts::RequestContext;
+use tracedecay_contracts::feedback::FeedbackPortFuture;
+use tracedecay_domain::CommitId;
 
 pub fn daemon_operation_event_authority() -> OperationEventAuthority {
     operation_event_authority()
@@ -116,6 +120,17 @@ pub trait DaemonAdvisoryCycleInvocationPort: Send + Sync {
         Box::pin(async { DaemonAdvisoryCycleMountV1::Answers })
     }
 
+    /// Refreshes only the configured PR's retained GitHub observations.
+    /// Early owners have no configured provider; they must not run a feedback
+    /// cycle or report an empty successful refresh.
+    fn refresh_github<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _expected_head_commit_id: &'a CommitId,
+    ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
+        Box::pin(async { GitHubReviewRefreshOutcomeV1::Unavailable })
+    }
+
     fn invoke_proximity(
         &self,
         request: DaemonFeedbackProximityInvocationRequest,
@@ -138,6 +153,21 @@ impl DaemonAdvisoryCycleInvocationOwner {
 
     pub fn project_id(&self) -> &ProjectId {
         &self.project_id
+    }
+
+    /// Uses the caller's admitted source grant and request lifetime. Callers
+    /// carry their live cancellation signal around this future; cancellation
+    /// drops the refresh before any subsequent provider read or publication.
+    pub fn refresh_github<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        expected_head_commit_id: &'a CommitId,
+    ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
+        if context.scope().project_id != self.project_id {
+            return Box::pin(async { GitHubReviewRefreshOutcomeV1::Denied });
+        }
+        self.service
+            .refresh_github(context, expected_head_commit_id)
     }
 
     pub fn invoke_proximity(
@@ -957,7 +987,7 @@ impl DaemonInvocationService {
         level = "trace",
         skip_all
     )]
-    pub(super) async fn answering_advisory_cycle_owner(
+    pub async fn answering_advisory_cycle_owner(
         &self,
         project_root: Option<&Path>,
         deadline: &Deadline,
