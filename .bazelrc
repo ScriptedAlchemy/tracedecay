@@ -56,6 +56,9 @@ build:windows --action_env=PATH
 # Windows runfiles default to a manifest; suites read fixtures and spawn
 # binaries through the runfiles tree.
 build:windows --enable_runfiles
+# Git for Windows exports its installation root to Git Bash. Preserve gix's
+# native discovery fast path in tests instead of launching Git per hook.
+test:windows --test_env=EXEPATH
 
 test --test_output=errors
 # Suites spawn child services as well as the bounded Rust test harness.

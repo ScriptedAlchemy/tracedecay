@@ -156,9 +156,11 @@ impl DaemonClientStream {
                 }
                 // Boxed: the connect state machine would otherwise inflate
                 // every caller's future past the large-future lint.
-                Ok(Self::Tcp(
-                    Box::pin(asupersync::net::TcpStream::connect(*address)).await?,
-                ))
+                let stream = Box::pin(asupersync::net::TcpStream::connect(*address)).await?;
+                // Control frames and their terminators must not wait for a
+                // previous small write's acknowledgement on loopback.
+                stream.set_nodelay(true)?;
+                Ok(Self::Tcp(stream))
             }
         }
     }
@@ -516,7 +518,11 @@ impl BrokerListener {
         match self {
             #[cfg(unix)]
             Self::Unix(listener) => Ok(BrokerStream::Unix(listener.accept().await?.0)),
-            Self::Tcp(listener) => Ok(BrokerStream::Tcp(listener.accept().await?.0)),
+            Self::Tcp(listener) => {
+                let (stream, _) = listener.accept().await?;
+                stream.set_nodelay(true)?;
+                Ok(BrokerStream::Tcp(stream))
+            }
         }
     }
 }
@@ -725,6 +731,13 @@ mod tests {
             let mut clients = tokio::task::JoinSet::new();
             for _ in 0..CLIENTS {
                 let stream = listener.accept().await.unwrap();
+                match &stream {
+                    BrokerStream::Tcp(stream) => {
+                        assert!(socket2::SockRef::from(stream).tcp_nodelay().unwrap());
+                    }
+                    #[cfg(unix)]
+                    BrokerStream::Unix(_) => panic!("expected loopback transport"),
+                }
                 clients.spawn(async move {
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
@@ -744,10 +757,15 @@ mod tests {
             clients.spawn(async move {
                 use asupersync::io::AsyncWriteExt;
 
-                let (_reader, mut writer) = DaemonClientStream::connect(&endpoint)
-                    .await
-                    .unwrap()
-                    .into_split();
+                let stream = DaemonClientStream::connect(&endpoint).await.unwrap();
+                match &stream {
+                    DaemonClientStream::Tcp(stream) => {
+                        assert!(socket2::SockRef::from(stream).tcp_nodelay().unwrap());
+                    }
+                    #[cfg(unix)]
+                    DaemonClientStream::Unix(_) => panic!("expected loopback transport"),
+                }
+                let (_reader, mut writer) = stream.into_split();
                 let line = DaemonAuthPreface::new(TOKEN).to_line().unwrap();
                 writer.write_all(line.as_bytes()).await.unwrap();
                 writer.write_all(b"\n").await.unwrap();
