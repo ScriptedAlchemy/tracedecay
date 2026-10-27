@@ -150,6 +150,8 @@ impl StdioLspSemanticAuthority {
             self.inner.args.clone(),
             self.inner.project_root.clone(),
             self.inner.timeouts,
+            Arc::clone(&self.inner.shared.documents),
+            attempt,
         );
         match startup {
             Ok(startup) => usage.start(startup),
@@ -313,6 +315,8 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             inner.args.clone(),
                             inner.project_root.clone(),
                             timeouts,
+                            Arc::clone(&inner.shared.documents),
+                            attempt,
                         ) {
                             Ok(startup) => startup,
                             Err(error) => {

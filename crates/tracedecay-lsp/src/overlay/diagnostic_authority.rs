@@ -30,6 +30,12 @@ pub struct ManagedDiagnosticSnapshot {
 }
 
 pub trait ManagedDiagnosticSnapshotPort: Send + Sync {
+    /// Resolves current canonical scope without executing another diagnostic cycle.
+    fn current_authority(
+        &self,
+        request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>>;
+
     fn snapshot(
         &self,
         request: CanonicalDiagnosticRefreshRequest,
@@ -41,6 +47,13 @@ pub trait CanonicalDiagnosticSnapshotAuthority: Send + Sync {
         &self,
         request: CanonicalDiagnosticRefreshRequest,
     ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>>;
+
+    fn current_authority(
+        &self,
+        _request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<ManifestDigest, LspRuntimeFailure>> {
+        Box::pin(async { Err(LspRuntimeFailure::new("diagnostic-authority-unavailable")) })
+    }
 
     fn supports_workspace_diagnostics(&self) -> bool {
         false
