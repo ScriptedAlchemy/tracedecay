@@ -65,10 +65,11 @@ diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
          transitive_crate_outputs = dep_info.transitive_metadata_outputs
  
      dependency_search_artifacts = None
-@@ -1009,7 +1014,8 @@
+@@ -1009,8 +1014,9 @@
          error_format = None,
          allowed_unstable_rust_features = None,
          link_std_dylib = False,
+         bin_link_flags = None,
 -        dependency_search_artifacts = None):
 +        dependency_search_artifacts = None,
 +        force_depend_on_metadata = False):

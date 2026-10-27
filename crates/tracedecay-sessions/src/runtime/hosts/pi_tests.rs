@@ -167,6 +167,8 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
         0,
         "an interrupted empty scan must not clear the admitted summary"
     );
+    // The rewrite touches every file, so the sub-second stamp invalidates
+    // the quarantine and all 25 files re-fail: a changed file is retried.
     first.write_malformed_files(25);
     let changed = report(&first);
     assert_eq!(changed.failure_count, 25);
@@ -189,14 +191,12 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
         .unwrap();
     }
     let fully_reported = report(&first);
+    // All remaining files are unchanged and quarantined: no failures.
     assert_eq!(
-        fully_reported.failure_count,
-        MAX_DISCOVERY_FAILURE_EVIDENCE as u64
+        fully_reported.failure_count, 0,
+        "quarantined files stop counting against discovery"
     );
-    assert_eq!(
-        fully_reported.failures.len(),
-        MAX_DISCOVERY_FAILURE_EVIDENCE
-    );
+    assert_eq!(fully_reported.failures.len(), 0);
     assert_eq!(summary_count(&first, &fully_reported), 0);
     first.write_malformed_files(25);
     assert_eq!(
@@ -232,21 +232,36 @@ async fn repeated_discovery_summary_keeps_malformed_sources_and_coverage_refused
     let malformed = MAX_DISCOVERY_FAILURE_EVIDENCE + 1;
     layout.write_malformed_files(malformed);
     let admission = MemoryHostAdmission::default();
-    for _ in 0..2 {
-        let outcome = capture(&layout, &admission).await;
-        assert_eq!(outcome.discovery_failures, malformed as u64);
-        assert!(outcome.deferred);
-        assert!(admission.observations().is_empty());
-        let coverage = admission
-            .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://pi/v1")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            coverage.file_id, 2,
-            "malformed sources retain partial coverage"
-        );
-    }
+    let first_outcome = capture(&layout, &admission).await;
+    assert_eq!(first_outcome.discovery_failures, malformed as u64);
+    assert!(first_outcome.deferred);
+    assert!(admission.observations().is_empty());
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://pi/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        coverage.file_id, 2,
+        "malformed sources retain partial coverage"
+    );
+    // A later pass quarantines the unchanged malformed files: they are not
+    // re-opened, not re-counted, and the refused coverage is retained.
+    let second_outcome = capture(&layout, &admission).await;
+    assert_eq!(
+        second_outcome.discovery_failures, 0,
+        "unchanged malformed files are not re-failed"
+    );
+    assert!(!second_outcome.deferred, "a clean pass is not deferred");
+    assert!(admission.observations().is_empty());
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://pi/v1")
+        .await
+        .unwrap();
+    assert!(
+        coverage.is_some(),
+        "coverage for the malformed source is retained after quarantine"
+    );
 }
 
 #[tokio::test]
@@ -600,5 +615,45 @@ fn system_prompt_replay_is_not_projected_as_conversation() {
             .facts()
             .iter()
             .all(|fact| matches!(fact, CanonicalObservationFactV1::Unknown { .. }))
+    );
+}
+
+/// A fresh `SourceSweep` models a daemon restart: the in-process source
+/// ledger starts empty, so only the durable completion memo can keep a
+/// converged, unchanged session file out of admission.
+#[tokio::test]
+async fn converged_session_file_is_not_re_admitted_by_a_fresh_sweep() {
+    let layout = Layout::new();
+    layout.write_fixture();
+    let admission = MemoryHostAdmission::default();
+    let first = capture(&layout, &admission).await;
+    assert!(!first.deferred);
+    let first_counts = admission.capture_call_counts();
+    let second = capture(&layout, &admission).await;
+    assert!(!second.deferred);
+    assert_eq!(
+        admission.capture_call_counts(),
+        first_counts,
+        "an unchanged, fully admitted file must not be re-admitted"
+    );
+}
+
+/// An unchanged malformed file is quarantined durably after its first
+/// failure; later sweeps (fresh or not) neither re-read it nor count it.
+#[tokio::test]
+async fn malformed_session_header_is_not_re_failed_by_a_fresh_sweep() {
+    let layout = Layout::new();
+    layout.write_fixture();
+    layout.write_malformed_files(1);
+    let admission = MemoryHostAdmission::default();
+    let first = capture(&layout, &admission).await;
+    assert!(
+        first.discovery_failures >= 1,
+        "the malformed file must fail once"
+    );
+    let second = capture(&layout, &admission).await;
+    assert_eq!(
+        second.discovery_failures, 0,
+        "an unchanged malformed file must be quarantined after its first failure"
     );
 }

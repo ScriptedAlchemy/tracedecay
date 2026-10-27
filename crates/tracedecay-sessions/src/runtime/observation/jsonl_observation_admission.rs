@@ -7,6 +7,7 @@ use std::num::NonZeroU64;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::sync::Notify;
 
@@ -1843,6 +1844,7 @@ struct ActiveAdmission<'request> {
     generation: ObservationSourceGenerationV1,
     file_identity: u64,
     cancellation: ObservationCancellation,
+    refusal_warned: AtomicBool,
 }
 
 impl ActiveAdmission<'_> {
@@ -2121,25 +2123,32 @@ impl ActiveAdmission<'_> {
                 if is_deterministic_content_refusal(&outcome)
                     && !self.cancellation.is_cancelled() =>
             {
-                tracing::warn!(
-                    provider = self.provider,
-                    session = self.source.session_id().as_str(),
-                    offset = checkpoint.offset,
-                    reason = outcome.reason_code.unwrap_or("host_admission_refused"),
-                    cause = outcome.cause.as_deref().unwrap_or("unspecified"),
-                    "admission refused a record; covering past it"
-                );
-                self.advance_coverage(
-                    expected_cursor,
-                    checkpoint,
+                if self.refusal_warned.swap(true, Ordering::Relaxed) {
+                    tracing::debug!(
+                        provider = self.provider,
+                        session = self.source.session_id().as_str(),
+                        offset = checkpoint.offset,
+                        reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                        "admission refused another record; covering past it"
+                    );
+                } else {
+                    tracing::warn!(
+                        provider = self.provider,
+                        session = self.source.session_id().as_str(),
+                        offset = checkpoint.offset,
+                        reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                        cause = outcome.cause.as_deref().unwrap_or("unspecified"),
+                        "admission refused a record; covering past it"
+                    );
+                }
+                let advance_reason =
                     if outcome.reason_code == Some("observation_identity_collision") {
                         ObservationCoverageReason::ObservationIdentityCollision
                     } else {
                         ObservationCoverageReason::AdmissionRefused
-                    },
-                    None,
-                )
-                .await?;
+                    };
+                self.advance_coverage(expected_cursor, checkpoint, advance_reason, None)
+                    .await?;
                 Ok(DurableFrameDisposition::Refused)
             }
             Err(outcome) => {
@@ -2476,6 +2485,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         generation,
         file_identity: raw.file_identity,
         cancellation,
+        refusal_warned: AtomicBool::new(false),
     };
     let mut skipped = raw.skipped.iter().copied().peekable();
     let mut pending: Vec<DurableJsonlFrame> = Vec::new();

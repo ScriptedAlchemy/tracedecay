@@ -16,6 +16,17 @@ use super::ProductionProjectCompositionHarnessV1;
 use super::journey_test_support::{initialize_project, tool_payload};
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 
+/// True while another open file description holds the task lease exclusively.
+/// The shared probe lock lasts only for the call.
+fn task_lease_is_held(lease: &std::path::Path) -> bool {
+    std::fs::File::open(lease).is_ok_and(|file| {
+        matches!(
+            file.try_lock_shared(),
+            Err(std::fs::TryLockError::WouldBlock)
+        )
+    })
+}
+
 const RELEASE_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
@@ -110,9 +121,9 @@ async fn shutdown_waits_for_accepted_curator_settlement_and_lock_release() {
     tokio::time::timeout(RELEASE_DEADLINE, pause.entered.notified())
         .await
         .expect("the accepted curator reaches durable publication");
-    let task_lock = dashboard_root.join("automation_locks/memory_curator.lock");
+    let task_lock = dashboard_root.join("automation_locks/memory_curator.lease");
     assert!(
-        task_lock.exists(),
+        task_lease_is_held(&task_lock),
         "the pending settlement still owns its task lock"
     );
 
@@ -130,7 +141,7 @@ async fn shutdown_waits_for_accepted_curator_settlement_and_lock_release() {
     }
     assert!(!shutdown.is_finished());
     assert!(
-        task_lock.exists(),
+        task_lease_is_held(&task_lock),
         "shutdown must preserve the settlement's lock"
     );
     release.send(()).expect("release curator settlement");
@@ -140,7 +151,7 @@ async fn shutdown_waits_for_accepted_curator_settlement_and_lock_release() {
         .expect("shutdown task");
 
     assert!(
-        !task_lock.exists(),
+        !task_lease_is_held(&task_lock),
         "shutdown must join exact task-lock release"
     );
     let ledger = std::fs::read_to_string(dashboard_root.join("automation_runs.jsonl"))

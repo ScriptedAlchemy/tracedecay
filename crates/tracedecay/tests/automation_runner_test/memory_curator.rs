@@ -101,11 +101,13 @@ async fn memory_curator_empty_store_skips_without_a_backend_attempt_and_releases
     assert_eq!(run.ledger_record.backend_attempt_count, 0);
     assert!(run.ledger_record.backend_attempts.is_empty());
     assert!(
-        !cg.store_layout()
-            .dashboard_root
-            .join("automation_locks")
-            .join("memory_curator.lock")
-            .exists(),
+        tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(
+            &cg.store_layout().dashboard_root,
+            tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
+        )
+        .await
+        .unwrap()
+        .is_some(),
         "the empty run must release its scheduler lock"
     );
 }
