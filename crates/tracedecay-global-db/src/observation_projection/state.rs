@@ -17,7 +17,7 @@ use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::{LcmError, LcmStorageKind};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Row, params};
-use tracedecay_sessions::runtime::shared::durable_project_path_key;
+use tracedecay_sessions::runtime::shared::{durable_project_path_key, path_identity_key};
 use tracedecay_sessions::runtime::store_access::{
     message_record_from_row, session_record_from_row,
 };
@@ -1237,11 +1237,20 @@ pub(super) fn reconcile_session_rows_detailed(
             .chain(expected.started_at)
             .min(),
         ended_at: actual.ended_at.into_iter().chain(expected.ended_at).max(),
-        transcript_path: reconcile_optional(
-            "transcript_path",
-            actual.transcript_path.as_ref(),
-            expected.transcript_path.as_ref(),
-        )?,
+        transcript_path: match (&actual.transcript_path, &expected.transcript_path) {
+            // Compare Windows display aliases through the durable key authority,
+            // retaining the first stored spelling as for the other annotations.
+            (Some(actual), Some(expected))
+                if path_identity_key(actual) == path_identity_key(expected) =>
+            {
+                Some(actual.clone())
+            }
+            _ => reconcile_optional(
+                "transcript_path",
+                actual.transcript_path.as_ref(),
+                expected.transcript_path.as_ref(),
+            )?,
+        },
         metadata_json: reconcile_metadata(
             actual.metadata_json.as_ref(),
             expected.metadata_json.as_ref(),
@@ -1698,6 +1707,30 @@ mod reconcile_tests {
         assert_eq!(
             from_verbatim.project_path, normalized.project_path,
             "both spellings of one directory must converge on the plain form"
+        );
+    }
+
+    #[test]
+    fn transcript_display_spellings_reconcile_without_hiding_collisions() {
+        let mut actual = record("user");
+        actual.transcript_path = Some(r"C:\sessions\rollout.jsonl".to_owned());
+        let mut expected = actual.clone();
+        expected.transcript_path = Some(r"\\?\C:\sessions\rollout.jsonl".to_owned());
+        let actual = canonicalize_session_project_paths(&actual);
+        let expected = canonicalize_session_project_paths(&expected);
+        assert_eq!(
+            reconcile_session_rows_detailed(&actual, &expected)
+                .unwrap()
+                .transcript_path,
+            Some(r"C:\sessions\rollout.jsonl".to_owned())
+        );
+        let mut conflicting = expected;
+        conflicting.transcript_path = Some("c:/sessions/other.jsonl".to_owned());
+        assert_eq!(
+            reconcile_session_rows_detailed(&actual, &conflicting)
+                .unwrap_err()
+                .field(),
+            "transcript_path"
         );
     }
 

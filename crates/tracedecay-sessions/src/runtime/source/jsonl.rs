@@ -384,11 +384,7 @@ impl HoldUnchangedGenerationCache {
 #[cfg(test)]
 pub(in crate::runtime) fn spin_until_jsonl_change_settled(path: &Path) -> bool {
     for _ in 0..10_000_000u32 {
-        let Ok(file) = std::fs::File::open(path) else {
-            std::thread::yield_now();
-            continue;
-        };
-        let Ok(metadata) = file.metadata() else {
+        let Ok(metadata) = std::fs::metadata(path) else {
             std::thread::yield_now();
             continue;
         };

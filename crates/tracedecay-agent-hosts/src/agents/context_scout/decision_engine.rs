@@ -634,6 +634,7 @@ pub mod test_server {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::io::Read as _;
     use std::time::{Duration, Instant};
 
     use super::test_server::{
@@ -1059,12 +1060,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_engine_is_unreachable() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+    fn a_disconnected_engine_is_unreachable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // A closed port can spend the entire request deadline in Windows'
+        // connect retries. Close an established request to observe transport
+        // loss independently of that platform's refusal timing.
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.read_exact(&mut [0_u8; 1]).unwrap();
+        });
         let mut configured = config(&format!("http://127.0.0.1:{port}"));
         configured.timeout = Duration::from_millis(500);
         assert_eq!(
@@ -1073,6 +1078,7 @@ mod tests {
                 .ask_blocking(&request("s", vec![noul("q")])),
             DecisionEngineOutcomeV1::Unreachable
         );
+        peer.join().unwrap();
     }
 
     #[test]

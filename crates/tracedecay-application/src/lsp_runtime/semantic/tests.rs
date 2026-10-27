@@ -103,11 +103,18 @@ impl PendingAnalyzerRequest {
 
     async fn assert_stopped(mut self) {
         let mut byte = [0_u8];
-        let bytes = tokio::time::timeout(TEST_BOUND, self.stream.read(&mut byte))
+        let stopped = tokio::time::timeout(TEST_BOUND, self.stream.read(&mut byte))
             .await
-            .expect("cancelled analyzer work must release its process")
-            .unwrap();
-        assert_eq!(bytes, 0);
+            .expect("cancelled analyzer work must release its process");
+        match stopped {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            other => panic!("cancelled analyzer connection must close: {other:?}"),
+        }
     }
 }
 

@@ -26,7 +26,7 @@ lockfile and generated Bazel targets:
 
 ```bash
 CARGO_BAZEL_REPIN=workspace bazel fetch --repo=@c
-bazel run //scripts:bazel/gen_builds.py
+bazel run //scripts:gen_builds
 ```
 
 For a targeted dependency update, use `CARGO_BAZEL_REPIN=<crate>` instead.
